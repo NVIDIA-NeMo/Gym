@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import hashlib
 import json
 import re
@@ -188,6 +189,20 @@ class BrowsecompAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+class _RolloutDeadline(Exception):
+    """A model or tool call was still running when the rollout's wall-clock limit ran out."""
+
+
+async def _before_deadline(deadline: Optional[float], awaitable):
+    # Bounds a single in-flight call: the per-step check alone cannot stop a call that hangs.
+    if deadline is None:
+        return await awaitable
+    try:
+        return await asyncio.wait_for(awaitable, max(0.0, deadline - time.monotonic()))
+    except asyncio.TimeoutError as e:
+        raise _RolloutDeadline() from e
+
+
 def _is_infrastructure_failure(exc: BaseException) -> bool:
     """True when the harness failed, not the sample.
 
@@ -293,7 +308,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
         reset_threshold = self._reset_threshold(self.config)
         loop_started = time.monotonic()
+        deadline = loop_started + self.config.rollout_timeout_s if self.config.rollout_timeout_s is not None else None
         timed_out = False
+        model_response = None
 
         # --- Progress board state (ported from the reference harness) ---
         # The board lives in the system prompt and is re-rendered only at the
@@ -440,12 +457,20 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         new_outputs = chosen if chosen is not None else []
                         continue
 
-            model_response = await self.server_client.post(
-                server_name=self.config.model_server.name,
-                url_path=self.url_path_for_request("/v1/responses", request),
-                json=new_body,
-                cookies=model_server_cookies,
-            )
+            try:
+                model_response = await _before_deadline(
+                    deadline,
+                    self.server_client.post(
+                        server_name=self.config.model_server.name,
+                        url_path=self.url_path_for_request("/v1/responses", request),
+                        json=new_body,
+                        cookies=model_server_cookies,
+                    ),
+                )
+            except _RolloutDeadline:
+                print(f"[browsecomp][timeout][{qid}] step={step} in=model_call", flush=True)
+                timed_out = True
+                break
             # We raise for status here since we expect model calls to always work.
             await raise_for_status(model_response)
             model_response_json = await get_response_json(model_response)
@@ -559,12 +584,20 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                             "system prompt across context resets." % len(progress_board)
                         )
                 else:
-                    api_response = await self.server_client.post(
-                        server_name=self.config.resources_server.name,
-                        url_path=f"/{output_function_call.name}",
-                        json=tool_args,
-                        cookies=resources_server_cookies,
-                    )
+                    try:
+                        api_response = await _before_deadline(
+                            deadline,
+                            self.server_client.post(
+                                server_name=self.config.resources_server.name,
+                                url_path=f"/{output_function_call.name}",
+                                json=tool_args,
+                                cookies=resources_server_cookies,
+                            ),
+                        )
+                    except _RolloutDeadline:
+                        print(f"[browsecomp][timeout][{qid}] step={step} in=tool_call", flush=True)
+                        timed_out = True
+                        break
                     # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
                     resources_server_cookies = api_response.cookies
 
@@ -602,6 +635,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 )
                 new_outputs.append(tool_response)
                 full_trajectory.append(tool_response)
+            if timed_out:
+                break
 
             # --- Pre-reset warning: last chance to save the progress board ---
             if pre_reset_nudge_due and new_outputs and new_outputs[-1].type == "function_call_output":
@@ -741,9 +776,21 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             )
 
         # Propogate any extra cookies necessary for downstream verification
-        for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
+        for k, v in (*resources_server_cookies.items(), *(model_server_cookies or {}).items()):
             response.set_cookie(k, v)
 
+        if model_response is None:
+            # The first model call was still running at the limit: there is no response to extend.
+            model_response = NeMoGymResponse(
+                id=f"resp_timeout_{qid}",
+                created_at=time.time(),
+                model=body.model or "",
+                object="response",
+                output=[],
+                parallel_tool_calls=False,
+                tool_choice="auto",
+                tools=[],
+            )
         model_response.output = full_trajectory
         model_response.usage = usage
         # Surface counters for downstream analysis (ported from gym-gitlab fe9845ee).
