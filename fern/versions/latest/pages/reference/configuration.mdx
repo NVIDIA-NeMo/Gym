@@ -30,6 +30,14 @@ On multi-node deployments, the `swe_agents` server embeds these paths in command
 
 Servers that pre-staged setup trees next to the package (the layout before `cache_dir` existed, for example baked container images) keep using those trees **only while `cache_dir` is left at its default** — explicitly configuring `cache_dir` opts out, and removing the pre-staged trees migrates a default-config deployment. Contents accumulate across runs; both directories are safe to delete when no run is active.
 
+### Server Virtual Environments
+
+`gym env start` sets up one uv virtual environment per server and starts the server with that environment's own interpreter (`<venv>/bin/python`), then logs which venv each server runs from. A venv that was copied or moved after it was built still runs its own interpreter, but its `bin/activate` still puts the original location first on `PATH`, so commands a server runs by name (such as `python` or `uv`) are looked up there first. Rebuild a moved venv, or create it with `uv venv --relocatable`, if its servers start such subprocesses.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `uv_lock_timeout_seconds` | `UV_LOCK_TIMEOUT` if already exported, else `1800` | Seconds a server install waits for uv's cache lock. Servers start together and share one `uv_cache_dir`, so the rest wait while one of them does a cold install; uv's own default of 300 can be too short for that. Exported as `UV_LOCK_TIMEOUT` to the Gym process and to every server, test, and venv-setup subprocess it launches. Set it to `null` to leave `UV_LOCK_TIMEOUT` as inherited. |
+
 ---
 
 ## Path Resolution and External Roots
@@ -92,6 +100,67 @@ server_id:                    # Your unique name for this server
       entrypoint: app.py      # Python file to run
       # ... additional fields vary by server type
 ```
+
+### HTTP Connection Pool
+
+Gym uses one shared aiohttp connection pool per process. Each top-level limit is a budget for
+one server process group (or the rollout CLI), divided across that server's FastAPI workers. It
+is not a deployment-wide budget: every agent, model, and resources server gets its own pool.
+
+```yaml
+global_aiohttp_connector_limit: 102400
+global_aiohttp_connector_limit_per_host: 1024
+
+# Optional sizing checks. Set these when the expected outbound concurrency is known.
+global_aiohttp_intended_concurrency: 4096
+global_aiohttp_intended_concurrency_per_host: 1024
+```
+
+At startup, Gym logs the configured and effective per-worker limits once per server. An explicit
+connector limit of `0` keeps aiohttp's existing meaning of unlimited. Gym rejects a positive
+limit that becomes zero after worker division, because that would accidentally turn a bounded
+pool into an unlimited one. The optional intended-concurrency values also apply separately to
+each server or CLI pool. When intended demand is larger than effective capacity or can exhaust the
+file-descriptor budget, Gym logs an actionable warning. The connector limit and file-descriptor
+soft limit remain in the startup information line, but the connector ceiling alone does not trigger
+a file-descriptor warning because it is not an allocation.
+
+The total aiohttp limit is a scheduling limit, not a strict open-socket cap across multiple
+hosts. Idle-connection reuse and aiohttp's waiter wake-up order can exceed the total limit for
+as long as requests to more than one host are in flight. Pool waits are also not first come, first
+served: a new request that can reuse an idle pooled connection skips requests that are already
+waiting, and aiohttp wakes waiting hosts in random order, so a few requests can wait much longer than
+the backend latency. When sizing pools, keep file-descriptor, ephemeral-port, and downstream
+connection budgets in mind.
+
+Pool metrics require an active metrics exporter before the shared client is constructed.
+Gym server processes and the orchestrator used by `gym eval run` initialize telemetry
+automatically. When Gym telemetry is enabled and another library, such as NeMo RL, already set
+up nemo-lens in the same process, Gym reuses its providers, and pool metrics follow that library's
+metrics setting.
+Standalone `gym eval run --no-serve` and library calls to `setup_server_client()`
+do not initialize telemetry; callers must initialize it explicitly before creating the client.
+Initializing telemetry later does not replace an existing connector. Missing metrics from
+these standalone processes do not mean that no requests queued.
+
+When this instrumentation is installed, Gym records one histogram sample per queued aiohttp
+connection acquisition. This metric is independent of the `http_client` tracing span group:
+
+| Metric or attribute | Meaning |
+| --- | --- |
+| `gym.http.connection_pool.queue_duration_ms` | Histogram of wait time for queued connects; immediate connects do not record a sample |
+| `gym.http.connection_pool.connect_total` | Observable counter of all connection attempts (`connect()` calls), including attempts that later fail or are abandoned; use it as the denominator for the queued fraction |
+| `nemo.gym.http.connection_pool.queue_constraint` | Binding limit: `total`, `per_host`, or `unknown` |
+| `nemo.gym.http.connection_pool.queue_outcome` | Queue outcome: `ok`, or `abandoned` when the wait ends before a slot is available, including timeout and cancellation |
+| `nemo.gym.http.destination.server.name` | Configured destination server name for `ServerClient` calls, `remote_agent_service` for the remote agent's external service, or `external` for unlabeled direct calls |
+
+The destination attribute identifies the configured or fixed request destination, including
+across redirects. The resource attribute `nemo.gym.server.name` identifies the Gym process
+recording the metric; they are not the same.
+
+When metrics export is active at client construction, Gym uses `QueueTimedTCPConnector` to count
+connection attempts and measure queue waits. Otherwise, Gym uses aiohttp's `TCPConnector` directly
+without collecting these metrics.
 
 ### Reverse Proxy Headers
 
@@ -245,6 +314,13 @@ wandb_api_key: your-wandb-key
 - **When to use:** Set to `true` for multi-node setups (e.g. multi-node Ray clusters) where servers must communicate across machines.
 - **Effect:** Resolves and uses the host's IP address (`gethostbyname(gethostname())`) instead of localhost.
 
+**`sidecar`** — Optional block that starts a local HTTP/2 PING proxy so requests to NVCF endpoints survive the 340 second idle limit.
+
+- **Default:** absent or `enabled: false` — nothing is started and no URL changes.
+- **`instances`:** required when enabled. Each entry (`name`, `upstream`, `listen`) gets its own proxy, started on the node that starts the Gym servers.
+- **Effect:** model-server `*base_url` values whose host matches an instance's `upstream` are rewritten to `http://127.0.0.1:<port>`; top-level keys such as `policy_base_url` are left alone.
+- **See:** [NVCF Long Requests](/main/infrastructure/nvcf-h2-ping-sidecar) for every key.
+
 ---
 
 ## Experiment Tracking
@@ -252,6 +328,16 @@ wandb_api_key: your-wandb-key
 Gym exports the resolved config, aggregate metrics, and rollouts to any tracking backend you
 configure. Weights & Biases and MLflow are both supported, and both can be on at once. A backend
 is used only when every key it needs is set; otherwise it is silently skipped.
+
+Both SDKs are optional extras, not part of the core install.
+
+```bash
+uv sync --extra wandb   # Weights & Biases
+uv sync --extra mlflow  # MLflow
+```
+
+If a backend is configured but its extra isn't installed, Gym logs an error naming the missing
+extra and continues the run without that backend.
 
 ### Weights & Biases
 

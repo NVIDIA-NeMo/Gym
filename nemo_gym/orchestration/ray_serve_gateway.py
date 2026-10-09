@@ -46,6 +46,12 @@ logger = logging.getLogger(__name__)
 HEALTH_PATH = "/health"
 HEALTH_POLL_INTERVAL_S = 5.0
 HEALTH_TIMEOUT_S = 900.0
+# Each replica only proxies to its own vLLM, which batches and queues itself. Ray Serve's
+# default of 5 in-flight requests per replica would cap every instance at 5 concurrent requests.
+MAX_ONGOING_REQUESTS_PER_INSTANCE = 65536
+# aiohttp's default 300 s total timeout would cut off long generations with a 500; vLLM
+# bounds each request itself, so the proxy adds no limit of its own.
+PROXY_TIMEOUT = aiohttp.ClientTimeout(total=None)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -82,6 +88,17 @@ def max_replicas_per_node(
         return None
     tp_pp = tensor_parallel_size * pipeline_parallel_size
     return max(1, gpus_per_node // tp_pp)
+
+
+def deployment_options(args: argparse.Namespace) -> dict:
+    """Ray Serve options for the VLLMInstance deployment."""
+    return {
+        "num_replicas": args.number_of_instances,
+        "max_replicas_per_node": max_replicas_per_node(
+            args.tensor_parallel_size, args.pipeline_parallel_size, args.gpus_per_node
+        ),
+        "max_ongoing_requests": MAX_ONGOING_REQUESTS_PER_INSTANCE,
+    }
 
 
 def build_instance_command(
@@ -141,7 +158,7 @@ class VLLMInstance:
         # RAY_ADDRESS makes vLLM's own Ray executor join this cluster instead of starting its own.
         env = {**os.environ, "RAY_ADDRESS": ray.get_runtime_context().gcs_address}
         self._proc = subprocess.Popen(cmd, env=env)
-        self._session = aiohttp.ClientSession()
+        self._session = aiohttp.ClientSession(timeout=PROXY_TIMEOUT)
         self._wait_until_healthy()
 
     def _wait_until_healthy(self) -> None:
@@ -197,12 +214,7 @@ def main(argv: list[str] | None = None) -> None:
         # No existing cluster to join - start a local one.
         ray.init()
 
-    deployment = VLLMInstance.options(
-        num_replicas=args.number_of_instances,
-        max_replicas_per_node=max_replicas_per_node(
-            args.tensor_parallel_size, args.pipeline_parallel_size, args.gpus_per_node
-        ),
-    ).bind(
+    deployment = VLLMInstance.options(**deployment_options(args)).bind(
         model=args.model,
         tensor_parallel_size=args.tensor_parallel_size,
         pipeline_parallel_size=args.pipeline_parallel_size,

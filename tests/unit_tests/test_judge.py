@@ -18,7 +18,25 @@ import orjson
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.judge import JudgeError, call_judge, judge_failsafe, reraise_judge_errors
+from nemo_gym.judge import JudgeError, call_judge, judge_failsafe, normalize_math_judge_verdict, reraise_judge_errors
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("[[ A=B ]]", "[[A=B]]"),
+        ("[[ A != B ]]", "[[A!=B]]"),
+        ("[[\nA\t! = B\n]]", "[[A!=B]]"),
+        ("[[A=B]] then [[ A != B ]]", "[[A=B]] then [[A!=B]]"),
+        ("An explanation with spaces: [[ A=B ]]", "An explanation with spaces: [[A=B]]"),
+        ("A=B without brackets", "A=B without brackets"),
+        ("[[A==B]] [[A≠B]] [[a=b]] [[A=C]]", "[[A==B]] [[A≠B]] [[a=b]] [[A=C]]"),
+        ("[ [ A=B ] ]", "[ [ A=B ] ]"),
+        ("", ""),
+    ],
+)
+def test_normalize_math_judge_verdict(text: str, expected: str) -> None:
+    assert normalize_math_judge_verdict(text) == expected
 
 
 class _Req(BaseModel):

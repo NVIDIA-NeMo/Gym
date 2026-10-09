@@ -15,12 +15,13 @@
 import asyncio
 import logging
 import multiprocessing
+import pickle
 import socket
 from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
 
 import uvicorn
-from aiohttp import ClientOSError, ClientResponseError, RequestInfo
+from aiohttp import ClientOSError, ClientResponseError, RequestInfo, TCPConnector
 from fastapi import Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -28,11 +29,13 @@ from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
+from requests.exceptions import ProxyError
+from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from yarl import URL
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
-from nemo_gym.config_types import BaseRunServerInstanceConfig
+from nemo_gym.config_types import BaseRunServerInstanceConfig, ConfigError, HeadServerUnreachableError
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
@@ -48,21 +51,27 @@ from nemo_gym.server_utils import (
     DictConfig,
     GlobalAIOHTTPAsyncClientConfig,
     HeadServer,
+    KeepaliveHttpToolsProtocol,
     ServerClient,
     SimpleServer,
     UvicornProxyHeadersConfig,
     _format_upstream_error_log,
     _log_validation_exception,
     _make_keepalive_socket_factory,
+    _set_tcp_keepalive,
     _validation_exception_handler,
     initialize_ray,
     raise_for_status,
 )
+from nemo_gym.telemetry import connection_pool
+from nemo_gym.telemetry.connection_pool import connection_pool_capacity, report_connection_pool_capacity
 
 
 _TCP_KEEPALIVE_TEST_IDLE = 42
 _TCP_KEEPALIVE_TEST_INTERVAL = 7
 _TCP_KEEPALIVE_TEST_PROBES = 2
+# macOS exposes the idle option as TCP_KEEPALIVE rather than TCP_KEEPIDLE.
+_TCP_KEEPIDLE_OPT = getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None))
 _TEST_ADDR_INFO = (
     socket.AF_INET,
     socket.SOCK_STREAM,
@@ -158,6 +167,32 @@ class TestServerUtils:
 
         assert exc_info.value.response_content == content
         response.content.read.assert_not_awaited()
+
+    async def test_raise_for_status_debug_print_omits_request_headers(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
+    ) -> None:
+        api_key = "sk-FAKE-CANARY"  # pragma: allowlist secret
+        url = URL(f"http://model.test/v1/chat/completions?api-key={api_key}")
+        request_info = RequestInfo(
+            url=url,
+            method="POST",
+            headers=CIMultiDictProxy(CIMultiDict({"Authorization": f"Bearer {api_key}"})),
+            real_url=url,
+        )
+        response = MagicMock()
+        response.ok = False
+        response.request_info = request_info
+        response.raise_for_status.side_effect = ClientResponseError(
+            request_info=request_info, history=(), status=401, message="Unauthorized"
+        )
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", True)
+
+        with raises(ClientResponseError):
+            await raise_for_status(response, b'{"error":"invalid api key"}')
+
+        printed = capsys.readouterr().out
+        assert api_key not in printed
+        assert "Request info: POST http://model.test/v1/chat/completions\n" in printed
 
     def test_global_aiohttp_client_request_debug_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
@@ -274,6 +309,66 @@ class TestServerUtils:
         with raises(ValueError):
             ServerClient.load_from_global_config()
 
+    def _nothing_listening_on_the_head_server(self, monkeypatch: MonkeyPatch, host: str, port: int) -> ConnectionError:
+        """Make `load_from_global_config` take the fetch path and have the head server refuse the connection."""
+        global_config_dict = DictConfig({"head_server": {"host": host, "port": port}})
+        monkeypatch.setattr(
+            nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=global_config_dict)
+        )
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+
+        refused = ConnectionError("[Errno 61] Connection refused")
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", MagicMock(side_effect=refused))
+        return refused
+
+    def test_ServerClient_load_from_global_config_unreachable_head_server_is_a_ConfigError(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # An unreachable head server is a user mistake (nothing started, or the wrong port), not a bug:
+        # it must be a ConfigError so `exit_cleanly_on_config_error` prints the message instead of a
+        # traceback (#2687), and still a ValueError for callers that already catch that.
+        refused = self._nothing_listening_on_the_head_server(monkeypatch, host="127.0.0.1", port=11000)
+
+        with raises(HeadServerUnreachableError) as exc_info:
+            ServerClient.load_from_global_config()
+
+        assert isinstance(exc_info.value, ConfigError)
+        assert isinstance(exc_info.value, ValueError)
+        # The low-level cause is not lost, just kept off the user-facing message.
+        assert exc_info.value.__cause__ is refused
+
+    def test_ServerClient_load_from_global_config_unreachable_head_server_message_is_actionable(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # Same wording as `gym env status`: name the address that was tried, then the fix for each of
+        # the two likely causes (nothing running -> `gym env start`; running elsewhere -> override).
+        self._nothing_listening_on_the_head_server(monkeypatch, host="10.0.0.5", port=9500)
+
+        with raises(HeadServerUnreachableError) as exc_info:
+            ServerClient.load_from_global_config()
+
+        message = str(exc_info.value)
+        assert message.startswith("Could not connect to the head server at http://10.0.0.5:9500.")
+        assert "Is the head server running? Start it with: `gym env start`." in message
+        assert "`++head_server.host=<host>` / `++head_server.port=<port>`" in message
+
+    def test_ServerClient_load_from_global_config_unreachable_head_server_logs_the_cause_at_debug(
+        self, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+    ) -> None:
+        # A proxy or name-resolution failure is also a requests ConnectionError, and the CLI prints the
+        # ConfigError without its cause, so the real reason must still reach `--verbose` (DEBUG) output.
+        self._nothing_listening_on_the_head_server(monkeypatch, host="127.0.0.1", port=11000)
+        proxy_error = ProxyError("Tunnel connection failed: 407 Proxy Authentication Required")
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", MagicMock(side_effect=proxy_error))
+
+        with caplog.at_level(logging.DEBUG, logger="nemo_gym.server_utils"), raises(HeadServerUnreachableError):
+            ServerClient.load_from_global_config()
+
+        (record,) = [record for record in caplog.records if record.name == "nemo_gym.server_utils"]
+        assert record.levelno == logging.DEBUG
+        assert "http://127.0.0.1:11000" in record.getMessage()
+        assert record.exc_info[1] is proxy_error
+
     async def test_ServerClient_get_post_sanity(self, monkeypatch: MonkeyPatch) -> None:
         server_client = ServerClient(
             head_server_config=BaseServerConfig(host="abcdef", port=12345),
@@ -308,6 +403,82 @@ class TestServerUtils:
             url_path="blah blah",
         )
         assert "my mock response" == actual_response
+
+    @mark.parametrize("tracing_enabled", [False, True])
+    @mark.parametrize("internal", [False, True])
+    @mark.parametrize("error_type", [RuntimeError, ClientOSError, nemo_gym.server_utils.ServerDisconnectedError])
+    async def test_explicit_transport_attempt_cap_disables_request_retry(
+        self,
+        monkeypatch: MonkeyPatch,
+        tracing_enabled: bool,
+        internal: bool,
+        error_type: type[Exception],
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
+        client = MagicMock()
+        client.request = AsyncMock(side_effect=error_type("transport failed"))
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_aiohttp_client",
+            lambda: client,
+        )
+
+        with raises(error_type, match="transport failed"):
+            await nemo_gym.server_utils.request(
+                method="POST",
+                url="https://example.test",
+                _internal=internal,
+                _max_num_tries=1,
+            )
+
+        assert client.request.await_count == 1
+
+    @mark.parametrize("attempt_cap", [0, -1])
+    async def test_explicit_transport_attempt_cap_rejects_nonpositive_values(
+        self, monkeypatch: MonkeyPatch, attempt_cap: int
+    ) -> None:
+        client = self._mock_global_client(monkeypatch, connection_errors=0)
+        with raises(ValueError, match="_max_num_tries must be at least 1"):
+            await nemo_gym.server_utils.request("POST", "https://example.test", _max_num_tries=attempt_cap)
+        client.request.assert_not_awaited()
+
+    @mark.parametrize("tracing_enabled", [False, True])
+    async def test_explicit_transport_attempt_cap_counts_mixed_errors(
+        self,
+        monkeypatch: MonkeyPatch,
+        tracing_enabled: bool,
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
+        client = MagicMock()
+        client.request = AsyncMock(
+            side_effect=[
+                RuntimeError("generic failure"),
+                nemo_gym.server_utils.ClientOSError("socket failure"),
+                "must not be reached",
+            ]
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_aiohttp_client",
+            lambda: client,
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_utils.asyncio,
+            "sleep",
+            AsyncMock(),
+        )
+
+        with raises(
+            nemo_gym.server_utils.ClientOSError,
+            match="socket failure",
+        ):
+            await nemo_gym.server_utils.request(
+                method="POST",
+                url="https://example.test",
+                _max_num_tries=2,
+            )
+
+        assert client.request.await_count == 2
 
     async def test_ServerClient_preserves_external_capture_url(self, monkeypatch: MonkeyPatch) -> None:
         server_client = ServerClient(
@@ -533,7 +704,7 @@ class TestServerUtils:
         mock_sock = MagicMock()
         socket_ctor_mock = MagicMock(return_value=mock_sock)
         monkeypatch.setattr(socket, "socket", socket_ctor_mock)
-        for opt_name in ("TCP_KEEPIDLE", "TCP_KEEPINTVL", "TCP_KEEPCNT"):
+        for opt_name in ("TCP_KEEPIDLE", "TCP_KEEPALIVE", "TCP_KEEPINTVL", "TCP_KEEPCNT"):
             monkeypatch.delattr(socket, opt_name, raising=False)
 
         factory = _make_keepalive_socket_factory(
@@ -545,11 +716,365 @@ class TestServerUtils:
 
         mock_sock.setsockopt.assert_called_once_with(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
+    def test_keepalive_idle_falls_back_to_macos_tcp_keepalive(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.delattr(socket, "TCP_KEEPIDLE", raising=False)
+        monkeypatch.setattr(socket, "TCP_KEEPALIVE", 0x10, raising=False)
+        mock_sock = MagicMock()
+
+        _set_tcp_keepalive(
+            mock_sock, _TCP_KEEPALIVE_TEST_IDLE, _TCP_KEEPALIVE_TEST_INTERVAL, _TCP_KEEPALIVE_TEST_PROBES
+        )
+
+        mock_sock.setsockopt.assert_any_call(socket.IPPROTO_TCP, 0x10, _TCP_KEEPALIVE_TEST_IDLE)
+
+    @mark.parametrize("family", [socket.AF_INET, socket.AF_INET6, socket.AF_UNIX])
+    def test_keepalive_httptools_protocol_enables_keepalive_on_tcp_only(
+        self, monkeypatch: MonkeyPatch, family: int
+    ) -> None:
+        parent_connection_made = MagicMock()
+        monkeypatch.setattr(HttpToolsProtocol, "__init__", lambda self, *args, **kwargs: None)
+        monkeypatch.setattr(HttpToolsProtocol, "connection_made", parent_connection_made)
+        protocol = KeepaliveHttpToolsProtocol(
+            keepalive=(_TCP_KEEPALIVE_TEST_IDLE, _TCP_KEEPALIVE_TEST_INTERVAL, _TCP_KEEPALIVE_TEST_PROBES)
+        )
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        transport = MagicMock()
+        transport.get_extra_info.return_value = sock
+        try:
+            protocol.connection_made(transport)  # A Unix socket must not raise on TCP-level options.
+            keepalive_on = sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
+            assert keepalive_on is (family != socket.AF_UNIX)
+            if family != socket.AF_UNIX and _TCP_KEEPIDLE_OPT is not None:
+                assert sock.getsockopt(socket.IPPROTO_TCP, _TCP_KEEPIDLE_OPT) == _TCP_KEEPALIVE_TEST_IDLE
+        finally:
+            sock.close()
+        parent_connection_made.assert_called_once_with(transport)
+
     def test_GlobalAIOHTTPAsyncClientConfig_keepalive_defaults(self) -> None:
         cfg = GlobalAIOHTTPAsyncClientConfig()
         assert cfg.global_aiohttp_tcp_keepalive_idle_seconds == 60
         assert cfg.global_aiohttp_tcp_keepalive_interval_seconds == 10
         assert cfg.global_aiohttp_tcp_keepalive_probes == 3
+
+    @mark.parametrize(
+        ("workers", "expected_total", "expected_per_host"),
+        [(1, 101, 17), (4, 25, 4), (16, 6, 1)],
+    )
+    def test_connection_pool_capacity_divides_aggregate_limits(
+        self, workers: int, expected_total: int, expected_per_host: int
+    ) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=101,
+            global_aiohttp_connector_limit_per_host=17,
+        )
+
+        capacity = connection_pool_capacity(cfg, workers)
+
+        assert capacity.total == expected_total
+        assert capacity.per_host == expected_per_host
+
+    def test_connection_pool_capacity_rounds_intended_concurrency_up(self) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_intended_concurrency=13,
+            global_aiohttp_intended_concurrency_per_host=5,
+        )
+
+        capacity = connection_pool_capacity(cfg, workers=4)
+
+        assert (capacity.intended, capacity.intended_per_host) == (4, 2)
+
+    @mark.parametrize("workers", [0, -1])
+    def test_connection_pool_capacity_rejects_invalid_worker_count(self, workers: int) -> None:
+        with raises(ValueError, match="worker count must be at least 1"):
+            connection_pool_capacity(GlobalAIOHTTPAsyncClientConfig(), workers)
+
+    @mark.parametrize(
+        ("total", "per_host", "workers"),
+        [(3, 2, 4), (3, 1024, 4), (100 * 1024, 8, 16), (0, 8, 16), (3, 0, 4), (1, 1024, 2), (1024, 1, 2)],
+        ids=[
+            "both",
+            "total-only",
+            "per-host-only",
+            "per-host-with-unlimited-total",
+            "total-with-unlimited-per-host",
+            "total-of-one",
+            "per-host-of-one",
+        ],
+    )
+    def test_connection_pool_capacity_rejects_zero_effective_limit(
+        self, total: int, per_host: int, workers: int
+    ) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=total,
+            global_aiohttp_connector_limit_per_host=per_host,
+        )
+
+        with raises(ValueError, match="must remain at least 1"):
+            connection_pool_capacity(cfg, workers=workers)
+
+    @mark.parametrize("field", ["global_aiohttp_connector_limit", "global_aiohttp_connector_limit_per_host"])
+    def test_connection_pool_config_rejects_negative_limits(self, field: str) -> None:
+        with raises(ValidationError):
+            GlobalAIOHTTPAsyncClientConfig(**{field: -1})
+
+    @mark.parametrize("field", ["global_aiohttp_intended_concurrency", "global_aiohttp_intended_concurrency_per_host"])
+    def test_connection_pool_config_rejects_nonpositive_intended_concurrency(self, field: str) -> None:
+        with raises(ValidationError):
+            GlobalAIOHTTPAsyncClientConfig(**{field: 0})
+
+    @mark.parametrize(("total", "per_host"), [(0, 0), (0, 64), (64, 0)])
+    @mark.parametrize("workers", [1, 4, 16])
+    def test_connection_pool_capacity_preserves_explicit_unlimited_limits(
+        self, total: int, per_host: int, workers: int
+    ) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=total,
+            global_aiohttp_connector_limit_per_host=per_host,
+        )
+        capacity = connection_pool_capacity(cfg, workers=workers)
+        assert capacity.total == (total // workers if total else 0)
+        assert capacity.per_host == (per_host // workers if per_host else 0)
+
+    def test_connection_pool_capacity_reports_effective_limits_and_warns(
+        self,
+        caplog: LogCaptureFixture,
+        capsys: CaptureFixture[str],
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=10,
+            global_aiohttp_connector_limit_per_host=6,
+            global_aiohttp_intended_concurrency=12,
+            global_aiohttp_intended_concurrency_per_host=8,
+        )
+        capacity = connection_pool_capacity(cfg, workers=4)
+        monkeypatch.setattr(connection_pool, "_ephemeral_port_capacity", lambda: 5)
+        connection_pool._REPORTED_CAPACITIES.clear()
+
+        with caplog.at_level(logging.INFO, logger="nemo_gym.telemetry.connection_pool"):
+            report_connection_pool_capacity(cfg, capacity, visible=True)
+
+        visible_report = capsys.readouterr().out
+        assert "aggregate_total=10" in visible_report
+        assert "effective_total=2" in visible_report
+        assert "intended per-worker concurrency 3 exceeds effective total limit 2" in caplog.text
+        assert "intended per-host concurrency 2 exceeds effective per-host limit 1" in caplog.text
+        assert "aggregate intended per-host concurrency 8" in caplog.text
+
+    @mark.parametrize(
+        ("workers", "effective_total", "per_worker_per_host", "intended_per_host"),
+        [(4, 16, 256, 250), (16, 4, 64, 63)],
+    )
+    def test_per_host_report_and_warning_respect_the_total_clamp(
+        self,
+        workers: int,
+        effective_total: int,
+        per_worker_per_host: int,
+        intended_per_host: int,
+        caplog: LogCaptureFixture,
+        capsys: CaptureFixture[str],
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """aiohttp serves min(limit, limit_per_host), so a large per-host limit is not reachable.
+
+        Reporting the configured value instead of the enforced one hid real oversubscription:
+        with limit=64/workers=4 a host can only reach 16, however large limit_per_host is.
+        """
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=64,
+            global_aiohttp_connector_limit_per_host=1024,
+            global_aiohttp_intended_concurrency_per_host=1000,
+        )
+        capacity = connection_pool_capacity(cfg, workers=workers)
+        monkeypatch.setattr(connection_pool, "_ephemeral_port_capacity", lambda: None)
+        connection_pool._REPORTED_CAPACITIES.clear()
+
+        with caplog.at_level(logging.INFO, logger="nemo_gym.telemetry.connection_pool"):
+            report_connection_pool_capacity(cfg, capacity, visible=True)
+
+        visible_report = capsys.readouterr().out
+        # The per-worker value is distinct from both the aggregate config and total clamp.
+        assert "aggregate_per_host=1024" in visible_report
+        assert f"effective_per_host={effective_total}" in visible_report
+        assert f"per_worker_per_host={per_worker_per_host}" in visible_report
+        assert "configured_per_host=" not in visible_report
+        assert (
+            f"intended per-host concurrency {intended_per_host} exceeds effective per-host limit {effective_total}"
+            in caplog.text
+        )
+
+    @mark.parametrize(
+        ("total", "workers", "effective_total"),
+        [(100 * 1024, 1, "102400"), (100 * 1024, 2, "51200"), (0, 1, "unlimited"), (0, 2, "unlimited")],
+    )
+    def test_connection_pool_limit_alone_does_not_warn_against_file_descriptor_budget(
+        self,
+        total: int,
+        workers: int,
+        effective_total: str,
+        caplog: LogCaptureFixture,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=total,
+        )
+        capacity = connection_pool_capacity(cfg, workers=workers)
+        connection_pool._REPORTED_CAPACITIES.clear()
+        monkeypatch.setattr(connection_pool.resource, "getrlimit", lambda _resource: (65535, 65535))
+        monkeypatch.setattr(connection_pool, "_ephemeral_port_capacity", lambda: None)
+
+        with caplog.at_level(logging.INFO, logger="nemo_gym.telemetry.connection_pool"):
+            report_connection_pool_capacity(cfg, capacity)
+
+        assert f"effective_total={effective_total} " in caplog.text
+        assert "file_descriptor_soft_limit=65535" in caplog.text
+        assert not any(record.levelno >= logging.WARNING for record in caplog.records)
+
+    @mark.parametrize("workers", [1, 4])
+    def test_unlimited_limits_are_reported_and_skip_demand_warnings(
+        self,
+        workers: int,
+        caplog: LogCaptureFixture,
+        capsys: CaptureFixture[str],
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=0,
+            global_aiohttp_connector_limit_per_host=0,
+            global_aiohttp_intended_concurrency=4096,
+            global_aiohttp_intended_concurrency_per_host=1024,
+        )
+        capacity = connection_pool_capacity(cfg, workers=workers)
+        connection_pool._REPORTED_CAPACITIES.clear()
+        monkeypatch.setattr(connection_pool.resource, "getrlimit", lambda _resource: (1048576, 1048576))
+        monkeypatch.setattr(connection_pool, "_ephemeral_port_capacity", lambda: None)
+
+        with caplog.at_level(logging.INFO, logger="nemo_gym.telemetry.connection_pool"):
+            report_connection_pool_capacity(cfg, capacity, visible=True)
+
+        visible_report = capsys.readouterr().out
+        for field in (
+            "aggregate_total",
+            "aggregate_per_host",
+            "effective_total",
+            "effective_per_host",
+            "per_worker_per_host",
+        ):
+            assert f"{field}=unlimited " in visible_report
+        assert not any(record.levelno >= logging.WARNING for record in caplog.records)
+
+    def test_unlimited_total_still_checks_a_finite_per_host_limit(
+        self,
+        caplog: LogCaptureFixture,
+        capsys: CaptureFixture[str],
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=0,
+            global_aiohttp_connector_limit_per_host=8,
+            global_aiohttp_intended_concurrency=4096,
+            global_aiohttp_intended_concurrency_per_host=16,
+        )
+        capacity = connection_pool_capacity(cfg, workers=1)
+        connection_pool._REPORTED_CAPACITIES.clear()
+        monkeypatch.setattr(connection_pool.resource, "getrlimit", lambda _resource: (1048576, 1048576))
+        monkeypatch.setattr(connection_pool, "_ephemeral_port_capacity", lambda: None)
+
+        with caplog.at_level(logging.INFO, logger="nemo_gym.telemetry.connection_pool"):
+            report_connection_pool_capacity(cfg, capacity, visible=True)
+
+        visible_report = capsys.readouterr().out
+        assert "effective_total=unlimited " in visible_report
+        assert "effective_per_host=8 " in visible_report
+        assert "intended per-host concurrency 16 exceeds effective per-host limit 8" in caplog.text
+        assert "exceeds effective total limit" not in caplog.text
+
+    def test_unlimited_per_host_is_clamped_to_the_total_limit(
+        self, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch
+    ) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=8,
+            global_aiohttp_connector_limit_per_host=0,
+            global_aiohttp_intended_concurrency_per_host=20,
+        )
+        capacity = connection_pool_capacity(cfg, workers=1)
+        connection_pool._REPORTED_CAPACITIES.clear()
+        monkeypatch.setattr(connection_pool, "_ephemeral_port_capacity", lambda: None)
+
+        with caplog.at_level(logging.INFO, logger="nemo_gym.telemetry.connection_pool"):
+            report_connection_pool_capacity(cfg, capacity)
+
+        assert "effective_per_host=8 per_worker_per_host=unlimited" in caplog.text
+        assert "intended per-host concurrency 20 exceeds effective per-host limit 8" in caplog.text
+
+    def test_intended_concurrency_warns_with_file_descriptor_prefix(
+        self, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch
+    ) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=1000,
+            global_aiohttp_intended_concurrency=100,
+        )
+        capacity = connection_pool_capacity(cfg, workers=1)
+        connection_pool._REPORTED_CAPACITIES.clear()
+        monkeypatch.setattr(connection_pool.resource, "getrlimit", lambda _resource: (64, 64))
+        monkeypatch.setattr(connection_pool, "_ephemeral_port_capacity", lambda: None)
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.telemetry.connection_pool"):
+            report_connection_pool_capacity(cfg, capacity)
+
+        assert (
+            "aiohttp file-descriptor capacity may be exhausted: intended per-worker concurrency 100 can exhaust "
+            "the file-descriptor soft limit 64"
+        ) in caplog.text
+        assert "aiohttp connection pool may queue requests" not in caplog.text
+
+    async def test_connection_pool_telemetry_is_not_installed_when_disabled(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.setattr(nemo_gym.server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 1)
+        monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: False)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
+        report = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "report_connection_pool_capacity", report)
+
+        client = nemo_gym.server_utils.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+        try:
+            assert type(client.connector) is TCPConnector
+            assert client.trace_configs == []
+            report.assert_not_called()
+        finally:
+            await client.close()
+            monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+
+    async def test_connection_pool_telemetry_is_installed_when_enabled(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.setattr(nemo_gym.server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 1)
+        monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: True)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: False)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
+
+        client = nemo_gym.server_utils.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+        try:
+            assert isinstance(client.connector, connection_pool.QueueTimedTCPConnector)
+            assert client.trace_configs == []
+        finally:
+            await client.close()
+            monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+
+    @mark.parametrize(
+        "field, value",
+        [
+            ("global_aiohttp_tcp_keepalive_idle_seconds", 0),
+            ("global_aiohttp_tcp_keepalive_idle_seconds", 32768),
+            ("global_aiohttp_tcp_keepalive_interval_seconds", 0),
+            ("global_aiohttp_tcp_keepalive_interval_seconds", 32768),
+            ("global_aiohttp_tcp_keepalive_probes", 0),
+            ("global_aiohttp_tcp_keepalive_probes", 128),
+        ],
+    )
+    def test_GlobalAIOHTTPAsyncClientConfig_rejects_out_of_range_keepalive(self, field: str, value: int) -> None:
+        # Linux setsockopt returns EINVAL for these, so they must fail at config load instead.
+        with raises(ValidationError):
+            GlobalAIOHTTPAsyncClientConfig.model_validate({field: value})
 
     def test_keepalive_socket_factory_uses_configured_values(self, monkeypatch: MonkeyPatch) -> None:
         mock_sock = MagicMock()
@@ -1135,11 +1660,36 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
         return client
 
-    async def test_request_bounded_connection_retries_surface_dead_endpoint(self, monkeypatch: MonkeyPatch) -> None:
+    @mark.parametrize("tracing_enabled", [False, True])
+    @mark.parametrize(("attempt_cap", "expected_attempts"), [(None, 3), (1, 1), (5, 3)])
+    async def test_request_bounded_connection_retries_surface_dead_endpoint(
+        self, monkeypatch: MonkeyPatch, tracing_enabled: bool, attempt_cap: int | None, expected_attempts: int
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
         client = self._mock_global_client(monkeypatch, connection_errors=10)
         with raises(ClientOSError):
-            await nemo_gym.server_utils.request("POST", "http://dead-host:1/v1", _max_connection_retries=3)
-        assert client.request.await_count == 3
+            await nemo_gym.server_utils.request(
+                "POST", "http://dead-host:1/v1", _max_num_tries=attempt_cap, _max_connection_retries=3
+            )
+        assert client.request.await_count == expected_attempts
+        assert "_max_num_tries" not in client.request.call_args.kwargs
+        assert "_max_connection_retries" not in client.request.call_args.kwargs
+
+    @mark.parametrize(("attempt_cap", "expected_attempts"), [(1, 1), (5, 3)])
+    async def test_request_caps_generic_errors_at_the_lower_attempt_limit(
+        self, monkeypatch: MonkeyPatch, attempt_cap: int, expected_attempts: int
+    ) -> None:
+        client = MagicMock()
+        client.request = AsyncMock(side_effect=TimeoutError("upstream timed out"))
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+
+        with raises(TimeoutError, match="upstream timed out"):
+            await nemo_gym.server_utils.request(
+                "POST", "http://slow-host:1/v1", _max_num_tries=attempt_cap, _max_connection_retries=3
+            )
+
+        assert client.request.await_count == expected_attempts
 
     async def test_request_connection_retries_unbounded_by_default(self, monkeypatch: MonkeyPatch) -> None:
         client = self._mock_global_client(monkeypatch, connection_errors=4)
@@ -1319,7 +1869,7 @@ class TestRunWebserverProxyKwargs:
         self,
         monkeypatch: MonkeyPatch,
         config_dict: dict,
-        num_workers: int,
+        num_workers: int | None,
         ray_enabled: bool | None = None,
         is_worker: bool = False,
     ) -> dict:
@@ -1344,6 +1894,7 @@ class TestRunWebserverProxyKwargs:
         )
 
         captured: dict = {}
+        self.uvicorn_kwargs = captured
         monkeypatch.setattr(nemo_gym.server_utils.uvicorn, "run", lambda **kwargs: captured.update(kwargs))
 
         server_config = BaseRunServerInstanceConfig(
@@ -1406,10 +1957,66 @@ class TestRunWebserverProxyKwargs:
         """The issue calls out parser, keepalive, access-log, and graceful-shutdown as must-not-change."""
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
 
-        assert "httptools" == kwargs["http"]
+        # Still the httptools parser (never an h11 fallback), now with TCP keepalive on accepted connections.
+        assert issubclass(kwargs["http"].func, HttpToolsProtocol)
         assert 30 == kwargs["timeout_keep_alive"]
         assert kwargs["access_log"] is False
         assert 0.5 == kwargs["timeout_graceful_shutdown"]
+
+    def test_server_tcp_keepalive_uses_global_aiohttp_keepalive_config(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
+        assert kwargs["http"].func is KeepaliveHttpToolsProtocol
+        assert kwargs["http"].keywords["keepalive"] == (60, 10, 3)
+
+        kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch,
+            {"global_aiohttp_tcp_keepalive_idle_seconds": 90, "global_aiohttp_tcp_keepalive_probes": 5},
+            num_workers=4,
+        )
+        assert kwargs["http"].keywords["keepalive"] == (90, 10, 5)
+        # Multi-worker uvicorn pickles its config into spawned worker processes.
+        restored = pickle.loads(pickle.dumps(kwargs["http"]))
+        assert restored.func is KeepaliveHttpToolsProtocol
+        assert restored.keywords["keepalive"] == (90, 10, 5)
+
+    @mark.skipif(_TCP_KEEPIDLE_OPT is None, reason="platform has no TCP keepalive idle option")
+    async def test_uvicorn_applies_tcp_keepalive_to_accepted_connections(self, monkeypatch: MonkeyPatch) -> None:
+        """Start a real uvicorn server with the `http` protocol that run_webserver builds and serve one request."""
+        http_protocol = self._capture_uvicorn_kwargs(
+            monkeypatch, {"global_aiohttp_tcp_keepalive_idle_seconds": 90}, num_workers=1
+        )["http"]
+
+        async def app(scope, receive, send) -> None:
+            await send({"type": "http.response.start", "status": 200, "headers": [(b"content-length", b"2")]})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        server = uvicorn.Server(
+            uvicorn.Config(app, host="127.0.0.1", port=0, http=http_protocol, lifespan="off", log_level="warning")
+        )
+        serve_task = asyncio.create_task(server.serve())
+        try:
+            while not server.started:
+                await asyncio.sleep(0.01)
+            port = server.servers[0].sockets[0].getsockname()[1]
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")
+            await writer.drain()
+            response = await asyncio.wait_for(reader.readuntil(b"ok"), timeout=5)
+            assert response.startswith(b"HTTP/1.1 200")
+
+            # HTTP/1.1 keeps the connection open, so the server side of it can be inspected.
+            (connection,) = server.server_state.connections
+            accepted_sock = connection.transport.get_extra_info("socket")
+            assert accepted_sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
+            assert 90 == accepted_sock.getsockopt(socket.IPPROTO_TCP, _TCP_KEEPIDLE_OPT)
+            assert 10 == accepted_sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL)
+            assert 3 == accepted_sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT)
+
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            server.should_exit = True
+            await asyncio.wait_for(serve_task, timeout=5)
 
     def test_trusted_proxy_opt_in_is_forwarded_to_uvicorn(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(
@@ -1424,6 +2031,37 @@ class TestRunWebserverProxyKwargs:
     def test_enabling_without_allowlist_fails_startup(self, monkeypatch: MonkeyPatch) -> None:
         with raises(ValidationError, match="requires a non-empty uvicorn_forwarded_allow_ips"):
             self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_proxy_headers": True}, num_workers=1)
+
+    @mark.parametrize(("is_worker", "num_workers"), [(False, None), (False, 1), (False, 4), (True, 4)])
+    def test_connection_pool_report_is_printed_only_by_the_main_process(
+        self, monkeypatch: MonkeyPatch, is_worker: bool, num_workers: int | None
+    ) -> None:
+        report = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "report_connection_pool_capacity", report)
+
+        self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=num_workers, is_worker=is_worker)
+
+        if is_worker:
+            report.assert_not_called()
+        else:
+            report.assert_called_once()
+            assert report.call_args.args[1].workers == (num_workers or 1)
+            assert report.call_args.kwargs == {"visible": True}
+
+    @mark.parametrize("is_worker", [False, True])
+    def test_positive_limit_that_divides_to_zero_fails_before_uvicorn_starts(
+        self, monkeypatch: MonkeyPatch, is_worker: bool
+    ) -> None:
+        report = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "report_connection_pool_capacity", report)
+
+        with raises(ValueError, match="must remain at least 1"):
+            self._capture_uvicorn_kwargs(
+                monkeypatch, {"global_aiohttp_connector_limit_per_host": 8}, num_workers=16, is_worker=is_worker
+            )
+
+        assert self.uvicorn_kwargs == {}
+        report.assert_not_called()
 
 
 class TestHeadServerProxyKwargs:
@@ -1469,3 +2107,64 @@ class TestHeadServerProxyKwargs:
 
         assert kwargs["proxy_headers"] is True
         assert kwargs["forwarded_allow_ips"] == ["10.0.0.1"]
+
+
+@mark.parametrize("header", [None, b"X-Other-Harness-Reply"])
+def test_model_header_comes_from_its_harness_property(monkeypatch, header):
+    import sys
+    from types import ModuleType
+
+    harness = ModuleType("responses_api_agents.test_header_harness")
+    harness._assistant_message_header = header
+    plain = ModuleType("responses_api_agents.test_plain_harness")
+    monkeypatch.setitem(sys.modules, harness.__name__, harness)
+    monkeypatch.setitem(sys.modules, plain.__name__, plain)
+    client = ServerClient(
+        head_server_config={"host": "localhost", "port": 0},
+        global_config_dict=OmegaConf.create(
+            {
+                "first": {
+                    "responses_api_agents": {
+                        "test_header_harness": {
+                            "model_server": {"type": "responses_api_models", "name": "first_model"},
+                        }
+                    }
+                },
+                "second": {
+                    "responses_api_agents": {
+                        "test_plain_harness": {
+                            "model_server": {"type": "responses_api_models", "name": "second_model"},
+                        }
+                    }
+                },
+                "observability_enabled": True,
+            }
+        ),
+    )
+    assert client.assistant_message_header("first_model") == (header.lower() if header else None)
+    assert client.assistant_message_header("second_model") is None
+    assert client.assistant_message_header("unused_model") is None
+
+
+def test_shared_model_rejects_conflicting_harness_headers(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    config = {}
+    for index, header in enumerate((b"x-one-reply", b"x-two-reply")):
+        name = f"test_header_{index}"
+        harness = ModuleType(f"responses_api_agents.{name}")
+        harness._assistant_message_header = header
+        monkeypatch.setitem(sys.modules, harness.__name__, harness)
+        config[name] = {
+            "responses_api_agents": {
+                name: {
+                    "model_server": {"type": "responses_api_models", "name": "policy"},
+                }
+            }
+        }
+    client = ServerClient(
+        head_server_config={"host": "localhost", "port": 0}, global_config_dict=OmegaConf.create(config)
+    )
+    with raises(ValueError, match="different assistant headers"):
+        client.assistant_message_header("policy")
