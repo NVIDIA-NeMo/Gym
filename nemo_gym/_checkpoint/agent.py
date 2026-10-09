@@ -23,6 +23,7 @@ so a rollout that is never checkpointed pays nothing for its boundaries.
 """
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
@@ -43,6 +44,8 @@ from nemo_gym._checkpoint.steps import Boundary, EpisodeSteps, StepMode
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.server_utils import current_session_id
 
+
+LOGGER = logging.getLogger(__name__)
 
 BoundarySnapshot = Callable[[], dict[str, JsonValue]]
 
@@ -108,6 +111,12 @@ class AgentSessionHooks(Protocol):
 
     async def retire_agent_session(self, session_key: str) -> None: ...
 
+    async def resume_agent_sessions(self, session_keys: list[str]) -> None:
+        """Resume state outside the process that the last commit's export parked, such as paused sandboxes.
+
+        Runs in the background when admission reopens after a commit. Optional and best effort.
+        """
+
 
 @dataclass
 class _Session:
@@ -170,6 +179,9 @@ class AgentSessionParticipant(CheckpointParticipant):
         self._seeding: dict[str, EpisodeId] = {}
         self._open = asyncio.Event()
         self._open.set()
+        # Sessions the last commit exported, for the resume hook.
+        self._exported: set[str] = set()
+        self._resume_task: Optional[asyncio.Task] = None
         # With several workers: this worker's routing owner, and where restored legacy episodes are claimed.
         self.owner: Optional[str] = None
         self.claim_restored: Optional[Callable[[str], Awaitable[Optional[dict[str, Any]]]]] = None
@@ -352,6 +364,15 @@ class AgentSessionParticipant(CheckpointParticipant):
         for session in self._sessions.values():
             session.park_requested = False
             session.resume.set()
+        exported, self._exported = sorted(self._exported), set()
+        if exported:
+            self._resume_task = asyncio.create_task(self._resume_exported(exported))
+
+    async def _resume_exported(self, session_keys: list[str]) -> None:
+        try:
+            await self.hooks.resume_agent_sessions([key for key in session_keys if key in self._sessions])
+        except Exception:
+            LOGGER.warning("resuming the exported agent sessions' state after the checkpoint failed", exc_info=True)
 
     def readiness(self) -> PrepareReport:
         legacy_blockers = {
@@ -423,6 +444,7 @@ class AgentSessionParticipant(CheckpointParticipant):
         missing = [session.key for session in sessions if session.key not in states]
         if missing:
             raise ControlError(f"the agent did not export sessions {missing}")
+        self._exported = {session.key for session in sessions}
         return [
             AgentSessionRecord(
                 session_key=session.key,

@@ -105,6 +105,9 @@ class SandboxNotesAgent(SimpleAgent):
         await self._sandboxes.stop(session_key)
         await super().retire_agent_session(session_key)
 
+    async def resume_agent_sessions(self, session_keys: list[str]) -> None:
+        await self._sandboxes.resume_paused(session_keys)
+
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         # The episode is over: free its sandbox. Its snapshots stay for the checkpoints that name them.
         await self._sandboxes.stop(state.request.agent_session_id)
