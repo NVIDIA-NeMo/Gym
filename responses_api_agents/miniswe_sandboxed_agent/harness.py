@@ -303,6 +303,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
 
     async def execute(self, budget: float) -> tuple[NeMoGymResponse, HarnessOutcome, dict]:
         """Run one sandbox command and collect its persisted native artifacts."""
+        deadline = monotonic() + budget
         remote = self.remote_directory
         model_kwargs = self.params.model_dump(exclude_none=True)
         for key in ("input", "model", "tools", "stream"):
@@ -453,6 +454,10 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             termination.artifacts = [str(self.directory / "trajectory.json")]
         if (self.directory / "agent.log").exists():
             termination.artifacts.append(str(self.directory / "agent.log"))
+        if monotonic() >= deadline:
+            # The sandbox may end the command at the deadline without raising; that run timed out,
+            # whatever it reported, and the observations below must say so too.
+            termination.reason = "timeout"
         if self.observability_enabled:
             invocation = AgentInvocation(invocation_id=self.context.session_id)
             observations = AgentObservationBundle(source="miniswe", records=[invocation])
@@ -553,6 +558,8 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 if termination.reason == "infrastructure_error"
                 else "incomplete"
             )
+            if termination.reason == "timeout":
+                invocation.error_type = "TimeoutError"
             invocation.duration_ms = (monotonic() - started) * 1000
             extra["ng_agent_observations"] = observations.model_dump(mode="json")
             extra["ng_trajectory"] = trajectory.model_dump(mode="json")

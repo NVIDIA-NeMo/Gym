@@ -269,7 +269,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         completed = "reward" in rewards
         failure = None
         if not completed:
-            failure = (result.get("exception_info") or {}).get("exception_type", "MissingOfficialReward")
+            exception_info = result.get("verifier_exception_info") or result.get("exception_info") or {}
+            failure = exception_info.get("exception_type", "MissingOfficialReward")
         elif session.termination.reason == "infrastructure_error":
             failure = session.termination.detail or "Agent infrastructure failure"
         return SandboxedVerifyResponse(

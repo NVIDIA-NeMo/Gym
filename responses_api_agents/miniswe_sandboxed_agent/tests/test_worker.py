@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig
 
 
@@ -196,3 +197,33 @@ async def test_cancellation_during_native_cleanup_retains_trajectory(tmp_path, r
     assert outcome.reason == "cancelled"
     assert len(response.output) == 1
     assert extra["mini_swe_trajectory"]["info"]["exit_status"] == "Submitted"
+
+
+async def test_command_ended_at_deadline_is_an_incomplete_timeout(tmp_path, runner_factory, monkeypatch):
+    async def query(params):
+        await asyncio.Event().wait()
+
+    harness = await runner_factory(
+        context=HarnessContext(session_id="deadline-test", instruction="inspect"),
+        config=MiniSWEConfig(),
+        params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        query=query,
+        model_name="model",
+        directory=tmp_path / "artifacts",
+        observability_enabled=True,
+    )
+    run_command = harness.sandbox.exec
+
+    async def exec(command, **kwargs):
+        try:
+            return await run_command(command, **kwargs)
+        except TimeoutError:
+            # A sandbox server can kill the command at the deadline and report its exit instead of raising.
+            return SandboxExecResult("", "Killed", 137)
+
+    monkeypatch.setattr(harness.sandbox, "exec", exec)
+    _, outcome, extra = await harness.execute(2)
+    assert outcome.reason == "timeout", outcome
+    invocation = extra["ng_agent_observations"]["records"][0]
+    assert invocation["status"] == "incomplete"
+    assert invocation["error_type"] == "TimeoutError"
