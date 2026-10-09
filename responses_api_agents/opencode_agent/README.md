@@ -96,3 +96,12 @@ preserved; otherwise the temporary workspace is removed after the call. A local
 working directory is not filesystem isolation. The optional `legacy_sandbox` mode
 delegates to the existing old package; benchmarks can keep using that
 package directly.
+
+## Terminal-Bench 2.1
+
+Use the [single-task recipe](../../benchmarks/terminal_bench_2_1/README.md#opencode-in-a-task-sandbox)
+to compose the independent TB Resources, OpenCode, EnvironmentServer and model
+configs. Resources owns the task sandbox and verifier; OpenCode borrows it through
+the same session contract as SWE-Pro. `single_agent_turn_legacy` adapts prepared
+flat rows to that lifecycle; it does not invoke the agent's legacy `/run` path.
+The EnvironmentServer closes the agent before grading, then closes Resources.
