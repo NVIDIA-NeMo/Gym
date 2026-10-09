@@ -14,10 +14,9 @@ import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
 from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 from nemo_gym.server_utils import (
-    _WARNED_IMPLICIT_RAY_SERVERS,
+    SimpleServer,
     _connect_server_to_ray,
     _declared_ray_enabled,
-    _server_uses_ray,
     entrypoint_ray_enabled,
 )
 
@@ -111,46 +110,6 @@ def _server_class_declarations(root: Path = PARENT_DIR) -> list[tuple[Path, ast.
     return declarations
 
 
-def test_omitted_ray_flag_preserves_compatibility(caplog, monkeypatch: pytest.MonkeyPatch) -> None:
-    class LegacyServer:
-        ray_enabled = None
-
-    monkeypatch.setattr(nemo_gym.server_utils, "ray_is_installed", lambda: True)
-    _WARNED_IMPLICIT_RAY_SERVERS.clear()
-    assert _server_uses_ray(LegacyServer, WITH_CLUSTER) is True
-    assert "Ray remains enabled for backward compatibility" in caplog.text
-    assert "future release will default it to false" in caplog.text
-
-
-@pytest.mark.parametrize(
-    ("installed", "config"),
-    [(False, WITH_CLUSTER), (True, WITHOUT_CLUSTER)],
-    ids=["ray-not-installed", "no-cluster-to-join"],
-)
-def test_omitted_ray_flag_runs_without_ray_when_it_cannot_join_a_cluster(
-    caplog, monkeypatch: pytest.MonkeyPatch, installed: bool, config
-) -> None:
-    class LegacyServer:
-        ray_enabled = None
-
-    monkeypatch.setattr(nemo_gym.server_utils, "ray_is_installed", lambda: installed)
-    _WARNED_IMPLICIT_RAY_SERVERS.clear()
-    assert _server_uses_ray(LegacyServer, config) is False
-    assert "runs without Ray" in caplog.text
-
-
-def test_explicit_ray_declarations_do_not_warn(caplog) -> None:
-    class RayServer:
-        ray_enabled = True
-
-    class NonRayServer:
-        ray_enabled = False
-
-    assert _server_uses_ray(RayServer, WITHOUT_CLUSTER) is True
-    assert _server_uses_ray(NonRayServer, WITH_CLUSTER) is False
-    assert caplog.text == ""
-
-
 class TestConnectServerToRay:
     class RayServer:
         ray_enabled = True
@@ -176,6 +135,15 @@ class TestConnectServerToRay:
         initialize_ray = self._patch(monkeypatch, launched_by_gym=True)
         _connect_server_to_ray(self.NonRayServer, WITH_CLUSTER)
         initialize_ray.assert_not_called()
+
+    def test_undeclared_server_never_connects(self, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+        class UndeclaredServer(SimpleServer):
+            pass
+
+        initialize_ray = self._patch(monkeypatch, launched_by_gym=True)
+        _connect_server_to_ray(UndeclaredServer, WITH_CLUSTER)
+        initialize_ray.assert_not_called()
+        assert caplog.text == ""
 
     def test_gym_launched_ray_server_without_a_cluster_fails_instead_of_starting_one(
         self, monkeypatch: pytest.MonkeyPatch
