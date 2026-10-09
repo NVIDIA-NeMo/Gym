@@ -32,6 +32,13 @@ You need the two artifact files that `gym eval run` writes alongside the main ro
 
 Both files are required. `rollouts.jsonl` alone is not sufficient because many resources servers drop verifier-specific fields from the verify response; those fields are preserved in `*_materialized_inputs.jsonl`.
 
+<Note>
+Ordinary re-scoring supports fresh manifest-backed runs when their files contain no superseded attempts. Write the
+new scores to a separate output. If a saved answer was superseded by a newer attempt, first export the selected
+results using `gym eval aggregate`. Judge-only recovery of manifest-backed runs and appending reverified results
+back into those runs remain follow-ups; see [evaluation resume](/main/evaluation/resume).
+</Note>
+
 ### Relay ATIF trajectories
 
 The initial external-trajectory path accepts the completed, text-only ATIF v1.7 profile emitted by NeMo Relay. It does not load the Relay runtime. You need:

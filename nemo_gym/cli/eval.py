@@ -573,9 +573,16 @@ def _check_saved_completion(output: Path) -> None:
     if coverage.exists():
         report = json.loads(coverage.read_text())
         if report.get("complete") is False:
+            retryable = report.get("retryable", 1) > 0
+            guidance = (
+                "Resume unfinished work after resolving failures."
+                if retryable
+                else "No tasks are eligible for retry: inspect terminal failures, omissions and exhausted budgets."
+            )
             raise IncompleteEvaluationError(
                 f"{report['successful']}/{report['expected']} samples completed. "
-                f"Partial artifacts retained at {output}; resume unfinished work after resolving failures."
+                f"Partial artifacts retained at {output}. {guidance}",
+                retryable=retryable,
             )
 
 

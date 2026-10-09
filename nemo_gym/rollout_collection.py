@@ -106,6 +106,7 @@ from nemo_gym.rollout_records import (
     coverage_path_for,
     journal_path_for,
     logical_rollout_id,
+    resolve_rollout_path,
 )
 from nemo_gym.rollout_recovery import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS as _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
@@ -1109,7 +1110,9 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
             raise ValueError("environment_server_routes are required when environment_routing_mode=taskset")
         return self
 
-    def check_completion(self, *, expected: int, results: List[Dict[str, Any]], completed: int | None = None) -> None:
+    def check_completion(
+        self, *, expected: int, results: List[Dict[str, Any]], completed: int | None = None, retryable: bool = True
+    ) -> None:
         """Reject incomplete submitted runs after saving their partial artifacts."""
         if not self.require_complete:
             return
@@ -1125,6 +1128,8 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
             raise IncompleteEvaluationError(
                 f"EVAL FAILED: {completed}/{expected} samples completed. "
                 f"Partial artifacts retained at {self.output_jsonl_fpath}."
+                + (" No tasks are eligible for retry." if not retryable else ""),
+                retryable=retryable,
             )
 
 
@@ -1678,7 +1683,15 @@ def _failure_outcome(row: Dict, failure: Dict, stage: str) -> RolloutFailure:
         episode_id=EpisodeId(rollout_id=logical_rollout_id(row), attempt=row.get(ATTEMPT_INDEX_KEY_NAME, 0)),
         run_id=row[RUN_ID_KEY],
         source="environment" if observed_response else "collector",
-        delivery="delivered" if observed_response or failure.get("_ng_failure_http_status") else "possibly_delivered",
+        delivery=(
+            "delivered"
+            if observed_response
+            or (
+                failure.get("_ng_failure_http_status")
+                and failure["_ng_failure_http_status"] not in _SERVER_DID_NOT_RUN_STATUSES
+            )
+            else "possibly_delivered"
+        ),
         failure=EpisodeFailure(
             failure_reason=message[:2000],
             terminal=bool(failure.get(NG_TERMINAL_KEY)),
@@ -2614,7 +2627,9 @@ class RolloutCollectionHelper(BaseModel):
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         # Choose the target before locking, including fresh runs. Replacing an
         # output alias would otherwise change the lock identity during collection.
-        config = config.model_copy(update={"output_jsonl_fpath": str(Path(config.output_jsonl_fpath).resolve())})
+        config = config.model_copy(
+            update={"output_jsonl_fpath": str(resolve_rollout_path(Path(config.output_jsonl_fpath)))}
+        )
         # Hold ownership from identity validation through final aggregation/reporting.
         with run_lock(Path(config.output_jsonl_fpath)):
             return await self._run_locked_from_config(config)
@@ -2837,7 +2852,7 @@ class RolloutCollectionHelper(BaseModel):
                 route_failures_to_sidecar=config.route_failures_to_sidecar,
                 typed_outcomes=config.route_failures_to_sidecar,
                 validate_results=True,
-                on_dispatch=store.record_dispatch,
+                on_dispatch_batch=store.record_dispatches,
                 max_resident_tasks=config.max_resident_rollout_tasks,
                 interleave_by_agent=True,
                 dispatch_budget_s=config.dispatch_budget_s,
@@ -2891,7 +2906,11 @@ class RolloutCollectionHelper(BaseModel):
                         result = _failure_outcome(row, result, "agent")
                 structured_failure = isinstance(result, RolloutFailure)
                 if structured_failure:
-                    result = diagnostics | _failure_compatibility_row(result, verification_response)
+                    compatibility = _failure_compatibility_row(result, verification_response)
+                    # Keep producer evidence without making it the canonical failure reason.
+                    if "error" in diagnostics:
+                        compatibility.pop("error")
+                    result = diagnostics | compatibility
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -3160,7 +3179,8 @@ class RolloutCollectionHelper(BaseModel):
             )
             raise IncompleteEvaluationError(
                 f"None of the {len(input_rows)} dispatched rollouts produced a result "
-                f"{dict(failure_counts)}.{drained_note} Inspect {failures_fpath}; the run has no score to report."
+                f"{dict(failure_counts)}.{drained_note} Inspect {failures_fpath}; the run has no score to report.",
+                retryable=store.coverage()["retryable"] > 0,
             )
         print(latency_tracker.summary())
 
@@ -3285,7 +3305,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 print(format_health_report(health_result))
 
         config.check_completion(
-            expected=expected_rollouts, results=persisted_results, completed=completion["successful"]
+            expected=expected_rollouts,
+            results=persisted_results,
+            completed=completion["successful"],
+            retryable=completion["retryable"] > 0,
         )
         return results
 
@@ -3719,6 +3742,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         typed_outcomes: bool = False,
         validate_results: bool = False,
         on_dispatch: Optional[Callable[[Dict], None]] = None,
+        on_dispatch_batch: Optional[Callable[[List[Dict]], None]] = None,
         interleave_by_agent: bool = False,
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
@@ -3772,6 +3796,37 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # spent, and must drain rather than disable the check.
         deadline = (time.monotonic() + dispatch_budget_s) if dispatch_budget_s is not None else None
 
+        # Coalesce requests admitted on the same event-loop turn. Only rows that
+        # acquired a slot and passed the drain check enter this batch. Persist the
+        # reservations before releasing any request to the server.
+        reservation_waiters: list[tuple[Dict, Future]] = []
+
+        def flush_reservations() -> None:
+            batch = [(row, waiter) for row, waiter in reservation_waiters if not waiter.cancelled()]
+            reservation_waiters.clear()
+            if not batch:
+                return
+            try:
+                on_dispatch_batch([row for row, _ in batch])
+            except Exception as error:
+                for _, waiter in batch:
+                    waiter.set_exception(error)
+            else:
+                for _, waiter in batch:
+                    waiter.set_result(None)
+
+        async def reserve_dispatch(row: Dict) -> None:
+            if on_dispatch_batch is None:
+                if on_dispatch is not None:
+                    on_dispatch(row)
+                return
+            loop = asyncio.get_running_loop()
+            waiter = loop.create_future()
+            if not reservation_waiters:
+                loop.call_soon(flush_reservations)
+            reservation_waiters.append((row, waiter))
+            await waiter
+
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
             server_name = (
                 self._dispatch_name(row)
@@ -3800,8 +3855,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 started_at = time.time()
                 res = None
                 stage = "request"
-                if on_dispatch is not None:
-                    on_dispatch(row)
+                await reserve_dispatch(row)
                 succeeded = False
                 try:
                     request_body = _episode_request_body(row) if _materialized_taskset(row) else row
@@ -3840,6 +3894,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     if not (route_failures_to_sidecar or typed_outcomes) or not isinstance(
                         e, (*_RUN_FAILURE_ERRORS, InvalidRolloutResult)
                     ):
+                        if isinstance(e, InvalidRolloutResult):
+                            e.add_note(
+                                "Set +route_failures_to_sidecar=true to save this invalid reply as a failure "
+                                "and continue independent tasks; fix the producer before retrying the failed task."
+                            )
                         raise
                     if res is not None:
                         res.release()
@@ -4136,7 +4195,7 @@ def _expand_input_glob(input_glob: str) -> List[str]:
     seen: Dict[Path, str] = {}  # source identity includes its companion recovery files
     for pattern in patterns:
         for path in sorted(glob_module.glob(pattern)):
-            resolved = Path(path).resolve()
+            resolved = resolve_rollout_path(Path(path))
             if resolved.stem.endswith(("_attempts", "_failures", "_materialized_inputs")):
                 # Broad shard globs must not score recovery artifacts as results.
                 continue
@@ -4150,6 +4209,26 @@ class RolloutAggregationHelper(BaseModel):
         if not input_paths:
             raise ConfigPathNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
         output_fpath = Path(config.output_jsonl_fpath)
+        # Metrics-only aggregation may target the source basename. Its report
+        # must not replace the collector's run-specific completion snapshot.
+        report_path = coverage_path_for(
+            output_fpath if config.merge_shards else output_fpath.with_stem(output_fpath.stem + "_aggregate")
+        )
+        for source in input_paths:
+            for artifact in (
+                Path(source),
+                manifest_path_for(Path(source)),
+                journal_path_for(Path(source)),
+                materialized_path_for(Path(source)),
+                failures_path_for(Path(source)),
+                coverage_path_for(Path(source)),
+            ):
+                if report_path.resolve() == artifact.resolve() or (
+                    report_path.exists() and artifact.exists() and report_path.samefile(artifact)
+                ):
+                    raise ConfigError(
+                        "Aggregate coverage must not overwrite source rollout artifacts; choose a new output path."
+                    )
         if config.merge_shards:
             sources = {
                 artifact
@@ -4391,7 +4470,7 @@ class RolloutAggregationHelper(BaseModel):
             "shards": components,
             "shards_without_inventory": [str(path) for path in legacy_paths],
         }
-        atomic_write_json(coverage_path_for(output_fpath), completion)
+        atomic_write_json(report_path, completion)
         if not inventory_known:
             print(
                 "Completion coverage is unknown for legacy shards without validated attempt history; "
@@ -4410,7 +4489,7 @@ class RolloutAggregationHelper(BaseModel):
                 f"({completion['measured']} measured, {completion['masked']} masked, {completion['unscored']} unscored), "
                 f"{completion['failed']} failed, "
                 f"{completion['intentionally_omitted']} intentionally omitted, {completion['unknown']} unknown. "
-                f"Details: {coverage_path_for(output_fpath)}"
+                f"Details: {report_path}"
             )
         if get_exporters():  # pragma: no cover
             metrics = {

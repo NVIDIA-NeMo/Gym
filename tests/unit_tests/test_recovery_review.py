@@ -561,3 +561,257 @@ def test_interrupted_fresh_replacement_requires_repeating_fresh_command(prepared
     assert fresh.manifest.run_id != old_run_id
     assert fresh.coverage()["attempts"] == 0
     assert [row["task"] for row in fresh.pending(3)] == ["new", "new"]
+
+
+@pytest.mark.parametrize("status", [429, 502, 503, 504])
+def test_gateway_failure_does_not_prove_environment_delivery(status):
+    row = {"_ng_task_index": 0, "_ng_rollout_index": 0, "_ng_run_id": "run"}
+    failure = collection._failure_outcome(
+        row, {"_ng_failure_class": "agent_run_error", "_ng_failure_http_status": status}, "request"
+    )
+    assert failure.source == "collector"
+    assert failure.delivery == "possibly_delivered"
+
+
+async def test_producer_error_is_preserved_in_persisted_sidecar(runner_config, monkeypatch):
+    async def post(**kwargs):
+        if kwargs["json"]["task"] == 1:
+            return FakeResponse(
+                200, {"_ng_failure_class": "agent_run_error", "error": "Sandbox unavailable: original evidence"}
+            )
+        return FakeResponse(200, {"response": {}, "reward": 1.0})
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    [failure] = RolloutStore.read(Path(runner_config.output_jsonl_fpath)).failures()
+    assert failure["error"] == "Sandbox unavailable: original evidence"
+    assert failure["_ng_failure_record"]["failure"]["failure_reason"] == "Agent reported a no-result failure"
+    assert "reward" not in failure
+
+
+@pytest.mark.parametrize("unsafe", [False, True])
+def test_legacy_alias_companions_never_erase_saved_results(prepared_run, unsafe):
+    output, prepare = prepared_run
+    output.write_text('{"_ng_task_index":0,"_ng_rollout_index":0,"reward":1}\n')
+    alias = output.with_name("latest.jsonl")
+    alias.symlink_to(output)
+    materialized_path_for(alias).write_bytes(prepare()[1].model_dump_json().encode())
+    before = snapshot(output)
+    with pytest.raises(ConfigError, match="beside the rollout alias"):
+        RolloutStore.start_or_resume(alias, prepare, resume=True, allow_unsafe=unsafe)
+    with pytest.raises(ConfigError, match="beside the rollout alias"):
+        collection._expand_input_glob(str(alias))
+    assert snapshot(output) == before
+
+
+@pytest.mark.parametrize("kind", ["terminal", "omitted", "exhausted", "retryable", "unknown"])
+def test_cli_retryability_matches_store_pending_work(prepared_run, kind):
+    from nemo_gym.cli.eval import _check_saved_completion
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row, unfinished = store.pending(3)
+        store.record_dispatch(row)
+        store.record_outcome(row | {"reward": 1.0, "response": {}})
+        if kind != "unknown":
+            for _ in range(3 if kind == "exhausted" else 1):
+                store.allocate_attempt(unfinished)
+                store.record_outcome(
+                    unfinished
+                    | {
+                        "_ng_failure_class": "skipped" if kind == "omitted" else "agent_run_error",
+                        "_ng_failure_terminal": kind in {"terminal", "omitted"},
+                    }
+                )
+        assert bool(store.pending(3)) is (kind in {"retryable", "unknown"})
+    with pytest.raises(IncompleteEvaluationError) as error:
+        _check_saved_completion(output)
+    assert error.value.exit_code == (75 if kind in {"retryable", "unknown"} else 76)
+
+
+async def test_aggregate_without_merge_preserves_source_coverage(prepared_run, monkeypatch):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False):
+        pass
+    before = coverage_path_for(output).read_bytes()
+    monkeypatch.setattr(collection.RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
+    await collection.RolloutAggregationHelper().run_from_config(
+        collection.RolloutAggregationConfig(
+            input_glob=str(output),
+            output_jsonl_fpath=str(output),
+            merge_shards=False,
+            disable_health_check=True,
+        )
+    )
+    assert coverage_path_for(output).read_bytes() == before
+    assert output.with_name("rollouts_aggregate_coverage.json").exists()
+
+
+def test_batch_reservations_are_durable_before_dispatch(prepared_run, monkeypatch):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        rows = store.pending(3)
+        original_write = RunManifest.write
+        writes = []
+
+        def write(manifest, path):
+            writes.append(dict(manifest.next_attempt))
+            original_write(manifest, path)
+
+        monkeypatch.setattr(RunManifest, "write", write)
+        store.record_dispatches(rows)
+        assert len(writes) == 1
+        assert writes[0] == {"0-0": 1, "1-0": 1}
+        assert len(RolloutStore.read(output).pending(3)) == 2
+        store.record_dispatches(rows)
+        assert len(writes) == 1
+        assert all(row["_ng_attempt_index"] == 0 for row in rows)
+
+
+def test_failed_batch_reservation_changes_neither_memory_nor_disk(prepared_run, monkeypatch):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        rows = store.pending(3)
+        original_rows = [dict(row) for row in rows]
+        before = snapshot(output)
+
+        def fail(*args):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(RunManifest, "write", fail)
+        with pytest.raises(OSError, match="disk full"):
+            store.record_dispatches(rows)
+        assert store.manifest.next_attempt == {}
+        assert rows == original_rows
+        assert snapshot(output) == before
+
+
+@pytest.mark.parametrize("newer", ["none", "interrupted", "failed", "succeeded"])
+def test_health_only_accepts_already_selected_rows(prepared_run, newer):
+    from scripts.harness_conformance.runner import inspect_episode
+    from scripts.harness_conformance.scenarios import SCENARIOS
+
+    from nemo_gym.rollout_health import JournalHealthUnavailable, run_health_checks
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row, failed = store.pending(3)
+        store.record_dispatches([row, failed])
+        store.record_outcome(row | {"reward": 1.0, "response": {}})
+        store.record_outcome(failed | {"_ng_failure_class": "judge_failed"})
+        if newer != "none":
+            store.allocate_attempt(row)
+            if newer != "interrupted":
+                store.record_outcome(
+                    row
+                    | (
+                        {"_ng_failure_class": "agent_run_error"}
+                        if newer == "failed"
+                        else {"reward": 0.0, "response": {}}
+                    )
+                )
+    before = output.read_bytes(), failures_path_for(output).read_bytes()
+    if newer == "none":
+        run_health_checks([output, failures_path_for(output)], workers=1)
+        assert (output.parent / "quality_summary.json").exists()
+        # The production conformance reader must reach reporting, even when a
+        # minimal synthetic result fails its unrelated capability checks.
+        report = inspect_episode(SCENARIOS[0], output.parent, {})
+        assert report is not None
+    else:
+        with pytest.raises(JournalHealthUnavailable, match="superseded outcomes"):
+            run_health_checks(output, workers=1)
+    assert before == (output.read_bytes(), failures_path_for(output).read_bytes())
+
+
+async def test_ordinary_reverification_reads_fresh_manifest_without_changing_source(prepared_run, monkeypatch):
+    import nemo_gym.rollout_reverification as reverify
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        for row in store.pending(3):
+            store.record_dispatch(row)
+            store.record_outcome(row | {"reward": 0.0, "response": {"answer": "saved"}})
+    before = snapshot(output)
+    monkeypatch.setattr(reverify, "_guard_reverify_mode", AsyncMock(return_value=None))
+    seen = []
+
+    async def verify(row):
+        seen.append(row)
+        return row, {"reward": 1.0, "response": row["response"]}
+
+    monkeypatch.setattr(
+        reverify, "_run_verification_payloads", lambda payloads, **kwargs: [verify(row) for row in payloads]
+    )
+    await reverify.RolloutReverificationHelper().run_from_config(
+        reverify.RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
+            rollouts_jsonl_fpath=str(output),
+            output_jsonl_fpath=str(output.with_name("rescored.jsonl")),
+            disable_aggregation=True,
+            upload_rollouts=False,
+        )
+    )
+    assert len(seen) == 2 and all(row["response"] == {"answer": "saved"} for row in seen)
+    assert all((output.parent / name).read_bytes() == content for name, content in before.items())
+    assert all(row["reward"] == 1.0 for row in read_records(output.with_name("rescored.jsonl")))
+
+
+async def test_production_dispatch_batches_reservations_before_http(runner_config, monkeypatch):
+    output = Path(runner_config.output_jsonl_fpath)
+    runner_config.num_samples_in_parallel = 3
+    writes = []
+    original = RunManifest.write
+
+    def write(manifest, path):
+        writes.append(dict(manifest.next_attempt))
+        original(manifest, path)
+
+    monkeypatch.setattr(RunManifest, "write", write)
+
+    async def post(**kwargs):
+        row = kwargs["json"]
+        saved = RunManifest.model_validate_json(manifest_path_for(output).read_bytes())
+        assert saved.next_attempt[collection.logical_rollout_id(row)] > row["_ng_attempt_index"]
+        return FakeResponse(200, {"response": {}, "reward": 1.0})
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    assert writes == [{}, {"0-0": 1, "1-0": 1, "2-0": 1}]
+
+
+async def test_invalid_reply_without_routing_explains_how_to_continue(runner_config, monkeypatch):
+    runner_config.route_failures_to_sidecar = False
+    install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, {"reward": 1.0})))
+    with pytest.raises(collection.InvalidRolloutResult) as error:
+        await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    assert any("+route_failures_to_sidecar=true" in note for note in error.value.__notes__)
+
+
+async def test_reservation_write_failure_prevents_http_dispatch(runner_config, monkeypatch):
+    original = RunManifest.write
+
+    def write(manifest, path):
+        if manifest.next_attempt:
+            raise OSError("reservation disk unavailable")
+        original(manifest, path)
+
+    monkeypatch.setattr(RunManifest, "write", write)
+    client = install_fake_server_client(monkeypatch, AsyncMock())
+    with pytest.raises(OSError, match="reservation disk unavailable"):
+        await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    client.post.assert_not_awaited()
+    output = Path(runner_config.output_jsonl_fpath)
+    assert RunManifest.model_validate_json(manifest_path_for(output).read_bytes()).next_attempt == {}
+    assert output.read_bytes() == b""
+
+
+def test_duplicate_batch_identity_is_rejected_before_persistence(prepared_run):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(3)[0]
+        before = snapshot(output)
+        with pytest.raises(ConfigError, match="Duplicate rollout"):
+            store.record_dispatches([row, dict(row)])
+        assert snapshot(output) == before
+        assert store.manifest.next_attempt == {}

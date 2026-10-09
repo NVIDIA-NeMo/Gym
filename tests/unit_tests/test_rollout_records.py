@@ -510,7 +510,9 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
     assert failures_path_for(output).read_bytes() == original_failures
     if merge_shards:
         assert [row["reward"] for row in read_records(merged)] == [0.0]
-    report = orjson.loads(coverage_path_for(merged).read_bytes())
+    report = orjson.loads(
+        coverage_path_for(merged if merge_shards else merged.with_stem("merged_aggregate")).read_bytes()
+    )
     assert (report["expected"], report["successful"], report["unknown"]) == (5, 1, 2)
     assert (report["measured"], report["masked"], report["failed"], report["intentionally_omitted"]) == (
         int(not masked),
@@ -617,7 +619,9 @@ async def test_legacy_repeated_explicit_ids_remain_aggregatable(tmp_path, monkey
         )
     )
     assert scored == records
-    coverage = orjson.loads(coverage_path_for(target).read_bytes())
+    coverage = orjson.loads(
+        coverage_path_for(target if merge_shards else target.with_stem(target.stem + "_aggregate")).read_bytes()
+    )
     assert coverage["successful"] == 2 and not coverage["coverage_known"]
     assert coverage["expected"] is None
     automatic = orjson.loads((target.parent / "quality_summary.json").read_bytes())["run"]

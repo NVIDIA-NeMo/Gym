@@ -41,6 +41,7 @@ from nemo_gym.rollout_recovery import (
     _digest,
     _get_max_rollout_attempts,
     is_terminal_failure,
+    manifest_path_for,
     observed_elapsed,
 )
 
@@ -58,6 +59,28 @@ def coverage_path_for(output: Path) -> Path:
 
 def materialized_path_for(output: Path) -> Path:
     return output.with_name(output.stem + "_materialized_inputs.jsonl")
+
+
+def resolve_rollout_path(output: Path) -> Path:
+    """Resolve aliases without abandoning legacy companions beside the alias."""
+    resolved = output.resolve()
+    for companion in (
+        manifest_path_for,
+        journal_path_for,
+        materialized_path_for,
+        failures_path_for,
+        coverage_path_for,
+    ):
+        alias_artifact, target_artifact = companion(output), companion(resolved)
+        if alias_artifact.resolve() != target_artifact.resolve() and (
+            alias_artifact.exists() or alias_artifact.is_symlink()
+        ):
+            raise ConfigError(
+                f"Recovery artifacts exist beside the rollout alias ({alias_artifact}). "
+                "Use the original Gym revision, or move all companions beside the resolved output "
+                f"({resolved}) after backing up the run. Saved artifacts were not changed."
+            )
+    return resolved
 
 
 def logical_rollout_id(row: dict) -> str:
@@ -442,6 +465,9 @@ class RolloutRecords:
             ),
             "counted_failures": sum(self.failure_count(identity) for identity in self.expected),
             "attempts_exhausted": self.exhausted_count(max_attempts),
+            "retryable": sum(
+                self._retryable(identity) and self.failure_count(identity) < max_attempts for identity in self.expected
+            ),
             "max_rollout_attempts": max_attempts,
             "retry_terminal_timeouts": self.retry_terminal_timeouts,
             "completion_fraction": counts["success"] / expected if expected else 1.0,

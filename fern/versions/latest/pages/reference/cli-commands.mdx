@@ -843,6 +843,10 @@ How it works:
 Changed inputs or task configuration are rejected on resume. Legacy runs without a manifest also require an explicit override. `+allow_unsafe_resume=true` reuses saved inputs when their identity cannot be verified or deliberately differs; it does not bypass corrupt or conflicting history. Prefer a new output path when evaluating changed tasks or models.
 </Warning>
 
+After normal collection, exit status `75` means incomplete with eligible retries; `76` means incomplete with no
+eligible retries. The Slurm chain continues after `75` and stops after `76`. Explicit Ctrl-C retains the existing
+cancellation behavior and can return `0` with partial artifacts; check coverage after cancellation.
+
 See [Resume and recover evaluations](/main/evaluation/resume) for artifact requirements, attempt selection, and the current limits on judge-only recovery.
 
 ### `gym eval submit`

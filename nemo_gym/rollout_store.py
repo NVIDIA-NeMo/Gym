@@ -35,17 +35,48 @@ from nemo_gym.rollout_records import (
     RUN_ID_KEY,
     RolloutRecord,
     RolloutRecords,
+    _indexed_records,
     coverage_path_for,
     journal_path_for,
     logical_rollout_id,
     materialized_path_for,
     prepare_append,
     read_records,
+    resolve_rollout_path,
 )
 from nemo_gym.rollout_recovery import RunManifest, atomic_write_json, manifest_path_for, validate_resume
 
 
 logger = logging.getLogger(__name__)
+
+
+def raw_outcomes_are_selected(path: Path) -> bool:
+    """Whether an existing row-oriented reader can read this run without filtering.
+
+    A manifest alone does not require a different reader. Superseded rows,
+    including answers superseded by interrupted attempts, do. Validate the whole
+    run even when the caller reads only the success file or only its sidecar.
+    """
+    output = (
+        path.with_name(path.stem.removesuffix("_failures") + path.suffix) if path.stem.endswith("_failures") else path
+    )
+    output = resolve_rollout_path(output)
+    if journal_path_for(output).exists():
+        return False
+    if not manifest_path_for(output).exists():
+        return True
+    store = RolloutStore.read(output)
+    selected = {
+        (record.path, record.offset)
+        for disposition in ("success", "failure", "omitted")
+        for record in store.selected_records(disposition).values()
+    }
+    raw = {
+        (record.path, record.offset)
+        for artifact in (output, failures_path_for(output))
+        for record, _ in _indexed_records(artifact)
+    }
+    return raw == selected
 
 
 class RolloutStore:
@@ -90,7 +121,7 @@ class RolloutStore:
         migrate_outcomes: Callable[[Path], int] | None = None,
     ) -> "RolloutStore":
         """Prepare or validate a run while its controller holds the run lock."""
-        output = output.resolve()
+        output = resolve_rollout_path(output)
         manifest_path = manifest_path_for(output)
         materialized = materialized_path_for(output)
         artifacts = (output, failures_path_for(output), materialized, manifest_path, journal_path_for(output))
@@ -175,7 +206,7 @@ class RolloutStore:
         cls, output: Path, *, import_legacy: bool = True, retry_terminal_timeouts: bool = False
     ) -> "RolloutStore | None":
         """Read selected outcomes without modifying files or acquiring a writer lock."""
-        output = output.resolve()
+        output = resolve_rollout_path(output)
         path = manifest_path_for(output)
         if journal_path_for(output).exists():
             raise ConfigError(
@@ -239,25 +270,43 @@ class RolloutStore:
         must not increment it. A failed restore reserves a new number before a
         fresh execution. Reservations do not consume the failure retry budget.
         """
+        self.allocate_attempts([row])
+        return row[ATTEMPT_INDEX_KEY_NAME]
+
+    def allocate_attempts(self, rows: list[dict]) -> None:
+        """Reserve one admitted batch atomically before any of its requests start."""
         self._require_open()
-        identity, _ = self._state._key(row)
-        attempt = self.manifest.next_attempt.get(identity, self._state.latest.get(identity, -1) + 1)
-        manifest = self.manifest.model_copy(
-            update={"next_attempt": self.manifest.next_attempt | {identity: attempt + 1}}
-        )
+        if not rows:
+            return
+        next_attempt = dict(self.manifest.next_attempt)
+        reservations = []
+        identities = set()
+        for row in rows:
+            identity, _ = self._state._key(row)
+            if identity in identities:
+                raise ConfigError(f"Duplicate rollout in reservation batch: {identity}")
+            identities.add(identity)
+            attempt = next_attempt.get(identity, self._state.latest.get(identity, -1) + 1)
+            reservations.append((row, identity, attempt))
+            next_attempt[identity] = attempt + 1
+        manifest = self.manifest.model_copy(update={"next_attempt": next_attempt})
         manifest.write(manifest_path_for(self.output))
+        # Publish in memory only after all reservations are durable.
         self.manifest = self._state.manifest = manifest
-        self._state.latest[identity] = attempt
-        row[ATTEMPT_INDEX_KEY_NAME] = attempt
-        row[RUN_ID_KEY] = manifest.run_id
-        self._allocated.add((identity, attempt))
-        return attempt
+        for row, identity, attempt in reservations:
+            self._state.latest[identity] = attempt
+            row[ATTEMPT_INDEX_KEY_NAME] = attempt
+            row[RUN_ID_KEY] = manifest.run_id
+            self._allocated.add((identity, attempt))
 
     def record_dispatch(self, row: dict) -> None:
         """Reserve once for this controller's request; no dispatch event is stored."""
+        self.record_dispatches([row])
+
+    def record_dispatches(self, rows: list[dict]) -> None:
+        """Reserve requests admitted together with one durable manifest write."""
         self._require_open()
-        if self._state._key(row) not in self._allocated:
-            self.allocate_attempt(row)
+        self.allocate_attempts([row for row in rows if self._state._key(row) not in self._allocated])
 
     def record_outcome(self, result: dict, *, sync: bool = False) -> None:
         """Append the outcome once; a complete JSONL row is the recovery record."""

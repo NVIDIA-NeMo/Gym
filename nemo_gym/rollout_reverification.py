@@ -64,6 +64,7 @@ from nemo_gym.rollout_collection import (
 )
 from nemo_gym.rollout_records import journal_path_for
 from nemo_gym.rollout_recovery import manifest_path_for
+from nemo_gym.rollout_store import raw_outcomes_are_selected
 from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
@@ -1013,16 +1014,24 @@ def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]
 
 class RolloutReverificationHelper(BaseModel):
     async def run_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
-        for name in (config.rollouts_jsonl_fpath, config.output_jsonl_fpath):
-            if name is None:
-                continue
-            path = _resolve_under_cwd_or_install(name).resolve()
-            if manifest_path_for(path).exists() or journal_path_for(path).exists():
-                raise ConfigError(
-                    "Manifest-backed reverification is a follow-up to evaluation resume. "
-                    "Resume collection to retry unfinished tasks from their inputs, or reverify "
-                    "a selected-result projection in a separate output. Saved artifacts were not changed."
-                )
+        # Judge-only recovery can migrate source failures or seed old rewards;
+        # leave those manifest-aware semantics to the dedicated follow-up.
+        for name in (config.output_jsonl_fpath, config.rollouts_jsonl_fpath if config.judge_failed_only else None):
+            if name is not None:
+                path = _resolve_under_cwd_or_install(name).resolve()
+                if manifest_path_for(path).exists() or journal_path_for(path).exists():
+                    raise ConfigError(
+                        "Manifest-backed reverification is a follow-up for judge-only recovery or in-place output. "
+                        "Re-score ordinary results into a separate output, or use a selected-result projection."
+                    )
+        if config.rollouts_jsonl_fpath is not None and not raw_outcomes_are_selected(
+            _resolve_under_cwd_or_install(config.rollouts_jsonl_fpath)
+        ):
+            raise ConfigError(
+                "Reverification of histories with superseded outcomes is a follow-up to evaluation resume. "
+                "Use a selected-result projection in a separate output. Saved artifacts were not changed."
+            )
+        # Output guards in _prepare_output_fpaths still forbid modifying an established run.
         force_warning: Optional[str] = None
         output_name_prefix = ""
         if config.input_format != "atif":

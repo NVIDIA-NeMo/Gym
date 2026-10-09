@@ -69,7 +69,10 @@ the collector accepts their two known legacy judge markers while rejecting other
 
 Malformed replies become terminal `environment_protocol_violation` failures when routing is enabled; running the whole task again
 cannot fix an invalid response format. A reply from a different execution attempt remains retryable because a transport
-retry can return a stale response. Receiving an HTTP reply records delivery as established.
+retry can return a stale response. With failure routing disabled (the default), invalid replies stop collection;
+`+route_failures_to_sidecar=true` records them and lets independent tasks continue. Fix the producer before retrying
+a task whose response violates the contract. Environment replies establish delivery; gateway/throttling errors
+(429, 502, 503, 504) leave delivery uncertain because they do not prove the Environment Server received the request.
 
 ## Attempts and completion coverage
 
@@ -157,11 +160,11 @@ reconciliation and its partial bytes are removed before appending. Malformed com
 An old materialized inventory alone does not establish validated completion coverage during aggregation.
 Merged rollout files are selected-result projections; keep the original shard artifacts for further recovery.
 
-Every newly collected run has recovery history, including its first collection. Manifest-aware health reads are a
-follow-up, so automatic checks print a short skip message for all these runs;
-collection and scoring still finish. Use `+disable_health_check=true` to skip those checks, or run health checks
-on the merged selected-result projection written by `gym eval aggregate`. Standalone health checks reject a
-manifest-backed source rather than treating superseded attempts as extra samples.
+Every newly collected run has recovery history, including its first collection. Health checks work when all saved
+rows still represent selected attempts. If a file contains superseded outcomes, automatic checks print a skip
+message and standalone checks explain how to export a merged selected-result projection with `gym eval aggregate`.
+Collection and scoring still finish. Direct health reports for those histories remain a follow-up; they must not
+count old attempts as extra samples.
 
 Known runtime connection references (for example `${policy_base_url}` and `${policy_api_key}` inside agent client
 settings) do not change experiment identity when their values change. Model names and task parameters still do.
@@ -270,18 +273,23 @@ diagnostic evidence only: it is neither a scored response nor an eligible saved 
 For a legacy `judge_failed` or `judge_invalid` result that includes the actual generated response, the sidecar preserves it outside
 the canonical failure record, without a reward. Diagnostic token and trajectory evidence is retained too.
 Judge-only recovery from these manifest-backed runs is a separate follow-up: this PR resumes unfinished tasks
-from their inputs. The existing `gym eval reverify` workflow remains available for legacy files and exported
-selected-result projections. A selected-result projection contains completed answers, not failed answers for
-`--judge-failed-only` recovery. Reverification rejects manifest-backed inputs and outputs before changing them, so it cannot
-silently reuse an older answer or append results without recording attempts.
+from their inputs. Ordinary `gym eval reverify` re-scores saved answers into a separate output when the source
+has no superseded records, including fresh manifest-backed runs. Histories containing older attempts must first
+be exported with `gym eval aggregate` to a selected-result projection. That projection contains completed answers,
+not failed answers for `--judge-failed-only` recovery. Judge-only recovery of manifest-backed runs and writing
+reverified results back into an established run remain blocked until the follow-up.
 
 Aggregation resolves source file symlinks before locating their companion history, and deduplicates aliases of the
-same rollout file. Health and reverification apply the same history protections through aliases. For a merged output
+same rollout file. Older runs may have companions beside an output symlink instead of its target; Gym refuses
+these ambiguous layouts without changing files. Back up the run and move all companions beside the resolved
+output, or use the original Gym revision. Health and reverification apply the same history protections through aliases. For a merged output
 symlink, aggregation replaces the target file and preserves the symlink. It refuses to replace an input or an established
 recovery history through either spelling. Copied manifest-backed runs
 are rejected by run identity. Legacy runs have no trustworthy run identifier: independent evaluations may share the
 same input inventory, so Gym does not identify them by an inventory hash. Supply each original legacy run only once;
 copies at different locations are treated as separate inputs, and their coverage is relative to those supplied inputs.
+Metrics-only aggregation (`+merge_shards=false`) writes `<output>_aggregate_coverage.json` so it preserves the
+collector's `<output>_coverage.json` even when both commands use the same output basename.
 
 
 When `+count_missing_rollouts_as_zero=true` is enabled, a task with no result for
@@ -304,8 +312,15 @@ Both paths must use the same controller rules:
   target; it must not independently add one. Failed restore reserves a new target before starting from input.
 - Continuation and interruption do not consume the failure budget. Only saved eligible failures do.
 
-The CLI exits with code **75** after saving a partial evaluation, including a dispatch-budget drain. Code 0 means a
-completed evaluation; ordinary errors keep their existing failure status. The library still supports returning partial
-results when `require_complete=false`; CLI status is checked separately. Checkpoint-triggered stops must use the same
-incomplete status when that integration lands. End-to-end checkpoint restoration and Slurm successor behavior require
-validation with the checkpoint stack.
+After normal collection returns, the CLI exits with **75** if the evaluation is incomplete and tasks remain eligible
+for resume, including after a dispatch-budget drain. It exits with **76** if the evaluation is incomplete but only
+terminal failures, intentional omissions or exhausted retry budgets remain. Neither status reports a complete score.
+The Slurm auto-resume chain continues after 75 without spending an infrastructure retry, subject to its walltime cap;
+it stops after 76. Coverage reports expose the number of eligible tasks as `retryable`.
+
+Code 0 means a completed evaluation after normal collection. An explicit Ctrl-C in `gym eval run` retains the existing
+cancellation behavior: it can return 0 with partial artifacts when `require_complete=false`. Inspect coverage to determine
+completion after cancellation. Ordinary errors keep their existing failure status. The library still supports returning
+partial results when `require_complete=false`; CLI status is checked separately. Checkpoint-triggered stops must use the
+same incomplete statuses when that integration lands. End-to-end checkpoint restoration still requires validation
+with the checkpoint stack.

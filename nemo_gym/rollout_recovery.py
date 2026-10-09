@@ -512,3 +512,8 @@ class IncompleteEvaluationError(RuntimeError):
     """Saved partial results are valid, but the evaluation still has unfinished work."""
 
     exit_code = 75
+
+    def __init__(self, message: str, *, retryable: bool = True):
+        super().__init__(message)
+        # Keep incomplete measurements nonzero, even when retry cannot help.
+        self.exit_code = 75 if retryable else 76

@@ -317,7 +317,7 @@ async def test_interrupted_runner_closes_files_and_reuses_saved_zero(tmp_path, m
             for row in examples:
 
                 async def complete(row=row):
-                    kwargs["on_dispatch"](row)
+                    kwargs["on_dispatch_batch"]([row])
                     dispatched.append(row["task"])
                     if interrupt and row["task"] == 1:
                         raise interruption()
@@ -531,6 +531,9 @@ async def test_native_typed_outcomes_reject_foreign_identity_without_stopping_ot
     }
     assert isinstance(outcomes[0], RolloutFailure) and outcomes[0].failure.stage is None
     assert outcomes[0].episode_id.rollout_id == "0-0" and outcomes[0].episode_id.attempt == 0
+    assert outcomes[0].delivery == "delivered"
+    assert outcomes[0].failure.terminal is (mismatch != "attempt")
+    assert (outcomes[0].failure.failure_kind == "environment_protocol_violation") is (mismatch != "attempt")
     assert outcomes[1]["artifact"] == "completed"
 
 

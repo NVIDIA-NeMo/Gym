@@ -509,13 +509,17 @@ def test_journal_health_waits_for_followup_without_reporting_stale_results(prepa
     from nemo_gym.rollout_health import run_health_checks
 
     output, prepare = prepared_run
-    RolloutStore.start_or_resume(output, prepare, resume=False)
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(3)[0]
+        store.record_dispatch(row)
+        store.record_outcome(row | {"reward": 1.0, "response": {}})
+        store.allocate_attempt(row)  # Interrupted newer attempt supersedes the saved answer.
     if alias:
         shortcut = output.with_name("shortcut.jsonl")
         shortcut.symlink_to(output)
         output = shortcut
     before = snapshot(output)
-    with pytest.raises(ConfigError, match="Manifest-aware health reports are a follow-up"):
+    with pytest.raises(ConfigError, match="histories with superseded outcomes"):
         run_health_checks(output, workers=1)
     assert snapshot(output) == before
 
