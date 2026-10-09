@@ -116,7 +116,7 @@ a config that uses `_inherit_from` cannot add new keys to `models`.
 
 See `configs/kilocode_agent.yaml`.
 
-## Task-sandbox integration (draft)
+## Task-sandbox integration
 
 [configs/kilocode_sandboxed.yaml](configs/kilocode_sandboxed.yaml) runs Kilo inside the task
 sandbox supplied by the benchmark's Resources Server. The Environment Server coordinates setup,
@@ -163,11 +163,9 @@ gym eval run --no-serve \
 Keep `resources_tool_transports: []`: Kilo provides its own sandbox tools and rejects required
 external tool grants. Collection calls the Environment Server's `/run`, never the agent's `/run`.
 
-Size the harness for the served model and benchmark: set `context_window` / `max_output_tokens` to
-the model's limits, and raise `timeout` for long-horizon tasks (the SWE-bench Pro run used 21600).
-`timeout` also sets Kilo's model-stream watchdog (`chunkTimeout`), because the Gym Model Server
-returns a completion only once it is finished. `webfetch` is allowed by default; deny it in
-`kilo_config.permission` if a benchmark must not reach the web.
+Set `context_window` / `max_output_tokens` to the served model's limits and raise `timeout` for
+long-horizon benchmarks. `timeout` also sets Kilo's model-stream watchdog (`chunkTimeout`), because
+the Gym Model Server returns each completion only once it is finished.
 
 ### Switch harness or benchmark
 
@@ -198,15 +196,8 @@ Requests carry one text user message, optionally preceded by a system/developer 
 request fields, model overrides, `repo_dir`, `extra_args` and `env` are rejected. Identical
 activation retries join the running task; session close owns cancellation.
 
-CLI/API errors and nonzero exits raise, so the episode fails instead of scoring zero. As with Pi and
-Codex, the CLI runs under Node, so an agent command such as `pkill -f node` also stops the harness; the
-episode is then reported as an infrastructure failure. A killed run
+CLI/API errors and nonzero exits raise, so the episode fails instead of scoring zero. A killed run
 or a `length` stop returns an `incomplete` response. Observations come from a snapshot of Kilo's
 SQLite database (root and child sessions, tool timing, usage), annotated with the root outcome and
 a sandbox record; if the snapshot is unavailable, a coverage gap is reported. Token IDs and
 logprobs are not available.
-
-Validated on SWE-bench Pro with the stock Resources server (Nemotron 3.5 Super, 2026-10-09): a
-five-task smoke covering Ubuntu, Node, Go, Python and Alpine images completed setup and grading, and
-the full run (731 tasks x 3 attempts, 256 concurrent episodes) scored 51.30% mean pass@1 (per repeat
-52.39 / 50.21 / 51.30), with 2 agent-caused environment failures counted as failures.
