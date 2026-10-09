@@ -35,7 +35,7 @@ from nemo_gym.agent_utils.sandbox_session import (
     harness_not_run_observations,
     harness_not_run_response,
 )
-from nemo_gym.agent_utils.session_capture import SessionCaptureConfig
+from nemo_gym.agent_utils.sandbox_session_capture import SandboxSessionCaptureConfig
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -228,7 +228,7 @@ def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Opti
 
 class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
-    # Hermes calls the Gym model server, or in agent sessions the session capture's endpoint; never both.
+    # Hermes calls the Gym model server, or in agent sessions the sandbox session capture's endpoint; never both.
     model_server: ModelServerRef | None = None
     model: Optional[str] = None
     concurrency: int = 32
@@ -253,15 +253,15 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     checkpoints_enabled: bool = False
     # Runs a capture component in each agent session's sandbox; sandboxed Hermes sends its model calls to the
     # capture's endpoint, and the session close returns what it captured. Requires model_server: null and model.
-    session_capture: SessionCaptureConfig | None = None
+    sandbox_session_capture: SandboxSessionCaptureConfig | None = None
 
     @model_validator(mode="after")
     def _one_model_endpoint(self) -> "HermesAgentConfig":
-        if self.session_capture is not None and self.model_server is not None:
-            raise ValueError("Hermes cannot use model_server with session_capture; set model_server: null")
+        if self.sandbox_session_capture is not None and self.model_server is not None:
+            raise ValueError("Hermes cannot use model_server with sandbox_session_capture; set model_server: null")
         if self.model_server is None:
-            if self.session_capture is None:
-                raise ValueError("Hermes needs model_server or session_capture")
+            if self.sandbox_session_capture is None:
+                raise ValueError("Hermes needs model_server or sandbox_session_capture")
             if not self.model:
                 raise ValueError("Hermes needs model when model_server is null")
         return self
@@ -465,7 +465,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 session_dir=session_dir,
                 owns_sandbox=owns_sandbox,
                 harness="Hermes",
-                session_capture=self.config.session_capture,
+                session_capture=self.config.sandbox_session_capture,
             ),
         )
         try:
@@ -498,9 +498,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
         gaps = [] if runtime_info is not None else [ObservationGap(code="runtime_info_unavailable")]
         model_ref = self.config.model_server
         if model_ref is None:
-            # A session capture serves the calls, so their response IDs do not identify Gym model server calls.
+            # A sandbox session capture serves the calls, so their response IDs do not identify Gym model server calls.
             gaps.append(
-                ObservationGap(code="model_call_join_key_unavailable", detail="a session capture serves model calls")
+                ObservationGap(
+                    code="model_call_join_key_unavailable", detail="a sandbox session capture serves model calls"
+                )
             )
         if isinstance(raw_observations, dict):
             try:
@@ -591,7 +593,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if state.session.session_capture_failed:
             # Nothing would be captured, so Hermes does not run; close returns the masked capture.
             token_capture = state.session.token_capture()
-            reason = (token_capture.mask_reason if token_capture else None) or "session capture did not start"
+            reason = (token_capture.mask_reason if token_capture else None) or "sandbox session capture did not start"
             return AgentEpisode(
                 response=harness_not_run_response(body, model=self._model_name(), reason=reason),
                 observations=harness_not_run_observations(source="hermes", reason=reason),
@@ -815,7 +817,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         if self.config.model_server is None:
             raise HTTPException(
-                422, "Hermes host execution needs model_server; session_capture runs in agent sessions"
+                422, "Hermes host execution needs model_server; sandbox_session_capture runs in agent sessions"
             )
         params = self._conversation_params(body)
 

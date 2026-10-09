@@ -77,7 +77,7 @@ class HermesSandboxSession(AgentSessionState):
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
-    # The session capture's endpoint, set at seed when a capture is configured and started.
+    # The sandbox session capture's endpoint, set at seed when a capture is configured and started.
     capture_endpoint: ModelEndpoint | None = None
 
     async def install_runtime(self, *, install_timeout: float) -> None:

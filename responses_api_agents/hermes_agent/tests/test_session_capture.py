@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Hermes agent sessions that send sandboxed model calls through a configured session capture."""
+"""Hermes agent sessions that send sandboxed model calls through a configured sandbox session capture."""
 
 import json
 from pathlib import Path
@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 import responses_api_agents.hermes_agent.app as hermes_app
 from nemo_gym.agent_utils.sandbox_session import HARNESS_NOT_RUN_GAP
-from nemo_gym.agent_utils.session_capture import SessionCapture, SessionCaptureConfig
+from nemo_gym.agent_utils.sandbox_session_capture import SandboxSessionCapture, SandboxSessionCaptureConfig
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
@@ -34,8 +34,8 @@ CAPTURE_URL = "http://127.0.0.1:4321/v1"
 CAPTURED = TokenCapture(atif_trajectories=[{"steps": []}], metrics={"calls": 1})
 
 
-class FakeCapture(SessionCapture):
-    """A session capture whose start succeeds or raises, and which may dictate the model name."""
+class FakeCapture(SandboxSessionCapture):
+    """A sandbox session capture whose start succeeds or raises, and which may dictate the model name."""
 
     def __init__(self, *, start: str = "ok", model: str | None = None):
         self.start_mode, self.model = start, model
@@ -54,8 +54,8 @@ class FakeCapture(SessionCapture):
         EVENTS.append("capture.abort")
 
 
-def _capture(**options) -> SessionCaptureConfig:
-    return SessionCaptureConfig(implementation=f"{__name__}:FakeCapture", options=options)
+def _capture(**options) -> SandboxSessionCaptureConfig:
+    return SandboxSessionCaptureConfig(implementation=f"{__name__}:FakeCapture", options=options)
 
 
 def _config(**kwargs) -> HermesAgentConfig:
@@ -66,7 +66,7 @@ def _config(**kwargs) -> HermesAgentConfig:
         "entrypoint": "app.py",
         "model": "policy",
         "model_server": None,
-        "session_capture": _capture(),
+        "sandbox_session_capture": _capture(),
     }
     return HermesAgentConfig(**(fields | kwargs))
 
@@ -150,7 +150,7 @@ def seeded(monkeypatch):
     ("fields", "message"),
     [
         ({"model_server": {"type": "responses_api_models", "name": "policy_model"}}, "set model_server: null"),
-        ({"session_capture": None}, "needs model_server or session_capture"),
+        ({"sandbox_session_capture": None}, "needs model_server or sandbox_session_capture"),
         ({"model": None}, "needs model when model_server is null"),
     ],
 )
@@ -160,15 +160,17 @@ def test_config_requires_exactly_one_model_endpoint(fields, message):
 
 
 def test_config_accepts_model_server_without_capture():
-    config = _config(session_capture=None, model_server={"type": "responses_api_models", "name": "policy_model"})
-    assert config.session_capture is None
+    config = _config(
+        sandbox_session_capture=None, model_server={"type": "responses_api_models", "name": "policy_model"}
+    )
+    assert config.sandbox_session_capture is None
 
 
 @pytest.mark.parametrize(("capture_model", "harness_model"), [(None, "policy"), ("served", "served")])
 async def test_activation_calls_the_capture_endpoint_and_close_returns_its_capture(
     seeded, capture_model, harness_model
 ):
-    hermes = await seeded.seed_with(_config(session_capture=_capture(model=capture_model)))
+    hermes = await seeded.seed_with(_config(sandbox_session_capture=_capture(model=capture_model)))
     # The capture starts at seed, after the runtime is installed and before any harness input exists.
     assert EVENTS == ["capture.start"]
     assert not any(path.endswith("/input.json") for path in seeded.sandbox.uploaded)
@@ -191,7 +193,7 @@ async def test_activation_calls_the_capture_endpoint_and_close_returns_its_captu
 
 
 async def test_failed_capture_start_answers_without_running_hermes(seeded):
-    hermes = await seeded.seed_with(_config(session_capture=_capture(start="raise")))
+    hermes = await seeded.seed_with(_config(sandbox_session_capture=_capture(start="raise")))
     commands_after_seed = list(seeded.sandbox.commands)
 
     response = await hermes.responses(seeded.request, NeMoGymResponseCreateParamsNonStreaming(input="fix bug"))
