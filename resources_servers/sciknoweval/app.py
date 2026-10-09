@@ -58,7 +58,7 @@ class SciKnowEvalVerifyResponse(BaseVerifyResponse, SciKnowEvalVerifyRequest):
 
 
 class SciKnowEvalResourcesServer(SimpleResourcesServer):
-    ray_enabled: ClassVar[bool] = False
+    ray_enabled = False
 
     config: SciKnowEvalResourcesServerConfig
     _judge_semaphore: asyncio.Semaphore = PrivateAttr()

@@ -84,6 +84,10 @@ def test_oracle_download_and_reuse(monkeypatch, tmp_path, existing):
     setup_molopt.ensure_oracle_artifacts(tmp_path)
     assert path.read_bytes() == data
     assert download.call_count == (0 if existing else 1)
+    if not existing:
+        request = download.call_args.args[0]
+        assert request.full_url == "https://dataverse.harvard.edu/api/access/datafile/123"
+        assert request.get_header("User-agent") == "NeMo-Gym/1.0 (ChemCoTBench oracle setup)"
     assert list(path.parent.iterdir()) == [path]
 
 

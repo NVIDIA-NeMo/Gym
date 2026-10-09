@@ -69,7 +69,7 @@ class ChemCoTBenchVerifyResponse(BaseVerifyResponse, ChemCoTBenchVerifyRequest):
 
 
 class ChemCoTBenchResourcesServer(SimpleResourcesServer):
-    ray_enabled: ClassVar[bool] = False
+    ray_enabled = False
 
     config: ChemCoTBenchResourcesServerConfig
     _repo: Path = PrivateAttr()

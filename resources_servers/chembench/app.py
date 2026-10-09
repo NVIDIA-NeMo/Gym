@@ -133,7 +133,7 @@ class ChembenchVerifier:
 
 
 class ChembenchResourcesServer(ChembenchVerifier, SimpleResourcesServer):
-    ray_enabled: ClassVar[bool] = False
+    ray_enabled = False
 
     config: ChembenchResourcesServerConfig
 

@@ -6,7 +6,18 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from resources_servers.chemeval.english_judge import RUBRIC_TO_TASK
+
+RUBRIC_TO_TASK = {
+    "fill_in_the_blank": "fill_blank",
+    "short_answer": "short_answer",
+    "calculation": "calculation",
+    "abstract_generation": "paper_abstract",
+    "outline_generation": "research_outline",
+    "physicochemical": "molecular_description",
+    "single_step_synthesis": "single_step_synthesis",
+    "multi_step_synthesis": "multi_step_synthesis",
+    "reaction_intermediate": "reaction_intermediate",
+}
 
 
 class TaskData(BaseModel):

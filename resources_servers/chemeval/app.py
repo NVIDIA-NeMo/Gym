@@ -77,7 +77,7 @@ class ChemEvalVerifyResponse(BaseVerifyResponse, ChemEvalVerifyRequest):
 
 
 class ChemEvalResourcesServer(SimpleResourcesServer):
-    ray_enabled: ClassVar[bool] = False
+    ray_enabled = False
 
     config: ChemEvalResourcesServerConfig
     _grader: ModuleType = PrivateAttr()

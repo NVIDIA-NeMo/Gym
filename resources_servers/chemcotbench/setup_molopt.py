@@ -9,7 +9,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parent
@@ -44,7 +44,12 @@ def ensure_oracle_artifacts(cache: Path) -> None:
             continue
         temporary = None
         try:
-            with urlopen(f"https://dataverse.harvard.edu/api/access/datafile/{file_id}", timeout=120) as response:
+            # Dataverse rejects urllib's default User-Agent with HTTP 403.
+            request = Request(
+                f"https://dataverse.harvard.edu/api/access/datafile/{file_id}",
+                headers={"User-Agent": "NeMo-Gym/1.0 (ChemCoTBench oracle setup)"},
+            )
+            with urlopen(request, timeout=120) as response:
                 with NamedTemporaryFile(dir=oracle_dir, delete=False) as stream:
                     temporary = Path(stream.name)
                     shutil.copyfileobj(response, stream)
