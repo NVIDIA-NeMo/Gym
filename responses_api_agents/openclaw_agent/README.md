@@ -247,3 +247,12 @@ It creates a sandbox, runs there, and destroys it on close; the default workdir 
 never triggers a replacement or host execution. With neither access nor a usable
 provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
+
+## Terminal-Bench 2.1
+
+Use the [single-task recipe](../../benchmarks/terminal_bench_2_1/README.md#openclaw-in-a-task-sandbox)
+to compose the independent TB Resources, OpenClaw, EnvironmentServer and model
+configs. Resources owns the task sandbox and verifier; OpenClaw borrows it through
+the same session contract as SWE-Pro. `single_agent_turn_legacy` adapts prepared
+flat rows to that lifecycle; it does not invoke the agent's legacy `/run` path.
+The EnvironmentServer closes the agent before grading, then closes Resources.
