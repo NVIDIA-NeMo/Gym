@@ -578,10 +578,9 @@ class TestRunHelperH2PingSidecar:
 class TestRunHelperRayStartup:
     """RunHelper.start starts or joins Ray only when a configured server may use it."""
 
-    @pytest.mark.parametrize(("ray_enabled", "expect_ray"), [(False, False), (True, True), (None, True)])
-    def test_ray_follows_configured_server_declarations(
-        self, monkeypatch: MonkeyPatch, tmp_path: Path, ray_enabled: bool | None, expect_ray: bool
-    ) -> None:
+    def _start(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, *, ray_enabled: bool | None, ray_installed: bool
+    ) -> tuple[MagicMock, MagicMock]:
         declaration = "" if ray_enabled is None else f"    ray_enabled = {ray_enabled}\n"
         (tmp_path / "app.py").write_text(f"class Server:\n{declaration}    pass\nServer.run_webserver()\n")
         cfg = OmegaConf.create(
@@ -599,6 +598,7 @@ class TestRunHelperRayStartup:
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **kwargs: cfg)
         monkeypatch.setattr(nemo_gym.cli.env, "configure_telemetry_env", MagicMock())
         monkeypatch.setattr(nemo_gym.cli.env, "init_telemetry", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "ray_is_installed", lambda: ray_installed)
         initialize_ray = MagicMock()
         monkeypatch.setattr(nemo_gym.cli.env, "initialize_ray", initialize_ray)
         monkeypatch.setattr(
@@ -617,8 +617,38 @@ class TestRunHelperRayStartup:
         runner = RunHelper()
         runner.wait_for_dry_run_spinup = MagicMock()
         runner.start(MagicMock())
+        return initialize_ray, run_command
+
+    @pytest.mark.parametrize(
+        ("ray_enabled", "ray_installed", "expect_ray"),
+        [
+            (False, True, False),
+            (True, True, True),
+            (None, True, True),
+            (False, False, False),
+            (None, False, False),
+        ],
+    )
+    def test_ray_follows_configured_server_declarations(
+        self,
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+        ray_enabled: bool | None,
+        ray_installed: bool,
+        expect_ray: bool,
+    ) -> None:
+        initialize_ray, run_command = self._start(
+            monkeypatch, tmp_path, ray_enabled=ray_enabled, ray_installed=ray_installed
+        )
+
         assert initialize_ray.called is expect_ray
         run_command.assert_called_once()
+
+    def test_ray_server_without_ray_installed_fails_before_launching_anything(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        with raises(ConfigError, match=r"test_server(.|\n)*nemo-gym\[ray\]"):
+            self._start(monkeypatch, tmp_path, ray_enabled=True, ray_installed=False)
 
 
 class TestRunHelperServerReadiness:
@@ -1627,3 +1657,27 @@ class TestListEnvironments:
         list_environments()
 
         assert f"config: {cfg.resolve()}" in capsys.readouterr().out
+
+
+def test_version_reports_a_missing_dependency_instead_of_failing(
+    monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from importlib.metadata import PackageNotFoundError
+
+    import nemo_gym.cli.general
+
+    installed_version = nemo_gym.cli.general.md_version
+
+    def md_version(dep: str) -> str:
+        if dep == "ray":
+            raise PackageNotFoundError(dep)
+        return installed_version(dep)
+
+    monkeypatch.setattr(nemo_gym.cli.general, "get_global_config_dict", lambda: OmegaConf.create({"json": True}))
+    monkeypatch.setattr(nemo_gym.cli.general, "md_version", md_version)
+
+    nemo_gym.cli.general.version()
+
+    dependencies = json.loads(capsys.readouterr().out)["dependencies"]
+    assert dependencies["ray"] == "not installed"
+    assert dependencies["openai"] == installed_version("openai")
