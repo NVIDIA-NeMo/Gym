@@ -33,13 +33,11 @@ Run the benchmark evaluation:
 JUDGE_MODEL=openai/nvidia/zai-org/glm-5.2 \
 JUDGE_MODEL_API_BASE=https://inference-api.nvidia.com/v1 \
 JUDGE_MODEL_API_KEY="${NVINF_API_KEY}" \
-gym eval run \
+gym eval run --resume --concurrency 8 \
   --benchmark biomysterybench \
   --split benchmark \
   --model nvinf/nvidia/nvidia/nemotron-3-ultra \
   --output "${PWD}/benchmarks/biomysterybench/logs/rollouts.jsonl" \
-  --concurrency 8 \
-  --resume \
   ++prepare_script_args.output_dir="${PWD}/benchmarks/biomysterybench/data"
 ```
 
