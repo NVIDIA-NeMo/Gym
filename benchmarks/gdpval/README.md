@@ -71,6 +71,15 @@ Required environment variables for the judge:
   `gcp/google/gemini-3.1-pro-preview`
 - `HF_TOKEN` — for downloading reference files (avoids HF anonymous rate limits)
 
+The task sandbox runs on OpenSandbox:
+
+- `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` — the OpenSandbox endpoint and key
+- `GDPVAL_SANDBOX_IMAGE` — the sandbox image (see `resources_servers/gdpval/README.md`)
+- `TAVILY_API_KEY` — for the `web_search` and `fetch_web_page` tools
+
+The agent runs inside the sandbox and calls the model and resources servers from there, so pass
+`++use_absolute_ip=true` when the servers' default addresses are not reachable from the sandbox.
+
 By default deliverables are graded by a **panel** of judges (GPT-5.5, Gemini 3.1
 Pro Preview, Claude Opus 4.8), one sampled per call. See
 [Multi-judge panel](#multi-judge-panel) for how it works, the per-member
