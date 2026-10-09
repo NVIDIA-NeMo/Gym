@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from pathlib import Path
 
-from responses_api_agents.harbor_agent_general.app import HarborAgentConfig
+from responses_api_agents.harbor_agent_general.app import GYM_ROOT, HarborAgentConfig, temporary_worker_env
 
 
 def _make_config(tmp_path: Path, harbor_jobs_dir: Path, **config_overrides: object) -> HarborAgentConfig:
@@ -49,9 +50,47 @@ def test_normalize_jobs_dir_maps_jsonl_path_to_harbor_directory(tmp_path: Path) 
     assert config.harbor_jobs_dir == (tmp_path / "logs" / "harbor").resolve()
 
 
+def test_relative_dataset_and_jobs_paths_resolve_from_gym_root(tmp_path: Path) -> None:
+    config = _make_config(
+        tmp_path,
+        Path("relative/jobs"),
+        harbor_dataset={"path": "relative/tasks"},
+    )
+
+    assert config.harbor_jobs_dir == GYM_ROOT / "relative/jobs"
+    assert config.harbor_dataset.path == GYM_ROOT / "relative/tasks"
+
+
 def test_reward_key_defaults_to_reward_and_accepts_override(tmp_path: Path) -> None:
     assert _make_config(tmp_path, tmp_path / "default").harbor_reward_key == "reward"
     assert _make_config(tmp_path, tmp_path / "custom", harbor_reward_key="score").harbor_reward_key == "score"
+
+
+def test_worker_environment_is_empty_by_default_and_accepts_values(tmp_path: Path) -> None:
+    default_config = _make_config(tmp_path, tmp_path / "default")
+    configured = _make_config(
+        tmp_path,
+        tmp_path / "configured",
+        harbor_worker_env={"OPENAI_API_KEY": "test-key", "JUDGE_MODEL": "test-judge"},
+    )
+
+    assert default_config.harbor_worker_env == {}
+    assert configured.harbor_worker_env == {
+        "OPENAI_API_KEY": "test-key",
+        "JUDGE_MODEL": "test-judge",
+    }
+
+
+def test_temporary_worker_environment_restores_process_state(monkeypatch) -> None:
+    monkeypatch.setenv("EXISTING_WORKER_VALUE", "before")
+    monkeypatch.delenv("NEW_WORKER_VALUE", raising=False)
+
+    with temporary_worker_env({"EXISTING_WORKER_VALUE": "during", "NEW_WORKER_VALUE": "temporary"}):
+        assert os.environ["EXISTING_WORKER_VALUE"] == "during"
+        assert os.environ["NEW_WORKER_VALUE"] == "temporary"
+
+    assert os.environ["EXISTING_WORKER_VALUE"] == "before"
+    assert "NEW_WORKER_VALUE" not in os.environ
 
 
 def test_build_job_config_applies_single_trial_defaults(tmp_path: Path) -> None:

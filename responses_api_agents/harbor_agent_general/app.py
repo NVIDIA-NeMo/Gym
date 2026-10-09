@@ -16,8 +16,11 @@
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -55,22 +58,45 @@ from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
 logger = logging.getLogger(__name__)
 
 NUM_SAMPLES_IN_PARALLEL_KEY_NAME = "num_samples_in_parallel"
+GYM_ROOT = Path(__file__).resolve().parents[2]
 
 _RAY_WORKER_EVENT_LOOP: asyncio.AbstractEventLoop | None = None
 
 
+def resolve_from_gym_root(path: Path) -> Path:
+    return path.resolve() if path.is_absolute() else (GYM_ROOT / path).resolve()
+
+
+@contextmanager
+def temporary_worker_env(values: dict[str, str]) -> Iterator[None]:
+    """Install per-job variables without leaking them into the next Ray task."""
+    previous = {key: os.environ[key] for key in values if key in os.environ}
+    new_keys = values.keys() - previous.keys()
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for key in new_keys:
+            os.environ.pop(key, None)
+        os.environ.update(previous)
+
+
 @ray.remote(scheduling_strategy="SPREAD", runtime_env={"py_executable": sys.executable})
-def harbor_job_worker(job_config_dict: dict, task_name: str) -> str:
+def harbor_job_worker(job_config_dict: dict, task_name: str, worker_env: dict[str, str]) -> str:
     global _RAY_WORKER_EVENT_LOOP
     logging.disable(logging.DEBUG)
-    if _RAY_WORKER_EVENT_LOOP is None or _RAY_WORKER_EVENT_LOOP.is_closed():
-        _RAY_WORKER_EVENT_LOOP = asyncio.new_event_loop()
-        asyncio.set_event_loop(_RAY_WORKER_EVENT_LOOP)
-    return _RAY_WORKER_EVENT_LOOP.run_until_complete(HarborAgent.run_job(job_config_dict, task_name))
+    with temporary_worker_env(worker_env):
+        if _RAY_WORKER_EVENT_LOOP is None or _RAY_WORKER_EVENT_LOOP.is_closed():
+            _RAY_WORKER_EVENT_LOOP = asyncio.new_event_loop()
+            asyncio.set_event_loop(_RAY_WORKER_EVENT_LOOP)
+        return _RAY_WORKER_EVENT_LOOP.run_until_complete(HarborAgent.run_job(job_config_dict, task_name))
 
 
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     harbor_ray_task_num_cpus: float = Field(default=0.25, ge=0)
+    # Passed as a task argument and installed inside the worker process. Do not
+    # use Ray runtime_env for secrets: Ray persists runtime_env values in logs.
+    harbor_worker_env: dict[str, str] = Field(default_factory=dict)
     harbor_jobs_dir: Path
     harbor_debug: bool = Field(default=False)
     harbor_max_retries: int = Field(default=0)
@@ -83,10 +109,17 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     @field_validator("harbor_jobs_dir", mode="after")
     @classmethod
     def normalize_jobs_dir(cls, harbor_jobs_dir: Path) -> Path:
-        harbor_jobs_dir = harbor_jobs_dir.resolve()
+        harbor_jobs_dir = resolve_from_gym_root(harbor_jobs_dir)
         if harbor_jobs_dir.suffix.lower() == ".jsonl":
             return harbor_jobs_dir.parent / "harbor"
         return harbor_jobs_dir
+
+    @field_validator("harbor_dataset", mode="after")
+    @classmethod
+    def normalize_dataset_path(cls, harbor_dataset: DatasetConfig) -> DatasetConfig:
+        if harbor_dataset.path is None or harbor_dataset.path.is_absolute():
+            return harbor_dataset
+        return harbor_dataset.model_copy(update={"path": resolve_from_gym_root(harbor_dataset.path)})
 
     def build_job_config(self, task_name: str, job_name: str) -> JobConfig:
         return JobConfig(
@@ -140,7 +173,9 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 )
 
                 job_ref = harbor_job_worker.options(num_cpus=self.config.harbor_ray_task_num_cpus).remote(
-                    job_config.model_dump(mode="json"), body.task_name
+                    job_config.model_dump(mode="json"),
+                    body.task_name,
+                    dict(self.config.harbor_worker_env),
                 )
                 try:
                     trial_dir = Path(await job_ref)
@@ -382,7 +417,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
     def success_response(self, body: HarborRunRequest, trial_dir: Path) -> HarborVerifyResponse:
         trial_paths = TrialPaths(trial_dir)
         trial = TrialResult.model_validate_json(trial_paths.result_path.read_text())
-        task_paths = TaskPaths(trial.config.task.get_local_path())
+        task_paths = TaskPaths(resolve_from_gym_root(trial.config.task.get_local_path()))
         if trial.step_results:
             path_entries = [
                 (
