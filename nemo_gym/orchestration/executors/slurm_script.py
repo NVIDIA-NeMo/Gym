@@ -19,6 +19,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from nemo_gym.exporters import exporter_extras
 from nemo_gym.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.orchestration.api import (
     RUNTIME_ENV_PREFIX,
@@ -1001,7 +1002,7 @@ def build_sbatch_script(
         ref=gi.ref if gi else None,
         prepare_cmd=prepare_cmd,
         command=benchmark.command,
-        extras=(GYM_TELEMETRY_EXTRA,) if instrumented else (),
+        extras=((GYM_TELEMETRY_EXTRA,) if instrumented else ()) + exporter_extras(benchmark.run),
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
