@@ -849,15 +849,15 @@ class FileLineageStore(IncrementalLineageStore):
         resolution = super()._resolve(rollout_id, request_items)
         if resolution.status != ParentResolutionStatus.UNRESOLVED:
             return resolution
-        match = self._resolve_row(rollout_id, request_items)
+        match, reason = self._resolve_row(rollout_id, request_items)
         if match is not None:
             return LineageResolution(ParentResolutionStatus.RESOLVED, match=match)
-        return resolution
+        return LineageResolution(ParentResolutionStatus.UNRESOLVED, reason=reason or resolution.reason)
 
-    def _resolve_row(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None:
+    def _resolve_row(self, rollout_id: str, request_items: list[dict]) -> tuple[LineageMatch | None, str]:
         fingerprint = assistant_fingerprint(request_items)
         if not fingerprint:
-            return None
+            return None, "empty_fingerprint"
         with self._locked(rollout_id):
             # Failure rows and fingerprints from incompatible algorithms cannot resolve as parents.
             records = [
@@ -867,21 +867,25 @@ class FileLineageStore(IncrementalLineageStore):
                 and record.get("fingerprint_version") == FINGERPRINT_VERSION
             ]
         if len(records) != 1:
-            return None
+            reason = "ledger_fingerprint_missing" if not records else "ledger_fingerprint_ambiguous"
+            return None, reason
         record = records[0]
         context_len = int(record["context_len"])
         if len(request_items) < context_len:
-            return None
+            return None, "ledger_context_short"
         if conversation_digest(request_items[:context_len]) != record["context_digest"]:
-            return None
-        return LineageMatch(
-            model_call_id=str(record["model_call_id"]),
-            # Token-free custody rows omit the column; legacy rows keep it.
-            cumulative_token_ids=tuple(int(token) for token in record.get("cumulative_token_ids") or ()),
-            digest=str(record["digest"]),
-            staging_chain=tuple(record.get("staging_chain") or []),
-            prev_len=int(record.get("cum_len") or 0),
-            chain_hash=str(record.get("chain_hash") or ""),
+            return None, "ledger_context_digest_mismatch"
+        return (
+            LineageMatch(
+                model_call_id=str(record["model_call_id"]),
+                # Token-free custody rows omit the column; legacy rows keep it.
+                cumulative_token_ids=tuple(int(token) for token in record.get("cumulative_token_ids") or ()),
+                digest=str(record["digest"]),
+                staging_chain=tuple(record.get("staging_chain") or []),
+                prev_len=int(record.get("cum_len") or 0),
+                chain_hash=str(record.get("chain_hash") or ""),
+            ),
+            "",
         )
 
     async def record(self, commit: CaptureLedgerCommit) -> None:

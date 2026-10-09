@@ -331,6 +331,22 @@ async def test_commit_ordering_parent_resolvable_only_after_record(store):
 
 
 @pytest.mark.asyncio
+async def test_file_store_reports_why_a_ledger_row_did_not_match(tmp_path):
+    store = FileLineageStore(tmp_path)
+    missing = await store.resolve("r1", [USER_1, ASSISTANT_SEEDED, USER_2])
+    assert missing.status == ParentResolutionStatus.UNRESOLVED
+    assert missing.reason == "ledger_fingerprint_missing"
+
+    await _record_call_1(store)
+    changed_context = await store.resolve(
+        "r1",
+        [{"role": "user", "content": "changed"}, ASSISTANT_1, USER_2],
+    )
+    assert changed_context.status == ParentResolutionStatus.UNRESOLVED
+    assert changed_context.reason == "ledger_context_digest_mismatch"
+
+
+@pytest.mark.asyncio
 async def test_file_store_cross_handle_visibility(tmp_path):
     writer = FileLineageStore(tmp_path)
     reader = FileLineageStore(tmp_path)
