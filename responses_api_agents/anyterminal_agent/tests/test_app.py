@@ -24,8 +24,11 @@ import hashlib
 import json
 import os
 import shutil
+import tarfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Lock
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
@@ -51,6 +54,7 @@ from responses_api_agents.anyterminal_agent.app import (
     GymAgentHarnessProcessor,
     RunTerminalAgent,
     _build_provider,
+    _ensure_agent_deps_archive,
     _file_lock,
     _format_container,
     _instruction_from_input,
@@ -58,6 +62,38 @@ from responses_api_agents.anyterminal_agent.app import (
     _safe_config_json,
     update_metrics,
 )
+
+
+def test_agent_deps_archive_creation_is_process_safe(tmp_path: Path) -> None:
+    deps_dir = tmp_path / "shared_agent_deps"
+    deps_dir.mkdir()
+    (deps_dir / ".installed").write_text("recipe-hash")
+    (deps_dir / "payload.txt").write_text("ready")
+
+    barrier = Barrier(2)
+    lock = Lock()
+    temporary_paths: list[Path] = []
+    real_tarfile_open = tarfile.open
+
+    def synchronized_tarfile_open(name, *args, **kwargs):
+        with lock:
+            temporary_paths.append(Path(name))
+        barrier.wait(timeout=10)
+        return real_tarfile_open(name, *args, **kwargs)
+
+    with (
+        patch.object(app, "CACHE_DIR", tmp_path / "cache"),
+        patch.object(app.tarfile, "open", side_effect=synchronized_tarfile_open),
+        ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        archives = list(executor.map(_ensure_agent_deps_archive, (deps_dir, deps_dir)))
+
+    assert archives[0] == archives[1]
+    assert archives[0].is_file()
+    assert len(set(temporary_paths)) == 2
+    assert not list(archives[0].parent.glob("*.tmp"))
+    with real_tarfile_open(archives[0], "r:gz") as archive:
+        assert "./payload.txt" in archive.getnames()
 
 
 def _config(**overrides) -> AnyTerminalAgentConfig:
