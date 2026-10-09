@@ -4476,3 +4476,75 @@ class TestLatencyMerge:
         result = {NG_TRAJECTORY_KEY: {"task_id": "0", "rollout_id": "0-0", "invocations": [{"invocation_id": "r"}]}}
         _attach_ng_perf(result, observability_enabled=True, rollout_latency_ms=1234.5, rollout_duration_ms=1234.4)
         assert result["ng_perf"]["rollout_duration_ms"] == 1234.4
+
+    def test_repeated_client_call_ids_fold_into_one_call_with_attempts(self) -> None:
+        """OpenCode's SDK retries a failed request with the same headers, so the server captures the same client
+        call id more than once: one logical call, the earlier records as failed attempts."""
+        captures = [
+            self._capture(
+                model_call_id="c1",
+                response_id=None,
+                client_call_id="oc-7",
+                client_session_id="ses",
+                client_sent_at_ms=100_000.0,
+                started_at=100.2,
+                completed_at=100.9,
+                latency_total_ms=700.0,
+                status_code=500,
+                error_category="server_error",
+                tokens_in=None,
+                tokens_out=None,
+                tokens_reasoning=None,
+                cached_tokens=None,
+                response=None,
+            ),
+            self._capture(
+                model_call_id="c2",
+                response_id="r2",
+                client_call_id="oc-7",
+                client_session_id="ses",
+                client_sent_at_ms=100_000.0,
+                started_at=101.5,
+                completed_at=104.8,
+                latency_total_ms=3300.0,
+                status_code=200,
+                tokens_in=800,
+                tokens_out=70,
+                tokens_reasoning=20,
+                cached_tokens=100,
+            ),
+        ]
+        steps = [
+            {
+                "invocation_id": "ses",
+                "completed_at": 105.0,
+                "processed_at": 105.3,
+                "clock_domain": "sandbox:s",
+                "token_stats": {
+                    "prompt_tokens": 700,
+                    "completion_tokens": 50,
+                    "reasoning_tokens": 20,
+                    "cached_tokens": 100,
+                },
+            },
+        ]
+        result = {
+            "ng_trajectory": {
+                "task_id": "2",
+                "rollout_id": "2-3",
+                "invocations": [{"invocation_id": "ses"}],
+                "model_calls": steps,
+            },
+            "ng_model_call_capture": {"calls": captures},
+        }
+        record = _build_trajectory_record(self._row(), result)
+        [call] = record.model_calls
+        assert call.model_call_id == "c2" and call.client_call_id == "oc-7"
+        assert (call.started_at, call.completed_at) == (100.0, 105.0)
+        assert (call.server_started_at, call.server_completed_at) == (101.5, 104.8)
+        assert [(a.attempt_index, a.status, a.status_code) for a in call.attempts] == [
+            (1, "error", 500),
+            (2, "completed", 200),
+        ]
+        assert call.attempts[0].started_at == 100.2 and call.attempts[0].duration_ms == 700.0
+        assert "model_call_join_unverified" not in {g.code for g in record.gaps}

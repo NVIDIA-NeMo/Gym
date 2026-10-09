@@ -246,6 +246,59 @@ _HARNESS_OWNED_CALL_FIELDS = (
 )
 
 
+def _capture_attempt_status(raw_call: dict[str, Any]) -> str:
+    category = raw_call.get("error_category")
+    if category in ("timeout", "cancelled"):
+        return str(category)
+    status_code = raw_call.get("status_code")
+    if category or (isinstance(status_code, int) and status_code >= 400):
+        return "error"
+    return "completed"
+
+
+def _fold_repeated_client_calls(raw_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Capture records sharing a client call id are one logical call the client retried (OpenCode's SDK resends
+    with the same headers). The record that answered stands for the call; the others become its attempts.
+    Records without a client call id, and ids seen once, pass through in start order."""
+
+    def start(call: dict[str, Any]) -> float:
+        value = call.get("started_at")
+        return float(value) if isinstance(value, (int, float)) else float("inf")
+
+    ordered = sorted(raw_calls, key=start)
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for call in ordered:
+        if isinstance(call.get("client_call_id"), str):
+            groups[call["client_call_id"]].append(call)
+    folded: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for call in ordered:
+        client_call_id = call.get("client_call_id")
+        group = groups.get(client_call_id) if isinstance(client_call_id, str) else None
+        if not group or len(group) == 1:
+            folded.append(call)
+            continue
+        if client_call_id in seen:
+            continue
+        seen.add(client_call_id)
+        answered = [c for c in group if _capture_attempt_status(c) == "completed"]
+        representative = (answered or group)[-1]
+        attempts = [
+            {
+                "attempt_index": index,
+                "started_at": c.get("started_at"),
+                "completed_at": c.get("completed_at"),
+                "duration_ms": c.get("latency_total_ms"),
+                "status": _capture_attempt_status(c),
+                "status_code": c.get("status_code"),
+                "error_type": c.get("error_category") if _capture_attempt_status(c) != "completed" else None,
+            }
+            for index, c in enumerate(group, start=1)
+        ]
+        folded.append({**representative, "_attempts": attempts})
+    return folded
+
+
 def _step_tokens_match(step: TrajectoryTokenStats, captured: TrajectoryTokenStats) -> bool:
     """OpenCode's step counts against the provider's usage: OpenCode's input excludes its cache reads and its
     output excludes reasoning, so prompt = input + cached and completion = output + reasoning."""
@@ -373,10 +426,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             unpaired_steps[call.invocation_id].append(index)
     for steps in unpaired_steps.values():
         steps.sort(key=lambda i: (model_calls[i].started_at or model_calls[i].completed_at or 0.0))
-    for raw_call in sorted(
-        (c for c in raw_calls if isinstance(c, dict)),
-        key=lambda c: (c.get("started_at") if isinstance(c.get("started_at"), (int, float)) else float("inf")),
-    ):
+    for raw_call in _fold_repeated_client_calls([c for c in raw_calls if isinstance(c, dict)]):
         model_call_id = raw_call.get("model_call_id")
         metadata = {
             key: raw_call[key]
@@ -403,6 +453,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         client_purpose = raw_call.get("client_purpose")
         projected = TrajectoryModelCall(
             model_call_id=model_call_id,
+            attempts=raw_call.get("_attempts") or [],
             # The server's bounds are the server's: the harness's logical call keeps started_at/completed_at.
             server_started_at=raw_call.get("started_at"),
             server_completed_at=raw_call.get("completed_at"),
@@ -454,8 +505,9 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             for key in ("response_metadata", "token_stats"):
                 merged[key].update(update.pop(key))
             # exclude_none keeps empty lists, so a capture record with no attempts would erase the
-            # producer's. Capture has no attempt visibility today; only let it add, never clear.
-            if not update.get("attempts"):
+            # producer's. The server's attempts (repeated client call ids) only fill in when the harness
+            # recorded none itself.
+            if not update.get("attempts") or merged.get("attempts"):
                 update.pop("attempts", None)
             # Harness evidence wins wherever both sides have a value: identity, purpose, status and the
             # harness's own clock and bounds. The capture only fills what the harness left empty.
