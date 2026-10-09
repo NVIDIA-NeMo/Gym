@@ -14,6 +14,7 @@ import asyncio
 
 import pytest
 
+from nemo_gym.token_id_capture import lineage as lineage_module
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore, _custody_columns
 from nemo_gym.token_id_capture.protocols import CaptureLedger
@@ -502,3 +503,53 @@ async def test_unversioned_legacy_token_carrying_row_cannot_resolve_or_anchor_a_
     assert sorted(failure.reason for failure in manifest.failures) == sorted(
         ["ledger_row_missing_response_id", UNRESOLVED_PARENT_REASON]
     )
+
+
+@pytest.mark.asyncio
+async def test_file_store_ledger_cache_keeps_a_rollout_that_was_just_read(tmp_path):
+    store = FileLineageStore(tmp_path, max_cached_rollouts=2)
+    for rollout_id in ("r1", "r2"):
+        await store.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id=rollout_id))
+
+    await store.manifest("r1")
+    await store.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r3"))
+
+    # r1 was used more recently than r2, so r2 is the one evicted.
+    assert list(store._ledger_cache) == ["r1", "r3"]
+
+
+async def _record_chain(store: FileLineageStore, rollout_id: str, calls: int) -> None:
+    """Record ``calls`` calls whose rows carry a staging chain one key longer each time, as a long agent's do."""
+    chain: list[str] = []
+    for index in range(calls):
+        chain.append(f"{rollout_id}/c{index}")
+        request = [USER_1, {"role": "user", "content": str(index)}]
+        await store.record(
+            _commit(
+                _call_record(f"c{index}"), request, [ASSISTANT_1], rollout_id=rollout_id, staging_chain=tuple(chain)
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_file_store_ledger_cache_is_bounded_by_its_rows_and_chains_not_only_by_rollouts(tmp_path, monkeypatch):
+    """Each row stores its whole staging chain, so one long rollout can outweigh thousands of short ones."""
+    monkeypatch.setattr(lineage_module, "MAX_CACHED_LEDGER_ENTRIES", 100)
+    store = FileLineageStore(tmp_path)
+    # Ten calls cost 10 rows plus 1 + 2 + ... + 10 chain keys: 65 entries per rollout.
+    await _record_chain(store, "r1", 10)
+    await _record_chain(store, "r2", 10)
+
+    assert list(store._ledger_cache) == ["r2"]
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert len(manifest.records) == 10
+
+
+@pytest.mark.asyncio
+async def test_file_store_ledger_cache_keeps_the_newest_rollout_even_over_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(lineage_module, "MAX_CACHED_LEDGER_ENTRIES", 10)
+    store = FileLineageStore(tmp_path)
+    await _record_chain(store, "r1", 10)
+
+    # Evicting the rollout being served would make every one of its calls re-read the whole ledger.
+    assert list(store._ledger_cache) == ["r1"]
