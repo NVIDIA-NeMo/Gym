@@ -10,7 +10,7 @@ exact acceptance gates. The longer design and code map are in
 
 ## Current live status
 
-- Gym branch tip `739cfac02` and RL branch tip `68ff2f02` are pushed to
+- Gym implementation head `739cfac02` and RL branch tip `68ff2f02` are pushed to
   `ehosseiniasl/multi-harness-training-routing` in their respective forks.
 - Gym commits `7c8e20775`, `0f474dc80`, `7f8454ac1`, and `739cfac02` address
   the token-lineage blockers exposed by OpenClaw: assistant reasoning
@@ -199,8 +199,9 @@ Use branch `ehosseiniasl/multi-harness-training-routing` in both repositories.
 | NeMo Gym | [NVIDIA-NeMo/Gym#4082](https://github.com/NVIDIA-NeMo/Gym/pull/4082) | `739cfac02` |
 | NeMo RL | [NVIDIA-NeMo/RL#4521](https://github.com/NVIDIA-NeMo/RL/pull/4521) | `68ff2f02` |
 
-The Gym branch tip will be newer after committing this handoff refresh. Fetch
-the branch tip and use the hashes above only as minimum ancestry checks:
+The Gym branch tip also contains documentation commits newer than the
+implementation hash. Fetch the branch tip and use the hashes above only as
+minimum ancestry checks:
 
 ```bash
 git clone https://github.com/NVIDIA-NeMo/Gym.git nemo-gym-multi-harness
