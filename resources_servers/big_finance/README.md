@@ -29,6 +29,12 @@ fields. The required five-row `data/example_rollouts.jsonl` and matching
 `data/example_metrics.json` are committed alongside it. Validate all three with
 `gym env test --resources-server big_finance`.
 
+For OpenAI-backed rollouts, also pass
+`--config resources_servers/big_finance/configs/openai_model.yaml`. This applies
+BigFinance's retry and timeout settings to its own `big_finance_policy_model`
+instance without changing the shared `policy_model`. Omit this overlay when
+selecting another model type.
+
 See `benchmarks/big_finance/README.md` for credentials, scoring, safety,
 preparation, and standalone parity notes.
 

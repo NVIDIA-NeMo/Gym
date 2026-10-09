@@ -15,9 +15,11 @@
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
+from aiohttp import ClientResponseError, ClientTimeout
 from big_finance_harness.prompts import SYSTEM_PROMPT
 from big_finance_harness.tools import (
     EdgarSearchTool,
@@ -27,11 +29,12 @@ from big_finance_harness.tools import (
     ToolError,
     WebSearchTool,
 )
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, PermanentEndpointError
 from nemo_gym.server_utils import ServerClient
 from resources_servers.big_finance.app import (
     BigFinanceResourcesServer,
@@ -40,10 +43,173 @@ from resources_servers.big_finance.app import (
     extract_final_answer,
     format_trace,
 )
+from responses_api_models.openai_model.app import (
+    SimpleModelServer,
+    SimpleModelServerConfig,
+    UpstreamRetriesExhaustedError,
+)
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CONFIG_FPATH = _REPO_ROOT / "resources_servers/big_finance/configs/big_finance.yaml"
+_OPENAI_CONFIG_PATHS = [
+    "responses_api_models/openai_model/configs/openai_model.yaml",
+    "resources_servers/big_finance/configs/big_finance.yaml",
+    "resources_servers/big_finance/configs/openai_model.yaml",
+]
+
+
+def _resolved_config(config_paths: list[str], overrides: dict | None = None) -> DictConfig:
+    initial = OmegaConf.merge(
+        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        {
+            "config_paths": [str(_REPO_ROOT / path) for path in config_paths],
+            "policy_base_url": "https://provider.example/v1",
+            "policy_api_key": "test-key",
+            "policy_model_name": "policy",
+        },
+        overrides or {},
+    )
+    return GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=initial,
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+
+
+def _configured_model(config: DictConfig, instance: str) -> SimpleModelServer:
+    model_config = OmegaConf.to_container(config[instance].responses_api_models.openai_model, resolve=True)
+    return SimpleModelServer(
+        config=SimpleModelServerConfig(name=instance, **model_config),
+        server_client=MagicMock(spec=ServerClient, global_config_dict=config),
+    )
+
+
+def _provider_error_response(status: int, content: bytes) -> SimpleNamespace:
+    request_info = SimpleNamespace(
+        url="https://provider.example/v1/responses",
+        real_url="https://provider.example/v1/responses",
+        method="POST",
+        headers={},
+    )
+    return SimpleNamespace(
+        status=status,
+        ok=False,
+        request_info=request_info,
+        content=SimpleNamespace(read=AsyncMock(return_value=content)),
+        raise_for_status=MagicMock(side_effect=ClientResponseError(request_info, (), status=status)),
+    )
+
+
+@pytest.mark.parametrize("model_type", ["dummy_model", "vllm_model"])
+def test_big_finance_model_copy_without_openai_overlay(model_type: str) -> None:
+    paths = [_OPENAI_CONFIG_PATHS[1]]
+    if model_type != "dummy_model":
+        paths.insert(0, f"responses_api_models/{model_type}/configs/{model_type}.yaml")
+    config = _resolved_config(paths)
+
+    assert set(config.big_finance_policy_model.responses_api_models) == {model_type}
+    assert config.big_finance_policy_model == config.policy_model
+    agent_name = config.get("agent_map", {}).get("big_finance", "big_finance")
+    assert config[agent_name].responses_api_agents.finance_agent.model_server.name == "big_finance_policy_model"
+
+
+@pytest.mark.parametrize("extra_body", [{}, {"reasoning": {"effort": "high"}, "max_output_tokens": 1000}])
+def test_big_finance_model_overlay_preserves_mixed_vals_policy(extra_body: dict) -> None:
+    vals_paths = [
+        _OPENAI_CONFIG_PATHS[0],
+        "resources_servers/finance_sec_search/configs/finance_sec_search.yaml",
+        "resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml",
+    ]
+    policy_body = {"service_tier": "auto", "reasoning": {"effort": "low", "summary": "auto"}}
+    overrides = {
+        "policy_model": {"responses_api_models": {"openai_model": {"extra_body": policy_body}}},
+    }
+    vals_only = _resolved_config(vals_paths, overrides)
+    if extra_body:
+        overrides["big_finance_policy_model"] = {"responses_api_models": {"openai_model": {"extra_body": extra_body}}}
+    mixed = _resolved_config(vals_paths + _OPENAI_CONFIG_PATHS[1:], overrides)
+
+    assert mixed.policy_model == vals_only.policy_model
+    assert mixed.search_judge_model == vals_only.search_judge_model
+    for instance, resources_type in (
+        ("finance_agent", "finance_sec_search"),
+        ("finance_agent_v2", "finance_agent_v2"),
+    ):
+        agent_name = mixed.get("agent_map", {}).get(instance, instance)
+        assert mixed[agent_name].responses_api_agents.finance_agent.model_server.name == "policy_model"
+        resources = mixed[f"{resources_type}_resources_server"].resources_servers[resources_type]
+        assert resources.retrieval_model_server.name == "policy_model"
+        assert resources.judge_model_server.name == "search_judge_model"
+
+    policy = _configured_model(mixed, "policy_model")
+    big_finance_policy = _configured_model(mixed, "big_finance_policy_model")
+    judge = _configured_model(mixed, "big_finance_judge_model")
+    assert policy.config.upstream_retry_policy.max_attempts == 1
+    assert policy.config.upstream_max_num_tries is None
+    assert policy.config.upstream_request_timeout_seconds is None
+    assert big_finance_policy.config.extra_body == OmegaConf.to_container(OmegaConf.merge(policy_body, extra_body))
+    assert big_finance_policy.config.openai_base_url == policy.config.openai_base_url
+    assert big_finance_policy.config.openai_api_key == policy.config.openai_api_key
+    assert big_finance_policy.config.openai_model == policy.config.openai_model
+    assert big_finance_policy.config.upstream_retry_policy.max_attempts == 13
+    assert judge.config.upstream_retry_policy.max_attempts == 21
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("instance,attempts", [("big_finance_policy_model", 13), ("big_finance_judge_model", 21)])
+@pytest.mark.parametrize("failure", ["http_503", "timeout"])
+async def test_big_finance_model_retry_budget(
+    monkeypatch: pytest.MonkeyPatch, instance: str, attempts: int, failure: str
+) -> None:
+    server = _configured_model(_resolved_config(_OPENAI_CONFIG_PATHS), instance)
+    transport = AsyncMock(return_value=_provider_error_response(503, b"unavailable"))
+    if failure == "timeout":
+        transport.side_effect = TimeoutError("provider timed out")
+    backoff_sleep = AsyncMock()
+    inner_sleep = AsyncMock()
+    monkeypatch.setattr("nemo_gym.openai_utils.request", transport)
+    monkeypatch.setattr("nemo_gym.openai_utils.sleep", inner_sleep)
+    monkeypatch.setattr("responses_api_models.openai_model.app.asyncio.sleep", backoff_sleep)
+
+    with pytest.raises(UpstreamRetriesExhaustedError, match=f"after {attempts} attempts") as error:
+        await server.responses(NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+    assert transport.await_count == attempts
+    assert backoff_sleep.await_args_list == [call(0.5)] * (attempts - 1)
+    inner_sleep.assert_not_awaited()
+    for request_call in transport.await_args_list:
+        assert request_call.kwargs["_max_num_tries"] == 1
+        assert request_call.kwargs["timeout"] == ClientTimeout(total=1800)
+    if failure == "http_503":
+        assert error.value.status == 503
+        assert error.value.response_content == b"unavailable"
+    else:
+        assert isinstance(error.value.__cause__, TimeoutError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("instance", ["big_finance_policy_model", "big_finance_judge_model"])
+@pytest.mark.parametrize("status", [400, 401])
+async def test_big_finance_model_terminal_errors(monkeypatch: pytest.MonkeyPatch, instance: str, status: int) -> None:
+    server = _configured_model(_resolved_config(_OPENAI_CONFIG_PATHS), instance)
+    content = b'{"error":{"code":"invalid_api_key"}}' if status == 401 else b"bad request"
+    transport = AsyncMock(return_value=_provider_error_response(status, content))
+    backoff_sleep = AsyncMock()
+    monkeypatch.setattr("nemo_gym.openai_utils.request", transport)
+    monkeypatch.setattr("responses_api_models.openai_model.app.asyncio.sleep", backoff_sleep)
+
+    # A permanent authentication failure also stops later calls to the same endpoint.
+    for _ in range(2 if status == 401 else 1):
+        with pytest.raises(PermanentEndpointError if status == 401 else ClientResponseError) as error:
+            await server.responses(NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+        assert error.value.status == status
+
+    transport.assert_awaited_once()
+    backoff_sleep.assert_not_awaited()
 
 
 def _response(output: list[dict]) -> NeMoGymResponse:
