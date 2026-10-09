@@ -141,17 +141,19 @@ async def test_observation_parser_runs_off_event_loop(setup, tmp_path):
     agent, sandbox = setup
     capture_observations(sandbox, tmp_path)
     loop_thread = threading.get_ident()
+    parser_threads = []
     from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
     from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import activate
 
     def parse(*args, **kwargs):
-        assert threading.get_ident() != loop_thread
+        parser_threads.append(threading.get_ident())
         return parse_opencode_observations(*args, **kwargs)
 
     with patch("responses_api_agents.opencode_agent.sandbox.parse_opencode_observations", side_effect=parse) as parsed:
         request, session_id, task = await activate(agent, sandbox)
         await task
         parsed.assert_called_once()
+        assert len(parser_threads) == 1 and parser_threads[0] != loop_thread
         await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
