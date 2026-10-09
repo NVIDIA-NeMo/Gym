@@ -20,6 +20,10 @@ anyterminal_hermes:
         terminal_timeout: 180
         compression_enabled: true
         compression_threshold: 0.85
+        # Match the 16K training backend with headroom for one generated token.
+        # Hermes otherwise assumes a much larger unknown-model context and only
+        # learns the real boundary after an avoidable HTTP 400.
+        context_window: 15872
 
       container_formatter: "docker://{docker_image}"
 

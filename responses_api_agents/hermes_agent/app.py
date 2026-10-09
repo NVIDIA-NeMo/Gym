@@ -277,6 +277,16 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
     compression_threshold: float = 0.85
+    # Hermes calls this ``model.context_length`` internally. Expose the same
+    # context-window vocabulary as the other AnyTerminal harness adapters and
+    # translate it in config.yaml so preflight compaction happens before the
+    # backend's hard limit.
+    context_window: Optional[int] = Field(default=None, gt=0)
+    # Optional direct endpoint for native context summaries. AnyTerminal sets
+    # this to the model URL without the rollout/capture prefix, keeping harness
+    # bookkeeping out of the policy trajectory while normal turns remain
+    # correlated.
+    compaction_base_url: Optional[str] = None
     chat_template_kwargs_enabled: bool = True
     api_key: Optional[str] = None
     delegation_max_iterations: int = 50
@@ -366,8 +376,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
     def _build_config(self, mcp_accesses: list[MCPToolAccess] | None = None) -> str:
         import yaml
 
+        model_config: str | dict[str, Any] = self._model_name()
+        if self.config.context_window is not None:
+            model_config = {
+                "default": self._model_name(),
+                "context_length": self.config.context_window,
+            }
         config: dict[str, Any] = {
-            "model": self._model_name(),
+            "model": model_config,
             "provider": "auto",
             "toolsets": ["hermes-cli"],
             "agent": {"max_turns": self.config.max_turns},
@@ -390,6 +406,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 "enabled": self.config.checkpoints_enabled,
             },
         }
+        if self.config.compaction_base_url:
+            config["auxiliary"] = {
+                "compression": {
+                    "provider": "custom",
+                    "model": self._model_name(),
+                    "base_url": self.config.compaction_base_url,
+                    "api_key": self.config.api_key or "gym",  # pragma: allowlist secret
+                }
+            }
         if mcp_accesses:
             # A grant is for tools, so Hermes' resource and prompt helper tools stay off.
             config["mcp_servers"] = {
