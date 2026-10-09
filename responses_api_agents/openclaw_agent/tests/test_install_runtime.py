@@ -11,7 +11,7 @@ import pytest
 
 
 INSTALLER = Path(__file__).parents[1] / "install_openclaw_runtime.sh"
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Native OpenClaw requires Linux")
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="OpenClaw sandbox execution requires Linux")
 
 
 @pytest.fixture

@@ -966,3 +966,5 @@ class TestConfigYaml:
         assert inner["resources_server"] is None
         assert inner["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
         assert inner["model"] == "${policy_model_name}"
+        assert inner["sandbox_install_timeout_seconds"] == 600
+        assert inner["session_close_timeout_seconds"] == 60

@@ -8,7 +8,7 @@ Minimal, meant to be extended, and currently eval-only.
 
 ## Quick start
 
-OpenClaw is auto-installed on the first local CLI invocation. Starting an agent server for native
+OpenClaw is auto-installed on the first local CLI invocation. Starting an agent server for sandbox
 sessions does not install or execute OpenClaw on the agent-server host.
 Make sure `env.yaml` is also set.
 
@@ -26,11 +26,17 @@ gym eval run --no-serve --agent openclaw_math_agent \
 
 The default config binds `model_server` to Gym's `policy_model` and uses
 `${policy_model_name}`. The adapter generates the OpenClaw provider configuration
-for both local CLI calls and native sessions. Configure the endpoint and API key
+for both local CLI calls and sandbox sessions. Configure the endpoint and API key
 on the Gym model server.
 
 Existing local callers may still supply their own OpenClaw provider configuration
 when `model_server` is unset.
+
+Compared with the previous shipped YAML, the fixed `nvinf` provider/model block
+is removed. `workspace_root`, `openclaw_agent_id`, `thinking`, `system_prompt`,
+`extra_args`, `env`, and `concurrency` now use class defaults unless overridden.
+`resources_server` is now `null`: local `/run` needs an explicit Resources binding.
+Session install/close timeouts default to 600/60 seconds.
 
 ## Config fields
 
@@ -56,9 +62,8 @@ when `model_server` is unset.
   are rejected); overridden by the `OPENCLAW_VERSION` env var, and falls back to
   `setup_openclaw.DEFAULT_OPENCLAW_VERSION`. An already-installed `openclaw` is only
   reused when `openclaw --version` reports exactly the resolved version; anything else
-  is reinstalled, so changing the override or the config pin takes effect on the next
-  startup. After an install, the launcher selected on `PATH` must report the requested
-  version, or startup fails.
+  is reinstalled on first local use after a restart. After an install, the launcher
+  selected on `PATH` must report the requested version, or that local request fails.
   Note: releases ≥ 2026.9.0 store session history in SQLite instead of JSONL, which
   the agent's transcript reader does not support yet — tool results and interrupted
   sessions are not captured, so stick to 2026.6.11 until that lands.
@@ -79,7 +84,9 @@ reused when it reports exactly the requested Node version. Incompatible runtimes
 are replaced, not bypassed silently.
 
 The host installer settings above apply only to local CLI calls, with installation deferred
-until the first call. Native sessions use their separate in-sandbox installer and the exact
+until the first call rather than startup. Concurrent callers share one background-thread
+attempt; it does not block the event loop, and failed installs can be retried.
+Sandbox sessions use their separate in-sandbox installer and the exact
 configured `openclaw_version`; host environment overrides do not change that runtime.
 
 `configs/openclaw_agent.yaml` supports both paths: an agent session selects sandbox
@@ -88,9 +95,9 @@ rejected, never retried on the host.
 Local `/run` requires a Resources binding; direct `/v1/responses` does not.
 
 
-## Native EnvironmentServer sessions
+## EnvironmentServer sandbox sessions
 
-The native path runs OpenClaw and its file/process tools inside the task sandbox created by
+The sandbox path runs OpenClaw and its file/process tools inside the task sandbox created by
 Resources. The agent server borrows `SandboxAccess`, installs the pinned runtime, launches one
 invocation in `SandboxAccess.workdir`, and disconnects after confirmed cleanup. Resources retains
 ownership of task preparation, verification, and sandbox destruction.
@@ -104,7 +111,7 @@ config_paths:
   - responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
-# Route existing prepared flat rows through native session orchestration.
+# Route existing prepared flat rows through sandbox session orchestration.
 environment_routing_mode: legacy
 environment_server_name: single_agent_turn_legacy
 
@@ -145,7 +152,7 @@ calls the rollout-scoped Responses endpoint, closes the agent, verifies, and clo
 The model server address must be reachable from inside the task sandbox. Its `/ng-rollout/.../v1`
 route is embedded in OpenClaw's Chat Completions provider configuration to retain model-call linkage.
 
-The native adapter sets OpenClaw's provider `timeoutSeconds` to `model_timeout_seconds` (600 seconds
+The sandbox adapter sets OpenClaw's provider `timeoutSeconds` to `model_timeout_seconds` (600 seconds
 by default). This raises the upstream 120-second idle watchdog so buffered reasoning responses can
 finish. For example, set `openclaw_agent.responses_api_agents.openclaw_agent.model_timeout_seconds`
 to `1200` for a 20-minute model-call limit. Increase the separate `timeout` and EnvironmentServer episode
@@ -172,11 +179,11 @@ private Node binary; task Node/Python and the global library search path are not
 Per-session HOME, config, caches, prompt, transcript, and supervisor output are isolated under
 `/tmp/nemo-gym-openclaw-sessions/`. OpenClaw reads the generated config directly without onboarding
 or creating bootstrap files in the task repository. The task's PATH and dependencies are preserved.
-The native adapter enables `read`, `write`, `edit`, `exec`, and `process`; subagent/channel/plugin
+The sandbox adapter enables `read`, `write`, `edit`, `exec`, and `process`; subagent/channel/plugin
 execution and required external HTTP/MCP tools are unsupported. OpenClaw's internal `gateway`
 exec host refers to the embedded CLI process inside the borrowed sandbox.
 
-Native request support is deliberately explicit:
+Sandbox request support is deliberately explicit:
 
 - One activation per session; one worker per agent server. Concurrent sessions are independent.
   Identical activation requests join the running task or replay its result/error. A different request
@@ -191,11 +198,11 @@ Native request support is deliberately explicit:
 - The request `model`, when supplied, must match the configured model.
 - `max_output_tokens`, `temperature`, `top_p`, reasoning overrides, tool-selection controls, output
   schemas, history replay, and other unsupported Responses options are rejected before activation.
-  The native config also rejects `max_output_tokens`: model metadata does not prove an effective
+  The sandbox config also rejects `max_output_tokens`: model metadata does not prove an effective
   inference limit. Configure sampling and per-call limits on the Gym model server and inspect the
   effective captured requests. An episode-wide token budget is not implemented.
 - Custom command, environment, OpenClaw config, Node path, extra arguments, and agent-ID overrides
-  are rejected for native sessions. Existing callers without an agent-session cookie retain the
+  are rejected for sandbox sessions. Existing callers without an agent-session cookie retain the
   local CLI behavior and configuration. Both paths now include request `instructions` in the
   same configured-system, request-instructions, input-system order.
 

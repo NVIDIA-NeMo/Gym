@@ -176,7 +176,7 @@ def setup():
     module = "responses_api_agents.openclaw_agent.app"
     with (
         patch(
-            f"{module}.ensure_openclaw", side_effect=AssertionError("native sessions must not install host OpenClaw")
+            f"{module}.ensure_openclaw", side_effect=AssertionError("sandbox sessions must not install host OpenClaw")
         ),
         patch(f"{module}.resolve_provider_config"),
         patch(f"{module}.get_global_config_dict", return_value={}),
@@ -231,7 +231,7 @@ def close_body(session_id):
 
 
 @pytest.mark.parametrize("model_timeout_seconds", [600, 1200])
-def test_http_native_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeout_seconds):
+def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeout_seconds):
     agent, sandbox = setup
     agent.config.model_timeout_seconds = model_timeout_seconds
     with patch.object(agent, "_run_openclaw", AsyncMock(side_effect=AssertionError("host OpenClaw must not run"))):
@@ -412,6 +412,20 @@ def test_rejected_request_does_not_consume_activation(setup):
     sandbox.launch.assert_awaited_once()
 
 
+def test_request_allowlist_rejects_future_fields_but_accepts_defaults(setup):
+    class ExtendedRequest(NeMoGymResponseCreateParamsNonStreaming):
+        future_control: str | None = None
+
+    agent, sandbox = setup
+    assert agent._sandbox_input(ExtendedRequest(input="task", stream=False, background=False)) == ("task", "")
+    with pytest.raises(HTTPException, match="future_control") as error:
+        agent._sandbox_input(ExtendedRequest(input="task", future_control="unsupported"))
+    assert error.value.status_code == 422
+    with pytest.raises(HTTPException, match="metadata"):
+        agent._sandbox_input(ExtendedRequest(input="task", metadata={"ignored": "value"}))
+    sandbox.launch.assert_not_awaited()
+
+
 def test_no_session_keeps_existing_local_path(setup):
     agent, sandbox = setup
     with patch.object(agent, "_create_response", AsyncMock(side_effect=RuntimeError("legacy path reached"))) as legacy:
@@ -544,7 +558,7 @@ def test_runtime_failures_cannot_become_successful_responses(setup, failure, sto
         assert invocation["conversation"][-1]["content"][0]["text"] == "Fixed"
 
 
-async def test_local_and_native_prompts_include_the_same_instructions(setup):
+async def test_local_and_sandbox_prompts_include_the_same_instructions(setup):
     agent, _ = setup
     agent.config.system_prompt = "configured system"
     body = NeMoGymResponseCreateParamsNonStreaming(
@@ -559,7 +573,7 @@ async def test_local_and_native_prompts_include_the_same_instructions(setup):
 
 
 @pytest.mark.parametrize("marker", [None, "expired"])
-async def test_obsolete_native_cookie_never_falls_back_to_host(setup, marker):
+async def test_obsolete_sandbox_cookie_never_falls_back_to_host(setup, marker):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {"nemo_gym_openclaw_sandbox_session": marker}})
     with patch.object(agent, "_create_response", AsyncMock(side_effect=AssertionError("host fallback"))):
@@ -928,7 +942,7 @@ async def test_usage_sums_cache_writes_and_failed_calls(setup):
         (2, {"cacheRead": 3}, 5, 20),
     ],
 )
-def test_native_usage_details_preserve_positive_counts_and_treat_defaulted_zero_as_unknown(
+def test_sandbox_usage_details_preserve_positive_counts_and_treat_defaulted_zero_as_unknown(
     setup, first_cache, second_cache, expected_cache, expected_input
 ):
     agent, sandbox = setup
@@ -959,7 +973,7 @@ def test_native_usage_details_preserve_positive_counts_and_treat_defaulted_zero_
 
 
 @pytest.mark.parametrize("second_usage", [None, "unavailable"])
-def test_missing_call_usage_keeps_native_cache_aggregate_unknown(setup, second_usage):
+def test_missing_call_usage_keeps_sandbox_cache_aggregate_unknown(setup, second_usage):
     agent, sandbox = setup
     transcript = [json.loads(line) for line in events().splitlines()]
     transcript[2]["message"]["usage"] = second_usage
@@ -1133,7 +1147,7 @@ async def test_two_sessions_keep_workspaces_model_routes_and_observations_separa
 
 
 @pytest.mark.parametrize("marker", [None, 7, "expired-session"])
-async def test_invalid_or_expired_native_cookie_never_uses_local_execution(setup, marker):
+async def test_invalid_or_expired_sandbox_cookie_never_uses_local_execution(setup, marker):
     agent, sandbox = setup
     request = Request(
         {
@@ -1149,7 +1163,7 @@ async def test_invalid_or_expired_native_cookie_never_uses_local_execution(setup
     sandbox.launch.assert_not_awaited()
 
 
-def test_native_close_cookie_blocks_legacy_run_with_configured_resources(setup):
+def test_sandbox_close_cookie_blocks_legacy_run_with_configured_resources(setup):
     from nemo_gym.config_types import ResourcesServerRef
 
     agent, sandbox = setup
@@ -1214,7 +1228,7 @@ async def test_invalid_envelope_usage_does_not_discard_valid_transcript(setup):
         ({"cacheRead": 5}, 5),
     ],
 )
-async def test_native_envelope_fallback_preserves_known_and_unknown_cache_details(setup, cache, expected_cache):
+async def test_sandbox_envelope_fallback_preserves_known_and_unknown_cache_details(setup, cache, expected_cache):
     agent, sandbox = setup
     request, session_id, task = await activate(agent, sandbox)
     await task
@@ -1455,7 +1469,7 @@ async def test_independent_configs_route_prepared_rows_through_environment_run(s
             offline=True,
         )
     )
-    # The benchmark's legacy allowlist predates this native harness. Keep its
+    # The benchmark's legacy allowlist predates this sandbox harness. Keep its
     # definition untouched and explicitly opt in, as the CLI smoke does.
     monkeypatch.setenv("NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING", "1")
     if failed:
@@ -1609,7 +1623,7 @@ async def test_failed_seed_cleanup_retains_state_until_explicit_retry(setup):
 
 
 @pytest.mark.parametrize("marker", [None, [], {}, 7])
-async def test_seed_rejects_malformed_native_cookie_before_connecting(setup, marker):
+async def test_seed_rejects_malformed_sandbox_cookie_before_connecting(setup, marker):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {"agent_session_id": marker}})
     with pytest.raises(HTTPException, match="Invalid agent session marker"):
@@ -1639,7 +1653,7 @@ async def test_stale_cookie_cannot_recreate_session_or_close_receipt_after_full_
 
 
 @pytest.mark.parametrize("owned", [False, True])
-def test_sandbox_source_controls_ownership_and_native_routing(setup, owned):
+def test_sandbox_source_controls_ownership_and_sandbox_routing(setup, owned):
     agent, sandbox = setup
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}

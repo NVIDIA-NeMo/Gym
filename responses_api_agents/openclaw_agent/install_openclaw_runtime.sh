@@ -8,18 +8,18 @@ runtime=$1
 openclaw_version=$2
 node_version=22.19.0
 if [ "$(uname -s)" != Linux ]; then
-  echo 'Native OpenClaw requires a Linux sandbox.' >&2
+  echo 'OpenClaw sandbox execution requires a Linux sandbox.' >&2
   exit 1
 fi
 if ! command -v python3 >/dev/null 2>&1; then
-  echo 'Native OpenClaw requires Python >=3.8 in the task image for descendant supervision.' >&2
+  echo 'OpenClaw sandbox execution requires Python >=3.8 in the task image for descendant supervision.' >&2
   exit 1
 fi
-python3 -c 'import sys; assert sys.version_info >= (3, 8), "Native OpenClaw requires Python >=3.8"'
+python3 -c 'import sys; assert sys.version_info >= (3, 8), "OpenClaw sandbox execution requires Python >=3.8"'
 case "$(uname -m)" in
   x86_64) arch=x64 ;;
   aarch64) arch=arm64 ;;
-  *) echo 'Native OpenClaw supports Linux x86_64/aarch64 only.' >&2; exit 1 ;;
+  *) echo 'OpenClaw sandbox execution supports Linux x86_64/aarch64 only.' >&2; exit 1 ;;
 esac
 platform="linux-${arch}"
 node_dist="https://nodejs.org/dist/v${node_version}"
@@ -27,19 +27,19 @@ if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
   :
 elif [[ "$(ldd --version 2>&1 || true)" == *musl* ]]; then
   if [ "$arch" != x64 ]; then
-    echo "Native OpenClaw's pinned Node ${node_version} musl build supports x86_64 only" >&2
+    echo "OpenClaw sandbox execution's pinned Node ${node_version} musl build supports x86_64 only" >&2
     exit 1
   fi
   platform=linux-x64-musl
   node_dist="https://unofficial-builds.nodejs.org/download/release/v${node_version}"
 else
-  echo 'Native OpenClaw requires glibc or musl; could not identify the sandbox libc' >&2
+  echo 'OpenClaw sandbox execution requires glibc or musl; could not identify the sandbox libc' >&2
   exit 1
 fi
 
 install_packages() {
   if [ "$(id -u)" -ne 0 ]; then
-    echo "Native OpenClaw requires $*: preinstall these packages (automatic installation requires root)." >&2
+    echo "OpenClaw sandbox execution requires $*: preinstall these packages (automatic installation requires root)." >&2
     exit 1
   fi
   if command -v apk >/dev/null 2>&1; then
@@ -48,7 +48,7 @@ install_packages() {
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
   else
-    echo "Native OpenClaw requires $*: preinstall these packages (automatic installation requires apt-get or apk)." >&2
+    echo "OpenClaw sandbox execution requires $*: preinstall these packages (automatic installation requires apt-get or apk)." >&2
     exit 1
   fi
 }
@@ -91,7 +91,7 @@ if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && [ ! -s /etc/pki/tls/certs/ca-b
   missing+=(ca-certificates)
 fi
 if [ "${#missing[@]}" -gt 0 ]; then
-  echo "Native OpenClaw prerequisites missing: ${missing[*]}. Preinstall curl, ca-certificates, tar, gzip, coreutils, gawk." >&2
+  echo "OpenClaw sandbox execution prerequisites missing: ${missing[*]}. Preinstall curl, ca-certificates, tar, gzip, coreutils, gawk." >&2
   install_packages curl ca-certificates tar gzip coreutils gawk
 fi
 if [ "$platform" = linux-x64-musl ] && ! python3 -c 'import ctypes; ctypes.CDLL("libstdc++.so.6")' 2>/dev/null; then

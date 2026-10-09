@@ -396,14 +396,14 @@ set --
 command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 command -v bash >/dev/null 2>&1 || set -- "$@" bash
 if [ "$#" -gt 0 ]; then
-    [ "$(id -u)" = 0 ] || { echo "Native OpenClaw requires $*: preinstall these tools or use a root image." >&2; exit 1; }
+    [ "$(id -u)" = 0 ] || { echo "OpenClaw sandbox execution requires $*: preinstall these tools or use a root image." >&2; exit 1; }
     if command -v apk >/dev/null 2>&1; then
         apk add --no-cache "$@"
     elif command -v apt-get >/dev/null 2>&1; then
         apt-get update
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
     else
-        echo "Native OpenClaw requires $*: preinstall these tools (automatic installation requires apt-get or apk)." >&2
+        echo "OpenClaw sandbox execution requires $*: preinstall these tools (automatic installation requires apt-get or apk)." >&2
         exit 1
     fi
 fi
@@ -493,21 +493,28 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         if not isinstance(workdir, str) or not workdir.startswith("/") or workdir in ("/", "/tmp"):
             raise HTTPException(422, "OpenClaw workdir must be absolute and separate from /tmp runtime storage")
         if any(access.required for access in self.effective_tool_accesses(body)):
-            raise HTTPException(422, "Native OpenClaw supports its own sandbox tools, not required HTTP/MCP tools")
+            raise HTTPException(
+                422, "OpenClaw sandbox execution supports its own sandbox tools, not required HTTP/MCP tools"
+            )
         if self.config.model_server is None:
-            raise HTTPException(422, "Native OpenClaw requires a sandbox-reachable Gym model_server")
+            raise HTTPException(422, "OpenClaw sandbox execution requires a sandbox-reachable Gym model_server")
         if not self.config.openclaw_version or not re.fullmatch(
             r"\d+\.\d+\.\d+(?:-\d+)?", self.config.openclaw_version
         ):
-            raise HTTPException(422, "Native OpenClaw requires an exact openclaw_version, for example 2026.6.11")
+            raise HTTPException(
+                422, "OpenClaw sandbox execution requires an exact openclaw_version, for example 2026.6.11"
+            )
         if self.config.openclaw_config or self.config.max_output_tokens is not None or self.config.node_bin_dir:
             raise HTTPException(
-                422, "Native OpenClaw does not support openclaw_config, max_output_tokens, or node_bin_dir overrides"
+                422,
+                "OpenClaw sandbox execution does not support openclaw_config, max_output_tokens, or node_bin_dir overrides",
             )
         if self.config.openclaw_agent_id != "main":
-            raise HTTPException(422, "Native OpenClaw currently requires openclaw_agent_id=main")
+            raise HTTPException(422, "OpenClaw sandbox execution currently requires openclaw_agent_id=main")
         if self.config.command != "openclaw" or self.config.extra_args or self.config.env:
-            raise HTTPException(422, "Native OpenClaw does not support command, extra_args, or env overrides")
+            raise HTTPException(
+                422, "OpenClaw sandbox execution does not support command, extra_args, or env overrides"
+            )
 
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
@@ -599,57 +606,39 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
     def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         """Validate and normalize input before consuming the session's activation."""
-        unsupported = (
-            "include",
-            "store",
-            "service_tier",
-            "prompt_cache_key",
-            "prompt_cache_retention",
-            "safety_identifier",
-            "stream_options",
-            "user",
-            "max_output_tokens",
-            "temperature",
-            "top_p",
-            "reasoning",
-            "max_tool_calls",
-            "previous_response_id",
-            "prompt",
-            "text",
-            "context_management",
-            "conversation",
-            "moderation",
-            "top_logprobs",
-            "truncation",
-        )
         if body.model is not None and body.model != self.config.model:
-            raise HTTPException(422, "Native OpenClaw model must match the configured model")
+            raise HTTPException(422, "OpenClaw sandbox execution model must match the configured model")
         extras = set(body.model_extra or {})
         if extras:
-            raise HTTPException(422, f"Native OpenClaw does not support extra request fields: {sorted(extras)}")
-        values = body.model_dump(mode="json")
-        for name in unsupported:
-            if values.get(name) is not None:
-                raise HTTPException(422, f"Native OpenClaw does not support request field {name}")
-        if body.tools or body.tool_choice != "auto" or not body.parallel_tool_calls or body.background:
-            raise HTTPException(422, "OpenClaw owns tool selection and execution policy")
-        if (body.metadata or {}).get("chat_template_kwargs") is not None:
-            raise HTTPException(422, "Configure chat_template_kwargs on the Gym model server for OpenClaw")
+            raise HTTPException(
+                422, f"OpenClaw sandbox execution does not support extra request fields: {sorted(extras)}"
+            )
+        supported = {"input", "instructions", "model"}
+        for name, field in type(body).model_fields.items():
+            if name in supported:
+                continue
+            value = getattr(body, name)
+            if name in ("stream", "background") and value is False:
+                continue
+            if value != field.get_default(call_default_factory=True):
+                raise HTTPException(422, f"OpenClaw sandbox execution does not support request field {name}")
         items = (
             [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
         )
         roles = [getattr(item, "role", None) for item in items]
         if roles not in (["user"], ["system", "user"]):
-            raise HTTPException(422, "Native OpenClaw accepts one text user prompt with an optional system message")
+            raise HTTPException(
+                422, "OpenClaw sandbox execution accepts one text user prompt with an optional system message"
+            )
         for item in items:
             if not isinstance(item.content, str) and any(
                 (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) != "input_text"
                 for part in item.content
             ):
-                raise HTTPException(422, "Native OpenClaw only supports text input")
+                raise HTTPException(422, "OpenClaw sandbox execution only supports text input")
         prompt, system = self._prompt_input(body)
         if not prompt.strip():
-            raise HTTPException(422, "Native OpenClaw requires a nonempty user prompt")
+            raise HTTPException(422, "OpenClaw sandbox execution requires a nonempty user prompt")
         return prompt, system
 
     async def _sandbox_response(
@@ -662,13 +651,13 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         # The pinned CLI reads configuration directly; onboarding would create
         # workspace bootstrap files and unrelated provider/channel state.
-        native_config = self._build_openclaw_config({}, state.request.episode_id.capture_key)
+        session_config = self._build_openclaw_config({}, state.request.episode_id.capture_key)
         # OpenClaw conservatively disables stream usage for custom origins. Gym
         # supports it; request the final usage chunk instead of retaining zero counters.
-        native_config["models"]["providers"]["nemo"]["models"][0]["compat"] = {
+        session_config["models"]["providers"]["nemo"]["models"][0]["compat"] = {
             "supportsUsageInStreaming": True,
         }
-        native_config.update(
+        session_config.update(
             {
                 "agents": {
                     "defaults": {
@@ -707,7 +696,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             str(self.config.timeout),
         ]
         payload = {
-            "config": native_config,
+            "config": session_config,
             "directory": state.session.session_dir,
             "command": command,
             "prompt": f"{system}\n\n{prompt}" if system else prompt,
@@ -840,7 +829,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             output_tokens += count("output")
         if not assistants:
             # The legacy envelope parser defaults missing counters to zero.
-            # Native totals retain valid subtotals without coercing malformed cache values.
+            # Harness totals retain valid subtotals without coercing malformed cache values.
             cache_read = raw_usage.get("cacheRead")
             cached_tokens = cache_read if type(cache_read) is int and cache_read > 0 else None
             input_count, output_count = raw_usage.get("input"), raw_usage.get("output")
@@ -906,7 +895,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 transcript_available=bool(events),
                 model_ref=self.config.model_server,
             )
-            # Native sessions enable only local file/process tools, so there is
+            # Sandbox sessions enable only local file/process tools, so there is
             # exactly one invocation; child sessions cannot be spawned.
             state.observations.gaps = [
                 gap for gap in state.observations.gaps if gap.code != "subagent_hierarchy_unavailable"
@@ -914,7 +903,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             state.observations.records[0].status = status
             state.observations.gaps.extend(gaps)
         except Exception:
-            LOG.exception("Could not build native OpenClaw observations")
+            LOG.exception("Could not build OpenClaw observations")
             state.observations = AgentObservationBundle(
                 source=OPENCLAW_OBSERVATION_SOURCE,
                 gaps=[ObservationGap(code="observation_capture_failed"), *gaps],
@@ -1100,7 +1089,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         ] = None,
     ) -> tuple[list[Any], dict[str, int], str]:
         """setup and run agent. returns (output_items, usage, model_name)."""
-        # Local callers still get automatic installation. Native sessions never
+        # Local callers still get automatic installation. Sandbox sessions never
         # enter this path, so their host does not need OpenClaw, Node, or npm.
         if self._local_setup_task is None:
             self._local_setup_task = asyncio.create_task(
@@ -1402,15 +1391,15 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: OpenClawAgentRunRequest) -> OpenClawAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "Native OpenClaw sessions must use EnvironmentServer /run")
+            raise HTTPException(409, "OpenClaw sandbox sessions must use EnvironmentServer /run")
         try:
             if isinstance(request.session, Mapping) and _SANDBOX_SESSION_KEY in request.session:
-                raise HTTPException(409, "Native OpenClaw sessions must use EnvironmentServer /run")
+                raise HTTPException(409, "OpenClaw sandbox sessions must use EnvironmentServer /run")
         except (AssertionError, AttributeError):
             pass
         if self.config.resources_server is None:
             raise HTTPException(
-                422, "Direct OpenClaw /run requires resources_server; use EnvironmentServer /run for native sessions"
+                422, "Direct OpenClaw /run requires resources_server; use EnvironmentServer /run for sandbox sessions"
             )
         async with self.sem:
             cookies = request.cookies
