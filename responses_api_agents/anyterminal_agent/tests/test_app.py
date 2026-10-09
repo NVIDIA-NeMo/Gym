@@ -177,7 +177,7 @@ class TestSetupScriptsExist:
         script = PARENT_DIR / "responses_api_agents" / "hermes_agent" / "scripts" / "hermes_agent_deps.sh"
         contents = script.read_text()
 
-        assert '"$DEPS_DIR/bin/python3" -P -c "import model_tools;' in contents
+        assert 'PYTHONPATH= "$DEPS_DIR/bin/python3" -P -c "import model_tools;' in contents
         assert "for attempt in {1..12}" in contents
         assert 'if [ "$hermes_health_ok" -ne 1 ]' in contents
 
