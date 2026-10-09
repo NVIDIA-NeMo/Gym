@@ -16,7 +16,7 @@ from nemo_gym.agent_utils.sandbox_session import (
     harness_not_run_observations,
     harness_not_run_response,
 )
-from nemo_gym.agent_utils.session_capture import SessionCapture, SessionCaptureConfig
+from nemo_gym.agent_utils.sandbox_session_capture import SandboxSessionCapture, SandboxSessionCaptureConfig
 from nemo_gym.base_responses_api_agent import ModelEndpoint, TokenCapture
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
@@ -430,8 +430,8 @@ ENDPOINT = ModelEndpoint(base_url="http://127.0.0.1:4321/v1", model="served")
 CAPTURED = TokenCapture(atif_trajectories=[{"steps": []}], metrics={"calls": 1})
 
 
-class FakeCapture(SessionCapture):
-    """A session capture whose start and collect succeed, raise, or hang, as its options say."""
+class FakeCapture(SandboxSessionCapture):
+    """A sandbox session capture whose start and collect succeed, raise, or hang, as its options say."""
 
     def __init__(self, *, start: str = "ok", collect: str = "ok"):
         self.start_mode, self.collect_mode = start, collect
@@ -457,14 +457,14 @@ class FakeCapture(SessionCapture):
         EVENTS.append("capture.abort")
 
 
-class IncompleteCapture(SessionCapture):
+class IncompleteCapture(SandboxSessionCapture):
     async def start(self, sandbox: AsyncSandbox) -> ModelEndpoint:
         return ENDPOINT
 
 
-def capture_config(**options) -> SessionCaptureConfig:
+def capture_config(**options) -> SandboxSessionCaptureConfig:
     timeout = options.pop("collect_timeout_seconds", 1)
-    return SessionCaptureConfig(
+    return SandboxSessionCaptureConfig(
         implementation=f"{__name__}:FakeCapture", options=options, collect_timeout_seconds=timeout
     )
 
@@ -736,17 +736,17 @@ def test_capture_config_builds_a_new_component_per_session():
     ("implementation", "options", "message"),
     [
         ("FakeCapture", {}, "must look like 'package.module:ClassName'"),
-        ("nemo_gym.no_such_module:FakeCapture", {}, "cannot import session capture implementation"),
-        (f"{__name__}:Missing", {}, "is not a SessionCapture subclass"),
-        (f"{__name__}:ENDPOINT", {}, "is not a SessionCapture subclass"),
-        (f"{__name__}:TokenCapture", {}, "is not a SessionCapture subclass"),
+        ("nemo_gym.no_such_module:FakeCapture", {}, "cannot import sandbox session capture implementation"),
+        (f"{__name__}:Missing", {}, "is not a SandboxSessionCapture subclass"),
+        (f"{__name__}:ENDPOINT", {}, "is not a SandboxSessionCapture subclass"),
+        (f"{__name__}:TokenCapture", {}, "is not a SandboxSessionCapture subclass"),
         (f"{__name__}:IncompleteCapture", {}, "does not implement every method"),
-        (f"{__name__}:FakeCapture", {"unknown": 1}, "invalid options for session capture"),
+        (f"{__name__}:FakeCapture", {"unknown": 1}, "invalid options for sandbox session capture"),
     ],
 )
 def test_capture_config_rejects_an_unusable_implementation_at_load(implementation, options, message):
     with pytest.raises(ValidationError, match=message):
-        SessionCaptureConfig(implementation=implementation, options=options)
+        SandboxSessionCaptureConfig(implementation=implementation, options=options)
 
 
 def test_harness_not_run_response_is_a_failed_empty_assistant_turn_for_the_request():

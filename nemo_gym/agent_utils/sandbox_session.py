@@ -15,7 +15,7 @@ from openai.types.responses import ResponseError
 
 from nemo_gym.agent_utils import process_supervisor
 from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
-from nemo_gym.agent_utils.session_capture import SessionCapture, SessionCaptureConfig
+from nemo_gym.agent_utils.sandbox_session_capture import SandboxSessionCapture, SandboxSessionCaptureConfig
 from nemo_gym.agent_utils.supervisor_client import (
     OUTPUT_LOG_FILE,
     STOP_REQUEST_FILE,
@@ -136,7 +136,7 @@ class SandboxSession[Artifacts]:
     workdir: str | None
     harness: str
     owns_sandbox: bool = False
-    session_capture: SessionCaptureConfig | None = None
+    session_capture: SandboxSessionCaptureConfig | None = None
     launch_started: bool = field(default=False, init=False)
     cleanup: CleanupReceipt | None = field(default=None, init=False)
     artifacts: Artifacts | None = field(default=None, init=False)
@@ -148,7 +148,7 @@ class SandboxSession[Artifacts]:
     _close_task: asyncio.Task[None] | None = field(default=None, init=False)
     _collect: Callable[[], Awaitable[Artifacts]] | None = field(default=None, init=False)
     _capture_attempted: bool = field(default=False, init=False)
-    _capture_component: SessionCapture | None = field(default=None, init=False)
+    _capture_component: SandboxSessionCapture | None = field(default=None, init=False)
     _capture_endpoint: ModelEndpoint | None = field(default=None, init=False)
     _token_capture: TokenCapture | None = field(default=None, init=False)
 
@@ -170,11 +170,11 @@ class SandboxSession[Artifacts]:
 
     @property
     def session_capture_failed(self) -> bool:
-        """Whether a configured session capture cannot run, so the harness must not run either."""
+        """Whether a configured sandbox session capture cannot run, so the harness must not run either."""
         return self.session_capture is not None and self._capture_endpoint is None and self._token_capture is not None
 
     def token_capture(self) -> TokenCapture | None:
-        """The collected (or masked) session capture; None without a configured capture or before close."""
+        """The collected (or masked) sandbox session capture; None without a configured capture or before close."""
         return self._token_capture
 
     async def start_session_capture(self) -> ModelEndpoint | None:
@@ -197,7 +197,7 @@ class SandboxSession[Artifacts]:
                 reason = "start was cancelled"
             else:
                 reason = f"{type(error).__name__}: {error}"
-                LOG.exception("%s session capture did not start; the harness will not run", self.harness)
+                LOG.exception("%s sandbox session capture did not start; the harness will not run", self.harness)
             self._token_capture = _masked(f"capture did not start: {reason}")
             await self._abort_capture()
             if not isinstance(error, Exception):
@@ -226,17 +226,17 @@ class SandboxSession[Artifacts]:
             return
         except TimeoutError as error:
             if not deadline.expired():
-                LOG.exception("Collecting the %s session capture failed", self.harness)
+                LOG.exception("Collecting the %s sandbox session capture failed", self.harness)
                 reason = f"capture collection failed: {type(error).__name__}: {error}"
             else:
-                LOG.error("Collecting the %s session capture exceeded %ss", self.harness, timeout)
+                LOG.error("Collecting the %s sandbox session capture exceeded %ss", self.harness, timeout)
                 reason = f"capture collection exceeded {timeout}s"
         except asyncio.CancelledError:
             self._token_capture = _masked("capture collection was cancelled")
             await self._abort_capture()
             raise
         except Exception as error:
-            LOG.exception("Collecting the %s session capture failed", self.harness)
+            LOG.exception("Collecting the %s sandbox session capture failed", self.harness)
             reason = f"capture collection failed: {type(error).__name__}: {error}"
         self._token_capture = _masked(reason)
         await self._abort_capture()
@@ -252,7 +252,7 @@ class SandboxSession[Artifacts]:
                 async with asyncio.timeout(config.collect_timeout_seconds):
                     await component.abort(self.sandbox)
             except Exception:
-                LOG.exception("Aborting the %s session capture failed", self.harness)
+                LOG.exception("Aborting the %s sandbox session capture failed", self.harness)
 
         await asyncio.shield(asyncio.create_task(abort()))
 

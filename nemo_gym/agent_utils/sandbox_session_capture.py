@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pluggable capture of a harness's model calls from inside its task sandbox.
 
-A session capture is a component that runs next to the harness in the task sandbox, for example a proxy that
+A sandbox session capture is a component that runs next to the harness in the task sandbox, for example a proxy that
 records every model call with its token ids. It supplies the endpoint the harness calls, and when the session
 closes it is collected into a :class:`~nemo_gym.base_responses_api_agent.TokenCapture` that the agent returns
 from its close response. Gym ships only this interface and its lifecycle in
@@ -20,7 +20,7 @@ from nemo_gym.base_responses_api_agent import ModelEndpoint, TokenCapture
 from nemo_gym.sandbox.api import AsyncSandbox
 
 
-class SessionCapture(ABC):
+class SandboxSessionCapture(ABC):
     """One capture component for one sandbox session.
 
     ``SandboxSession`` builds a new instance per session, calls ``start`` once before the harness command is
@@ -50,31 +50,35 @@ class SessionCapture(ABC):
         """Stop the component without collecting, best effort; never raise."""
 
 
-def load_session_capture_class(implementation: str) -> type[SessionCapture]:
-    """Import ``"package.module:ClassName"`` and check that it is a concrete :class:`SessionCapture`.
+def load_sandbox_session_capture_class(implementation: str) -> type[SandboxSessionCapture]:
+    """Import ``"package.module:ClassName"`` and check that it is a concrete :class:`SandboxSessionCapture`.
 
     Raises ``ValueError`` naming the configured path when it is malformed, cannot be imported, or does not
-    name a concrete ``SessionCapture`` subclass.
+    name a concrete ``SandboxSessionCapture`` subclass.
     """
     module_name, separator, class_name = implementation.partition(":")
     if not separator or not module_name or not class_name:
         raise ValueError(
-            f"session capture implementation must look like 'package.module:ClassName', got {implementation!r}"
+            f"sandbox session capture implementation must look like 'package.module:ClassName', got {implementation!r}"
         )
     try:
         module = importlib.import_module(module_name)
     except ImportError as error:
-        raise ValueError(f"cannot import session capture implementation {implementation!r}: {error}") from error
+        raise ValueError(
+            f"cannot import sandbox session capture implementation {implementation!r}: {error}"
+        ) from error
     capture_class = getattr(module, class_name, None)
-    if not (isinstance(capture_class, type) and issubclass(capture_class, SessionCapture)):
-        raise ValueError(f"session capture implementation {implementation!r} is not a SessionCapture subclass")
+    if not (isinstance(capture_class, type) and issubclass(capture_class, SandboxSessionCapture)):
+        raise ValueError(
+            f"sandbox session capture implementation {implementation!r} is not a SandboxSessionCapture subclass"
+        )
     if inspect.isabstract(capture_class):
-        raise ValueError(f"session capture implementation {implementation!r} does not implement every method")
+        raise ValueError(f"sandbox session capture implementation {implementation!r} does not implement every method")
     return capture_class
 
 
-class SessionCaptureConfig(BaseModel):
-    """Selects the session capture an agent runs in each task sandbox.
+class SandboxSessionCaptureConfig(BaseModel):
+    """Selects the sandbox session capture an agent runs in each task sandbox.
 
     An agent embeds this as an optional configuration field and passes it to ``SandboxSession``.
     The implementation and its options are validated when the configuration loads.
@@ -82,7 +86,7 @@ class SessionCaptureConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Import path of a SessionCapture subclass, as "package.module:ClassName".
+    # Import path of a SandboxSessionCapture subclass, as "package.module:ClassName".
     implementation: str
     # Keyword arguments for the implementation's constructor.
     options: dict[str, Any] = Field(default_factory=dict)
@@ -93,18 +97,20 @@ class SessionCaptureConfig(BaseModel):
     @field_validator("implementation")
     @classmethod
     def _load_implementation(cls, implementation: str) -> str:
-        load_session_capture_class(implementation)
+        load_sandbox_session_capture_class(implementation)
         return implementation
 
     @model_validator(mode="after")
-    def _validate_options(self) -> "SessionCaptureConfig":
+    def _validate_options(self) -> "SandboxSessionCaptureConfig":
         self.build()
         return self
 
-    def build(self) -> SessionCapture:
+    def build(self) -> SandboxSessionCapture:
         """Construct a new capture component for one session."""
-        capture_class = load_session_capture_class(self.implementation)
+        capture_class = load_sandbox_session_capture_class(self.implementation)
         try:
             return capture_class(**self.options)
         except TypeError as error:
-            raise ValueError(f"invalid options for session capture {self.implementation!r}: {error}") from error
+            raise ValueError(
+                f"invalid options for sandbox session capture {self.implementation!r}: {error}"
+            ) from error
