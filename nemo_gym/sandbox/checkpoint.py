@@ -6,16 +6,26 @@ A sandbox is session state outside Gym's process. Its owner, the resources serve
 implements its participant's checkpoint hooks (``export_session_states`` and friends from
 ``nemo_gym._checkpoint``) by delegating to a :class:`SandboxSessionCheckpointer`:
 
-- At commit, :meth:`~SandboxSessionCheckpointer.export` pauses every live session's sandbox. On OpenSandbox a
-  pause commits the root filesystem as a snapshot, and that snapshot is the restore point: the live sandbox
-  keeps changing after the checkpoint, so a descriptor of it alone would restore work the agent then replays.
-  The exported state names the snapshot, the descriptor, and the spec to re-create from.
+- At commit, :meth:`~SandboxSessionCheckpointer.export` pauses every live session's sandbox. The paused
+  sandbox is frozen at the checkpoint, and the exported state names it (descriptor and spec) so a restore can
+  resume it in place. The live sandbox keeps changing once it resumes, so a descriptor of a running sandbox
+  alone would restore work the agent then replays.
+- What the restore point is depends on the backend, recorded as ``restore_point``:
+
+  - ``"snapshot"``: the pause also leaves a snapshot that survives the resume, and the provider declares
+    ``snapshot_survives_resume = True``. The state names the snapshot too, and a restore can re-create the
+    sandbox from it even after the live one moved on (a fork).
+  - ``"paused"``: the pause only freezes the sandbox, or its snapshot is consumed by the resume (OpenSandbox
+    on Kubernetes). The checkpoint can restore the sandbox only while it is still paused. A snapshot id is
+    still recorded when the provider can look one up, for the operator tooling, but it is best effort and
+    never a correctness input: the listing may be partial or stale.
+
 - The sandbox stays paused until its next use: :meth:`~SandboxSessionCheckpointer.ensure_running` resumes it
   once. Prepare stops every caller before commit, so nothing uses the sandbox in between.
 - After a crash, :meth:`~SandboxSessionCheckpointer.restore` rebuilds each session's sandbox in a fresh
-  process. It resumes the old sandbox when that is still paused at the recorded snapshot, and otherwise
-  creates a new one from the snapshot and stops the old one. It validates every state first and installs all
-  or nothing, as the participant hooks require.
+  process. It resumes the old sandbox when that is still paused at the checkpoint; otherwise it forks from
+  the snapshot on a ``"snapshot"`` backend and raises a typed error on a ``"paused"`` one. It validates every
+  state first and installs all or nothing, as the participant hooks require.
 - :meth:`~SandboxSessionCheckpointer.stop` frees a session's sandbox, on close and on retire.
 
 Snapshots are never deleted here. One lives as long as a checkpoint that can restore it, which only the
@@ -29,7 +39,8 @@ import logging
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Optional, Protocol, runtime_checkable
+from datetime import datetime, timezone
+from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
@@ -59,8 +70,19 @@ class SupportsSandboxSnapshotLookup(Protocol):
         ...
 
 
+RestorePoint = Literal["paused", "snapshot"]
+
+# How long a commit waits for the best-effort snapshot lookup of one sandbox before recording none.
+SNAPSHOT_LOOKUP_TIMEOUT_S = 15.0
+
+
 class SandboxCheckpointState(BaseModel):
-    """What a restore needs to rebuild one session's sandbox as of a checkpoint."""
+    """What a restore needs to rebuild one session's sandbox as of a checkpoint.
+
+    ``restore_point`` says what the checkpoint can be restored from: the paused sandbox only, or also the
+    snapshot named by ``snapshot_id``. ``expires_at`` is when the sandbox's TTL runs out (a Unix timestamp),
+    estimated from its creation and ``spec.ttl_s``; ``None`` when the spec sets no TTL.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -69,6 +91,12 @@ class SandboxCheckpointState(BaseModel):
     snapshot_id: Optional[str]
     spec: dict[str, JsonValue]
     paused_at: float
+    restore_point: RestorePoint
+    expires_at: Optional[float] = None
+
+    @property
+    def expired(self) -> bool:
+        return self.expires_at is not None and time.time() > self.expires_at
 
 
 class SandboxCheckpointError(RuntimeError):
@@ -97,6 +125,7 @@ class _Entry:
     spec: SandboxSpec
     # Set from the moment a checkpoint starts pausing the sandbox until ensure_running saw it run again.
     paused_by_checkpoint: bool = False
+    created_at: float = field(default_factory=time.time)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -104,7 +133,8 @@ class SandboxSessionCheckpointer:
     """The sandboxes one server owns, by session, and their checkpoint operations.
 
     ``parallelism`` bounds concurrent pause, create, and resume calls against the backend: a commit pauses
-    every live session at once and a restore rebuilds them all at once.
+    every live session at once and a restore rebuilds them all at once. Size it with the commit deadline: at
+    OpenSandbox's measured rate, ``parallelism`` sandboxes pause every 20 to 30 seconds.
     """
 
     def __init__(self, provider: SandboxProvider, *, parallelism: int = 16) -> None:
@@ -119,6 +149,12 @@ class SandboxSessionCheckpointer:
         return self._provider
 
     @property
+    def restore_point(self) -> RestorePoint:
+        """What this provider's checkpoints can be restored from; see the module docstring."""
+        survives = bool(getattr(self._provider, "snapshot_survives_resume", False))
+        return "snapshot" if survives and isinstance(self._provider, SupportsSandboxSnapshotLookup) else "paused"
+
+    @property
     def session_ids(self) -> list[str]:
         return list(self._entries)
 
@@ -130,11 +166,16 @@ class SandboxSessionCheckpointer:
         entry = self._entries.get(session_id)
         return entry.sandbox if entry is not None else None
 
-    def add(self, session_id: str, sandbox: AsyncSandbox, spec: SandboxSpec) -> None:
-        """Track a sandbox the server created itself; ``spec`` is what a restore re-creates it from."""
+    def add(
+        self, session_id: str, sandbox: AsyncSandbox, spec: SandboxSpec, *, created_at: Optional[float] = None
+    ) -> None:
+        """Track a sandbox the server created itself; ``spec`` is what a restore re-creates it from.
+
+        ``created_at`` (a Unix timestamp) dates the TTL estimate in the exported state; it defaults to now.
+        """
         if session_id in self._entries:
             raise ValueError(f"session {session_id!r} already has a sandbox")
-        self._entries[session_id] = _Entry(sandbox=sandbox, spec=spec)
+        self._entries[session_id] = _Entry(sandbox=sandbox, spec=spec, created_at=created_at or time.time())
 
     async def create(self, session_id: str, spec: SandboxSpec) -> AsyncSandbox:
         """Create a session's sandbox with the shared provider and track it."""
@@ -168,7 +209,14 @@ class SandboxSessionCheckpointer:
         the failure stay paused until their next ``ensure_running``.
         """
         exported = await asyncio.gather(*(self._export_one(session_id) for session_id in session_ids))
-        return {session_id: state for session_id, state in exported if state is not None}
+        states = {session_id: state for session_id, state in exported if state is not None}
+        if states and self.restore_point == "paused":
+            LOGGER.info(
+                "checkpointed %d sandbox(es) by pausing them; this backend keeps no snapshot past the resume, so "
+                "the checkpoint can restore them only while they are still paused",
+                len(states),
+            )
+        return states
 
     async def _export_one(self, session_id: str) -> tuple[str, Optional[dict[str, JsonValue]]]:
         entry = self._entries.get(session_id)
@@ -188,13 +236,16 @@ class SandboxSessionCheckpointer:
                     await entry.sandbox.pause()
                 except Exception as error:
                     raise SandboxCheckpointError(session_id, f"could not be paused: {error}") from error
-                snapshot_id = await self._latest_snapshot_id(handle)
+                snapshot_id = await self._latest_snapshot_id(handle, session_id=session_id)
+            ttl_s = entry.spec.ttl_s
             state = SandboxCheckpointState(
                 provider_name=handle.provider_name,
                 descriptor=descriptor,
                 snapshot_id=snapshot_id,
                 spec=spec_to_json(entry.spec),
                 paused_at=time.time(),
+                restore_point=self.restore_point,
+                expires_at=entry.created_at + float(ttl_s) if ttl_s is not None else None,
             )
             return session_id, state.model_dump(mode="json")
 
@@ -237,30 +288,35 @@ class SandboxSessionCheckpointer:
     ) -> None:
         async with self._semaphore:
             old = await self._reconnect(session_id, state)
+            resume_error: Optional[BaseException] = None
             if old is not None:
                 try:
-                    paused_here = await old.status() == SandboxStatus.PAUSED and (
-                        state.snapshot_id is None or await self._latest_snapshot_id(old.handle) == state.snapshot_id
-                    )
+                    paused_here = await old.status() == SandboxStatus.PAUSED
+                    if paused_here and state.restore_point == "snapshot" and state.snapshot_id is not None:
+                        # The snapshot listing is authoritative here: a pause at a later checkpoint means the
+                        # frozen sandbox is not this checkpoint's, and the fork below is.
+                        paused_here = await self._latest_snapshot_id(old.handle) == state.snapshot_id
                     if paused_here:
                         # Still frozen at this checkpoint: the crash came before anything resumed it.
                         await old.resume()
                         created[session_id] = old
                         return
                 except Exception as error:
+                    resume_error = error
                     LOGGER.warning(
-                        "sandbox %s of session %s cannot be resumed (%r); re-creating it from its snapshot",
+                        "sandbox %s of session %s cannot be resumed (%r)",
                         state.descriptor.get("sandbox_id"),
                         session_id,
                         error,
                     )
-            if state.snapshot_id is None:
-                raise SandboxCheckpointError(
-                    session_id,
-                    "has no snapshot to re-create from and its sandbox is no longer paused at the checkpoint",
-                )
+            if state.restore_point == "paused" or state.snapshot_id is None:
+                raise SandboxCheckpointError(session_id, self._unrestorable(state, old, resume_error))
+            # A snapshot replaces the image: OpenSandbox requires exactly one of the two.
             fork_spec = dataclasses.replace(
-                spec, files={}, provider_options={**spec.provider_options, "snapshot_id": state.snapshot_id}
+                spec,
+                image=None,
+                files={},
+                provider_options={**spec.provider_options, "snapshot_id": state.snapshot_id},
             )
             sandbox = AsyncSandbox(self._provider, fork_spec, owns_provider=False)
             try:
@@ -279,6 +335,26 @@ class SandboxSessionCheckpointer:
                         "failed to stop superseded sandbox %s of session %s: %r", old.handle, session_id, error
                     )
 
+    @staticmethod
+    def _unrestorable(
+        state: SandboxCheckpointState, old: Optional[AsyncSandbox], resume_error: Optional[BaseException]
+    ) -> str:
+        """Why a session's sandbox cannot be rebuilt, for the typed error."""
+        sandbox_id = state.descriptor.get("sandbox_id")
+        if state.expired:
+            expiry = datetime.fromtimestamp(state.expires_at, tz=timezone.utc).isoformat(timespec="seconds")
+            return f"sandbox {sandbox_id} reached its TTL at {expiry} and the checkpoint keeps no snapshot of it"
+        if old is None:
+            return f"sandbox {sandbox_id} is unreachable and the checkpoint keeps no snapshot to re-create it from"
+        if resume_error is not None:
+            return f"sandbox {sandbox_id} is paused but did not resume: {resume_error}"
+        if state.restore_point == "paused":
+            return (
+                f"sandbox {sandbox_id} resumed after the checkpoint; this backend keeps no durable snapshot, so "
+                "the checkpoint could restore it only while it was still paused"
+            )
+        return f"has no snapshot to re-create from and sandbox {sandbox_id} is no longer paused at the checkpoint"
+
     async def _reconnect(self, session_id: str, state: SandboxCheckpointState) -> Optional[AsyncSandbox]:
         if not isinstance(self._provider, ConnectableProvider):
             return None
@@ -286,7 +362,7 @@ class SandboxSessionCheckpointer:
             return await AsyncSandbox.connect(state.descriptor, provider=self._provider, owns_provider=False)
         except Exception as error:
             LOGGER.info(
-                "sandbox %s of session %s is unreachable (%r); re-creating it from its snapshot",
+                "sandbox %s of session %s is unreachable (%r)",
                 state.descriptor.get("sandbox_id"),
                 session_id,
                 error,
@@ -305,7 +381,26 @@ class SandboxSessionCheckpointer:
             await entry.sandbox.stop()
         self._entries.pop(session_id, None)
 
-    async def _latest_snapshot_id(self, handle: Optional[SandboxHandle]) -> Optional[str]:
+    async def _latest_snapshot_id(
+        self, handle: Optional[SandboxHandle], *, session_id: Optional[str] = None
+    ) -> Optional[str]:
+        """The sandbox's newest snapshot, or ``None`` when the provider has no lookup.
+
+        At export (``session_id`` given) the lookup is best effort: a failure or a slow listing records no
+        snapshot rather than failing the commit. At restore it raises, and the caller decides.
+        """
         if handle is None or not isinstance(self._provider, SupportsSandboxSnapshotLookup):
             return None
-        return await self._provider.latest_snapshot_id(handle)
+        if session_id is None:
+            return await self._provider.latest_snapshot_id(handle)
+        try:
+            async with asyncio.timeout(SNAPSHOT_LOOKUP_TIMEOUT_S):
+                return await self._provider.latest_snapshot_id(handle)
+        except Exception as error:
+            LOGGER.warning(
+                "snapshot lookup for sandbox %s of session %s failed (%r); the checkpoint records no snapshot id",
+                handle.sandbox_id,
+                session_id,
+                error,
+            )
+            return None

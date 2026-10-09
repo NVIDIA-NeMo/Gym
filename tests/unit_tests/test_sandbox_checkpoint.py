@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.checkpoint import (
     SandboxCheckpointError,
     SandboxCheckpointState,
@@ -23,9 +24,15 @@ class FakeSnapshotProvider:
     """OpenSandbox-shaped fake: pause snapshots the filesystem, create can fork a snapshot, connect is by id."""
 
     name = "fake-snapshots"
+    snapshot_survives_resume = True
 
-    def __init__(self, *, keeps_snapshots: bool = True) -> None:
+    def __init__(self, *, keeps_snapshots: bool = True, consumes_snapshot_on_resume: bool = False) -> None:
         self.keeps_snapshots = keeps_snapshots
+        self.consumes_snapshot_on_resume = consumes_snapshot_on_resume
+        if consumes_snapshot_on_resume:
+            self.snapshot_survives_resume = False
+        self.lookup_error: Exception | None = None
+        self.lookup_delay_s = 0.0
         self.boxes: dict[str, dict[str, Any]] = {}
         self.snapshots: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, str]] = []
@@ -55,6 +62,8 @@ class FakeSnapshotProvider:
         sandbox_id = f"sb-{self._counter}"
         snapshot_id = spec.provider_options.get("snapshot_id")
         self._maybe_fail("create", sandbox_id)
+        if (spec.image is None) == (snapshot_id is None):
+            raise ValueError("exactly one of image or snapshot_id must be specified")  # as OpenSandbox does
         fs = list(self.snapshots[snapshot_id]["fs"]) if snapshot_id is not None else []
         self.boxes[sandbox_id] = {"fs": fs, "state": "running", "spec": spec}
         return SandboxHandle(sandbox_id=sandbox_id, provider_name=self.name, raw=None)
@@ -112,6 +121,9 @@ class FakeSnapshotProvider:
         if box["state"] != "paused":
             raise RuntimeError(f"sandbox {handle.sandbox_id} is not paused")
         box["state"] = "running"
+        if self.consumes_snapshot_on_resume:
+            for snapshot_id in [s for s, snap in self.snapshots.items() if snap["sandbox_id"] == handle.sandbox_id]:
+                del self.snapshots[snapshot_id]
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         return {"sandbox_id": handle.sandbox_id}
@@ -125,6 +137,10 @@ class FakeSnapshotProvider:
         return SandboxHandle(sandbox_id=sandbox_id, provider_name=self.name, raw=None)
 
     async def latest_snapshot_id(self, handle: SandboxHandle) -> str | None:
+        if self.lookup_delay_s:
+            await asyncio.sleep(self.lookup_delay_s)
+        if self.lookup_error is not None:
+            raise self.lookup_error
         mine = [
             (snap["order"], snapshot_id)
             for snapshot_id, snap in self.snapshots.items()
@@ -366,8 +382,119 @@ async def test_a_backend_without_snapshots_restores_only_while_still_paused() ->
 
     # Moved on since: nothing to rebuild from.
     await (await fresh.ensure_running("s1")).exec("drift")
-    with pytest.raises(SandboxCheckpointError, match="no snapshot to re-create from"):
+    with pytest.raises(SandboxCheckpointError, match="resumed after the checkpoint; this backend keeps no durable"):
         await SandboxSessionCheckpointer(provider).restore(states)
+
+
+# -- a backend whose resume consumes the snapshot (OpenSandbox on Kubernetes) ----------------------------------
+
+
+def consuming_provider() -> FakeSnapshotProvider:
+    return FakeSnapshotProvider(consumes_snapshot_on_resume=True)
+
+
+async def test_export_records_the_paused_restore_point_and_a_best_effort_snapshot_id() -> None:
+    provider = consuming_provider()
+    checkpointer = await seeded(provider, "s1")
+    assert checkpointer.restore_point == "paused"
+
+    state = SandboxCheckpointState.model_validate((await checkpointer.export(["s1"]))["s1"])
+
+    assert state.restore_point == "paused"
+    # The snapshot id is still recorded for the operator tooling while the listing can see it.
+    assert state.snapshot_id in provider.snapshots
+    assert state.expires_at is None, "the spec sets no TTL"
+
+
+async def test_export_tolerates_a_failing_or_slow_snapshot_listing(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = consuming_provider()
+    checkpointer = await seeded(provider, "s1", "s2")
+    provider.lookup_error = RuntimeError("listing is per replica and this one is empty")
+    first = SandboxCheckpointState.model_validate((await checkpointer.export(["s1"]))["s1"])
+
+    provider.lookup_error = None
+    provider.lookup_delay_s = 0.2
+    monkeypatch.setattr("nemo_gym.sandbox.checkpoint.SNAPSHOT_LOOKUP_TIMEOUT_S", 0.01)
+    second = SandboxCheckpointState.model_validate((await checkpointer.export(["s2"]))["s2"])
+
+    # Neither failure fails the commit: the sandboxes are paused and the states say so, without a snapshot.
+    assert first.snapshot_id is None and second.snapshot_id is None
+    assert provider.boxes["sb-1"]["state"] == "paused" and provider.boxes["sb-2"]["state"] == "paused"
+
+
+async def test_restore_resumes_in_place_while_still_paused_without_consulting_the_listing() -> None:
+    provider = consuming_provider()
+    states = await (await seeded(provider, "s1")).export(["s1"])
+    provider.lookup_error = RuntimeError("listing unavailable")
+
+    fresh = SandboxSessionCheckpointer(provider)
+    await fresh.restore(states)
+    await (await fresh.ensure_running("s1")).exec("s1: two")
+
+    assert fresh.get("s1").handle.sandbox_id == "sb-1"
+    assert provider.files("sb-1") == ["s1: one", "s1: two"]
+    assert ops(provider, "create") == ["sb-1"], "nothing was forked"
+
+
+async def test_restore_fails_typed_once_the_sandbox_resumed_after_the_checkpoint() -> None:
+    provider = consuming_provider()
+    checkpointer = await seeded(provider, "s1")
+    states = await checkpointer.export(["s1"])
+    # The run continued (eager resume consumed the snapshot), then the process died.
+    await (await checkpointer.ensure_running("s1")).exec("drift")
+    assert provider.snapshots == {}
+
+    with pytest.raises(SandboxCheckpointError, match="'s1'.*resumed after the checkpoint") as error:
+        await SandboxSessionCheckpointer(provider).restore(states)
+
+    assert "keeps no durable snapshot" in str(error.value)
+    assert ops(provider, "create") == ["sb-1"], "no fork was attempted"
+    assert provider.boxes["sb-1"]["state"] == "running", "the live sandbox is left alone"
+
+
+async def test_restore_names_the_ttl_when_the_sandbox_expired() -> None:
+    provider = consuming_provider()
+    checkpointer = SandboxSessionCheckpointer(provider)
+    spec = SandboxSpec(image="img:1", ttl_s=3600)
+    await (await checkpointer.create("s1", spec)).exec("s1: one")
+    states = await checkpointer.export(["s1"])
+    state = SandboxCheckpointState.model_validate(states["s1"])
+    assert state.expires_at is not None and 0 < state.expires_at - state.paused_at <= 3600
+
+    # Long after: the backend reaped the sandbox.
+    del provider.boxes["sb-1"]
+    expired = {"s1": {**states["s1"], "expires_at": state.paused_at - 1}}
+    with pytest.raises(SandboxCheckpointError, match="reached its TTL at .* and the checkpoint keeps no snapshot"):
+        await SandboxSessionCheckpointer(provider).restore(expired)
+
+    # Within the TTL but gone anyway: the error says so without blaming the TTL.
+    with pytest.raises(SandboxCheckpointError, match="is unreachable and the checkpoint keeps no snapshot"):
+        await SandboxSessionCheckpointer(provider).restore(states)
+
+
+async def test_add_dates_the_ttl_estimate_from_the_given_creation_time() -> None:
+    provider = consuming_provider()
+    checkpointer = SandboxSessionCheckpointer(provider)
+    spec = SandboxSpec(image="img:1", ttl_s=100)
+    handle = await provider.create(spec)
+    sandbox = await AsyncSandbox.connect({"sandbox_id": handle.sandbox_id}, provider=provider, owns_provider=False)
+    checkpointer.add("s1", sandbox, spec, created_at=1_000.0)
+
+    state = SandboxCheckpointState.model_validate((await checkpointer.export(["s1"]))["s1"])
+    assert state.expires_at == 1_100.0
+
+
+async def test_a_snapshot_backend_still_forks_after_a_resume() -> None:
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, "s1")
+    assert checkpointer.restore_point == "snapshot"
+    states = await checkpointer.export(["s1"])
+    assert SandboxCheckpointState.model_validate(states["s1"]).restore_point == "snapshot"
+    await (await checkpointer.ensure_running("s1")).exec("drift")
+
+    fresh = SandboxSessionCheckpointer(provider)
+    await fresh.restore(states)
+    assert provider.files(fresh.get("s1").handle.sandbox_id) == ["s1: one"]
 
 
 # -- stop ---------------------------------------------------------------------------------------------------

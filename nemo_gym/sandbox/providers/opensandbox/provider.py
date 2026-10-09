@@ -728,6 +728,10 @@ class OpenSandboxProvider:
     """Provider backed by the OpenSandbox SDK/server API."""
 
     name = "opensandbox"
+    # The BatchSandbox controller consumes the pause snapshot when the sandbox resumes, so a checkpoint can
+    # restore a sandbox only while it is still paused; see nemo_gym.sandbox.checkpoint. The snapshot listing
+    # is served per replica and may be partial, which is another reason it is never a correctness input.
+    snapshot_survives_resume = False
 
     def __init__(
         self,
@@ -1068,6 +1072,8 @@ class OpenSandboxProvider:
             base_url = f"{self._connection.protocol or 'https'}://{base_url}"
         headers = {"OPEN-SANDBOX-API-KEY": self._connection.api_key} if self._connection.api_key else {}
         timeout_s = float(self._connection.request_timeout_s) if self._connection.request_timeout_s else 30.0
+        # Same certificate policy as the SDK transport and the PTY sockets (connection.tls_verify).
+        tls: dict[str, Any] = {} if self._connection.tls_verify else {"ssl": False}
         newest: tuple[str, str] | None = None
         page = 1
         while True:
@@ -1078,6 +1084,7 @@ class OpenSandboxProvider:
                 params={"sandboxId": handle.sandbox_id, "page": str(page), "pageSize": "100"},
                 timeout=aiohttp.ClientTimeout(total=timeout_s),
                 _control=True,
+                **tls,
             )
             async with response:
                 if response.status >= 400:

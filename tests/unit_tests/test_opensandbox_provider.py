@@ -27,7 +27,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxResources, SandboxSpec, SandboxStatus
 
 
 pytestmark = pytest.mark.sandbox
@@ -2504,3 +2504,44 @@ async def test_shared_memory_metadata_reaches_create_api(fake_opensandbox_sdk, s
     provider = OpenSandboxProvider(attribution={"enabled": False}, probe={"command": None})
     await provider.create(SandboxSpec(image="image:tag", metadata={"nemo.nvidia.com/shm": size}))
     assert FakeSandbox.created_kwargs["metadata"]["nemo.nvidia.com/shm"] == size
+
+
+@pytest.mark.parametrize("tls_verify", [False, True])
+def test_snapshot_lookup_follows_the_connection_certificate_policy(
+    monkeypatch: pytest.MonkeyPatch, tls_verify: bool
+) -> None:
+    """The listing goes over Gym's shared client, so it must carry connection.tls_verify itself."""
+    import nemo_gym.server_utils as server_utils
+
+    calls: list[dict[str, object]] = []
+
+    class Response:
+        status = 200
+
+        async def __aenter__(self) -> "Response":
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+        async def json(self, content_type: object = None) -> dict:
+            return {
+                "items": [{"id": "snap-1", "createdAt": "2026-10-08T00:00:00Z"}],
+                "pagination": {"hasNextPage": False},
+            }
+
+    async def fake_request(method: str, url: str, **kwargs: object) -> Response:
+        calls.append({"method": method, "url": url, **kwargs})
+        return Response()
+
+    monkeypatch.setattr(server_utils, "request", fake_request)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "https://cell.example", "api_key": "k", "protocol": "https", "tls_verify": tls_verify}
+    )
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=None)
+
+    assert asyncio.run(provider.latest_snapshot_id(handle)) == "snap-1"
+    [call] = calls
+    assert call["url"] == "https://cell.example/v1/snapshots"
+    assert call["headers"] == {"OPEN-SANDBOX-API-KEY": "k"}
+    assert (call.get("ssl") is False) == (not tls_verify)
