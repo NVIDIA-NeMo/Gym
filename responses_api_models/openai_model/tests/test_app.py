@@ -150,6 +150,46 @@ class TestApp:
         assert len(calls) == 1
         assert calls[0].status_code == status
 
+    @pytest.mark.parametrize("status", [400, 503])
+    @pytest.mark.parametrize("propagate", [False, True])
+    @pytest.mark.parametrize("body_format", ["bytes", "text", "absent"])
+    async def test_late_chat_error_preserves_selected_provider_details(
+        self, monkeypatch: MonkeyPatch, status: int, propagate: bool, body_format: str
+    ) -> None:
+        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.001)
+        server = self._setup_server(propagate_upstream_http_status_codes=[status] if propagate else [])
+        message = "Provider rejected the request"
+        error = ClientResponseError(MagicMock(), (), status=status, message=message)
+        detail = json.dumps({"error": {"message": message, "code": "provider_code"}})
+        if body_format != "absent":
+            error.response_content = detail.encode() if body_format == "bytes" else detail
+        release = asyncio.Event()
+
+        async def reject(**kwargs):
+            await release.wait()
+            raise error
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=reject)
+        response = await server.chat_completions_dispatch(
+            MagicMock(), {"stream": True, "messages": [{"role": "user", "content": "hello"}]}
+        )
+        stream = response.body_iterator
+        assert await anext(stream) == b": keep-alive\n\n"
+        release.set()
+        events = [event async for event in stream]
+        assert len(events) == 1
+        assert events[0].startswith("event: error\ndata: ")
+        saved_error = json.loads(events[0].split("data: ", 1)[1])["error"]
+        expected_status = status if propagate else 500
+        expected_detail = (message if body_format == "absent" else detail) if propagate else "Model request failed"
+        assert saved_error == {
+            "message": f"HTTP {expected_status}: {expected_detail}",
+            "type": "server_error" if expected_status >= 500 else "invalid_request_error",
+            "code": expected_status,
+        }
+        server._client.create_chat_completion.assert_awaited_once()
+
     @pytest.mark.parametrize("allowed", [[], [401]])
     @pytest.mark.parametrize("status", [400, 429, 503])
     @pytest.mark.parametrize("api", ["responses", "chat/completions"])
@@ -818,7 +858,7 @@ class TestApp:
         assert (provider_calls, model_server_replies) == (1, 1)
 
     @pytest.mark.asyncio
-    async def test_responses_preserves_provider_http_400_across_server_hop(
+    async def test_responses_raises_terminal_provider_error_without_retry(
         self,
         monkeypatch: MonkeyPatch,
     ) -> None:

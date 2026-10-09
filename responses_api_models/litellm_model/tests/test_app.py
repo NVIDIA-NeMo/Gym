@@ -492,7 +492,7 @@ class TestLiteLLMModelServer:
         assert response.output[0].content[0].text == "Hello!"
         assert server._client.create_response.await_count == 2
 
-    async def test_responses_propagates_configured_http_status(self) -> None:
+    async def test_responses_preserves_original_provider_exception(self) -> None:
         provider_error = ClientResponseError(
             SimpleNamespace(real_url="https://litellm.example.com/v1/responses"),
             (),
