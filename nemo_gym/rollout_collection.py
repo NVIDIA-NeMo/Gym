@@ -26,12 +26,14 @@ from asyncio import Future, Semaphore
 from collections import Counter, defaultdict, deque
 from collections.abc import Mapping
 from contextlib import ExitStack, nullcontext
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import timedelta
 from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from uuid import uuid4
 
 import orjson
 from aiohttp import ClientError
@@ -438,6 +440,12 @@ def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
 
 
 def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
+    identity = row.get("trajectory_identity")
+    if isinstance(identity, dict):
+        task_id = identity.get("task_id")
+        rollout_id = identity.get("rollout_id")
+        if isinstance(task_id, str) and task_id and isinstance(rollout_id, str) and rollout_id:
+            return task_id, rollout_id
     task_id = next(
         (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
         str(row[TASK_INDEX_KEY_NAME]),
@@ -1669,10 +1677,22 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+    responses_create_params = row.get("responses_create_params") or {}
+    metadata = responses_create_params.get("metadata") if isinstance(responses_create_params, dict) else {}
+    metadata_purpose = metadata.get("nemo_rl_rollout_purpose") if isinstance(metadata, dict) else None
+    trajectory_identity = row.get("trajectory_identity")
+    if not isinstance(trajectory_identity, dict):
+        trajectory_identity = {}
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
+        ROLLOUT_ID_KEY_NAME: row.get(ROLLOUT_ID_KEY_NAME),
+        "sampling_event_id": trajectory_identity.get("sampling_event_id"),
+        "group_id": trajectory_identity.get("group_id"),
+        "rollout_id": trajectory_identity.get("rollout_id"),
         "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
+        "rollout_purpose": row.get("rollout_purpose"),
+        "metadata_rollout_purpose": metadata_purpose,
         "environment_server": row.get(NG_ENVIRONMENT_SERVER_KEY),
         "taskset": _materialized_taskset(row),
     }
@@ -3662,6 +3682,19 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                             environment_server_type=server_type,
                         )
 
+                # Copy only after admission, not the full offered batch: bounded
+                # dispatch must also bound these potentially multimodal payloads.
+                # Reuse caller-owned correlation ids without mutating source rows.
+                # Materialized episodes already own their identity contract;
+                # do not replace it with a legacy dispatch capture id.
+                if _materialized_taskset(row) is None:
+                    row = deepcopy(row)
+                    row.setdefault(ROLLOUT_ID_KEY_NAME, f"rollout-{uuid4().hex}")
+                print(
+                    "[rollout_collection] /run dispatch "
+                    f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                    flush=True,
+                )
                 started = time.monotonic()
                 started_at = time.time()
                 res = None
@@ -3767,6 +3800,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``drain_margin_s`` stops sooner for rows that would not have time to finish.
 
         Rows start in the order given, once the returned iterator is first consumed.
+        Legacy rows are copied after admission and receive a fresh ``_ng_rollout_id``
+        only when the caller did not provide one; source rows retain their original ids.
+        Materialized episode requests retain their existing episode identity rules.
 
         A row that ran resolves to exactly the ``(row, result)`` pair Gym's own `/run` endpoint
         returned — no Gym-private fields are added to ``result``. A row that produced no `/run`
