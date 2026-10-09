@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A resources server whose sessions own sandboxes, checkpointed through the real resources participant."""
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any, ClassVar
@@ -67,6 +68,9 @@ class NotesServer(SimpleResourcesServer):
 
     async def retire_session_state(self, session_id: str) -> None:
         await self._sandboxes.stop(session_id)
+
+    async def resume_session_states(self, session_ids: list[str]) -> None:
+        await self._sandboxes.resume_paused(session_ids)
 
 
 def make_server(provider: FakeSnapshotProvider) -> tuple[NotesServer, httpx.AsyncClient]:
@@ -201,4 +205,42 @@ async def test_a_pause_failure_fails_the_commit_and_the_episode_continues_after_
 
     assert status["phase"] == "prepared", "the controller resumes and checkpoints again later"
     assert not list(tmp_path.rglob("manifest*")), "a failed export publishes nothing"
+    assert after.status_code == 200 and provider.files("sb-1") == ["echo one >> notes", "echo two >> notes"]
+
+
+async def test_resume_brings_the_paused_sandboxes_back_before_any_tool_call(tmp_path: Path) -> None:
+    provider = FakeSnapshotProvider()
+    _, client = make_server(provider)
+    async with client:
+        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        await client.post("/append", json={"line": "one"})
+        await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
+        await client.post("/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path)), headers=AUTH)
+        assert provider.boxes["sb-1"]["state"] == "paused"
+        resume = await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
+        # The participant resumes the exported sessions' sandboxes in the background, not on the next tool call.
+        for _ in range(50):
+            if provider.boxes["sb-1"]["state"] == "running":
+                break
+            await asyncio.sleep(0.01)
+
+    assert resume.status_code == 200
+    assert provider.boxes["sb-1"]["state"] == "running" and ("resume", "sb-1") in provider.calls
+
+
+async def test_a_failed_eager_resume_does_not_fail_the_resume_and_the_next_call_retries(tmp_path: Path) -> None:
+    provider = FakeSnapshotProvider()
+    _, client = make_server(provider)
+    async with client:
+        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        await client.post("/append", json={"line": "one"})
+        await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
+        await client.post("/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path)), headers=AUTH)
+        provider.fail[("resume", "sb-1")] = RuntimeError("backend busy")
+        resume = await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
+        await asyncio.sleep(0.05)
+        still_paused = provider.boxes["sb-1"]["state"]
+        after = await client.post("/append", json={"line": "two"})
+
+    assert resume.status_code == 200 and still_paused == "paused"
     assert after.status_code == 200 and provider.files("sb-1") == ["echo one >> notes", "echo two >> notes"]

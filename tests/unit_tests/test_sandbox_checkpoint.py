@@ -522,3 +522,22 @@ async def test_a_failed_stop_keeps_the_session_for_a_retry() -> None:
 
     await checkpointer.stop("s1")
     assert provider.boxes["sb-1"]["state"] == "stopped" and "s1" not in checkpointer
+
+
+# -- eager resume ---------------------------------------------------------------------------------------------
+
+
+async def test_resume_paused_resumes_what_a_checkpoint_paused_and_tolerates_failures() -> None:
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, "s1", "s2", "s3")
+    await checkpointer.export(["s1", "s2"])
+    provider.fail[("resume", "sb-1")] = RuntimeError("backend busy")
+
+    await checkpointer.resume_paused(["s1", "s2", "s3", "gone"])
+
+    # s2 resumed, s3 was never paused, s1's failure is logged and left for the next use.
+    assert provider.boxes["sb-2"]["state"] == "running" and provider.boxes["sb-3"]["state"] == "running"
+    assert provider.boxes["sb-1"]["state"] == "paused"
+    assert ops(provider, "resume") == ["sb-1", "sb-2"]
+    await (await checkpointer.ensure_running("s1")).exec("s1: two")
+    assert provider.boxes["sb-1"]["state"] == "running" and provider.files("sb-1") == ["s1: one", "s1: two"]

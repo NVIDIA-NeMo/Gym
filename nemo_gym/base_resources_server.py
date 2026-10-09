@@ -349,6 +349,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         """Discard a session whose attempt was retired."""
         raise NotImplementedError
 
+    async def resume_session_states(self, session_ids: list[str]) -> None:
+        """Resume state the last commit parked outside the process, such as paused sandboxes. Optional."""
+
     def normalize_tool_name(self, name: str) -> str:
         """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""
         return normalize_tool_name(name, self.config.name or self.__class__.__name__)

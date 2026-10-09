@@ -37,7 +37,7 @@ import asyncio
 import dataclasses
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional, Protocol, runtime_checkable
@@ -201,6 +201,21 @@ class SandboxSessionCheckpointer:
                             await entry.sandbox.resume()
                     entry.paused_by_checkpoint = False
         return entry.sandbox
+
+    async def resume_paused(self, session_ids: Iterable[str]) -> None:
+        """Resume the sandboxes a checkpoint paused, before their next use; best effort and bounded.
+
+        For the resume phase: a checkpoint that was not followed by a crash leaves every exported sandbox paused,
+        and resuming them here instead of on their next tool call takes that latency off the episode. A failure
+        is logged; ``ensure_running`` tries again on the next use.
+        """
+        outcomes = await asyncio.gather(
+            *(self.ensure_running(session_id) for session_id in session_ids if session_id in self._entries),
+            return_exceptions=True,
+        )
+        for session_id, outcome in zip([s for s in session_ids if s in self._entries], outcomes):
+            if isinstance(outcome, BaseException):
+                LOGGER.warning("sandbox of session %s did not resume after the checkpoint: %r", session_id, outcome)
 
     async def export(self, session_ids: list[str]) -> dict[str, JsonValue]:
         """Pause each session's sandbox and return its checkpoint state; leaves out sessions no longer held.
