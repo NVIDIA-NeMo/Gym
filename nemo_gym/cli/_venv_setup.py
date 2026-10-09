@@ -21,6 +21,7 @@ from pathlib import Path
 
 
 SETUP_COMPLETE_MARKER = ".nemo-gym-setup-complete"
+SETUP_INSTALLING_MARKER = ".nemo-gym-setup-installing"
 
 
 def setup_environment(venv: Path, command: str, *, skip_if_ready: bool) -> int:
@@ -41,6 +42,9 @@ def setup_environment(venv: Path, command: str, *, skip_if_ready: bool) -> int:
             return 0
 
         marker.unlink(missing_ok=True)
+        installing = venv / SETUP_INSTALLING_MARKER
+        venv.mkdir(exist_ok=True)
+        installing.touch()
         # The installer inherits the lock, so killing this wrapper cannot let
         # another setup overlap a surviving installer. Close, rather than
         # explicitly unlock, our descriptor when leaving this block.
@@ -50,6 +54,7 @@ def setup_environment(venv: Path, command: str, *, skip_if_ready: bool) -> int:
         missing = [str(path) for path in required_files if not path.is_file()]
         if missing:
             raise RuntimeError(f"Virtual environment setup did not create: {', '.join(missing)}")
+        installing.unlink(missing_ok=True)
         marker.touch()
     return 0
 

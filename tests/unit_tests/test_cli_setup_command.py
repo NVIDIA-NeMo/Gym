@@ -28,7 +28,7 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.cli._venv_setup
 import nemo_gym.cli.setup_command
-from nemo_gym.cli._venv_setup import SETUP_COMPLETE_MARKER, setup_environment
+from nemo_gym.cli._venv_setup import SETUP_COMPLETE_MARKER, SETUP_INSTALLING_MARKER, setup_environment
 from nemo_gym.cli.setup_command import (
     _get_nemo_gym_install_flags,
     _get_nemo_gym_version_spec,
@@ -100,6 +100,19 @@ class TestCLISetupCommandSetupEnvCommand:
         )
         assert "--skip-if-ready" in shlex.split(before)
         assert "uv pip install" in self._installation_command(before)
+
+    def test_interrupted_venv_is_not_skipped(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        config = self._debug_global_config_dict(tmp_path) | {"skip_venv_if_present": True}
+        (server_dir / ".venv/bin").mkdir(parents=True)
+        (server_dir / ".venv/bin/python").touch()
+        (server_dir / ".venv/bin/activate").touch()
+        (server_dir / ".venv" / SETUP_INSTALLING_MARKER).touch()
+
+        actual_command = setup_env_command(server_dir, config, "policy")
+
+        assert "--skip-if-ready" in shlex.split(actual_command)
+        assert "uv pip install" in self._installation_command(actual_command)
 
     def test_head_server_deps(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)
@@ -341,11 +354,14 @@ def test_shared_venv_waits_for_installer_even_if_wrapper_dies(setup_component, i
 def test_failed_forced_setup_invalidates_marker_and_can_retry(setup_component, command: str, code: int) -> None:
     _, _, venv = setup_component
     marker = venv / SETUP_COMPLETE_MARKER
+    installing = venv / SETUP_INSTALLING_MARKER
     marker.touch()
     assert setup_environment(venv, command, skip_if_ready=False) == code
     assert not marker.exists()
+    assert installing.is_file()
     assert setup_environment(venv, _install_command(venv), skip_if_ready=True) == 0
     assert marker.is_file()
+    assert not installing.exists()
 
 
 @pytest.mark.parametrize("has_marker", [False, True])

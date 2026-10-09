@@ -25,6 +25,7 @@ from typing import IO, Any, Mapping
 from omegaconf import DictConfig
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.cli._venv_setup import SETUP_INSTALLING_MARKER
 from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
@@ -129,11 +130,16 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     venv_python_fpath = venv_path / "bin/python"
     venv_activate_fpath = venv_path / "bin/activate"
     skip_venv_if_present = global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME]
-    should_skip_venv_setup = bool(skip_venv_if_present) and venv_python_fpath.exists() and venv_activate_fpath.exists()
+    should_skip_venv_setup = (
+        bool(skip_venv_if_present)
+        and venv_python_fpath.exists()
+        and venv_activate_fpath.exists()
+        and not (venv_path / SETUP_INSTALLING_MARKER).exists()
+    )
     activate_cmd = f"source {shlex.quote(str(venv_activate_fpath))}"
     if should_skip_venv_setup:
-        # Reuse existing environments, including prebuilt venvs without Gym's
-        # completion marker or writable setup-lock directories.
+        # Reuse existing environments, including prebuilt venvs without Gym's completion
+        # marker; only a venv whose Gym install was interrupted is set up again.
         return f"cd {shlex.quote(str(dir_path))} && {activate_cmd}"
 
     # explicitly set python path if specified. In Google colab, gym env start fails due to uv pip install falls back to system python (/usr) without this and errors.
