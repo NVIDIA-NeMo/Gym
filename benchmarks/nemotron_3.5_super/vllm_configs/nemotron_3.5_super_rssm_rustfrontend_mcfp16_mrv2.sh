@@ -123,8 +123,18 @@ VLLM_DECODE_ARGS=(
             ]
         }
     }'
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-    --max-cudagraph-capture-size 1536
+    --compilation-config '{
+        "cudagraph_mode": "FULL_DECODE_ONLY",
+        "cudagraph_capture_sizes": [
+            6, 12, 18, 24, 30, 36, 42, 48,
+            72, 96, 144, 192, 240, 288, 336, 384,
+            480, 576, 672, 768,
+            864, 960, 1056, 1152, 1248, 1344, 1440, 1536,
+            1728, 1920, 2112, 2304, 2496, 2688, 2880, 3072,
+            3456, 3840, 4224, 4608, 4992, 5376, 5760, 6144
+        ]
+    }'
+    --max-cudagraph-capture-size 6144
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
 )
