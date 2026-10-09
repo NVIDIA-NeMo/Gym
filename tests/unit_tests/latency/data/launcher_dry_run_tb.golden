@@ -1,0 +1,106 @@
+bench=tb C=48 replicas=2 wall=04:00:00 sandbox_timeout=7200
+  max_num_seqs=192  experiment=exp
+================= server_command =================
+#!/bin/bash
+set -euo pipefail
+
+export MAX_NUM_SEQS=192
+
+# Nemotron's three-read Mamba SSM state layout.
+export VLLM_SSM_CONV_STATE_LAYOUT=DS
+export VLLM_USE_FASTOKENS=1
+# V2 model runner is the 0.29.0 default but carries a large speed regression.
+export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_HTTP_TIMEOUT_KEEP_ALIVE=180
+# Rust frontend stays off: 1-2% SWE accuracy delta in this vLLM, and we have no accuracy budget.
+
+source "benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super_low_concurrency.sh"
+
+if [[ $(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt $(ulimit -Hn) ]]; then
+  ulimit -Sn 65535
+fi
+
+vllm serve "/models/m" --served-model-name "m"     "${VLLM_COMMON_ARGS[@]}" "${VLLM_SERVE_ARGS[@]}"     --host $(hostname)     --port 8001
+================= eval_command_0 =================
+set -euo pipefail
+source /opt/Gym_venv/bin/activate
+cd /opt/Gym
+
+export NEMO_GYM_RUN_ID="$SLURM_JOB_ID"
+export NEMO_GYM_USER="${NEMO_GYM_USER:-$SLURM_JOB_USER}"
+
+source "benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super_low_concurrency.sh"
+
+gym eval prepare     --config responses_api_models/vllm_model/configs/vllm_model.yaml     --config benchmarks/nemotron_3.5_super/split50/shards/tb_r0.yaml     +use_cached_prepared_benchmarks=true
+
+experiment_name=exp/replica_0
+rollouts_fpath=results/$experiment_name/rollouts.jsonl
+
+gym eval run     --config responses_api_models/vllm_model/configs/vllm_model.yaml     --config benchmarks/nemotron_3.5_super/split50/shards/tb_r0.yaml     --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml     --config benchmarks/nemotron_3.5_super/policy_model_override.yaml     +wandb_project=tester-gym-low-concurrency     +wandb_name=$experiment_name     +uv_venv_dir=/opt/uv_venvs     +nemo_gym_log_dir=results/$experiment_name/logs     +skip_venv_if_present=true     ++output_jsonl_fpath=$rollouts_fpath     ++overwrite_metrics_conflicts=true     ++split=benchmark     ++use_absolute_ip=true     ++reuse_existing_data_preparation=true     ++resume_from_cache=true     ++num_samples_in_parallel=48     ++policy_base_url=http://$(getent hosts "$REPLICA_NODE" | awk 'NR == 1 {print $1}'):8001/v1     ++policy_api_key=dummy_api_key     ++policy_model_name=m     ++upload_rollouts=false     ++global_aiohttp_connector_limit_per_host=16384     ++port_range_low=63000     ++port_range_high=64000     ++observability_enabled=true     ++model_call_capture_dir=/opt/Gym/results/$experiment_name/model_calls     ++route_failures_to_sidecar=true     ++terminal_bench_2_1_terminus_2_sandboxed_agent.responses_api_agents.terminus_2_sandboxed_agent.sandbox_timeout=7200     "${GYM_MODEL_PARAMS[@]}"
+================= eval_command_1 =================
+set -euo pipefail
+source /opt/Gym_venv/bin/activate
+cd /opt/Gym
+
+export NEMO_GYM_RUN_ID="$SLURM_JOB_ID"
+export NEMO_GYM_USER="${NEMO_GYM_USER:-$SLURM_JOB_USER}"
+
+source "benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super_low_concurrency.sh"
+
+gym eval prepare     --config responses_api_models/vllm_model/configs/vllm_model.yaml     --config benchmarks/nemotron_3.5_super/split50/shards/tb_r1.yaml     +use_cached_prepared_benchmarks=true
+
+experiment_name=exp/replica_1
+rollouts_fpath=results/$experiment_name/rollouts.jsonl
+
+gym eval run     --config responses_api_models/vllm_model/configs/vllm_model.yaml     --config benchmarks/nemotron_3.5_super/split50/shards/tb_r1.yaml     --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml     --config benchmarks/nemotron_3.5_super/policy_model_override.yaml     +wandb_project=tester-gym-low-concurrency     +wandb_name=$experiment_name     +uv_venv_dir=/opt/uv_venvs     +nemo_gym_log_dir=results/$experiment_name/logs     +skip_venv_if_present=true     ++output_jsonl_fpath=$rollouts_fpath     ++overwrite_metrics_conflicts=true     ++split=benchmark     ++use_absolute_ip=true     ++reuse_existing_data_preparation=true     ++resume_from_cache=true     ++num_samples_in_parallel=48     ++policy_base_url=http://$(getent hosts "$REPLICA_NODE" | awk 'NR == 1 {print $1}'):8001/v1     ++policy_api_key=dummy_api_key     ++policy_model_name=m     ++upload_rollouts=false     ++global_aiohttp_connector_limit_per_host=16384     ++port_range_low=63000     ++port_range_high=64000     ++observability_enabled=true     ++model_call_capture_dir=/opt/Gym/results/$experiment_name/model_calls     ++route_failures_to_sidecar=true     ++terminal_bench_2_1_terminus_2_sandboxed_agent.responses_api_agents.terminus_2_sandboxed_agent.sandbox_timeout=7200     "${GYM_MODEL_PARAMS[@]}"
+================= batch_command =================
+set -euo pipefail
+
+nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
+
+srun --nodes=2 --ntasks=2 --ntasks-per-node=1 --kill-on-bad-exit=1     --container-image=/containers/c.sqsh     --container-name=lowconc-server     --container-mounts=/a:/a     --container-workdir=$SLURM_SUBMIT_DIR     --no-container-mount-home     bash -c '
+        set -euo pipefail
+        cd "$SLURM_SUBMIT_DIR"
+        exec "$@"
+    ' bash bash -c "$server_command" &
+server_step=$!
+
+cleanup_server() {
+    job_status=$?
+    trap - EXIT INT TERM
+    set +e
+    kill "$server_step" 2>/dev/null || true
+    wait "$server_step" 2>/dev/null || true
+    exit "$job_status"
+}
+trap cleanup_server EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+eval_steps=()
+for (( i = 0; i < 2; i++ )); do
+    var="eval_command_$i"
+    REPLICA_NODE="${nodes[i]}"     eval_command="${!var}"     srun --overlap --nodes=1 --ntasks=1 --cpus-per-task=$SLURM_CPUS_ON_NODE         --nodelist="${nodes[i]}" --gpus=0         --container-image=/containers/c.sqsh         --container-name=lowconc-eval         --container-mounts=/a:/a         --container-workdir="$SLURM_SUBMIT_DIR"         --no-container-mount-home         bash -c '
+            set -euo pipefail
+            cd "$SLURM_SUBMIT_DIR"
+            exec bash -c "$eval_command"
+        ' &
+    eval_steps+=($!)
+done
+
+# Without this the collectors would spin for the whole allocation if the engines died --
+# the failure mode that burned a 4 h allocation before.
+watch_server() {
+    while kill -0 "$server_step" 2>/dev/null; do sleep 30; done
+    echo "vLLM server step exited; stopping collectors" >&2
+    kill "${eval_steps[@]}" 2>/dev/null || true
+}
+watch_server &
+watchdog=$!
+
+status=0
+for pid in "${eval_steps[@]}"; do
+    wait "$pid" || status=$?
+done
+kill "$watchdog" 2>/dev/null || true
+exit "$status"

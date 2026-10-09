@@ -30,7 +30,13 @@
 #   NUM_REPLICAS     engines = nodes            2   (shards exist for 2 only)
 #   WALLTIME         sbatch --time              04:00:00
 #   SANDBOX_TIMEOUT  harness cap, seconds       7200
-#   EXPERIMENT_NAME  results/<this>/...         $USER-low-concurrency/<bench>_split50_c<C>_n<N>
+#   EXPERIMENT_NAME  results/<this>/replica_<i>  $USER-low-concurrency/<bench>_split50_c<C>_n<N>
+#                    The same name is the same run: launching it again continues it (Gym's
+#                    ++resume_from_cache=true is always on and dispatches only the rollouts missing from
+#                    each replica's rollouts file). A deliberate repeat needs a new name.
+#   SHARD_DIR        per-replica shard configs  benchmarks/nemotron_3.5_super/split50/shards
+#   LATENCY_METRICS  per-rollout latency timeline  0 (see LATENCY-METRICS.md); outputs go to
+#                    results/<replica>/metrics/ and one report per job to results/<job>/metrics/
 #   SBATCH_ACCOUNT / SBATCH_PARTITION / SBATCH_GRES / SLURM_COMMENT   cluster-specific
 #   DRY_RUN=1        print the generated scripts instead of submitting
 
@@ -46,6 +52,11 @@ Run this from your Gym repo root, or set GYM=<path to your checkout>." >&2; exit
 # Overridable so the recipe can be smoke-tested against a small hand-built shard without
 # editing the committed 50% split.
 SHARD_DIR="${SHARD_DIR:-benchmarks/nemotron_3.5_super/split50/shards}"
+# LATENCY_METRICS=1 turns on the per-rollout latency timeline (docs: LATENCY-METRICS.md): model-call capture in
+# metadata mode, the OpenCode header plugin, run_info.json, and the post-run build + check + analyze per replica
+# and one benchmark report per job. The engine's per-request metrics and cached-token counts are already on in
+# the vLLM recipe. Default off: byte-identical scripts.
+LATENCY_METRICS="${LATENCY_METRICS:-0}"
 
 # C=48 on both, deliberately aligned so the two benchmarks share one operating point.
 # Set CONCURRENCY=32 for SWE when latency fidelity matters more than matching TB.
@@ -88,9 +99,9 @@ DEFAULT_VLLM_CONFIG=benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_supe
 VLLM_CONFIG="${VLLM_CONFIG:-$DEFAULT_VLLM_CONFIG}"
 [[ -f "$VLLM_CONFIG" ]] || { echo "missing vllm config $VLLM_CONFIG" >&2; exit 1; }
 
-# Every axis that changes what the run *is* goes in the name, so two runs can never land in the
-# same directory: benchmark, concurrency, replica count, and the recipe when it is not the
-# default one (the default keeps its historical unsuffixed name).
+# Every axis that changes what the run *is* goes in the name: benchmark, concurrency, replica count, and the
+# recipe when it is not the default one (the default keeps its historical unsuffixed name). The same name is
+# the same run; a second launch continues it (see the resume guard below).
 recipe_tag=""
 if [[ "$VLLM_CONFIG" != "$DEFAULT_VLLM_CONFIG" ]]; then
     recipe_tag="_$(basename "$VLLM_CONFIG" .sh | sed 's/^nemotron_3.5_super_low_concurrency_//')"
@@ -101,7 +112,7 @@ EXTRA_GYM_ARGS="++${inst}.responses_api_agents.${agent}.sandbox_timeout=${SANDBO
 # SLURM_COMMENT exempts the job from the idle-GPU reaper on oci-hsg; harmless elsewhere.
 default_comment='{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"240","reason":"benchmarking","description":"POR - https://nvaiinfa.aha.io/ideas/ideas/NMP-I-791"}}'
 SLURM_COMMENT="${SLURM_COMMENT:-$default_comment}"
-export SBATCH_ACCOUNT="${SBATCH_ACCOUNT:-nemotron_n3_post}"
+export SBATCH_ACCOUNT="${SBATCH_ACCOUNT:-coreai_nvfm_llm}"
 export SBATCH_PARTITION="${SBATCH_PARTITION:-batch}"
 export SBATCH_GRES="${SBATCH_GRES:-gpu:4}"
 
@@ -111,6 +122,88 @@ WORKER_SERVER_PORT=8001
 # max(8, 4 x concurrency) — see the recipe header for why.
 MAX_NUM_SEQS=$(( CONCURRENCY * 4 ))
 (( MAX_NUM_SEQS < 8 )) && MAX_NUM_SEQS=8
+
+# ---------------------------------------------------------------- resume guard (login node)
+# The same EXPERIMENT_NAME is the same run: Gym (++resume_from_cache=true, always on) dispatches only the
+# rollouts missing from each replica's rollouts file. Before submitting into an existing experiment directory,
+# refuse what Gym would mishandle silently: a replica without Gym's two files (Gym would start a fresh run in a
+# directory that already holds one) or run facts that differ from the stored ones (Gym would mix two
+# configurations into one run). A run made without LATENCY_METRICS has no run_info.json: only the files are
+# checked.
+exp_dir="results/$EXPERIMENT_NAME"
+if compgen -G "$exp_dir/replica_*" > /dev/null; then
+    command -v python3 > /dev/null || { echo "resume refused: python3 is needed on the login node to compare the stored run facts" >&2; exit 1; }
+    for (( i = 0; i < NUM_REPLICAS; i++ )); do
+        for f in rollouts.jsonl rollouts_materialized_inputs.jsonl; do
+            [[ -f "$exp_dir/replica_$i/$f" ]] || { echo "resume refused: $exp_dir/replica_$i/$f is missing; Gym would start a fresh run in a directory that already holds one" >&2; exit 1; }
+        done
+        info="$exp_dir/replica_$i/metrics/run_info.json"
+        [[ -f "$info" ]] || continue
+        python3 - "$info" "$MODEL" "$MODEL_NAME" "$(basename "$CONTAINER")" "$(basename "$VLLM_CONFIG")" \
+            "$CONCURRENCY" "$NUM_REPLICAS" "$MAX_NUM_SEQS" "$SANDBOX_TIMEOUT" "${bench_configs_arr[i]}" <<'PY' || exit 1
+import json, os, sys
+path, *now = sys.argv[1:]
+keys = ("model", "model_name", "container", "vllm_config", "concurrency", "num_replicas", "max_num_seqs",
+        "sandbox_timeout_s", "shard_config")
+stored = json.load(open(path))
+def same(key, old, new):
+    if key == "shard_config":  # relative or absolute, with or without ".." segments: the same file is the same shard
+        return os.path.realpath(str(old)) == os.path.realpath(new)
+    return str(old) == new
+bad = [(k, stored[k], v) for k, v in zip(keys, now) if k in stored and not same(k, stored[k], v)]
+for key, old, new in bad:
+    print(f"resume refused: {key} differs from {path}: stored {old!r}, now {new!r}", file=sys.stderr)
+sys.exit(1 if bad else 0)
+PY
+    done
+    echo "Resuming $exp_dir: Gym dispatches only the rollouts missing from each replica"
+fi
+
+# Latency-timeline fragments. All empty when LATENCY_METRICS is off, and each is glued onto an existing line
+# below, so the rendered scripts are byte-identical to the default ones in that case.
+latency_eval_pre=""
+latency_gym_args=""
+latency_eval_post=""
+latency_batch_post=""
+if [[ "$LATENCY_METRICS" == "1" ]]; then
+    # run_info.json pins the run's knobs for the benchmark report; the commit is read here, on the login node,
+    # because the container has no git.
+    CODE_COMMIT=$(git -C "$GYM" rev-parse --short HEAD 2>/dev/null || echo unknown)
+    latency_run_facts="\"benchmark\": \"$BENCH\", \"instance\": \"$inst\", \"agent\": \"$agent\", \"model\": \"$MODEL\", \"model_name\": \"$MODEL_NAME\", \"vllm_config\": \"$(basename "$VLLM_CONFIG")\", \"container\": \"$(basename "$CONTAINER")\", \"concurrency\": $CONCURRENCY, \"num_replicas\": $NUM_REPLICAS, \"sandbox_timeout_s\": $SANDBOX_TIMEOUT, \"walltime\": \"$WALLTIME\", \"max_num_seqs\": $MAX_NUM_SEQS, \"experiment_name\": \"$EXPERIMENT_NAME\", \"latency_metrics\": true"
+    # Capture records carry metadata only (no prompts or completions). The OpenCode harness installs its header
+    # plugin only under its own flag; Terminus records its spans regardless.
+    latency_gym_args=" ++model_call_capture_payloads=metadata"
+    [[ "$BENCH" == "swe" ]] && latency_gym_args+=" ++${inst}.responses_api_agents.${agent}.latency_metrics=true"
+    # Glued onto the last line of `gym eval run`: capture the collector's exit, then run the build, the check and
+    # the analysis whatever happened, and exit with the collector's code so the job status is still the
+    # collection's.
+    latency_eval_post=$(cat <<EOF
+ || collector_status=\$?
+python benchmarks/nemotron_3.5_super/analysis/timeline.py build --run-dir results/\$experiment_name \\
+    --tokenize-url http://\$(getent hosts "\$REPLICA_NODE" | awk 'NR == 1 {print \$1}'):$WORKER_SERVER_PORT/v1 \\
+    || echo "LATENCY TIMELINE BUILD FAILED" >&2
+python benchmarks/nemotron_3.5_super/analysis/timeline.py check --run-dir results/\$experiment_name \\
+    || echo "LATENCY CHECK FAILED (see results/\$experiment_name/metrics/timeline_check.json)" >&2
+python benchmarks/nemotron_3.5_super/analysis/timeline.py analyze --run-dir results/\$experiment_name \\
+    || echo "LATENCY ANALYZE FAILED" >&2
+exit "\$collector_status"
+EOF
+)
+    # One benchmark report per job, after every replica step has exited (whatever its status). A failure here
+    # prints a line and leaves the job's exit code to the collectors.
+    latency_batch_post=$(cat <<EOF
+
+srun --overlap --nodes=1 --ntasks=1 --nodelist="\${nodes[0]}" --gpus=0 \\
+    --container-image=$CONTAINER \\
+    --container-name=lowconc-eval \\
+    --container-mounts=$MOUNTS \\
+    --container-workdir="\$SLURM_SUBMIT_DIR" \\
+    --no-container-mount-home \\
+    bash -c 'cd "\$SLURM_SUBMIT_DIR" && source /opt/Gym_venv/bin/activate && cd /opt/Gym && python benchmarks/nemotron_3.5_super/analysis/timeline.py report --experiment-dir results/$EXPERIMENT_NAME' \\
+    || echo "LATENCY REPORT FAILED" >&2
+EOF
+)
+fi
 
 echo "bench=$BENCH C=$CONCURRENCY replicas=$NUM_REPLICAS wall=$WALLTIME sandbox_timeout=$SANDBOX_TIMEOUT"
 echo "  max_num_seqs=$MAX_NUM_SEQS  experiment=$EXPERIMENT_NAME"
@@ -146,6 +239,18 @@ export server_command
 
 # ---------------------------------------------------------------- Gym collector, one per replica
 for (( i = 0; i < NUM_REPLICAS; i++ )); do
+    latency_eval_pre=""
+    if [[ "$LATENCY_METRICS" == "1" ]]; then
+        latency_eval_pre=$(cat <<EOF
+collector_status=0
+mkdir -p results/\$experiment_name/metrics
+[[ -f results/\$experiment_name/metrics/run_info.json ]] || cat > results/\$experiment_name/metrics/run_info.json <<RUNINFO
+{"schema_version": 1, $latency_run_facts, "replica": $i, "shard_config": "${bench_configs_arr[i]}", "slurm_job_id": "\$SLURM_JOB_ID", "node": "\$REPLICA_NODE", "code_commit": "$CODE_COMMIT", "started_at": "\$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+RUNINFO
+EOF
+)
+        latency_eval_pre+=$'\n\n'
+    fi
     printf -v "eval_command_$i" '%s' "$(cat <<EOF
 set -euo pipefail
 source /opt/Gym_venv/bin/activate
@@ -161,10 +266,10 @@ gym eval prepare \
     --config ${bench_configs_arr[i]} \
     +use_cached_prepared_benchmarks=true
 
-experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/replica_$i
+experiment_name=$EXPERIMENT_NAME/replica_$i
 rollouts_fpath=results/\$experiment_name/rollouts.jsonl
 
-gym eval run \
+${latency_eval_pre}gym eval run \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --config ${bench_configs_arr[i]} \
     --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml \
@@ -179,6 +284,7 @@ gym eval run \
     ++split=benchmark \
     ++use_absolute_ip=true \
     ++reuse_existing_data_preparation=true \
+    ++resume_from_cache=true \
     ++num_samples_in_parallel=$CONCURRENCY \
     ++policy_base_url=http://\$(getent hosts "\$REPLICA_NODE" | awk 'NR == 1 {print \$1}'):$WORKER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
@@ -190,8 +296,8 @@ gym eval run \
     ++observability_enabled=true \
     ++model_call_capture_dir=/opt/Gym/results/\$experiment_name/model_calls \
     ++route_failures_to_sidecar=true \
-    $EXTRA_GYM_ARGS \
-    "\${GYM_MODEL_PARAMS[@]}"
+    $EXTRA_GYM_ARGS${latency_gym_args} \
+    "\${GYM_MODEL_PARAMS[@]}"${latency_eval_post}
 EOF
 )"
     export "eval_command_$i"
@@ -261,7 +367,7 @@ watchdog=\$!
 status=0
 for pid in "\${eval_steps[@]}"; do
     wait "\$pid" || status=\$?
-done
+done${latency_batch_post}
 kill "\$watchdog" 2>/dev/null || true
 exit "\$status"
 EOF
