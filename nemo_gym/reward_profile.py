@@ -23,6 +23,7 @@ from numbers import Real
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import orjson
 from pandas import DataFrame, Series, notna
 from pandas.core.groupby.generic import DataFrameGroupBy
@@ -200,7 +201,12 @@ class RewardProfiler:
             )
             return None
 
-        return Histogram(data)
+        try:
+            return Histogram(data)
+        except ValueError as error:
+            if "Too many bins for data range" not in str(error):
+                raise
+            return Histogram(np_histogram=np.histogram(data, bins=1))
 
     def describe_dataframe(self, df: DataFrame) -> DataFrame:
         stat_index = [
