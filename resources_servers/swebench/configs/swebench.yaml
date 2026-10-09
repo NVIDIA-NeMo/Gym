@@ -16,6 +16,10 @@ swebench_resources_server:          # instance name — how agents/CLI refer to 
       evaluation_timeout: 1800
 
       sandbox_provider: sandbox
+      # Partial-rollout checkpoints pause each session's sandbox at commit and resume it at restore;
+      # parallelism bounds the concurrent backend calls. Size it with the commit deadline.
+      sandbox_checkpoint:
+        parallelism: 16
       sandbox_config:
         ttl_s: 18000
         ready_timeout_s: 1200
