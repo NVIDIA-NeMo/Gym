@@ -354,3 +354,25 @@ def test_missing_private_hooks_are_reported_without_raising():
 def test_root_status(result, expected):
     observer = HermesAgentObserver().instrument(_FakeAgent())
     assert _invocation(observer.finish(result), "root").status == expected
+
+
+@pytest.mark.parametrize("keyword", [False, True])
+def test_correlated_errors_keep_invocation_headers_without_mutating_input(keyword):
+    agent = _FakeAgent()
+    seen = []
+
+    def fail(api_kwargs):
+        seen.append(api_kwargs)
+        raise RuntimeError("provider rejected request")
+
+    agent._interruptible_api_call = fail
+    observer = HermesAgentObserver(root_invocation_id="root", capture_correlated=True).instrument(agent)
+    original = {"messages": [], "extra_headers": {"custom": "value"}}
+    with pytest.raises(RuntimeError):
+        if keyword:
+            agent._interruptible_api_call(api_kwargs=original)
+        else:
+            agent._interruptible_api_call(original)
+    assert seen[0]["extra_headers"] == {"custom": "value", "x-session-id": "root"}
+    assert original == {"messages": [], "extra_headers": {"custom": "value"}}
+    assert "model_call_ownership_unavailable" not in {g.code for g in observer.finish().gaps}

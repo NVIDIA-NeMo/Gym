@@ -33,6 +33,7 @@ from nemo_gym.health.checks import (
     _ended_on_failed_call,
     _is_context_overflow_rejection,
     _is_failed,
+    _is_failed_attempt,
     _is_successful,
     _normalized_trajectory_calls,
     _replay_identity,
@@ -183,7 +184,10 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             or not bindings.complete
             or not bindings.matched_calls
             or not _transcript_tokens(record)[2]
-            or any(call.get("tokens_in") is None or call.get("tokens_out") is None for call in bindings.matched_calls)
+            or any(
+                not _is_failed_attempt(call) and (call.get("tokens_in") is None or call.get("tokens_out") is None)
+                for call in bindings.matched_calls
+            )
         ):
             unobserved.append(spec.id)
             continue
@@ -234,6 +238,10 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         model_calls=len(calls),
         successful_model_calls=sum(_is_successful(call) for call in turn_bindings.matched_calls),
         model_call_errors=len(failed),
+        model_call_errors_usage_unknown=sum(
+            _is_failed_attempt(call) and (call.get("tokens_in") is None or call.get("tokens_out") is None)
+            for call in failed
+        ),
         errors_by_status=dict(errors_by_status),
         ended_on_error=_ended_on_failed_call(calls),
         duplicated_calls=duplicated,
@@ -415,6 +423,9 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
                     "by_status": dict(sorted(error_statuses.items())),
                     "rollouts_affected": sum(bool(digest.model_call_errors) for digest in digests),
                     "ended_on_error": sum(digest.ended_on_error for digest in digests),
+                    # Failed calls with no finished response and no usage: the token checks skip them,
+                    # and any tokens the server spent on them are counted nowhere else.
+                    "usage_unknown": sum(digest.model_call_errors_usage_unknown for digest in digests),
                 },
                 "duplicated_calls": {
                     "replayed": sum(digest.duplicated_calls for digest in digests),

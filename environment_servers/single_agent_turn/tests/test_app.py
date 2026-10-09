@@ -421,7 +421,7 @@ async def test_failed_agent_response_still_reaches_verification(reward: float, m
 
 
 @pytest.mark.parametrize("mask_sample", [False, True])
-@pytest.mark.parametrize("result_path", ["native", "flat-adapter"])
+@pytest.mark.parametrize("result_path", ["episode-request", "flat-adapter"])
 async def test_results_preserve_verification_and_observations(mask_sample: bool, result_path: str) -> None:
     environment, client = _environment_server()
     observations = {

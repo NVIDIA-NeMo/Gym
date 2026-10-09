@@ -145,8 +145,9 @@ def test_server_suite_exit_status(tmp_path: Path, monkeypatch: MonkeyPatch, capf
     monkeypatch.setattr(
         nemo_gym.cli.env,
         "setup_env_command",
-        lambda directory, *_: f"cd {shlex.quote(str(directory))} && "
-        f"export PATH={shlex.quote(str(Path(sys.executable).parent))}:$PATH",
+        lambda directory, *_: (
+            f"cd {shlex.quote(str(directory))} && export PATH={shlex.quote(str(Path(sys.executable).parent))}:$PATH"
+        ),
     )
     monkeypatch.setenv("PYTEST_ADDOPTS", "")
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
@@ -476,6 +477,178 @@ class TestRunHelperLaunchEnvironment:
         assert extra_env is not None
         assert "sk-super-secret-12345" in extra_env[NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME]
         assert extra_env[NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME] == "test_server"
+
+
+class TestRunHelperH2PingSidecar:
+    """RunHelper starts the sidecar before the servers, stops it after them, and skips it in a dry run."""
+
+    def _patch_launch(self, monkeypatch: MonkeyPatch, cfg, events: list) -> None:
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **kwargs: cfg)
+        monkeypatch.setattr(nemo_gym.cli.env, "configure_telemetry_env", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "init_telemetry", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "initialize_ray", MagicMock())
+        monkeypatch.setattr(
+            nemo_gym.cli.env.HeadServer,
+            "run_webserver",
+            MagicMock(return_value=(MagicMock(), MagicMock(), MagicMock())),
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "_resolve_server_dir", lambda p: Path("/mock/server/dir"))
+        monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *args: "echo setup")
+        mock_client = MagicMock()
+        mock_client.poll_for_status.return_value = "success"
+        monkeypatch.setattr(nemo_gym.cli.env, "ServerClient", MagicMock(return_value=mock_client))
+
+        def mock_run_command(cmd, dir_path, server_name="", extra_env=None, **kwargs):
+            events.append(("server", extra_env))
+            return MagicMock(pid=1, **{"poll.return_value": None})
+
+        monkeypatch.setattr(nemo_gym.cli.env, "run_command", mock_run_command)
+
+    def _config(self, dry_run: bool):
+        return OmegaConf.create(
+            {
+                "dry_run": dry_run,
+                "verbose": False,
+                "uv_venv_dir": str(PARENT_DIR),
+                "policy_base_url": "https://abc.invocation.api.nvcf.nvidia.com/v1",
+                "test_server": {
+                    "resources_servers": {
+                        "dummy": {"entrypoint": "app.py", "domain": "other", "host": "127.0.0.1", "port": 8000}
+                    }
+                },
+            }
+        )
+
+    def test_starts_before_servers_and_stops_after(self, monkeypatch: MonkeyPatch) -> None:
+        from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+
+        cfg = self._config(dry_run=False)
+        events: list = []
+        self._patch_launch(monkeypatch, cfg, events)
+        manager = MagicMock()
+        manager.stop.side_effect = lambda: events.append("sidecar stopped")
+
+        def fake_start(global_config_dict):
+            events.append("sidecar started")
+            global_config_dict["policy_base_url"] = "http://127.0.0.1:1250/v1"
+            return manager
+
+        monkeypatch.setattr(nemo_gym.cli.env, "start_h2_ping_sidecar", fake_start)
+        runner = RunHelper()
+        runner.wait_for_server_readiness = MagicMock()
+        runner.start(MagicMock())
+
+        assert events[0] == "sidecar started"
+        _, extra_env = events[1]
+        # The servers learn their URLs from the serialized config, so it must carry the rewritten one.
+        assert "http://127.0.0.1:1250/v1" in extra_env[NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME]
+
+        runner.poll = RunHelper.poll.__get__(runner)
+        runner._head_server_thread = MagicMock(is_alive=lambda: True)
+        runner.poll()
+        manager.check.assert_called_once()
+
+        runner.shutdown()
+        assert events[-1] == "sidecar stopped"
+        manager.stop.assert_called_once()
+        assert runner._h2_ping_sidecar is None
+
+    def test_failed_sidecar_start_aborts_before_any_server(self, monkeypatch: MonkeyPatch) -> None:
+        events: list = []
+        self._patch_launch(monkeypatch, self._config(dry_run=False), events)
+        monkeypatch.setattr(nemo_gym.cli.env, "start_h2_ping_sidecar", MagicMock(side_effect=RuntimeError("no port")))
+        runner = RunHelper()
+
+        with raises(RuntimeError, match="no port"):
+            runner.start(MagicMock())
+
+        assert events == []
+
+    def test_dry_run_starts_no_sidecar(self, monkeypatch: MonkeyPatch) -> None:
+        events: list = []
+        self._patch_launch(monkeypatch, self._config(dry_run=True), events)
+        start = MagicMock()
+        monkeypatch.setattr(nemo_gym.cli.env, "start_h2_ping_sidecar", start)
+        runner = RunHelper()
+        runner.wait_for_dry_run_spinup = MagicMock()
+        runner.start(MagicMock())
+        start.assert_not_called()
+
+
+class TestRunHelperRayStartup:
+    """RunHelper.start starts or joins Ray only when a configured server may use it."""
+
+    def _start(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, *, ray_enabled: bool | None, ray_installed: bool
+    ) -> tuple[MagicMock, MagicMock]:
+        declaration = "" if ray_enabled is None else f"    ray_enabled = {ray_enabled}\n"
+        (tmp_path / "app.py").write_text(f"class Server:\n{declaration}    pass\nServer.run_webserver()\n")
+        cfg = OmegaConf.create(
+            {
+                "dry_run": True,
+                "verbose": False,
+                "uv_venv_dir": str(PARENT_DIR),
+                "test_server": {
+                    "resources_servers": {
+                        "dummy": {"entrypoint": "app.py", "domain": "other", "host": "127.0.0.1", "port": 8000}
+                    }
+                },
+            }
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **kwargs: cfg)
+        monkeypatch.setattr(nemo_gym.cli.env, "configure_telemetry_env", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "init_telemetry", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "ray_is_installed", lambda: ray_installed)
+        initialize_ray = MagicMock()
+        monkeypatch.setattr(nemo_gym.cli.env, "initialize_ray", initialize_ray)
+        monkeypatch.setattr(
+            nemo_gym.cli.env.HeadServer,
+            "run_webserver",
+            MagicMock(return_value=(MagicMock(), MagicMock(), MagicMock())),
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "_resolve_server_dir", lambda p: tmp_path)
+        monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *args: "echo setup")
+        mock_client = MagicMock()
+        mock_client.poll_for_status.return_value = "success"
+        monkeypatch.setattr(nemo_gym.cli.env, "ServerClient", MagicMock(return_value=mock_client))
+        run_command = MagicMock(return_value=MagicMock(pid=12345))
+        monkeypatch.setattr(nemo_gym.cli.env, "run_command", run_command)
+
+        runner = RunHelper()
+        runner.wait_for_dry_run_spinup = MagicMock()
+        runner.start(MagicMock())
+        return initialize_ray, run_command
+
+    @pytest.mark.parametrize(
+        ("ray_enabled", "ray_installed", "expect_ray"),
+        [
+            (False, True, False),
+            (True, True, True),
+            (None, True, True),
+            (False, False, False),
+            (None, False, False),
+        ],
+    )
+    def test_ray_follows_configured_server_declarations(
+        self,
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+        ray_enabled: bool | None,
+        ray_installed: bool,
+        expect_ray: bool,
+    ) -> None:
+        initialize_ray, run_command = self._start(
+            monkeypatch, tmp_path, ray_enabled=ray_enabled, ray_installed=ray_installed
+        )
+
+        assert initialize_ray.called is expect_ray
+        run_command.assert_called_once()
+
+    def test_ray_server_without_ray_installed_fails_before_launching_anything(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        with raises(ConfigError, match=r"test_server(.|\n)*nemo-gym\[ray\]"):
+            self._start(monkeypatch, tmp_path, ray_enabled=True, ray_installed=False)
 
 
 class TestRunHelperServerReadiness:
@@ -1484,3 +1657,27 @@ class TestListEnvironments:
         list_environments()
 
         assert f"config: {cfg.resolve()}" in capsys.readouterr().out
+
+
+def test_version_reports_a_missing_dependency_instead_of_failing(
+    monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from importlib.metadata import PackageNotFoundError
+
+    import nemo_gym.cli.general
+
+    installed_version = nemo_gym.cli.general.md_version
+
+    def md_version(dep: str) -> str:
+        if dep == "ray":
+            raise PackageNotFoundError(dep)
+        return installed_version(dep)
+
+    monkeypatch.setattr(nemo_gym.cli.general, "get_global_config_dict", lambda: OmegaConf.create({"json": True}))
+    monkeypatch.setattr(nemo_gym.cli.general, "md_version", md_version)
+
+    nemo_gym.cli.general.version()
+
+    dependencies = json.loads(capsys.readouterr().out)["dependencies"]
+    assert dependencies["ray"] == "not installed"
+    assert dependencies["openai"] == installed_version("openai")

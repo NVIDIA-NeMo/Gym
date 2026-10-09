@@ -14,9 +14,11 @@
 # limitations under the License.
 import asyncio
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import (
@@ -114,7 +116,7 @@ CHAT_COMPLETION_TOOL_CALL_RESPONSE = {
 }
 
 
-def _make_server(max_concurrent_requests=None) -> LiteLLMModelServer:
+def _make_server(max_concurrent_requests=None, **kwargs) -> LiteLLMModelServer:
     config = LiteLLMModelServerConfig(
         host="0.0.0.0",
         port=8081,
@@ -124,6 +126,7 @@ def _make_server(max_concurrent_requests=None) -> LiteLLMModelServer:
         max_concurrent_requests=max_concurrent_requests,
         entrypoint="",
         name="",
+        **kwargs,
     )
     return LiteLLMModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
@@ -473,3 +476,56 @@ class TestLiteLLMModelServer:
             *(server.responses(body=NeMoGymResponseCreateParamsNonStreaming(input="hello")) for _ in range(8))
         )
         assert peak == 2
+
+    async def test_responses_applies_the_upstream_retry_policy(self) -> None:
+        server = _make_server(
+            upstream_max_num_tries=1,
+            upstream_retry_policy={"max_attempts": 2, "backoff_initial_seconds": 0},
+        )
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(
+            side_effect=[TimeoutError("transient provider timeout"), deepcopy(NATIVE_RESPONSE)]
+        )
+
+        response = await server.responses(body=NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+        assert response.output[0].content[0].text == "Hello!"
+        assert server._client.create_response.await_count == 2
+
+    async def test_responses_preserves_original_provider_exception(self) -> None:
+        provider_error = ClientResponseError(
+            SimpleNamespace(real_url="https://litellm.example.com/v1/responses"),
+            (),
+            status=400,
+            message="bad request",
+        )
+        provider_error.response_content = b'{"error":{"code":"context_length_exceeded"}}'
+        server = _make_server(propagate_upstream_http_status_codes=[400])
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=provider_error)
+
+        with pytest.raises(ClientResponseError) as exc_info:
+            await server.responses(body=NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+        assert exc_info.value is provider_error
+
+    @pytest.mark.parametrize("allowed,expected", [([], 500), ([429], 500), ([400], 400)])
+    @pytest.mark.parametrize("api", ["responses", "chat/completions"])
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_http_routes_respect_propagation_policy(self, allowed, expected, api, stream) -> None:
+        server = _make_server(propagate_upstream_http_status_codes=allowed)
+        error = ClientResponseError(SimpleNamespace(real_url="https://litellm.example/v1"), (), status=400)
+        error.response_content = b'{"error":{"code":"context_length_exceeded"}}'
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=error)
+        server._client.create_chat_completion = AsyncMock(side_effect=error)
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        body = {"input": "hello"} if api == "responses" else {"messages": [{"role": "user", "content": "hello"}]}
+        body["stream"] = stream
+        response = TestClient(app).post(f"/v1/{api}", json=body)
+        assert response.status_code == expected
+        if expected == 400:
+            assert response.json() == {"error": {"code": "context_length_exceeded"}}
+        operation = server._client.create_response if api == "responses" else server._client.create_chat_completion
+        operation.assert_awaited_once()

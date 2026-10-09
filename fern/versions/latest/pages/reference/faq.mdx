@@ -330,15 +330,15 @@ NeMo Gym automatically sets up Ray for distributed computing for CPU-intensive t
 ## Ray Setup in NeMo Gym
 
 ### Automatic Initialization
-Ray is initialized when you start NeMo Gym servers:
+NeMo Gym starts or joins a Ray cluster only when a configured server needs it:
 
 ```bash
 gym env start --config $config_paths
 ```
 
-The initialization happens in two places:
-1. **Main Process** (`cli.py`): Ray is initialized in the main process when `RunHelper.start()` is called.
-2. **Server Process** (`server_utils.py`): Each server process, including Uvicorn managers and workers, connects only when its implementation's `ray_enabled` declaration resolves to true.
+Ray is involved in two places:
+1. **Main process** (`RunHelper.start()` in `nemo_gym/cli/env.py`): before launching servers, Gym reads each server's `ray_enabled` declaration from its entrypoint. It starts or joins Ray only if a server declares `ray_enabled = True`, or doesn't declare it while Ray is installed. Otherwise no Ray cluster is created.
+2. **Server process** (`server_utils.py`): each server process, including Uvicorn managers and workers, connects only when its implementation's `ray_enabled` declaration resolves to true.
 
 Server implementations declare whether they use Ray as a class attribute:
 ```python
@@ -346,7 +346,18 @@ class MyResourcesServer(SimpleResourcesServer):
     ray_enabled = False
 ```
 
-`None` remains enabled for backward compatibility and produces a warning. A future release will interpret `None` as disabled, so new and maintained servers should declare `True` or `False` explicitly.
+Declare `ray_enabled` on the class your entrypoint calls `run_webserver()` on, even if a parent class already declares it. Gym reads only that class's own source before launching servers.
+
+A server that leaves `ray_enabled` undeclared (`None`) joins the run's Ray cluster when Ray is installed and a cluster exists, and logs a warning. Otherwise it runs without Ray. A future release will interpret `None` as disabled, so new and maintained servers should declare `True` or `False` explicitly.
+
+### Installing Ray
+Servers that use Ray need Ray installed both where `gym` runs and in their own environment. Install it with the `ray` extra:
+
+```bash
+pip install "nemo-gym[ray]"
+```
+
+If a configured server declares `ray_enabled = True` and Ray isn't installed where `gym` runs, `gym env start` stops before launching any server and names the servers that need it. Ray is still a core dependency today; the extra lets environments request it explicitly ahead of making it optional.
 
 ### Ray Configuration
 You can also specify a custom Ray cluster address in your config:
@@ -355,7 +366,7 @@ ray_head_node_address: "ray://your-cluster-address:10001"
 ```
 Training frameworks like [Nemo-RL](https://github.com/NVIDIA-NeMo/RL) will configure the Ray head node address, allowing remote tasks to run across all nodes in the cluster.
 
-If no address is specified, NeMo Gym starts a local Ray cluster and stores the address in the global config. Only server implementations declaring `ray_enabled = True`, or relying on the temporary `None` compatibility default, connect to it.
+If no address is specified and a configured server needs Ray, NeMo Gym starts a local Ray cluster and stores the address in the global config. Only servers that need Ray connect to it.
 
 ## Using Ray for CPU-Intensive Tasks
 
