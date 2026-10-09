@@ -22,6 +22,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 from shlex import quote
+from tempfile import TemporaryDirectory
 from time import time
 from traceback import format_exc
 from typing import Any, Dict, List, Literal, Optional
@@ -430,6 +431,15 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
     artifacts_dir: Optional[str] = None
     opencode_model_call_timeout: Optional[int] = None
+    verbatim_prompt: bool = Field(
+        default=False,
+        description=(
+            "Send the task prompt to `opencode run` on stdin instead of as a command-line argument. "
+            "OpenCode wraps an argument containing spaces in double quotes and escapes inner quotes "
+            "(anomalyco/opencode#43923), so the model otherwise sees an altered prompt. Off by default "
+            "so existing results stay comparable."
+        ),
+    )
 
     # Sandbox config
     sandbox_provider: str
@@ -859,6 +869,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # and there is no way to set it to null.
         # Here, we set an exorbitantly high number that cannot ever be reached.
         # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
+        prompt_arg = f"-- {quote(query)}"
+        prompt_remote_fpath = None
+        if self.config.verbatim_prompt:
+            prompt_remote_fpath = f"/tmp/nemo-gym-prompt-{uuid4().hex}.txt"
+            prompt_arg = f"< {quote(prompt_remote_fpath)}"
+
         command = f"""
         echo "Shell: $SHELL" \
         && {install_str} \
@@ -867,13 +883,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
         && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
-            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
+            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} {prompt_arg} \
         && echo "OpenCode run finished"
         """
 
         if self.config.debug:
             print("Starting OpenCode (runtime configuration omitted to protect credentials)", file=sys.stderr)
 
+        if prompt_remote_fpath is not None:
+            with TemporaryDirectory() as directory:
+                prompt_local_fpath = Path(directory) / "prompt.txt"
+                prompt_local_fpath.write_text(query, encoding="utf-8")
+                await sandbox.upload(prompt_local_fpath, prompt_remote_fpath)
         if ripgrep_remote_path is not None:
             await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
 

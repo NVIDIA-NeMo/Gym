@@ -1338,3 +1338,79 @@ def test_assistant_message_plugin_hooks() -> None:
         check=True,
         timeout=30,
     )
+
+
+@mark.parametrize("verbatim_prompt", [False, True])
+async def test_prompt_delivery_to_opencode(tmp_path: Path, monkeypatch: MonkeyPatch, verbatim_prompt: bool) -> None:
+    """Run the generated launch command against a stand-in `opencode` that records what it receives."""
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.preinstalled_opencode = True
+    config.opencode_version = "test"
+    config.artifacts_dir = str(tmp_path / "artifacts")
+    config.verbatim_prompt = verbatim_prompt
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    uploads: Dict[str, bytes] = {}
+
+    async def upload(source: Any, target: str) -> None:
+        uploads[target] = Path(source).read_bytes()
+
+    sandbox = MagicMock(
+        upload=AsyncMock(side_effect=upload),
+        download=AsyncMock(),
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(stdout="Shell: sh\nOpenCode run finished", stderr="", return_code=0, error_type=None),
+                RuntimeError("no session to export"),
+            ]
+        ),
+    )
+    monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+    prompt = "Run `python3 -c \"print(1)\"`, then\n-- report $HOME and 'quotes'."
+
+    await server.responses(
+        request=MagicMock(session={SESSION_ID_KEY: "s"}, cookies={"sandbox_id": ""}, state=SimpleNamespace()),
+        body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": prompt}]),
+    )
+
+    command = sandbox.exec.await_args_list[0].kwargs["command"]
+    prompt_paths = [path for path in uploads if path.startswith("/tmp/nemo-gym-prompt-")]
+    home = tmp_path / "home"
+    bin_dir = home / ".opencode/bin"
+    bin_dir.mkdir(parents=True)
+    received = tmp_path / "received.json"
+    opencode = bin_dir / "opencode"
+    opencode.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "if sys.argv[1:] == ['--version']:\n    print('test'); sys.exit(0)\n"
+        f"stdin = sys.stdin.read() if {verbatim_prompt} else None\n"
+        f"open({str(received)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'stdin': stdin}}))\n"
+    )
+    opencode.chmod(0o755)
+    local_command = command.replace("/tmp/nemo-gym-mcp-setup-error", shlex.quote(str(tmp_path / "mcp-error")))
+    if verbatim_prompt:
+        [prompt_path] = prompt_paths
+        local_prompt = tmp_path / "prompt.txt"
+        local_prompt.write_bytes(uploads[prompt_path])
+        local_command = local_command.replace(prompt_path, shlex.quote(str(local_prompt)))
+    else:
+        assert prompt_paths == []
+    completed = subprocess.run(
+        ["sh", "-c", local_command],
+        env={"HOME": str(home), "PATH": f"{bin_dir}{os.pathsep}{os.defpath}"},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    argv = json.loads(received.read_text())
+    if verbatim_prompt:
+        # No message argument: `opencode run` uses stdin verbatim instead of re-quoting arguments.
+        assert argv == {"argv": ["run", "--title", "NG dummy title", "--thinking"], "stdin": prompt}
+        assert prompt not in command
+    else:
+        # Unchanged default: the prompt is the final argument, which `opencode run` wraps in quotes.
+        assert argv == {"argv": ["run", "--title", "NG dummy title", "--thinking", "--", prompt], "stdin": None}

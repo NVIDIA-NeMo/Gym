@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -715,3 +716,42 @@ class TestConfigYaml:
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 8
         assert inner["command"] == "opencode"
+
+
+class TestVerbatimPrompt:
+    @pytest.mark.parametrize("verbatim_prompt", [False, True])
+    async def test_prompt_delivery_to_opencode(self, tmp_path: Path, verbatim_prompt: bool) -> None:
+        """Launch a stand-in `opencode` that records its arguments and stdin."""
+        received = tmp_path / "received.json"
+        opencode = tmp_path / "opencode"
+        opencode.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            "stdin = sys.stdin.read() if os.environ.get('READ_STDIN') else None\n"
+            f"open({str(received)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'stdin': stdin}}))\n"
+        )
+        opencode.chmod(0o755)
+        agent = _make_agent(
+            command=str(opencode),
+            verbatim_prompt=verbatim_prompt,
+            env={"READ_STDIN": "1"} if verbatim_prompt else {},
+            repo_dir=str(tmp_path / "repo"),
+        )
+        prompt = "Run `python3 -c \"print(1)\"`, then\n-- report $HOME and 'quotes'."
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=tmp_path / "workspace"),
+            patch(
+                "responses_api_agents.opencode_agent.app.parse_opencode_session",
+                return_value=([], {"input_tokens": 0, "output_tokens": 0}),
+            ),
+        ):
+            await agent._run_opencode(prompt, None, collect_observations=False)
+
+        received_call = json.loads(received.read_text())
+        assert received_call["argv"][:2] == ["run", "-m"]
+        if verbatim_prompt:
+            assert prompt not in received_call["argv"]
+            assert received_call["stdin"] == prompt
+        else:
+            assert received_call["argv"][-1] == prompt
