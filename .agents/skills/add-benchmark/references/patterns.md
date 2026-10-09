@@ -379,7 +379,7 @@ class MyAgent(SimpleResponsesAPIAgent):
 - Use `ConfigDict(extra="allow")` on request/response models for flexible field forwarding
 - **Token ID propagation**: model responses include `prompt_token_ids`, `generation_token_ids`, and `generation_log_probs`. Propagate these from each model response into the next turn's input — required for RL training. See `swe_agents/app.py` for the implementation pattern.
 - **Monotonic trajectories**: NeMo RL requires the token sequence across multi-turn rollouts to only grow. Never summarize, truncate, or modify prior turns between steps.
-- **Thinking model compatibility**: thinking models emit `<think>`/`<thinking>` blocks. Strip these before parsing tool calls from model output, or parsing will break. See `harbor_agent` for the handling pattern.
+- **Thinking model compatibility**: thinking models emit `<think>`/`<thinking>` blocks. Strip these before parsing tool calls from model output, or parsing will break.
 - **Concurrency control for external services**: if the agent calls external services (Docker containers, APIs), use `asyncio.Semaphore` to throttle concurrent calls — external services may not handle thousands of simultaneous requests.
 
 ---

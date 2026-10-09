@@ -453,7 +453,7 @@ def _build_gdpval_user_prompt(task_prompt: str, input_files_dir: Optional[str] =
 
 
 # Pin the Ray worker to this server's venv (same pattern as
-# swe_agents / harbor_agent / mini_swe_agent / code_gen / spider2_lite).
+# swe_agents / mini_swe_agent / code_gen / spider2_lite).
 # Without this, workers fall back to the cluster's default Python, which
 # does not have the per-server `stirrup` extra installed, and every
 # rollout dies with `ModuleNotFoundError: No module named 'stirrup'` at

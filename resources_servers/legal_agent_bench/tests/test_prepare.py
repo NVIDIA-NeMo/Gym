@@ -86,11 +86,12 @@ def test_generated_task_cache_is_deterministic_and_credential_free(monkeypatch, 
     assert _tree_hashes(first) == _tree_hashes(second)
     prepare.validate_harbor_tasks(first)
     rows = [json.loads(line) for line in (first / prepare.INDEX_FILENAME).read_text().splitlines()]
-    assert [row["instance_id"] for row in rows] == [
-        "legal_agent_bench::area__task-group__scenario-01",
-        "legal_agent_bench::area__task-one",
-    ]
-    assert all(row["agent_ref"]["name"] == "legal_agent_bench_harbor_agent" for row in rows)
+    assert [row["task_name"] for row in rows] == ["area__task-group__scenario-01", "area__task-one"]
+    assert all(row["harbor_dataset"] == "legal_agent_bench" for row in rows)
+    assert all(row["agent_ref"]["name"] == "legal_agent_bench_agent" for row in rows)
+    for row in rows:
+        [message] = row["responses_create_params"]["input"]
+        assert message["content"] == (first / row["task_name"] / "instruction.md").read_text(encoding="utf-8")
     for toml in first.glob("*/task.toml"):
         text = toml.read_text(encoding="utf-8")
         assert "[verifier.env]" not in text
@@ -211,6 +212,9 @@ def test_runtime_hydration_keeps_pristine_cache_secret_free(monkeypatch, tmp_pat
     assert "[verifier.env]" not in cached_toml
     assert 'LAB_JUDGE_API_KEY = "test-secret"' in runtime_toml  # pragma: allowlist secret
     assert 'LEGAL_AGENT_BENCH_REWARD_MODE = "full_task"' in runtime_toml
+    # Runtime tasks start the shared prebuilt image; the pristine cache keeps Harbor's build spec only.
+    assert 'docker_image = "legal-agent-bench-runtime:latest"' in runtime_toml
+    assert "docker_image" not in cached_toml
     assert (tasks / "area__task-one" / "documents" / "input.txt").stat().st_ino == (
         runtime / "area__task-one" / "documents" / "input.txt"
     ).stat().st_ino

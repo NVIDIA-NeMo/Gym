@@ -1,7 +1,17 @@
+# Legal Agent Bench through harbor_tasks: this server prepares the LAB Harbor tasks and grades them with their task
+# verifier, harbor_harness_agent runs the LAB harness in the task sandbox, and the single-agent-turn Environment
+# Server drives each episode. Build the runtime image once from any prepared task's environment/ directory:
+#   docker build -t legal-agent-bench-runtime:latest <harbor_tasks_dir>/<any task>/environment
+# Docker is the supported sandbox backend. Add a model server.
+config_paths:
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+  - nemo_gym/sandbox/providers/docker/configs/docker.yaml
+
 legal_agent_bench:
   resources_servers:
     legal_agent_bench:
       entrypoint: app.py
+      allowed_agents: [harbor_harness_agent]
       domain: agent
       verified: false
       description: Harbor-native integration of <a href='https://github.com/harveyai/harvey-labs/tree/f46ef86e4788545622db25dcffa3aebb7a139929'>Legal Agent Benchmark (LAB)</a>
@@ -23,40 +33,48 @@ legal_agent_bench:
       judge_max_tokens: 4096
       judge_parallelism: 6
 
-responses_create_params:
-  temperature: 1.0
-  top_p: 0.95
-
-legal_agent_bench_harbor_agent:
-  responses_api_agents:
-    harbor_agent:
-      entrypoint: ../../resources_servers/legal_agent_bench/harbor_bridge.py
-      concurrency: 1
-
+      # harbor_tasks settings: the hydrated runtime tree is the only dataset, started from the prebuilt image.
+      runtime_image: legal-agent-bench-runtime:latest
       harbor_datasets:
         legal_agent_bench:
-          local_dataset_path: ${legal_agent_bench.resources_servers.legal_agent_bench.harbor_tasks_dir}
+          path: ${legal_agent_bench.resources_servers.legal_agent_bench.harbor_tasks_dir}
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 43200
+        ready_timeout_s: 1800
+      harbor_verifier:
+        override_timeout_sec: 3600
+      artifacts_dir: results/legal_agent_bench/harbor_tasks
 
-      harbor_agent_name: null
-      harbor_agent_import_path: resources_servers.legal_agent_bench.legal_harbor_agent:LegalAgentBenchHarborAgent
-      harbor_agent_kwargs:
-        agent_id: legal-agent-bench
-        agent_config_id: legal-agent-bench
-        run_timestamp: nemo-gym
-        skills_dir: ${legal_agent_bench.resources_servers.legal_agent_bench.harness_skills_dir}
-        max_turns: 60
-        shell_timeout: 60
-        agent_model_max_tokens: 32768
-        agent_model_timeout_seconds: 1800
-
-      harbor_environment_type: docker
-      harbor_environment_import_path: null
-      harbor_environment_kwargs: {}
-
+legal_agent_bench_agent:
+  responses_api_agents:
+    harbor_harness_agent:
+      entrypoint: app.py
+      domain: agent
+      description: The Legal Agent Bench harness, run as a Harbor agent in the task sandbox
       model_server:
         type: responses_api_models
         name: policy_model
-
+      token_id_capture: true
+      resources_server:
+        type: resources_servers
+        name: legal_agent_bench
+      harbor_agent:
+        import_path: resources_servers.legal_agent_bench.legal_harbor_agent:LegalAgentBenchHarborAgent
+        model_name: ${policy_model_name}
+        override_timeout_sec: 10800
+        kwargs:
+          agent_id: legal-agent-bench
+          agent_config_id: legal-agent-bench
+          run_timestamp: nemo-gym
+          skills_dir: ${legal_agent_bench.resources_servers.legal_agent_bench.harness_skills_dir}
+          max_turns: 60
+          shell_timeout: 60
+          temperature: 1.0
+          agent_model_top_p: 0.95
+          agent_model_max_tokens: 32768
+          agent_model_timeout_seconds: 1800
+      logs_dir: results/legal_agent_bench/harbor_harness_agent
       datasets:
       - name: example
         type: example
@@ -67,17 +85,15 @@ legal_agent_bench_harbor_agent:
         jsonl_fpath: resources_servers/legal_agent_bench/data/generated/all.jsonl
         license: MIT
 
-      harbor_agent_override_timeout: 10800
-      harbor_agent_max_timeout: null
-      harbor_verifier_override_timeout: 3600
-      harbor_verifier_max_timeout: null
-      harbor_timeout_multiplier: null
-      harbor_jobs_dir: results/legal_agent_bench/harbor_jobs
-
 legal_agent_bench_environment_server:
+  _inherit_from: single_agent_turn_legacy
   environment_servers:
-    legacy_agent:
-      entrypoint: app.py
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: legal_agent_bench
       agent_server:
         type: responses_api_agents
-        name: legal_agent_bench_harbor_agent
+        name: legal_agent_bench_agent
+      max_concurrent_episodes: 1
+      queue_timeout_seconds: 86400

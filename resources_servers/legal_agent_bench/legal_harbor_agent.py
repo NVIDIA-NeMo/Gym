@@ -50,10 +50,10 @@ except ImportError:  # pragma: no cover
 
 
 LAB_TASK_ID_MARKER = "lab_task_id:"
+VDR_DIR = "/workspace/vdr"
+SKILLS_DIR = "/workspace/skills"
 AGENT_VERSION = "0.1.0"
 INITIAL_USER_PROMPT = "Please begin working on the task described in the system prompt."
-REQUIRED_TASK_KEYS = {"title", "instructions", "criteria"}
-REQUIRED_CRITERION_KEYS = {"id", "title", "match_criteria"}
 SYSTEM_PROMPT_PATH = _VENDOR_ROOT / "harness" / "system-prompt.md"
 SYSTEM_PROMPT_PREAMBLE = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
@@ -65,12 +65,11 @@ class HarborToolExecutor:
         self,
         environment: BaseEnvironment,
         *,
-        host_vdr_dir: Path,
         shell_timeout: int = 60,
         max_output_chars: int = 16_384,
     ) -> None:
         self.environment = environment
-        self.host_vdr_dir = host_vdr_dir
+        self.vdr_files: list[str] = []
         self.shell_timeout = shell_timeout
         self.max_output_chars = max_output_chars
         self.files_read: list[str] = []
@@ -84,6 +83,11 @@ class HarborToolExecutor:
         result, _metrics = await self._run_container_tool("preflight", {})
         if result.startswith("Error:"):
             raise RuntimeError(result)
+        # The Resources Server staged the task documents before the agent received the sandbox.
+        listing = await self.environment.exec(f"cd {VDR_DIR} && find . -type f", timeout_sec=60)
+        if listing.return_code != 0:
+            raise RuntimeError(f"Cannot list task documents in {VDR_DIR}: {listing.stderr or listing.stdout}")
+        self.vdr_files = sorted(line.removeprefix("./") for line in (listing.stdout or "").splitlines() if line)
 
     async def execute(self, tool_name: str, arguments: str | dict) -> str:
         if isinstance(arguments, str):
@@ -178,9 +182,7 @@ class HarborToolExecutor:
         return output
 
     def get_metrics(self) -> dict:
-        all_vdr_files = sorted(
-            str(path.relative_to(self.host_vdr_dir)) for path in self.host_vdr_dir.rglob("*") if path.is_file()
-        )
+        all_vdr_files = self.vdr_files
         unique_reads = list(dict.fromkeys(self.files_read))
         skipped = [path for path in all_vdr_files if path not in unique_reads]
         return {
@@ -241,20 +243,16 @@ class LegalAgentBenchHarborAgent(BaseAgent):
         return AGENT_VERSION
 
     async def setup(self, environment: BaseEnvironment) -> None:
+        """Install the harness skills; the Resources Server has already staged the task documents."""
+        validate_harness_skills(self.skills_dir)
         await environment.exec(
-            "mkdir -p /workspace/vdr /workspace/output /workspace/workspace /workspace/skills /logs/agent",
-            timeout_sec=60,
+            f"rm -rf {SKILLS_DIR} && mkdir -p /workspace/output /workspace/workspace /logs/agent", timeout_sec=60
         )
+        await environment.upload_dir(self.skills_dir, SKILLS_DIR)
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         task_id = _extract_task_id(instruction)
-        task_dir = _task_dir_from_environment(environment)
-        task = _load_task_from_mirror(task_dir, task_id=task_id)
-        docs_dir = Path(task["docs_dir"])
-
         skill_names = self._skill_names()
-
-        await self._hydrate_environment(environment, docs_dir)
 
         artifact_dir = Path(self.logs_dir) / "artifacts" / "lab-run"
         output_artifact = artifact_dir / "output"
@@ -262,16 +260,16 @@ class LegalAgentBenchHarborAgent(BaseAgent):
         artifact_dir.mkdir(parents=True, exist_ok=True)
 
         tools = get_all_tool_definitions()
-        config = self._result_config(task_id, task_dir, tools, skill_names)
+        config = self._result_config(task_id, tools, skill_names)
         (artifact_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
 
         adapter = self._create_adapter()
         system_prompt = SYSTEM_PROMPT_PREAMBLE
         if skill_names:
             system_prompt += _load_skills(skill_names, self.skills_dir)
-        system_prompt += "\n\n## Task\n\n" + task["system_prompt"]
+        system_prompt += "\n\n## Task\n\n" + _task_prompt(instruction)
 
-        executor = HarborToolExecutor(environment, host_vdr_dir=docs_dir, shell_timeout=self.shell_timeout)
+        executor = HarborToolExecutor(environment, shell_timeout=self.shell_timeout)
         await executor.preflight()
 
         transcript_path = artifact_dir / "transcript.jsonl"
@@ -313,13 +311,6 @@ class LegalAgentBenchHarborAgent(BaseAgent):
         _write_agent_error_flags(Path(self.logs_dir), metrics)
         _populate_context(context, result, metrics, task_id, self.agent_id, artifact_dir)
 
-    async def _hydrate_environment(self, environment: BaseEnvironment, docs_dir: Path) -> None:
-        validate_harness_skills(self.skills_dir)
-        await environment.exec("rm -rf /workspace/vdr /workspace/skills && mkdir -p /workspace", timeout_sec=60)
-        await environment.upload_dir(docs_dir, "/workspace/vdr")
-        await environment.upload_dir(self.skills_dir, "/workspace/skills")
-        await environment.exec("mkdir -p /workspace/output /workspace/workspace", timeout_sec=60)
-
     def _skill_names(self) -> list[str]:
         available_skills = discover_harness_skills(self.skills_dir)
         skill_names = available_skills if self.skills is None else list(self.skills)
@@ -348,13 +339,12 @@ class LegalAgentBenchHarborAgent(BaseAgent):
             top_p=kwargs.pop("agent_model_top_p", None),
         )
 
-    def _result_config(self, task_id: str, task_dir: Path, tools: list[dict], skill_names: list[str]) -> dict:
+    def _result_config(self, task_id: str, tools: list[dict], skill_names: list[str]) -> dict:
         return {
             "agent_id": self.agent_id,
             "agent_config_id": self.agent_config_id,
             "model": self.model,
             "task": task_id,
-            "task_dir": str(task_dir),
             "run_id": self._run_id(task_id),
             "max_turns": self.max_turns,
             "temperature": self.temperature,
@@ -470,44 +460,10 @@ async def _chat_with_timeout(
         raise TimeoutError(f"agent model request exceeded timeout of {float(timeout_seconds):g}s") from exc
 
 
-def _load_task_from_mirror(task_dir: Path, *, task_id: str) -> dict:
-    config_path = task_dir / "task.json"
-    if not config_path.exists():
-        raise FileNotFoundError(f"task.json not found in Harbor task mirror: {config_path}")
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    _validate_task_config(config, config_path)
-    docs_dir = task_dir / config.get("docs_dir", "documents")
-    if not docs_dir.exists():
-        raise FileNotFoundError(f"Documents directory not found in Harbor task mirror: {docs_dir}")
-    system_prompt = config.get("instructions") or (task_dir / "instruction.md").read_text(encoding="utf-8")
-    return {
-        "name": task_id,
-        "task_dir": str(task_dir),
-        "docs_dir": str(docs_dir),
-        "system_prompt": system_prompt,
-        "config": config,
-    }
-
-
-def _validate_task_config(config: dict, task_path: Path) -> None:
-    for key in REQUIRED_TASK_KEYS:
-        if key not in config:
-            raise ValueError(f"{task_path}: missing required key '{key}'")
-    criteria = config["criteria"]
-    if not isinstance(criteria, list) or not criteria:
-        raise ValueError(f"{task_path}: 'criteria' must be a non-empty list")
-    for i, criterion in enumerate(criteria):
-        for key in REQUIRED_CRITERION_KEYS:
-            if key not in criterion:
-                raise ValueError(f"{task_path}: criterion {i} missing required key '{key}'")
-
-
-def _task_dir_from_environment(environment: BaseEnvironment) -> Path:
-    environment_dir = Path(getattr(environment, "environment_dir"))
-    task_dir = environment_dir.parent
-    if not (task_dir / "task.toml").exists():
-        raise FileNotFoundError(f"Could not infer Harbor task mirror from environment_dir={environment_dir}")
-    return task_dir
+def _task_prompt(instruction: str) -> str:
+    """The LAB task instructions: instruction.md without its task-id marker and title heading."""
+    body = re.sub(rf"^\s*<!--\s*{re.escape(LAB_TASK_ID_MARKER)}[^>]*-->\s*", "", instruction)
+    return re.sub(r"^# [^\n]*\n+", "", body, count=1).strip()
 
 
 def _extract_task_id(instruction: str) -> str:

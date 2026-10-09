@@ -1,51 +1,62 @@
-harbor_agent:
-  responses_api_agents:
-    harbor_agent:
-      entrypoint: app.py
-      domain: agent
-      description: Harbor agent for BiomniBench-DA (Docker bind-mount profile).
-      concurrency: 4
+# BiomniBench-DA: Harbor tasks served by harbor_tasks, solved by Harbor's Terminus-2 through harbor_harness_agent, and
+# driven by the single-agent-turn Environment Server. Tasks come from prepare.py's default `sandbox` profile.
+# Add a sandbox provider config, e.g. nemo_gym/sandbox/providers/docker/configs/docker.yaml, and a model server.
+config_paths:
+  - resources_servers/harbor_tasks/configs/harbor_tasks.yaml
+  - responses_api_agents/harbor_harness_agent/configs/harbor_harness_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
+biomnibench_da_resources_server:
+  _inherit_from: harbor_tasks
+  resources_servers:
+    harbor_tasks:
+      description: BiomniBench-DA data-analysis tasks graded by an LLM judge
       harbor_datasets:
         biomnibench_da:
-          local_dataset_path: "environments/biomnibench_da/data/example"
-          workdir: "/app"
+          path: environments/biomnibench_da/data/example
+      # The tasks ask for no network, which Gym sandboxes do not enforce. Harbor's own Docker environment did.
+      allow_unenforced_network_policy: true
+      artifacts_dir: results/biomnibench_da/harbor_tasks
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: environments/biomnibench_da/data/example.jsonl
+          license: MIT
 
-      harbor_agent_name: null
-      harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym:Terminus2NemoGym"
-      harbor_agent_kwargs:
-        max_turns: 20
-        interleaved_thinking: true
-        enable_summarize: false
-        collect_rollout_details: true
-        trajectory_config:
-          raw_content: true
-        model_info:
-          max_input_tokens: 49152
-          max_output_tokens: 49152
-          input_cost_per_token: 0.0
-          output_cost_per_token: 0.0
+biomnibench_da_agent:
+  _inherit_from: harbor_harness_agent
+  responses_api_agents:
+    harbor_harness_agent:
+      resources_server:
+        type: resources_servers
+        name: biomnibench_da_resources_server
+      harbor_agent:
+        name: terminus-2
+        model_name: openai/${policy_model_name}
+        kwargs:
+          max_turns: 20
+          interleaved_thinking: true
+          enable_summarize: false
+          trajectory_config:
+            raw_content: true
+          model_info:
+            max_input_tokens: 49152
+            max_output_tokens: 49152
+            input_cost_per_token: 0.0
+            output_cost_per_token: 0.0
+          llm_call_kwargs:
+            api_key: gym
+      logs_dir: results/biomnibench_da/harbor_harness_agent
 
-      harbor_environment_type: "docker"
-      harbor_environment_import_path: null
-      harbor_environment_kwargs: {}
-      harbor_no_delete: true
-
-      model_server:
-        type: responses_api_models
-        name: policy_model
-
-      harbor_agent_override_timeout: null
-      harbor_agent_max_timeout: null
-      harbor_verifier_override_timeout: null
-      harbor_verifier_max_timeout: null
-      harbor_timeout_multiplier: null
-      harbor_jobs_dir: "responses_api_agents/harbor_agent/jobs"
-
-harbor_agent_environment_server:
+biomnibench_da:
+  _inherit_from: single_agent_turn_legacy
   environment_servers:
-    legacy_agent:
-      entrypoint: app.py
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: biomnibench_da_resources_server
       agent_server:
         type: responses_api_agents
-        name: harbor_agent
+        name: biomnibench_da_agent
+      max_concurrent_episodes: 4
+      queue_timeout_seconds: 86400

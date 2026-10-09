@@ -1,0 +1,36 @@
+# Resources server for Harbor-format tasks: owns the task sandbox and grades it with the task's Harbor verifier.
+harbor_tasks:
+  resources_servers:
+    harbor_tasks:
+      allowed_agents: [harbor_harness_agent, codex_agent, hermes_agent, pi_agent]
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Harbor-format tasks graded by each task's own Harbor verifier
+      value: Run any Harbor dataset with any session-capable agent
+
+      # Alias -> harbor.models.job.config:DatasetConfig. A local `path` (relative to the Gym repository), or a
+      # registry `name` and `version`. Rows name tasks as {harbor_dataset: <alias>, task_name: <name>}.
+      harbor_datasets:
+        example:
+          path: resources_servers/harbor_tasks/data/tasks
+
+      # Top-level sandbox provider config, e.g. nemo_gym/sandbox/providers/docker/configs/docker.yaml.
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 21600
+        ready_timeout_s: 900
+
+      # Follows harbor.models.trial.config:VerifierConfig.
+      harbor_verifier:
+        override_timeout_sec: null
+        max_timeout_sec: null
+      verifier_timeout_multiplier: 1.0
+      reward_key: reward
+      artifacts_dir: results/harbor_tasks
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/harbor_tasks/data/example.jsonl
+          license: Apache 2.0

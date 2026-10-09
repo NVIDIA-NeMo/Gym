@@ -2,7 +2,7 @@ name: legal_agent_bench
 version: 0.1.0
 experimental: true
 kind: benchmark
-integration_profile: external-agent-loop
+integration_profile: custom-gym-agent-loop
 domain: agent
 description: Harbor-native Legal Agent Benchmark document tasks scored by the official
   all-criteria full-task metric.
@@ -16,7 +16,7 @@ reward:
   - 1.0
   higher_is_better: true
 determinism: unknown
-agent_server: harbor_agent
+agent_server: harbor_harness_agent
 datasets:
 - name: legal_agent_bench
   type: benchmark
@@ -25,6 +25,6 @@ datasets:
   num_repeats: 1
 model_server: policy_model
 canonical_split: benchmark
-prompt_source: agent
+prompt_source: prepared
 lifecycle: active
-resources_server: null
+resources_server: legal_agent_bench

@@ -1,0 +1,1 @@
+{"task_id": "hello-world", "harbor_dataset": "example", "task_name": "hello-world", "responses_create_params": {"input": [{"role": "user", "content": "Create a file named `hello.txt` in `/app` whose entire content is the line `Hello, world!`.\n"}], "metadata": {"harbor_agent_timeout_sec": "600.0"}}}

@@ -107,25 +107,27 @@ def test_prepare_docker_bind_compose(minimal_source: Path, tmp_path: Path) -> No
     assert rollout_input.is_file()
     rows = [json.loads(line) for line in rollout_input.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(rows) == 1
-    assert rows[0]["instance_id"] == "biomnibench_da::da-1-3-r001"
-    assert rows[0]["agent_ref"] == {"name": "harbor_agent"}
+    assert rows[0]["harbor_dataset"] == "biomnibench_da"
+    assert rows[0]["task_id"] == rows[0]["task_name"] == "da-1-3-r001"
+    assert rows[0]["responses_create_params"]["input"] == [{"role": "user", "content": "Task da-1-3\n"}]
+    assert rows[0]["responses_create_params"]["metadata"] == {"harbor_agent_timeout_sec": "60.0"}
+    assert rows[0]["agent_ref"] == {"name": "biomnibench_da_agent"}
 
 
-def test_prepare_singularity_staging(minimal_source: Path, tmp_path: Path) -> None:
-    output = tmp_path / "sing_tasks"
-    _run_prepare(minimal_source, output, "singularity")
+def test_prepare_sandbox_uploads_data_into_the_workdir(minimal_source: Path, tmp_path: Path) -> None:
+    output = tmp_path / "sandbox_tasks"
+    _run_prepare(minimal_source, output, "sandbox")
 
     task_dir = output / "da-1-3-r001"
     env = task_dir / "environment"
-    assert not (env / "data").exists()
-    assert (env / "files" / "data" / "sample.txt").read_text(encoding="utf-8") == "hello\n"
-    setup = (env / "files" / "setup.sh").read_text(encoding="utf-8")
-    assert "HARBOR_STAGING" in setup
-    assert "/app/data" in setup
+    # Harbor uploads environment/ into the workdir only when the task has no build spec.
+    assert (env / "data" / "sample.txt").read_text(encoding="utf-8") == "hello\n"
     assert not (env / "docker-compose.yaml").exists()
+    assert not (env / "Dockerfile").exists()
 
     toml = tomllib.loads((task_dir / "task.toml").read_text(encoding="utf-8"))
     assert toml["environment"]["docker_image"] == "biomnibench-da-runtime:smoke"
+    assert toml["environment"]["workdir"] == "/app"
 
 
 def test_prepare_requires_local_dir_or_download(tmp_path: Path) -> None:

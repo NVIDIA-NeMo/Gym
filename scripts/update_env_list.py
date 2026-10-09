@@ -178,7 +178,7 @@ def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cov
                                 hf_id = entry.get("huggingface_identifier")
                                 if isinstance(hf_id, dict):
                                     agent.huggingface_repo_id = hf_id.get("repo_id")
-            elif v3.get("harbor_datasets") or v3.get("vf_env_id"):
+            elif v3.get("vf_env_id"):
                 agent.types.append("train")
     return agent
 

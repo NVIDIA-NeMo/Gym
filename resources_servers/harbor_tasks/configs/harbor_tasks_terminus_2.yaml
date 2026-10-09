@@ -1,0 +1,18 @@
+# Harbor tasks run by Harbor's Terminus-2 through the single-agent-turn Environment Server. The Environment Server
+# seeds the task sandbox, hands it to the agent, runs one agent turn, verifies the sandbox, and closes both sessions.
+# Add a sandbox provider config, e.g. nemo_gym/sandbox/providers/docker/configs/docker.yaml, and a model server.
+config_paths:
+  - resources_servers/harbor_tasks/configs/harbor_tasks.yaml
+  - responses_api_agents/harbor_harness_agent/configs/harbor_harness_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+harbor_tasks_terminus_2:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: harbor_tasks
+      agent_server:
+        type: responses_api_agents
+        name: harbor_harness_agent

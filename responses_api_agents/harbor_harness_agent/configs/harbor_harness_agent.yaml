@@ -1,0 +1,37 @@
+# Runs a Harbor agent in the task sandbox a Resources Server hands it (for example resources_servers/harbor_tasks).
+harbor_harness_agent:
+  responses_api_agents:
+    harbor_harness_agent:
+      entrypoint: app.py
+      domain: agent
+      description: Any Harbor agent in a Resources-owned task sandbox
+      resources_server:
+        type: resources_servers
+        name: harbor_tasks
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Harbor's output has no token ids; the model server captures them on the rollout-prefixed base URL.
+      token_id_capture: true
+
+      # Follows harbor.models.trial.config:AgentConfig.
+      harbor_agent:
+        name: terminus-2
+        # LiteLLM routes `openai/` names to the OpenAI-compatible Gym model server.
+        model_name: openai/${policy_model_name}
+        override_timeout_sec: null
+        max_timeout_sec: null
+        kwargs:
+          max_turns: 50
+          llm_call_kwargs:
+            # The Gym model server does not check this key; LiteLLM requires one.
+            api_key: gym
+        # TIP: escape $ (\${MY_ENV}) so Harbor resolves secrets itself instead of Hydra writing them to the config.
+        env: {}
+
+      # Terminus-2 calls the model from this process and takes the base URL as `api_base`. Installed agents run in
+      # the sandbox: set model_base_url_kwarg to null and list their base-URL variables, e.g. [OPENAI_BASE_URL].
+      model_base_url_kwarg: api_base
+      model_base_url_env: []
+      agent_timeout_multiplier: 1.0
+      logs_dir: results/harbor_harness_agent

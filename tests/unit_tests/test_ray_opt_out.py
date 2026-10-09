@@ -37,8 +37,6 @@ DIRECT_RAY_COMPONENTS = {
     },
     "responses_api_agents": {
         "anyterminal_agent",
-        "harbor_agent",
-        "harbor_agent_general",
         "mini_swe_agent",
         "mini_swe_agent_2",
         "osworld_agent",

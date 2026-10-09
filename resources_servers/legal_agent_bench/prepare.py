@@ -43,10 +43,15 @@ DEFAULT_TASKS_DIR = PACKAGE_DIR / "data" / "cache" / "harbor_tasks" / "legal_age
 DEFAULT_RUNTIME_TASKS_DIR = PACKAGE_DIR / "data" / "runtime" / "harbor_tasks" / "legal_agent_bench"
 DEFAULT_SKILLS_DIR = PACKAGE_DIR / "data" / "cache" / "harness" / "skills"
 INDEX_FILENAME = "all.jsonl"
+HARBOR_DATASET_ALIAS = "legal_agent_bench"
+AGENT_NAME = "legal_agent_bench_agent"
+# Harbor builds each task image from environment/Dockerfile; Gym sandboxes start a prebuilt image instead.
+DEFAULT_RUNTIME_IMAGE = "legal-agent-bench-runtime:latest"
 DEFAULT_INDEX_FPATH = PACKAGE_DIR / "data" / "generated" / INDEX_FILENAME
 CACHE_MARKER = ".nemo_gym_asset.json"
-CACHE_FORMAT_VERSION = 4
+CACHE_FORMAT_VERSION = 5
 REWARD_MODES = ("full_task", "criteria_pass_rate")
+AGENT_TIMEOUT_SECONDS = 108000
 REWARD_MODE_ENV_KEY = "LEGAL_AGENT_BENCH_REWARD_MODE"
 LAB_HARBOR_SOURCE_DIR = PACKAGE_DIR / "vendor" / "harvey_labs" / "lab_harbor"
 TOOL_RUNNER_SOURCE = LAB_HARBOR_SOURCE_DIR / "container_tool_runner.py"
@@ -155,7 +160,7 @@ def validate_harbor_tasks(tasks_dir: str | Path, *, require_marker: bool = True,
     if len(task_dirs) != EXPECTED_TASK_COUNT:
         raise ValueError(f"Expected {EXPECTED_TASK_COUNT} Harbor tasks in {path}, found {len(task_dirs)}")
     invalid: list[str] = []
-    source_ids: list[str] = []
+    index_entries: list[tuple[str, str]] = []
     verifier_templates = {relpath: source.read_bytes() for relpath, source in VERIFIER_TEMPLATE_SOURCES.items()}
     tool_runner_template = TOOL_RUNNER_SOURCE.read_bytes()
     for task_dir in task_dirs:
@@ -179,7 +184,7 @@ def validate_harbor_tasks(tasks_dir: str | Path, *, require_marker: bool = True,
         if not source_id or flatten_task_id(str(source_id)) != task_dir.name:
             invalid.append(f"{task_dir.name}: missing or inconsistent lab_task_id metadata")
         else:
-            source_ids.append(str(source_id))
+            index_entries.append((str(source_id), (task_dir / "instruction.md").read_text(encoding="utf-8")))
         if (task_dir / "tests" / "task.json").read_bytes() != (task_dir / "task.json").read_bytes():
             invalid.append(f"{task_dir.name}: verifier task.json differs from source task.json")
         for relpath, template in verifier_templates.items():
@@ -205,7 +210,7 @@ def validate_harbor_tasks(tasks_dir: str | Path, *, require_marker: bool = True,
         raise FileNotFoundError(
             f"Legal Agent Bench task index is missing from the prepared cache: {index_path}"
         ) from exc
-    expected_index = _render_task_index(source_ids)
+    expected_index = _render_task_index(index_entries)
     if index_text != expected_index:
         raise ValueError(f"Legal Agent Bench task index is stale or non-deterministic: {index_path}")
     for source_id in SMOKE_TASK_IDS:
@@ -315,6 +320,7 @@ def hydrate_runtime_tasks(
     *,
     verifier_env: dict[str, str],
     reward_mode: str,
+    docker_image: str = DEFAULT_RUNTIME_IMAGE,
     cache_is_validated: bool = False,
 ) -> Path:
     if reward_mode not in REWARD_MODES:
@@ -334,7 +340,8 @@ def hydrate_runtime_tasks(
             toml_path = task_dir / "task.toml"
             clean_toml = toml_path.read_text(encoding="utf-8")
             toml_path.unlink()  # break the hardlink before injecting runtime-only values
-            toml_path.write_text(_replace_verifier_env(clean_toml, env), encoding="utf-8")
+            runtime_toml = _with_docker_image(_replace_verifier_env(clean_toml, env), docker_image)
+            toml_path.write_text(runtime_toml, encoding="utf-8")
         _replace_directory(stage, runtime)
     return runtime
 
@@ -475,17 +482,22 @@ def _validate_task_json(config: Any, path: Path) -> None:
             raise ValueError(f"{path} criterion {index} is invalid")
 
 
-def _render_task_index(source_ids: Iterable[str]) -> str:
+def _render_task_index(entries: Iterable[tuple[str, str]]) -> str:
+    """Render harbor_tasks rows from (LAB source id, instruction.md text) pairs."""
     rows = []
-    for source_id in sorted(source_ids):
+    for source_id, instruction in sorted(entries):
+        task_name = flatten_task_id(source_id)
         row = {
             "agent_ref": {
-                "name": "legal_agent_bench_harbor_agent",
+                "name": AGENT_NAME,
                 "type": "responses_api_agents",
             },
-            "instance_id": f"legal_agent_bench::{flatten_task_id(source_id)}",
+            "task_id": task_name,
+            "harbor_dataset": HARBOR_DATASET_ALIAS,
+            "task_name": task_name,
             "responses_create_params": {
-                "input": [],
+                "input": [{"role": "user", "content": instruction}],
+                "metadata": {"harbor_agent_timeout_sec": str(AGENT_TIMEOUT_SECONDS)},
                 "temperature": 1.0,
                 "top_p": 0.95,
             },
@@ -503,6 +515,7 @@ def _build_task_cache(source_root: Path, output_dir: Path) -> None:
         raise FileNotFoundError(f"Legal Agent Bench runtime templates are missing: {missing_templates}")
 
     source_entries = _source_task_entries(source_root)
+    index_entries: list[tuple[str, str]] = []
     for source_id, source_task_dir in source_entries:
         task_name = flatten_task_id(source_id)
         task_dir = output_dir / task_name
@@ -523,10 +536,9 @@ def _build_task_cache(source_root: Path, output_dir: Path) -> None:
         task_json_text = json.dumps(config, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
         (task_dir / "task.json").write_text(task_json_text, encoding="utf-8")
         (task_dir / "tests" / "task.json").write_text(task_json_text, encoding="utf-8")
-        (task_dir / "instruction.md").write_text(
-            f"<!-- lab_task_id:{source_id} -->\n\n# {config['title']}\n\n{config['instructions']}\n",
-            encoding="utf-8",
-        )
+        instruction = f"<!-- lab_task_id:{source_id} -->\n\n# {config['title']}\n\n{config['instructions']}\n"
+        (task_dir / "instruction.md").write_text(instruction, encoding="utf-8")
+        index_entries.append((source_id, instruction))
         (task_dir / "task.toml").write_text(_task_toml(config, source_id), encoding="utf-8")
         (task_dir / "environment" / "Dockerfile").write_text(_DOCKERFILE, encoding="utf-8")
         shutil.copyfile(TOOL_RUNNER_SOURCE, task_dir / "environment" / "harness" / "container_tool_runner.py")
@@ -538,7 +550,7 @@ def _build_task_cache(source_root: Path, output_dir: Path) -> None:
         test_script.write_text(_TEST_SCRIPT, encoding="utf-8")
         test_script.chmod(test_script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     (output_dir / INDEX_FILENAME).write_text(
-        _render_task_index(source_id for source_id, _ in source_entries),
+        _render_task_index(index_entries),
         encoding="utf-8",
     )
     _write_marker(output_dir, "tasks")
@@ -561,7 +573,7 @@ def _task_toml(config: dict[str, Any], source_id: str) -> str:
         [
             "",
             "[agent]",
-            "timeout_sec = 108000",
+            f"timeout_sec = {AGENT_TIMEOUT_SECONDS}",
             "",
             "[verifier]",
             "timeout_sec = 1800",
@@ -646,6 +658,13 @@ def _replace_verifier_env(toml: str, env: dict[str, str]) -> str:
         index += 1
     block = ["[verifier.env]"] + [f"{key} = {json.dumps(value)}" for key, value in sorted(env.items())]
     return "\n".join(output).rstrip() + "\n\n" + "\n".join(block) + "\n"
+
+
+def _with_docker_image(toml: str, docker_image: str) -> str:
+    """Pin the runtime task to a prebuilt image built from the shared environment/Dockerfile."""
+    if "\n[environment]\n" not in toml:
+        raise ValueError("Legal Agent Bench task.toml has no [environment] table")
+    return toml.replace("\n[environment]\n", f"\n[environment]\ndocker_image = {json.dumps(docker_image)}\n", 1)
 
 
 def _hardlink_or_copy(source: str, destination: str) -> str:

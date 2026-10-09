@@ -275,15 +275,3 @@ class TestConfig:
         path = Path(__file__).resolve().parent.parent / relative_path
         data = yaml.safe_load(path.read_text())
         assert config_name in data
-
-    def test_requirements_share_harbor_pin(self) -> None:
-        agent_dir = Path(__file__).resolve().parent.parent
-        terminus_requirement = next(
-            line for line in (agent_dir / "requirements.txt").read_text().splitlines() if line.startswith("harbor @")
-        )
-        harbor_requirement = next(
-            line
-            for line in (agent_dir.parent / "harbor_agent" / "requirements.txt").read_text().splitlines()
-            if line.startswith("harbor @")
-        )
-        assert terminus_requirement == harbor_requirement

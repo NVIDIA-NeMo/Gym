@@ -6,7 +6,7 @@ email triage, CSV/log analysis, coding, research, writing). Each task is graded 
 checks, an LLM judge, or both.
 
 This is an **external-benchmark integration** wired at the agent-server level (the same shape as
-`swe_agents` and `harbor_agent`): OpenClaw + PinchBench's own rollout/grading harness *is* the
+`swe_agents`): OpenClaw + PinchBench's own rollout/grading harness *is* the
 orchestration, so we wrap it rather than reimplement it.
 
 ## Architecture
@@ -33,7 +33,7 @@ the shared workspace mid-run — the per-task design avoids that entirely.
 
 ### The skill is cloned + patched at build time (not vendored)
 
-Following the repo convention (`harbor_agent` / `mini_swe_agent` pin a framework git commit rather
+Following the repo convention (`mini_swe_agent` pins a framework git commit rather
 than vendoring task files), `Dockerfile.benchmark` clones PinchBench at a pinned tag and applies a
 small NVIDIA integration patch:
 
