@@ -129,7 +129,8 @@ dependencies = [
     # FastAPI: Used for server infrastructure
     # Updated Thu Mar 26, 2026 with fastapi==0.135.2
     # License: MIT https://github.com/fastapi/fastapi/blob/25a3697cedc6e7dfb84e93c8ff965801486f00f4/LICENSE
-    "fastapi",
+    # 0.142.x exports telemetry a second time next to nemo-lens; 0.143 made that opt-in (fastapi/fastapi#16476)
+    "fastapi!=0.142.*",
 
     # MCP Python SDK: Used by Gym-owned Streamable HTTP MCP resources servers.
     # Updated Tue Jul 29, 2026 with mcp>=1.28.1,<2

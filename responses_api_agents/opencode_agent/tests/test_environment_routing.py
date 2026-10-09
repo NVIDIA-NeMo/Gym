@@ -20,7 +20,7 @@ from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParse
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
-from responses_api_agents.opencode_agent.tests.test_native_sessions import seed, setup  # noqa: F401
+from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
 
 
 class _Response:
@@ -34,7 +34,7 @@ class _Response:
         return json.dumps(self.payload).encode()
 
 
-def _resolved_config(path: str):
+def _resolved_config():
     return GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             skip_load_from_cli=True,
@@ -42,27 +42,45 @@ def _resolved_config(path: str):
             offline=True,
             initial_global_config_dict=OmegaConf.create(
                 {
-                    "config_paths": [path],
+                    "config_paths": [
+                        "resources_servers/swebench_pro/configs/swebench_pro.yaml",
+                        "responses_api_agents/opencode_agent/configs/opencode_agent.yaml",
+                        "environment_servers/single_agent_turn/configs/single_agent_turn.yaml",
+                    ],
                     "policy_model": {"responses_api_models": {"dummy_model": {"entrypoint": "app.py"}}},
+                    "environment_routing_mode": "taskset",
+                    "environment_server_routes": {"swebench_pro:smoke": "swebench_pro_opencode"},
+                    "swebench_pro_opencode_resources_server": {"_inherit_from": "swebench_pro_resources_server"},
+                    "swebench_pro_opencode_agent": {"_inherit_from": "opencode_agent"},
+                    "swebench_pro_opencode": {
+                        "_inherit_from": "single_agent_turn",
+                        "environment_servers": {
+                            "single_agent_turn": {
+                                "resources_server": {
+                                    "type": "resources_servers",
+                                    "name": "swebench_pro_opencode_resources_server",
+                                },
+                                "agent_server": {
+                                    "type": "responses_api_agents",
+                                    "name": "swebench_pro_opencode_agent",
+                                },
+                            }
+                        },
+                    },
                 }
             ),
         )
     )
 
 
-@pytest.mark.parametrize(
-    "config_path",
-    [
-        "benchmarks/swebench/pro/opencode_taskset.yaml",
-        "responses_api_agents/opencode_agent/configs/opencode_agent_swebench_pro.yaml",
-    ],
-)
-async def test_native_recipe_routes_collector_through_environment_and_responses(
-    setup, monkeypatch: pytest.MonkeyPatch, config_path: str
+async def test_session_composition_routes_collector_through_environment_and_responses(
+    setup, monkeypatch: pytest.MonkeyPatch
 ):
     agent, sandbox = setup
     monkeypatch.chdir(Path(__file__).resolve().parents[3])
-    config = _resolved_config(config_path)
+    # The benchmark's existing allowlist is unchanged; this integration is opt-in.
+    monkeypatch.setenv("NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING", "1")
+    config = _resolved_config()
     agent_name = "swebench_pro_opencode_agent"
     resources_name = "swebench_pro_opencode_resources_server"
     environment_name = config.environment_server_routes["swebench_pro:smoke"]
@@ -70,7 +88,9 @@ async def test_native_recipe_routes_collector_through_environment_and_responses(
     agent.config = OpenCodeAgentConfig.model_validate(
         OmegaConf.to_container(get_first_server_config_dict(config, agent_name), resolve=True) | {"name": agent_name}
     )
-    assert agent.config.execution_mode == "sandbox"
+    # Session routing must not require an execution-mode override.
+    assert agent.config.execution_mode == "local"
+    assert agent.config.opencode_config["permission"]["bash"]["*git submodule update*"] == "deny"
     agent.server_client.global_config_dict = config
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = config
@@ -100,7 +120,7 @@ async def test_native_recipe_routes_collector_through_environment_and_responses(
                 assert response.status_code == 200, response.text
                 return _Response(response.json())
             if server_name == agent_name:
-                assert url_path != "/run", "Native collection must not call agent /run"
+                assert url_path != "/run", "Environment collection must not call agent /run"
                 agent_http.cookies.clear()
                 agent_http.cookies.update(cookies or {})
                 response = await asyncio.to_thread(agent_http.post, url_path, json=body)

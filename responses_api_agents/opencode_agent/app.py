@@ -155,6 +155,8 @@ fi
 
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
+    # Session state selects sandbox vs local execution. Keep the old values as
+    # config aliases; only legacy_sandbox explicitly opts into the old bridge.
     execution_mode: Literal["local", "sandbox", "legacy_sandbox"] = "local"
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 8
@@ -236,17 +238,23 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     def _legacy(self) -> SimpleResponsesAPIAgent:
         if self.config.execution_mode != "legacy_sandbox":
             raise RuntimeError("The legacy sandbox bridge requires execution_mode=legacy_sandbox")
+        if self.config.resources_server is None:
+            raise HTTPException(422, "Legacy OpenCode requires resources_server")
         if self._legacy_agent is None:
-            from responses_api_agents.opencode_agent.legacy import LegacyOpenCodeAgent, LegacyOpenCodeAgentConfig
+            from responses_api_agents.opencode_sandboxed_agent.app import (
+                OpenCodeSandboxedAgent,
+                OpenCodeSandboxedAgentConfig,
+            )
 
             values = self.config.model_dump()
             if values["opencode_version"] is None:
-                # None preserves the local installer's default; the bridge has its own pinned default.
-                values.pop("opencode_version")
-            config = LegacyOpenCodeAgentConfig(
-                **{key: value for key, value in values.items() if key in LegacyOpenCodeAgentConfig.model_fields}
+                # The unchanged sandboxed config class requires an explicit version.
+                # Preserve the bridge's default, matching the shipped sandboxed YAML.
+                values["opencode_version"] = "1.17.11"
+            config = OpenCodeSandboxedAgentConfig(
+                **{key: value for key, value in values.items() if key in OpenCodeSandboxedAgentConfig.model_fields}
             )
-            self._legacy_agent = LegacyOpenCodeAgent(config=config, server_client=self.server_client)
+            self._legacy_agent = OpenCodeSandboxedAgent(config=config, server_client=self.server_client)
         return self._legacy_agent
 
     @staticmethod
@@ -519,10 +527,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             elif body != state.activation_request:
                 raise HTTPException(409, "OpenCode sandbox sessions support one activation; retry the same request")
             return (await asyncio.shield(state.task)).model_copy(deep=True)
-        if self.config.execution_mode == "sandbox":
-            raise HTTPException(409, "Native OpenCode requires a seeded agent session")
         if self.config.execution_mode == "legacy_sandbox":
             return await self._legacy().responses(request, body)
+        # Only genuinely unseeded calls reach local execution; invalid or closed
+        # session markers are rejected above, never retried on the host.
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         episode = await self._create_episode(
@@ -540,7 +548,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if (
             self._agent_session_id_from_request(request) is not None
             or self._native_session_marker(request) is not None
-            or self.config.execution_mode == "sandbox"
         ):
             raise HTTPException(409, "Native OpenCode sessions must use EnvironmentServer /run")
         if self.config.execution_mode == "legacy_sandbox":

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import ast
 import asyncio
 import atexit
 import json
@@ -20,6 +21,7 @@ import resource
 import socket
 import sys
 import time
+import warnings
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
@@ -1201,6 +1203,51 @@ def _server_uses_ray(server_class: type) -> bool:
         )
         _WARNED_IMPLICIT_RAY_SERVERS.add(server_class)
     return True
+
+
+def _declared_ray_enabled(class_node: ast.ClassDef) -> bool | None:
+    """The literal `ray_enabled` assigned in a class body, or None when there is none."""
+    for item in class_node.body:
+        if not isinstance(item, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "ray_enabled" for target in item.targets):
+            continue
+        if isinstance(item.value, ast.Constant) and isinstance(item.value.value, bool):
+            return item.value.value
+    return None
+
+
+def entrypoint_may_use_ray(entrypoint_fpath: Path) -> bool:
+    """Whether the server started by this entrypoint may connect to Ray.
+
+    The orchestrator must decide whether to start Ray before any server exists, and each server runs in its
+    own venv, so this reads the source instead of importing it. It finds the classes the entrypoint calls
+    `run_webserver()` on and checks their `ray_enabled` declarations. Anything it cannot settle from the
+    source alone, such as an inherited declaration or a class imported from another module, counts as using
+    Ray, which matches the runtime default for undeclared servers.
+    """
+    try:
+        source = entrypoint_fpath.read_text()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(source)
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return True
+
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    invoked_class_names = {
+        node.func.value.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "run_webserver"
+        and isinstance(node.func.value, ast.Name)
+    }
+    if not invoked_class_names:
+        return True
+    return any(
+        name not in classes or _declared_ray_enabled(classes[name]) is not False for name in invoked_class_names
+    )
 
 
 class SimpleServer(BaseServer):

@@ -26,13 +26,10 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
-    NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
-    NeMoGymResponseUsage,
     NeMoGymSummary,
 )
 from nemo_gym.rollout_observability import (
@@ -523,28 +520,3 @@ def parse_opencode_export(opencode_export: Dict[str, Any]) -> List[NeMoGymRespon
             raise NotImplementedError(message)
 
     return messages
-
-
-def opencode_export_usages(opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
-    """Retain the token accounting used by the legacy flat-row adapter."""
-    usages: List[NeMoGymResponseUsage] = []
-    for message in opencode_export["messages"]:
-        if message["info"]["role"] != "assistant":
-            continue
-
-        token_info = message["info"].get("tokens")
-        if not token_info:
-            continue
-
-        usage = NeMoGymResponseUsage(
-            input_tokens=token_info["input"]
-            + (token_info.get("cache") or {}).get("read", 0)
-            + (token_info.get("cache") or {}).get("write", 0),
-            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=token_info["cache"]["read"]),
-            output_tokens=token_info["output"] + token_info["reasoning"],
-            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=token_info["reasoning"]),
-            total_tokens=token_info.get("total", 0),  # Somehow total may be missing
-        )
-        usages.append(usage)
-
-    return usages

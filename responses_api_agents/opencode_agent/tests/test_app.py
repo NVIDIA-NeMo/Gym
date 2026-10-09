@@ -20,9 +20,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-import yaml
+from omegaconf import OmegaConf
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import GlobalConfigDictParser
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
@@ -706,12 +707,20 @@ class TestConfigYaml:
         app_path = Path(__file__).resolve().parent.parent / "app.py"
         compile(app_path.read_text(), str(app_path), "exec")
 
-    def test_config_yaml_parses(self) -> None:
-        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "opencode_local_agent.yaml"
-        data = yaml.safe_load(cfg_path.read_text())
+    def test_config_yaml_parses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(Path(__file__).resolve().parents[3])
+        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "opencode_agent.yaml"
+        _, configs = GlobalConfigDictParser().load_extra_config_paths([str(cfg_path)])
+        data = OmegaConf.to_container(OmegaConf.merge(*configs), resolve=True)
         assert "opencode_agent" in data
         inner = data["opencode_agent"]["responses_api_agents"]["opencode_agent"]
-        assert inner["entrypoint"] == "app.py"
-        assert inner["concurrency"] == 8
-        assert inner["command"] == "opencode"
-        assert inner["execution_mode"] == "local"
+        config = OpenCodeAgentConfig.model_validate(inner | {"host": "localhost", "port": 8000, "name": "opencode"})
+        assert config.entrypoint == "app.py"
+        assert config.concurrency == 8
+        assert config.command == "opencode"
+        assert config.execution_mode == "local"
+        assert config.resources_server is None
+        assert config.model_server.name == "policy_model"
+        assert config.opencode_config["permission"]["bash"]["*"] == "allow"
+        assert config.opencode_config["permission"]["bash"]["*git submodule update*"] == "deny"
+        assert config.opencode_config["tools"]["webfetch"] is False
