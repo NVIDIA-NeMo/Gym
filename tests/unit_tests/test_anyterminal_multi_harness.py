@@ -9,6 +9,7 @@ from nemo_gym.rollout_collection import RolloutCollectionHelper
 
 PROFILE = "responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness.yaml"
 ENROOT_PROFILE = "responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness_enroot.yaml"
+OPENSANDBOX_PROFILE = "responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness_opensandbox.yaml"
 SOURCE = "anyterminal_multi_harness"
 POOL = ["anyterminal_opencode", "anyterminal_openclaw", "anyterminal_pi", "anyterminal_hermes"]
 
@@ -97,6 +98,17 @@ def test_enroot_profile_selects_named_provider_for_every_harness() -> None:
     config = _resolved_profile(ENROOT_PROFILE)
 
     assert config.sandbox.enroot
+    assert all(
+        config[name].responses_api_agents.anyterminal_agent.sandbox_provider == "sandbox" for name in [*POOL, SOURCE]
+    )
+
+
+def test_opensandbox_profile_selects_kubernetes_provider_for_every_harness(monkeypatch) -> None:
+    monkeypatch.setenv("OPENSANDBOX_API_KEY", "test-key")
+    config = _resolved_profile(OPENSANDBOX_PROFILE)
+
+    assert config.sandbox.opensandbox.connection.api_key == "test-key"
+    assert config.sandbox.opensandbox.connection.domain
     assert all(
         config[name].responses_api_agents.anyterminal_agent.sandbox_provider == "sandbox" for name in [*POOL, SOURCE]
     )
