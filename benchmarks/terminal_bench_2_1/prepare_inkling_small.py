@@ -87,6 +87,7 @@ def prepare() -> Path:
                         {"role": "user", "content": TERMINAL_INTERACTION_GUIDANCE},
                     ]
                 },
+                "task_id": name,
                 "task_name": task["task"]["name"],
                 "docker_image": task["environment"]["docker_image"],
                 "task_folder": name,

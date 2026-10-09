@@ -1,7 +1,7 @@
 {
   "task_repository": "https://github.com/harbor-framework/terminal-bench-2-1",
   "task_revision": "7131e4375048a0e408a8fb404b5f499d726b695b", "_task_revision_scan": "# pragma: allowlist secret",
-  "normalized_rows_sha256": "7152e5291b1886f36a579e9a492fcac5ffac836b9d93d91b2cb218ecdf2194ae", "_normalized_rows_sha256_scan": "# pragma: allowlist secret",
+  "normalized_rows_sha256": "9c4495cfe5aba94640e9c66fe7c29cae48b992656ca1a000789f67d230f1eac2", "_normalized_rows_sha256_scan": "# pragma: allowlist secret",
   "normalization": "Replace task_folder with its final directory name; serialize each row with json.dumps(sort_keys=True, ensure_ascii=False), followed by a newline, in task_order. Hash the UTF-8 bytes.",
   "task_order": [
     "headless-terminal",

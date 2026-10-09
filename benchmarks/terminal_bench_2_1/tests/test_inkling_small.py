@@ -11,6 +11,7 @@ from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_2_1 import prepare_inkling_small as preparation
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.task_materialization import materialize_task
 
 
 def git(path: Path, *args: str) -> str:
@@ -43,6 +44,7 @@ def pinned_tasks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dict]:
                     {"role": "user", "content": preparation.TERMINAL_INTERACTION_GUIDANCE},
                 ]
             },
+            "task_id": name,
             "task_name": f"terminal-bench/{name}",
             "docker_image": f"example/{name}:pinned",
             "task_folder": name,
@@ -79,6 +81,25 @@ def test_pinned_clone_preserves_prompts_order_and_tags_and_repairs_cached_rows(p
     output.write_text("stale cached inputs\n")
     preparation.prepare()
     assert output.read_bytes() == original
+
+
+def test_every_row_has_a_unique_task_id_matching_its_task_folder(pinned_tasks: list[dict]) -> None:
+    rows = [json.loads(line) for line in preparation.prepare().read_text().splitlines()]
+    assert len(rows) == 89
+    assert [row["task_id"] for row in rows] == [Path(row["task_folder"]).name for row in rows]
+    assert len({row["task_id"] for row in rows}) == 89
+
+
+def test_task_id_survives_other_datasets_shifting_row_positions(pinned_tasks: list[dict]) -> None:
+    row = json.loads(preparation.prepare().read_text().splitlines()[0])
+    first = materialize_task(row, taskset="inkling", task_index=0)
+    shifted = materialize_task(row, taskset="inkling", task_index=89)
+    assert first["task_id"] == shifted["task_id"] == {"taskset": "inkling", "task_id": row["task_id"]}
+
+    # Without the explicit ID, the same task would be renamed by its position.
+    positional = {key: value for key, value in row.items() if key != "task_id"}
+    assert materialize_task(positional, taskset="inkling", task_index=0)["task_id"]["task_id"] == "0"
+    assert materialize_task(positional, taskset="inkling", task_index=89)["task_id"]["task_id"] == "89"
 
 
 @pytest.mark.parametrize("change", ["tracked", "untracked", "revision"])
