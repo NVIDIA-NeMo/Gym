@@ -474,6 +474,18 @@ def test_token_store_retire_syncs_the_directory_once_per_batch(tmp_path):
     assert fsync_root.call_count == 1
 
 
+def test_token_store_delete_syncs_the_directory_only_when_it_removed_something(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r1")
+
+    with patch.object(store, "_fsync_root", wraps=store._fsync_root) as fsync_root:
+        assert store.delete_now(["r1"]) == {"removed": ["r1"], "absent": []}
+        assert fsync_root.call_count == 1
+        # A retried batch, or IDs that never captured anything, change nothing on disk.
+        assert store.delete_now(["r1", "never-captured"]) == {"removed": [], "absent": ["r1", "never-captured"]}
+        assert fsync_root.call_count == 1
+
+
 def test_token_store_delete_removes_the_fence_so_the_rollout_id_can_be_reused(tmp_path):
     store = TokenCaptureStore(tmp_path)
     _store_entry(store, "r0")

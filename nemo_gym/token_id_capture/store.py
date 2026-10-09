@@ -40,7 +40,12 @@ from uuid import uuid4
 
 import orjson
 
-from nemo_gym.token_id_capture.protocols import TokenCaptureFrozenError, TokenCaptureRetiredError, TokenCaptureSnapshot
+from nemo_gym.token_id_capture.protocols import (
+    RolloutRemovalPayload,
+    TokenCaptureFrozenError,
+    TokenCaptureRetiredError,
+    TokenCaptureSnapshot,
+)
 from nemo_gym.token_id_capture.records import TokenEntry
 
 
@@ -376,7 +381,7 @@ class TokenCaptureStore:
         # The directory fsync after the state replace also makes the unlinks above durable.
         self._write_state(rollout_id, state, sync_root=sync_root)
 
-    async def retire(self, rollout_ids: Sequence[str]) -> dict:
+    async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         """Remove rollouts' records and keep a fence, whatever their state.
 
         This is ``drop`` without the snapshot check, for rollouts the consumer is done with but won't
@@ -384,11 +389,10 @@ class TokenCaptureStore:
         and abandoned attempts. Like ``drop``, it leaves the fence that makes later writes for the
         rollout fail, including writes from a duplicate execution of the same rollout. Retiring again
         is a no-op.
-        The result validates as ``staging.records.RolloutRemoval``.
         """
         return await asyncio.to_thread(self.retire_now, rollout_ids)
 
-    def retire_now(self, rollout_ids: Sequence[str]) -> dict:
+    def retire_now(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         """Synchronous ``retire``."""
         removed, absent = [], []
         changed = False
@@ -406,27 +410,35 @@ class TokenCaptureStore:
             self._fsync_root()
         return {"removed": removed, "absent": absent}
 
-    async def delete(self, rollout_ids: Sequence[str]) -> dict:
+    async def delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         """Remove rollouts' records and fences.
 
         Delete retired rollouts once nothing of those attempts can still write, for example at the end
         of the run, which removes their fences. Delete a rollout ID before reusing it, so the new
         execution starts empty. Deleting again is a no-op.
-        The result validates as ``staging.records.RolloutRemoval``.
         """
         return await asyncio.to_thread(self.delete_now, rollout_ids)
 
-    def delete_now(self, rollout_ids: Sequence[str]) -> dict:
+    def delete_now(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         """Synchronous ``delete``."""
         removed, absent = [], []
+        changed = False
         for rollout_id in validate_rollout_ids(rollout_ids):
             with self._locked(rollout_id):
                 (removed if self._has_records(rollout_id) else absent).append(rollout_id)
-                self.path_for(rollout_id).unlink(missing_ok=True)
-                self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-                self.intents_path_for(rollout_id).unlink(missing_ok=True)
-                self.state_path_for(rollout_id).unlink(missing_ok=True)
-        if removed or absent:
+                for path in (
+                    self.path_for(rollout_id),
+                    self.incomplete_path_for(rollout_id),
+                    self.intents_path_for(rollout_id),
+                    self.state_path_for(rollout_id),
+                ):
+                    try:
+                        path.unlink()
+                        changed = True
+                    except FileNotFoundError:
+                        pass
+        # A repeated or empty delete changes nothing on disk, so it syncs nothing.
+        if changed:
             self._fsync_root()
         return {"removed": removed, "absent": absent}
 
