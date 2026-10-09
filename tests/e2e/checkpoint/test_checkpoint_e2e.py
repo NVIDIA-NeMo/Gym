@@ -40,10 +40,12 @@ from checkpoint_deployment import (
     CAPTURE_CONTROL_TOKEN,
     COUNTER_SCRIPT,
     NOTES_SCRIPT,
+    NOTES_SCRIPT_READ,
     NOTES_SCRIPT_THREE,
     TOKEN,
     Deployment,
     counter_row,
+    notes_episode,
     notes_row,
     weather_episode,
     weather_row,
@@ -1173,6 +1175,109 @@ async def test_retiring_a_sandboxed_episode_stops_its_sandbox(deploy, tmp_path: 
     assert replacement.json()["reward"] == 1.0
     assert len(after["boxes"]) == 2
     assert retired["snapshots"] == {}, "a retire takes no snapshot"
+
+
+# -- agent-owned sandbox ----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("restore_agent", [True, False])
+async def test_an_agent_owned_sandbox_is_restored_with_the_episode(
+    deploy, tmp_path: Path, restore_agent: bool
+) -> None:
+    deployment = deploy("agent_sandbox")
+    deployment.backend("/_ctl/script", NOTES_SCRIPT_READ)
+    # The first note is appended before the checkpoint; the model call that asks for the second is held.
+    deployment.backend("/_ctl/hold", {"after_calls": 1})
+    async with httpx.AsyncClient(base_url=deployment.url("environment"), timeout=120) as http:
+        first = asyncio.create_task(http.post("/run", json=notes_episode("agent-notes-1")))
+        await wait_until(lambda: len(deployment.backend_calls()) == 2)
+        await checkpoint(deployment, tmp_path / "ckpt", ["agent-notes-1"])
+        at_commit = deployment.sandbox_state()
+        skip = () if restore_agent else ("agent",)
+        await crash_and_restore(deployment, tmp_path / "ckpt", ["agent-notes-1"], skip_kinds=skip)
+        first.cancel()
+        replacement = await http.post("/run", json=notes_episode("agent-notes-1", attempt=1))
+        after = deployment.sandbox_state()
+
+    # The agent's commit hook snapshotted its sandbox's file as of the checkpoint and left the sandbox running.
+    [box] = at_commit["boxes"].values()
+    assert box["state"] == "running"
+    [snapshot] = [s for s in at_commit["snapshots"].values() if s["sandboxId"] == box["id"]]
+    assert snapshot["files"] == {"notes": "one\n"}
+    if restore_agent:
+        assert replacement.status_code == 200, replacement.text
+        assert replacement.json()["result"]["reward"] == 1.0
+        # The restore forked the snapshot; closing the agent session at the end of the episode freed the fork and
+        # deleted the snapshots of it.
+        [fork] = [b for b in after["boxes"].values() if b["from_snapshot"] == snapshot["id"]]
+        assert after["boxes"][box["id"]]["state"] == "stopped"
+        assert fork["files"] == {"notes": "one\ntwo\n"}
+        assert fork["state"] == "stopped" and snapshot["id"] not in after["snapshots"]
+    else:
+        # Without the agent restore the continued episode has no agent session, and no sandbox: the negative
+        # control shows the agent's restore matters. The environment reports the failure with no result.
+        body = replacement.json() if replacement.status_code == 200 else {}
+        assert not body.get("result") or body["result"]["reward"] != 1.0, body
+
+
+async def test_an_agent_owned_sandbox_that_moved_on_is_rebuilt_from_its_snapshot(deploy, tmp_path: Path) -> None:
+    deployment = deploy("agent_sandbox")
+    deployment.backend("/_ctl/script", NOTES_SCRIPT_READ)
+    deployment.backend("/_ctl/hold", {"after_calls": 1})
+    async with httpx.AsyncClient(base_url=deployment.url("environment"), timeout=120) as http:
+        first = asyncio.create_task(http.post("/run", json=notes_episode("agent-notes-2")))
+        await wait_until(lambda: len(deployment.backend_calls()) == 2)
+        await checkpoint(deployment, tmp_path / "ckpt", ["agent-notes-2"])
+        [snapshot] = deployment.sandbox_state()["snapshots"].values()
+        # No crash yet: the episode continues past the checkpoint and appends "two" to the live sandbox; the model
+        # call after that is held.
+        participants = await deployment.participants()
+        await coordination.resume(participants, "c1", deadline_ts=deadline())
+        assert deployment.sandbox_state()["boxes"][snapshot["sandboxId"]]["state"] == "running", "never paused"
+        deployment.backend("/_ctl/hold", {"after_calls": 2, "release_held": True})
+        await wait_until(lambda: len(deployment.backend_calls()) == 3)
+        await wait_until(
+            lambda: deployment.sandbox_state()["boxes"][snapshot["sandboxId"]]["files"] == {"notes": "one\ntwo\n"}
+        )
+        await crash_and_restore(deployment, tmp_path / "ckpt", ["agent-notes-2"])
+        first.cancel()
+        replacement = await http.post("/run", json=notes_episode("agent-notes-2", attempt=1))
+        after = deployment.sandbox_state()
+
+    # The restore rebuilt the sandbox from the snapshot, so the replayed "two" landed once and read_notes saw
+    # exactly the expected lines.
+    assert replacement.status_code == 200, replacement.text
+    assert replacement.json()["result"]["reward"] == 1.0
+    old = after["boxes"][snapshot["sandboxId"]]
+    [fork] = [box for box in after["boxes"].values() if box["from_snapshot"] == snapshot["id"]]
+    assert fork["files"] == {"notes": "one\ntwo\n"}
+    assert old["state"] == "stopped" and old["files"] == {"notes": "one\ntwo\n"}
+
+
+async def test_retiring_an_episode_stops_the_agents_sandbox(deploy, tmp_path: Path) -> None:
+    deployment = deploy("agent_sandbox")
+    deployment.backend("/_ctl/script", NOTES_SCRIPT_READ)
+    deployment.backend("/_ctl/hold", {"after_calls": 1})
+    async with httpx.AsyncClient(base_url=deployment.url("environment"), timeout=120) as http:
+        run = asyncio.create_task(http.post("/run", json=notes_episode("agent-notes-3")))
+        await wait_until(lambda: len(deployment.backend_calls()) == 2)
+        participants = await deployment.participants()
+
+        await coordination.retire(
+            participants, "retire", [EpisodeId(rollout_id="agent-notes-3")], deadline_ts=deadline()
+        )
+
+        await wait_until(run.done, timeout=10)
+        retired = deployment.sandbox_state()
+        deployment.backend("/_ctl/release", {})
+        replacement = await http.post("/run", json=notes_episode("agent-notes-3", attempt=1))
+        after = deployment.sandbox_state()
+
+    [box] = retired["boxes"].values()
+    assert box["state"] == "stopped" and box["files"] == {"notes": "one\n"}
+    assert replacement.status_code == 200, replacement.text
+    assert replacement.json()["result"]["reward"] == 1.0
+    assert len(after["boxes"]) == 2 and retired["snapshots"] == {}
 
 
 # -- snapshot garbage collection --------------------------------------------------------------------------
