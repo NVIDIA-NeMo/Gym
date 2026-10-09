@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
+import re
 import warnings
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -301,3 +302,30 @@ def test_entrypoint_detection_matches_shipped_server_declarations() -> None:
         if entrypoint_ray_enabled(path) is not expected
     ]
     assert not mismatches, "Orchestrator Ray detection disagrees with shipped declarations:\n" + "\n".join(mismatches)
+
+
+_NEMO_GYM_EXTRAS_RE = re.compile(r"nemo[-_]gym\[([^\]]*)\]")
+
+
+def _requested_nemo_gym_extras(component_dir: Path) -> set[str]:
+    extras: set[str] = set()
+    for manifest in ("requirements.txt", "pyproject.toml", "setup.py"):
+        manifest_path = component_dir / manifest
+        if manifest_path.exists():
+            for match in _NEMO_GYM_EXTRAS_RE.finditer(manifest_path.read_text()):
+                extras.update(extra.strip() for extra in match.group(1).split(","))
+    return extras
+
+
+def test_ray_servers_request_the_ray_extra() -> None:
+    # Ray is installed into a server venv only when that server asks for it, so every server that declares
+    # ray_enabled = True must request nemo-gym's `ray` extra in its manifest.
+    ray_components = {
+        Path(*path.relative_to(PARENT_DIR).parts[:2])
+        for path, _class_node, expected in _server_class_declarations()
+        if expected
+    }
+    assert ray_components
+
+    missing = sorted(str(c) for c in ray_components if "ray" not in _requested_nemo_gym_extras(PARENT_DIR / c))
+    assert not missing, "Servers declaring ray_enabled = True must request nemo-gym[ray]:\n" + "\n".join(missing)

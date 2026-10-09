@@ -357,6 +357,8 @@ Servers that use Ray need Ray installed both where `gym` runs and in their own e
 pip install "nemo-gym[ray]"
 ```
 
+A server that declares `ray_enabled = True` requests the extra in its own dependency file, for example `-e nemo-gym[dev,ray] @ ../../` in `requirements.txt`, so its environment gets Ray. Gym pins the server's Ray to the exact version installed where `gym` runs.
+
 If a configured server declares `ray_enabled = True` and Ray isn't installed where `gym` runs, `gym env start` stops before launching any server and names the servers that need it. Ray is still a core dependency today; the extra lets environments request it explicitly ahead of making it optional.
 
 ### Ray Configuration
