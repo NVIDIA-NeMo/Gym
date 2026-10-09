@@ -161,6 +161,36 @@ resuming an earlier Harbor trial. Stop the server after collection. The raw
 job directory remains gitignored; only the small evidence exports above are
 intended for review.
 
+## Compatibility and benchmark impact
+
+This integration supports Gym's `--benchmark labbench2_pdf` workflow:
+`gym list benchmarks labbench2_pdf` discovers the benchmark, `gym eval prepare`
+generates its JSONL index and Harbor Docker task registry, and `gym eval run
+--split benchmark` collects rollouts through `harbor_agent_general`.
+Preparation accepts downloaded or local inputs and, by default, skips questions
+missing any required PDF.
+
+Benchmark discovery/preparation and Harbor configuration tests pass on the
+integration branch. The committed real FigQA2 rollout demonstrates Docker
+execution with reward 1.0; it is not a full benchmark baseline.
+
+Compatibility limits:
+
+- There is no catalog `manifest.yaml`; Gym lists this benchmark with status
+  `no-manifest`. This does not prevent discovery or execution.
+- Upstream Gym inspected on 2026-10-09 routes agents through Environment
+  Servers. These configs rely on its supported but deprecated automatic
+  `legacy_agent` relay. An explicit Environment Server is needed when
+  `error_on_agent_without_environment_server` is enabled, and before that
+  compatibility fallback is removed. Latest upstream behavior was inspected,
+  not freshly validated end-to-end after rebasing this integration.
+- Harbor owns inference, so this profile does not use Gym's model server or
+  model-call capture. The representative rollout is therefore **unobserved**
+  by Gym's model-call health checks; inspect its original Harbor trajectory.
+- Scores cover only questions retained after PDF filtering. Compare runs using
+  the same question snapshot and PDF coverage; upstream `main` updates or
+  newly available papers can change the evaluated set and results.
+
 ## Test
 
 ```bash
