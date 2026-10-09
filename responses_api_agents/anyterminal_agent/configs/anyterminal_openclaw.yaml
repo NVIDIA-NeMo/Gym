@@ -28,6 +28,21 @@ anyterminal_openclaw:
               contextInjection: never
               startupContext:
                 enabled: false
+              # OpenClaw defaults to a 20k-token compaction reserve, which leaves no usable
+              # prompt budget for the 15,872-token training context. Keep one policy turn in
+              # reserve and avoid an extra agentic memory-flush call before compaction.
+              compaction:
+                reserveTokens: 4096
+                reserveTokensFloor: 4096
+                keepRecentTokens: 4096
+                memoryFlush:
+                  enabled: false
+                postCompactionSections: []
+              # Terminal commands such as package installation can emit tens of thousands of
+              # characters. Bound each retained result so a single tool call cannot force an
+              # otherwise healthy rollout through compaction.
+              contextLimits:
+                toolResultMaxChars: 4000
               # An explicit empty filter removes bundled skills from both discovery and the
               # system prompt. The global zero limits below defend the same invariant if the
               # selected agent id cannot be resolved and the filter fallback changes upstream.

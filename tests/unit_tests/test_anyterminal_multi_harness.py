@@ -50,6 +50,12 @@ def test_profile_composes_all_four_terminal_harnesses_with_one_dataset_owner() -
     assert openclaw_defaults.contextInjection == "never"
     assert openclaw_defaults.startupContext.enabled is False
     assert list(openclaw_defaults.skills) == []
+    assert openclaw_defaults.contextLimits.toolResultMaxChars == 4000
+    assert openclaw_defaults.compaction.reserveTokens == 4096
+    assert openclaw_defaults.compaction.reserveTokensFloor == 4096
+    assert openclaw_defaults.compaction.keepRecentTokens == 4096
+    assert openclaw_defaults.compaction.memoryFlush.enabled is False
+    assert list(openclaw_defaults.compaction.postCompactionSections) == []
     assert openclaw_config.skills.limits.maxSkillsInPrompt == 0
     assert openclaw_config.skills.limits.maxSkillsPromptChars == 0
     openclaw_tools = openclaw_config.tools

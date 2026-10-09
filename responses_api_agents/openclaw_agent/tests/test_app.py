@@ -369,6 +369,54 @@ class TestBuildOpenclawConfig:
 
         assert cfg["models"]["providers"]["nemo"]["baseUrl"] == "http://policy/ng-rollout/7-2/v1"
 
+    def test_training_capture_routes_compaction_model_outside_rollout_ledger(self) -> None:
+        agent = _make_agent(
+            model="model",
+            model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        )
+
+        def resolve(rollout_id: str | None = None) -> str:
+            suffix = f"/ng-rollout/{rollout_id}/training-token-capture" if rollout_id else ""
+            return f"http://policy{suffix}/v1"
+
+        with (
+            patch.object(agent, "_token_id_capture_enabled", return_value=True),
+            patch.object(agent, "_resolve_model_base_url", side_effect=resolve),
+        ):
+            cfg = agent._build_openclaw_config({}, "7-2")
+
+        providers = cfg["models"]["providers"]
+        assert providers["nemo"]["baseUrl"] == "http://policy/ng-rollout/7-2/training-token-capture/v1"
+        assert providers["nemo_compaction"]["baseUrl"] == "http://policy/v1"
+        assert cfg["agents"]["defaults"]["compaction"]["model"] == "nemo_compaction/model"
+
+    def test_training_capture_preserves_explicit_compaction_model(self) -> None:
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy"),
+            openclaw_config={"agents": {"defaults": {"compaction": {"model": "other/summarizer"}}}},
+        )
+        with (
+            patch.object(agent, "_token_id_capture_enabled", return_value=True),
+            patch.object(agent, "_resolve_model_base_url", return_value="http://policy/v1"),
+        ):
+            cfg = agent._build_openclaw_config({}, "7-2")
+
+        assert cfg["agents"]["defaults"]["compaction"]["model"] == "other/summarizer"
+        assert "nemo_compaction" not in cfg["models"]["providers"]
+
+    def test_evaluation_capture_keeps_compaction_on_correlated_provider(self) -> None:
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        )
+        with (
+            patch.object(agent, "_token_id_capture_enabled", return_value=False),
+            patch.object(agent, "_resolve_model_base_url", return_value="http://policy/ng-rollout/7-2/v1"),
+        ):
+            cfg = agent._build_openclaw_config({}, "7-2")
+
+        assert "nemo_compaction" not in cfg["models"]["providers"]
+        assert "compaction" not in cfg.get("agents", {}).get("defaults", {})
+
     def test_responses_propagates_rollout_path(self) -> None:
         agent = _make_agent()
 
