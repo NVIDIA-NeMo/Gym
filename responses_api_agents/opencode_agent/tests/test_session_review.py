@@ -8,8 +8,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
     active_sessions,
@@ -54,6 +56,20 @@ def test_no_sandbox_or_provider_returns_422_before_connecting(setup):
     assert "sandbox_access or a configured sandbox_provider" in response.text
     assert not active_sessions(agent)
     sandbox.exec.assert_not_awaited()
+
+
+def test_request_allowlist_rejects_future_fields_but_accepts_defaults(setup):
+    class ExtendedRequest(NeMoGymResponseCreateParamsNonStreaming):
+        future_control: str | None = None
+
+    agent, sandbox = setup
+    assert agent._session_input(ExtendedRequest(input="task", stream=False, background=False)) == ("task", "")
+    with pytest.raises(HTTPException, match="future_control") as error:
+        agent._session_input(ExtendedRequest(input="task", future_control="unsupported"))
+    assert error.value.status_code == 422
+    with pytest.raises(HTTPException, match="metadata"):
+        agent._session_input(ExtendedRequest(input="task", metadata={"ignored": "value"}))
+    sandbox.launch.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

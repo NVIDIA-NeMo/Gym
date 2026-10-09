@@ -712,40 +712,18 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
 
     def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
-        unsupported = (
-            "max_output_tokens",
-            "temperature",
-            "top_p",
-            "reasoning",
-            "max_tool_calls",
-            "previous_response_id",
-            "prompt",
-            "text",
-            "context_management",
-            "conversation",
-            "moderation",
-            "top_logprobs",
-            "truncation",
-            "include",
-            "store",
-            "service_tier",
-            "prompt_cache_key",
-            "prompt_cache_retention",
-            "safety_identifier",
-            "stream_options",
-            "user",
-        )
-        values = body.model_dump(mode="json")
-        for key in unsupported:
-            if values.get(key) is not None:
+        supported = {"input", "instructions", "model"}
+        for key, field in type(body).model_fields.items():
+            if key in supported:
+                continue
+            value = getattr(body, key)
+            if key in ("stream", "background") and value is False:
+                continue
+            if value != field.get_default(call_default_factory=True):
                 raise HTTPException(
                     422,
                     f"OpenCode sandbox execution does not support request field {key}; configure Gym model limits/sampling",
                 )
-        if body.tools or body.tool_choice != "auto" or not body.parallel_tool_calls or body.background:
-            raise HTTPException(422, "OpenCode owns tool selection and execution policy")
-        if (body.metadata or {}).get("chat_template_kwargs") is not None:
-            raise HTTPException(422, "Configure chat_template_kwargs on the Gym model server")
         if body.model not in (None, "", "dummy_model", self.config.model_server.name):
             raise HTTPException(422, "OpenCode sandbox execution uses the configured Gym model_server")
         items = (
