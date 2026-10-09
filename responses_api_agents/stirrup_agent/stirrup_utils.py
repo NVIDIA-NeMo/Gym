@@ -19,24 +19,21 @@ nothing task-specific lives here.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
 import uuid
-from typing import Any, List, Tuple, cast
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, cast
 
 from stirrup.clients.utils import to_openai_messages
 from stirrup.core.models import AssistantMessage, ChatMessage, SystemMessage, ToolMessage, UserMessage
 
-from nemo_gym.openai_utils import (
-    NeMoGymChatCompletionMessageParam,
-    NeMoGymEasyInputMessage,
-    NeMoGymFunctionCallOutput,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
-)
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
+
+
+if TYPE_CHECKING:
+    from nemo_gym.openai_utils import NeMoGymChatCompletionMessageParam
 
 
 LOGGER = logging.getLogger(__name__)
@@ -153,13 +150,13 @@ def _canonical_provider_message(message: dict[str, Any]) -> dict[str, Any]:
 def to_provider_openai_messages(messages: list[ChatMessage]) -> list[NeMoGymChatCompletionMessageParam]:
     """Serialize Stirrup history for an OpenAI-compatible provider."""
     serialized = to_openai_messages(restore_tool_messages_for_model(messages))
-    return cast(list[NeMoGymChatCompletionMessageParam], [_canonical_provider_message(m) for m in serialized])
+    return cast("list[NeMoGymChatCompletionMessageParam]", [_canonical_provider_message(m) for m in serialized])
 
 
 def convert_stirrup_history_to_output_items(
     history: List[List[Any]],
 ) -> Tuple[List, List]:
-    """Convert Stirrup message history into NeMoGym input/output items.
+    """Convert Stirrup message history into NeMoGym input/output items, as JSON objects.
 
     Returns ``(input_items, output_items)`` where *input_items* are
     system/user messages and *output_items* are assistant messages +
@@ -202,20 +199,21 @@ def convert_stirrup_history_to_output_items(
         for msg in turn:
             if isinstance(msg, SystemMessage):
                 input_items.append(
-                    NeMoGymEasyInputMessage(
-                        role="system",
-                        content=msg.content if isinstance(msg.content, str) else str(msg.content),
-                    )
+                    {
+                        "role": "system",
+                        "content": msg.content if isinstance(msg.content, str) else str(msg.content),
+                        "type": "message",
+                    }
                 )
 
             elif isinstance(msg, NeMoUserMessage) and msg.tool_call_id:
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 output_items.append(
-                    NeMoGymFunctionCallOutput(
-                        call_id=_disambiguate(msg.tool_call_id, output_seq),
-                        output=content,
-                        type="function_call_output",
-                    )
+                    {
+                        "call_id": _disambiguate(msg.tool_call_id, output_seq),
+                        "output": content,
+                        "type": "function_call_output",
+                    }
                 )
 
             elif isinstance(msg, UserMessage):
@@ -227,25 +225,19 @@ def convert_stirrup_history_to_output_items(
                 else:
                     content_text = str(msg.content)
 
-                input_items.append(NeMoGymEasyInputMessage(role="user", content=content_text))
+                input_items.append({"role": "user", "content": content_text, "type": "message"})
 
             elif isinstance(msg, AssistantMessage):
                 content_text = msg.content if isinstance(msg.content, str) else ""
                 if content_text:
                     output_items.append(
-                        NeMoGymResponseOutputMessage(
-                            id=f"msg-{uuid.uuid4().hex[:8]}",
-                            content=[
-                                NeMoGymResponseOutputText(
-                                    type="output_text",
-                                    text=content_text,
-                                    annotations=[],
-                                )
-                            ],
-                            role="assistant",
-                            status="completed",
-                            type="message",
-                        )
+                        {
+                            "id": f"msg-{uuid.uuid4().hex[:8]}",
+                            "content": [{"type": "output_text", "text": content_text, "annotations": []}],
+                            "role": "assistant",
+                            "status": "completed",
+                            "type": "message",
+                        }
                     )
 
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
@@ -256,25 +248,27 @@ def convert_stirrup_history_to_output_items(
                             or f"call-{uuid.uuid4().hex[:8]}"
                         )
                         output_items.append(
-                            NeMoGymResponseFunctionToolCall(
-                                id=f"fc-{uuid.uuid4().hex[:8]}",
-                                arguments=tc.arguments if isinstance(tc.arguments, str) else json.dumps(tc.arguments),
-                                call_id=_disambiguate(call_id, call_seq),
-                                name=tc.name,
-                                type="function_call",
-                                status="completed",
-                            )
+                            {
+                                "id": f"fc-{uuid.uuid4().hex[:8]}",
+                                "arguments": tc.arguments
+                                if isinstance(tc.arguments, str)
+                                else json.dumps(tc.arguments),
+                                "call_id": _disambiguate(call_id, call_seq),
+                                "name": tc.name,
+                                "type": "function_call",
+                                "status": "completed",
+                            }
                         )
 
             elif isinstance(msg, ToolMessage):
                 call_id = msg.tool_call_id if hasattr(msg, "tool_call_id") else f"call-{uuid.uuid4().hex[:8]}"
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 output_items.append(
-                    NeMoGymFunctionCallOutput(
-                        call_id=_disambiguate(call_id, output_seq),
-                        output=content,
-                        type="function_call_output",
-                    )
+                    {
+                        "call_id": _disambiguate(call_id, output_seq),
+                        "output": content,
+                        "type": "function_call_output",
+                    }
                 )
 
     return input_items, output_items
@@ -302,3 +296,95 @@ def extract_deliverable_text(history: List[List[Any]], finish_params: Any) -> st
             break
 
     return "\n\n".join(parts) if parts else ""
+
+
+_BASE64_DATA_URL_PREFIX = re.compile(r"^data:[^;,]*;base64,")
+_MEDIA_URL_EXAMPLES = {
+    "input_image": '{"image_url": "data:image/png;base64,..."}',
+    "input_video": '{"video_url": {"url": "data:video/mp4;base64,..."}}',
+}
+
+
+def _abbreviate(value: Any, keep: int = 40) -> str:
+    text = json.dumps(value, default=str)
+    return text if len(text) <= 2 * keep + 5 else f"{text[:keep]} ... {text[-keep:]}"
+
+
+def _media_bytes(source: Any, part_type: str) -> bytes:
+    url = source.get("url") if isinstance(source, dict) else source
+    match = _BASE64_DATA_URL_PREFIX.match(url) if isinstance(url, str) else None
+    if match is None:
+        raise ValueError(
+            f"Stirrup expects {part_type} as a base64 data URL, e.g. {_MEDIA_URL_EXAMPLES[part_type]}, "
+            f"but {_abbreviate(source)} was given"
+        )
+    return base64.b64decode(url[match.end() :])
+
+
+def _stirrup_content(content: Any) -> Any:
+    """Convert Responses message content into Stirrup ``Content``."""
+    from stirrup.core.models import ImageContentBlock, VideoContentBlock
+
+    if isinstance(content, str):
+        return content
+    blocks: list[Any] = []
+    for part in content or []:
+        match part.get("type"):
+            case "input_text":
+                blocks.append(part["text"])
+            case "input_image":
+                blocks.append(ImageContentBlock(data=_media_bytes(part.get("image_url"), "input_image")))
+            case "input_video":
+                source = part.get("video_url", part.get("video"))
+                blocks.append(VideoContentBlock(data=_media_bytes(source, "input_video")))
+            case _:
+                raise ValueError(
+                    "Stirrup expects input_text, input_image or input_video content parts, "
+                    f"but {_abbreviate(part)} was given"
+                )
+    return blocks
+
+
+def _text_content(content: Any, role: str) -> str:
+    blocks = _stirrup_content(content)
+    if isinstance(blocks, str):
+        return blocks
+    if not all(isinstance(block, str) for block in blocks):
+        raise ValueError(f"Stirrup expects text-only {role} messages, but {_abbreviate(content)} was given")
+    return "".join(blocks)
+
+
+def messages_from_input(input: Any, instructions: Optional[str]) -> tuple[Optional[str], list[Any]]:
+    """Convert Responses API input into Stirrup's system prompt and initial messages.
+
+    ``instructions`` and the leading system/developer messages form the system prompt, which Stirrup appends
+    to its own base system prompt.
+    """
+    from stirrup.core.models import UserMessage
+
+    items = [{"type": "message", "role": "user", "content": input}] if isinstance(input, str) else input
+    system_parts = [instructions] if instructions else []
+    messages: list[Any] = []
+    for index, item in enumerate(items):
+        item = item if isinstance(item, dict) else item.model_dump()
+        item_type, role = item.get("type", "message"), item.get("role")
+        if item_type != "message":
+            raise ValueError(f"Stirrup expects message items, but input[{index}] is {_abbreviate(item)}")
+        if role in ("system", "developer"):
+            if messages:
+                raise ValueError(
+                    f"Stirrup expects {role} messages before the first user message, "
+                    f"but input[{index}] is {_abbreviate(item)}"
+                )
+            system_parts.append(_text_content(item.get("content"), role))
+        elif role == "user":
+            messages.append(UserMessage(content=_stirrup_content(item.get("content"))))
+        elif role == "assistant":
+            raise NotImplementedError("Multi-turn input with assistant messages is not supported by Stirrup yet")
+        else:
+            raise ValueError(
+                f"Stirrup expects system, developer or user messages, but input[{index}] is {_abbreviate(item)}"
+            )
+    if not messages:
+        raise ValueError("Stirrup requires a user message in responses_create_params.input")
+    return "\n\n".join(system_parts) or None, messages

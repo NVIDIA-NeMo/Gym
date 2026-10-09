@@ -7,7 +7,7 @@ import io
 import pytest
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from responses_api_agents.stirrup_agent.app import _messages_from_input
+from responses_api_agents.stirrup_agent.stirrup_utils import messages_from_input
 
 
 pytest.importorskip("stirrup")
@@ -15,6 +15,12 @@ pytest.importorskip("stirrup")
 
 def _body(**kwargs) -> NeMoGymResponseCreateParamsNonStreaming:
     return NeMoGymResponseCreateParamsNonStreaming(**kwargs)
+
+
+def _messages_from_input(body: NeMoGymResponseCreateParamsNonStreaming):
+    """Convert the request as the sandbox runner receives it, serialized to JSON."""
+    params = body.model_dump(mode="json")
+    return messages_from_input(params["input"], params["instructions"])
 
 
 def test_single_user_message_becomes_the_task_without_a_system_prompt():

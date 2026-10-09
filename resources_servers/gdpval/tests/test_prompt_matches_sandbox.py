@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from resources_servers.gdpval.task_sandbox import WORKDIR
+
 
 _REPO = Path(__file__).resolve().parents[3]
 _CONTAINERS = Path(__file__).resolve().parents[1] / "containers"
@@ -160,15 +162,11 @@ def test_prompt_advertises_the_working_dir_the_provider_actually_uses(prompt):
     """The prompt's example path must be this sandbox's, not the reference one.
 
     The published Artificial Analysis prompt says `/home/user`, because their
-    sandbox runs as a non-root user. GDPValTask constructs the provider with
-    `working_dir="/root"`, and every command is prefixed with a `cd` to it, so
-    an example rooted at /home/user sends the model to a directory that does
-    not exist here.
+    sandbox runs as a non-root user. The task sandbox's working directory is
+    `WORKDIR`, and every command is prefixed with a `cd` to it, so an example
+    rooted at /home/user sends the model to a directory that does not exist here.
     """
-    task_src = (_REPO / "responses_api_agents" / "stirrup_agent" / "tasks" / "gdpval.py").read_text(encoding="utf-8")
-    m = re.search(r'^\s*working_dir\s*=\s*"([^"]+)"', task_src, re.MULTILINE)
-    assert m, "could not find the working_dir the GDPval provider is constructed with"
-    working_dir = m.group(1)
+    working_dir = WORKDIR
 
     assert working_dir in prompt, f"prompt never names the real working dir {working_dir}"
     assert "/home/user" not in prompt, (

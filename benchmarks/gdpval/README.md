@@ -5,6 +5,39 @@ knowledge-work tasks scored by an LLM judge against per-task rubrics. This
 benchmark wires the Stirrup-based agent (`responses_api_agents/stirrup_agent`)
 to the GDPVal resources server (`resources_servers/gdpval`).
 
+## How it works
+
+```
+┌──────────────────────┐  1. seed session        ┌─────────────────────────────┐
+│  Environment server  │  4. /verify             │   GDPVal resources server   │
+│                      │ ──────────────────────► │ reference files, task tools,│
+└──────────┬───────────┘                         │ judging                     │
+           │ 2. seed agent session               └──────┬───────────────▲──────┘
+           │    (sandbox + tool access)                 │ owns          │ task tools
+           ▼                                            ▼               │
+┌──────────────────────┐  3. installs Stirrup,   ┌──────────────────────┴──────┐
+│    Stirrup agent     │     runs the episode    │        Task sandbox         │
+│                      │ ──────────────────────► │ /root, Stirrup loop,        │
+└──────────────────────┘                         │ code_exec                   │
+                                                 └──────────────┬──────────────┘
+                                                                │ model calls
+                                                                ▼
+                                                 ┌─────────────────────────────┐
+                                                 │        Model server         │
+                                                 └─────────────────────────────┘
+```
+
+1. The environment server seeds a resources session: the resources server downloads the task's reference files,
+   starts a sandbox from the image built from `resources_servers/gdpval/containers/Dockerfile` and uploads the files under `/root`.
+2. The environment server seeds the Stirrup agent with access to that sandbox and to the resources server's task tools.
+3. The agent installs Stirrup in the sandbox and runs the episode there. Shell commands (`code_exec`) run in the
+   sandbox; the task tools (`finish`, `abandon_task_finish`, `web_search`, `fetch_web_page`) are calls to the
+   resources server, and `finish` checks the submitted files exist.
+4. `/verify` copies the submitted files to `task_<id>/repeat_<n>/` under `persist_deliverables_dir`, stops the sandbox
+   and judges the files, against the rubric or a reference model's deliverables.
+
+Each output line holds `responses_create_params`, the agent's `response`, the `reward` and the `judge_response`.
+
 ## Prepare data
 
 Downloads `openai/gdpval` from HuggingFace and writes
@@ -351,7 +384,7 @@ The benchmark config sets these Stirrup agent keys on
 | Key | GDPVal | Stirrup default | Meaning |
 |-----|--------|-----------------|---------|
 | `context_window_tokens` | `262144` | `262144` | Model context window used to size each call's `max_completion_tokens` and to decide when Stirrup compacts the context. It replaces the window Stirrup derived from the request's `max_output_tokens`, which now only lowers the per-call cap `max_completion_tokens_cap` (default `64000`). |
-| `min_completion_tokens` | `8192` | `1024` | Floor on each call's `max_completion_tokens`. GDPVal tasks routinely need multi-thousand-token scripts: a 1,024-token completion cannot hold a useful tool call and can start a sticky `code_exec({})` loop after long reasoning turns. `max_completion_tokens_cap` always applies, and when the tokenizer renders the full prompt the remaining context is also a strict bound. |
+| `min_completion_tokens` | `8192` | `1024` | Floor on each call's `max_completion_tokens`. GDPVal tasks routinely need multi-thousand-token scripts: a 1,024-token completion cannot hold a useful tool call and can start a sticky `code_exec({})` loop after long reasoning turns. `max_completion_tokens_cap` always applies. |
 | `prompt_estimator_truncate_history_thinking` | unset | unset | Prompt estimator only; never sent to the model. Set it to `true` for checkpoints whose chat template drops reasoning from assistant turns before the last user turn, so the estimate matches. |
 | `min_compaction_summary_words` | `50` | `1` | Minimum words in a context-compaction summary, which rejects near-empty summaries that would erase progress on long sessions. After 3 rejected attempts the agent raises an error instead of replacing its history. |
 | `truncation_recovery` | `true` | `false` | After a call spends its whole completion budget without a usable tool call, run the next call with thinking disabled and a one-time instruction to act now. The budget is unchanged and the instruction is not recorded in the trajectory. Disabling thinking needs a model server that forwards request `chat_template_kwargs` (`forward_request_chat_template_kwargs: true` on `vllm_model`); otherwise only the instruction is sent. |

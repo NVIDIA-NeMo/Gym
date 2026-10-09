@@ -27,22 +27,18 @@ that break on long-context models served by vLLM:
    genuinely long, this turns a normal "ran out of output budget" event
    into a fatal error.
 
-This subclass addresses both.  Before each call we tokenize the messages
-and size ``max_completion_tokens`` as::
+This subclass addresses both.  Before each call we estimate the prompt's
+tokens from its character count and size ``max_completion_tokens`` as::
 
-    context_window − tokenized(messages) − completion_token_buffer
+    context_window − estimated(messages) − completion_token_buffer
 
 raised toward a configurable minimum (historically 1,024 tokens), subject to
-the hard cap. Estimated remaining context is also a strict bound when the
-tokenizer successfully renders the complete prompt; approximate fallbacks keep
-the configured floor because they can substantially overcount retained reasoning. On the response
+the hard cap. The floor holds even past the estimated context, because the
+estimate can substantially overcount retained reasoning. On the response
 side, we replicate Stirrup parsing but do *not* raise on
 ``finish_reason=length`` — the agent loop will either terminate when the
 model invokes the ``finish`` tool or exhaust ``max_turns``, yielding a
 clean timeout instead of a crash.
-
-``model_id`` selects the HuggingFace tokenizer (or local checkpoint path).
-When unset, an approximate character-count fallback is used.
 """
 
 from __future__ import annotations
@@ -50,13 +46,12 @@ from __future__ import annotations
 import json
 import logging
 from time import perf_counter
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import stirrup.core.agent as _stirrup_agent_mod
 from pydantic import ValidationError as _PydanticValidationError
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.clients.utils import to_openai_tools
-from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -66,8 +61,11 @@ from stirrup.core.models import (
     ToolCall,
 )
 
-from nemo_gym.openai_utils import NeMoGymChatCompletionMessageParam
 from responses_api_agents.stirrup_agent.stirrup_utils import to_provider_openai_messages
+
+
+if TYPE_CHECKING:
+    from nemo_gym.openai_utils import NeMoGymChatCompletionMessageParam
 
 
 LOGGER = logging.getLogger(__name__)
@@ -124,43 +122,8 @@ def _install_tool_arg_error_surfacing() -> None:
 _install_tool_arg_error_surfacing()
 
 
-# Replace stirrup's SIMPLE_FINISH_TOOL with a coercing variant whose
-# FinishParams accepts `paths` as a JSON-encoded string and normalizes to
-# list[str]. vLLM 0.20.0's --tool-call-parser deepseek_v4 forwards DSv4's
-# string="false" args as JSON strings (the unwrap landed upstream in vLLM
-# PR #41801, merged 2026-05-06, but the wedu image predates the merge).
-# See responses_api_agents/stirrup_agent/finish_tool_coercing.py for the
-# coerced schema. The override happens at module-import time so any Agent
-# constructed after this point picks up the coercing variant via the
-# default-arg path in stirrup.core.agent.Agent.__init__.
-def _install_coercing_finish_tool() -> None:
-    import stirrup.tools as _tools_mod
-    import stirrup.tools.finish as _finish_mod
-
-    if getattr(_finish_mod.SIMPLE_FINISH_TOOL, "_gym_coercing_finish_patched", False):
-        return
-
-    from responses_api_agents.stirrup_agent.finish_tool_coercing import (
-        COERCING_FINISH_TOOL,
-    )
-
-    # Tag for idempotency.
-    setattr(COERCING_FINISH_TOOL, "_gym_coercing_finish_patched", True)
-
-    # Patch the canonical binding plus every place stirrup or its callers
-    # captured a reference via `from ... import SIMPLE_FINISH_TOOL`.
-    _finish_mod.SIMPLE_FINISH_TOOL = COERCING_FINISH_TOOL
-    if hasattr(_tools_mod, "SIMPLE_FINISH_TOOL"):
-        _tools_mod.SIMPLE_FINISH_TOOL = COERCING_FINISH_TOOL
-    if hasattr(_stirrup_agent_mod, "SIMPLE_FINISH_TOOL"):
-        _stirrup_agent_mod.SIMPLE_FINISH_TOOL = COERCING_FINISH_TOOL
-
-
-_install_coercing_finish_tool()
-
 # Target floor for per-call max_completion_tokens. Below this the model usually
-# cannot produce a useful answer. The hard cap always takes precedence; exact
-# tokenizer estimates also enforce remaining context as a strict bound.
+# cannot produce a useful answer. The hard cap always takes precedence.
 _MIN_COMPLETION_TOKENS = 1024
 
 # Hard cap on per-call max_completion_tokens.  Oversized completion budgets
@@ -196,34 +159,6 @@ _TRUNCATION_RECOVERY_NUDGE = (
 )
 
 
-def _load_tokenizer(model_id: Optional[str]):
-    """Load a HuggingFace tokenizer, tolerating version differences in transformers."""
-    if not model_id:
-        return None
-    try:
-        from transformers import AutoTokenizer
-    except ImportError:
-        LOGGER.warning(
-            "transformers is not installed; dynamic max_tokens sizing will use "
-            "a character-count fallback.  `pip install transformers` to enable."
-        )
-        return None
-    # Some tokenizers (Mistral family) expose a ``fix_mistral_regex`` kwarg.
-    # Try the richer call first, fall back to the common signature.
-    for kwargs in (
-        {"use_fast": True, "trust_remote_code": True, "fix_mistral_regex": True},
-        {"use_fast": True, "trust_remote_code": True},
-    ):
-        try:
-            return AutoTokenizer.from_pretrained(model_id, **kwargs)
-        except TypeError:
-            continue
-        except Exception as exc:
-            LOGGER.warning(f"Failed to load tokenizer for {model_id!r}: {exc}")
-            return None
-    return None
-
-
 class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
     """ChatCompletionsClient that sizes max_completion_tokens per call and
     does not raise on a length-finish response."""
@@ -231,7 +166,6 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
     def __init__(
         self,
         *args: Any,
-        model_id: Optional[str] = None,
         completion_token_buffer: int = 1000,
         temperature: float = 1.0,
         top_p: float = 0.95,
@@ -259,12 +193,6 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         # emitting a tool call; consumed by the very next generate().
         self._recover_from_truncation = False
         self._truncation_overruns = 0
-        self._tokenizer = _load_tokenizer(model_id)
-        if model_id and self._tokenizer is None:
-            LOGGER.warning(
-                f"model_id={model_id!r} provided but tokenizer could not be loaded. "
-                "Dynamic max_tokens will use a character-count fallback."
-            )
 
     # ------------------------------------------------------------------
     # Token counting
@@ -346,174 +274,24 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
                 counted_messages.append({**message, "content": estimated_content})
         return counted_messages
 
-    def _messages_for_template_count(
-        self,
-        messages: list[NeMoGymChatCompletionMessageParam],
-    ) -> list[NeMoGymChatCompletionMessageParam]:
-        """Mirror vLLM's tool-argument decoding before template rendering.
-
-        OpenAI history carries ``function.arguments`` as a JSON string, while
-        Nemotron's Jinja template iterates it as a mapping. vLLM decodes that
-        field before rendering; HuggingFace ``apply_chat_template`` does not.
-        Keep this as a fallback template-input variant so templates that
-        natively accept OpenAI's string representation retain their existing
-        behavior. The provider payload is never mutated.
-        """
-        normalized_messages: list[NeMoGymChatCompletionMessageParam] = []
-        messages_changed = False
-        for message in messages:
-            tool_calls = message.get("tool_calls")
-            if not isinstance(tool_calls, list):
-                normalized_messages.append(message)
-                continue
-
-            normalized_calls = []
-            changed = False
-            for tool_call in tool_calls:
-                if not isinstance(tool_call, dict):
-                    normalized_calls.append(tool_call)
-                    continue
-                function = tool_call.get("function")
-                if not isinstance(function, dict) or not isinstance(function.get("arguments"), str):
-                    normalized_calls.append(tool_call)
-                    continue
-                try:
-                    arguments = json.loads(function["arguments"])
-                except json.JSONDecodeError:
-                    normalized_calls.append(tool_call)
-                    continue
-                if not isinstance(arguments, dict):
-                    normalized_calls.append(tool_call)
-                    continue
-                normalized_calls.append({**tool_call, "function": {**function, "arguments": arguments}})
-                changed = True
-
-            normalized_messages.append({**message, "tool_calls": normalized_calls} if changed else message)
-            messages_changed = messages_changed or changed
-        return normalized_messages if messages_changed else messages
-
     def _count_input_tokens(
         self,
         messages: list[NeMoGymChatCompletionMessageParam],
         tools: Optional[dict[str, Tool]] = None,
     ) -> int:
-        """Return the best available prompt-token estimate."""
-        return self._count_input_tokens_with_confidence(messages, tools)[0]
+        """Estimate the prompt tokens from the complete serialized payload, tool calls and schemas included.
 
-    def _count_input_tokens_with_confidence(
-        self,
-        messages: list[NeMoGymChatCompletionMessageParam],
-        tools: Optional[dict[str, Tool]] = None,
-    ) -> tuple[int, bool]:
-        """Estimate the full prompt token count the server will see.
-
-        ``messages`` must already be serialized for the provider. This keeps
-        token accounting aligned with the exact payload sent on the wire,
-        including assistant ``tool_calls``, multimodal content blocks, and
-        tool-schema injection.
-
-        Counting strategy (in order, best -> worst):
-
-        1. ``tokenizer.apply_chat_template(messages, tools=…)`` — ideal,
-           but some chat templates don't support the ``tools`` kwarg.
-        2. ``tokenizer.apply_chat_template(messages)`` + tokenise the tool
-           JSON blob separately — still captures assistant ``tool_calls``
-           via the chat template.
-        3. Tokenise the JSON of the serialized messages and tools blob —
-           rough but serialises everything.
-        4. Character-count fallback when no tokenizer is present.
-
-        Returns ``(count, exact_template_render)``. Only a successful render of
-        the complete prompt is exact enough to impose a hard context bound.
-        JSON and character fallbacks remain useful for budget sizing, but must
-        not turn an approximate over-count into a false context-overflow error.
-
-        Any residual gap is absorbed by ``completion_token_buffer``.
+        ``messages`` must already be serialized for the provider. Any residual gap is absorbed by
+        ``completion_token_buffer``.
         """
-        import json as _json
-
-        if self._tokenizer is None:
-            # Pure character-count fallback. Count the complete serialized
-            # payload, including assistant tool-call names and arguments.
-            counted_messages = self._messages_for_estimator_count(messages)
-            total = len(_json.dumps(counted_messages, ensure_ascii=False)) // 3
-            if tools:
-                try:
-                    total += len(_json.dumps(to_openai_tools(tools))) // 3
-                except Exception:
-                    pass
-            return total, False
-
-        oai_tools = None
+        counted_messages = self._messages_for_estimator_count(messages)
+        total = len(json.dumps(counted_messages, ensure_ascii=False)) // 3
         if tools:
             try:
-                oai_tools = to_openai_tools(tools)
-            except Exception as exc:
-                LOGGER.warning(f"to_openai_tools failed ({exc}).")
-
-        # Strategy 1: apply_chat_template with tools=
-        template_kwargs: dict[str, Any] = {}
-        if self._prompt_estimator_truncate_history_thinking is not None:
-            template_kwargs["truncate_history_thinking"] = self._prompt_estimator_truncate_history_thinking
-        normalized_template_messages = self._messages_for_template_count(messages)
-        template_message_variants = [messages]
-        if normalized_template_messages is not messages:
-            template_message_variants.append(normalized_template_messages)
-        if oai_tools is not None:
-            last_template_error = None
-            for template_messages in template_message_variants:
-                try:
-                    text = self._tokenizer.apply_chat_template(
-                        template_messages,
-                        tools=oai_tools,
-                        tokenize=False,
-                        add_generation_prompt=True,
-                        **template_kwargs,
-                    )
-                    return len(self._tokenizer(text, add_special_tokens=False)["input_ids"]), True
-                except Exception as exc:
-                    last_template_error = exc
-            LOGGER.debug(
-                "apply_chat_template(tools=) unsupported (%s); trying separate tool count.",
-                last_template_error,
-            )
-
-        # Strategy 2: apply_chat_template on messages only + separate tool JSON count
-        last_template_error = None
-        for template_messages in template_message_variants:
-            try:
-                text = self._tokenizer.apply_chat_template(
-                    template_messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    **template_kwargs,
-                )
-                total = len(self._tokenizer(text, add_special_tokens=False)["input_ids"])
-                if oai_tools is not None:
-                    total += len(self._tokenizer(_json.dumps(oai_tools), add_special_tokens=False)["input_ids"])
-                # With no tools this is the complete rendered prompt. When tools
-                # exist, tokenizing their JSON separately does not reproduce the
-                # template's wrappers or token boundaries and remains approximate.
-                return total, oai_tools is None
-            except Exception as exc:
-                last_template_error = exc
-        LOGGER.warning("apply_chat_template(messages) failed (%s); falling back to JSON count.", last_template_error)
-
-        # Strategy 3: tokenise the full JSON payload
-        try:
-            counted_messages = self._messages_for_estimator_count(messages)
-            blob = _json.dumps(counted_messages)
-            total = len(self._tokenizer(blob, add_special_tokens=False)["input_ids"])
-            if oai_tools is not None:
-                total += len(self._tokenizer(_json.dumps(oai_tools), add_special_tokens=False)["input_ids"])
-            return total, False
-        except Exception as exc:
-            LOGGER.warning(f"JSON tokenisation failed ({exc}); falling back to character count.")
-
-        # Strategy 4: character count
-        counted_messages = self._messages_for_estimator_count(messages)
-        total = len(_json.dumps(counted_messages, ensure_ascii=False)) // 3
-        return total, False
+                total += len(json.dumps(to_openai_tools(tools))) // 3
+            except Exception:
+                pass
+        return total
 
     async def generate(
         self,
@@ -533,20 +311,12 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         if recovering:
             provider_messages = [*provider_messages, {"role": "user", "content": _TRUNCATION_RECOVERY_NUDGE}]
 
-        input_tokens, exact_template_render = self._count_input_tokens_with_confidence(provider_messages, tools)
-        context_window = self._max_tokens
-        estimated_remaining_context = context_window - input_tokens
-        if exact_template_render and estimated_remaining_context <= 0:
-            raise ContextOverflowError(
-                f"Estimated prompt ({input_tokens} tokens) leaves no room in the {context_window}-token context window"
-            )
+        input_tokens = self._count_input_tokens(provider_messages, tools)
         dynamic_max = max(
-            estimated_remaining_context - self._completion_token_buffer,
+            self._max_tokens - input_tokens - self._completion_token_buffer,
             self._min_completion_tokens,
         )
         capped_max = min(dynamic_max, self._max_completion_tokens_cap)
-        if exact_template_render:
-            capped_max = min(capped_max, estimated_remaining_context)
 
         # ``self._kwargs`` is spread last so explicit per-request kwargs override
         # the agent-level defaults.
@@ -603,7 +373,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
             "actual prompt=%d completion=%d (reasoning=%d) finish=%s "
             "content_len=%d tool_calls=%d",
             input_tokens,
-            context_window,
+            self._max_tokens,
             self._completion_token_buffer,
             dynamic_max,
             capped_max,
