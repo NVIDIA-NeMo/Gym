@@ -1083,3 +1083,149 @@ class TestApp:
             UpstreamRetryPolicy(
                 pre_request_jitter_seconds=pre_request_jitter_seconds,
             )
+
+
+def _chat_completion(message: dict, finish_reason: str = "stop") -> dict:
+    return {
+        "id": "chatcmpl-1",
+        "choices": [{"finish_reason": finish_reason, "index": 0, "message": {"role": "assistant", **message}}],
+        "created": 1753983922,
+        "model": "dummy_model",
+        "object": "chat.completion",
+    }
+
+
+_REASONING_ONLY_CHAT = _chat_completion({"content": None, "reasoning_content": "Let me look at the file first."})
+_TOOL_CALL_CHAT = _chat_completion(
+    {
+        "content": None,
+        "tool_calls": [
+            {"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "a.py"}'}}
+        ],
+    },
+    finish_reason="tool_calls",
+)
+
+
+def _reasoning_only_response() -> dict:
+    response = _response_data()
+    response["output"] = [
+        {"id": "rs_1", "type": "reasoning", "summary": [{"type": "summary_text", "text": "Let me think."}]}
+    ]
+    return response
+
+
+class TestRetryEmptyCompletions:
+    def _server(self, retry_empty_completions: int) -> SimpleModelServer:
+        return TestApp()._setup_server(retry_empty_completions=retry_empty_completions)
+
+    async def test_default_returns_reasoning_only_completion_unchanged(self) -> None:
+        server = self._server(0)
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=[_REASONING_ONLY_CHAT, _TOOL_CALL_CHAT])
+
+        client = TestClient(server.setup_webserver())
+        result = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+
+        assert result.status_code == 200
+        assert result.json()["choices"][0]["message"].get("tool_calls") is None
+        assert server._client.create_chat_completion.await_count == 1
+
+    async def test_chat_reasoning_only_completion_is_retried(self) -> None:
+        server = self._server(2)
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=[_REASONING_ONLY_CHAT, _TOOL_CALL_CHAT])
+
+        client = TestClient(server.setup_webserver())
+        body = {"messages": [{"role": "user", "content": "fix the bug"}]}
+        result = client.post("/v1/chat/completions", json=body)
+
+        assert result.status_code == 200
+        assert result.json()["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "read_file"
+        assert server._client.create_chat_completion.await_count == 2
+        first, second = server._client.create_chat_completion.await_args_list
+        assert first.kwargs == second.kwargs  # the same request is re-issued
+
+    async def test_chat_retries_are_bounded_and_last_attempt_is_returned(self) -> None:
+        server = self._server(2)
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(return_value=_REASONING_ONLY_CHAT)
+
+        client = TestClient(server.setup_webserver())
+        result = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+
+        assert result.status_code == 200
+        assert result.json()["choices"][0]["message"]["content"] is None
+        assert server._client.create_chat_completion.await_count == 3
+
+    async def test_chat_non_empty_and_truncated_completions_are_not_retried(self) -> None:
+        for completion in (
+            _chat_completion({"content": "Done."}),
+            _TOOL_CALL_CHAT,
+            _chat_completion({"content": None, "reasoning_content": "long..."}, finish_reason="length"),
+        ):
+            server = self._server(3)
+            server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+            server._client.create_chat_completion = AsyncMock(return_value=completion)
+
+            client = TestClient(server.setup_webserver())
+            result = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+
+            assert result.status_code == 200
+            assert server._client.create_chat_completion.await_count == 1
+
+    async def test_responses_reasoning_only_output_is_retried(self) -> None:
+        server = self._server(1)
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=[_reasoning_only_response(), _response_data()])
+
+        client = TestClient(server.setup_webserver())
+        result = client.post("/v1/responses", json={"input": "hello"})
+
+        assert result.status_code == 200
+        assert result.json()["output"][0]["type"] == "message"
+        assert server._client.create_response.await_count == 2
+
+    async def test_responses_with_text_or_incomplete_status_are_not_retried(self) -> None:
+        truncated = _reasoning_only_response()
+        truncated["status"] = "incomplete"
+        truncated["incomplete_details"] = {"reason": "max_output_tokens"}
+        for response in (_response_data(), truncated):
+            server = self._server(2)
+            server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+            server._client.create_response = AsyncMock(return_value=response)
+
+            client = TestClient(server.setup_webserver())
+            result = client.post("/v1/responses", json={"input": "hello"})
+
+            assert result.status_code == 200
+            assert server._client.create_response.await_count == 1
+
+    @pytest.mark.parametrize("endpoint", ["responses", "chat_completions"])
+    async def test_empty_retry_preserves_provider_retry_policy(self, endpoint: str) -> None:
+        server = TestApp()._setup_server(
+            retry_empty_completions=1,
+            max_concurrent_requests=1,
+            upstream_max_num_tries=1,
+            upstream_retry_policy={"max_attempts": 2, "backoff_initial_seconds": 0},
+        )
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        empty, visible = (
+            (_reasoning_only_response(), _response_data())
+            if endpoint == "responses"
+            else (_REASONING_ONLY_CHAT, _TOOL_CALL_CHAT)
+        )
+        operation = AsyncMock(side_effect=[TimeoutError("transient"), empty, visible])
+        if endpoint == "responses":
+            server._client.create_response = operation
+            result = await server.responses(NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+            assert result.output[0].type == "message"
+        else:
+            server._client.create_chat_completion = operation
+            result = await server.chat_completions(
+                NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "hello"}])
+            )
+            assert result.choices[0].message.tool_calls[0].function.name == "read_file"
+        assert operation.await_count == 3
+        assert all(call.kwargs == operation.await_args_list[0].kwargs for call in operation.await_args_list)
+        assert not server._semaphore.locked()

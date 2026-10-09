@@ -23,6 +23,29 @@ A value of one disables HTTP retries. Connection-error retries are controlled
 separately. Internal Gym clients retain their existing unbounded extension for
 rate-limit statuses; 404 and 408 never trigger that extension.
 
+## Retrying empty completions
+
+Some always-thinking reasoning models occasionally stop after emitting only
+reasoning: the chat completion has `finish_reason: "stop"` but neither
+`content` nor `tool_calls` (on `/v1/responses`, the output holds only
+`reasoning` items). Agent harnesses usually treat that empty assistant turn as
+fatal and end the episode. `retry_empty_completions: N` re-issues the same
+upstream request up to N extra times when this happens; the first response with
+visible output (or the last attempt) is returned. Responses cut off by the
+token limit (`finish_reason: "length"`, `status: "incomplete"`) are returned as
+is. The default, 0, disables the retry.
+
+Each empty-completion retry uses the configured upstream retry policy and
+releases its provider slot between attempts. With `upstream_max_num_tries: 1`,
+the maximum provider attempts are `(N + 1) * upstream_retry_policy.max_attempts`.
+
+```yaml
+policy_model:
+  responses_api_models:
+    openai_model:
+      retry_empty_completions: 2
+```
+
 
 # Licensing information
 Code: Apache 2.0
