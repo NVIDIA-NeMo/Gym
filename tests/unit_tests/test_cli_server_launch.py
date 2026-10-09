@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import shlex
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -24,6 +27,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     UV_VENV_DIR_KEY_NAME,
 )
+from nemo_gym.telemetry.startup import STARTUP_SETUP_DONE_NS_ENV
 from tests.unit_tests.test_global_config import TestGlobalConfig as _TestGlobalConfig
 
 
@@ -59,3 +63,30 @@ class TestServerLaunchCommand:
         assert f"source {shlex.quote(str(expected_venv / 'bin' / 'activate'))}" in setup_lines[0]
         assert NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME not in command
         assert NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME not in command
+
+    def test_stamps_when_venv_setup_finished_before_launching_the_server(self, tmp_path: Path) -> None:
+        """The server cannot see the venv setup that ran before it existed, so the shell stamps its end."""
+        server_dir = self._setup_server_dir(tmp_path)
+        global_config_dict = _TestGlobalConfig._default_global_config_dict_values.fget(None) | {
+            UV_VENV_DIR_KEY_NAME: str(PARENT_DIR)
+        }
+        venv_python = str(server_dir / ".venv" / "bin" / "python")
+
+        command = _server_launch_command(server_dir, global_config_dict, "my_server", Path("app.py"))
+
+        *_, stamp_line, launch_line = command.splitlines()
+        assert f"export {STARTUP_SETUP_DONE_NS_ENV}=$({shlex.quote(venv_python)} -c " in stamp_line
+        assert shlex.split(launch_line)[:2] == ["&&", venv_python]
+
+    def test_the_stamp_is_a_wall_clock_nanosecond_integer_visible_to_the_server(self) -> None:
+        """Runs the stamp fragment for real, with the interpreter standing in for the venv's."""
+        stamp_fragment = (
+            f"export {STARTUP_SETUP_DONE_NS_ENV}=$({shlex.quote(sys.executable)} -c "
+            f"'import time; print(time.time_ns())') && {shlex.quote(sys.executable)} -c "
+            f"'import os; print(os.environ[\"{STARTUP_SETUP_DONE_NS_ENV}\"])'"
+        )
+        before_ns = time.time_ns()
+
+        result = subprocess.run(["bash", "-c", stamp_fragment], capture_output=True, text=True, check=True)
+
+        assert before_ns <= int(result.stdout) <= time.time_ns()

@@ -134,7 +134,7 @@ the backend latency. When sizing pools, keep file-descriptor, ephemeral-port, an
 connection budgets in mind.
 
 Pool metrics require an active metrics exporter before the shared client is constructed.
-Gym server processes and the orchestrator used by `gym eval run` initialize telemetry
+Gym server processes and the supervisor used by `gym eval run` initialize telemetry
 automatically. When Gym telemetry is enabled and another library, such as NeMo RL, already set
 up nemo-lens in the same process, Gym reuses its providers, and pool metrics follow that library's
 metrics setting.

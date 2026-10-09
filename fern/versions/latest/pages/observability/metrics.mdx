@@ -27,7 +27,9 @@ would disagree the first time one dropped a sample.
 | `gym.rollout.duration_ms` | Histogram | ms | Wall-clock duration of one rollout, from the agent server's `/run`. |
 | `gym.verify.duration_ms` | Histogram | ms | Wall-clock duration of one verification. |
 | `gym.verify.success_rate` | Gauge | fraction | Cumulative fraction of verifications that completed. See below. |
-| `gym.servers.active` | Gauge | count | Number of servers the orchestrator started. |
+| `gym.servers.active` | Gauge | count | Number of servers the supervisor started. |
+| `gym.server.startup_duration_ms` | Histogram | ms | One server's wall-clock from the supervisor spawning it to its first answered health probe. Recorded by the supervisor, with a resolution of about three seconds. |
+| `gym.server.startup_stage_duration_ms` | Histogram | ms | One stage of one server's own startup, recorded by that server. The `nemo.gym.startup.stage` attribute names the stage. |
 | `gym.http.connection_pool.queue_duration_ms` | Histogram | ms | Time one queued connection acquisition waited for an aiohttp pool slot. |
 | `gym.http.connection_pool.connect_total` | Observable counter | count | All outbound aiohttp connection attempts (`connect()` calls), including attempts that later fail or are abandoned. |
 | `gym.server.memory.usage` | Gauge | bytes | Current RSS or PSS for one managed server and its descendants. |
@@ -40,6 +42,34 @@ would disagree the first time one dropped a sample.
 
 Rollout duration is recorded even when a rollout fails. A crashed rollout still consumed
 wall-clock time, and dropping those samples would bias the histogram toward the fast path.
+
+### Startup Metrics
+
+Both startup histograms carry `nemo.gym.server.name` and `nemo.gym.server.type`. The stage histogram also
+carries `nemo.gym.startup.stage`. Stages are contiguous, so for one server they sum to the time from spawn to
+the server calling `uvicorn.run`:
+
+| Stage | What it covers |
+| --- | --- |
+| `venv_setup` | Venv creation and dependency installation in the launch shell. Near zero when `skip_venv_if_present` reuses a venv. |
+| `interpreter_start` | The server's interpreter starting and importing the server module and its dependencies. |
+| `worker_start` | Workers only: the main process handing off to Uvicorn to the worker entering `run_webserver`, which covers spawning the worker process and importing the server module. |
+| `load_config` | Loading the merged config and this server's section of it. |
+| `init_ray` | Starting or joining Ray, for servers that use it. |
+| `init_server` | Constructing the server object, including its `model_post_init` (external tool installs, model clients, caches). |
+| `init_telemetry` | Initialising OpenTelemetry in this process. |
+| `setup_webserver` | The server's `setup_webserver`, which registers its routes. |
+| `expose_tools_over_mcp` | Auto-exposing tools over MCP, for resources servers that enable it. |
+| `configure_app` | Liveness routes, middleware, instrumentation, and profiling. |
+| `uvicorn_startup` | From the end of app configuration to Uvicorn running the app's startup, just before it accepts connections. Not recorded by the main process of a multi-worker server, which does not serve requests. |
+
+A server with `num_workers` above 1 runs `run_webserver` again in every Uvicorn worker. Each worker reports its own
+stages, starting at `worker_start`, with `nemo.gym.server.worker` set to true. The main process of that server
+reports the stages up to the hand-off, with the attribute false. For a single-process server the attribute is
+always false. Group by it, or filter on it, so a worker's `init_server` is not averaged with the main process's.
+
+Server-side stages are exact. The supervisor's `gym.server.startup_duration_ms` has a resolution of about three
+seconds, so use the stage histograms to attribute time within a server.
 
 ### Memory Metrics
 
@@ -66,11 +96,11 @@ carries last-value semantics, so a rate cannot be expressed directly. A long-liv
 therefore shows a figure that moves more slowly as it ages. Read it as "this process's
 success fraction so far," and use traces for anything finer.
 
-### Why Only the Orchestrator Reports `gym.servers.active`
+### Why Only the Supervisor Reports `gym.servers.active`
 
 `gym.servers.active` is a gauge, so the exported value is whichever process wrote last.
 If every server reported it, the result would be neither the fleet size nor any process's
-view of it. The orchestrator is the only process that knows how many servers it started,
+view of it. The supervisor is the only process that knows how many servers it started,
 so it is the only writer. It sets the count after startup and zero on shutdown.
 
 ## HTTP Metrics

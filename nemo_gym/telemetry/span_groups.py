@@ -93,7 +93,13 @@ class GymSpanGroup:
     SANDBOX = "sandbox"
     """Sandbox provider create/exec/delete spans."""
 
-    ALL_GROUPS: Final[frozenset] = frozenset([JOB, SERVER, HTTP_CLIENT, ROLLOUT, VERIFY, AGENT, MODEL_CALL, SANDBOX])
+    STARTUP = "startup"
+    """Server startup, once per run: the supervisor's ``gym.startup`` and per-server
+    ``gym.startup.server`` spans, and each server's own ``gym.server.startup`` stage spans."""
+
+    ALL_GROUPS: Final[frozenset] = frozenset(
+        [JOB, SERVER, HTTP_CLIENT, ROLLOUT, VERIFY, AGENT, MODEL_CALL, SANDBOX, STARTUP]
+    )
 
     #: The groups that make one rollout appear as one trace across Gym's server
     #: processes. Every preset is a superset of this.
@@ -101,8 +107,8 @@ class GymSpanGroup:
 
     #: ``all`` is not here: nemo-lens reserves it as a wildcard over every registered group.
     _PRESETS: ClassVar[dict] = {
-        "default": frozenset([JOB]) | CROSS_PROCESS_SPINE,
-        # NOTE: ``per_rollout`` deliberately omits ``job`` so each rollout is its own root
+        "default": frozenset([JOB, STARTUP]) | CROSS_PROCESS_SPINE,
+        # NOTE: ``per_rollout`` deliberately omits ``job`` and ``startup`` so each rollout is its own root
         # trace with a bounded span count. ``job`` wraps a whole eval run and lives in
         # ``default`` and ``all``.
         "per_rollout": frozenset([VERIFY, AGENT, MODEL_CALL]) | CROSS_PROCESS_SPINE,

@@ -95,6 +95,7 @@ from nemo_gym.telemetry.connection_pool import (
     set_server_name,
 )
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.telemetry.startup import ServerStartupTimeline
 
 
 logger = logging.getLogger(__name__)
@@ -1278,7 +1279,7 @@ class SimpleServer(BaseServer):
         """Initialise this process's nemo-lens telemetry. Idempotent, once per process.
 
         Every Gym server is its own process with its own providers — there is no parent
-        handle to inherit, only the `NEMO_GYM_OTEL_*` environment the orchestrator
+        handle to inherit, only the `NEMO_GYM_OTEL_*` environment the supervisor
         exported before spawning it. A failure here is logged and swallowed: telemetry
         must never stop a server from serving.
         """
@@ -1450,18 +1451,27 @@ repr(e): {repr(e)}"""
 
     @classmethod
     def run_webserver(cls) -> Optional[FastAPI]:  # pragma: no cover
+        startup = ServerStartupTimeline(
+            getenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, cls.__name__),
+            _telemetry_server_type(cls),
+            worker=is_nemo_gym_fastapi_worker(),
+        )
         global_config_dict = get_global_config_dict()
 
         is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
 
         server_config = cls.load_config_from_global_config()
+        startup.mark("load_config")
         _connect_server_to_ray(cls, global_config_dict)
+        if cls.ray_enabled:
+            startup.mark("init_ray")
 
         server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
             global_config_dict=global_config_dict,
         )
         server = cls(config=server_config, server_client=server_client)
+        startup.mark("init_server")
 
         if global_config_dict[DRY_RUN_KEY_NAME]:
             return
@@ -1472,14 +1482,17 @@ repr(e): {repr(e)}"""
         # Once per process — uvicorn's multi-worker path re-enters run_webserver in each
         # worker via the module import, and init_telemetry is idempotent.
         server.setup_telemetry()
+        startup.mark("init_telemetry")
 
         app = server.setup_webserver()
+        startup.mark("setup_webserver")
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
             from nemo_gym.mcp_auto_exposure import maybe_auto_expose
 
             maybe_auto_expose(server, app)
+            startup.mark("expose_tools_over_mcp")
         server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()
@@ -1504,6 +1517,7 @@ repr(e): {repr(e)}"""
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
         if profiling_config.profiling_enabled:
             server.setup_profiling(app, profiling_config)
+        startup.mark("configure_app")
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
         uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
@@ -1557,7 +1571,15 @@ repr(e): {repr(e)}"""
         else:
             uvicorn_kwargs["app"] = app
 
+        # A multi-worker main process hands the app off to Uvicorn workers and never serves it, so it
+        # reports now; every process that serves the app reports when its startup runs.
+        if is_main_fastapi_proc and uvicorn_kwargs.get("workers"):
+            startup.report()
+        else:
+            startup.report_when_serving(app)
+
         if is_main_fastapi_proc:
+            startup.announce_serve()
             try:
                 uvicorn.run(**uvicorn_kwargs)
             finally:
