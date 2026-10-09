@@ -74,6 +74,10 @@ AGENT_REQUEST_FAILED = "agent_request_failed"
 AGENT_TIMEOUT = "agent_timeout"
 AGENT_COMMAND_NOT_ALLOWED = "agent_command_not_allowed"
 
+# --- environment: one episode attempt ------------------------------------------------ #
+ENVIRONMENT_SERVER_FAILED = "environment_server_failed"
+ENVIRONMENT_PROTOCOL_VIOLATION = "environment_protocol_violation"
+
 # --- verifier and judge --------------------------------------------------------------- #
 # ``judge_failed`` is produced today by judge_failsafe and by reverification.
 JUDGE_FAILED = "judge_failed"
@@ -112,6 +116,8 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         AGENT_REQUEST_FAILED,
         AGENT_TIMEOUT,
         AGENT_COMMAND_NOT_ALLOWED,
+        ENVIRONMENT_SERVER_FAILED,
+        ENVIRONMENT_PROTOCOL_VIOLATION,
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,

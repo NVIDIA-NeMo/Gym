@@ -85,6 +85,14 @@ from nemo_gym.rollout_collection import (
     migrate_invalid_judge_main_rows,
     observed_elapsed,
 )
+from nemo_gym.rollout_records import (
+    coverage_path_for,
+    materialized_path_for,
+)
+from nemo_gym.rollout_records import (
+    journal_path_for as rollout_attempts_path_for,
+)
+from nemo_gym.rollout_recovery import manifest_path_for
 from resources_servers.gdpval.multistage_elo import (
     PartialStagePolicy,
     PerReferenceTotals,
@@ -2541,7 +2549,7 @@ def _prepare_resume(
     and rows incrementally, giving a later resume state to read. Prior state is
     reused only when ``resume_from_cache`` is set and both the rollouts file and a
     fingerprint-matching journal exist; every other case renames the prior
-    rollouts, failure sidecar, journal and aggregate metrics to
+    rollouts, failure sidecar, journals, manifest, materialized inputs, coverage and aggregate metrics to
     ``<name>.stale.<ns>`` and starts fresh (with the reason logged).
     """
     import sys
@@ -2566,6 +2574,12 @@ def _prepare_resume(
             failures_path_for(output_fpath),
             journal_fpath,
             aggregate_metrics_path_for(output_fpath),
+            # A previous single-pass run owns these additional companions.
+            # Preserve them together so they cannot claim the new stage output.
+            manifest_path_for(output_fpath),
+            rollout_attempts_path_for(output_fpath),
+            materialized_path_for(output_fpath),
+            coverage_path_for(output_fpath),
         ):
             if stale.exists():
                 quarantined = stale.with_name(stale.name + stale_suffix)

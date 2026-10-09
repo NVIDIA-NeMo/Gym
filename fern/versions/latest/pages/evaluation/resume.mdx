@@ -1,0 +1,311 @@
+---
+title: "Resume an Evaluation"
+description: "Reuse saved rollout results and check input and configuration identity before resuming."
+position: 8
+---
+
+# Resume an Evaluation
+
+Gym resumes at completed rollout boundaries. A saved result is reused, including a valid reward of zero.
+An interrupted rollout starts a new attempt; Gym does not restore an agent's conversation, browser, or sandbox state.
+
+## Resume saved results
+
+Restart the evaluation with the same input, agent, output path, and model/environment configuration, adding
+`+resume_from_cache=true` to the command. Gym compares the current run with the saved
+`<output_stem>_manifest.json` before reusing results.
+
+The manifest contains a run identifier, a format version, and digests of:
+
+- The source dataset.
+- The fully materialized tasks, including prompt and skill expansion.
+- The collection settings and resolved model/environment configuration that affect the tasks.
+
+The manifest does not store credentials or raw configuration values. Changing collection concurrency, reporting options,
+recognized credential fields, endpoint addresses, or capture directories does not invalidate saved results.
+This includes the shipped policy/judge/provider API-key fields and authentication headers at known server settings
+boundaries. Other headers, custom configuration fields, and task parameters remain part of identity; custom integrations
+should not assume arbitrary credential names are automatically excluded. Gym resolves configuration
+for the materialized agents, their selected Environment Servers, and referenced servers; unused server configurations need not resolve in the collector.
+Changing a model, sampling settings, task data paths, prompts, tasks, or Environment Server orchestration does invalidate saved results.
+Memory retention, resident-task limits, dispatch budgets, longest-first scheduling, and explicit retry controls can change on resume without changing task identity.
+
+Keep the manifest, materialized inputs, rollout output, and failure sidecar together.
+Before dispatch, Gym atomically reserves the next execution number in the manifest. It then appends and flushes each
+completed result or reported failure to its JSONL file. Intentional omissions are saved in the sidecar with
+`_ng_omitted=true`. There is no separate dispatch journal or outcome event to reconcile.
+These guarantees cover collector process failure; they do not promise survival of a machine or storage failure
+before buffered outcomes reach durable storage.
+
+The collector acquires an exclusive run lock before preparation or resume validation and holds it through reporting.
+A second collector targeting the same output is rejected. The operating system releases the lock after process death;
+an old lock file can remain safely. For parallel jobs, use separate output paths and aggregate afterward.
+
+An infrastructure failure is eligible for another attempt according to the configured attempt limit and terminal markers.
+A completed wrong answer is a result, so it is not retried merely because its reward is zero.
+
+## Environment Server boundary
+
+An Environment Server owns one episode attempt: preparing resources, running the agent, verifying its answer,
+and cleaning up that attempt. The collector owns the saved run history and decides which logical rollouts need
+another attempt after a restart. Resume sends a new episode attempt through the same Environment Server;
+it does not restore in-memory environment state or guarantee that cleanup ran after a hard process kill.
+
+For example, if two of three episodes finish and the third reports a retryable setup failure, resume keeps the
+first two results and sends only the third task again with a larger attempt index. A terminal failure is recorded
+but not retried. Native episode replies must match the dispatched task and attempt identities.
+
+Native Environment Servers may return completed results without a `reward` or model `response`. Such results
+remain saved and reusable; no zero reward is invented. Results without a numeric reward are reported as `unscored`.
+Stirrup legacy `execute_only=true` results are also completed and reusable without a reward; enabling failure routing
+does not turn them into failures.
+`require_complete` checks completed episodes, so an unscored completion satisfies that check without becoming a score.
+
+Native episode failures preserve the producer's `failure_kind`, including an unspecified value. The generic
+`environment_server_failed` label is used only for compatibility routing; it is not invented as the canonical kind.
+The terminal flag, stage, and partial-response diagnostics are retained. Nonterminal failures can retry the whole episode.
+Judge-only recovery is a follow-up. Built-in `judge_failsafe` results retain their saved answers without a reward;
+the collector accepts their two known legacy judge markers while rejecting other reserved result keys.
+
+Malformed replies become terminal `environment_protocol_violation` failures when routing is enabled; running the whole task again
+cannot fix an invalid response format. A reply from a different execution attempt remains retryable because a transport
+retry can return a stale response. Receiving an HTTP reply records delivery as established.
+
+## Attempts and completion coverage
+
+A logical rollout retains its task/rollout identity across restarts. Each execution receives a larger attempt index,
+reserved by the controller in the run manifest. An execution number is separate from the failure retry budget.
+
+`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS` limits counted failures per logical rollout (default: 3). Only a recorded,
+nonterminal failure whose request was delivered or possibly delivered consumes that budget. A collector interruption,
+a checkpoint continuation, or a failure known to occur before sending does not consume it. Terminal failures and
+intentional omissions stop retrying independently of the budget. The explicit terminal-timeout override makes those
+otherwise terminal failures eligible and counted under its existing opt-in policy.
+
+When the cap is reached, Gym reports the exhausted count and failure sidecar path. Raising the cap allows more retries.
+Coverage includes `counted_failures`, `attempts_exhausted`, and `max_rollout_attempts`. Its `attempts` field counts reserved
+execution numbers, including reservations made immediately before an interruption; it is not the retry-budget counter.
+For example, three interruptions can reserve executions 0, 1, and 2 while consuming zero failures. The next resume can
+still start execution 3 with the original failure budget.
+
+Explicit `_ng_rollout_id` values must be valid capture IDs. Preprocessing preserves them for single copies and adds
+`-r<rollout_index>` when repeats or agent fan-out expand a row. Direct preprocessing callers should use the returned
+IDs and capture keys rather than assuming the original ID survives expansion. The resulting IDs must be unique within
+the run and follow `EpisodeId` rules; the `-a<N>` suffix for positive attempt numbers is reserved.
+Invalid or colliding IDs are configuration errors before dispatch.
+
+Tasks drained before dispatch by `dispatch_budget_s` consume no attempt and remain available on resume.
+The opt-in `retry_terminal_timeouts`, `retry_invalid_judge_responses`, and `dispatch_longest_first` controls
+also apply to manifest-backed runs. Invalid-judge migration preserves the run and attempt identities; an interrupted
+sidecar-first migration can be reconciled, while conflicting or foreign payloads still fail validation.
+Incomplete final writes are repaired after history validation and before migration reads them. Cached-deliverable reuse
+survives an interrupted retry, but a newer recorded outcome can supersede that instruction.
+
+Offline aggregation accepts the same `+retry_terminal_timeouts=true` option. Coverage records the active
+`retry_terminal_timeouts` and `max_rollout_attempts` policy alongside `attempts_exhausted`; use the same settings as
+collection to compare that diagnostic count. These settings do not change selected scores.
+
+Reported `kill_shaped` failures are persisted in the failure sidecar, even when the legacy producer
+also sets `_ng_no_persist`. They count toward the retry budget when nonterminal and delivered or possibly delivered. This differs from older collectors that discarded these failures and did not count them.
+A suppression without a reported failure is an intentional omission. Existing legacy reverification keeps its previous suppression behavior.
+
+The **newest reserved execution number** determines the current outcome. A late result from an older execution
+remains in the append-only artifacts but cannot replace the newer attempt or count as an extra sample. If the newest
+execution has no saved outcome, the rollout remains unfinished and can restart from input without spending a failure
+retry. Collection and offline aggregation share this rule, recorded as `selection_policy: "latest_allocated"`.
+
+Gym writes `<output_stem>_coverage.json` with an exact inventory:
+
+| Field | Meaning |
+| --- | --- |
+| `expected` | Number of logical rollouts in the materialized inputs. |
+| `successful` | Rollouts with a completed result, including wrong answers and completed masked results. |
+| `measured` | Completed results with a numeric reward whose producer did not set `mask_sample`, including valid reward-zero results. |
+| `masked` | Completed results with a numeric reward whose producer set `mask_sample`. These remain saved and reusable on resume. |
+| `unscored` | Completed results without a numeric reward, including those also marked `mask_sample`. |
+| `failed` | Rollouts whose selected attempt reported a no-result failure. |
+| `intentionally_omitted` | Explicit producer omissions, including terminal `skipped` outcomes. |
+| `unknown` | Rollouts with no saved outcome, including work never dispatched. |
+
+The existing `successful` field remains the completed-result total. The measurement split is additive:
+
+```text
+successful = measured + masked + unscored
+expected = measured + masked + unscored + failed + intentionally_omitted + unknown
+```
+
+Counts describe the selected attempt for each logical rollout. Older attempts cannot count again or change whether
+the selected result is masked. Failure metadata on a completed result does not by itself make it a no-result failure.
+
+`complete` requires a completed result for every expected rollout; `reconciled` only requires that none remain unknown.
+A fully masked run can be complete while containing no unmasked measurements. Masking alone does not trigger recovery.
+Completed-result quality scoring follows the verifier/aggregation contract; these counts describe collection coverage.
+
+`scored` counts completed results with a numeric reward, plus failures explicitly counted as zero when
+aggregating. Unscored completions do not enter this count. It is separate from the measurement split. Setting `count_failure_classes_as_zero` does not change a failure into
+a measured or completed result and cannot make the outcome counts exceed `expected`.
+An explicit `skipped` entry in `count_failure_classes_as_zero` includes terminal skipped payloads in scoring while their
+completion disposition remains intentionally omitted. Omissions without a failure payload cannot be scored this way.
+
+Collection and offline aggregation export the same counts as `coverage/measured`, `coverage/masked`, `coverage/unscored`, `coverage/failed`,
+`coverage/omitted`, and `coverage/unknown`. For legacy shards without a manifest or journal, observed measured/masked counts remain
+available, while expected, omitted, and unknown totals remain unknown.
+
+The coverage file is a snapshot written at collection start and cleanup. After an abrupt process kill it may be stale;
+resume or aggregate to reconstruct it from the manifest and saved outcomes. An incomplete final JSONL write is ignored during
+reconciliation and its partial bytes are removed before appending. Malformed complete records remain errors.
+An old materialized inventory alone does not establish validated completion coverage during aggregation.
+Merged rollout files are selected-result projections; keep the original shard artifacts for further recovery.
+
+Every newly collected run has recovery history, including its first collection. Manifest-aware health reads are a
+follow-up, so automatic checks print a short skip message for all these runs;
+collection and scoring still finish. Use `+disable_health_check=true` to skip those checks, or run health checks
+on the merged selected-result projection written by `gym eval aggregate`. Standalone health checks reject a
+manifest-backed source rather than treating superseded attempts as extra samples.
+
+Known runtime connection references (for example `${policy_base_url}` and `${policy_api_key}` inside agent client
+settings) do not change experiment identity when their values change. Model names and task parameters still do.
+Arbitrary nested task fields named `port` or `api_key` are retained in the identity.
+
+### Legacy artifacts and explicit overrides
+
+Older runs have no manifest. By default, Gym rejects a resume whose identity cannot be checked. To deliberately reuse
+legacy artifacts or accept an input/configuration mismatch, set `+allow_unsafe_resume=true` alongside resume.
+Gym warns and reuses the **saved materialized tasks**. The manifest records that identity was imported or overridden,
+and coverage reports `identity_verified=false`. Future resumes continue to require the override. Existing legacy
+payloads are preserved; newly written payloads carry the run identifier. Gym still rejects corrupt or unsupported
+manifests and materialized inputs that no longer match their saved manifest.
+
+With `--no-serve`, Gym obtains the server configuration from the running head server, so a changed model or verifier
+still prevents verified resume. Missing required server configurations are errors. Stirrup's `RERUN_INCOMPLETE=true`
+recovery toggle is allowed; nested task parameters and model settings still affect experiment identity.
+
+Use a fresh output location when the intention is to evaluate changed tasks or a different model.
+A non-resume collection at an existing output path replaces the main output, failure sidecar, any retired draft attempt journal,
+manifest, materialized inputs, coverage, and aggregate metrics. Keep the previous run under a different path to retain it.
+Both fresh collection and resume resolve an output symlink before taking the run lock; they write the target and its
+companion files while preserving the symlink.
+
+If an explicitly fresh replacement is interrupted during setup, old metadata may remain beside partially replaced
+files. Resume refuses that inconsistent history, including with `allow_unsafe_resume=true`. Repeat the fresh command
+without `--resume` to finish replacing that run, or choose a new output path; this cannot recover the overwritten run.
+
+If only part of a legacy cache exists and there is no manifest, journal, or run-tagged outcome, Gym prints `Skipping resume_from_cache`
+and starts fresh from the current inputs, replacing the incomplete cache. This also covers interruption during initial
+preparation before the run identity was published. If a manifest or journal exists, missing required artifacts remain
+an error rather than causing an automatic restart.
+
+The unsafe override permits an explicitly unverified legacy import or a deliberate experiment-identity override.
+It does not recreate lost execution reservations: if a current-format manifest is missing, restore it from a backup or
+start at a new output path. Conflicting records, foreign run IDs, and corrupt metadata remain errors.
+
+This revision uses manifest version 2. Artifacts from earlier, unmerged versions of this PR that used an attempt
+journal must be read with their original revision or retained separately before starting a new run. Gym reports this
+format mismatch instead of silently dropping history.
+
+Offline aggregation reads legacy append/reverify artifacts line by line when neither a manifest nor a journal exists,
+even if an old inventory contains repeated explicit rollout IDs. It does not automatically migrate those artifacts or
+claim known completion coverage. When explicitly importing a legacy run for resume, reused attempt indices are ordered
+by their recorded arrival, with sidecar failures read before main-file results. This compatibility rule does not relax
+conflict detection for manifest-backed records.
+
+## Structured failures for direct callers
+
+`RolloutCollectionHelper.run_outcomes()` is an opt-in interface for callers that need failure information as data.
+Each future returns `(input_row, outcome)`, where `outcome` is either the existing completed-result dictionary or a
+`RolloutFailure`. It associates an `EpisodeId` (logical rollout and attempt) with a required run ID,
+who observed the failure (`environment` or `collector`), delivery evidence, and the shared `EpisodeFailure`.
+The nested failure carries `failure_reason`, the terminal flag, an optional failure kind, and an optional execution stage
+(`admission`, `seed`, `agent`, `verification`, or `cleanup`). Unknown stages remain unset. Delivery evidence does not authorize
+transport replay: a timeout is `possibly_delivered`, because the server may already have received the request.
+Saved failure records include `schema_version: 1`; unsupported versions, unknown fields, and inconsistent nested
+run/attempt identities or routing aliases are rejected. An absent `failure_kind` still represents a failure; only
+the compatibility routing alias uses a generic source-based category.
+Structured failures require `failure_reason`; the former `message` name is not accepted.
+Legacy sidecar routing fields remain supported as described below.
+Pass `run_id` to associate direct calls with an existing run, overriding existing row stamps in the invocation's copies.
+Without it, pre-stamped rows retain their IDs and unstamped rows share a new ID for this invocation.
+The returned rows are copies; caller-owned input rows are not modified.
+
+```python
+from nemo_gym.rollout_collection import RolloutCollectionHelper
+from nemo_gym.rollout_outcomes import RolloutFailure
+
+
+async def collect_outcomes(input_rows):
+    helper = RolloutCollectionHelper()
+    rows = helper.preprocess_examples(input_rows)
+    for future in helper.run_outcomes(rows):
+        row, outcome = await future
+        if isinstance(outcome, RolloutFailure):
+            print(outcome.episode_id.capture_key, outcome.failure.failure_kind, outcome.failure.failure_reason)
+        else:
+            print(outcome.get("reward", "Completed without a score"))
+```
+
+Configure and start the referenced Gym servers before calling the helper. Callers supplying explicit rollout IDs can skip
+preprocessing. The direct API does not save files, retry tasks, or make training decisions. Its caller owns those operations.
+Expected HTTP, JSON, and completed-result validation errors become failure records; programming errors and cancellation
+still propagate. A malformed completed result must not be interpreted as a reward-zero sample.
+
+`run_examples()` retains its existing dictionary/exception behavior. A legacy agent result tagged with
+`_ng_failure_class` is converted explicitly at the structured API boundary; its old reward/response placeholders are
+not copied into the failure record. Completed masked results remain completed dictionaries.
+
+The evaluation runner validates HTTP result shape and native task/attempt identity regardless of failure routing.
+Agents cannot return a full collector-owned `RolloutFailure` record or choose its source/delivery observations.
+They report failures through the episode contract, HTTP errors, or supported legacy markers. Its sidecar retains the existing
+`_ng_failure_*` routing aliases for row-oriented consumers and stores the canonical record under `_ng_failure_record`. Those aliases can be removed after
+the consumers and the producer migration in [#3180](https://github.com/NVIDIA-NeMo/Gym/issues/3180) adopt the new contract.
+When routing is disabled, exceptions and malformed failure payloads can stop the run. Well-formed explicit failures are
+still accepted as data. Diagnostic observations, trajectories, and captured model calls are retained in the surrounding
+sidecar record, outside the canonical failure; they do not turn a failure into a completed training sample.
+
+Producer-specific diagnostic fields, such as archived trace paths and grader notes, remain in the sidecar envelope.
+The canonical explanation comes only from shared `failure_reason` or legacy `_ng_failure_message`; core does not guess from producer-specific fields.
+The bounded canonical failure record stays separate from those diagnostics. Other producer responses are retained
+as `_ng_failure_response` for inspection, including any synthetic failure text a producer supplied. This field is
+diagnostic evidence only: it is neither a scored response nor an eligible saved answer for judge-only recovery.
+
+For a legacy `judge_failed` or `judge_invalid` result that includes the actual generated response, the sidecar preserves it outside
+the canonical failure record, without a reward. Diagnostic token and trajectory evidence is retained too.
+Judge-only recovery from these manifest-backed runs is a separate follow-up: this PR resumes unfinished tasks
+from their inputs. The existing `gym eval reverify` workflow remains available for legacy files and exported
+selected-result projections. A selected-result projection contains completed answers, not failed answers for
+`--judge-failed-only` recovery. Reverification rejects manifest-backed inputs and outputs before changing them, so it cannot
+silently reuse an older answer or append results without recording attempts.
+
+Aggregation resolves source file symlinks before locating their companion history, and deduplicates aliases of the
+same rollout file. Health and reverification apply the same history protections through aliases. For a merged output
+symlink, aggregation replaces the target file and preserves the symlink. It refuses to replace an input or an established
+recovery history through either spelling. Copied manifest-backed runs
+are rejected by run identity. Legacy runs have no trustworthy run identifier: independent evaluations may share the
+same input inventory, so Gym does not identify them by an inventory hash. Supply each original legacy run only once;
+copies at different locations are treated as separate inputs, and their coverage is relative to those supplied inputs.
+
+
+When `+count_missing_rollouts_as_zero=true` is enabled, a task with no result for
+its newest attempt contributes a zero to metrics only. It stays unfinished in
+the recovery coverage and remains eligible for resume. A known failure still
+requires the separate `count_failure_classes_as_zero` policy, and an intentional
+unscored completion is not treated as missing. Aggregation reports these added
+zeros as `imputed`, separately from measured rewards and counted failures.
+
+
+## Checkpoint-controller integration
+
+Restarting unfinished tasks from input is the scope of this change. Continuing an agent from saved execution state
+belongs to the checkpoint stack ([#3024](https://github.com/NVIDIA-NeMo/Gym/issues/3024)); it is not implemented here.
+Both paths must use the same controller rules:
+
+- Hold `run_lock(output, checkpoint_dir=...)` before run validation and checkpoint restore, through collection and reporting.
+- Validate the saved experiment first and associate each checkpoint with the manifest's run ID.
+- Reserve a target with `RolloutStore.allocate_attempt(row)` before restore or a fresh request. Checkpoint code uses that
+  target; it must not independently add one. Failed restore reserves a new target before starting from input.
+- Continuation and interruption do not consume the failure budget. Only saved eligible failures do.
+
+The CLI exits with code **75** after saving a partial evaluation, including a dispatch-budget drain. Code 0 means a
+completed evaluation; ordinary errors keep their existing failure status. The library still supports returning partial
+results when `require_complete=false`; CLI status is checked separately. Checkpoint-triggered stops must use the same
+incomplete status when that integration lands. End-to-end checkpoint restoration and Slurm successor behavior require
+validation with the checkpoint stack.
