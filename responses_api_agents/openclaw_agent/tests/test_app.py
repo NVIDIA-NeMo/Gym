@@ -335,7 +335,7 @@ class TestBuildOpenclawConfig:
 
         async def run_openclaw(*args, **kwargs):
             assert kwargs["rollout_id"] == "7-2"
-            return [], {"input_tokens": 0, "output_tokens": 0}, "model"
+            return [], {"input_tokens": 0, "output_tokens": 0}, "model", False
 
         request = MagicMock(path_params={"rollout_id": "7-2"})
         with patch.object(agent, "_run_openclaw", run_openclaw):
@@ -397,6 +397,7 @@ class TestBuildOpenclawConfig:
         assert len(resp.output) == 1
         assert resp.output[0].content[0].text == ""
         assert resp.usage.total_tokens == 0
+        assert resp.model_dump(mode="json")["_ng_agent_timed_out"] is True
 
     def test_env_passthrough(self) -> None:
         agent = _make_agent(env={"NVIDIA_API_KEY": "k", "EMPTY": ""})
@@ -464,9 +465,10 @@ class TestObservability:
             patch.object(agent, "_workspace_root", return_value=work_dir),
             patch.object(agent, "_run_exec", AsyncMock(side_effect=[(0, "", ""), (0, stdout, "")])),
         ):
-            output, _, _ = asyncio.run(agent._run_openclaw("solve", None, observation_collector=collector))
+            output, _, _, timed_out = asyncio.run(agent._run_openclaw("solve", None, observation_collector=collector))
 
         assert output[0].content[0].text == "done"
+        assert timed_out is False
         assert collector.call_args.args[0] == "session-1"
         assert collector.call_args.args[1][1]["type"] == "message"
         assert [(item[0], item[1]) for item in collector.call_args.args[2]] == [
@@ -485,7 +487,7 @@ class TestObservability:
                 [],
                 [],
             )
-            return [], {"input_tokens": 0, "output_tokens": 0}, "model"
+            return [], {"input_tokens": 0, "output_tokens": 0}, "model", False
 
         body = NeMoGymResponseCreateParamsNonStreaming(input="solve")
         with patch.object(agent, "_run_openclaw", run_openclaw):
@@ -505,7 +507,7 @@ class TestObservability:
         )
 
         async def run_openclaw(*args, **kwargs):
-            return [output], {"input_tokens": 1, "output_tokens": 1}, "model"
+            return [output], {"input_tokens": 1, "output_tokens": 1}, "model", False
 
         body = NeMoGymResponseCreateParamsNonStreaming(input="solve")
         with patch.object(agent, "_run_openclaw", run_openclaw):
@@ -528,7 +530,7 @@ class TestObservability:
                 [],
                 [ObservationGap(code="subagent_hierarchy_unavailable", detail="root_session_not_found")],
             )
-            return [], {"input_tokens": 0, "output_tokens": 0}, "model"
+            return [], {"input_tokens": 0, "output_tokens": 0}, "model", False
 
         with patch.object(agent, "_run_openclaw", run_openclaw):
             episode = asyncio.run(
@@ -569,7 +571,7 @@ class TestObservability:
 
         async def run_openclaw(*args, observation_collector=None, **kwargs):
             observation_collector("session-1", events, [("root", None, events)], [])
-            return [scored_output], {"input_tokens": 1, "output_tokens": 1}, "model"
+            return [scored_output], {"input_tokens": 1, "output_tokens": 1}, "model", False
 
         with patch.object(agent, "_run_openclaw", run_openclaw):
             episode = asyncio.run(
@@ -602,7 +604,7 @@ class TestObservability:
 
         async def run_openclaw(*args, observation_collector=None, **kwargs):
             observation_collector("session-1", parse_openclaw_session_events(session), [], [])
-            return parse_openclaw_session(session), {"input_tokens": 1, "output_tokens": 1}, "model"
+            return parse_openclaw_session(session), {"input_tokens": 1, "output_tokens": 1}, "model", False
 
         async def post(server_name, url_path, json=None, cookies=None, **kwargs):
             if url_path == "/seed_session":
@@ -648,6 +650,7 @@ class TestObservability:
                 ],
                 {"input_tokens": 1, "output_tokens": 1},
                 "model",
+                False,
             )
 
         body = NeMoGymResponseCreateParamsNonStreaming(input="solve")
@@ -728,11 +731,99 @@ class TestTimeoutSalvage:
             patch.object(agent, "_workspace_root", return_value=work_dir),
             patch.object(agent, "_run_exec", _run_exec_stub),
         ):
-            output, usage, _ = asyncio.run(agent._run_openclaw("solve", None))
+            output, usage, _, timed_out = asyncio.run(agent._run_openclaw("solve", None))
 
         assert output
         assert output[0].content[0].text == "partial"
+        assert timed_out is True
         assert not work_dir.exists()  # workdir cleanup still runs after salvage
+
+
+class TestTimeoutReporting:
+    """A Gym time limit must surface as finished_naturally=False, even though the output still ends in an
+    assistant message (salvaged or padded) and is verified as usual."""
+
+    @staticmethod
+    def _run(agent: OpenClawAgent, run_exec_stub):
+        async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+            if url_path == "/seed_session":
+                return _FakeResponse({})
+            if url_path.endswith("/v1/responses"):
+                response = await agent.responses(MagicMock(path_params={}), json)
+                return _FakeResponse(response.model_dump(mode="json"))
+            return _FakeResponse(json | {"reward": 0.5})
+
+        agent.server_client.global_config_dict = {}
+        agent.server_client.post = AsyncMock(side_effect=post)
+        request = MagicMock()
+        request.cookies = {}
+        body = OpenClawAgentRunRequest.model_validate({"responses_create_params": {"input": "solve"}})
+        with patch.object(agent, "_run_exec", run_exec_stub):
+            result = asyncio.run(agent.run(request, body))
+        verify_json = agent.server_client.post.await_args_list[-1].kwargs["json"]
+        return result, verify_json
+
+    @staticmethod
+    def _onboard(env: dict[str, str]) -> Path:
+        home = Path(env["HOME"])
+        config_path = home / ".openclaw" / "openclaw.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("{}")
+        return home
+
+    def test_natural_finish_is_reported_as_natural(self, tmp_path: Path) -> None:
+        agent = _make_agent(workspace_root=str(tmp_path))
+
+        async def _run_exec_stub(cmd, *, cwd, env, timeout):
+            if "onboard" in cmd:
+                self._onboard(env)
+                return 0, "", ""
+            session_path = _seed_session(Path(env["HOME"]), "session-1", "done")
+            return 0, json.dumps({"payloads": [], "meta": {"agentMeta": {"sessionFile": str(session_path)}}}), ""
+
+        result, verify_json = self._run(agent, _run_exec_stub)
+
+        assert result.finished_naturally is True
+        assert result.agent_timed_out is False
+        assert "_ng_agent_timed_out" not in verify_json["response"]
+        assert verify_json["response"]["metadata"] is None
+
+    def test_agent_run_timeout_is_not_natural(self, tmp_path: Path) -> None:
+        agent = _make_agent(workspace_root=str(tmp_path))
+
+        async def _run_exec_stub(cmd, *, cwd, env, timeout):
+            if "onboard" in cmd:
+                _seed_session(self._onboard(env), "session-1", "partial")
+                return 0, "", ""
+            raise TimeoutError("openclaw timed out")
+
+        result, verify_json = self._run(agent, _run_exec_stub)
+
+        assert result.finished_naturally is False
+        assert result.agent_timed_out is True
+        assert result.reward == 0.5
+        # the internal flag is removed before /verify and nothing is added to the metadata
+        assert "_ng_agent_timed_out" not in verify_json["response"]
+        assert verify_json["response"]["metadata"] is None
+        # the salvaged partial transcript is still what gets verified
+        assert [item["content"][0]["text"] for item in verify_json["response"]["output"]] == ["partial"]
+
+    def test_setup_timeout_is_not_natural(self, tmp_path: Path) -> None:
+        agent = _make_agent(workspace_root=str(tmp_path))
+
+        async def _run_exec_stub(cmd, *, cwd, env, timeout):
+            assert "onboard" in cmd
+            raise TimeoutError("openclaw onboard timed out")
+
+        result, verify_json = self._run(agent, _run_exec_stub)
+
+        assert result.finished_naturally is False
+        assert result.agent_timed_out is True
+        assert result.reward == 0.5
+        assert "_ng_agent_timed_out" not in verify_json["response"]
+        assert verify_json["response"]["metadata"] is None
+        # the padded empty assistant message is still what gets verified
+        assert [item["content"][0]["text"] for item in verify_json["response"]["output"]] == [""]
 
 
 class TestRunExecCancellation:
@@ -845,7 +936,7 @@ class TestSigtermSalvage:
             patch("signal.getsignal", return_value=signal.SIG_DFL),
             patch("signal.signal", side_effect=lambda sig, cb: registered.__setitem__(sig, cb)),
         ):
-            output, usage, _ = asyncio.run(_main())
+            output, usage, _, _ = asyncio.run(_main())
 
         assert output
         assert output[0].content[0].text == "partial"
@@ -908,7 +999,7 @@ class TestSigtermSalvage:
 
         assert install_calls == 1  # installed once, not once per run
         assert previous_calls == 1  # the previously-installed handler (uvicorn's) still fires
-        for output, _usage, _model in results:
+        for output, _usage, _model, _timed_out in results:
             assert output[0].content[0].text == "partial"
 
 

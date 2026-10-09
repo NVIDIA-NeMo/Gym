@@ -72,6 +72,9 @@ from responses_api_agents.openclaw_agent.setup_openclaw import ensure_openclaw
 
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
+# Set on the response only when a Gym time limit (setup_timeout or timeout) cut the run short;
+# run() removes it before /verify.
+_INTERNAL_TIMED_OUT_KEY = "_ng_agent_timed_out"
 
 
 def _decode_last_json_dict_suffix(raw: str) -> Optional[dict[str, Any]]:
@@ -375,6 +378,7 @@ class OpenClawAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     finished_naturally: bool = False
+    agent_timed_out: bool = False
     ng_agent_observations: AgentObservationBundle | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -572,8 +576,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         observation_collector: Optional[
             Callable[[str, list[dict[str, Any]], OpenClawSessionTree, list[ObservationGap]], None]
         ] = None,
-    ) -> tuple[list[Any], dict[str, int], str]:
-        """setup and run agent. returns (output_items, usage, model_name)."""
+    ) -> tuple[list[Any], dict[str, int], str, bool]:
+        """setup and run agent. returns (output_items, usage, model_name, timed_out)."""
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
         home = work_dir / ".openclaw-home"
@@ -619,6 +623,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             # session off disk, and return it. Returning quickly lets the harness still write the
             # response before the SIGKILL, so no harness change is needed.
             code, stdout, stderr = None, "", ""
+            timed_out = False
             self._install_sigterm_handler()
             sigterm_hit = asyncio.Event()
             self.sigterm_events.add(sigterm_hit)
@@ -638,6 +643,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                         await run_task
             except TimeoutError:
                 LOG.warning("openclaw timed out after %ds; salvaging partial session", self.config.timeout)
+                timed_out = True
             finally:
                 self.sigterm_events.discard(sigterm_hit)
 
@@ -676,7 +682,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                         LOG.exception("failed to record OpenClaw session artifact")
             if not output_items:
                 output_items = fallback_items
-            return output_items, usage, self.config.model
+            return output_items, usage, self.config.model, timed_out
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -698,7 +704,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         system_prompt = "\n\n".join(system_parts) if system_parts else None
 
         try:
-            output_items, usage, model_name = await self._run_openclaw(
+            output_items, usage, model_name, timed_out = await self._run_openclaw(
                 user_message,
                 system_prompt,
                 rollout_id=rollout_id,
@@ -707,6 +713,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         except TimeoutError:
             LOG.warning("OpenClaw timed out, padding empty output so the rollout scores instead of erroring")
             output_items, usage, model_name = [], {"input_tokens": 0, "output_tokens": 0}, self.config.model
+            timed_out = True
 
         if output_collector is not None:
             output_collector(list(output_items))
@@ -726,7 +733,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         output_tokens = usage.get("output_tokens", 0)
         cached_tokens = usage.get("cached_tokens", 0)
 
-        return NeMoGymResponse(
+        response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=model_name,
@@ -743,6 +750,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 total_tokens=input_tokens + output_tokens,
             ),
         )
+        if timed_out:
+            response = response.model_copy(update={_INTERNAL_TIMED_OUT_KEY: True})
+        return response
 
     async def responses(
         self,
@@ -860,6 +870,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             await raise_for_status(agent_resp)
             cookies = agent_resp.cookies
             agent_resp_json = await get_response_json(agent_resp)
+            timed_out = bool(agent_resp_json.pop(_INTERNAL_TIMED_OUT_KEY, False))
             raw_observations = (
                 agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
             )
@@ -885,7 +896,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             last = gym_resp.output[-1] if gym_resp.output else None
             naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
 
-            result = verify_json | {"turns_used": turns, "finished_naturally": naturally}
+            # A timed-out run still ends in an assistant message (salvaged or padded), so check explicitly.
+            result = verify_json | {
+                "turns_used": turns,
+                "finished_naturally": naturally and not timed_out,
+                "agent_timed_out": timed_out,
+            }
             if observations is not None:
                 result["ng_agent_observations"] = observations.model_dump(mode="json")
             return OpenClawAgentVerifyResponse.model_validate(result)
