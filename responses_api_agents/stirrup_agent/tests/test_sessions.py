@@ -129,6 +129,42 @@ def test_an_episode_runs_stirrup_in_the_borrowed_sandbox(agent, client, root, mo
     assert closed.status_code == 200
     assert closed.json()["resources_cookies"] == {"session": "after-search"}
     assert sorted(p.name for p in root.iterdir()) == ["report.txt"]
+    usage = response.json()["usage"]
+    assert (usage["input_tokens"], usage["output_tokens"], usage["total_tokens"]) == (30, 15, 45)
+    bundle = closed.json()["agent_observations"]
+    assert bundle["gaps"] == []
+    invocation, *tools = bundle["records"]
+    assert invocation["status"] == "completed"
+    assert [ref["response_id"] for ref in invocation["model_calls"]] == ["chatcmpl-1", "chatcmpl-2", "chatcmpl-3"]
+    assert {ref["model_ref"]["name"] for ref in invocation["model_calls"]} == {"policy_model"}
+    assert [item["call_id"] for item in invocation["conversation"] if item["type"] == "function_call_output"] == [
+        tool["tool_call_id"] for tool in tools
+    ]
+
+
+def test_a_failed_episode_still_closes_with_its_evidence(agent, client, root, monkeypatch):
+    resources = _Resources(_resources_app([]))
+    model = _ModelServer([_call("fetch_web_page", json.dumps({"url": "x"}))])
+    monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: model.base_url)
+    tool_access = _TOOL_ACCESS.model_copy(update={"base_url": resources.base_url})
+    try:
+        _seed(client, sandbox_access=_sandbox_access(str(root)), tool_accesses=[tool_access])
+        with pytest.raises(RuntimeError, match="500"):
+            client.post(
+                f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
+                json={"input": "Write the report.", "model": "policy", "tools": _TOOLS},
+            )
+        closed = _close(client)
+    finally:
+        model.close()
+        resources.close()
+
+    bundle = closed.json()["agent_observations"]
+    (invocation,) = bundle["records"]
+    assert invocation["status"] == "failed"
+    assert [ref["response_id"] for ref in invocation["model_calls"]] == ["chatcmpl-1"]
+    assert invocation["conversation"] == []
+    assert bundle["gaps"] == []
 
 
 def test_a_session_without_a_sandbox_is_rejected(client):

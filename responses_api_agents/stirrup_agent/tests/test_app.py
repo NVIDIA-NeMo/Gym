@@ -24,7 +24,7 @@ from nemo_gym.episode_types import EpisodeId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tool_access import DirectHTTPToolAccess
-from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig
+from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig, _observations
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
 from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
 from responses_api_agents.stirrup_agent.stirrup_utils import convert_stirrup_history_to_output_items
@@ -51,7 +51,7 @@ async def _runner_payload(config: StirrupAgentWrapperConfig, body: NeMoGymRespon
         request=SimpleNamespace(episode_id=EpisodeId(rollout_id="rollout", attempt=0)),
         session=SimpleNamespace(workdir="/root"),
         tool_access=DirectHTTPToolAccess(name="tools", required=True, base_url="http://resources:8000"),
-        execute=AsyncMock(return_value={"input_items": [], "output_items": [], "elapsed_seconds": 0}),
+        execute=AsyncMock(return_value={"input_items": [], "output_items": [], "elapsed_seconds": 0, "usages": []}),
     )
     with patch.object(StirrupAgentWrapper, "resolve_model_base_url", return_value="http://policy.invalid/v1"):
         await wrapper._run_sandbox_episode(body, state)
@@ -153,3 +153,38 @@ class TestApp:
         assert output_items[1]["type"] == "function_call_output"
         assert output_items[1]["call_id"] == "call_1"
         assert output_items[1]["output"] == "ok"
+
+
+class TestObservations:
+    MODEL = ModelServerRef(type="responses_api_models", name="policy_model")
+    TOOL = {"kind": "tool_call", "invocation_id": "root", "tool_call_id": "c1", "status": "completed"}
+
+    def _output(self, **observations):
+        raw = {"invocation_id": "root", "status": "completed", "model_response_ids": ["r1"], "tool_calls": [self.TOOL]}
+        raw |= observations
+        return {"input_items": [{"role": "user", "content": "hi", "type": "message"}], "observations": raw}
+
+    def test_a_part_that_fails_validation_becomes_a_gap_and_the_rest_is_kept(self) -> None:
+        bundle = _observations(self._output(tool_calls=[self.TOOL, {**self.TOOL, "status": "exploded"}]), self.MODEL)
+
+        assert [record.kind for record in bundle.records] == ["agent_invocation", "tool_call"]
+        assert [(gap.code, gap.detail) for gap in bundle.gaps] == [
+            ("observation_capture_failed", "tool_calls[1]: ValidationError")
+        ]
+
+    def test_an_invalid_conversation_keeps_the_model_call_references(self) -> None:
+        output = self._output()
+        output["input_items"] = [{"type": "no_such_item"}]
+
+        bundle = _observations(output, self.MODEL)
+
+        invocation = bundle.records[0]
+        assert [ref.response_id for ref in invocation.model_calls] == ["r1"]
+        assert invocation.conversation == []
+        assert [gap.detail for gap in bundle.gaps] == ["conversation: ValidationError"]
+
+    def test_no_runner_output_is_one_gap(self) -> None:
+        bundle = _observations(None, self.MODEL)
+
+        assert bundle.records == []
+        assert [gap.code for gap in bundle.gaps] == ["observation_capture_failed"]
