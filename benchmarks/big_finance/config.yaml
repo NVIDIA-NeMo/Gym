@@ -1,8 +1,4 @@
 # BigFinanceBench public 50-question benchmark.
-policy_max_connection_retries: 12
-policy_max_retries: 12
-policy_request_timeout_s: 1800
-
 config_paths:
   - resources_servers/big_finance/configs/big_finance.yaml
 
