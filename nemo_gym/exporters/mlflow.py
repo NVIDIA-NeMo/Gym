@@ -130,13 +130,13 @@ class MLflowExporter(BaseExporter):
             environ["MLFLOW_TRACKING_TOKEN"] = self.config.mlflow_tracking_token
         self.client = MlflowClient(tracking_uri=self.config.mlflow_tracking_uri)
         experiment_id = self._experiment_id(self.config.mlflow_experiment_name)
-        tags = [RunTag(k, v) for k, v in self.config.mlflow_run_tags.items()] or None
-        self.run_id = self.client.create_run(
-            experiment_id, run_name=self.config.mlflow_run_name, tags=tags
-        ).info.run_id
+        # create_run takes tags as a dict; mlflow.note.content is the key MLflow renders as the run description.
+        tags = dict(self.config.mlflow_run_tags)
         if self.config.mlflow_run_description:
-            # mlflow.note.content is the standard MLflow key rendered as run description.
-            self.client.set_tag(self.run_id, "mlflow.note.content", self.config.mlflow_run_description)
+            tags["mlflow.note.content"] = self.config.mlflow_run_description
+        self.run_id = self.client.create_run(
+            experiment_id, run_name=self.config.mlflow_run_name, tags=tags or None
+        ).info.run_id
 
     def teardown(self) -> None:
         if self.client is not None and self.run_id is not None:
