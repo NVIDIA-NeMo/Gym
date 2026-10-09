@@ -125,10 +125,16 @@ _OTLP_ENV_FIELD_MAP = {
 _TRUTHY = ("1", "true", "yes", "on")
 
 
-def _lens_fallback_is_set(env_name: str) -> bool:
-    """Whether the ``NEMO_LENS_*`` fallback for Gym's ``NEMO_GYM_OTEL_*`` *env_name* is set."""
-    fallback = _OTEL_FALLBACK_PREFIX + env_name.removeprefix(_OTEL_PREFIX)
-    return bool(os.environ.get(fallback, "").strip())
+def _lens_fallback_name(env_name: str) -> str:
+    """The ``NEMO_LENS_*`` fallback for Gym's ``NEMO_GYM_OTEL_*`` *env_name*."""
+    return _OTEL_FALLBACK_PREFIX + env_name.removeprefix(_OTEL_PREFIX)
+
+
+def _same_setting(config_value: Any, env_value: str) -> bool:
+    """Whether *env_value* asks for the same setting as *config_value*."""
+    if isinstance(config_value, bool):
+        return (env_value.lower() in _TRUTHY) == config_value
+    return env_value == str(config_value)
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -230,9 +236,17 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
         value = getattr(telemetry_config, field, None)
         if value is None:
             continue
-        # Lens reads the NEMO_GYM_OTEL_* name before its NEMO_LENS_* fallback.
-        # Writing the YAML value here would silently override a NEMO_LENS_* value the user set.
-        if field in _LENS_FIELDS and _lens_fallback_is_set(env_name):
+        fallback = _lens_fallback_name(env_name)
+        fallback_value = os.environ.get(fallback, "").strip()
+        if field in _LENS_FIELDS and fallback_value:
+            if field in telemetry_config.model_fields_set and not _same_setting(value, fallback_value):
+                logger.warning(
+                    "telemetry.%s=%r from the config is ignored because %s=%r is set",
+                    field,
+                    value,
+                    fallback,
+                    fallback_value,
+                )
             continue
         os.environ.setdefault(env_name, "1" if value is True else "0" if value is False else str(value))
 

@@ -19,6 +19,7 @@ has to reach a server process. These tests cover that translation and, important
 precedence: a raw env var set by the user must beat YAML, never the other way round.
 """
 
+import logging
 import os
 
 import pytest
@@ -266,6 +267,45 @@ def test_lens_fallback_env_reaches_the_resolved_lens_config(clean_otel_env):
     config = lens.NemoLensConfig.from_env(prefix="NEMO_GYM_OTEL", fallback_prefix="NEMO_LENS")
     assert config.exporter == "otlp"
     assert config.span_groups == "per_rollout"
+
+
+def test_a_config_value_overridden_by_lens_env_is_reported(clean_otel_env, caplog):
+    """A user who wrote a value in the telemetry block must learn that the environment won."""
+    clean_otel_env.setenv("NEMO_LENS_EXPORTER", "otlp")
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.telemetry.setup"):
+        configure_telemetry_env(TelemetryConfig(enabled=True, exporter="console"))
+
+    assert "telemetry.exporter='console' from the config is ignored because NEMO_LENS_EXPORTER='otlp' is set" in (
+        caplog.text
+    )
+
+
+@pytest.mark.parametrize(
+    ("block", "env"),
+    [
+        pytest.param({"enabled": True}, "console", id="field-not-in-config"),
+        pytest.param({"enabled": True, "exporter": "otlp"}, "otlp", id="same-value"),
+    ],
+)
+def test_lens_env_that_overrides_nothing_is_not_reported(clean_otel_env, caplog, block, env):
+    """A default, or a config value the environment agrees with, is not worth a warning."""
+    clean_otel_env.setenv("NEMO_LENS_EXPORTER", env)
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.telemetry.setup"):
+        configure_telemetry_env(TelemetryConfig.model_validate(block))
+
+    assert "is ignored because" not in caplog.text
+
+
+def test_a_boolean_lens_env_value_is_compared_by_meaning(clean_otel_env, caplog):
+    """`true` in the environment agrees with `true` in the config even though the strings differ."""
+    clean_otel_env.setenv("NEMO_LENS_METRICS_ENABLED", "true")
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.telemetry.setup"):
+        configure_telemetry_env(TelemetryConfig(enabled=True, metrics_enabled=True))
+
+    assert "is ignored because" not in caplog.text
 
 
 def test_lens_run_id_is_shared_rather_than_replaced(clean_otel_env):
