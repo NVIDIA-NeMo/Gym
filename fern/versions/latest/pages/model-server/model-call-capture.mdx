@@ -307,7 +307,8 @@ Late calls are more common than they sound, because an agent the framework gave 
 `TokenSource.drop` leaves the same kind of fence in the complete-record token store.
 After a rollout is retired, its manifest route returns HTTP 410 instead of an empty manifest, so a framework that reads it too late finds out rather than building an empty receipt.
 
-A late call may already have staged its tokens before Gym discarded its row, and no manifest names those tokens.
+A call that starts after its rollout was retired is not admitted for capture, so it stages nothing.
+A call that was already in flight, however, may have staged its tokens before Gym discarded its row, and no manifest names those tokens.
 Gym logs a warning with the call's staging key, and the framework that staged the tokens has to remove them, for example by sweeping staged rows that no receipt references.
 
 Retire every rollout the framework is done with, whether it finished or was abandoned.

@@ -494,7 +494,8 @@ async def test_retire_removes_ledgers_and_reports_absent_rollouts(store):
     assert result.removed == ["r1", "r2"]
     assert result.absent == ["r-none"]
     for rollout_id in ("r1", "r2"):
-        assert not await store.has_rows(rollout_id)
+        with pytest.raises(RolloutRetiredError):
+            await store.has_rows(rollout_id)
         with pytest.raises(RolloutRetiredError):
             await store.manifest(rollout_id)
     # The retired call can no longer anchor a continuation.
@@ -520,7 +521,8 @@ async def test_retired_rollouts_discard_later_records_and_failures(store):
     await _record_call_1(store, rollout_id="r-unstarted")
 
     for rollout_id in ("r1", "r-unstarted"):
-        assert not await store.has_rows(rollout_id)
+        with pytest.raises(RolloutRetiredError):
+            await store.has_rows(rollout_id)
     # Other rollouts are unaffected.
     await _record_call_1(store, rollout_id="r2")
     assert await store.has_rows("r2")
@@ -682,3 +684,17 @@ def test_retire_and_delete_declare_their_result_shape():
 
     for method in (CaptureLedger.retire, CaptureLedger.delete, FileLineageStore.retire, InMemoryLineageStore.delete):
         assert typing.get_type_hints(method)["return"] is RolloutRemovalPayload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_items", [[USER_1, ASSISTANT_1, USER_2], [USER_1]], ids=["continuation", "root"])
+async def test_a_call_on_a_retired_rollout_is_not_admitted_for_staging(store, request_items):
+    """A late continuation, or the first call of a duplicate run, would stage tokens no manifest names."""
+    await _record_call_1(store)
+    await store.retire(["r1"])
+
+    context = await _admit(store, request_items)
+
+    assert context.capture_admission is None
+    with pytest.raises(RolloutRetiredError):
+        await store.has_rows("r1")

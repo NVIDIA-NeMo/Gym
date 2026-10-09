@@ -112,12 +112,22 @@ class RolloutControlClient:
         self._request_timeout_s = request_timeout_s
 
     async def manifest(self, rollout_id: str) -> RolloutManifest:
+        """Fetch a rollout's manifest. A retired rollout raises ``RolloutRetiredError``."""
+        from nemo_gym.token_id_capture.store import validate_rollout_id
+
+        # Validate before building the URL: dot segments are normalized, so "../rollouts/r1" would fetch r1.
+        validate_rollout_id(rollout_id)
         response = await self._request("GET", f"/rollouts/{rollout_id}/manifest")
+        if response.status == 410:
+            raise RolloutRetiredError(f"rollout {rollout_id} is retired: {await response.text()}")
         if response.status != 200:
             raise RuntimeError(
                 f"rollout {rollout_id} manifest fetch failed: HTTP {response.status} {await response.text()}"
             )
-        return RolloutManifest.model_validate(await response.json())
+        manifest = RolloutManifest.model_validate(await response.json())
+        if manifest.rollout_id != rollout_id:
+            raise ValueError(f"asked for the manifest of rollout {rollout_id} but got rollout {manifest.rollout_id}")
+        return manifest
 
     async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemoval:
         """Retire ledgers; see ``CaptureLedger.retire``. Retrying after a failure is safe."""

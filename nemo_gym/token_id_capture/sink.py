@@ -39,6 +39,7 @@ from nemo_gym.token_id_capture.protocols import (
     CaptureLedger,
     LineageResolution,
     LineageResolver,
+    RolloutRetiredError,
     TokenCaptureFrozenError,
     TokenSink,
 )
@@ -286,7 +287,18 @@ async def resolve_parent(request_messages: list | None) -> None:
             )
         return
     is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
-    if is_root or not await ledger.has_rows(context.rollout_id):
+    try:
+        has_rows = await ledger.has_rows(context.rollout_id)
+    except RolloutRetiredError:
+        # A late call of an abandoned attempt, or the first call of a duplicate run. Admitting it would stage
+        # tokens that the ledger then refuses to record, so no manifest would ever name them.
+        logger.warning(
+            "Model call %s of rollout %s arrived after the rollout was retired; its tokens are not captured.",
+            context.model_call_id,
+            context.rollout_id,
+        )
+        return
+    if is_root or not has_rows:
         context.capture_admission = CaptureAdmission(
             rollout_id=context.rollout_id,
             model_call_id=context.model_call_id,

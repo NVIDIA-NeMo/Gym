@@ -531,6 +531,8 @@ class InMemoryLineageStore:
     async def has_rows(self, rollout_id: str) -> bool:
         if self._ledgers.get(rollout_id):
             return True
+        if rollout_id in self._retired:
+            raise RolloutRetiredError(f"rollout {rollout_id} is retired")
         return bool(self.index.for_rollout(rollout_id).by_call_id)
 
     async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
@@ -1018,7 +1020,11 @@ class FileLineageStore(IncrementalLineageStore):
 
     def _has_rows(self, rollout_id: str) -> bool:
         with self._locked(rollout_id):
-            return bool(self._read(rollout_id))
+            if self._read(rollout_id):
+                return True
+            if self._is_retired(rollout_id):
+                raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+            return False
 
     async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         return await asyncio.to_thread(self._retire, rollout_ids)

@@ -201,7 +201,10 @@ class CaptureLedger(LineageResolver, Protocol):
         ...
 
     async def has_rows(self, rollout_id: str) -> bool:
-        """Return whether any ledger row (committed or failed) exists."""
+        """Return whether any ledger row (committed or failed) exists.
+
+        A retired rollout raises ``RolloutRetiredError``, so admission can refuse to capture its late calls.
+        """
         ...
 
     async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:

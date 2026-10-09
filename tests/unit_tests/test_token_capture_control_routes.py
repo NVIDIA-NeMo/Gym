@@ -16,6 +16,7 @@ from nemo_gym.token_id_capture.control_routes import (
     install_rollout_control_routes,
 )
 from nemo_gym.token_id_capture.lineage import FileLineageStore
+from nemo_gym.token_id_capture.protocols import RolloutRetiredError
 
 
 TOKEN = "secret"
@@ -50,7 +51,8 @@ async def test_retire_route_removes_ledgers_and_fences_them(client, ledger, tmp_
     assert response.json() == {"removed": ["r1"], "absent": ["r2"]}
     assert not (tmp_path / "r1.lineage.jsonl").exists()
     await _record_failure(ledger, "r1")
-    assert not await ledger.has_rows("r1")
+    with pytest.raises(RolloutRetiredError):
+        await ledger.has_rows("r1")
 
 
 @pytest.mark.asyncio
@@ -196,5 +198,42 @@ async def test_manifest_route_reports_a_retired_rollout_as_gone(client, ledger, 
     response = client.get(f"{CONTROL_ROUTE_PREFIX}/rollouts/r1/manifest", headers=AUTH)
 
     assert response.status_code == 410
-    with pytest.raises(RuntimeError, match="HTTP 410"):
+
+
+@pytest.mark.asyncio
+async def test_client_reports_a_retired_manifest_with_the_typed_error(client, ledger, monkeypatch):
+    await _record_failure(ledger, "r1")
+    client.post(RETIRE, json={"rollout_ids": ["r1"]}, headers=AUTH)
+
+    with pytest.raises(RolloutRetiredError):
         await _client_over(client, monkeypatch).manifest("r1")
+
+
+@pytest.mark.asyncio
+async def test_client_validates_a_manifest_rollout_id_before_sending(monkeypatch):
+    control = RolloutControlClient("http://model", auth_token=TOKEN, request_timeout_s=1.0)
+    sent = []
+
+    async def request(method, path, **kwargs):
+        sent.append(path)
+        return _Response(200, {"rollout_id": "r1", "records": [], "failures": []})
+
+    monkeypatch.setattr(control, "_request", request)
+
+    # Dot segments are normalized in the URL, so "../rollouts/r1" would fetch rollout r1's manifest.
+    with pytest.raises(ValueError, match="Invalid rollout id"):
+        await control.manifest("../rollouts/r1")
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_client_rejects_a_manifest_for_a_different_rollout(monkeypatch):
+    control = RolloutControlClient("http://model", auth_token=TOKEN, request_timeout_s=1.0)
+
+    async def request(method, path, **kwargs):
+        return _Response(200, {"rollout_id": "r2", "records": [], "failures": []})
+
+    monkeypatch.setattr(control, "_request", request)
+
+    with pytest.raises(ValueError, match="r2"):
+        await control.manifest("r1")
