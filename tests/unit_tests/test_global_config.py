@@ -40,6 +40,7 @@ from nemo_gym.global_config import (
     find_open_port,
     get_first_server_config_dict,
     get_global_config_dict,
+    reassign_auto_assigned_ports,
 )
 from nemo_gym.server_utils import (
     DictConfig,
@@ -1414,3 +1415,52 @@ class TestConfigLoadErrors:
         parser = GlobalConfigDictParser()
         config = DictConfig({"my_server": {"resources_servers": {"x": {"entrypoint": "app.py", "domain": "other"}}}})
         parser.raise_on_no_server_instances(config)
+
+
+class TestReassignAutoAssignedPorts:
+    def _parse(self, monkeypatch: MonkeyPatch, config: dict, ports: list) -> DictConfig:
+        TestGlobalConfig()._mock_versions_for_testing(monkeypatch)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", MagicMock(return_value=False))
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", MagicMock(side_effect=ports))
+        monkeypatch.setattr(
+            nemo_gym.global_config.hydra, "main", MagicMock(return_value=lambda fn: lambda: fn(DictConfig(config)))
+        )
+        return get_global_config_dict()
+
+    def test_only_gym_picked_ports_change_and_old_ones_stay_disallowed(self, monkeypatch: MonkeyPatch) -> None:
+        config = {
+            "auto": {"responses_api_models": {"m": {"entrypoint": "app.py"}}},
+            "pinned": {"responses_api_models": {"m": {"entrypoint": "app.py", "port": 15000}}},
+        }
+        global_config_dict = self._parse(monkeypatch, config, [12345, 12346])
+
+        find_open_port = nemo_gym.global_config._find_open_port_using_range
+        assert reassign_auto_assigned_ports(global_config_dict) == {"auto": (12345, 12346)}
+
+        assert get_first_server_config_dict(global_config_dict, "auto")["port"] == 12346
+        assert get_first_server_config_dict(global_config_dict, "pinned")["port"] == 15000
+        assert 12345 in find_open_port.call_args.kwargs["disallowed_ports"]
+        assert list(global_config_dict["disallowed_ports"]) == [DEFAULT_HEAD_SERVER_PORT, 12345, 15000, 12346]
+        # The cached global config is the object that changed, so every later reader sees the new ports.
+        assert get_global_config_dict() is global_config_dict
+
+    def test_servers_missing_from_the_config_are_skipped(self, monkeypatch: MonkeyPatch) -> None:
+        global_config_dict = self._parse(
+            monkeypatch, {"auto": {"responses_api_models": {"m": {"entrypoint": "app.py"}}}}, [12345]
+        )
+        monkeypatch.setattr(nemo_gym.global_config, "_AUTO_ASSIGNED_PORT_SERVERS", ["gone", "auto"])
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", MagicMock(return_value=12346))
+
+        assert reassign_auto_assigned_ports(global_config_dict) == {"auto": (12345, 12346)}
+
+    @mark.parametrize("attempts", [0, "3", True, None])
+    def test_invalid_server_startup_attempts_is_a_config_error(self, monkeypatch: MonkeyPatch, attempts) -> None:
+        config = {
+            "auto": {"responses_api_models": {"m": {"entrypoint": "app.py"}}},
+            "server_startup_attempts": attempts,
+        }
+
+        with raises(ConfigError, match="server_startup_attempts"):
+            self._parse(monkeypatch, config, [12345])
