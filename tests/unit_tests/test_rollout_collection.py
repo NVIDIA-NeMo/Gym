@@ -70,6 +70,7 @@ from nemo_gym.rollout_collection import (
     RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
+    _agent_request_failure_row,
     _attach_ng_perf,
     _attach_trajectory_record,
     _build_ng_perf,
@@ -4884,6 +4885,75 @@ class TestRolloutCollection:
         # No capture uses the derived id.
         # The explicit id replaces it.
         assert store.read("0-0") == []
+
+    @pytest.mark.parametrize("drained", [False, True])
+    async def test_run_from_config_keeps_captured_calls_on_a_failure_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drained: bool
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)},
+        )
+        source_row = {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
+        output_fpath = tmp_path / "output.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(output_fpath),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                [example] = examples
+                # The agent's model call was rejected, then the agent raised instead of returning.
+                store.record(
+                    "0-0",
+                    {
+                        "model_call_id": "rejected",
+                        "dialect": "responses",
+                        "status_code": 400,
+                        "request": {"input": "secret"},
+                        "response": {"error": {"message": "bad request"}},
+                    },
+                )
+                result = (
+                    {NG_FAILURE_CLASS_KEY: "cancelled", NG_DISPATCH_DRAINED_KEY: True}
+                    if drained
+                    else _agent_request_failure_row(RuntimeError("agent raised"), 500)
+                )
+                future = Future()
+                future.set_result(_CompletedRollout(row=example, result=result, rollout_latency_ms=None))
+                return [future]
+
+        # The only rollout produced no result, so the run has nothing to score.
+        with pytest.raises(RuntimeError, match="no score to report"):
+            await Helper().run_from_config(config)
+
+        failures_fpath = _failures_path_for(output_fpath)
+        failures = (
+            [orjson.loads(line) for line in failures_fpath.read_bytes().splitlines()]
+            if failures_fpath.exists()
+            else []
+        )
+        [failure] = failures
+        if drained:
+            # A drained row never started, so it has no calls of its own to keep.
+            assert "ng_model_call_capture" not in failure
+            return
+        assert failure[NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
+        [call] = failure["ng_model_call_capture"]["calls"]
+        assert call["model_call_id"] == "rejected" and call["status_code"] == 400
+        # Metadata only: payloads stay in the capture store, and no trajectory is projected.
+        assert "request" not in call and "response" not in call
+        assert "ng_trajectory" not in failure and "ng_perf" not in failure
 
     async def test_run_from_config_does_not_finalize_a_nonparticipating_agent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

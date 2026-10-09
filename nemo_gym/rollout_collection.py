@@ -2796,7 +2796,7 @@ class RolloutCollectionHelper(BaseModel):
 
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)
-                # No rollout happened, so there is nothing to capture, tokenize or average.
+                # No rollout result, so there is nothing to tokenize or average.
                 no_result = failure_class in _NO_RESULT_FAILURE_CLASSES or bool(result.get(NG_DISPATCH_DRAINED_KEY))
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
@@ -2807,9 +2807,16 @@ class RolloutCollectionHelper(BaseModel):
                         capture_dirs,
                         include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
                     )
+                elif capture_dirs and not result.get(NG_DISPATCH_DRAINED_KEY):
+                    # A failed `/run` still made model calls before it failed. Attach their metadata (not
+                    # payloads) to the failure record so they are not lost. A drained row never started
+                    # and made none.
+                    merge_model_call_capture_into_record(result, capture_dirs)
 
+                # A failure record keeps its captured calls as they are; only a record that already
+                # carries agent evidence gets a trajectory projected.
                 if (
-                    "ng_model_call_capture" in result
+                    ("ng_model_call_capture" in result and not no_result)
                     or "ng_agent_observations" in result
                     or NG_TRAJECTORY_KEY in result
                 ):
