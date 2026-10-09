@@ -117,10 +117,11 @@ def test_native_turns_enable_content_health_without_call_references(tmp_path, pa
 def test_invocation_bound_failed_call_remains_evaluable(tmp_path, parse):
     trajectory, observations = _trajectory(parse, _session_db(tmp_path, [_policy({"type": "text", "text": "known"})]))
     _, _, verdict = _health(tmp_path, trajectory, observations, status_code=503, tokens_out=0)
-    assert {"rollout_ended_on_failed_model_call", "model_call_zero_completion_tokens"} <= {
-        f["check"] for f in verdict["findings"]
-    }
-    assert not {"agent_turn_hollow", "rollout_missing_agent_turns"} & {f["check"] for f in verdict["findings"]}
+    checks = {f["check"] for f in verdict["findings"]}
+    assert "rollout_ended_on_failed_model_call" in checks
+    # The 503 produced no generation, so it has no tokens to account for.
+    assert not {"model_call_zero_completion_tokens", "model_call_missing_token_counts"} & checks
+    assert not {"agent_turn_hollow", "rollout_missing_agent_turns"} & checks
 
 
 @pytest.mark.parametrize("parts", [[], [{"type": "text", "text": ""}]])
