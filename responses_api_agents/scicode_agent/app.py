@@ -32,7 +32,7 @@ import statistics
 from typing import Any, Dict, List
 
 from fastapi import Request, Response
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 from step_utils import (
     OUT_OF_CONTEXT,
     PREFILLED_STEPS_CODE,
@@ -81,6 +81,9 @@ class ScicodeAgentRunRequest(BaseRunRequest):
     problem_id: str
     sub_steps: List[dict]
     required_dependencies: str
+    # Benchmark-specific official code for steps that provide context but are not generated/scored.
+    # Keys are canonical step numbers such as "13.6".
+    prefilled_steps_code: Dict[str, str] = Field(default_factory=dict)
 
 
 def _empty_response() -> dict:
@@ -227,6 +230,10 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             }
             step_usage.append(step_record)
             # Prefilled steps provide context for later steps but are not scored (no solution entry).
+            step_number = sub_steps[cur_step]["step_number"]
+            if step_number in body.prefilled_steps_code:
+                previous_llm_code[cur_step] = body.prefilled_steps_code[step_number]
+                continue
             if (body.problem_id, cur_step) in PREFILLED_STEPS_CODE:
                 previous_llm_code[cur_step] = PREFILLED_STEPS_CODE[(body.problem_id, cur_step)]
                 step_record["status"] = "prefilled"

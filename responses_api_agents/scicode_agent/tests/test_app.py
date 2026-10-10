@@ -278,6 +278,30 @@ class TestApp:
         assert set(captured["verify"]["solutions"].keys()) == {"62.2"}
 
     @pytest.mark.asyncio
+    async def test_run_uses_row_prefill_before_legacy_fallback(self):
+        agent = _agent()
+        captured = {"model": []}
+
+        def _post(server_name, url_path, json, cookies):
+            if url_path == "/v1/responses":
+                captured["model"].append(json)
+                return _Resp(_model_json("x = 1"))
+            captured["verify"] = json
+            return _Resp({"reward": 1.0})
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        body = _run_request(problem_id="62", n_steps=2)
+        body.prefilled_steps_code = {"62.1": "class OfficialVerifiedBlock:\n    pass"}
+        with patch.object(app, "raise_for_status", AsyncMock()):
+            await agent.run(_FakeRequest(), body)
+
+        assert len(captured["model"]) == 1
+        prompt = captured["model"][0]["input"][0]["content"]
+        assert "class OfficialVerifiedBlock" in prompt
+        assert "self.operator_dict = operator_dict" not in prompt
+        assert set(captured["verify"]["solutions"]) == {"62.2"}
+
+    @pytest.mark.asyncio
     async def test_run_context_window_sentinels_remaining_steps(self):
         agent = _agent()
         captured = {}
