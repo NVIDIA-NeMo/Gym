@@ -1057,3 +1057,38 @@ def test_opencode_num_task_calls_counts_subagent_launches():
     }
     assert _opencode_num_task_calls(export) == 2
     assert _opencode_num_task_calls({}) is None
+
+
+# Behaviour flags end to end (detector cases are in test_behavior.py).
+from responses_api_agents.opencode_sandboxed_agent.app import _rollout_behavior  # noqa: E402
+from responses_api_agents.opencode_sandboxed_agent.tests.test_behavior import (  # noqa: E402
+    DNS_FAIL,
+    GOLD,
+    TASK,
+    TEST_PATCH,
+    bash,
+    export,
+)
+
+
+def test_rollout_behavior_writes_evidence_and_never_raises(tmp_path) -> None:
+    body = OpenCodeSandboxedAgentRunRequest.model_validate(
+        {
+            "responses_create_params": {"input": [{"role": "user", "content": "Solve"}]},
+            "repo": TASK.repo,
+            "patch": GOLD,
+            "test_patch": TEST_PATCH,
+        }
+    )
+    url = "https://raw.githubusercontent.com/sindresorhus/serialize-error/main/src/core.py"
+    results_fpath = tmp_path / "export.json"
+    results_fpath.write_text(json.dumps(export(bash(f"curl {url}", DNS_FAIL))))
+
+    result = anyio.run(_rollout_behavior, body, str(results_fpath))
+    assert result is not None and result["upstream_fetch_attempt"] and not result["net_blocked_legit"]
+    saved = json.loads((tmp_path / "behavior.json").read_text())
+    assert saved["flags"] == result and saved["evidence"]["upstream_fetch_attempt"]
+
+    assert anyio.run(_rollout_behavior, body, "") is None
+    results_fpath.write_text('{"messages": "not a list"}')
+    assert anyio.run(_rollout_behavior, body, str(results_fpath)) is None

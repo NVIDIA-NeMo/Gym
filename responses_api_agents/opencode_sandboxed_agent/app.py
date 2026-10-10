@@ -16,7 +16,7 @@
 import json
 import sqlite3
 import sys
-from asyncio import Semaphore
+from asyncio import Semaphore, to_thread
 from copy import deepcopy
 from pathlib import Path
 from shlex import quote
@@ -82,6 +82,7 @@ from nemo_gym.server_utils import (
     raise_for_status,
 )
 from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
+from responses_api_agents.opencode_sandboxed_agent.behavior import TaskInfo, detect_behavior
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -471,6 +472,33 @@ def _opencode_num_task_calls(opencode_export: Optional[Dict[str, Any]]) -> Optio
     )
 
 
+def _write_behavior(results_fpath: Path, task: TaskInfo) -> Dict[str, bool]:
+    report = detect_behavior(json.loads(results_fpath.read_text() or "{}"), task)
+    results_fpath.with_name("behavior.json").write_text(
+        json.dumps({"flags": report.flags, "evidence": report.evidence})
+    )
+    return report.flags
+
+
+async def _rollout_behavior(body: BaseRunRequest, results_fpath: str) -> Optional[Dict[str, bool]]:
+    """Behaviour flags of the exported session (``results_fpath``); None, logged, on any failure."""
+    if not results_fpath:
+        return None
+    row = body.model_extra or {}
+    task = TaskInfo(
+        repo=str(row.get("repo") or ""),
+        gold_patch=str(row.get("patch") or ""),
+        test_patch=str(row.get("test_patch") or ""),
+        test_files=tuple(str(f) for f in row.get("test_files") or ()),
+        solution_commit=str(row.get("solution_commit") or ""),
+    )
+    try:
+        return await to_thread(_write_behavior, Path(results_fpath), task)
+    except Exception:
+        print("Failed to compute rollout behaviour flags", format_exc(), file=sys.stderr)
+        return None
+
+
 def _extract_opencode_session_id(session_list_stdout: str) -> str:
     """Return the newest OpenCode session ID from ``session list`` JSON output."""
     sessions = json.loads(session_list_stdout)
@@ -518,6 +546,9 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     rollout_time_taken: Optional[float] = None
     # Subagent launches: ``task`` tool calls in the exported main session.
     opencode_num_task_calls: Optional[int] = None
+    # Reward-hacking / network-blocked behaviour flags of the main session (behavior.py);
+    # None when they could not be computed. Evidence is in behavior.json beside the export.
+    opencode_behavior: Optional[Dict[str, bool]] = None
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -1158,6 +1189,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     self._sandbox_id_to_run_result.pop(session_key, None)
 
         response_dict |= run_result
+        response_dict["opencode_behavior"] = await _rollout_behavior(
+            body, run_result.get("opencode_results_fpath") or ""
+        )
         response_dict |= {
             "agent_queue_time_taken": queue_time_taken,
             "seed_session_time_taken": seed_session_time_taken,
