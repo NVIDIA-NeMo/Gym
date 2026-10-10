@@ -18,7 +18,7 @@ import builtins
 import gc
 import logging
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -990,6 +990,7 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
                 logs=SimpleNamespace(stdout=[FakeLog("stdout")], stderr=[]),
                 error=None,
                 exit_code=None,
+                complete=SimpleNamespace(execution_time_in_millis=1),
             )
 
     class FakeFiles:
@@ -1122,6 +1123,172 @@ async def test_exec_background_polls_status_and_logs(monkeypatch: pytest.MonkeyP
     assert raw.commands.run_calls[0][1].kwargs["background"] is True
     assert raw.commands.status_calls == ["exec-42", "exec-42"]
     assert raw.commands.log_calls == ["exec-42"]
+
+
+# execd enforces timeout_s by SIGKILLing the process group and reports it as
+# exit code -1 with "signal: killed" (live probe, opensandbox 0.1.15), nothing more.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exit_code", "traceback", "sleep_s", "timeout_s", "error_type", "note"),
+    [
+        (-1, ["signal: killed"], 0.06, 0.05, "timeout", "Command ended by its time limit: OpenSandbox killed it"),
+        (1, ["exit status 1"], 0.06, 0.05, "timeout", "inferred from elapsed time only: exit code 1"),
+        (3, ["exit status 3"], 0.0, 30, None, None),
+        (-1, ["signal: killed"], 0.06, None, None, None),
+    ],
+    ids=["killed-at-limit", "failed-past-limit", "failed-early", "no-time-limit"],
+)
+async def test_exec_labels_commands_ended_by_their_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: int,
+    traceback: list[str],
+    sleep_s: float,
+    timeout_s: float | None,
+    error_type: str | None,
+    note: str | None,
+) -> None:
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    async def run(_command: str, *, opts: FakeRunCommandOpts) -> Any:
+        await asyncio.sleep(sleep_s)
+        return SimpleNamespace(
+            logs=SimpleNamespace(stdout=[SimpleNamespace(text="started")], stderr=[]),
+            error=SimpleNamespace(name="CommandExecError", value=str(exit_code), traceback=traceback),
+            exit_code=exit_code,
+        )
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(opensandbox_provider, "_TIME_LIMIT_SLACK_S", 0.0)
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 5}, probe={"command": None})
+    raw = SimpleNamespace(commands=SimpleNamespace(run=run))
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-1", provider_name="opensandbox", raw=raw)
+
+    result = await provider.exec(handle, "sleep 30", timeout_s=timeout_s)
+
+    assert result.return_code == exit_code
+    assert result.stdout == "started"
+    assert result.error_type == error_type
+    stderr_lines = result.stderr.split("\n")
+    assert stderr_lines[0] == f"CommandExecError: {exit_code}"
+    if note is None:
+        assert len(stderr_lines) == 1
+    else:
+        assert note in stderr_lines[1]
+
+
+@pytest.mark.parametrize(
+    ("execution", "expected"),
+    [
+        (SimpleNamespace(exit_code=3, error=None, complete=None), (3, None, None)),
+        (SimpleNamespace(exit_code=None, error=SimpleNamespace(), complete=None), (125, "sandbox", None)),
+        (SimpleNamespace(exit_code=None, error=None, complete=SimpleNamespace()), (0, None, None)),
+    ],
+    ids=["exit-code", "error-without-code", "completed"],
+)
+def test_execution_outcome_maps_sdk_results(execution: Any, expected: tuple[int, str | None, str | None]) -> None:
+    assert opensandbox_provider._execution_outcome(execution) == expected
+
+
+async def test_exec_without_final_status_is_not_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stream cut short (no exit code, error or completion event) must not read as exit 0."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    async def run(_command: str, *, opts: FakeRunCommandOpts) -> Any:
+        return SimpleNamespace(
+            logs=SimpleNamespace(stdout=[SimpleNamespace(text="partial")], stderr=[]),
+            error=None,
+            exit_code=None,
+            complete=None,
+        )
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 5}, probe={"command": None})
+    raw = SimpleNamespace(commands=SimpleNamespace(run=run))
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-1", provider_name="opensandbox", raw=raw)
+
+    result = await provider.exec(handle, "pytest", timeout_s=30)
+
+    assert result.return_code == 125
+    assert result.error_type == "sandbox"
+    assert result.stdout == "partial"
+    assert result.stderr == "Command ended without a final status: no exit code, error or completion event"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exit_code", "error", "run_s", "error_type", "note"),
+    [
+        (-1, "signal: killed", 5.001, "timeout", "OpenSandbox killed it after 5.0s (timeout_s=5)"),
+        (2, "exit status 2", 5.2, "timeout", "inferred from elapsed time only: exit code 2 after 5.2s"),
+        (-1, "signal: killed", 1.0, None, None),
+    ],
+    ids=["killed-at-limit", "failed-past-limit", "killed-early"],
+)
+async def test_exec_background_labels_time_limit_from_server_timestamps(
+    monkeypatch: pytest.MonkeyPatch, exit_code: int, error: str, run_s: float, error_type: str | None, note: str | None
+) -> None:
+    """The client sees the end only at its next poll, so execd's own timestamps decide."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    started_at = datetime(2026, 10, 8, 13, 29, 30, tzinfo=timezone.utc)
+
+    async def run(_command: str, *, opts: FakeRunCommandOpts) -> Any:
+        return SimpleNamespace(id="exec-1")
+
+    async def get_command_status(_execution_id: str) -> Any:
+        return SimpleNamespace(
+            running=False,
+            exit_code=exit_code,
+            error=error,
+            started_at=started_at,
+            finished_at=started_at + timedelta(seconds=run_s),
+        )
+
+    async def get_background_command_logs(_execution_id: str) -> Any:
+        return SimpleNamespace(content="started\n", cursor=8)
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5}, probe={"command": None}, operations={"background_exec": True}
+    )
+    raw = SimpleNamespace(
+        commands=SimpleNamespace(
+            run=run, get_command_status=get_command_status, get_background_command_logs=get_background_command_logs
+        )
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-bg", provider_name="opensandbox", raw=raw)
+
+    result = await provider.exec(handle, "sleep 30", timeout_s=5)
+
+    assert result.return_code == exit_code
+    assert result.stdout == "started\n"
+    assert result.error_type == error_type
+    if note is None:
+        assert result.stderr == error
+    else:
+        first, second = result.stderr.split("\n")
+        assert first == error
+        assert note in second
 
 
 @pytest.mark.asyncio
