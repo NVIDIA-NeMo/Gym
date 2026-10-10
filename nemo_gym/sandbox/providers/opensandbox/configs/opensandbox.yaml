@@ -21,6 +21,9 @@ sandbox:
     sandbox-api: opensandbox-sdk
   opensandbox:
     connection:
+      # Resolve an owner-only key file at runtime, without serializing the key.
+      # To use api_key_file, replace the api_key entry below.
+      # api_key_file: /run/secrets/opensandbox-key
       # May include the scheme (https://host): it then sets `protocol` and takes precedence over it.
       domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
       api_key: ${oc.env:OPENSANDBOX_API_KEY}
@@ -36,6 +39,10 @@ sandbox:
       # certificate the client can verify.
       tls_verify: false
     create:
+      # For private images, reference an owner-only JSON file containing
+      # registry (host[:port]), username, and password. Credentials are read
+      # only at runtime and are restricted to images from that registry.
+      # image_auth_file: /run/secrets/registry.json
       request_timeout_s: 1200
       # Must exceed the spec's ready_timeout_s (1200 for mini_swe_agent_2): this
       # bounds the whole create call, which now includes the readiness wait.

@@ -17,6 +17,7 @@
 import asyncio
 import hashlib
 import ipaddress
+import json
 import logging
 import math
 import re
@@ -454,6 +455,8 @@ class OpenSandboxConnectionConfig:
 
     domain: str | None = None
     api_key: str | None = None
+    # Keep credentials out of resolved configuration and Harbor job artifacts.
+    api_key_file: str | None = None
     protocol: str | None = None
     request_timeout_s: int | None = None
     use_server_proxy: bool = False
@@ -469,6 +472,8 @@ class OpenSandboxConnectionConfig:
     tls_verify: bool = False
 
     def __post_init__(self) -> None:
+        if self.api_key_file and self.api_key is not None:
+            raise ValueError("Configure either api_key or api_key_file, not both")
         if self.domain is None:
             return
         self.domain, scheme = split_domain_scheme(self.domain)
@@ -527,6 +532,8 @@ class OpenSandboxCreateConfig:
     retry_delay_s: float = 5.0
     retry_max_delay_s: float = 60.0
     image_pull_policy: str | None = DEFAULT_IMAGE_PULL_POLICY
+    # JSON with registry, username, and password; resolved only for SDK calls.
+    image_auth_file: str | None = None
     skip_health_check: bool = False
     connect_attempt_timeout_s: float = 30.0
     connect_poll_s: float = 2.0
@@ -952,8 +959,9 @@ class OpenSandboxProvider:
             # OpenSandbox SDK 0.1.15 appends ``/v1`` directly. Normalizing here
             # prevents a configured trailing slash from producing ``//v1``.
             kwargs["domain"] = self._connection.domain.rstrip("/")
-        if self._connection.api_key is not None:
-            kwargs["api_key"] = self._connection.api_key
+        api_key = self._resolve_api_key()
+        if api_key is not None:
+            kwargs["api_key"] = api_key
         if self._connection.protocol is not None:
             kwargs["protocol"] = self._connection.protocol
         if request_timeout_s is None:
@@ -968,8 +976,8 @@ class OpenSandboxProvider:
             # every health ping and create times out at ready_timeout. Inject
             # the key only in proxy mode: a direct sandbox endpoint runs
             # untrusted code and must never see it.
-            if self._connection.api_key is not None:
-                kwargs["headers"] = {"OPEN-SANDBOX-API-KEY": self._connection.api_key}
+            if api_key is not None:
+                kwargs["headers"] = {"OPEN-SANDBOX-API-KEY": api_key}
         if (
             self._connection.transport_backend == "aiohttp"
             or self._connection.keepalive_expiry_s is not None
@@ -1513,7 +1521,7 @@ class OpenSandboxProvider:
         elif options.resource_requests is not None:
             kwargs["resource_requests"] = _resource_map(SandboxResources.from_mapping(options.resource_requests))
         if spec.image is not None:
-            kwargs["image"] = _to_image_spec(spec.image, options.image_auth)
+            kwargs["image"] = _to_image_spec(spec.image, self._resolve_image_auth(spec.image, options.image_auth))
         if options.snapshot_id is not None:
             kwargs["snapshot_id"] = options.snapshot_id
         if spec.ttl_s is not None:
@@ -1978,6 +1986,46 @@ class OpenSandboxProvider:
             error_type = "sandbox" if execution.error is not None else None
         return SandboxExecResult(stdout, "\n".join(stderr_parts) or None, return_code, error_type)
 
+    def _resolve_image_auth(self, image: str, inline_auth: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        """Read private registry credentials without storing or sending them to another registry."""
+        if not self._create.image_auth_file:
+            return inline_auth
+        if inline_auth is not None:
+            raise ValueError("Configure either image_auth or create.image_auth_file, not both")
+        path = Path(self._create.image_auth_file).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError("OpenSandbox registry credential file is missing")
+        if path.stat().st_mode & 0o077:
+            raise PermissionError("OpenSandbox registry credential file must be owner-only")
+        try:
+            credentials = json.loads(path.read_text())
+        except (ValueError, UnicodeDecodeError):
+            raise ValueError("OpenSandbox registry credential file must contain valid JSON") from None
+        if (
+            not isinstance(credentials, dict)
+            or set(credentials) != {"registry", "username", "password"}
+            or any(not isinstance(value, str) or not value.strip() for value in credentials.values())
+        ):
+            raise ValueError("OpenSandbox registry credential file requires registry, username, and password strings")
+        registry = credentials["registry"]
+        if "/" in registry or "/" not in image or image.split("/", 1)[0].lower() != registry.lower():
+            raise ValueError("OpenSandbox registry credentials do not match the requested image registry")
+        return {"username": credentials["username"], "password": credentials["password"]}
+
+    def _resolve_api_key(self) -> str | None:
+        """Read a private key only at runtime, without mutating stored configuration."""
+        if not self._connection.api_key_file:
+            return self._connection.api_key
+        path = Path(self._connection.api_key_file).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError("OpenSandbox API key file is missing")
+        if path.stat().st_mode & 0o077:
+            raise PermissionError("OpenSandbox API key file must be owner-only")
+        key = path.read_text().strip()
+        if not key:
+            raise ValueError("OpenSandbox API key file is empty")
+        return key
+
     def _pty_http_client(self) -> Any:
         """Return the aiohttp client for one PTY session (same ``tls_verify`` as the SDK transport)."""
         import aiohttp
@@ -2023,8 +2071,9 @@ class OpenSandboxProvider:
             timeout_s=request_timeout_s,
         )
         headers = dict(endpoint.headers)
-        if self._connection.api_key:
-            headers["OPEN-SANDBOX-API-KEY"] = self._connection.api_key
+        api_key = self._resolve_api_key()
+        if self._connection.use_server_proxy and api_key:
+            headers["OPEN-SANDBOX-API-KEY"] = api_key
         return f"{self._connection.protocol}://{endpoint.endpoint}", headers, request_timeout_s
 
     async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> SandboxPtySession:

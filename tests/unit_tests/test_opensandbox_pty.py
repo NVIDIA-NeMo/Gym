@@ -16,6 +16,7 @@
 import asyncio
 import json
 import struct
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -425,31 +426,61 @@ def test_effective_command_rewrites() -> None:
         _effective_command(SandboxPtySpec(user=0))
 
 
-async def test_provider_create_pty_resolves_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("proxy", [False, True])
+@pytest.mark.parametrize("credential_source", ["inline", "file", "none"])
+@pytest.mark.parametrize("operation", ["create", "attach"])
+async def test_provider_pty_resolves_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, proxy: bool, credential_source: str, operation: str
+) -> None:
     pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
     pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
     from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    endpoint = "server/v1/sandboxes/sb-1/proxy/44772" if proxy else "sandbox:44772"
+    endpoint_headers = {"X-EXECD-ACCESS-TOKEN": "tok"}
 
     class FakeRaw:
         async def get_endpoint(self, port: int) -> SimpleNamespace:
             assert port == 44772
             return SimpleNamespace(
-                endpoint="server/v1/sandboxes/sb-1/proxy/44772",
-                headers={"X-EXECD-ACCESS-TOKEN": "tok"},
+                endpoint=endpoint,
+                headers=endpoint_headers,
             )
 
-    provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "http"})
+    connection: dict[str, Any] = {"domain": "server", "protocol": "http", "use_server_proxy": proxy}
+    if credential_source == "inline":
+        connection["api_key"] = "fake-test-credential"
+    elif credential_source == "file":
+        path = tmp_path / "key"
+        path.write_text("fake-test-credential\n")
+        path.chmod(0o600)
+        connection["api_key_file"] = str(path)
+    provider = OpenSandboxProvider(connection=connection)
     ws = FakeWs([CONNECTED])
     client = FakeHttpClient(ws=ws)
     monkeypatch.setattr(provider, "_pty_http_client", lambda: client)
 
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
-    session = await provider.create_pty(handle, SandboxPtySpec(cwd="/w"))
-    url, body, headers = client.post_calls[0]
-    assert url == "http://server/v1/sandboxes/sb-1/proxy/44772/pty"
-    assert body == {"cwd": "/w"}
-    assert headers == {"X-EXECD-ACCESS-TOKEN": "tok", "OPEN-SANDBOX-API-KEY": "k"}
-    await session.close()
+    if operation == "create":
+        session = await provider.create_pty(handle, SandboxPtySpec(cwd="/w"))
+    else:
+        session = await provider.attach_pty(handle, "s-1", takeover=True, since=10)
+    try:
+        expected_headers = dict(endpoint_headers)
+        if proxy and credential_source != "none":
+            expected_headers["OPEN-SANDBOX-API-KEY"] = "fake-test-credential"
+        if operation == "create":
+            url, body, headers = client.post_calls[0]
+            assert url == f"http://{endpoint}/pty"
+            assert body == {"cwd": "/w"}
+            assert headers == expected_headers
+        ws_url, ws_headers = client.ws_calls[0]
+        query = "" if operation == "create" else "?takeover=1&since=10"
+        assert ws_url == f"ws://{endpoint}/pty/s-1/ws{query}"
+        assert ws_headers == expected_headers
+        assert endpoint_headers == {"X-EXECD-ACCESS-TOKEN": "tok"}
+    finally:
+        await session.close()
 
 
 async def test_open_pty_session_invalid_spec_closes_client() -> None:
@@ -677,7 +708,9 @@ async def test_provider_attach_pty_reuses_endpoint(monkeypatch: pytest.MonkeyPat
         async def get_endpoint(self, port: int) -> SimpleNamespace:
             return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
 
-    provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "https"})
+    provider = OpenSandboxProvider(
+        connection={"domain": "server", "api_key": "k", "protocol": "https", "use_server_proxy": True}
+    )
     client = FakeHttpClient(ws=FakeWs([CONNECTED]))
     monkeypatch.setattr(provider, "_pty_http_client", lambda: client)
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
