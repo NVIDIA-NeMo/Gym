@@ -48,6 +48,7 @@ from nemo_gym.token_id_capture.records import (
     ParentResolutionStatus,
     TokenEntry,
     extract_token_fields,
+    response_finish_reason,
     response_to_output_items,
     stamp_lineage,
     strip_token_fields,
@@ -396,6 +397,7 @@ async def capture_tokens(
             # The Anthropic mapping reuses this id on its outer envelope,
             # so the recorded id matches what the client received in every dialect.
             response_id=str(payload.get("id") or "") or None,
+            finish_reason=response_finish_reason(payload),
             created_at=time.time(),
             prefix_requested=context.prefix_requested,
             prefix_supplied=context.prefix_supplied,
