@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- nemo_gym/sandbox/providers/docker/configs/docker.yaml
+use_absolute_ip: true
+benchcad_agent:
+  responses_api_agents:
+    benchcad_agent:
+      entrypoint: app.py
+      domain: agent
+      description: CAD generation, editing, and numeric QA with OpenCode and native BenchCAD scoring
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: 4
+      benchmark_root: benchmarks/benchcad/.cache/upstream
+      dataset_root: benchmarks/benchcad/data
+      results_dir: results/benchcad
+      artifacts_dir: results/benchcad/opencode
+      opencode_version: 1.17.11
+      opencode_max_context_window: 131072
+      opencode_model_call_timeout: 3600000
+      preinstalled_opencode: true
+      output_token_policy: remaining_context
+      sandbox_timeout: 3600
+      sandbox_provider: sandbox
+      network_access: inherit
+      token_id_capture: false
+      sandbox_config:
+        image: benchcad-opencode:77fd16a
+        workdir: /workspace
+        ttl_s: 7200
+        ready_timeout_s: 600
+        resources:
+          cpu: 2
+          memory_mib: 8192
+        env:
+          PATH: /opt/benchcad/.venv/bin:/usr/local/bin:/usr/bin:/bin
+          OPENCODE_DISABLE_AUTOUPDATE: '1'
+          OPENCODE_DISABLE_SHARE: '1'
+          OPENCODE_DISABLE_MODELS_FETCH: 'true'
+      opencode_config:
+        provider:
+          nemo_gym:
+            models:
+              dummy_model:
+                modalities:
+                  input: [text, image]
+                  output: [text]
+        compaction:
+          auto: false
+        agent:
+          build:
+            steps: 50
+          title:
+            disable: true
+        permission:
+          '*': allow
+          webfetch: deny
+          websearch: deny
+          task: deny
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: benchmarks/benchcad/example.jsonl
+        license: Creative Commons Attribution 4.0 International
+      - name: benchcad
+        type: benchmark
+        jsonl_fpath: benchmarks/benchcad/data/benchcad_benchmark.jsonl
+        prepare_script: benchmarks/benchcad/prepare.py
+        num_repeats: 1
+        license: Creative Commons Attribution 4.0 International
+benchcad_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: benchcad_agent
+      default_episode_timeout_seconds: 7200

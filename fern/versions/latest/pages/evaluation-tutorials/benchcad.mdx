@@ -1,0 +1,126 @@
+---
+title: "BenchCAD with OpenCode"
+description: "Evaluate CAD generation, editing, and numeric QA using OpenCode and BenchCAD's native scoring."
+---
+
+# BenchCAD with OpenCode
+
+[BenchCAD](https://github.com/BenchCAD/BenchCAD-main) evaluates parametric CAD
+generation and understanding. Gym's `benchcad_agent` runs the existing sandboxed
+OpenCode harness and uses the upstream prompt builders, answer extraction, and
+scorers. No judge model is required.
+
+| Task | Model input | Reward |
+| --- | --- | --- |
+| `vision2code` | Canonical four-view render | Voxel IoU |
+| `codeedit` | Original CadQuery code and edit instruction | Normalized IoU improvement |
+| `vision_qa` | Dataset image and numeric questions | Mean type-aware numeric accuracy |
+| `code_qa` | CadQuery code and numeric questions | Mean type-aware numeric accuracy |
+
+Rewards retain their native fractional values. Count and boolean questions use
+exact equality; dimensional and ratio questions use sign-aware symmetric ratio
+accuracy. CodeEdit uses the upstream baseline IoU and clips improvement to [0, 1].
+
+The integration pins upstream commit `77fd16a80a4e5fc39964ee23b6cc3225beefac8f`,
+dataset revision `5919f578ab09ec283603a082fab07c7639ab56eb`, and OpenCode `1.17.11`.
+Code is MIT licensed upstream; the [dataset](https://huggingface.co/datasets/BenchCAD/BenchCAD)
+is CC BY 4.0, attributed to the BenchCAD authors in the preparation manifest.
+
+## Prepare data and the CAD environment
+
+Run from the Gym repository root with Gym installed. Preparation needs `git`,
+`uv`, network access to GitHub and Hugging Face, and Python 3.12. The CAD stack
+uses a separate Python environment because its NumPy dependency does not support
+Gym's Python 3.13. Its pins match upstream's CAD stack, with the upstream ARM
+Dockerfile's `nlopt==2.11.0` compatibility adjustment.
+
+```bash
+# Start with one part per task.
+python -m benchmarks.benchcad.prepare --limit 1
+
+# Select task variants explicitly, or omit --limit for the full dataset.
+python -m benchmarks.benchcad.prepare --tasks code_qa codeedit --limit 5
+
+# Full preparation includes all four tasks and renders Vision2Code references.
+gym eval prepare --config benchmarks/benchcad/config.yaml
+```
+
+Preparation reuses the upstream data conversion scripts. It creates
+`benchmarks/benchcad/data/benchcad_benchmark.jsonl`, individual task JSONLs,
+private reference assets, and a manifest recording actual part counts and
+source revisions. Full Vision2Code preparation executes the ground-truth CAD
+programs and renders their canonical 524×524 inputs; this is substantial CPU
+work. It does not substitute Hugging Face's low-resolution preview images.
+
+The upstream Vision2Code downloader can skip ground-truth programs that fail to
+execute. Inspect preparation counts before reporting a full benchmark result.
+QA has one rollout per part, with all questions for that part in the prompt.
+The committed `example.jsonl` contains five Code-QA parts; prepare their private
+assets with `python -m benchmarks.benchcad.prepare --tasks code_qa --limit 5`
+before running that file.
+
+## Build the OpenCode sandbox
+
+```bash
+docker build -f benchmarks/benchcad/Dockerfile -t benchcad-opencode:77fd16a .
+```
+
+The image includes OpenCode, Python 3.12, and the CAD libraries. It excludes the
+upstream task data. The agent sandbox receives only the prompt and allowed images;
+the model opens images using OpenCode's `read` tool. A fresh sandbox executes the
+final predicted program. Reference geometry and QA answers stay in the trusted
+scoring process outside both sandboxes.
+
+The configuration uses Gym's Docker provider. The task image is separate from
+the model inference runtime. Do not mount reference data into task containers.
+
+## Connect a model and evaluate
+
+Serve the checkpoint using a compatible inference runtime with tool calling and,
+for the vision tasks, image input. Set `policy_base_url`, `policy_api_key`, and
+`policy_model_name` in your local `env.yaml`. Match the agent's
+`opencode_max_context_window` to the endpoint's context limit; the benchmark
+configuration defaults to 131,072 tokens. Start evaluation after the model
+endpoint is ready.
+
+```bash
+gym env start --config benchmarks/benchcad/config.yaml --model-type vllm_model
+
+gym eval run --no-serve --agent benchcad_agent \
+  --input benchmarks/benchcad/data/benchcad_benchmark.jsonl \
+  --output results/benchcad/rollouts.jsonl \
+  --num-repeats 1 --concurrency 4
+```
+
+Use `--input benchmarks/benchcad/data/code_qa.jsonl` to evaluate an individual
+task variant. Context size, maximum agent steps, timeouts, and concurrency are
+configurable in `benchmarks/benchcad/config.yaml`.
+
+OpenCode retains image tool results in its conversation, so repeated reads,
+crops, and generated renders can exceed an endpoint's image limit even when a
+task starts with one image. For vLLM endpoints, configure
+`--limit-mm-per-prompt` for the intended tool budget and available GPU memory
+before running vision evaluations. A rejected image request may be retried until
+the agent timeout; the current adapter records that outcome as a zero-scored
+`agent_timeout`, not a masked infrastructure failure. Audit server errors when
+interpreting vision scores.
+
+## Interpret results
+
+Each rollout retains the task, record ID, native reward, status, scorer revision,
+and artifact directory. Artifacts include the input, full Gym response, final
+answer, execution diagnostics, predicted STEP when produced, and result. The
+OpenCode harness also saves its trajectory under `results/benchcad/opencode`.
+
+Missing code, invalid answers, code execution failures, context exhaustion, and agent or code timeouts score
+zero. Infrastructure failures set `mask_sample: true`; report their count and
+resolve them before comparing models. The upstream IoU implementation returns
+zero when geometry cannot be loaded or voxelized; this behavior is preserved.
+
+Report scores separately for the four task variants, along with the preparation
+manifest and OpenCode budgets. A pooled mean weights the much larger Vision2Code
+split heavily. A subset smoke run is not a full benchmark score. OpenCode allows
+tool use and iterative work, so label these results `benchcad-opencode`; they are
+a distinct protocol from the upstream single-response leaderboard and its own
+specialized agentic arm. This adapter is for evaluation and does not produce
+training token IDs or log probabilities.
