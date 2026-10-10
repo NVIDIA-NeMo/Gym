@@ -15,8 +15,9 @@ def supervise(directory: Path) -> int:
     """Keep one episode clock and publish the shared supervisor's cleanup receipt.
 
     This is the sole dependency on Gym's private ``_supervise`` helper. Its CLI
-    requires a finite deadline; infinity here leaves cancellation to the NOOA
+    requires a finite deadline; infinity here leaves cancellation to the
     environment without changing the shared supervisor or copying its reaper.
+    Worker exit reaps agent-owned descendants before verification.
     """
     (directory / "runner.pid").write_text(str(os.getpid()))
     receipt = process_supervisor._supervise(
@@ -27,6 +28,8 @@ def supervise(directory: Path) -> int:
             "responses_api_agents.nooa_agent.sandbox_entrypoint",
             str(directory / "input.json"),
             str(directory / "result.json"),
+            str(directory / "runner.stop"),
+            str(directory / "completion.json"),
         ],
         timeout=math.inf,
         cleanup_timeout=5,

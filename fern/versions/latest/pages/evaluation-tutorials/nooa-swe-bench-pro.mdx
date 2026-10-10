@@ -3,6 +3,8 @@ title: "NOOA sessions and SWE-bench Pro"
 description: "Run NOOA through the native Environment Server and a Resources-owned sandbox."
 ---
 
+# NOOA sessions and SWE-bench Pro
+
 NOOA uses Gym's native agent sessions and existing `single_agent_turn` Environment Server. It seeds Resources,
 opens and invokes NOOA, closes the agent to collect evidence and final Resources cookies, asks Resources to
 verify, and closes Resources. Call the Environment Server's `/run`; NOOA
@@ -32,11 +34,40 @@ is not automatically rewritten. No host virtual environment or provider credenti
 Direct HTTP tool grants arrive through the native session. Generated `self.*` resource methods, `GymResponsesLLM`,
 and `GymTraceHooks` execute alongside NOOA. Model and resource cookies remain separate; final resource cookies
 return on close for verification. Model/resource infrastructure failures fail the episode instead of becoming a
-reward-zero response. Policy-budget exhaustion remains a gradable partial response.
+reward-zero response. Policy-budget exhaustion remains a gradable partial response unless an unrecovered infrastructure failure also occurred.
 
 Hooks capture Python execution and nested resource calls. Sandbox results are exported on completion or handled
 errors; a hard kill can lose in-memory events. Sandbox-written results are agent-reported evidence, not trusted
 training records. Resources remains responsible for rewards.
+
+Successful episodes return NOOA observations and trajectories. Failed episodes use the unchanged Gym collector's
+existing `partial_response` contract: it does not persist failed observation bundles, producer trajectories, or
+secondary cleanup errors. This NOOA-only integration does not extend shared failure persistence.
+
+## Session cleanup and verification
+
+The NOOA recipes select `single_agent_turn`, following the shared agent session lifecycle used by the
+Hermes and Simple Agent integrations. In sandboxed mode, agent close stops NOOA-owned task processes,
+returns the final Resources cookies and agent evidence, and disconnects from the borrowed sandbox before
+verification. In embedded mode, session close returns evidence and cookies after the invocation adapter
+has completed its own cleanup.
+Resources retains ownership of the sandbox and closes it after verification. Timeouts and cancellation
+use the same bounded cleanup path.
+
+The sandboxed BenchAgent recipes use NOOA's invocation-scoped `preserve_background_services()` while the agent is active;
+the external supervisor stops those services during agent close. The TaskAgent and optional BenchAgent
+requirements both pin NOOA to `19caab169b018476ac433d040f6ae3f06aeff101`, which provides this scope and
+summary-fork isolation. Rebuild existing agent runtimes for the new dependency; keep earlier benchmark
+results associated with their original pins.
+
+A successful main-model call clears a recovered transport failure. Optional summarization failures do not
+set or clear the parent invocation's failure state. Required resource failures and unrecovered main-model
+failures remain fatal, and secondary cleanup failures do not replace the original terminal exception.
+
+The opt-in `responses_api_models/vllm_model/nooa_app.py` adapter omits `prompt_cache_key` and removes equal duplicate `reasoning`/`reasoning_content`
+aliases when all backend URLs use `https://inference-api.nvidia.com/v1`. Other backends and unequal alias
+values keep their original request fields. NOOA baseline launches select this entrypoint; the shared VLLM entrypoint is unchanged. These changes preserve ordered assistant history and native
+benchmark grading; they do not establish a benchmark score improvement.
 
 ## Native stateful example
 
@@ -59,7 +90,8 @@ The recipe reuses the existing Resources-owned task sandbox, patch extraction, a
 ```bash
 python benchmarks/swebench/pro/prepare_nooa.py
 gym env start --config benchmarks/swebench/pro/nooa.yaml \
-  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml --model-type vllm_model
+  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
+  --config responses_api_models/vllm_model/configs/nooa_vllm_model.yaml
 
 gym eval run --no-serve --agent swebench_pro_nooa_agent \
   --input benchmarks/swebench/data/swebench_pro_nooa.jsonl \
