@@ -83,6 +83,8 @@ class _Episode:
     restart: bool = False
     resume: asyncio.Event = field(default_factory=asyncio.Event)
     suspended_remaining: Optional[float] = None
+    # Set when the owner's final cleanup starts: a retire then waits for the episode without cancelling it.
+    finishing: bool = False
 
     def suspend_deadline(self) -> None:
         if self.deadline is None or self.deadline.when() is None or self.suspended_remaining is not None:
@@ -93,8 +95,13 @@ class _Episode:
     def resume_deadline(self) -> None:
         if self.suspended_remaining is None or self.deadline is None:
             return
-        self.deadline.reschedule(asyncio.get_running_loop().time() + self.suspended_remaining)
-        self.suspended_remaining = None
+        remaining, self.suspended_remaining = self.suspended_remaining, None
+        try:
+            self.deadline.reschedule(asyncio.get_running_loop().time() + remaining)
+        except RuntimeError:
+            # The episode's deadline scope has already exited, for example while a failing step unwinds;
+            # there is nothing left to time, and raising here would hide the original error.
+            pass
 
 
 def _blocks(episode: _Episode) -> bool:
@@ -166,6 +173,16 @@ class EpisodeSteps:
         continuation, episode.continuation = episode.continuation, None
         return continuation
 
+    def finishing(self, key: str) -> None:
+        """The episode's protocol is over and its owner is releasing what it created.
+
+        A retire from here on waits for the episode but does not cancel its task: the owner's cleanup,
+        which closes the episode's sessions, must run to completion.
+        """
+        episode = self._episodes.get(key)
+        if episode is not None:
+            episode.finishing = True
+
     async def end(self, key: str) -> None:
         episode = self._episodes.get(key)
         if episode is not None:
@@ -202,15 +219,25 @@ class EpisodeSteps:
         if mode == "replay" and self.closed:
             episode.suspend_deadline()
         await self._changed()
+        completed = False
         try:
             yield
+            completed = True
         finally:
             if self._episodes.get(key) is episode:
-                if mode == "replay" and self.closed:
+                if mode == "replay" and self.closed and completed:
                     # The checkpoint already counts this episode at the boundary before the step; it stays there,
                     # not a blocker, until its next boundary parks it with the step's result.
                     pass
+                elif mode == "replay" and self.closed:
+                    # The step raised, so the episode is failing, and its cleanup may close its sessions before the
+                    # commit.
+                    # Continuing it from the boundary before the step would need those sessions, so it is exported
+                    # with no boundary and starts over from its input after a crash.
+                    # It stays out of the blockers, so one failure does not fail the whole checkpoint.
+                    episode.boundary = None
                 else:
+                    # A step that raised has no next boundary: the episode is failing, so it blocks until it ends.
                     self._set_state(episode, "running")
                     episode.resume_deadline()
             await self._changed()
@@ -259,7 +286,7 @@ class EpisodeSteps:
         return list(self._episodes)
 
     async def retire(self, key: str) -> None:
-        """Stop the episode and wait until its task has ended.
+        """Stop the episode: cancel it unless its final cleanup already started, then wait until it has ended.
 
         The episode stays tracked until then, so if this wait is cut short,
         a later retire finds it and waits again, and a duplicate start of the same attempt is refused.
@@ -275,8 +302,8 @@ class EpisodeSteps:
         self._blocking += _blocks(episode) - blocked
         episode.resume.set()
         if episode.task is not None and episode.task is not asyncio.current_task():
-            # Cancel once: cancelling again would interrupt the cleanup the first cancellation started.
-            if first:
+            # Cancel once, and never once the final cleanup started: cancelling would interrupt that cleanup.
+            if first and not episode.finishing:
                 episode.task.cancel()
             await asyncio.wait([episode.task])
         self._forget(key, episode)
