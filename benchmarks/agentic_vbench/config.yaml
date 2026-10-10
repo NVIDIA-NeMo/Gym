@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Agentic-VBench: 100 pinned video-editing tasks run verbatim through upstream
+# Harbor 0.6.6 / OpenCode 1.14.39 and scored by each task's native verifier.
+#
+# The agent calls Gym's policy model server (chat completions), so the served model
+# name, seed and sampling overrides on policy_model apply. The benchmark checkout,
+# Harbor and the Docker client are materialized inside the job; task containers run
+# on a remote rootless Podman backend found through backend_dir/client.env.
+# `agentic_vbench_*` selectors are the run-level knobs a launcher overrides.
+agentic_vbench_agent:
+  responses_api_agents:
+    agentic_vbench_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Direct endpoint for launchers that serve the model themselves (unsets model_server).
+      model_base_url: ${oc.env:AGENTIC_VBENCH_MODEL_BASE_URL,null}
+      model_id: ${oc.env:AGENTIC_VBENCH_MODEL_ID,null}
+      benchmark_root: ${oc.env:AGENTIC_VBENCH_ROOT,null}
+      harbor_python: ${oc.env:AGENTIC_VBENCH_HARBOR_PYTHON,null}
+      output_root: ${oc.env:AGENTIC_VBENCH_OUTPUT_ROOT,null}
+      runtime_root: ${oc.env:AGENTIC_VBENCH_RUNTIME_ROOT,null}
+      docker_cli_dir: ${oc.env:AGENTIC_VBENCH_DOCKER_CLI_DIR,null}
+      backend_dir: ${oc.env:AGENTIC_VBENCH_BACKEND_DIR,null}
+      backend_wait_seconds: ${oc.select:agentic_vbench_backend_wait_seconds,1800}
+      credentials_file: ${oc.env:AGENTIC_VBENCH_CREDENTIALS_FILE,null}
+      backend: ${oc.select:agentic_vbench_backend,remote}
+      judge_protocol: ${oc.select:agentic_vbench_judge_protocol,nvinference-hybrid}
+      concurrency: ${oc.select:agentic_vbench_concurrency,12}
+      max_turns: ${oc.select:agentic_vbench_max_turns,null}
+      verifier_timeout_multiplier: ${oc.select:agentic_vbench_verifier_timeout_multiplier,3}
+      model_context_tokens: ${oc.select:agentic_vbench_context_tokens,262144}
+      model_output_capability_tokens: ${oc.select:agentic_vbench_output_tokens,100000}
+      model_call_timeout_ms: ${oc.select:agentic_vbench_model_call_timeout_ms,3600000}
+      datasets:
+        - name: agentic_vbench
+          type: benchmark
+          jsonl_fpath: ${oc.env:AGENTIC_VBENCH_DATASET,benchmarks/agentic_vbench/data/agentic_vbench_benchmark.jsonl}
+          prepare_script: benchmarks/agentic_vbench/prepare.py
+          num_repeats: 1
+
+agentic_vbench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: agentic_vbench_agent
+      # A trial can take hours: a 100k-token agent session plus a verifier up to 3 x 1800 s.
+      default_episode_timeout_seconds: ${oc.select:agentic_vbench_episode_timeout_seconds,43200}

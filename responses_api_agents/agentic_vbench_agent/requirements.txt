@@ -1,0 +1,3 @@
+-e nemo-gym @ ../../
+# Upstream Harbor runs the tasks; the agent venv hosts it so no second interpreter is needed.
+harbor==0.6.6

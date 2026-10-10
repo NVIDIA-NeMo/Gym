@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+services:
+  main:
+    image: localhost/${MAIN_IMAGE_NAME}
+    userns_mode: host
+    user: "0:0"
+    pid: private
+    # The rootless backend cannot enforce the cpus limit (no cgroup delegation), so
+    # containers see every host core. Bound BLAS/OpenMP thread pools to the task's
+    # declared cpus; otherwise concurrent verifiers thrash the node and time out.
+    environment:
+      OMP_NUM_THREADS: ${CPUS}
+      MKL_NUM_THREADS: ${CPUS}
+      OPENBLAS_NUM_THREADS: ${CPUS}
+      NUMEXPR_NUM_THREADS: ${CPUS}
+      VECLIB_MAXIMUM_THREADS: ${CPUS}
+    entrypoint:
+      - /bin/bash
+      - -c
+      - mkdir -p /logs/agent /logs/verifier /logs/artifacts; trap 'exit 0' TERM INT; sleep infinity & wait
+    deploy:
+      resources:
+        limits:
+          cpus: ${CPUS}
+          memory: ${MEMORY}
