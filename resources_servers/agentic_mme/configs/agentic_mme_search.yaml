@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Overlay on agentic_mme.yaml. Supply keys through private Gym configuration.
+# Enabling this overlay explicitly allows task images to be uploaded to ImgBB.
+agentic_mme_agent:
+  responses_api_agents:
+    agentic_mme_agent:
+      retrieval:
+        mode: live
+        serper_api_key: ${agentic_mme_serper_api_key}
+        imgbb_api_key: ${agentic_mme_imgbb_api_key}
+        jina_api_key: ${agentic_mme_jina_api_key}
+        allow_image_upload: true
