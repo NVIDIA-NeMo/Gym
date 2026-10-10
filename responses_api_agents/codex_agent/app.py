@@ -32,7 +32,12 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import (
+    SandboxSession,
+    harness_not_run_observations,
+    harness_not_run_response,
+)
+from nemo_gym.agent_utils.sandbox_session_capture import SandboxSessionCaptureConfig
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -424,6 +429,21 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    # Agent sessions only: a component started in each task sandbox that serves Codex's model calls and records
+    # them; the session close returns its token capture. Codex calls the streaming Responses API
+    # (``POST <base_url>/responses`` with ``stream: true``), so the endpoint the capture returns must serve it.
+    # A capture replaces the Gym model server for those calls, so model_server must be null.
+    sandbox_session_capture: SandboxSessionCaptureConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_model_endpoint(self) -> "CodexAgentConfig":
+        """Reject a config that names both a Gym model server and a sandbox session capture."""
+        if self.model_server is not None and self.sandbox_session_capture is not None:
+            raise ValueError(
+                "Codex takes model_server or sandbox_session_capture, not both; "
+                "set model_server: null to use sandbox_session_capture"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_context_budget(self) -> "CodexAgentConfig":
@@ -476,6 +496,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             agent_session_id=state.request.agent_session_id,
             agent_observations=state.observations
             or AgentObservationBundle(source="codex", gaps=[ObservationGap(code="agent_activation_interrupted")]),
+            token_capture=state.session.token_capture(),
         )
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> CodexSandboxSession:
@@ -504,7 +525,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "Codex runtime/session files must be outside SandboxAccess.workdir")
         if any(access.required for access in self.effective_tool_accesses(body)):
             raise HTTPException(422, "Native Codex supports its own sandbox tools, not required HTTP/MCP tools")
-        if self.config.model_server is None:
+        if self.config.model_server is None and self.config.sandbox_session_capture is None:
             raise HTTPException(422, "Native Codex requires a sandbox-reachable Gym model_server")
         if not self.config.codex_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.codex_version):
             raise HTTPException(422, "Native Codex requires an exact codex_version, for example 0.144.4")
@@ -532,7 +553,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
         state = CodexSandboxSession(
             request=body,
             session=SandboxSession(
-                sandbox=sandbox, session_dir=directory, workdir=workdir, owns_sandbox=owns_sandbox, harness="Codex"
+                sandbox=sandbox,
+                session_dir=directory,
+                workdir=workdir,
+                owns_sandbox=owns_sandbox,
+                harness="Codex",
+                session_capture=self.config.sandbox_session_capture,
             ),
             runtime=runtime,
         )
@@ -571,6 +597,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     f"error_type={installed.error_type}; stdout={installed.stdout}; stderr={installed.stderr}"
                 )
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+            # Started at seed so its endpoint is known when the activation writes the Codex config. A capture that
+            # does not start returns None; the activation then answers without running Codex.
+            state.capture_endpoint = await state.session.start_session_capture()
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -579,7 +608,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
             raise
         return state
 
-    def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+    def _sandbox_input(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, *, model: Optional[str]
+    ) -> tuple[str, str]:
         """Validate and normalize input before consuming the session's activation."""
         unsupported = (
             "max_output_tokens",
@@ -608,7 +639,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         for name in unsupported:
             if values.get(name) is not None:
                 raise HTTPException(422, f"Native Codex does not support request field {name}")
-        if body.model is not None and body.model != self._effective_model():
+        if body.model is not None and body.model != model:
             raise HTTPException(422, "Native Codex model is selected by agent and model-server configuration")
         unknown = set(body.model_extra or {})
         if unknown:
@@ -667,9 +698,20 @@ class CodexAgent(SimpleResponsesAPIAgent):
         prompt: str,
         system: str,
     ) -> NeMoGymResponse:
-        config = self._build_config(
-            self._resolve_call_base_url(state.request.episode_id.capture_key), developer_instructions=system
+        model = self._session_model(state) or "codex-default"
+        if state.session.session_capture_failed:
+            # Nothing would be captured, so Codex does not run; close returns the masked capture.
+            reason = state.session.token_capture().mask_reason
+            state.observations = harness_not_run_observations(source="codex", reason=reason)
+            return harness_not_run_response(body, model=model, reason=reason)
+        endpoint = self.model_endpoint(
+            model_server=self.config.model_server,
+            rollout_id=state.request.episode_id.capture_key,
+            session_endpoint=state.capture_endpoint,
         )
+        config = self._build_config(endpoint.base_url, developer_instructions=system)
+        if endpoint.model:
+            config["model"] = endpoint.model
         await state.upload_text("home/.codex/config.toml", toml_dumps(config))
         command = self._build_command("-", state.session.workdir)
         command[0:1] = [
@@ -888,7 +930,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
-            model=self._effective_model(),
+            model=model,
             object="response",
             output=output,
             status=status,
@@ -918,10 +960,18 @@ class CodexAgent(SimpleResponsesAPIAgent):
         endpoint (``model_server`` unset) is used verbatim and never prefixed — it has no
         prefix-stripping middleware, so a prefix would 404 every call.
         """
-        if self.config.model_server:
-            return self.resolve_model_base_url(self.config.model_server.name, rollout_id)
         # Mirrors claude_code_agent's null anthropic_base_url: null means the provider's real API.
-        return self.config.openai_base_url or "https://api.openai.com/v1"
+        return self.model_endpoint(
+            model_server=self.config.model_server,
+            rollout_id=rollout_id,
+            base_url=self.config.openai_base_url or "https://api.openai.com/v1",
+        ).base_url
+
+    def _session_model(self, state: CodexSandboxSession) -> Optional[str]:
+        """The model a session's Codex is told to use: the capture's model name when it dictates one."""
+        if state.capture_endpoint is not None and state.capture_endpoint.model:
+            return state.capture_endpoint.model
+        return self._effective_model()
 
     def _effective_model(self) -> Optional[str]:
         """The model name written into the generated config (and reported on the response).
@@ -1142,6 +1192,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
     ) -> NeMoGymResponse:
+        if self.config.sandbox_session_capture is not None:
+            raise HTTPException(
+                422, "sandbox_session_capture runs only in agent sessions; the host path cannot capture calls"
+            )
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -1215,7 +1269,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 raise HTTPException(409, "Codex activation does not match the seeded session and rollout route")
             if state.session.closing:
                 raise HTTPException(409, "Codex session is closing")
-            prompt, system = self._sandbox_input(body)
+            prompt, system = self._sandbox_input(body, model=self._session_model(state))
             if state.task is None:
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(self._sandbox_response(state, body, prompt=prompt, system=system))
