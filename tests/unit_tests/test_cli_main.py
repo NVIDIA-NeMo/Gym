@@ -265,6 +265,43 @@ class TestEvalRunFlags:
         assert "+responses_create_params.tool_choice=auto" in overrides  # unknown +override passes through
 
 
+class TestHarborTargetFlags:
+    """`--force` on a Harbor TARGET reaches the prepare step as `args.force`; it is not a Hydra override."""
+
+    def _args_for(self, monkeypatch: MonkeyPatch, entry: str, argv: list[str]) -> tuple[object, list[str]]:
+        import nemo_gym.tasks.harbor.cli as harbor_cli
+
+        captured: dict = {}
+
+        def fake_entry(args, overrides):
+            captured["args"], captured["overrides"] = args, overrides
+
+        monkeypatch.setattr(harbor_cli, entry, fake_entry)
+        monkeypatch.setattr(sys, "argv", ["gym", *argv])
+        main()
+        return captured["args"], captured["overrides"]
+
+    def test_eval_run_force(self, monkeypatch: MonkeyPatch) -> None:
+        args, overrides = self._args_for(
+            monkeypatch, "run_target", ["eval", "run", "harbor:o/ds@4.0.0", "--force", "--agent", "a"]
+        )
+        assert args.target == "harbor:o/ds@4.0.0"
+        assert args.force is True
+        assert not any("force" in o for o in overrides)
+
+    def test_eval_run_force_defaults_off(self, monkeypatch: MonkeyPatch) -> None:
+        args, _ = self._args_for(monkeypatch, "run_target", ["eval", "run", "harbor:o/ds@4.0.0", "--agent", "a"])
+        assert args.force is False
+
+    def test_dataset_validate_force(self, monkeypatch: MonkeyPatch) -> None:
+        args, overrides = self._args_for(
+            monkeypatch, "validate_target", ["dataset", "validate", "harbor:o/ds", "--force"]
+        )
+        assert args.target == "harbor:o/ds"
+        assert args.force is True
+        assert not any("force" in o for o in overrides)
+
+
 class TestEvalExportFlags:
     def test_flags_dispatch_as_hydra_overrides(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(

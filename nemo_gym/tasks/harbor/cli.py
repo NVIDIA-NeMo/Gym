@@ -24,7 +24,7 @@ import yaml
 
 from nemo_gym import component_search_roots
 from nemo_gym.path_utils import failures_path_for
-from nemo_gym.tasks.harbor.hub import HubRef, datasets_dir, fetch_ref, is_hub_ref
+from nemo_gym.tasks.harbor.hub import datasets_dir, fetch_ref, is_hub_ref
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
 from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError, discover_tasks
 
@@ -98,19 +98,20 @@ def prepare_target(
     *,
     output_root: Path = DEFAULT_OUTPUT_ROOT,
     refresh_registry: bool = False,
+    force: bool = False,
 ) -> PreparedTaskset:
     """Fetch (for hub references) and load the tasks, then write the rows file.
 
     A task folder that does not load is skipped with a warning (and listed in
-    ``PreparedTaskset.skipped``) so the rest of the dataset still prepares.
+    ``PreparedTaskset.skipped``) so the rest of the dataset still prepares. ``force``
+    lets a fetch replace task folders whose content differs from the Harbor store.
     """
     if is_hub_ref(target):
-        taskset = HubRef.parse(target).name
-        folder = fetch_ref(target, refresh_registry=refresh_registry)
+        folder = fetch_ref(target, refresh_registry=refresh_registry, force=force)
         print(f"Fetched {target} into {folder}")
     else:
         folder = Path(target).expanduser().resolve()
-        taskset = folder.name
+    taskset = folder.name
     errors: dict[str, HarborTaskError] = {}
     tasks = discover_tasks(folder, skipped=errors)
     for task_id, error in errors.items():
@@ -258,7 +259,7 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
     agent_name = getattr(args, "agent", None)
     if not agent_name:
         raise ValueError("A Harbor target needs `--agent <harness>` (for example `--agent hermes_agent`)")
-    prepared = prepare_target(args.target)
+    prepared = prepare_target(args.target, force=getattr(args, "force", False))
     agent = resolve_agent(agent_name)
     config_path, tokens = build_run(prepared, agent, sandbox=getattr(args, "sandbox", None), overrides=overrides)
     print(f"Run config written to {config_path} (datasets folder: {datasets_dir()})")
@@ -269,7 +270,7 @@ def validate_target(args: argparse.Namespace, overrides: list[str]) -> None:
     """Entry point for ``gym dataset validate <target>``: run every task's reference solution and score it."""
     from nemo_gym.cli.main import _merge_config_paths, dispatch
 
-    prepared = prepare_target(args.target)
+    prepared = prepare_target(args.target, force=getattr(args, "force", False))
     agent = resolve_agent(ORACLE_AGENT)
     unvalidated = [task.task_id for task in prepared.tasks if not task.has_solution]
     if len(unvalidated) == len(prepared.tasks):

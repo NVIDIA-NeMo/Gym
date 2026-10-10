@@ -31,8 +31,10 @@ from nemo_gym.tasks.harbor.hub import (
     load_registry,
     resolve_dataset,
     validate_git_url,
+    validate_task_name,
 )
 from nemo_gym.tasks.harbor.materialize import materialize_task, run_config, write_rows
+from nemo_gym.tasks.harbor.package_store import PackageStoreError
 from nemo_gym.tasks.harbor.task import HarborTaskError
 
 
@@ -365,6 +367,10 @@ class TestHub:
     def test_ref_parsing(self):
         assert HubRef.parse("harbor:hello-world") == HubRef("hello-world", None)
         assert HubRef.parse("harbor:terminal-bench@2.0") == HubRef("terminal-bench", "2.0")
+        package = HubRef.parse("harbor:terminal-bench/terminal-bench@4.0.0")
+        assert package == HubRef("terminal-bench/terminal-bench", "4.0.0") and package.is_package
+        assert HubRef.parse("harbor:org/name@sha256:" + "a" * 64).version == "sha256:" + "a" * 64
+        assert not HubRef.parse("harbor:hello-world").is_package
         with pytest.raises(HubError):
             HubRef.parse("hello-world")
         with pytest.raises(HubError):
@@ -431,6 +437,14 @@ class TestHub:
         )
         [dataset] = load_registry(cache)
         assert dataset.tasks == (RegistryTask("hello-world", "https://github.com/x/y", "HEAD", "p"),)
+
+    def test_registry_task_names_that_are_not_folder_names_are_refused(self, tmp_path):
+        cache = tmp_path / ".harbor"
+        cache.mkdir()
+        task = {"name": "../..", "git_url": "https://github.com/x/y", "git_commit_id": "HEAD", "path": "p"}
+        (cache / "registry.json").write_text(json.dumps([{"name": "d", "version": "1.0", "tasks": [task]}]))
+        with pytest.raises(HubError, match=r"'\.\./\.\.'"):
+            load_registry(cache)
 
     @pytest.mark.parametrize(
         "url",
@@ -559,6 +573,262 @@ class TestHub:
         assert {pin["git_commit_id"] for pin in pins.values()} == {sha}
 
 
+class TestTaskNames:
+    """One validator guards every name that becomes a folder under the dataset folder."""
+
+    @pytest.mark.parametrize("name", ["../..", "a/b", "a\\b", ".", "..", "", "a\0b"])
+    def test_names_that_escape_or_are_not_a_folder_are_rejected(self, name):
+        with pytest.raises(HubError) as registry_error:
+            validate_task_name(name)
+        assert repr(name) in str(registry_error.value)
+        with pytest.raises(PackageStoreError) as store_error:
+            validate_task_name(name, error=PackageStoreError)
+        assert repr(name) in str(store_error.value)
+
+    @pytest.mark.parametrize("name", ["task$1", "name-with.dots_ok"])
+    def test_real_task_names_are_accepted(self, name):
+        assert validate_task_name(name) == name
+        assert validate_task_name(name, error=PackageStoreError) == name
+
+
+class TestPackageStore:
+    """The package store is faked at the HTTP layer: one handler per REST path."""
+
+    @staticmethod
+    def make_archive(folder: Path) -> bytes:
+        import io
+        import tarfile
+
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            tar.add(folder, arcname=".")
+        return buffer.getvalue()
+
+    def fake_store(self, tmp_path, monkeypatch, task_folders: dict[str, Path], tag="4.0.0"):
+        from nemo_gym.tasks.harbor import package_store as module
+
+        digests = {name: content_hash(folder) for name, folder in task_folders.items()}
+        calls = []
+
+        def request(self, method, path, *, params=None, body=None):
+            calls.append((method, path, params, body))
+            if path == "/rest/v1/dataset_version_tag":
+                assert params["tag"] == f"eq.{tag}" and params["package.name"] == "eq.terminal-bench"
+                return json.dumps(
+                    [{"dataset_version": {"id": "dv-1", "content_hash": "d" * 64}, "package": {}}]
+                ).encode()
+            if path == "/rest/v1/dataset_version":
+                return json.dumps([{"id": "dv-1", "content_hash": "d" * 64, "package": {}}]).encode()
+            if path == "/rest/v1/dataset_version_task":
+                assert params["dataset_version_id"] == "eq.dv-1"
+                if params["offset"] != "0":
+                    return b"[]"
+                rows = [
+                    {
+                        "task_version_id": f"tv-{name}",
+                        "task_version": {
+                            "content_hash": digest,
+                            "package": {"name": name, "org": {"name": "terminal-bench"}},
+                        },
+                    }
+                    for name, digest in sorted(digests.items())
+                ]
+                return json.dumps(rows).encode()
+            if path == "/rest/v1/rpc/resolve_task_version":
+                name = body["p_name"]
+                assert body["p_ref"] == f"sha256:{digests[name]}"
+                return json.dumps(
+                    {"content_hash": f"sha256:{digests[name]}", "archive_path": f"pkgs/{name}.tar.gz"}
+                ).encode()
+            if path.startswith("/storage/v1/object/packages/pkgs/"):
+                name = path.rsplit("/", 1)[1].removesuffix(".tar.gz")
+                return self.make_archive_for(name)
+            raise AssertionError(f"unexpected request {method} {path}")
+
+        module.PackageStore.make_archive_for = staticmethod(lambda name: self.make_archive(task_folders[name]))
+        monkeypatch.setattr(module.PackageStore, "_request", request)
+        return module, digests, calls
+
+    def test_fetches_tags_checks_digests_and_writes_manifest(self, tmp_path, monkeypatch):
+        import tomllib
+
+        folders = {name: write_task(tmp_path / "src" / name) for name in ("beta", "alpha")}
+        module, digests, calls = self.fake_store(tmp_path, monkeypatch, folders)
+
+        folder = module.fetch_package_dataset(
+            module.PackageRef("terminal-bench", "terminal-bench", "4.0.0"), tmp_path / "datasets"
+        )
+
+        assert folder == tmp_path / "datasets" / "terminal-bench-4.0.0"
+        assert sorted(p.name for p in folder.iterdir() if p.is_dir()) == ["alpha", "beta"]
+        assert content_hash(folder / "alpha") == digests["alpha"]
+        manifest = tomllib.loads((folder / "manifest.toml").read_text())
+        assert manifest["dataset"] == {
+            "name": "terminal-bench/terminal-bench",
+            "version": "4.0.0",
+            "source": "harbor-package-store",
+            "content_hash": "sha256:" + "d" * 64,
+        }
+        assert manifest["tasks"]["beta"] == {
+            "package": "terminal-bench/beta",
+            "content_hash": f"sha256:{digests['beta']}",
+        }
+        # A second fetch downloads nothing: every folder's digest already matches.
+        downloads_before = sum(1 for c in calls if c[1].startswith("/storage/"))
+        module.fetch_package_dataset(
+            module.PackageRef("terminal-bench", "terminal-bench", "4.0.0"), tmp_path / "datasets"
+        )
+        assert sum(1 for c in calls if c[1].startswith("/storage/")) == downloads_before
+        # The tasks load like any local folder.
+        assert [task.task_id for task in discover_tasks(folder)] == ["alpha", "beta"]
+
+    def test_digest_mismatch_is_rejected(self, tmp_path, monkeypatch):
+        folders = {"alpha": write_task(tmp_path / "src" / "alpha")}
+        module, _, _ = self.fake_store(tmp_path, monkeypatch, folders)
+        # The archive the store serves differs from the digest it advertised.
+        (folders["alpha"] / "instruction.md").write_text("tampered\n")
+        module.PackageStore.make_archive_for = staticmethod(lambda name: self.make_archive(folders[name]))
+        with pytest.raises(module.PackageStoreError, match="content hash mismatch"):
+            module.fetch_package_dataset(
+                module.PackageRef("terminal-bench", "terminal-bench", "4.0.0"), tmp_path / "datasets"
+            )
+        assert not (tmp_path / "datasets" / "terminal-bench-4.0.0" / "alpha" / "task.toml").exists()
+
+    def test_spoofed_package_name_is_rejected_before_any_filesystem_use(self, tmp_path, monkeypatch):
+        folders = {"../..": write_task(tmp_path / "src" / "evil")}
+        module, _, calls = self.fake_store(tmp_path, monkeypatch, folders)
+        removed = []
+        monkeypatch.setattr(module.shutil, "rmtree", lambda path, *args, **kwargs: removed.append(Path(path)))
+        with pytest.raises(module.PackageStoreError, match=r"'\.\./\.\.'"):
+            module.fetch_package_dataset(
+                module.PackageRef("terminal-bench", "terminal-bench", "4.0.0"), tmp_path / "datasets"
+            )
+        assert removed == []
+        assert not (tmp_path / "datasets").exists()
+        assert not any(c[1].startswith("/storage/") for c in calls)
+
+    def test_never_deletes_outside_the_dataset_folder(self, tmp_path, monkeypatch):
+        folders = {"alpha": write_task(tmp_path / "src" / "alpha")}
+        module, _, _ = self.fake_store(tmp_path, monkeypatch, folders)
+        # `alpha` in the dataset folder is a link to a folder elsewhere whose content differs from the store.
+        outside = write_task(tmp_path / "outside")
+        (outside / "instruction.md").write_text("edited locally\n")
+        folder = tmp_path / "datasets" / "terminal-bench-4.0.0"
+        folder.mkdir(parents=True)
+        (folder / "alpha").symlink_to(outside, target_is_directory=True)
+        real_rmtree, removed = module.shutil.rmtree, []
+
+        def recording_rmtree(path, *args, **kwargs):
+            removed.append(Path(path))
+            return real_rmtree(path, *args, **kwargs)
+
+        monkeypatch.setattr(module.shutil, "rmtree", recording_rmtree)
+        with pytest.raises(module.PackageStoreError, match="outside the dataset folder"):
+            module.fetch_package_dataset(
+                module.PackageRef("terminal-bench", "terminal-bench", "4.0.0"), tmp_path / "datasets", force=True
+            )
+        # Only the staging directory inside the dataset folder was ever removed; the link and its target were not.
+        assert folder / "alpha" not in removed and outside not in removed
+        assert all(path.is_relative_to(folder) for path in removed)
+        assert (outside / "instruction.md").read_text() == "edited locally\n"
+        assert (folder / "alpha").is_symlink()
+
+    def test_edited_folder_stops_prepare_without_force(self, tmp_path, monkeypatch):
+        folders = {"alpha": write_task(tmp_path / "src" / "alpha")}
+        module, digests, calls = self.fake_store(tmp_path, monkeypatch, folders)
+        ref = module.PackageRef("terminal-bench", "terminal-bench", "4.0.0")
+        folder = module.fetch_package_dataset(ref, tmp_path / "datasets")
+        (folder / "alpha" / "instruction.md").write_text("edited locally\n")
+        edited = content_hash(folder / "alpha")
+        downloads_before = sum(1 for c in calls if c[1].startswith("/storage/"))
+
+        with pytest.raises(module.PackageStoreError) as info:
+            module.fetch_package_dataset(ref, tmp_path / "datasets")
+
+        message = str(info.value)
+        assert str(folder / "alpha") in message
+        assert f"sha256:{edited}" in message and f"sha256:{digests['alpha']}" in message
+        assert "--force" in message
+        assert (folder / "alpha" / "instruction.md").read_text() == "edited locally\n"
+        assert sum(1 for c in calls if c[1].startswith("/storage/")) == downloads_before
+
+    def test_force_replaces_edited_folder_and_warns(self, tmp_path, monkeypatch, caplog):
+        folders = {"alpha": write_task(tmp_path / "src" / "alpha")}
+        module, digests, _ = self.fake_store(tmp_path, monkeypatch, folders)
+        ref = module.PackageRef("terminal-bench", "terminal-bench", "4.0.0")
+        folder = module.fetch_package_dataset(ref, tmp_path / "datasets")
+        (folder / "alpha" / "instruction.md").write_text("edited locally\n")
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.package_store"):
+            module.fetch_package_dataset(ref, tmp_path / "datasets", force=True)
+
+        assert content_hash(folder / "alpha") == digests["alpha"]
+        assert (folder / "alpha" / "instruction.md").read_text() != "edited locally\n"
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("Replacing" in m and str(folder / "alpha") in m and "--force" in m for m in warnings)
+
+    def test_folder_names_and_digest_refs(self):
+        from nemo_gym.tasks.harbor.package_store import PackageRef
+
+        assert PackageRef("o", "n", "4.0.0").folder_name("f" * 64) == "n-4.0.0"
+        assert PackageRef("o", "n", "v1/rc 2").folder_name("f" * 64) == "n-v1-rc-2"
+        assert PackageRef("o", "n").folder_name("f" * 64) == "n-ffffffffffff"
+        pinned = PackageRef("o", "n", "sha256:" + "e" * 64)
+        assert pinned.digest == "e" * 64 and pinned.folder_name("e" * 64) == "n-eeeeeeeeeeee"
+
+    def test_fetch_ref_dispatches_package_references(self, tmp_path, monkeypatch):
+        from nemo_gym.tasks.harbor import hub, package_store
+
+        seen = {}
+
+        def fake_fetch(ref, root, store=None, *, force=False):
+            seen["ref"], seen["root"], seen["force"] = ref, root, force
+            return root / "terminal-bench-4.0.0"
+
+        monkeypatch.setattr(package_store, "fetch_package_dataset", fake_fetch)
+        folder = hub.fetch_ref("harbor:terminal-bench/terminal-bench@4.0.0", tmp_path)
+        assert folder == tmp_path / "terminal-bench-4.0.0"
+        assert seen["ref"] == package_store.PackageRef("terminal-bench", "terminal-bench", "4.0.0")
+        assert seen["root"] == tmp_path
+        assert seen["force"] is False
+        hub.fetch_ref("harbor:terminal-bench/terminal-bench@4.0.0", tmp_path, force=True)
+        assert seen["force"] is True
+
+
+class TestSeparateVerifierFields:
+    def test_collect_hooks_and_artifacts_parse(self):
+        from pathlib import PurePosixPath
+
+        config = HarborTaskConfig.model_validate(
+            {
+                "artifacts": [
+                    "/app/output/report.json",
+                    {"source": "/var/log/api", "destination": "api-logs", "service": "api"},
+                ],
+                "verifier": {
+                    "environment_mode": "separate",
+                    "environment": {"docker_image": "org/verifier:1", "cpus": 2},
+                    "collect": [
+                        {"command": "kafka-dump > /logs/artifacts/topics.txt", "service": "kafka", "timeout_sec": 10}
+                    ],
+                },
+            }
+        )
+        assert [a.host_path for a in config.artifacts] == [
+            PurePosixPath("app/output/report.json"),
+            PurePosixPath("api-logs"),
+        ]
+        assert config.artifacts[1].service == "api"
+        assert config.verifier.collect[0].service == "kafka" and config.verifier.collect[0].timeout_sec == 10
+        assert not config.is_shared_verifier
+
+    def test_artifact_paths_stay_contained(self):
+        with pytest.raises(ValueError, match="inside"):
+            HarborTaskConfig.model_validate({"artifacts": ["/app/../etc/passwd"]})
+        with pytest.raises(ValueError, match="relative"):
+            HarborTaskConfig.model_validate({"artifacts": [{"source": "/a", "destination": "/abs"}]})
+
+
 class TestCli:
     def test_prepare_local_folder(self, tmp_path):
         folder = tmp_path / "ds"
@@ -580,6 +850,23 @@ class TestCli:
         assert "Multi-step" in prepared.skipped["bad"]
         assert any("Skipping task bad" in r.getMessage() for r in caplog.records)
         assert len(prepared.rows_path.read_text().splitlines()) == 1
+
+    def test_prepare_passes_force_to_the_fetch(self, tmp_path, monkeypatch):
+        from nemo_gym.tasks.harbor import cli as cli_module
+
+        folder = tmp_path / "datasets" / "ds-4.0.0"
+        write_task(folder / "a")
+        seen = {}
+
+        def fake_fetch_ref(target, root=None, *, refresh_registry=False, force=False):
+            seen["target"], seen["force"] = target, force
+            return folder
+
+        monkeypatch.setattr(cli_module, "fetch_ref", fake_fetch_ref)
+        prepare_target("harbor:o/ds@4.0.0", output_root=tmp_path / "out", force=True)
+        assert seen == {"target": "harbor:o/ds@4.0.0", "force": True}
+        prepare_target("harbor:o/ds@4.0.0", output_root=tmp_path / "out")
+        assert seen["force"] is False
 
     def test_resolve_agent_accepts_short_name(self):
         selection = resolve_agent("simple")
