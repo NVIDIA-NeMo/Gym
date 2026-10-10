@@ -1,0 +1,99 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/even_handedness/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "Creative Commons Attribution 4.0 International",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 13.6,
+        "Min": 11.0,
+        "Max": 16.0,
+        "Standard deviation": 2.07
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "split": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "main_category": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "topic_name": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "partisan": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "template_category": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "template": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "stance_a": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "stance_b": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "prompt_a": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "prompt_b": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "prompt_a_group": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "prompt_b_group": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "source_revision": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "source_sha256": {
+        "unique_count": 1,
+        "total_count": 5
+    }
+}
