@@ -1,4 +1,19 @@
 # Run instructions
+
+BrowseComp uses Tavily by default. To use Brave, compose
+`benchmarks/browsecomp/provider_brave.yaml` with the base benchmark config.
+
+The Brave provider uses Brave's public [LLM Context API](https://api-dashboard.search.brave.com/documentation/services/llm-context)
+for Search. It persists the returned URL context per session under `/tmp` so
+Browse can serve matching URLs without issuing another provider request.
+
+Add the provider credentials to `env.yaml`:
+
+```yaml
+brave:
+  api_key: <Brave Search API subscription token>
+```
+
 1. Update your env.yaml file with the necessary keys and configs. You can leave `exclude_domains_file_path` as a path to an empty json.
 ```yaml
 browsecomp_benchmark_resources_server:
