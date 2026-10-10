@@ -313,6 +313,86 @@ class TestSeed:
         assert spec.metadata["harbor_task"] == "hello"
 
 
+class TestSetupCommands:
+    def test_setup_commands_run_as_root_after_workdir(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.config.sandbox_setup_commands = ["sed -i s/a/b/ /etc/apt/sources.list", "apt-get update || true"]
+        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
+        assert response.status_code == 200, response.text
+        commands = [call["command"] for call in sandbox.execs]
+        assert commands[0] == "mkdir -p /app"
+        assert commands[1:3] == server.config.sandbox_setup_commands
+        assert all(call["user"] == "root" for call in sandbox.execs[1:3])
+
+    def test_failing_setup_command_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
+        class Failing(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if command == "false":
+                    return SandboxExecResult(stdout="", stderr="nope", return_code=1)
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        sandbox = Failing()
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, sandbox)
+        server.config.sandbox_setup_commands = ["false"]
+        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
+        assert response.status_code == 503
+        assert "nope" in response.json()["detail"] and sandbox.stopped
+
+
+class TestSeedWorkdirAndResources:
+    def test_image_workdir_used_when_task_sets_none(self, tmp_path, monkeypatch):
+        server, task, sandbox, created = make_server(tmp_path, monkeypatch)
+        # A task with a real Dockerfile and a prebuilt image declares no workdir; the image's WORKDIR is used.
+        (task.path / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\nRUN true\n")
+        (task.path / "task.toml").write_text(TASK_TOML.replace("cpus = 1", 'docker_image = "org/task:1"\ncpus = 1'))
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        assert task.workdir is None
+
+        class PwdSandbox(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if command == "pwd":
+                    return SandboxExecResult(stdout="/work\n", stderr="", return_code=0)
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        pwd_sandbox = PwdSandbox()
+
+        async def create(task, workdir):
+            created.append((task.task_id, workdir))
+            return pwd_sandbox
+
+        monkeypatch.setattr(server, "_create_sandbox", create)
+        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
+
+        assert response.status_code == 200, response.text
+        assert created == [("hello", None)]
+        assert response.json()["sandbox_access"]["workdir"] == "/work"
+
+    def test_resources_override_and_cpu_env(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "resources_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        spec = server._sandbox_spec(task, "/app")
+        assert spec.resources.cpu == 1.0 and spec.env["OMP_NUM_THREADS"] == "1"
+
+        server.config.sandbox_resources_override = {"cpu": 4, "memory_mib": 16384, "disk_gib": 30}
+        spec = server._sandbox_spec(task, "/app")
+        assert (spec.resources.cpu, spec.resources.memory_mib, spec.resources.disk_gib) == (4.0, 16384, 30)
+        assert spec.env["OMP_NUM_THREADS"] == "4"
+
+        # The override merges over the task's resources, so a GPU request survives a CPU/memory override.
+        task.config.environment.gpus = 1
+        task.config.environment.gpu_types = ["H100"]
+        spec = server._sandbox_spec(task, "/app")
+        assert spec.resources.gpu == 1 and spec.resources.cpu == 4.0
+        task.config.environment.gpus = None
+        task.config.environment.gpu_types = None
+
+        server.config.derive_cpu_env = False
+        assert "OMP_NUM_THREADS" not in server._sandbox_spec(task, "/app").env
+
+
 class TestVerify:
     def seeded_client(self, tmp_path, monkeypatch, sandbox=None):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch, sandbox)
@@ -332,11 +412,14 @@ class TestVerify:
         assert payload["failure_kind"] is None
         assert payload["verifier_rewards"] == {"reward": 1.0}
         assert payload["verifier_return_code"] == 0
+        assert payload["verifier_seconds"] >= 0
         assert payload["responses_create_params"]["input"][0]["content"] == "Create hello.txt"
 
         run = next(call for call in sandbox.execs if "test.sh" in call["command"])
-        assert run["command"] == "bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1"
-        assert run["cwd"] == "/app" and run["timeout_s"] == 120.0
+        assert run["command"] == "timeout --signal=KILL 120 bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1"
+        assert run["cwd"] == "/app"
+        # The exec itself is bounded by the budget plus the grace period; the provider keeps it alive that long.
+        assert run["timeout_s"] == 120 + server.config.verifier_grace_s
         # A root image needs no user override for the prepare step.
         prepare = next(
             call for call in sandbox.execs if "chmod 777" in call["command"] and "/tests" in call["command"]
@@ -424,20 +507,30 @@ class TestVerify:
         payload = client.post("/verify", json=verify_body()).json()
         assert payload["reward"] == 0.0 and payload["failure_kind"] == "harbor:invalid_reward"
 
-    def test_verifier_timeout_scores_zero(self, tmp_path, monkeypatch):
+    def test_verifier_timeout_when_exit_code_never_appears(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(
-            test_result=SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout")
+            test_result=SandboxExecResult(stdout=None, stderr=None, return_code=125, error_type="timeout")
         )
-        _, _, _, client = self.seeded_client(tmp_path, monkeypatch, sandbox)
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, sandbox)
+        server.config.verifier_grace_s = 0
+        (task.path / "task.toml").write_text(
+            TASK_TOML.replace("timeout_sec = 120.0\n\n[agent]", "timeout_sec = 0.01\n\n[agent]")
+        )
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        client = TestClient(server.setup_webserver())
+        assert client.post("/seed_session", json=seed_body(task)).status_code == 200
         payload = client.post("/verify", json=verify_body()).json()
-        assert payload["reward"] == 0.0
-        assert payload["mask_sample"] is False
-        assert payload["failure_kind"] == "harbor:verifier_timeout"
+        assert payload["reward"] == 0.0 and payload["failure_kind"] == "harbor:verifier_timeout"
 
     def test_sandbox_runtime_failure_masks(self, tmp_path, monkeypatch):
-        sandbox = FakeSandbox(
-            test_result=SandboxExecResult(stdout=None, stderr="gone", return_code=125, error_type="sandbox")
-        )
+        class BrokenLaunch(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if "test.sh" in command:
+                    return SandboxExecResult(stdout=None, stderr="gone", return_code=125, error_type="sandbox")
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        sandbox = BrokenLaunch()
         _, _, _, client = self.seeded_client(tmp_path, monkeypatch, sandbox)
         payload = client.post("/verify", json=verify_body()).json()
         assert payload["reward"] == 0.0

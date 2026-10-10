@@ -51,6 +51,7 @@ from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
 from nemo_gym.tasks.harbor.task import HarborTaskError
@@ -59,7 +60,6 @@ from resources_servers.harbor.sandbox_io import download_dir, upload_dir
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_WORKDIR = "/app"
 TESTS_DIR = "/tests"
 VERIFIER_LOGS_DIR = "/logs/verifier"
 AGENT_LOGS_DIR = "/logs/agent"
@@ -91,6 +91,7 @@ class HarborVerifyResponse(BaseVerifyResponse):
     verifier_rewards: dict[str, float] | None = None
     verifier_return_code: int | None = None
     verifier_logs_dir: str | None = None
+    verifier_seconds: float | None = None
 
 
 class HarborTasksetConfig(BaseModel):
@@ -114,6 +115,20 @@ class HarborResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_ttl_slack_s: float = Field(default=900, ge=0)
     sandbox_provider_options: dict[str, Any] = Field(default_factory=dict)
     sandbox_metadata: dict[str, str] = Field(default_factory=dict)
+    # Replaces the task's declared cpus, memory_mb and storage_mb when set (keys: cpu, memory_mib, disk_gib).
+    # Used to run a benchmark at fixed resources, for example to compare against another server.
+    sandbox_resources_override: dict[str, Any] | None = None
+    # Export CPU-count env vars (OMP_NUM_THREADS and friends) matching the sandbox CPU limit.
+    derive_cpu_env: bool = True
+    # Operator environment for every sandbox; a task's own `[environment.env]` wins.
+    sandbox_env: dict[str, str] = Field(default_factory=dict)
+    # Shell commands run as root in every new sandbox before the agent sees it, for repairs the
+    # operator owns rather than the task (for example pointing an end-of-life distro at an archive).
+    # A failing command fails the seed with a retryable 503.
+    sandbox_setup_commands: list[str] = Field(default_factory=list)
+    sandbox_setup_timeout_s: float = Field(default=600, gt=0)
+    # Extra seconds granted to `test.sh` beyond `[verifier].timeout_sec` before the in-container `timeout` kills it.
+    verifier_grace_s: float = Field(default=30, ge=0)
     # Verifier logs are downloaded here, one folder per resources session.
     artifacts_dir: Path = Path("results/harbor/verifier")
 
@@ -279,7 +294,7 @@ class HarborResourcesServer(SimpleResourcesServer):
 
     # -- sandbox ---------------------------------------------------------------------------
 
-    def _sandbox_spec(self, task: HarborTask, workdir: str) -> SandboxSpec:
+    def _sandbox_spec(self, task: HarborTask, workdir: str | None) -> SandboxSpec:
         global_config_dict = get_global_config_dict()
         metadata = (
             resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
@@ -287,30 +302,51 @@ class HarborResourcesServer(SimpleResourcesServer):
             | {"nemo_gym_resources_server": self.config.name, "harbor_task": task.task_id[:63]}
         )
         ttl = task.config.agent.timeout_sec + task.config.verifier.timeout_sec + self.config.sandbox_ttl_slack_s
+        # The override replaces only the keys it names, so a GPU task routed to the GPU provider keeps `gpu`.
+        resources = _sandbox_resources(task) | (self.config.sandbox_resources_override or {})
+        env = dict(self.config.sandbox_env) | dict(task.env)
+        if self.config.derive_cpu_env:
+            env = cpu_cap_env(resources.get("cpu")) | env
         return SandboxSpec(
             image=task.image,
             ttl_s=ttl,
             ready_timeout_s=self.config.sandbox_ready_timeout_s,
             workdir=workdir,
-            env=dict(task.env),
+            env=env,
             metadata=metadata,
-            resources=_sandbox_resources(task),
+            resources=resources,
             provider_options=dict(self.config.sandbox_provider_options),
         )
 
-    async def _create_sandbox(self, task: HarborTask, workdir: str) -> AsyncSandbox:
+    async def _create_sandbox(self, task: HarborTask, workdir: str | None) -> AsyncSandbox:
         provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
         sandbox = AsyncSandbox(provider_config)
         await sandbox.start(self._sandbox_spec(task, workdir))
         return sandbox
 
-    async def _prepare_workdir(self, sandbox: AsyncSandbox, task: HarborTask, workdir: str) -> None:
+    async def _prepare_workdir(self, sandbox: AsyncSandbox, task: HarborTask, workdir: str | None) -> str:
+        """Create the working directory, or resolve the image's own WORKDIR when the task sets none."""
+        if workdir is None:
+            result = await sandbox.exec("pwd", timeout_s=60)
+            if result.return_code != 0 or not (result.stdout or "").strip():
+                raise RuntimeError(f"Could not resolve the image working directory: {result.stderr or result.stdout}")
+            workdir = (result.stdout or "").strip().splitlines()[-1]
         commands = [f"mkdir -p {shlex.quote(workdir)}"]
         if task.user:
             commands.append(f"chown {shlex.quote(task.user)} {shlex.quote(workdir)}")
         result = await _exec_as_root_user(sandbox, " && ".join(commands), configured_user=task.user)
         if result.return_code != 0:
             raise RuntimeError(f"Could not prepare {workdir}: {result.stderr or result.stdout}")
+        return workdir
+
+    async def _run_setup_commands(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
+        for command in self.config.sandbox_setup_commands:
+            result = await sandbox.exec(command, cwd="/", timeout_s=self.config.sandbox_setup_timeout_s, user="root")
+            if result.return_code != 0:
+                raise RuntimeError(
+                    f"Sandbox setup command failed for {task.task_id!r} (exit {result.return_code}): "
+                    f"{(result.stderr or result.stdout or '')[-500:]}"
+                )
 
     async def _sandbox_access(self, session: HarborSession) -> SandboxAccess:
         return SandboxAccess(
@@ -345,14 +381,14 @@ class HarborResourcesServer(SimpleResourcesServer):
                 raise HTTPException(
                     422, f"Task {task.task_id!r} declares no image; sandbox-less tasks are not supported yet"
                 )
-            workdir = task.workdir or DEFAULT_WORKDIR
             try:
-                sandbox = await self._create_sandbox(task, workdir)
+                sandbox = await self._create_sandbox(task, task.workdir)
             except Exception as exc:
                 LOGGER.exception(f"Sandbox creation failed for {task.task_id}")
                 raise HTTPException(503, f"Could not start sandbox for {task.task_id!r}: {exc}") from exc
             try:
-                await self._prepare_workdir(sandbox, task, workdir)
+                workdir = await self._prepare_workdir(sandbox, task, task.workdir)
+                await self._run_setup_commands(sandbox, task)
                 session = HarborSession(
                     task=task,
                     taskset=body.task_id.taskset,
@@ -399,6 +435,7 @@ class HarborResourcesServer(SimpleResourcesServer):
         sandbox = session.sandbox
         settings = task.config.verifier
         logs_dir = self.config.artifacts_dir / session_id
+        started = asyncio.get_running_loop().time()
         try:
             # /logs/verifier is root-owned from seed; a non-root image user cannot reset it.
             prepare = await _exec_as_root_user(
@@ -415,20 +452,32 @@ class HarborResourcesServer(SimpleResourcesServer):
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
             await upload_dir(sandbox, task.path / "tests", TESTS_DIR)
+            # One plain exec for the whole run. The provider keeps it alive for as long as
+            # `timeout_s` says (OpenSandbox polls a background command, Docker streams), and
+            # `timeout` inside the container is the cap that stops the tests themselves.
+            # Commands must not be left running after the exec returns: OpenSandbox reaps
+            # them when the command completes, so a background launch never finishes.
+            budget = int(settings.timeout_sec)
             result = await sandbox.exec(
-                f"bash {TESTS_DIR}/test.sh > {VERIFIER_STDOUT} 2>&1",
+                f"timeout --signal=KILL {budget} bash {TESTS_DIR}/test.sh > {VERIFIER_STDOUT} 2>&1",
                 cwd=session.workdir,
                 env=dict(settings.env),
-                timeout_s=settings.timeout_sec,
+                timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
                 user=settings.user,
             )
-            if result.error_type == "timeout":
-                return self._measured(
-                    0.0, VERIFIER_TIMEOUT_KIND, f"test.sh exceeded [verifier].timeout_sec={settings.timeout_sec}"
-                )
-            if result.error_type is not None:
+            if result.error_type is not None and result.error_type != "timeout":
                 return self._masked(failure_kinds.VERIFIER_ERROR, f"test.sh could not run: {result.error_type}")
+            # Keep whatever the verifier wrote, including on a timeout, so a slow test.sh can be diagnosed.
             await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir)
+            if result.error_type == "timeout" or result.return_code == 137:
+                return self._measured(
+                    0.0,
+                    VERIFIER_TIMEOUT_KIND,
+                    f"test.sh exceeded [verifier].timeout_sec={settings.timeout_sec}; tail: {_stdout_tail(logs_dir)}",
+                ) | {
+                    "verifier_logs_dir": str(logs_dir),
+                    "verifier_seconds": round(asyncio.get_running_loop().time() - started, 1),
+                }
         except HTTPException:
             raise
         except Exception as exc:
@@ -437,7 +486,11 @@ class HarborResourcesServer(SimpleResourcesServer):
 
         # Absolute, so the row names a folder that exists from wherever the run was launched; the server
         # process runs from its own folder, where a relative artifacts_dir would otherwise resolve.
-        extras = {"verifier_return_code": result.return_code, "verifier_logs_dir": str(Path(logs_dir).resolve())}
+        extras = {
+            "verifier_return_code": result.return_code,
+            "verifier_logs_dir": str(Path(logs_dir).resolve()),
+            "verifier_seconds": round(asyncio.get_running_loop().time() - started, 1),
+        }
         rewards, problem = parse_reward_file(logs_dir)
         if rewards is None:
             kind = MISSING_REWARD_KIND if "written" in (problem or "") else INVALID_REWARD_KIND
