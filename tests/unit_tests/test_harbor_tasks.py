@@ -321,6 +321,7 @@ class TestMaterialize:
         )
         assert config["environment_routing_mode"] == "taskset"
         assert config["environment_server_routes"] == {"ds": "harbor_ds_environment"}
+        assert config["harbor_ds_resources_server"]["_inherit_from"] == "harbor_resources_server"
         resources = config["harbor_ds_resources_server"]["resources_servers"]["harbor"]
         assert resources["tasksets"]["ds"]["folder"] == str(folder.resolve())
         assert resources["tasksets"]["ds"]["tasks"] == {"a": tasks[0].digest, "b": tasks[1].digest}
@@ -600,5 +601,15 @@ class TestCli:
         config_paths = next(token for token in tokens if token.startswith("+config_paths="))
         assert str(config_path.resolve()) in config_paths
         assert "single_agent_turn/configs/single_agent_turn.yaml" in config_paths
+        assert "resources_servers/harbor/configs/harbor.yaml" in config_paths
         assert "opensandbox/configs/opensandbox.yaml" in config_paths
         assert f"+output_jsonl_fpath={tmp_path / 'out' / 'rollouts.jsonl'}" in tokens
+
+
+def test_harbor_task_data_schema_names_the_digest_key():
+    """The schema module may import only pydantic, so the key is spelled out; keep it equal to DIGEST_KEY."""
+    from resources_servers.harbor.task_data import TaskData
+
+    assert TaskData.model_fields["ng_digest"].alias == DIGEST_KEY
+    data = TaskData.model_validate({DIGEST_KEY: "abc", "other": 1})
+    assert data.ng_digest == "abc" and data.model_dump(by_alias=True)[DIGEST_KEY] == "abc"
