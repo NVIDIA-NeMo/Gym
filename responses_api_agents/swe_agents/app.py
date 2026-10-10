@@ -1797,9 +1797,12 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
         llm_model_config = {
             "model": self.config.body.model or "",
             "base_url": f"{model_server_base_url}/v1",
-            "temperature": self.config.inference_params["temperature"],
-            "top_p": self.config.inference_params["top_p"],
         }
+        # temperature/top_p are only in inference_params when the request set them;
+        # tomlkit cannot serialize None, so only write the keys that are present.
+        for key in ("temperature", "top_p"):
+            if self.config.inference_params.get(key) is not None:
+                llm_model_config[key] = self.config.inference_params[key]
         max_output_tokens = self.config.inference_params.get("tokens_to_generate")
         if max_output_tokens is not None:
             llm_model_config["max_output_tokens"] = max_output_tokens

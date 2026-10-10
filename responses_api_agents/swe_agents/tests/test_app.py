@@ -1054,6 +1054,27 @@ class TestOpenHandsHarnessProcessor:
         script_path = config.persistent_dir / f"agent_script_{config.agent_run_id}.sh"
         return script_path.read_text()
 
+    def test_get_run_command_writes_sampling_params_when_provided(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir, inference_params={"temperature": 0.7, "top_p": 0.95})
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenHandsHarnessProcessor(config=config).get_run_command()
+            script = self._read_agent_script(config)
+            assert "temperature = 0.7" in script
+            assert "top_p = 0.95" in script
+
+    def test_get_run_command_without_sampling_params(self) -> None:
+        # The request may omit temperature/top_p; the config must not require them.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir, inference_params={})
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            result = OpenHandsHarnessProcessor(config=config).get_run_command()
+            assert isinstance(result, ExecuteContainerCommandArgs)
+            script = self._read_agent_script(config)
+            assert "temperature =" not in script
+            assert "top_p =" not in script
+            assert 'base_url = "http://test-host:12345/v1"' in script
+
     def test_get_run_command_with_debug(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir, debug=True)
