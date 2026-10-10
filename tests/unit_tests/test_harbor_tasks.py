@@ -868,6 +868,23 @@ class TestCli:
         prepare_target("harbor:o/ds@4.0.0", output_root=tmp_path / "out")
         assert seen["force"] is False
 
+    def test_prepare_skips_excluded_and_compose_tasks(self, tmp_path, capsys):
+        folder = tmp_path / "ds"
+        for name in ("keep", "gpu-task", "grouped"):
+            write_task(folder / name)
+        (folder / "grouped" / "environment" / "docker-compose.yaml").write_text("services: {}\n")
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", exclude=["gpu-*"])
+        assert [task.task_id for task in prepared.tasks] == ["keep"]
+        out = capsys.readouterr().out
+        assert "Skipping gpu-task: excluded by --exclude-tasks 'gpu-*'" in out
+        assert "Skipping grouped: Compose environments are not supported yet" in out
+        assert len((prepared.rows_path).read_text().splitlines()) == 1
+        with pytest.raises(ValueError, match="No runnable task"):
+            prepare_target(str(folder), output_root=tmp_path / "out2", exclude=["*"])
+        only = prepare_target(str(folder), output_root=tmp_path / "out3", only=["gpu-*"])
+        assert [task.task_id for task in only.tasks] == ["gpu-task"]
+        assert "Skipping keep: not in --only-tasks" in capsys.readouterr().out
+
     def test_resolve_agent_accepts_short_name(self):
         selection = resolve_agent("simple")
         assert selection.instance_name == "simple_agent"
@@ -898,9 +915,12 @@ class TestCli:
         assert written["environment_server_routes"] == {"ds": "harbor_ds_environment"}
         assert written["harbor_ds_agent"]["responses_api_agents"]["hermes_agent"]["enabled_toolsets"] == ["terminal"]
         terminus = AgentSelection(tmp_path / "t.yaml", "terminus_2_sandboxed_agent", "terminus_2_sandboxed_agent")
-        _, _ = build_run(prepared, terminus, sandbox=None, overrides=[])
-        written = yaml.safe_load(config_path.read_text())
+        terminus_path, _ = build_run(prepared, terminus, sandbox=None, overrides=[])
+        # Each agent gets its own file, so the hermes config above is untouched.
+        assert terminus_path != config_path and terminus_path.name == "run_config_terminus_2_sandboxed_agent.yaml"
+        written = yaml.safe_load(terminus_path.read_text())
         assert written["harbor_ds_agent"]["responses_api_agents"]["terminus_2_sandboxed_agent"]["num_workers"] == 1
+        assert "hermes_agent" in yaml.safe_load(config_path.read_text())["harbor_ds_agent"]["responses_api_agents"]
         assert "+split=train" in tokens
         assert not any(token.startswith("+agent_name") for token in tokens)
         config_paths = next(token for token in tokens if token.startswith("+config_paths="))

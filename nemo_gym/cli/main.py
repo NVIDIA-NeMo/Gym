@@ -696,6 +696,22 @@ FORCE_REFETCH = Flag(
     ),
 )
 
+EXCLUDE_TASKS = Flag(
+    register=lambda p: p.add_argument(
+        "--exclude-tasks",
+        metavar="PATTERNS",
+        help="Comma-separated task names or globs to leave out of a task TARGET (e.g. `fp8-*,jax-speedrun-gpu`).",
+    ),
+)
+
+ONLY_TASKS = Flag(
+    register=lambda p: p.add_argument(
+        "--only-tasks",
+        metavar="PATTERNS",
+        help="Comma-separated task names or globs; only matching tasks of a task TARGET run.",
+    ),
+)
+
 
 def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
     expected_overrides = ["+verbose=true"] if args.verbose else []
@@ -928,6 +944,8 @@ COMMANDS = {
             SEARCH_DIR,
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent tasks."),
             _value_flag("limit", "limit", "Maximum number of tasks to validate."),
+            EXCLUDE_TASKS,
+            ONLY_TASKS,
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
         ),
     ),
@@ -1112,6 +1130,8 @@ COMMANDS = {
             AGENT_TYPE,
             ALLOW_UNSUPPORTED_PAIRING,
             _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),
+            EXCLUDE_TASKS,
+            ONLY_TASKS,
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),

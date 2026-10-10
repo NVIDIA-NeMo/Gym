@@ -50,6 +50,14 @@ class HarborTask:
         return self.image is not None or (self.path / "environment" / "Dockerfile").is_file()
 
     @property
+    def needs_compose(self) -> bool:
+        """The task's environment is a Compose group, which the harbor server cannot start yet."""
+        return any(
+            (self.path / "environment" / name).is_file()
+            for name in ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
+        )
+
+    @property
     def has_solution(self) -> bool:
         return (self.path / "solution" / "solve.sh").is_file()
 
