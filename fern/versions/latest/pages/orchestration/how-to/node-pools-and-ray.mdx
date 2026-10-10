@@ -1,0 +1,95 @@
+---
+title: "Node Pools and Ray"
+description: "Give services nodes of their own and span a Ray cluster across node pools."
+position: 3
+---
+
+By default every service competes for the whole allocation. A **node pool** reserves a slice of it. Pin a service to a pool with `node_pool` and it runs only on that pool's nodes, which is how a scorer or judge gets GPUs that the policy does not share.
+
+Pools are not separate Slurm requests. The job requests one allocation of the summed `nodes`, and pools take contiguous node ranges in declaration order. See [Node pools](/orchestration/configuration#node-pools).
+
+## Give a judge its own node
+
+```yaml
+compute:
+  cluster:
+    type: slurm
+    account: my-account
+    node_pools:
+      policy:
+        partition: batch
+        nodes: 2
+        gpus_per_node: 8
+      judge:
+        partition: batch
+        nodes: 1
+        gpus_per_node: 8
+
+services:
+  policy:
+    type: vllm
+    container: vllm/vllm-openai:v0.9.0
+    model: my-org/policy-model
+    tensor_parallel_size: 16
+    node_pool: policy
+  judge:
+    type: vllm
+    container: vllm/vllm-openai:v0.9.0
+    model: my-org/judge-model
+    tensor_parallel_size: 8
+    port: 8100
+    node_pool: judge
+
+driver:
+  policy_model: policy
+  benchmarks:
+    my-benchmark:
+      run:
+        config_paths:
+          - path/to/config.yaml
+```
+
+What this does:
+
+- The policy spans the two nodes of its pool. The judge runs on the third node only. A pinned service is sized against its own pool, so the judge is a single-node deployment even though the job has three nodes.
+- The driver runs on the first node of the policy's pool, because it reaches the policy over localhost.
+- The judge's default health check probes the judge's own node. It listens on port 8100 so it does not collide with the policy's default 8000, in case both end up on one node.
+
+<Note>
+
+`driver.policy_model` is the only service whose address submit injects into the benchmark's `run` config. For other services, such as the judge here, put the address in the benchmark's own configuration. When a pool is used, the job script exports `GYM_POOL_<POOL>_NODES` (for example `GYM_POOL_JUDGE_NODES`) as a comma-separated list of that pool's hostnames, and a `runtime:` value in `driver.env` (`JUDGE_HOST: runtime:GYM_POOL_JUDGE_NODES`) passes it to the driver.
+
+</Note>
+
+## Span a Ray cluster across pools
+
+A `ray` service starts a Ray cluster for benchmarks that manage their own device placement. The head starts on the driver's node, and every other node of the spanned pools joins it as a worker:
+
+```yaml
+node_pools:
+  main:
+    partition: batch
+    nodes: 1
+    gpus_per_node: 8
+  aux:
+    partition: batch
+    nodes: 2
+    gpus_per_node: 8
+
+services:
+  cluster:
+    type: ray
+    container: rayproject/ray:latest
+    node_pools: [main, aux]
+    resources:
+      aux:
+        extra_gpu: 8             # advertised by every node of the aux pool
+```
+
+- `node_pools` lists the pools to span, and it is a list: `node_pool` (singular) on a ray service is an error. An empty list starts a single-node cluster.
+- `resources` advertises custom Ray resources per pool, passed to `ray start --resources`. A benchmark asks for them by name. Every pool named under `resources` must also be in `node_pools`.
+- Workers wait for the head to answer `ray status` before joining, so a head that is still installing does not break them.
+- The head's `host:port` is exported to the job as `GYM_RAY_ADDRESS_<SERVICE>` (here `GYM_RAY_ADDRESS_CLUSTER`), and each pool's workers are started in their own step named `<service>_<pool>_workers`.
+- A `ray` service uses a Ray container image of your choosing. It is independent of the Ray used inside vLLM containers for [multi-node vLLM](/orchestration/how-to/multi-node-vllm).
+
+`extra_args` is appended to `ray start` on every node. Flags that only a head accepts (`--port`, `--redis-shard-ports`, `--include-dashboard`) are removed from the workers' commands.

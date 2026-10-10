@@ -1,0 +1,66 @@
+---
+title: "Resumable Runs"
+description: "Continue a benchmark automatically after a time limit, preemption, or node failure."
+position: 5
+---
+
+A long evaluation can outlive one allocation: the walltime runs out, the job is preempted, or a node fails. Marking a benchmark `resumable` makes its Slurm job a self-chaining sequence. When one job is killed by the scheduler, a successor starts and the run continues from the rollouts already collected instead of from zero.
+
+```yaml
+driver:
+  benchmarks:
+    gpqa:
+      resumable: true
+      run:
+        config_paths:
+          - benchmarks/gpqa/config.yaml
+```
+
+To tune it, pass a mapping instead of `true`:
+
+```yaml
+      resumable:
+        max_retries: 5            # non-timeout failures to retry (default 3)
+        max_walltime: "48:00:00"  # cap on total accumulated walltime (default: none)
+```
+
+Only executors that support it may set `resumable`, and Slurm does. The setting is per benchmark.
+
+## How it works
+
+The job script begins with a prologue that runs before any service starts. Each job in the chain receives its predecessor's Slurm job ID, looks at that job's final state with `sacct`, and decides whether to carry on. **Before doing any real work**, it queues its own successor with `sbatch --dependency=afternotok:<this job> --kill-on-invalid-dep=yes`, so the chain continues even if this job is killed mid-run.
+
+If a job finishes successfully, its queued successor has a dependency that can never be satisfied, and Slurm cancels it. The chain needs no explicit cleanup step on success.
+
+What the next job does with the previous job's state:
+
+| Previous job state | Next job |
+| --- | --- |
+| none (the first job) | Starts. |
+| state not yet visible to `sacct` | Resumes without counting a retry. It retries the lookup for about a minute first, to allow for accounting lag. |
+| `COMPLETED` | Exits successfully. |
+| `CANCELLED...` | Stops the chain. |
+| `TIMEOUT`, `PREEMPTED`, `NODE_FAIL` | Resumes, unless `max_walltime` has been reached, in which case it stops. |
+| anything else (a failed job, out of memory, and so on) | Counts one retry and resumes, until `max_retries` is exceeded, at which point it exits with an error. |
+
+Time limits, preemption, and node failure are not counted against `max_retries`, which exists so a job whose own script is broken does not requeue forever.
+
+## What gets resumed
+
+Submit adds `resume_from_cache: true` to the benchmark's `run` overrides unless you set it yourself. On the first job there is no cache and it starts fresh; on later jobs `gym eval run` reuses what was already collected. All jobs of a chain share one benchmark directory, so rollouts accumulate in the same `artifacts/` files, and each job's logs are kept separately because their file names include the Slurm job ID.
+
+The prologue keeps its state in dot-files in the benchmark directory:
+
+| File | Contents |
+| --- | --- |
+| `.gym_job_chain` | The Slurm job ID of every job in the chain, one per line. |
+| `.gym_accumulated_walltime` | Seconds of walltime consumed by finished jobs. Compared with `max_walltime`. |
+| `.gym_infra_retries` | Count of non-timeout retries so far. |
+
+## Limits and caveats
+
+- `max_walltime` is checked when the previous job ended by timeout, preemption, or node failure, against the walltime of the jobs that already finished. When it is reached the chain stops and exits with status 0, so a stopped chain is not an error.
+- If queueing a successor fails, the job prints a warning (`Chain will NOT continue on failure`) and carries on; that job just has no successor.
+- A job that finds its predecessor `CANCELLED` stops the chain. Because each job queues its successor before doing work, a successor may already be waiting in the queue when you cancel; check `squeue` and cancel any job still pending, using `.gym_job_chain` for the IDs of the jobs that have run.
+- `resumable` does not work with a benchmark `command`, because resuming relies on `gym eval run`'s cache.
+- The `gym-job.json` record contains the first job's ID only.
