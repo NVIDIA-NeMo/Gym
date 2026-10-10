@@ -9261,3 +9261,90 @@ class TestMultiAgentEnvironmentServers:
             ValueError, match="'outsider' is not an agent of environment server 'conversation': 'user', 'assistant'"
         ):
             RolloutCollectionHelper._validate_environment_servers([row], self._config())
+
+
+class TestCapturePayloadsInRows:
+    """``model_call_capture_payloads_in_rows: false`` keeps copies of captured requests and replies out of the rows:
+    every request repeats the conversation, so these copies grow with the square of its length."""
+
+    async def test_run_from_config_keeps_capture_payloads_out_of_rows_when_switched_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "observability_enabled": True,
+                "model_call_capture_dir": str(capture_dir),
+                "model_call_capture_payloads_in_rows": False,
+            },
+        )
+        source_row = {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                [example] = examples
+                request = {"input": [{"role": "user", "content": "the whole conversation, again"}]}
+                store.record(
+                    "0-0", {"model_call_id": "m1", "dialect": "responses", "request": request, "response": {}}
+                )
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=example, result={"response": {"usage": {}}}, rollout_latency_ms=None)
+                )
+                return [future]
+
+        [result] = await Helper().run_from_config(config)
+
+        # The call is still listed, without its payload, here and in the trajectory; the capture file keeps it.
+        assert [call["model_call_id"] for call in result["ng_model_call_capture"]["calls"]] == ["m1"]
+        assert "the whole conversation, again" not in orjson.dumps(result).decode()
+        assert store.read("0-0")[0]["request"]["input"][0]["content"] == "the whole conversation, again"
+
+
+class TestTrajectoryTurnRequests:
+    """Each turn of a producer trajectory may carry the whole request it answered; with capture payloads kept out of
+    rows those copies are dropped as well."""
+
+    @staticmethod
+    def _result() -> dict:
+        turn = {
+            "invocation_id": "root",
+            "task_id": "0",
+            "rollout_id": "0-0",
+            "turn_no": 1,
+            "timestamp": 1.0,
+            "question": [{"role": "user", "content": "the whole conversation, again"}],
+            "answer": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}],
+            "step_count": 0,
+        }
+        return {nemo_gym.rollout_collection.NG_TRAJECTORY_KEY: {"task_id": "0", "rollout_id": "0-0", "turns": [turn]}}
+
+    def test_turn_requests_are_kept_by_default(self) -> None:
+        result = self._result()
+        nemo_gym.rollout_collection._attach_trajectory_record(
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}, result
+        )
+        [turn] = result["ng_trajectory"]["turns"]
+        assert turn["question"] == [{"role": "user", "content": "the whole conversation, again"}]
+
+    def test_turn_requests_are_dropped_when_payloads_stay_out_of_rows(self) -> None:
+        result = self._result()
+        nemo_gym.rollout_collection._attach_trajectory_record(
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}, result, turn_requests=False
+        )
+        trajectory = result["ng_trajectory"]
+        assert trajectory["turns"][0].get("question") is None and trajectory["turns"][0]["answer"]
+        assert "turn_requests_omitted" in [gap["code"] for gap in trajectory["gaps"]]
+        assert "the whole conversation, again" not in orjson.dumps(result).decode()
