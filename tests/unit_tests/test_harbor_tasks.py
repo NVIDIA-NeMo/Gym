@@ -582,10 +582,17 @@ class TestCli:
         assert len(prepared.rows_path.read_text().splitlines()) == 1
 
     def test_resolve_agent_accepts_short_name(self):
-        selection = resolve_agent("hermes_agent")
-        assert selection.instance_name == "hermes_agent"
-        assert selection.impl_name == "hermes_agent"
-        assert selection.config_path.name == "hermes_agent.yaml"
+        selection = resolve_agent("simple")
+        assert selection.instance_name == "simple_agent"
+        assert selection.impl_name == "simple_agent"
+        assert selection.config_path.name == "simple_agent.yaml"
+        # `hermes` and `terminus_2` each match two harnesses; the caller has to pick.
+        for ambiguous in ("hermes", "terminus_2"):
+            with pytest.raises(ValueError, match="ambiguous"):
+                resolve_agent(ambiguous)
+        terminus = resolve_agent("terminus_2_sandboxed_agent")
+        assert terminus.instance_name == "terminus_2_sandboxed_agent"
+        assert terminus.impl_name == "terminus_2_sandboxed_agent"
         with pytest.raises(ValueError, match="No agent config"):
             resolve_agent("no_such_agent_xyz")
 
@@ -603,6 +610,10 @@ class TestCli:
         written = yaml.safe_load(config_path.read_text())
         assert written["environment_server_routes"] == {"ds": "harbor_ds_environment"}
         assert written["harbor_ds_agent"]["responses_api_agents"]["hermes_agent"]["enabled_toolsets"] == ["terminal"]
+        terminus = AgentSelection(tmp_path / "t.yaml", "terminus_2_sandboxed_agent", "terminus_2_sandboxed_agent")
+        _, _ = build_run(prepared, terminus, sandbox=None, overrides=[])
+        written = yaml.safe_load(config_path.read_text())
+        assert written["harbor_ds_agent"]["responses_api_agents"]["terminus_2_sandboxed_agent"]["num_workers"] == 1
         assert "+split=train" in tokens
         assert not any(token.startswith("+agent_name") for token in tokens)
         config_paths = next(token for token in tokens if token.startswith("+config_paths="))

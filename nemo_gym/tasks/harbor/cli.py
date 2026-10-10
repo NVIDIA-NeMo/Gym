@@ -69,6 +69,8 @@ AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
         "enabled_toolsets": ["terminal"],
         "chat_template_kwargs_enabled": False,
     },
+    # Episode sessions are process-local, so the harness must run as one worker.
+    "terminus_2_sandboxed_agent": {"num_workers": 1},
 }
 
 
@@ -137,29 +139,40 @@ def runs_in_sandbox(impl_name: str, impl_config: Any) -> bool:
 def resolve_agent(agent: str) -> AgentSelection:
     """Map ``--agent NAME[/FLAVOR]`` to ``responses_api_agents/<NAME>/configs/<FLAVOR>.yaml``.
 
-    ``NAME`` may omit a trailing ``_agent`` (``hermes`` selects ``hermes_agent``).
+    ``NAME`` may omit a trailing ``_agent`` or ``_sandboxed_agent`` (``simple`` selects ``simple_agent``).
+    A short name that matches two harnesses, such as ``hermes`` (``hermes_agent`` and
+    ``hermes_sandboxed_agent``) or ``terminus_2``, is refused with both full names, so a run never
+    lands on the wrong harness by default.
     """
     name, _, flavor = agent.partition("/")
-    candidates = [name] if name.endswith("_agent") else [name, f"{name}_agent"]
+    candidates = [name] if name.endswith("_agent") else [name, f"{name}_agent", f"{name}_sandboxed_agent"]
+    matches: list[Path] = []
     for root in component_search_roots():
         for folder_name in candidates:
             path = root / "responses_api_agents" / folder_name / "configs" / f"{flavor or folder_name}.yaml"
-            if path.is_file():
-                config = yaml.safe_load(path.read_text()) or {}
-                instances = [key for key, value in config.items() if isinstance(value, dict)]
-                if len(instances) != 1 or "responses_api_agents" not in config[instances[0]]:
-                    raise ValueError(f"{path} must define exactly one responses_api_agents instance")
-                impls = config[instances[0]]["responses_api_agents"]
-                if len(impls) != 1:
-                    raise ValueError(f"{path} must define exactly one agent implementation")
-                (impl_name,) = impls
-                return AgentSelection(
-                    config_path=path.resolve(),
-                    instance_name=instances[0],
-                    impl_name=impl_name,
-                    runs_in_sandbox=runs_in_sandbox(impl_name, impls[impl_name]),
-                )
-    raise ValueError(f"No agent config found for `--agent {agent}` (looked for {' or '.join(candidates)})")
+            if path.is_file() and path.resolve() not in matches:
+                matches.append(path.resolve())
+    if not matches:
+        raise ValueError(f"No agent config found for `--agent {agent}` (looked for {' or '.join(candidates)})")
+    folders = {path.parents[1].name for path in matches}
+    if len(folders) > 1:
+        options = " or ".join(f"`--agent {folder}`" for folder in sorted(folders))
+        raise ValueError(f"`--agent {agent}` is ambiguous; use {options}")
+    path = matches[0]
+    config = yaml.safe_load(path.read_text()) or {}
+    instances = [key for key, value in config.items() if isinstance(value, dict)]
+    if len(instances) != 1 or "responses_api_agents" not in config[instances[0]]:
+        raise ValueError(f"{path} must define exactly one responses_api_agents instance")
+    impls_config = config[instances[0]]["responses_api_agents"]
+    impls = list(impls_config)
+    if len(impls) != 1:
+        raise ValueError(f"{path} must define exactly one agent implementation")
+    return AgentSelection(
+        config_path=path,
+        instance_name=instances[0],
+        impl_name=impls[0],
+        runs_in_sandbox=runs_in_sandbox(impls[0], impls_config[impls[0]]),
+    )
 
 
 def resolve_sandbox_config(provider: str) -> Path:
@@ -236,7 +249,7 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
         raise ValueError("A Harbor target starts its own servers; drop --no-serve")
     agent_name = getattr(args, "agent", None)
     if not agent_name:
-        raise ValueError("A Harbor target needs `--agent <harness>` (for example `--agent hermes`)")
+        raise ValueError("A Harbor target needs `--agent <harness>` (for example `--agent hermes_agent`)")
     prepared = prepare_target(args.target)
     agent = resolve_agent(agent_name)
     config_path, tokens = build_run(prepared, agent, sandbox=getattr(args, "sandbox", None), overrides=overrides)

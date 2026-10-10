@@ -7,6 +7,7 @@ import logging
 import sys
 import tempfile
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter, time
 from traceback import format_exc
@@ -14,7 +15,8 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
-from fastapi import Request
+from aiohttp import ClientError, ClientResponseError
+from fastapi import HTTPException, Request
 from harbor.agents.terminus_2 import Terminus2
 from harbor.llms.base import BaseLLM, ContextLengthExceededError, LLMResponse
 from harbor.models.agent.context import AgentContext
@@ -24,7 +26,13 @@ from harbor.utils.logger import logger as harbor_logger
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSessionState,
+    BaseResponsesAPIAgentConfig,
+    SimpleResponsesAPIAgent,
+)
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
@@ -48,6 +56,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
 )
 from nemo_gym.sandbox import AsyncSandbox, create_provider
+from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
@@ -56,6 +65,7 @@ from nemo_gym.server_utils import (
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
+from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
 from responses_api_agents.terminus_2_sandboxed_agent.observability import TerminusObservations
 from responses_api_agents.terminus_2_sandboxed_agent.terminal import (
     ShellExitedError,
@@ -63,6 +73,9 @@ from responses_api_agents.terminus_2_sandboxed_agent.terminal import (
     TerminusTmuxSession,
     TerminusXMLParser,
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
@@ -86,6 +99,46 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_timeout: float
     remote_tmux_binary_path: Optional[str]
+
+
+# Model HTTP statuses that mean the endpoint is down, unauthorized or saturated, not that the model
+# produced a bad answer. Anything else (for example a 400 for a malformed prompt) stays a harness error.
+_MODEL_INFRASTRUCTURE_STATUSES = frozenset({401, 403, 408, 425, 429})
+
+
+class ModelUnreachableError(RuntimeError):
+    """The model endpoint never answered: refused connections, request timeouts or a 5xx/auth failure after retries."""
+
+
+class SandboxLostError(RuntimeError):
+    """The borrowed sandbox could not run a command."""
+
+
+class Terminus2InfrastructureError(HTTPException):
+    """The run failed for a reason that is not the agent's doing.
+
+    Raised as a 5xx so the environment server records a masked episode failure instead of verifying an
+    unmasked zero. The harness metrics ride along for in-process diagnostics (the legacy ``/run`` path
+    and tests); the HTTP body carries only the detail.
+    """
+
+    def __init__(self, status_code: int, detail: str, metrics: Dict[str, Any]):
+        super().__init__(status_code, detail=detail)
+        self.metrics = metrics
+
+
+def _is_model_infrastructure_error(exc: BaseException) -> bool:
+    if isinstance(exc, ClientResponseError):
+        return exc.status >= 500 or exc.status in _MODEL_INFRASTRUCTURE_STATUSES
+    return isinstance(exc, ClientError)
+
+
+@dataclass
+class Terminus2SessionState(AgentSessionState):
+    """A sandbox borrowed from a resources server for one episode."""
+
+    sandbox: AsyncSandbox
+    workdir: str | None
 
 
 class Terminus2AgentRunRequest(BaseRunRequest):
@@ -140,7 +193,7 @@ class NeMoGymSandboxEnvironment:
         env: dict[str, str] | None = None,
         **_: Any,
     ) -> Any:
-        result = await self._sandbox.exec(command, timeout_s=timeout_sec, cwd=cwd, user=user, env=env)
+        result = await self._exec(command, timeout_s=timeout_sec, cwd=cwd, user=user, env=env)
 
         return SimpleNamespace(
             stdout=result.stdout or "",
@@ -149,8 +202,16 @@ class NeMoGymSandboxEnvironment:
         )
 
     async def is_dir(self, path: str, user: str | int | None = None) -> bool:
-        result = await self._sandbox.exec(f"test -d {json.dumps(path)}", user=user)
+        result = await self._exec(f"test -d {json.dumps(path)}", user=user)
         return result.return_code == 0
+
+    async def _exec(self, command: str, **kwargs: Any) -> Any:
+        # A command that fails inside the sandbox returns a non-zero code; an exception here means the
+        # sandbox itself is gone (dropped connection, dead session), which is not the agent's doing.
+        try:
+            return await self._sandbox.exec(command, **kwargs)
+        except Exception as exc:
+            raise SandboxLostError(f"{type(exc).__name__}: {exc}") from exc
 
 
 def _instruction(input_value: Any) -> str:
@@ -212,17 +273,18 @@ class NeMoGymLLM(BaseLLM):
                     NeMoGymEasyInputMessage(role=message.get("role", "user"), content=message.get("content", ""))
                 )
             elif message.get("role") == "assistant":
+                # Replayed items need well-formed ids: OpenAI-compatible backends reject an empty string.
                 if message.get("reasoning_content"):
                     res.append(
                         NeMoGymResponseReasoningItem(
-                            id="",
+                            id=f"rs_{uuid4().hex}",
                             summary=[NeMoGymSummary(text=message.get("reasoning_content"), type="summary_text")],
                             type="reasoning",
                         )
                     )
                 res.append(
                     NeMoGymResponseOutputMessage(
-                        id="",
+                        id=f"msg_{uuid4().hex}",
                         content=[NeMoGymResponseOutputText(annotations=[], text=message.get("content", ""))],
                     )
                 )
@@ -272,11 +334,16 @@ class NeMoGymLLM(BaseLLM):
             except BaseException as exc:
                 if self.observations is not None:
                     self.observations.gap("model_attempt_without_response", type(exc).__name__)
+                if _is_model_infrastructure_error(exc):
+                    # The client has already retried; this is the endpoint failing, not the model answering.
+                    raise ModelUnreachableError(f"{type(exc).__name__}: {exc}") from exc
                 raise
 
         self._times_spent.append(perf_counter() - start_time)
         if not response:
-            raise TimeoutError(f"Failed to query model endpoint due to timeouts after {max_attempts} attempts!")
+            raise ModelUnreachableError(
+                f"Failed to query model endpoint due to timeouts after {max_attempts} attempts!"
+            )
 
         observed = (
             self.observations.record_response(observed_input, response, time())
@@ -465,10 +532,49 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         if not self.config.debug:
             harbor_logger.setLevel(logging.WARNING)
 
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> Terminus2SessionState:
+        """Borrow the resources server's sandbox for this episode."""
+        if body.sandbox_access is None:
+            raise HTTPException(422, "Terminus 2 needs sandbox_access from the resources server")
+        connection = body.sandbox_access.connection
+        if not isinstance(connection, DirectSandboxConnection):
+            raise HTTPException(422, "Terminus 2 supports only direct sandbox connections")
+        provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
+        try:
+            sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+        except BaseException:
+            await provider.aclose()
+            raise
+        return Terminus2SessionState(request=body, sandbox=sandbox, workdir=body.sandbox_access.workdir)
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, Terminus2SessionState):
+            raise TypeError("Expected a Terminus 2 session state")
+        await state.sandbox.disconnect()
+        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
+
     async def _connect_sandbox(self, sandbox_id: str) -> AsyncSandbox:
         provider = create_provider(resolve_provider_config(self.config.sandbox_provider, get_global_config_dict()))
         sandbox = await AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=provider)
         return sandbox
+
+    def _agent_timeout_sec(self, body: NeMoGymResponseCreateParamsNonStreaming) -> float:
+        """The run budget: the configured ceiling, bounded by the task's own ``[agent].timeout_sec``."""
+        budget = float(self.config.sandbox_timeout)
+        raw = (body.metadata or {}).get(AGENT_TIMEOUT_METADATA_KEY)
+        task_timeout: float | None = None
+        if raw is not None:
+            try:
+                task_timeout = float(raw)
+            except (TypeError, ValueError):
+                LOGGER.warning(f"Ignoring non-numeric {AGENT_TIMEOUT_METADATA_KEY}={raw!r} in the request metadata")
+        if task_timeout is not None and task_timeout > 0:
+            budget = min(budget, task_timeout)
+        LOGGER.debug(
+            f"Terminus 2 agent timeout: {budget}s (config sandbox_timeout={self.config.sandbox_timeout}, "
+            f"task {AGENT_TIMEOUT_METADATA_KEY}={raw!r})"
+        )
+        return budget
 
     async def _execute(
         self,
@@ -480,6 +586,16 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         instruction = _instruction(body.input)
         run_body = await request.json()
         rollout_id = self.rollout_id_from_run(run_body)
+        model_base_url = (
+            self.base_url_for_run(base_url=get_server_url(self.config.model_server.name), body=run_body) + "/v1"
+        )
+        if rollout_id is None:
+            # Environment servers address the agent through `/ng-rollout/<id>/v1/responses`; carry that id
+            # onto the model calls so capture correlates them with the episode.
+            path_params = getattr(request, "path_params", None) or {}
+            if path_params.get("rollout_id") is not None:
+                rollout_id = path_params["rollout_id"]
+                model_base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
         invocation_id = f"terminus2_{uuid4().hex}" if rollout_id is not None else None
         observations = None
         if invocation_id is not None:
@@ -493,9 +609,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             )
             observations = TerminusObservations(invocation_id, task_id, rollout_id, self.config.model_server)
 
-        model_base_url = (
-            self.base_url_for_run(base_url=get_server_url(self.config.model_server.name), body=run_body) + "/v1"
-        )
         llm = NeMoGymLLM(
             client=NeMoGymAsyncOpenAI(
                 base_url=model_base_url,
@@ -546,31 +659,55 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 )
             await agent.setup(environment)
 
+            # Outcomes: "completed" and "step_limit" are the agent's own result, "timeout" too (the
+            # budget is the task's); all three are verified. An "infrastructure_error" is not the
+            # agent's doing and is refused with a 5xx so the episode is recorded as a masked failure.
+            infrastructure_status: int | None = None
             try:
-                async with asyncio.timeout(self.config.sandbox_timeout):
+                async with asyncio.timeout(self._agent_timeout_sec(body)):
                     await agent.run(instruction, environment, context)
                 terminus2_completed = True
                 error = None
                 invocation_status = "completed"
                 error_type = None
+                n_episodes = (getattr(context, "metadata", None) or {}).get("n_episodes")
+                hit_step_limit = (
+                    self.config.max_turns is not None
+                    and n_episodes is not None
+                    and n_episodes >= self.config.max_turns
+                )
+                outcome = "step_limit" if hit_step_limit else "completed"
             except TimeoutError:
                 terminus2_completed = False
                 error = format_exc()
                 invocation_status = "incomplete"
                 error_type = "TimeoutError"
+                outcome = "timeout"
+            except (ModelUnreachableError, SandboxLostError) as exc:
+                terminus2_completed = False
+                error = format_exc()
+                invocation_status = "failed"
+                error_type = type(exc).__name__
+                outcome = "infrastructure_error"
+                # 502: the upstream model never answered. 503: the sandbox provider lost the episode.
+                infrastructure_status = 502 if isinstance(exc, ModelUnreachableError) else 503
+                cause = "model unreachable" if isinstance(exc, ModelUnreachableError) else "sandbox lost"
+                infrastructure_detail = f"{cause}: {exc}"
             except asyncio.CancelledError:
                 terminus2_completed = False
                 error = format_exc()
                 invocation_status = "incomplete"
                 error_type = "CancelledError"
+                outcome = "infrastructure_error"
+                infrastructure_status = 503
+                infrastructure_detail = "agent run cancelled"
             except BaseException as exc:
                 terminus2_completed = False
                 error = format_exc()
                 invocation_status = "failed"
                 error_type = type(exc).__name__
+                outcome = "failed"
                 print(f"Hit exception while running Terminus2: {format_exc()}", file=sys.stderr)
-            finally:
-                pass
 
         usage = NeMoGymResponseUsage(
             input_tokens=context.n_input_tokens or 0,
@@ -589,6 +726,14 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
             usage=usage,
+            # The episode path returns only the response, so the outcome rides in its metadata: a
+            # harness exception must not look like a model failure in the row.
+            metadata={
+                "terminus2_outcome": outcome,
+                "terminus2_completed": str(terminus2_completed).lower(),
+                **({"terminus2_error_type": error_type} if error_type else {}),
+                **({"terminus2_error": error[-500:]} if error else {}),
+            },
         )
 
         total_time = perf_counter() - start_time
@@ -625,9 +770,23 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                     *observations.compactions,
                 ],
             )
+        if infrastructure_status is not None:
+            print(f"Terminus 2 infrastructure failure ({error_type}): {error}", file=sys.stderr)
+            raise Terminus2InfrastructureError(
+                infrastructure_status,
+                detail=f"Terminus 2 infrastructure failure, {infrastructure_detail}"[:2000],
+                metrics=metrics,
+            )
         return response, metrics
 
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        agent_session_id = self._agent_session_id_from_request(request)
+        if agent_session_id is not None:
+            state = self._require_agent_session(agent_session_id)
+            if not isinstance(state, Terminus2SessionState):
+                raise TypeError("Expected a Terminus 2 session state")
+            response, _ = await self._execute(request, body, state.sandbox)
+            return response
         session_key = request.session[SESSION_ID_KEY]
         sandbox = self._session_sandboxes[session_key]
         response, _ = await self._execute(request, body, sandbox)
@@ -651,7 +810,15 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         session_key = request.session[SESSION_ID_KEY]
         self._session_sandboxes[session_key] = sandbox
 
-        response, metrics = await self._execute(request, body.responses_create_params, sandbox)
+        try:
+            response, metrics = await self._execute(request, body.responses_create_params, sandbox)
+        except HTTPException:
+            self._session_sandboxes.pop(session_key, None)
+            try:
+                await sandbox.stop()
+            except:
+                print("Failed to stop sandbox", format_exc(), file=sys.stderr)
+            raise
 
         verification = await self.server_client.post(
             server_name=self.config.resources_server.name,
