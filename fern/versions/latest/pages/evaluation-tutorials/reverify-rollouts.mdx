@@ -37,6 +37,14 @@ Ordinary re-scoring supports fresh manifest-backed runs when their files contain
 new scores to a separate output. If a saved answer was superseded by a newer attempt, first export the selected
 results using `gym eval aggregate`. Judge-only recovery of manifest-backed runs and appending reverified results
 back into those runs remain follow-ups; see [evaluation resume](/main/evaluation/resume).
+
+For manifest- or journal-backed sources, the output and its supporting files cannot overwrite the source run's
+manifest, saved inputs, results, failures or other recovery files, including when `--rollouts` names the run's `_failures` file. These checks include output aliases and the
+`unsafe_` prefix used by `--force`.
+
+For legacy outputs with no manifest or journal, `--resume` and `--append` preserve an existing symlink and an unambiguous
+set of sidecars beside that link. If both the link and its target have companion files, Gym refuses to choose between
+them; back up and reconcile the files first. New outputs put companions beside the resolved target.
 </Note>
 
 ### Relay ATIF trajectories

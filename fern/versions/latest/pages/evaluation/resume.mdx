@@ -285,10 +285,12 @@ reverified results back into an established run remain blocked until the follow-
 
 Aggregation resolves source file symlinks before locating their companion history, and deduplicates aliases of the
 same rollout file. Readers also accept older runs whose companions exist only beside the alias, when neither location
-has a manifest or journal. Competing companion sets remain an error. Collection and resume require companions beside
-the resolved output: back up and move an older run's files together before writing it. Health and reverification preserve
-the same checks against superseded history through aliases. Reverification protects the source run's supporting files
-as well as its main output, including aliases and the `unsafe_` output prefix. For a merged output
+has a manifest or journal. Competing companion sets remain an error. Rollout collection and its resume require companions
+beside the resolved output: back up and move an older run's files together before writing it. Legacy reverification
+`--resume` and `--append` may keep an unambiguous set of companions beside the alias; they do not split or migrate it.
+Health and reverification preserve the same checks against superseded history through aliases. Reverification protects
+a manifest- or journal-backed source run's supporting files and main output, even when the supplied source is its
+`_failures` sidecar. Protection includes aliases and the `unsafe_` output prefix. For a merged output
 symlink, aggregation replaces the target file and preserves the symlink. It refuses to replace an input or an established
 recovery history through either spelling. Copied manifest-backed runs
 are rejected by run identity. Legacy runs have no trustworthy run identifier: independent evaluations may share the
@@ -324,17 +326,21 @@ including a dispatch budget that drains every task. Such work can still resume a
 restarts spend the configured infrastructure retry limit instead of continuing forever. Increase the dispatch budget
 or reduce the drain margin if they prevented all work.
 
-The CLI exits with **76** if the evaluation is incomplete but only terminal failures, intentional omissions or exhausted
-retry budgets remain. This is a compatibility change from older collection commands that could return 0 for partial
-results: Slurm marks these evaluations FAILED, even when every missing task was intentionally skipped.
-None of these nonzero statuses reports a complete evaluation.
+The CLI exits with **76** if unfinished work includes terminal failures or exhausted retry budgets and nothing is
+eligible for retry. This is a compatibility change from older collection commands that could return 0 for these partial
+results: Slurm marks these evaluations FAILED. Intentional omissions do not hide other failed or unfinished tasks.
+
+If the only gaps are intentional omissions, the CLI exits with **0** and warns with the completed, expected and omitted
+counts. This also applies when every task is intentionally omitted. Omissions keep their separate coverage disposition:
+they are not completed answers and receive no measured score. GDPVal's explicitly accepted partial-stage omissions
+follow the same exit policy. None of the nonzero statuses reports a complete evaluation.
 
 The Slurm auto-resume chain continues after 75 without spending an infrastructure retry and stops after 76.
 Its accumulated walltime cap applies only when `max_walltime` is configured. Collection coverage exposes eligible
 tasks as `retryable` and new outcomes as `outcomes_recorded`; aggregate coverage includes `retryable` within each shard.
 
-Code 0 means a completed evaluation after normal collection. An explicit Ctrl-C in `gym eval run` retains the existing
-cancellation behavior: it can return 0 with partial artifacts when `require_complete=false`. Inspect coverage to determine
+Code 0 means collection finished, possibly with the intentional omissions described above. Inspect coverage to learn
+how many tasks actually completed. An explicit Ctrl-C in `gym eval run` retains the existing cancellation behavior: it can return 0 with partial artifacts when `require_complete=false`. Inspect coverage to determine
 completion after cancellation. Ordinary errors keep their existing failure status. The library still supports returning
 partial results when `require_complete=false`; CLI status is checked separately. Checkpoint-triggered stops must use the
 same incomplete statuses when that integration lands. End-to-end checkpoint restoration still requires validation

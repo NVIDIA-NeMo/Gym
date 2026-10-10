@@ -4268,3 +4268,89 @@ def test_single_pass_history_is_quarantined_before_switching_to_multistage(tmp_p
         assert len(moved) == 1 and moved[0].read_bytes() == data
     output.write_bytes(orjson.dumps(rows[0] | {"stage_index": 0, "reward": 1.0}) + b"\n")
     assert RolloutStore.read(output, import_legacy=False) is None
+
+
+@pytest.mark.parametrize("kind", ["terminal", "exhausted", "retryable", "drained", "omitted"])
+async def test_multistage_driver_completion_and_resume_are_bounded(tmp_path, monkeypatch, caplog, kind):
+    from nemo_gym.rollout_recovery import IncompleteEvaluationError
+
+    dispatches = []
+
+    class FakeHelper:
+        def _preprocess_rows_from_config(self, config):
+            return _materialized_rows(["t0", "t1"])
+
+        def _run_examples_with_metadata(self, rows, **kwargs):
+            async def done(row):
+                dispatches.append(row)
+                if row["task_id"] == "t0":
+                    ref = row["reference_ids"][0]
+                    result = {
+                        "task_id": "t0",
+                        "per_reference": {ref: {"wins": 1, "losses": 0, "ties": 0, "reference_elo": REF_ELOS[ref]}},
+                    }
+                else:
+                    result = {
+                        "task_id": "t1",
+                        NG_FAILURE_CLASS_KEY: "permanent" if kind == "terminal" else "transient",
+                        NG_TERMINAL_KEY: kind == "terminal",
+                        NG_NO_PERSIST_KEY: kind == "drained",
+                    }
+                return rollout_collection_module._CompletedRollout(row=row, result=result, rollout_latency_ms=None)
+
+            return [done(row) for row in rows]
+
+        async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            return tmp_path / "aggregate.json"
+
+    monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", FakeHelper)
+    monkeypatch.setattr(
+        multistage_module, "ensure_distribution", lambda *args, **kwargs: (_distribution(["t0", "t1"]), None)
+    )
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1" if kind == "exhausted" else "3")
+    config = rollout_collection_module.RolloutCollectionConfig(
+        input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+        output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+        require_complete=True,
+        route_failures_to_sidecar=True,
+    )
+    global_config = {
+        "multistage": {"enabled": True, "stages": ["2"], "seed": 0},
+        "gdpval": {
+            "resources_servers": {"gdpval": {"reference_models": {key: {"elo": elo} for key, elo in REF_ELOS.items()}}}
+        },
+    }
+    if kind == "omitted":
+        global_config["gdpval"]["resources_servers"]["gdpval"]["reference_models"] = {"a": {"elo": REF_ELOS["a"]}}
+        global_config["multistage"]["stages"] = [
+            {
+                "num_tasks": 2,
+                "partial_completion": {
+                    "min_success_fraction": 0.5,
+                    "min_per_reference_success_fraction": 0.5,
+                    "waivable_failure_classes": ["transient"],
+                },
+            }
+        ]
+        await run_e2e_multistage(config, global_config)
+        assert "1/2 samples completed, 1 intentionally omitted" in caplog.text
+        initial_dispatches = len(dispatches)
+        config.resume_from_cache = True
+        await run_e2e_multistage(config, global_config)
+        assert len(dispatches) == initial_dispatches
+        assert len(load_persisted_rows(Path(config.output_jsonl_fpath))[0]) == 1
+        return
+    with pytest.raises(IncompleteEvaluationError) as error:
+        await run_e2e_multistage(config, global_config)
+    assert error.value.exit_code == (76 if kind in {"terminal", "exhausted"} else 75)
+    initial_dispatches = len(dispatches)
+    original_results = Path(config.output_jsonl_fpath).read_bytes()
+    original_failures = failures_path_for(Path(config.output_jsonl_fpath)).read_bytes()
+    config.resume_from_cache = True
+    with pytest.raises(IncompleteEvaluationError) as error:
+        await run_e2e_multistage(config, global_config)
+    assert error.value.exit_code == {"terminal": 76, "exhausted": 76, "retryable": 75, "drained": 1}[kind]
+    assert Path(config.output_jsonl_fpath).read_bytes() == original_results
+    assert len(dispatches) - initial_dispatches == (0 if kind in {"terminal", "exhausted"} else 1)
+    if kind in {"terminal", "exhausted", "drained"}:
+        assert failures_path_for(Path(config.output_jsonl_fpath)).read_bytes() == original_failures

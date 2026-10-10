@@ -42,6 +42,7 @@ from nemo_gym.rollout_records import (
     materialized_path_for,
     prepare_append,
     read_records,
+    resolve_rollout_owner,
     resolve_rollout_path,
 )
 from nemo_gym.rollout_recovery import RunManifest, atomic_write_json, manifest_path_for, validate_resume
@@ -57,14 +58,7 @@ def raw_outcomes_are_selected(path: Path) -> bool:
     including answers superseded by interrupted attempts, do. Validate the whole
     run even when the caller reads only the success file or only its sidecar.
     """
-    output = resolve_rollout_path(path, read_only=True)
-    # An output may itself end in "_failures". Its own history takes priority
-    # over the naming convention for sidecars.
-    if not manifest_path_for(output).exists() and not journal_path_for(output).exists():
-        if output.stem.endswith("_failures"):
-            output = resolve_rollout_path(
-                output.with_name(output.stem.removesuffix("_failures") + output.suffix), read_only=True
-            )
+    output = resolve_rollout_owner(path)
     if journal_path_for(output).exists():
         return False
     if not manifest_path_for(output).exists():

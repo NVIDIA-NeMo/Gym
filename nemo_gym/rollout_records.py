@@ -64,8 +64,9 @@ def materialized_path_for(output: Path) -> Path:
 def resolve_rollout_path(output: Path, *, read_only: bool = False) -> Path:
     """Resolve an output without losing its companions.
 
-    Readers may retain an unambiguous legacy alias layout. Writers require all
-    recovery files beside the resolved output, so aliases cannot split a run.
+    Readers may retain an unambiguous legacy alias layout. Recovery writers
+    require all history beside the resolved output, so aliases cannot split a run.
+    Legacy-only reverification may reuse reader resolution after excluding history.
     Derived coverage reports do not establish ownership of a run.
     """
     resolved = output.resolve()
@@ -91,6 +92,22 @@ def resolve_rollout_path(output: Path, *, read_only: bool = False) -> Path:
         "Use the original Gym revision, or move all companions beside the resolved output "
         f"({resolved}) after backing up the run. Saved artifacts were not changed."
     )
+
+
+def resolve_rollout_owner(path: Path) -> Path:
+    """Find a run's main output when a reader is given its failure sidecar.
+
+    An output named ``*_failures`` with its own history owns that history;
+    strip the suffix only when the parent run has a manifest or journal.
+    """
+    output = resolve_rollout_path(path, read_only=True)
+    if not any(companion(output).exists() for companion in (manifest_path_for, journal_path_for)):
+        if output.stem.endswith("_failures"):
+            parent = output.with_name(output.stem.removesuffix("_failures") + output.suffix)
+            parent = resolve_rollout_path(parent, read_only=True)
+            if any(companion(parent).exists() for companion in (manifest_path_for, journal_path_for)):
+                return parent
+    return output
 
 
 def logical_rollout_id(row: dict) -> str:

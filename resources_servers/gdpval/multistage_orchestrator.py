@@ -1546,6 +1546,9 @@ async def run_multistage_stages(
             "stage_index": index,
             "num_tasks": len(task_ids),
             "num_rollouts": len(stage_rows),
+            # Only an accepted partial-stage policy can waive unresolved rows.
+            # Terminal/exhausted rows are already absent from unresolved_keys.
+            "num_retryable": 0 if partial_outcome is not None else len(unresolved_keys),
             "num_reused": num_reused,
             "reference_ids": list(reference_ids),
             "eval_elo": stage_elo,
@@ -1773,6 +1776,7 @@ def _resume_complete_stage(
         "num_tasks": len(task_ids),
         # Cached results can be incomplete even when the stage was marked complete.
         "num_rollouts": expected_stage_row_count,
+        "num_retryable": 0,
         "num_reused": 0,
         "reference_ids": reference_ids,
         "eval_elo": stage_elo,
@@ -2453,8 +2457,10 @@ async def run_e2e_multistage(
 
     latency_tracker = DispatchLatencyTracker()
     dispatch_started_at = time.monotonic()
+    outcomes_recorded = 0
 
     async def run_rollouts(rows: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        nonlocal outcomes_recorded
         semaphore = None
         if semaphore_size:
             from asyncio import Semaphore
@@ -2479,6 +2485,10 @@ async def run_e2e_multistage(
                 rollout_latency_ms=completed.rollout_latency_ms,
             )
             results.append((completed.row, completed.result))
+            # The stage runner persists these before it returns to the completion
+            # check. Drained/no-persist replies do not represent saved progress.
+            if not completed.result.get(NG_NO_PERSIST_KEY):
+                outcomes_recorded += 1
         return results
 
     output_fpath = Path(rollout_collection_config.output_jsonl_fpath)
@@ -2535,7 +2545,11 @@ Aggregate metrics: {aggregate_metrics_fpath}
 Stages: {orjson.dumps(stage_summaries, option=orjson.OPT_INDENT_2).decode()}"""
     )
     rollout_collection_config.check_completion(
-        expected=sum(stage["num_rollouts"] for stage in stage_summaries), results=all_results
+        expected=sum(stage["num_rollouts"] for stage in stage_summaries),
+        results=all_results,
+        intentionally_omitted=sum(stage.get("num_omitted", 0) for stage in stage_summaries),
+        retryable=any(stage["num_retryable"] > 0 for stage in stage_summaries),
+        made_progress=outcomes_recorded > 0,
     )
     return aggregate_metrics_fpath
 

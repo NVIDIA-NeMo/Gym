@@ -624,9 +624,12 @@ def test_cli_retryability_matches_store_pending_work(prepared_run, kind):
                     }
                 )
         assert bool(store.pending(3)) is (kind in {"retryable", "unknown"})
-    with pytest.raises(IncompleteEvaluationError) as error:
+    if kind == "omitted":
         _check_saved_completion(output)
-    assert error.value.exit_code == (75 if kind in {"retryable", "unknown"} else 76)
+    else:
+        with pytest.raises(IncompleteEvaluationError) as error:
+            _check_saved_completion(output)
+        assert error.value.exit_code == (75 if kind in {"retryable", "unknown"} else 76)
 
 
 async def test_aggregate_without_merge_preserves_source_coverage(prepared_run, monkeypatch):
@@ -911,6 +914,11 @@ def test_alias_readers_refuse_ambiguous_or_established_history(prepared_run, com
         raw_outcomes_are_selected(alias)
     with pytest.raises(ConfigError, match="beside the rollout alias"):
         collection._expand_input_glob(str(alias))
+    from nemo_gym.rollout_reverification import _prepare_output_fpaths
+
+    for resume, append in ((True, False), (False, True)):
+        with pytest.raises(ConfigError, match="beside the rollout alias|Manifest-backed"):
+            _prepare_output_fpaths("", str(alias), resume, False, append)
     assert snapshot(output) == before
 
 
@@ -1209,3 +1217,151 @@ async def test_stale_reply_without_routing_explains_retry(runner_config, monkeyp
         await collection.RolloutCollectionHelper().run_from_config(runner_config)
     assert any("resume to retry" in note for note in error.value.__notes__)
     assert all("fix the producer" not in note for note in error.value.__notes__)
+
+
+@pytest.mark.parametrize("mode", ["resume", "append"])
+async def test_reverify_writes_unambiguous_legacy_alias_layout(prepared_run, fake_reverification, mode):
+    reverify = fake_reverification
+    source, prepare = prepared_run
+    rows, _ = prepare()
+    source.write_bytes(b"".join(orjson.dumps(row | {"reward": 0.0, "response": {}}) + b"\n" for row in rows))
+    materialized_path_for(source).write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    if mode == "append":
+        source.write_bytes(orjson.dumps(rows[0] | {"reward": 0.0, "response": {}}) + b"\n")
+        failures_path_for(source).write_bytes(
+            orjson.dumps(rows[1] | {"_ng_failure_class": "judge_failed", "response": {}}) + b"\n"
+        )
+    target = source.with_name("rescored.jsonl")
+    target.write_bytes(orjson.dumps(rows[0] | {"reward": 0.5, "response": {}}) + b"\n")
+    alias = source.with_name("latest.jsonl")
+    alias.symlink_to(target)
+    failures = failures_path_for(alias)
+    failures.write_bytes(orjson.dumps(rows[1] | {"_ng_failure_class": "judge_failed"}) + b"\n")
+    before = failures.read_bytes()
+    await reverify.RolloutReverificationHelper().run_from_config(
+        reverify.RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath=str(materialized_path_for(source)),
+            rollouts_jsonl_fpath=str(source),
+            output_jsonl_fpath=str(alias),
+            resume_from_cache=mode == "resume",
+            append=mode == "append",
+            judge_failed_only=mode == "append",
+            disable_aggregation=True,
+            upload_rollouts=False,
+        )
+    )
+    assert alias.is_symlink()
+    saved = list(read_records(target))
+    assert [row["reward"] for row in saved] == [0.5, 1.0]
+    assert failures.read_bytes().startswith(before)
+    assert not failures_path_for(target).exists()
+    assert collection._expand_input_glob(str(alias)) == [str(alias)]
+
+
+@pytest.mark.parametrize(
+    "artifact", ["output", "failures", "inputs", "manifest", "journal", "coverage", "metrics", "lock"]
+)
+@pytest.mark.parametrize("mode", ["resume", "append", "overwrite"])
+@pytest.mark.parametrize("source_alias", [False, True])
+async def test_reverify_failure_source_protects_entire_parent_run(
+    prepared_run, fake_reverification, artifact, mode, source_alias
+):
+    from nemo_gym.path_utils import aggregate_metrics_path_for
+
+    reverify = fake_reverification
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        first, second = store.pending(3)
+        store.record_dispatches([first, second])
+        store.record_outcome(first | {"reward": 1.0, "response": {}})
+        store.record_outcome(second | {"_ng_failure_class": "judge_failed", "response": {}})
+    source = failures_path_for(output)
+    if source_alias:
+        source = output.with_name("failure_alias.jsonl")
+        source.symlink_to(failures_path_for(output))
+    destination = {
+        "output": output,
+        "failures": failures_path_for(output),
+        "inputs": materialized_path_for(output),
+        "manifest": manifest_path_for(output),
+        "journal": journal_path_for(output),
+        "coverage": coverage_path_for(output),
+        "metrics": aggregate_metrics_path_for(output),
+        "lock": output.with_name(output.stem + "_run.lock"),
+    }[artifact]
+    before = snapshot(output)
+    with pytest.raises(ConfigError, match="Manifest-backed|source rollout artifacts"):
+        await reverify.RolloutReverificationHelper().run_from_config(
+            reverify.RolloutReverificationConfig(
+                materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
+                rollouts_jsonl_fpath=str(source),
+                output_jsonl_fpath=str(destination),
+                resume_from_cache=mode == "resume",
+                append=mode == "append",
+                judge_failed_only=mode == "append",
+                overwrite=mode == "overwrite",
+                disable_aggregation=True,
+                upload_rollouts=False,
+            )
+        )
+    assert snapshot(output) == before
+    assert RolloutStore.read(output).coverage()["failed"] == 1
+
+
+@pytest.mark.parametrize("num_omitted", [1, 3])
+@pytest.mark.parametrize("require_complete", [False, True])
+async def test_collector_accepts_only_intentional_gaps_without_scoring_them(
+    runner_config, monkeypatch, caplog, num_omitted, require_complete
+):
+    from nemo_gym.cli.eval import _check_saved_completion
+
+    runner_config.require_complete = require_complete
+    runner_config.route_failures_to_sidecar = True
+
+    async def post(**kwargs):
+        if kwargs["json"]["_ng_task_index"] < num_omitted:
+            return FakeResponse(200, {"_ng_failure_class": "skipped", "_ng_failure_terminal": True})
+        return FakeResponse(200, {"reward": 1.0, "response": {}})
+
+    post_mock = AsyncMock(side_effect=post)
+    install_fake_server_client(monkeypatch, post_mock)
+    await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    output = Path(runner_config.output_jsonl_fpath)
+    _check_saved_completion(output)
+    assert f"{3 - num_omitted}/3 samples completed, {num_omitted} intentionally omitted" in caplog.text
+    store = RolloutStore.read(output)
+    assert store.coverage()["complete"] is False
+    assert store.coverage()["intentionally_omitted"] == num_omitted
+    assert store.coverage()["successful"] == 3 - num_omitted
+    assert all("reward" not in row for row in store.selected("omitted"))
+    assert len(list(read_records(output))) == 3 - num_omitted
+    runner_config.resume_from_cache = True
+    await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    _check_saved_completion(output)
+    assert post_mock.await_count == 3
+
+
+@pytest.mark.parametrize("remaining", ["terminal", "exhausted", "retryable", "unknown"])
+def test_omissions_do_not_hide_other_unfinished_work(prepared_run, remaining):
+    from nemo_gym.cli.eval import _check_saved_completion
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        omitted, unfinished = store.pending(3)
+        store.record_dispatch(omitted)
+        store.record_outcome(omitted | {"_ng_failure_class": "skipped", "_ng_failure_terminal": True})
+        if remaining != "unknown":
+            for _ in range(3 if remaining == "exhausted" else 1):
+                store.allocate_attempt(unfinished)
+                store.record_outcome(
+                    unfinished
+                    | {"_ng_failure_class": "agent_run_error", "_ng_failure_terminal": remaining == "terminal"}
+                )
+        with pytest.raises(IncompleteEvaluationError) as error:
+            collection.SharedRolloutCollectionConfig(
+                output_jsonl_fpath=str(output), require_complete=True
+            ).check_completion(expected=2, results=[], intentionally_omitted=1, retryable=bool(store.pending(3)))
+        assert error.value.exit_code == (75 if remaining in {"retryable", "unknown"} else 76)
+    with pytest.raises(IncompleteEvaluationError) as error:
+        _check_saved_completion(output)
+    assert error.value.exit_code == (75 if remaining in {"retryable", "unknown"} else 76)

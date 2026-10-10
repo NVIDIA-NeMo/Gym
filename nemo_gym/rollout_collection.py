@@ -120,6 +120,7 @@ from nemo_gym.rollout_recovery import (
     manifest_path_for,
     observed_elapsed,
     run_lock,
+    warn_if_only_omissions,
 )
 from nemo_gym.rollout_recovery import (
     _get_max_rollout_attempts as _get_max_rollout_attempts,
@@ -1117,11 +1118,12 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         expected: int,
         results: List[Dict[str, Any]],
         completed: int | None = None,
+        intentionally_omitted: int = 0,
         retryable: bool = True,
         made_progress: bool = True,
     ) -> None:
-        """Reject incomplete submitted runs after saving their partial artifacts."""
-        if not self.require_complete:
+        """Reject unfinished work; accept explicit omissions with a count warning."""
+        if not self.require_complete and not intentionally_omitted:
             return
         if completed is None:
             completed = len(
@@ -1131,6 +1133,11 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
                     if r.get(NG_FAILURE_CLASS_KEY) is None and not r.get(NG_NO_PERSIST_KEY)
                 }
             )
+        if (
+            warn_if_only_omissions(expected=expected, completed=completed, intentionally_omitted=intentionally_omitted)
+            or not self.require_complete
+        ):
+            return
         if completed < expected:
             raise IncompleteEvaluationError(
                 f"EVAL FAILED: {completed}/{expected} samples completed. "
@@ -3174,7 +3181,11 @@ class RolloutCollectionHelper(BaseModel):
             if config.count_missing_rollouts_as_zero and not config.disable_aggregation
             else []
         )
-        if input_rows and not selected_attempts and not counted and not missing:
+        only_omissions = (
+            completion["intentionally_omitted"] > 0
+            and completion["successful"] + completion["intentionally_omitted"] == completion["expected"]
+        )
+        if input_rows and not selected_attempts and not counted and not missing and not only_omissions:
             if batch_tracker is not None:
                 batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
             if upload_spool is not None:
@@ -3317,6 +3328,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             expected=expected_rollouts,
             results=persisted_results,
             completed=completion["successful"],
+            intentionally_omitted=completion["intentionally_omitted"],
             retryable=completion["retryable"] > 0,
             made_progress=store.outcomes_recorded > 0,
         )

@@ -21,6 +21,7 @@ completed rollouts; it does not checkpoint an agent's conversation or remote san
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 import stat
@@ -36,6 +37,9 @@ from omegaconf.errors import InterpolationResolutionError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.config_types import ConfigError
+
+
+logger = logging.getLogger(__name__)
 
 
 # Collection/output choices can change between invocations without changing a task.
@@ -506,6 +510,20 @@ def run_lock(output: Path, *, checkpoint_dir: Path | None = None) -> Iterator[No
                     f"Another collector owns this run ({path}). Wait for it to stop before resuming."
                 ) from error
         yield
+
+
+def warn_if_only_omissions(*, expected: int, completed: int, intentionally_omitted: int) -> bool:
+    """Accept policy omissions without describing them as completed or scored tasks."""
+    if intentionally_omitted > 0 and completed + intentionally_omitted == expected:
+        logger.warning(
+            "Evaluation finished with intentional omissions: %s/%s samples completed, %s intentionally omitted. "
+            "Exiting successfully; omitted tasks have no measured score.",
+            completed,
+            expected,
+            intentionally_omitted,
+        )
+        return True
+    return False
 
 
 class IncompleteEvaluationError(RuntimeError):

@@ -62,7 +62,13 @@ from nemo_gym.rollout_collection import (
     is_terminal_failure,
     migrate_invalid_judge_main_rows,
 )
-from nemo_gym.rollout_records import coverage_path_for, journal_path_for, materialized_path_for, resolve_rollout_path
+from nemo_gym.rollout_records import (
+    coverage_path_for,
+    journal_path_for,
+    materialized_path_for,
+    resolve_rollout_owner,
+    resolve_rollout_path,
+)
 from nemo_gym.rollout_recovery import manifest_path_for
 from nemo_gym.rollout_store import raw_outcomes_are_selected
 from nemo_gym.server_utils import (
@@ -978,10 +984,15 @@ def _prepare_output_fpaths(
                     "Cannot overwrite a manifest-backed run with reverification; choose a new output path."
                 )
             raise ConfigError("Manifest-backed reverification is a follow-up; choose a selected-result projection.")
-    # Explicit fresh overwrite replaces an alias itself, as before. Append and
-    # resume follow it; put their companions beside the actual destination.
+    # Preserve an unambiguous legacy alias layout on append/resume. New outputs
+    # put companions beside the target; fresh overwrite replaces the alias itself.
+    # Manifest/journal-backed writes remain rejected above, through either spelling.
     replacing_alias = overwrite and not (append or resume_from_cache) and output_fpath.is_symlink()
-    destination = output_fpath.absolute() if replacing_alias else resolve_rollout_path(output_fpath)
+    destination = (
+        output_fpath.absolute()
+        if replacing_alias
+        else resolve_rollout_path(output_fpath, read_only=append or resume_from_cache)
+    )
     failures_fpath = failures_path_for(destination)
     for written in (output_fpath, failures_fpath, aggregate_metrics_path_for(destination)):
         for source in protected_sources:
@@ -1031,9 +1042,13 @@ class RolloutReverificationHelper(BaseModel):
     async def run_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
         # Judge-only recovery can migrate source failures or seed old rewards;
         # leave those manifest-aware semantics to the dedicated follow-up.
-        for name in (config.output_jsonl_fpath, config.rollouts_jsonl_fpath if config.judge_failed_only else None):
+        for name, is_source in (
+            (config.output_jsonl_fpath, False),
+            (config.rollouts_jsonl_fpath if config.judge_failed_only else None, True),
+        ):
             if name is not None:
-                path = _resolve_under_cwd_or_install(name).resolve()
+                path = _resolve_under_cwd_or_install(name)
+                path = resolve_rollout_owner(path) if is_source else path.resolve()
                 if manifest_path_for(path).exists() or journal_path_for(path).exists():
                     raise ConfigError(
                         "Manifest-backed reverification is a follow-up for judge-only recovery or in-place output. "
@@ -1079,8 +1094,9 @@ class RolloutReverificationHelper(BaseModel):
             source_path = _resolve_under_cwd_or_install(config.rollouts_jsonl_fpath)
             rollouts_jsonl_fpath = resolve_rollout_path(source_path, read_only=True)
             protected_sources = {materialized_inputs_jsonl_fpath}
-            if manifest_path_for(rollouts_jsonl_fpath).exists() or journal_path_for(rollouts_jsonl_fpath).exists():
-                for source in (source_path, rollouts_jsonl_fpath):
+            owner = resolve_rollout_owner(source_path)
+            if manifest_path_for(owner).exists() or journal_path_for(owner).exists():
+                for source in (source_path, rollouts_jsonl_fpath, owner):
                     protected_sources.update(
                         (
                             source,
