@@ -1058,8 +1058,29 @@ class OpenSandboxProvider:
         paused sandbox has no exec daemon to check; resume rebuilds its
         endpoints and performs the health check instead.
         """
-        Sandbox, _, _, _, _ = _require_opensandbox_sdk()
+        AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential = _require_tenacity()
         sandbox_id = str(descriptor["sandbox_id"])
+        # Reconnecting is read-only, so a connect timeout under load is safe to retry.
+        retry_policy = AsyncRetrying(
+            retry=retry_if_exception(_is_retryable_create_error),
+            stop=stop_after_attempt(self._create.retries + 1),
+            wait=wait_random_exponential(
+                multiplier=self._create.retry_delay_s,
+                max=self._create.retry_max_delay_s,
+            ),
+            before_sleep=lambda retry_state: _log_operation_retry(
+                retry_state, operation="connect", sandbox_id=sandbox_id
+            ),
+            reraise=True,
+        )
+        async for attempt in retry_policy:
+            with attempt:
+                return await self._connect_once(sandbox_id)
+
+        raise RuntimeError("OpenSandbox connect retry loop did not run")
+
+    async def _connect_once(self, sandbox_id: str) -> SandboxHandle:
+        Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         timeout_s = self._create.connect_attempt_timeout_s
         # A cancelled SDK call skips its own transport cleanup; see resume().
         config = self._connection_config(request_timeout_s=timeout_s).with_transport_if_missing()
