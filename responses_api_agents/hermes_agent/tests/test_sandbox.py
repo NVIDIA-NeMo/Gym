@@ -1186,8 +1186,9 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
     monkeypatch.setattr(module.shutil, "which", lambda name: "/test/uv")
     ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
     failed = SimpleNamespace(return_code=1, stdout="", stderr="installer failed")
-    # Prepare paths, detect a missing runtime, fail installation, then remove session files.
-    sandbox.exec.side_effect = [ok, failed, failed, ok]
+    # Prepare paths, detect a missing runtime, probe the architecture for uv, fail installation, then
+    # remove session files.
+    sandbox.exec.side_effect = [ok, failed, ok, failed, ok]
     cleanup = sandbox.stop if owns_sandbox else sandbox.disconnect
     if cleanup_fails:
         cleanup.side_effect = RuntimeError("cleanup unavailable")
@@ -1211,3 +1212,48 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
         sandbox.disconnect.assert_not_awaited()
     else:
         sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8000/ng-rollout/native-a1/v1", "http://[::1]:8000/v1"])
+async def test_seed_refuses_loopback_model_url_on_remote_provider(agent, state, monkeypatch, url):
+    import responses_api_agents.hermes_agent.app as module
+
+    monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: url)
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {"opensandbox": {}})
+    provider = AsyncMock()
+    create_provider = MagicMock(return_value=provider)
+    monkeypatch.setattr(module, "create_provider", create_provider)
+    factory = MagicMock(return_value=state.session.sandbox)
+    factory.connect = AsyncMock(return_value=state.session.sandbox)
+    monkeypatch.setattr(module, "AsyncSandbox", factory)
+
+    with pytest.raises(ValueError, match=r"\+\+use_absolute_ip=true"):
+        await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
+
+    # Refused before the sandbox was connected or anything uploaded, so there is nothing to clean up.
+    create_provider.assert_not_called()
+    factory.connect.assert_not_awaited()
+    state.session.sandbox.upload.assert_not_awaited()
+    state.session.sandbox.exec.assert_not_awaited()
+    assert all(record.state is None for record in agent._session_records.values())
+
+
+async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monkeypatch, caplog):
+    import responses_api_agents.hermes_agent.app as module
+
+    monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://127.0.0.1:8000/v1")
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {"docker": {}})
+    monkeypatch.setattr(module, "create_provider", lambda config: AsyncMock())
+    factory = MagicMock(return_value=state.session.sandbox)
+    factory.connect = AsyncMock(return_value=state.session.sandbox)
+    monkeypatch.setattr(module, "AsyncSandbox", factory)
+
+    with caplog.at_level("WARNING", logger="nemo_gym.base_responses_api_agent"):
+        result = await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
+
+    assert result.agent_session_id == state.request.agent_session_id
+    assert sum("use_absolute_ip" in record.getMessage() for record in caplog.records) == 1
+    factory.connect.assert_awaited_once()
+    assert state.session.sandbox.upload.await_count >= 3
