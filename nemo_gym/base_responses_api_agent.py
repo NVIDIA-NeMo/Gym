@@ -24,7 +24,7 @@ from typing import Any, Optional
 from warnings import warn
 
 from fastapi import Body, FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -56,6 +56,7 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.token_id_capture.delivery import MASK_SAMPLE_KEY, TOKEN_CAPTURE_KEY
 from nemo_gym.tool_access import ToolAccess
 
 
@@ -107,14 +108,55 @@ class AgentCloseSessionRequest(BaseModel):
     episode_id: EpisodeId
 
 
+class TokenCapture(BaseModel):
+    """Token-level training data an agent session captured outside Gym's model server.
+
+    A component that records the harness's model calls itself, such as a capture service next to the task
+    sandbox, returns this when the agent session closes. The environment server adds ``result_fields()`` to the
+    episode result and leaves the reward unchanged.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # ATIF trajectories as JSON objects, carrying the sampled token ids and log probabilities for training.
+    atif_trajectories: list[dict[str, Any]] = Field(default_factory=list)
+    # Capture health and metrics, stored as the result's ``_ng_token_capture``.
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    # Whether the capture is unusable for training; the sample is then excluded from the loss.
+    masked: bool = False
+    mask_reason: str | None = None
+
+    @model_validator(mode="after")
+    def require_reason_exactly_when_masked(self) -> "TokenCapture":
+        if self.masked and not self.mask_reason:
+            raise ValueError("a masked token capture needs a mask_reason")
+        if not self.masked and self.mask_reason is not None:
+            raise ValueError("mask_reason is set only when the token capture is masked")
+        return self
+
+    def result_fields(self) -> dict[str, Any]:
+        """Return the fields this capture adds to an episode result.
+
+        ``atif_trajectories`` and ``_ng_token_capture`` are always present; a masked capture adds its reason to
+        ``_ng_token_capture`` and sets ``mask_sample``. An unmasked capture never clears a mask set elsewhere.
+        """
+        metrics = dict(self.metrics)
+        fields: dict[str, Any] = {"atif_trajectories": self.atif_trajectories, TOKEN_CAPTURE_KEY: metrics}
+        if self.masked:
+            metrics["error"] = self.mask_reason
+            fields[MASK_SAMPLE_KEY] = True
+        return fields
+
+
 class AgentCloseSessionResponse(BaseModel):
-    """Confirm closure and return captured observations."""
+    """Confirm closure and return captured observations and any token capture the session produced."""
 
     model_config = ConfigDict(extra="forbid")
 
     agent_session_id: str
     agent_observations: AgentObservationBundle | None = None
     resources_cookies: dict[str, str] | None = None
+    token_capture: TokenCapture | None = None
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):

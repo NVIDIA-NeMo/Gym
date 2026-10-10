@@ -9005,10 +9005,37 @@ class TestEnvironmentServerRouting:
         assert "reward" not in nested
         assert nested["verification"] == {"reward": 1.0}
 
-    def test_episode_result_may_not_use_collector_keys(self) -> None:
-        reply = self._native_identity("a") | {"result": {"reward": 1.0, "ng_trajectory": {}}}
+    @pytest.mark.parametrize("masked", [False, True])
+    def test_episode_result_keeps_token_capture_produced_by_the_environment(self, masked: bool) -> None:
+        from nemo_gym.base_responses_api_agent import TokenCapture
+        from nemo_gym.token_id_capture.delivery import TOKEN_CAPTURE_KEY
 
-        with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_trajectory'\]"):
+        capture = (
+            TokenCapture(metrics={"turns": 0}, masked=True, mask_reason="capture stream truncated")
+            if masked
+            else TokenCapture(
+                atif_trajectories=[{"steps": [{"metrics": {"completion_token_ids": [42], "logprobs": [-0.5]}}]}],
+                metrics={"turns": 1, "generated_tokens": 1},
+            )
+        )
+        result = {"reward": 1.0, "mask_sample": False} | capture.result_fields()
+        reply = self._native_identity("a") | {"failure": None, "result": result}
+
+        record = nemo_gym.rollout_collection._episode_record(reply)
+
+        assert record["reward"] == 1.0
+        assert record["mask_sample"] is masked
+        assert record[TOKEN_CAPTURE_KEY] == capture.result_fields()[TOKEN_CAPTURE_KEY]
+        assert record["atif_trajectories"] == capture.atif_trajectories
+        assert record[nemo_gym.rollout_collection.NG_TASK_ID_KEY] == {"taskset": "swe_pro", "task_id": "a"}
+
+    @pytest.mark.parametrize(
+        "key", ["ng_trajectory", "ng_model_call_capture", "_ng_rollout_id", "_ng_task_id", "_ng_failure_class"]
+    )
+    def test_episode_result_may_not_use_collector_keys(self, key: str) -> None:
+        reply = self._native_identity("a") | {"result": {"reward": 1.0, key: {}}}
+
+        with pytest.raises(ValueError, match=rf"reserved for rollout collection: \['{key}'\]"):
             nemo_gym.rollout_collection._episode_record(reply)
 
     def test_episode_detection_needs_object_identities_and_an_object_failure(self) -> None:

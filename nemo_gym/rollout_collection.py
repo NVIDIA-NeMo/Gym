@@ -125,6 +125,7 @@ from nemo_gym.token_id_capture import (
 from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
 from nemo_gym.token_id_capture.delivery import (
     MASK_SAMPLE_KEY,
+    TOKEN_CAPTURE_KEY,
     capture_build_can_retire,
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
@@ -334,7 +335,13 @@ def _is_episode_response(result: Any) -> bool:
 
 def _is_collector_key(key: str) -> bool:
     """Keys rollout collection writes itself; an Environment Server result must not use them."""
-    return key.startswith("_ng_") or key in (NG_TRAJECTORY_KEY, "ng_model_call_capture", NG_PERF_KEY)
+    # A token capture produced outside Gym's model server reports its health in TOKEN_CAPTURE_KEY next to its
+    # trajectories and mask. Identity, failure, and assembled observation keys stay collector-owned.
+    return (key.startswith("_ng_") and key != TOKEN_CAPTURE_KEY) or key in (
+        NG_TRAJECTORY_KEY,
+        "ng_model_call_capture",
+        NG_PERF_KEY,
+    )
 
 
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:

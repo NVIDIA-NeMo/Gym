@@ -464,6 +464,54 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
     )
 
 
+@pytest.mark.parametrize(
+    ("masked", "verifier_mask", "expected_mask"),
+    [(False, False, False), (False, True, True), (True, False, True)],
+)
+@pytest.mark.parametrize("result_path", ["episode-request", "flat-adapter"])
+async def test_results_carry_the_agent_session_token_capture(
+    masked: bool, verifier_mask: bool, expected_mask: bool, result_path: str
+) -> None:
+    environment, client = _environment_server()
+    trajectory = {"steps": [{"metrics": {"completion_token_ids": [42], "logprobs": [-0.5]}}]}
+    capture = (
+        {"metrics": {"turns": 0}, "masked": True, "mask_reason": "capture stream truncated"}
+        if masked
+        else {"atif_trajectories": [trajectory], "metrics": {"turns": 1}}
+    )
+    close_body = orjson.loads(client.responses[3].body)
+    close_body["token_capture"] = capture
+    client.responses[3] = _Response(close_body)
+    verification_body = orjson.loads(client.responses[4].body)
+    verification_body["mask_sample"] = verifier_mask
+    client.responses[4] = _Response(verification_body)
+
+    result = await environment.run_request(_request())
+    result = SingleAgentTurnResponse.model_validate_json(result.model_dump_json())
+    if result_path == "episode-request":
+        fields = result.result.model_dump(mode="json")
+    else:
+        adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)
+        fields = adapter._legacy_result(result)
+
+    expected_metrics = {"turns": 0, "error": "capture stream truncated"} if masked else {"turns": 1}
+    assert fields["reward"] == 1.0
+    assert fields["mask_sample"] is expected_mask
+    assert fields["_ng_token_capture"] == expected_metrics
+    assert fields["atif_trajectories"] == ([] if masked else [trajectory])
+    assert fields["benchmark_field"] == "preserved"
+
+
+async def test_results_without_token_capture_add_no_capture_fields() -> None:
+    environment, _ = _environment_server()
+
+    result = await environment.run_request(_request())
+
+    fields = result.result.model_dump(mode="json")
+    assert "_ng_token_capture" not in fields
+    assert "atif_trajectories" not in fields
+
+
 @pytest.mark.parametrize("stage", ["agent", "verification"])
 @pytest.mark.parametrize(
     "error",
