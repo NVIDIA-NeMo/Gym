@@ -68,6 +68,15 @@ def _model_url_for_rollout(model_url: str, rollout_id: Optional[str]) -> str:
     return apply_rollout_prefix(model_url, rollout_id) if model_url and rollout_id else model_url
 
 
+def _model_name(params: "AnySweInstanceConfig") -> str:
+    """The model name the harness is given and the response reports.
+
+    ``model`` is optional in a ``/run`` body (rows from ``prepare.py`` omit it), but ``NeMoGymResponse.model`` is a
+    required string. Both places use the same fallback so the reported name is the one the harness actually sent.
+    """
+    return params.body.model or "model"
+
+
 def _safe_config_json(params: "AnySweInstanceConfig", indent: Optional[int] = None) -> str:
     def redact(value: Any, key: str = "") -> Any:
         normalized = key.lower()
@@ -357,7 +366,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             for key in ("temperature", "top_p", "max_output_tokens")
             if getattr(params.body, key, None) is not None
         }
-        model_name = params.body.model or "model"
+        model_name = _model_name(params)
         return {
             "NGSWE_MODEL_NAME": model_name,
             "NGSWE_MODEL_URL": params.model_server_url,
@@ -628,7 +637,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         return NeMoGymResponse(
             id=f"anyswe-{params.instance_id}",
             created_at=int(time.time()),
-            model=params.body.model,
+            model=_model_name(params),
             object="response",
             output=saved.output if saved is not None else [],
             parallel_tool_calls=params.body.parallel_tool_calls,
