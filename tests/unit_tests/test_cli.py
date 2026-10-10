@@ -15,10 +15,11 @@
 import json
 import shutil
 import sys
+import time
 import tomllib
 from importlib import import_module
 from pathlib import Path
-from subprocess import TimeoutExpired
+from subprocess import Popen, TimeoutExpired
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -33,6 +34,7 @@ from nemo_gym.cli.env import (
     _GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
     RunConfig,
     RunHelper,
+    ServerExitedError,
     TestConfig,
     _resolve_server_dir,
     _select_shard,
@@ -46,6 +48,7 @@ from nemo_gym.cli.env import (
 )
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
+from nemo_gym.global_config import DEFAULT_SERVER_STARTUP_ATTEMPTS
 from nemo_gym.registry import EnvironmentEntry
 
 
@@ -247,6 +250,24 @@ class TestRunHelperShutdownReap:
         assert good.wait.call_count == 1
         assert bad.wait.call_count == 2
         assert runner._processes == {}
+
+    def test_server_under_the_bash_wrapper_is_stopped_too(self) -> None:
+        import psutil
+
+        # A `bash -c` wrapper with the server as its child, as with `run_command`. The trailing `exit` keeps bash from
+        # exec-ing the server in place (newer bash does that for the last command of a chain), so bash stays the parent.
+        wrapper = Popen(
+            f"{sys.executable} -c 'import time; time.sleep(300)'; exit $?", shell=True, executable="/bin/bash"
+        )
+        deadline = time.monotonic() + 10
+        while not psutil.Process(wrapper.pid).children() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        (server,) = psutil.Process(wrapper.pid).children()
+
+        runner = self._make_runner_with_processes({"srv": wrapper})
+        runner.shutdown()
+
+        assert not server.is_running() or server.status() == psutil.STATUS_ZOMBIE
 
     def test_unreaped_server_after_sigkill_is_warned(self, capsys) -> None:
         zombie = MagicMock()
@@ -583,3 +604,87 @@ class TestListEnvironments:
         list_environments()
 
         assert f"config: {cfg.resolve()}" in capsys.readouterr().out
+
+
+class TestRunHelperStartupRetry:
+    """A server that exits while spinning up (e.g. its port was taken after parse time) restarts the whole set."""
+
+    def _runner(self, monkeypatch: MonkeyPatch, outcomes: list, config: dict | None = None) -> tuple:
+        runner = RunHelper()
+        calls = iter(outcomes)
+
+        def start_once(_parser_config) -> None:
+            outcome = next(calls)
+            if outcome is not None:
+                raise outcome
+
+        monkeypatch.setattr(runner, "_start_once", start_once)
+        monkeypatch.setattr(runner, "shutdown", MagicMock())
+        reassign = MagicMock(return_value={"srv": (10001, 10002)})
+        monkeypatch.setattr(nemo_gym.cli.env, "reassign_auto_assigned_ports", reassign)
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda *_a, **_k: config or {})
+        return runner, reassign
+
+    def test_clean_start_is_not_retried(self, monkeypatch: MonkeyPatch) -> None:
+        runner, reassign = self._runner(monkeypatch, [None])
+
+        runner.start(MagicMock())
+
+        runner.shutdown.assert_not_called()
+        reassign.assert_not_called()
+
+    def test_exited_server_restarts_everything_with_new_ports(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        exited = ServerExitedError("Process `srv` finished unexpectedly!")
+        runner, reassign = self._runner(monkeypatch, [exited, exited, None])
+
+        runner.start(MagicMock())
+
+        assert runner.shutdown.call_count == 2
+        assert reassign.call_count == 2
+        out = capsys.readouterr().out
+        assert "attempt 1/3" in out and "attempt 2/3" in out and "(10001, 10002)" in out
+
+    def test_last_failed_attempt_still_shuts_everything_down(self, monkeypatch: MonkeyPatch) -> None:
+        exited = ServerExitedError("x")
+        runner, reassign = self._runner(monkeypatch, [exited, exited], config={"server_startup_attempts": 2})
+
+        with raises(ServerExitedError):
+            runner.start(MagicMock())
+
+        assert runner.shutdown.call_count == 2
+        assert reassign.call_count == 1
+
+    def test_default_attempts(self, monkeypatch: MonkeyPatch) -> None:
+        runner, reassign = self._runner(monkeypatch, [ServerExitedError("x")] * DEFAULT_SERVER_STARTUP_ATTEMPTS)
+
+        with raises(ServerExitedError):
+            runner.start(MagicMock())
+
+        assert reassign.call_count == DEFAULT_SERVER_STARTUP_ATTEMPTS - 1
+
+    def test_other_errors_are_not_retried(self, monkeypatch: MonkeyPatch) -> None:
+        runner, reassign = self._runner(monkeypatch, [ValueError("bug")])
+
+        with raises(ValueError):
+            runner.start(MagicMock())
+
+        reassign.assert_not_called()
+
+    def test_poll_raises_server_exited_for_a_dead_process(self) -> None:
+        runner = RunHelper()
+        runner._head_server_thread = MagicMock(is_alive=MagicMock(return_value=True))
+        dead = MagicMock()
+        dead.poll.return_value = 1
+        dead.communicate.return_value = (b"out", b"[Errno 98] address already in use")
+        runner._processes = {"srv": dead}
+
+        with raises(ServerExitedError, match="address already in use"):
+            runner.poll()
+
+    def test_poll_raises_server_exited_for_a_dead_head_server(self) -> None:
+        runner = RunHelper()
+        runner._head_server_thread = MagicMock(is_alive=MagicMock(return_value=False))
+        runner._processes = {}
+
+        with raises(ServerExitedError, match="Head server"):
+            runner.poll()
