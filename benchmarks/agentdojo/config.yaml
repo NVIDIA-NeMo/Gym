@@ -1,0 +1,20 @@
+config_paths:
+  - responses_api_agents/agentdojo_agent/configs/agentdojo_agent.yaml
+
+# The complete official AgentDojo v1.2.2 matrix: every user task clean, and every
+# (user task, injection task) pair under `important_instructions` (97 + 949 = 1,046 rows).
+# Rows select an upstream task by id; upstream loads the prompt and environment, so
+# prompt_config is null. A defense is chosen per run with the agent's `default_defense`,
+# which keeps the selector file identical across the undefended and defended arms.
+agentdojo_benchmark:
+  _inherit_from: agentdojo_agent
+  responses_api_agents:
+    agentdojo_agent:
+      datasets:
+        - name: agentdojo
+          type: benchmark
+          jsonl_fpath: benchmarks/agentdojo/data/agentdojo_benchmark.jsonl
+          prepare_script: benchmarks/agentdojo/prepare.py
+          prompt_config: null
+          num_repeats: 1
+          license: MIT
