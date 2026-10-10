@@ -180,6 +180,7 @@ def render_driver_entrypoint(
     command: str | None = None,
     *,
     extras: tuple[str, ...] = (),
+    otel_logs_prelude: str | None = None,
 ) -> str:
     """Render the srun entrypoint for the driver step.
 
@@ -193,6 +194,9 @@ def render_driver_entrypoint(
     `extras` are optional-dependency groups installed with the checkout; the server
     venvs Gym builds copy their telemetry packages from this process, so the driver
     is where `telemetry` has to be installed for any server to have it.
+
+    `otel_logs_prelude` runs last, after the venv exists, so it can see which OTLP
+    log exporter is installed and point logs at the matching collector port.
     """
     preamble: list[str] = []
     # Double quotes: the whole preamble ends up inside a single-quoted `bash -c` block.
@@ -218,6 +222,9 @@ def render_driver_entrypoint(
             "source .venv/bin/activate",
             f"uv pip install -e {install_target}",
         ]
+
+    if otel_logs_prelude:
+        preamble.append(otel_logs_prelude)
 
     if prepare_cmd:
         preamble.append(prepare_cmd)
