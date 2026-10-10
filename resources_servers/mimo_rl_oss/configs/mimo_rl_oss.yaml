@@ -1,0 +1,85 @@
+config_paths:
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+mimo_rl_oss_resources_server:
+  resources_servers:
+    mimo_rl_oss:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: MiMo-V2.6-RL-oss agentic tasks (code, cyber, terminal_bench, webdev, general_agent) graded by mimoagent
+      value: Agentic SWE, vulnerability reproduction, web development and knowledge-work RL across many harnesses
+      sandbox_provider: sandbox
+      exec_timeout: 900
+      webdev_judge_base_url: ${oc.env:MIMO_JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      webdev_judge_api_key: ${oc.env:MIMO_JUDGE_API_KEY,''}
+      webdev_judge_model: ${oc.env:MIMO_WEBDEV_JUDGE_MODEL,nvidia/qwen/qwen3.5-122b-a10b}
+      general_judge_base_url: ${oc.env:MIMO_JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      general_judge_api_key: ${oc.env:MIMO_JUDGE_API_KEY,''}
+      general_judge_model: ${oc.env:MIMO_GENERAL_JUDGE_MODEL,azure/openai/gpt-5.4-mini}
+      general_judge_api: ${oc.env:MIMO_GENERAL_JUDGE_API,responses}
+      sandbox_spec:
+        ttl_s: 14400
+        ready_timeout_s: 2400
+        resources:
+          cpu: 2
+          memory_mib: 8192
+          disk_gib: 30
+        metadata:
+          benchmark: mimo-rl-oss
+
+mimo_rl_oss_agent:
+  responses_api_agents:
+    harness_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: mimo_rl_oss_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      agent: mimoagent
+      agent_kwargs:
+        profile: cc-agent
+      sandbox_provider: sandbox
+      sandbox_python: /opt/mimo-rt/venv/bin/python
+      setup_commands:
+      - sh /work/gym_mount/responses_api_agents/mimoagent/install_runtime.sh
+      rollout_timeout: 7200
+      concurrency: 32
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/mimo_rl_oss/data/example.jsonl
+      - name: code
+        type: train
+        jsonl_fpath: resources_servers/mimo_rl_oss/data/code.jsonl
+        prepare_script: resources_servers/mimo_rl_oss/prepare.py
+        license: Apache 2.0
+      - name: cyber
+        type: train
+        jsonl_fpath: resources_servers/mimo_rl_oss/data/cyber.jsonl
+        prepare_script: resources_servers/mimo_rl_oss/prepare.py
+        license: Apache 2.0
+      - name: terminal_bench
+        type: train
+        jsonl_fpath: resources_servers/mimo_rl_oss/data/terminal_bench.jsonl
+        prepare_script: resources_servers/mimo_rl_oss/prepare.py
+        license: Apache 2.0
+      - name: webdev
+        type: train
+        jsonl_fpath: resources_servers/mimo_rl_oss/data/webdev.jsonl
+        prepare_script: resources_servers/mimo_rl_oss/prepare.py
+        license: Apache 2.0
+      - name: general_agent
+        type: train
+        jsonl_fpath: resources_servers/mimo_rl_oss/data/general_agent.jsonl
+        prepare_script: resources_servers/mimo_rl_oss/prepare.py
+        license: Apache 2.0
+mimo_rl_oss_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: mimo_rl_oss_agent
