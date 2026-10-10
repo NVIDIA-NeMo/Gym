@@ -84,10 +84,63 @@ def _require_apptainer(bin_path: str | None = None) -> str:
     )
 
 
+def _writable_dir(path: Path) -> bool:
+    """Can a sub-directory with a non-empty file be created under ``path``?
+
+    Probe the way apptainer writes its instance state (a directory plus files with content): on a full
+    filesystem an empty ``touch`` can still succeed while ``mkdir`` fails with ENOSPC.
+    """
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe_dir = path / f".nemo-gym-probe-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        probe_dir.mkdir()
+        try:
+            (probe_dir / "probe").write_bytes(b"nemo-gym apptainer config dir probe\n" * 64)
+        finally:
+            shutil.rmtree(probe_dir, ignore_errors=True)
+        return True
+    except OSError:
+        return False
+
+
+def _apptainer_config_dir(env: Mapping[str, str]) -> str | None:
+    """Return a fallback ``APPTAINER_CONFIGDIR`` when apptainer's default (``~/.apptainer``) is unusable.
+
+    ``apptainer instance start`` keeps per-instance state under ``<configdir>/instances/`` and fails with
+    "failed to create instance log files" when it cannot write there, e.g. when the home directory is a
+    read-only or full mount inside a container. An explicit ``APPTAINER_CONFIGDIR`` is always kept; otherwise
+    the default is used if writable, else a private per-user directory under the temp dir. Returns ``None``
+    when no override is needed (or no usable fallback exists).
+    """
+    if env.get("APPTAINER_CONFIGDIR"):
+        return None
+    home = env.get("HOME") or str(Path.home())
+    if _writable_dir(Path(home) / ".apptainer"):
+        return None
+    fallback = Path(tempfile.gettempdir()) / f"nemo-gym-apptainer-config-{os.getuid()}"
+    try:
+        fallback.mkdir(mode=0o700, exist_ok=True)
+        if fallback.is_symlink() or fallback.stat().st_uid != os.getuid():
+            return None
+    except OSError:
+        return None
+    if not _writable_dir(fallback):
+        return None
+    LOGGER.warning(
+        "%s is not writable; using APPTAINER_CONFIGDIR=%s for apptainer instance state.",
+        Path(home) / ".apptainer",
+        fallback,
+    )
+    return str(fallback)
+
+
 def _apptainer_subprocess_env(bin_path: str | None) -> dict[str, str]:
     env = os.environ.copy()
     if bin_path:
         env["PATH"] = f"{bin_path}:{env.get('PATH', '')}"
+    config_dir = _apptainer_config_dir(env)
+    if config_dir:
+        env["APPTAINER_CONFIGDIR"] = config_dir
     return env
 
 

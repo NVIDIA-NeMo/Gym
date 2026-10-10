@@ -20,6 +20,10 @@ where Docker is unavailable).
   image name such as `ubuntu:22.04`.
 - Running commands as a different user needs Apptainer **`--fakeroot`** support.
   CPU/memory limits need cgroups delegation. See [Limitations](#limitations).
+- A writable **`APPTAINER_CONFIGDIR`** (default `~/.apptainer`), where `instance start`
+  keeps per-instance state. If it is unset and `~/.apptainer` is not writable (e.g. a
+  read-only or full home mount inside a container), the provider points its apptainer
+  subprocesses at a private per-user directory under the temp dir instead.
 
 ## Quick start
 
