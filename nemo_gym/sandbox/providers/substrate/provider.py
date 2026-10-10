@@ -58,8 +58,22 @@ _CONTROL_BACKOFF_S = 0.5
 # that names a terminal state is the one exception: nothing will make that
 # actor routable again.
 _CAPACITY_MARKERS = ("router at capacity", "no worker has room")
-_TERMINAL_STATE_MARKERS = ("got: ACTOR_STATE_CRASHED", "got: ACTOR_STATE_DELETING")
+# Reasons that should clear within seconds: a transition in progress, a
+# concurrent-update conflict, ateapi being away. Retried for a bounded time
+# only, so an actor stranded mid-transition fails the step instead of hanging
+# it; anything else, a CRASHED actor included, fails at once.
+_TRANSIENT_MARKERS = (
+    "got: ACTOR_STATE_PAUSING",
+    "got: ACTOR_STATE_SUSPENDING",
+    "got: ACTOR_STATE_RESUMING",
+    "got: ACTOR_STATE_REVERTING",
+    "please retry",
+    "another operation is in progress",
+)
 _TRANSITION_RETRY_DELAY_S = 1.0
+_TRANSIENT_RETRY_BUDGET_S = 60.0
+# How long a park may stay mid-transition before the provider stops waiting.
+_PARK_SETTLE_BUDGET_S = 30.0
 
 _STATUS_MAP = {
     ateapi_pb2.ActorState.ACTOR_STATE_RUNNING: SandboxStatus.RUNNING,
@@ -121,17 +135,20 @@ def normalize_image(image: str) -> str:
     return image
 
 
-def _is_transient_503(response: httpx.Response) -> bool:
+def _classify_503(response: httpx.Response) -> str | None:
+    """Return "capacity", "transient", or None for a 503 that is not worth retrying.
+
+    Every 503 the router makes before forwarding reads "actor <id>
+    unavailable[: <reason>]"; a bare one with no reason is ateapi being away.
+    """
     if response.status_code != 503:
-        return False
+        return None
     text = response.text
-    if any(marker in text for marker in _TERMINAL_STATE_MARKERS):
-        return False
-    return "unavailable" in text
-
-
-def _is_capacity_503(response: httpx.Response) -> bool:
-    return any(marker in response.text for marker in _CAPACITY_MARKERS)
+    if any(marker in text for marker in _CAPACITY_MARKERS):
+        return "capacity"
+    if any(marker in text for marker in _TRANSIENT_MARKERS) or text.rstrip().endswith("unavailable"):
+        return "transient"
+    return None
 
 
 def _read_kube_config() -> dict[str, Any]:
@@ -266,7 +283,8 @@ class _SubstrateActor:
     # Held while a pause or suspend is in progress. Requests wait on it, since
     # the router refuses to resume an actor that is still PAUSING.
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    parking: bool = False
+    # Number of suspend tasks past their idle wait; those are left to finish.
+    parking: int = 0
     # True once a park settled and no request has gone out since, so two idle
     # parks that both found the actor idle do not both call the control plane.
     parked: bool = False
@@ -451,13 +469,16 @@ class SubstrateProvider:
         content: bytes | None = None,
         params: dict[str, str] | None = None,
         limited: bool = True,
+        retry: bool = True,
     ) -> httpx.Response:
         """Call the in-actor server through the router.
 
         The ate-target-actor header names the actor, and is also what makes
         the router resume a suspended or paused actor before forwarding. A 503
-        saying the router had no room is retried until the request budget is
-        spent; the request never reached the actor, so that is safe.
+        the router produced before forwarding is retried (see _classify_503);
+        the request never reached the actor, so that is safe. Readiness probes
+        pass retry=False: their own loop retries, and each attempt must get
+        the router's whole parking budget.
         """
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(base_url=f"http://{self._connection.atenet_addr}")
@@ -475,6 +496,7 @@ class SubstrateProvider:
         loop = asyncio.get_running_loop()
         budget = timeout_s if timeout_s is not None else (self._exec_config.default_timeout_s or 1800.0)
         deadline = loop.time() + budget
+        transient_deadline = loop.time() + min(budget, _TRANSIENT_RETRY_BUDGET_S)
         while True:
             remaining = max(deadline - loop.time(), 1.0)
             if limited:
@@ -486,12 +508,14 @@ class SubstrateProvider:
                 response = await self._http_client.request(
                     method, path, headers=headers, json=json, content=content, params=params, timeout=remaining
                 )
-            if not _is_transient_503(response):
+            kind = _classify_503(response) if retry else None
+            if kind is None:
                 return response
-            delay = (
-                self._exec_config.capacity_retry_delay_s if _is_capacity_503(response) else _TRANSITION_RETRY_DELAY_S
-            )
-            if loop.time() + delay >= deadline:
+            if kind == "capacity":
+                delay, limit = self._exec_config.capacity_retry_delay_s, deadline
+            else:
+                delay, limit = _TRANSITION_RETRY_DELAY_S, transient_deadline
+            if loop.time() + delay >= limit:
                 return response
             LOGGER.info("substrate: %s not routable yet (%s); retrying in %.0fs", actor.name, path, delay)
             await asyncio.sleep(delay)
@@ -578,7 +602,9 @@ class SubstrateProvider:
 
         while True:
             try:
-                response = await self._http("GET", handle.raw, probe.path, timeout_s=probe.timeout_s, limited=False)
+                response = await self._http(
+                    "GET", handle.raw, probe.path, timeout_s=probe.timeout_s, limited=False, retry=False
+                )
                 if response.status_code == 200:
                     consecutive += 1
                     if consecutive >= probe.stable_count:
@@ -705,7 +731,7 @@ class SubstrateProvider:
         caller then waits on the actor's lock instead, because the router
         cannot resume an actor that is mid-transition.
         """
-        if actor.suspend_task is not None and not actor.suspend_task.done() and not actor.parking:
+        if actor.suspend_task is not None and not actor.suspend_task.done() and actor.parking == 0:
             actor.suspend_task.cancel()
             actor.suspend_task = None
 
@@ -734,10 +760,12 @@ class SubstrateProvider:
         self._suspend_tasks.add(task)
         task.add_done_callback(self._suspend_tasks.discard)
         if delay <= 0:
-            # No idle phase to cancel: mark it parking now, before it runs, so
-            # a concurrent request waits on the lock instead of cancelling it.
-            actor.parking = True
-            await asyncio.shield(task)
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    return  # a newer request superseded the park; the result stands
+                raise
 
     async def _suspend_after(self, actor: _SubstrateActor, rpc: str, delay: float) -> None:
         try:
@@ -745,13 +773,13 @@ class SubstrateProvider:
                 await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
-        actor.parking = True
+        actor.parking += 1
         try:
             await self._suspend_if_idle(actor, rpc)
         except Exception as e:  # noqa: BLE001 - a background task must not die silently
             LOGGER.warning("substrate: idle %s of %s failed: %s", rpc, actor.name, e)
         finally:
-            actor.parking = False
+            actor.parking -= 1
 
     async def _suspend_if_idle(self, actor: _SubstrateActor, rpc: str) -> None:
         async with actor.lock:
@@ -765,6 +793,8 @@ class SubstrateProvider:
                 LOGGER.warning("substrate: %s on %s failed: %s", rpc, actor.name, e.details())
                 return
             actor.parked = state in _PARKED_STATES
+            if actor.parked and rpc == "SuspendActor":
+                actor.evicting = False  # the snapshot is in storage; the node can go
         if state not in _PARKED_STATES:
             LOGGER.warning(
                 "substrate: %s on %s did not park it: %s", rpc, actor.name, ateapi_pb2.ActorState.Name(state)
@@ -787,7 +817,7 @@ class SubstrateProvider:
                 raise
 
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._connection.grpc_timeout_s
+        deadline = loop.time() + _PARK_SETTLE_BUDGET_S
         while True:
             reply = await self._control("GetActor", ateapi_pb2.GetActorRequest(actor=actor.object_ref))
             state = reply.status.state
@@ -805,11 +835,15 @@ class SubstrateProvider:
         self._cancel_pending_suspend(actor)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._connection.grpc_timeout_s
+        # A worker that is going away cannot keep a node-local snapshot.
+        rpc = "SuspendActor" if actor.evicting else "PauseActor"
         while True:
             async with actor.lock:
                 if not actor.inflight:
-                    state = await self._park(actor, "PauseActor")
+                    state = await self._park(actor, rpc)
                     actor.parked = state in _PARKED_STATES
+                    if actor.parked and rpc == "SuspendActor":
+                        actor.evicting = False
                     break
             if loop.time() >= deadline:
                 raise RuntimeError(f"actor {actor.name!r} still has requests in flight; not pausing")
@@ -837,6 +871,7 @@ class SubstrateProvider:
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         await self._write_file(handle, target_path, Path(source_path).read_bytes())
+        await self._suspend_when_idle(handle.raw)
 
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
         async with self._in_flight(handle.raw):
@@ -852,6 +887,7 @@ class SubstrateProvider:
         target_path = Path(target_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(response.content)
+        await self._suspend_when_idle(handle.raw)
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         actor: _SubstrateActor = handle.raw

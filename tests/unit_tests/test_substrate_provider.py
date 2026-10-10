@@ -103,6 +103,7 @@ class _Recorder:
         content: Any = None,
         params: Any = None,
         limited: bool = True,
+        retry: bool = True,
     ) -> httpx.Response:
         self.http_paths.append(path)
         self.events.append(("http", path))
@@ -113,6 +114,8 @@ class _Recorder:
             return httpx.Response(self._exec_status, json=self._exec_body)
         if path == "/upload":
             return httpx.Response(204)
+        if path == "/download":
+            return httpx.Response(200, content=b"payload")
         # readiness probe and everything else
         return httpx.Response(self._probe_status)
 
@@ -343,6 +346,78 @@ async def test_exec_fails_fast_when_the_actor_is_gone(body: str) -> None:
         substrate_provider.SANDBOX_RUNTIME_RETURN_CODE,
         1,
     )
+
+
+async def test_exec_gives_up_on_a_503_it_cannot_explain() -> None:
+    recorder = _Recorder()
+    provider = _make_provider(recorder)
+    execs = 0
+
+    def router(request: httpx.Request) -> httpx.Response:
+        nonlocal execs
+        if request.url.path != "/exec":
+            return httpx.Response(200)
+        execs += 1
+        return httpx.Response(503, text="actor nemo-gym/gym-x unavailable: regenerate the golden snapshot")
+
+    provider._http = substrate_provider.SubstrateProvider._http.__get__(provider)
+    provider._http_client = httpx.AsyncClient(transport=httpx.MockTransport(router), base_url="http://router")
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+
+    result = await provider.exec(handle, "true", timeout_s=30)
+
+    assert (result.error_type, execs) == ("sandbox", 1)
+
+
+async def test_transient_503_retries_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(substrate_provider, "_TRANSITION_RETRY_DELAY_S", 0.01)
+    monkeypatch.setattr(substrate_provider, "_TRANSIENT_RETRY_BUDGET_S", 0.05)
+    recorder = _Recorder()
+    provider = _make_provider(recorder)
+    execs = 0
+
+    def router(request: httpx.Request) -> httpx.Response:
+        nonlocal execs
+        if request.url.path != "/exec":
+            return httpx.Response(200)
+        execs += 1
+        return httpx.Response(
+            503,
+            text="actor nemo-gym/gym-x unavailable: AssignWorker prerequisite not met (got: ACTOR_STATE_PAUSING, want ...)",
+        )
+
+    provider._http = substrate_provider.SubstrateProvider._http.__get__(provider)
+    provider._http_client = httpx.AsyncClient(transport=httpx.MockTransport(router), base_url="http://router")
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+
+    result = await provider.exec(handle, "true", timeout_s=30)
+
+    # A stranded actor costs a few retries, not the whole request budget.
+    assert result.error_type == "sandbox" and 2 <= execs <= 8
+
+
+async def test_eviction_clears_after_the_suspend_it_caused() -> None:
+    recorder = _Recorder(exec_body={"stdout": "", "stderr": "", "exit_code": 0, "evicting": True})
+    provider = _make_provider(recorder, suspend_policy="never")
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+
+    await provider.exec(handle, "true")
+    assert recorder.rpcs().count("SuspendActor") == 1 and not handle.raw.evicting
+
+    recorder._exec_body = {"stdout": "", "stderr": "", "exit_code": 0}
+    await provider.exec(handle, "true")
+    # Restored elsewhere with no new notice: the never policy applies again.
+    assert recorder.rpcs().count("SuspendActor") == 1
+
+
+async def test_download_parks_the_actor_afterwards(tmp_path) -> None:
+    recorder = _Recorder()
+    provider = _make_provider(recorder, suspend_policy="pause_after_exec")
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+
+    await provider.download_file(handle, "/work/out.txt", tmp_path / "out.txt")
+
+    assert recorder.rpcs().count("PauseActor") == 1
 
 
 async def test_exec_retries_an_aborted_conflict_503(monkeypatch: pytest.MonkeyPatch) -> None:

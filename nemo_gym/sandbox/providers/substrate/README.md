@@ -18,7 +18,9 @@ HTTP server inside the actor, addressed through the `atenet` router by the
 suspended actor before routing to it, so nothing has to resume it explicitly.
 When no worker has room the router parks the request for its budget and then
 answers 503; the provider waits and sends the request again, because it never
-reached the actor.
+reached the actor. A 503 for an actor mid-transition or a control-plane
+conflict is retried for about a minute; one that names a crashed or deleted
+actor, or that the provider cannot explain, fails the step at once.
 
 The in-actor server is Substrate's `demos/sandbox` binary. It is static, so an
 `ActorTemplate` mounts its image as a read-only image volume into the benchmark
@@ -115,7 +117,7 @@ sandbox:
       idle_before_suspend_s: 1.0
     exec:
       default_timeout_s: 1800
-      concurrency: 32
+      concurrency: 32             # per provider instance; Gym makes one per sandbox
       capacity_retry_delay_s: 5
     probe:
       timeout_s: 150              # above the router's --parked-request-budget
@@ -139,18 +141,26 @@ period and a restore download at the start of the next step.
 
 `never` leaves the actor running and is the control to measure against.
 
-Whatever the policy, an actor whose worker is being evicted (the in-actor
-server reports the worker's `SIGTERM` on its next reply) is suspended to
-storage once idle, since a node-local pause would go away with the node.
+Whatever the policy, an actor whose worker is being evicted is suspended to
+storage once idle, since a node-local pause would go away with the node: the
+in-actor server reports the worker's `SIGTERM` on its next `/exec` reply, once,
+and the provider suspends at the next idle moment (or in `pause()`). A paused
+actor has no process to signal, so it gets no notice; its snapshot stays under
+its node's `/var/lib/ate`, and Substrate does not move it when that node goes.
+Until it does, suspend every Gym actor (`kubectl ate suspend`) before rolling a
+worker pool or draining a node.
 
 ### Pause, resume and status
 
-The provider implements `SupportsSandboxPauseResume`. `pause()` calls
-`PauseActor` and returns once the control plane reports the actor parked;
-`resume()` sends a readiness probe through the router, which resumes the actor
-and parks the probe until a worker has room. `status()` reports a paused or
-suspended actor as `PAUSED`, a resuming one as `STARTING`, a crashed one as
-`ERROR`, and a deleted one as `STOPPED`.
+The provider implements `SupportsSandboxPauseResume`. `pause()` waits for
+requests in flight to finish (a pause would checkpoint a running command and
+cut its reply), calls `PauseActor` (or `SuspendActor` when the worker is being
+evicted) and returns once the control plane reports the actor parked; it raises
+if requests are still in flight after `connection.grpc_timeout_s`. `resume()`
+sends a readiness probe through the router, which resumes the actor and parks
+the probe until a worker has room. `status()` reports a paused, pausing,
+suspended or suspending actor as `PAUSED`, a resuming or reverting one as
+`STARTING`, a crashed one as `ERROR`, and a deleted one as `STOPPED`.
 
 ## What this provider does not honor
 

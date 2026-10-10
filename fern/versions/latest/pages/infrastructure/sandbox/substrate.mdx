@@ -5,8 +5,9 @@ position: 9
 ---
 
 The `substrate` provider runs each sandbox as an [Agent Substrate](https://github.com/agent-substrate/substrate)
-actor. Substrate pauses an actor when it is idle and resumes it on the next
-request, so a cluster can hold many more sandboxes than it has running workers.
+actor. The provider pauses the actor once a step is done and the router resumes
+it on the next request, so a cluster can hold many more sandboxes than it has
+running workers.
 That matters for agentic environments such as `mini_swe_agent_2`, where a
 sandbox spends most of a rollout waiting on the model.
 
