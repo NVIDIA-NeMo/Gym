@@ -81,8 +81,8 @@ class TestComponentSearchRoots:
         assert roots == [str(a), "/some/site-packages", str(Path.cwd()), str(PARENT_DIR)]
 
     def test_sys_path_builtins_entry_moved_last_even_if_already_present(self, tmp_path: Path, monkeypatch) -> None:
-        # Wheel install: PARENT_DIR is site-packages, already on sys.path. It must be dropped from the woven
-        # entries and appended last, so cwd/built-ins stay last and import order matches file lookup.
+        # Source checkout: if PARENT_DIR is already on sys.path it must be dropped from the woven entries and
+        # appended last, so cwd/built-ins stay last and import order matches file lookup.
         cwd = tmp_path / "cwd"
         cwd.mkdir()
         monkeypatch.chdir(cwd)
@@ -92,6 +92,25 @@ class TestComponentSearchRoots:
 
         assert resolved.count(PARENT_DIR.resolve()) == 1  # not duplicated
         assert resolved[-2:] == [Path.cwd().resolve(), PARENT_DIR.resolve()]  # cwd then built-ins, always last
+
+    def test_site_packages_install_root_stays_ahead_of_cwd(self, tmp_path: Path, monkeypatch) -> None:
+        # Wheel install: PARENT_DIR is site-packages. It must not be moved behind cwd, or a package in the
+        # working directory (e.g. a checkout of numpy) shadows every installed dependency.
+        import nemo_gym
+
+        site_dir = tmp_path / "lib" / "python3.12" / "site-packages"
+        site_dir.mkdir(parents=True)
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym, "PARENT_DIR", site_dir)
+
+        resolved = [r.resolve() for r in component_search_roots(sys_path=[Path("/usr/lib/python3.12"), site_dir])]
+
+        assert resolved == [Path("/usr/lib/python3.12").resolve(), site_dir.resolve(), Path.cwd().resolve()]
+        # File lookup (no sys_path) is unchanged: cwd before the built-ins.
+        assert [r.resolve() for r in component_search_roots()] == [Path.cwd().resolve(), site_dir.resolve()]
 
 
 class TestAugmentSysPath:
