@@ -15,19 +15,21 @@
 
 """Unit tests for the e2b sandbox provider (SDK faked; no network)."""
 
+import asyncio
 import inspect
 import re
 import sys
 import types
 from importlib.metadata import version
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
 from nemo_gym.package_info import __version__ as nemo_gym_version
-from nemo_gym.sandbox import AsyncSandbox, ConnectableProvider
+from nemo_gym.sandbox import AsyncSandbox, ConnectableProvider, Sandbox
 from nemo_gym.sandbox.providers import e2b as e2b_pkg
-from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxStatus, SupportsSandboxPauseResume
 from nemo_gym.sandbox.providers.e2b import _sdk as e2b_sdk
 from nemo_gym.sandbox.providers.e2b import provider as e2b_provider
 from nemo_gym.sandbox.providers.e2b.provider import _API_PARAM_KEYS, E2BCreateError, E2BProvider
@@ -172,6 +174,8 @@ class FakeSandbox:
         self.kill_calls: list[dict] = []
         self.kill_outcomes: list[object] = []
         self.running = True
+        self.paused = False
+        self.pause_calls: list[dict] = []
         self.exec_behaviour = None
         self.pid = 4242
         self.wait_outcomes: list = []
@@ -192,6 +196,18 @@ class FakeSandbox:
     async def is_running(self, **kwargs):
         _reject_connection_params("Sandbox.is_running", kwargs)
         return self.running
+
+    async def pause(self, **kwargs: object) -> bool:
+        self.pause_calls.append(kwargs)
+        was_paused = self.paused
+        self.paused = True
+        return not was_paused
+
+    async def get_info(self, **kwargs: object) -> types.SimpleNamespace:
+        _reject_connection_params("Sandbox.get_info", kwargs)
+        if not self.running:
+            raise FakeSandboxNotFound(self.sandbox_id)
+        return types.SimpleNamespace(state="paused" if self.paused else "running")
 
     async def kill(self, **kwargs):
         self.kill_calls.append(kwargs)
@@ -336,10 +352,14 @@ async def test_real_sdk_user_agent_and_call_shapes() -> None:
     connection = e2b.ConnectionConfig()
     products = connection.headers["User-Agent"].split()
     assert f"nemo-gym/{nemo_gym_version}" in products
-    envd_client = sandbox_async.get_envd_api(connection, "https://sandbox.example")
-    for transport in (client_async.get_transport(connection), envd_client._transport):
-        assert isinstance(transport, GymAiohttpTransport)
-    await envd_client.aclose()
+    assert isinstance(client_async.get_transport(connection), GymAiohttpTransport)
+    if hasattr(sandbox_async, "get_envd_api"):
+        envd_client = sandbox_async.get_envd_api(connection, "https://sandbox.example")
+        assert isinstance(envd_client._transport, GymAiohttpTransport)
+        await envd_client.aclose()
+    else:
+        # E2B 2.36 imports the envd transport factory directly.
+        assert isinstance(sandbox_async.get_transport(connection), GymAiohttpTransport)
 
     inspect.signature(e2b.AsyncSandbox.create).bind(
         template="base",
@@ -356,7 +376,8 @@ async def test_real_sdk_user_agent_and_call_shapes() -> None:
         **dict.fromkeys(_API_PARAM_KEYS),
         request_timeout=30,
     )
-    inspect.signature(e2b.AsyncSandbox.is_running).bind(object(), request_timeout=30)
+    inspect.signature(e2b.AsyncSandbox.get_info).bind(object(), request_timeout=30)
+    inspect.signature(e2b.AsyncSandbox.pause).bind(object(), request_timeout=30)
     inspect.signature(e2b.AsyncTemplate.exists).bind("base")
     inspect.signature(e2b.AsyncTemplate.build).bind(
         object(),
@@ -1048,3 +1069,92 @@ def test_invalid_template_config_is_rejected(create: dict[str, object]) -> None:
 def test_invalid_config_values_are_rejected(section: str, config: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=re.escape(message)):
         E2BProvider(**{section: config})
+
+
+async def test_public_pause_resume_refreshes_e2b_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = E2BProvider(
+        connection={"api_key": "test-key", "api_url": "https://gateway.example", "request_timeout_s": 12},
+        create={"template": "base"},
+    )
+    assert isinstance(provider, SupportsSandboxPauseResume)
+    async with AsyncSandbox(provider, _spec()) as sandbox:
+        await sandbox.start()
+        original = FakeSandbox.instances[-1]
+        health_check = AsyncMock(side_effect=AssertionError("Status must not wake a paused sandbox"))
+        monkeypatch.setattr(original, "is_running", health_check)
+        await sandbox.pause()
+        await sandbox.pause()  # Already-paused SDK responses are successful no-ops.
+        assert original.pause_calls == [{"request_timeout": 12}] * 2
+        assert await sandbox.status() is SandboxStatus.PAUSED
+        health_check.assert_not_called()
+
+        refreshed = FakeSandbox(sandbox_id=original.sandbox_id)
+        refreshed.exec_behaviour = FakeCommandResult(stdout="resumed")
+        connect = AsyncMock(return_value=refreshed)
+        monkeypatch.setattr(FakeSandbox, "connect", connect)
+        await sandbox.resume()
+        connect.assert_awaited_once_with(
+            original.sandbox_id, api_key="test-key", api_url="https://gateway.example", request_timeout=12
+        )
+        assert await sandbox.status() is SandboxStatus.RUNNING
+        assert (await sandbox.exec("echo resumed")).stdout == "resumed"
+        assert original.exec_calls == []
+    assert refreshed.killed
+    assert not original.killed
+
+
+def test_sync_public_pause_resume() -> None:
+    with Sandbox(E2BProvider(create={"template": "base"}), _spec()) as sandbox:
+        sandbox.start()
+        sandbox.pause()
+        assert sandbox.status() is SandboxStatus.PAUSED
+        sandbox.resume()
+        assert sandbox.status() is SandboxStatus.RUNNING
+        assert sandbox.exec("true").return_code == 0
+    assert FakeSandbox.instances[-1].killed
+
+
+@pytest.mark.parametrize("operation", ["pause", "resume"])
+@pytest.mark.parametrize(
+    "error", [FakeTimeout("deadline"), ConnectionError("lost"), FakeSandboxNotFound("gone"), asyncio.CancelledError()]
+)
+async def test_lifecycle_failure_is_not_retried_and_preserves_handle(
+    monkeypatch: pytest.MonkeyPatch, operation: str, error: BaseException
+) -> None:
+    provider = E2BProvider(create={"template": "base"}, operations={"retries": 5, "retry_delay_s": 0})
+    handle = await provider.create(_spec())
+    original = handle.raw
+    call = AsyncMock(side_effect=error)
+    if operation == "pause":
+        monkeypatch.setattr(original, "pause", call)
+    else:
+        monkeypatch.setattr(FakeSandbox, "connect", call)
+    with pytest.raises(type(error)):
+        await getattr(provider, operation)(handle)
+    call.assert_awaited_once()
+    assert handle.raw is original
+    await provider.close(handle)
+    assert original.killed
+
+
+@pytest.mark.parametrize("operation", ["pause", "resume"])
+async def test_lifecycle_rejects_closed_handle(operation: str) -> None:
+    provider = E2BProvider(create={"template": "base"})
+    handle = await provider.create(_spec())
+    await provider.close(handle)
+    with pytest.raises(RuntimeError, match="carries no e2b sandbox object"):
+        await getattr(provider, operation)(handle)
+    assert len(FakeSandbox.instances) == 1
+
+
+@pytest.mark.parametrize("outcome", ["resuming", ConnectionError("control plane unavailable")])
+async def test_status_reports_unknown_for_unavailable_state(monkeypatch: pytest.MonkeyPatch, outcome: object) -> None:
+    provider = E2BProvider(create={"template": "base"})
+    handle = await provider.create(_spec())
+    get_info = (
+        AsyncMock(side_effect=outcome)
+        if isinstance(outcome, Exception)
+        else AsyncMock(return_value=types.SimpleNamespace(state=outcome))
+    )
+    monkeypatch.setattr(handle.raw, "get_info", get_info)
+    assert await provider.status(handle) is SandboxStatus.UNKNOWN

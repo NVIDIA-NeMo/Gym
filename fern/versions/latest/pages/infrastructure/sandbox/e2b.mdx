@@ -170,6 +170,31 @@ carry the E2B sandbox ID for reconnection through another configured provider in
 public connect operation may extend a near-expiry sandbox to its SDK-default connection lifetime
 (300 seconds in E2B 2.36).
 
+## Pause and Resume
+
+The E2B provider supports the public async and sync sandbox lifecycle methods:
+
+```python
+from nemo_gym.sandbox import SandboxStatus
+
+await sandbox.pause()
+assert await sandbox.status() == SandboxStatus.PAUSED
+await sandbox.resume()
+result = await sandbox.exec("cat /tmp/checkpoint.txt")
+```
+
+For the synchronous `Sandbox`, call the same methods without `await`. Pause uses
+E2B's default memory-preserving snapshot. Resume connects to the same sandbox ID
+and refreshes the SDK handle so subsequent commands and file operations use the
+resumed connection. E2B's default connect timeout applies on resume (300 seconds
+in E2B 2.36), rather than the original creation TTL.
+
+Status reads the control plane without waking the guest. The provider does not
+retry failed pause/resume calls; a timeout or transport failure can leave the
+remote state unknown. Check status before retrying. Closing a paused sandbox
+still deletes it. This capability requires a service that implements E2B's public
+pause/connect endpoints.
+
 ## Security and Isolation
 
 E2B supplies the sandbox isolation boundary; when using a compatible gateway, its operator is
