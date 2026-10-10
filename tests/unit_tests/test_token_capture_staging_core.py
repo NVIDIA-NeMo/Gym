@@ -466,27 +466,29 @@ def test_local_record_builder_hashes_once_and_preserves_wire_validation(monkeypa
     corrupted = {**expected, "generation_log_probs_delta": [0.0, -0.75]}
     with pytest.raises(ValidationError, match="digest does not match"):
         StagedCallSnapshot.model_validate(corrupted)
+    with pytest.raises(ValidationError, match="digest does not match"):
+        StagedCallSnapshot.model_validate(corrupted, context=object())
     expected.pop("digest")
     with pytest.raises(ValidationError, match="digest"):
         StagedCallSnapshot.model_validate(expected)
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
+    ("field", "value", "error"),
     [
-        ("token_ids_delta", [True, 11]),
-        ("token_ids_delta", [10, 2**64]),
-        ("generation_log_probs_delta", [0.0, math.nan]),
-        ("generation_log_probs_delta", [0.0, 1e39]),
-        ("generation_log_probs_delta", [-0.1, -0.25]),
-        ("token_mask_delta", [0.0, 0.5]),
-        ("delta_len", 3),
-        ("parent_call_id", None),
-        ("extras", {"changed": True}),
+        ("token_ids_delta", [True, 11], "valid integer"),
+        ("token_ids_delta", [10, 2**64], "unsigned 64-bit"),
+        ("generation_log_probs_delta", [0.0, math.nan], "finite number"),
+        ("generation_log_probs_delta", [0.0, 1e39], "float32"),
+        ("generation_log_probs_delta", [-0.1, -0.25], "prompt-carry log probabilities"),
+        ("token_mask_delta", [0.0, 0.5], "only 0.0 or 1.0"),
+        ("delta_len", 3, "delta_len 3 does not match 2 token IDs"),
+        ("parent_call_id", None, "parentless staged call must have prev_len == 0"),
+        ("extras", {"changed": True}, "extras_digest does not match extras"),
     ],
 )
-def test_local_record_builder_keeps_integrity_checks(field: str, value: object) -> None:
-    with pytest.raises(ValidationError):
+def test_local_record_builder_keeps_integrity_checks(field: str, value: object, error: str) -> None:
+    with pytest.raises(ValidationError, match=error):
         StagedCallRecord.from_components(**{**_local_record_components(), field: value})
 
 
@@ -494,3 +496,33 @@ def test_local_record_builder_keeps_integrity_checks(field: str, value: object) 
 def test_local_record_builder_does_not_normalize_integer_float_columns(field: str) -> None:
     with pytest.raises(ValueError, match="Python floats"):
         StagedCallRecord.from_components(**{**_local_record_components(), field: [0, 1]})
+
+
+def test_bulk_token_encoding_reports_inconsistent_sequence_as_value_error() -> None:
+    class InconsistentTokens(list[int]):
+        def __len__(self) -> int:
+            return super().__len__() + 1
+
+    with pytest.raises(ValueError, match="token_ids cannot be encoded"):
+        encode_token_ids(InconsistentTokens([1]))
+
+
+@pytest.mark.parametrize("field", ["delta_len", "cum_len"])
+@pytest.mark.parametrize("boolean", [False, True])
+def test_staging_digest_rejects_boolean_lengths(field: str, boolean: bool) -> None:
+    # Match the numeric geometry so equality checks cannot reject True in place of 1.
+    args = {
+        **_digest_args(),
+        "parent_call_id": None,
+        "mode": "text",
+        "prev_len": 0,
+        "delta_len": 1,
+        "cum_len": 1,
+        "token_ids_delta": [10],
+        "token_mask_delta": [1.0],
+        "generation_log_probs_delta": [-0.25],
+        field: boolean,
+    }
+    error = f"{field} must be an unsigned 64-bit integer" if boolean else "staged call delta|cum_len"
+    with pytest.raises(ValueError, match=error):
+        compute_staging_digest(**args)
