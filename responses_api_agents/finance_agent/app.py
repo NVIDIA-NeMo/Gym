@@ -529,6 +529,20 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             body.model_dump() | {"response": await get_response_json(response)}
         )
 
+        if self.config.skip_verification:
+            # /verify is what frees the per-session state seeded above; release it without scoring.
+            discard_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/discard_session",
+                json={},
+                cookies=cookies,
+            )
+            await raise_for_status(discard_response)
+            return FinanceAgentVerifyResponse.model_validate(
+                verify_request.model_dump()
+                | {"reward": float(self.config.skip_verification_reward), "verification_skipped": True}
+            )
+
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
@@ -540,6 +554,9 @@ class FinanceAgent(SimpleResponsesAPIAgent):
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""
+        if self.config.skip_verification:
+            return await super().aggregate_metrics(body)
+
         response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/aggregate_metrics",

@@ -665,6 +665,48 @@ class TestRolloutObservability:
         assert not turn.model_calls
 
 
+class TestSkipVerification:
+    def test_run_skip_verification_uses_configured_reward(self, tmp_path: Path) -> None:
+        db = _session_db(tmp_path, [("assistant", [{"type": "text", "text": "done"}])])
+        items, usage = parse_opencode_session(db)
+        agent = _make_agent(skip_verification=True, skip_verification_reward=0.25)
+        agent._run_opencode = AsyncMock(return_value=(items, usage, "model", None))
+
+        class Response:
+            ok = True
+            cookies = {}
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            async def read(self):
+                return json.dumps(self.payload).encode()
+
+        async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+            if url_path == "/seed_session":
+                return Response({})
+            if url_path == "/v1/responses":
+                response = await agent.responses(MagicMock(path_params={}), json)
+                return Response(response.model_dump(mode="json"))
+            raise AssertionError(f"unexpected call under skip_verification: {url_path}")
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        body = OpenCodeAgentRunRequest.model_validate({"responses_create_params": {"input": "solve"}})
+
+        result = asyncio.run(agent.run(MagicMock(cookies={}), body))
+
+        payload = result.model_dump(mode="json")
+        assert payload["reward"] == 0.25
+        assert payload["verification_skipped"] is True
+        assert result.turns_used == 1
+        assert result.finished_naturally is True
+        assert payload["response"]["output"][0]["content"][0]["text"] == "done"
+        assert [c.kwargs["url_path"] for c in agent.server_client.post.await_args_list] == [
+            "/seed_session",
+            "/v1/responses",
+        ]
+
+
 class TestRepoDir:
     def test_creates_configured_repo_dir(self, tmp_path: Path) -> None:
         repo_dir = tmp_path / "nested" / "repo"

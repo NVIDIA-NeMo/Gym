@@ -284,6 +284,11 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         verify_request_data["response"]["usage"] = usage.model_dump() if usage_complete else None
         verify_request_data["token_usage_version"] = TOKEN_USAGE_VERSION
         verify_request_data["step_usage"] = step_usage
+        if self.config.skip_verification:
+            return verify_request_data | {
+                "reward": float(self.config.skip_verification_reward),
+                "verification_skipped": True,
+            }
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",

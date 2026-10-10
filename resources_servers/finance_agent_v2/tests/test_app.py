@@ -562,6 +562,24 @@ class TestSession:
         assert server._get_session_storage(_TEST_SESSION_ID) == {}
         assert _TEST_SESSION_ID in server._session_start_times
 
+    @pytest.mark.asyncio
+    async def test_discard_session_releases_seeded_state_without_judging(self) -> None:
+        """skip_verification rollouts call /discard_session instead of /verify; the seeded
+        documents and start time must be freed exactly as verify frees them, with no judge call."""
+        server = _make_server()
+        req = _mock_request()
+        await server.seed_session(req, MagicMock())
+        server._get_session_storage(_TEST_SESSION_ID)["doc"] = "retrieved filing text"
+
+        result = await server.discard_session(req)
+
+        assert result.discarded is True
+        assert _TEST_SESSION_ID not in server._data_storage
+        assert _TEST_SESSION_ID not in server._session_start_times
+        server.server_client.post.assert_not_called()
+        # Idempotent: a second discard (or one for a never-seeded session) is a no-op.
+        assert (await server.discard_session(req)).discarded is False
+
 
 # ============================================================================
 # verify(): per-criterion rubric judge
