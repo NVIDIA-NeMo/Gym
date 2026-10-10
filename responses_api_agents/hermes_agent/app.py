@@ -15,6 +15,7 @@
 import asyncio
 import atexit
 import logging
+import math
 import os
 import shutil
 import sys
@@ -75,7 +76,12 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
-from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, HermesSandboxSession
+from responses_api_agents.hermes_agent.sandbox import DEFAULT_UV_CACHE_DIR, HarnessProcessInfo, HermesSandboxSession
+
+
+# Task rows materialized from a task's own agent timeout carry it as request metadata under this key
+# (seconds, as a string); the episode's wall-clock budget is capped by it.
+AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
 
 
 def _usage_from_result(result: dict[str, Any]) -> Optional[NeMoGymResponseUsage]:
@@ -237,6 +243,8 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
     sandbox_runner_timeout_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
+    # Where uv builds for sandbox architectures other than the host's are cached.
+    uv_cache_dir: str = DEFAULT_UV_CACHE_DIR
     session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
@@ -446,7 +454,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             ),
         )
         try:
-            await state.install_runtime(install_timeout=self.config.sandbox_install_timeout_seconds)
+            await state.install_runtime(
+                install_timeout=self.config.sandbox_install_timeout_seconds, uv_cache_dir=self.config.uv_cache_dir
+            )
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -578,14 +588,33 @@ class HermesAgent(SimpleResponsesAPIAgent):
             ),
             "terminal_timeout": self.config.terminal_timeout,
         }
-        output = await state.execute(
-            payload,
-            timeout=self.config.sandbox_runner_timeout_seconds,
-            close_timeout=self.config.session_close_timeout_seconds,
-        )
+        timeout = self._agent_timeout_sec(body)
+        timed_out = False
+        try:
+            output = await state.execute(
+                payload,
+                timeout=timeout,
+                close_timeout=self.config.session_close_timeout_seconds,
+            )
+        except TimeoutError:
+            # The in-sandbox supervisor normally stops Hermes at the deadline and the runner writes its
+            # interrupted transcript. If even the supervisor overran, a captured transcript is still a
+            # scored timeout outcome; an overrun that left nothing behind stays an infrastructure failure.
+            artifacts = state.session.artifacts
+            if not isinstance(artifacts, dict) or not isinstance(artifacts.get("result"), dict):
+                raise
+            LOG.warning(
+                "Hermes session %s exceeded its %ss budget; returning the partial transcript",
+                agent_session_id,
+                timeout,
+            )
+            timed_out = True
+            output = artifacts
         result = output.get("result")
         if not isinstance(result, dict):
             raise RuntimeError("Hermes sandbox runner returned an invalid output")
+        if timed_out:
+            result = {**result, "completed": False, "interrupted": True, "stop_reason": "wall_time"}
         runtime = state.runtime_info
         response = self._response_from_result(
             body=body,
@@ -601,7 +630,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
         response.metadata = {
             **(response.metadata or {}),
             "harness_execution": "sandbox",
+            AGENT_TIMEOUT_METADATA_KEY: str(timeout),
         }
+        if timed_out or response.metadata.get("stop_reason") == "wall_time":
+            response.metadata["hermes_error_type"] = "TimeoutError"
         if runtime is not None:
             response.metadata.update(
                 harness_hostname=runtime.hostname,
@@ -634,6 +666,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
             value = getattr(body, name)
             if name in ("stream", "background") and value is False:
                 continue  # Explicit synchronous, non-streaming execution is supported.
+            if name == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
+                continue  # Task rows carry the agent's wall-clock budget; the activation honours it.
             if value != field.get_default(call_default_factory=True):
                 raise HTTPException(422, f"Hermes does not support request field {name}")
         body = body.model_copy(deep=True)
@@ -655,6 +689,21 @@ class HermesAgent(SimpleResponsesAPIAgent):
             ):
                 raise HTTPException(422, "Hermes only supports text input")
         return body
+
+    def _agent_timeout_sec(self, body: NeMoGymResponseCreateParamsNonStreaming) -> float:
+        """This episode's wall-clock budget: the task's agent timeout, capped by the server's ceiling."""
+        budget = float(self.config.sandbox_runner_timeout_seconds)
+        raw = (body.metadata or {}).get(AGENT_TIMEOUT_METADATA_KEY)
+        if raw is None:
+            return budget
+        try:
+            requested = float(raw)
+        except (TypeError, ValueError):
+            requested = math.nan
+        if not math.isfinite(requested) or requested <= 0:
+            LOG.warning("Ignoring invalid %s=%r; using the configured %ss", AGENT_TIMEOUT_METADATA_KEY, raw, budget)
+            return budget
+        return min(budget, requested)
 
     def _conversation_params(self, body: NeMoGymResponseCreateParamsNonStreaming) -> dict[str, Any]:
         user_message, history, input_system = _split_input_to_user_and_history(body.input)
@@ -772,6 +821,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         from run_agent import AIAgent  # from hermes-agent on path  # pyright: ignore[reportMissingImports]
 
+        if (body.metadata or {}).get(AGENT_TIMEOUT_METADATA_KEY) is not None:
+            LOG.warning("Hermes host execution does not bound the run by %s", AGENT_TIMEOUT_METADATA_KEY)
         params = self._conversation_params(body)
 
         base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
