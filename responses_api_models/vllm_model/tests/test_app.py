@@ -6110,8 +6110,29 @@ class TestEndpointFile:
         server._endpoint_last_check_at = None  # window over: the next call re-checks
         server._maybe_rebind_endpoint()
         assert server.config.base_url == ["http://newer-host:8712/v1"]
-        # Static base_url clients keep today's retry-forever behavior.
+        # Static base_url clients without route-around keep unbounded connection retries.
         assert self._make_server(tmp_path, endpoint_file=None)._clients[0].max_connection_retries is None
+
+    def test_route_around_bounds_connection_retries_over_a_static_url_list(self, tmp_path) -> None:
+        """``route_around_failing_endpoints`` needs bounded clients even without an endpoint file.
+
+        ``_call_endpoint`` counts a connection error against an endpoint only once the client
+        raises it, and a client built with ``max_connection_retries=None`` retries a refused
+        connection forever, so an unbounded client would never let a dead endpoint reach the
+        failure threshold that moves its sessions elsewhere.
+        """
+        static_urls = ["http://engine-0:8712/v1", "http://engine-1:8712/v1"]
+        server = self._make_server(
+            tmp_path,
+            endpoint_file=None,
+            base_url=static_urls,
+            route_around_failing_endpoints=True,
+            endpoint_connection_retries=3,
+        )
+        assert [client.max_connection_retries for client in server._clients] == [3, 3]
+        # Without route-around or an endpoint file, the same list keeps unbounded retries.
+        server = self._make_server(tmp_path, endpoint_file=None, base_url=static_urls)
+        assert [client.max_connection_retries for client in server._clients] == [None, None]
 
     def test_unpublished_endpoint_grace_lifecycle(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         endpoint_file = tmp_path / "endpoint.txt"
