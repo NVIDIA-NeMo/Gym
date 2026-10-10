@@ -1,0 +1,139 @@
+---
+title: "Run NOOA SWE-bench Pro with restricted networking"
+description: "Prepare NOOA offline and restrict only the SWE-bench Pro task sandbox on OpenSandbox."
+position: 5
+---
+
+# Run NOOA SWE-bench Pro with restricted networking
+
+The NOOA SWE-bench Pro recipe enables a task-only OpenSandbox network policy.
+The SWE Resources server applies default-deny egress when it creates the task
+sandbox, before handing the sandbox to NOOA. NOOA borrows that Resources-owned
+sandbox. Fresh grading sandboxes continue using the benchmark's original
+network settings, images, test artifacts, and dependency preparation.
+Other SWE harnesses, NOOA Terminal-Bench, and NOOA GDPval keep their existing
+network behavior.
+
+## Deployment requirements
+
+Use an OpenSandbox deployment with an egress sidecar and **`dns+nft` enforcement**.
+DNS-only filtering can be bypassed with a literal IP address. Provider API
+acceptance of a policy is not proof of enforcement; validate both blocked domain
+requests and blocked literal-IP requests against the actual deployment. See
+[OpenSandbox egress controls](/main/infrastructure/sandbox/opensandbox-best-practices#egress-controls-are-off-by-default).
+
+The allowlist contains the advertised **Gym model-server host**, which proxies
+inference to the configured upstream model. It does not add package indexes,
+GitHub, or the upstream model service to the task allowlist. Advertise a concrete
+host reachable from OpenSandbox; loopback and wildcard bind addresses are rejected.
+The recipe uses `use_absolute_ip: true`, but a controller behind NAT still needs a
+reachable advertised host and firewall rules for its selected server ports.
+
+<Warning>
+This policy allows **all ports and HTTP routes on the allowed host**. It does not
+limit access to a model API path, and it cannot isolate other services sharing
+that host or IP. Place the model endpoint accordingly and assess cohosted services.
+The current helper is a host allowlist, not a model-request authorization boundary.
+</Warning>
+
+Only the OpenSandbox network-policy provider is supported for restricted tasks.
+Unsupported providers, unreachable endpoint configuration, and provider policy
+creation errors fail explicitly; they never trigger an unrestricted retry.
+Configure the OpenSandbox deployment outside the task: no task environment variable
+can turn a DNS-only deployment into `dns+nft` enforcement.
+
+## Prepare the controller and model
+
+Use a reviewed, committed checkout in a new owned run directory. The following
+commands assume that checkout is at `$RUN_ROOT/Gym`. The controller needs Python
+3.13.14 or newer, package/GitHub access for preparation, and Docker capable of
+running a Linux amd64 build container. Docker is used only for offline runtime
+preparation; benchmark task sandboxes still run on OpenSandbox.
+
+```bash
+export RUN_ROOT=/absolute/path/to/new-owned-run
+cd "$RUN_ROOT/Gym"
+bash benchmarks/nooa_baselines/bootstrap_eval.sh "$RUN_ROOT"
+source "$RUN_ROOT/controller-venv/bin/activate"
+mkdir -p "$RUN_ROOT/data"
+python - <<'PY'
+import os
+from pathlib import Path
+from benchmarks.swebench.pro.prepare_nooa import prepare_tasks
+output = Path(os.environ["RUN_ROOT"]) / "data/swebench-pro-nooa-731.jsonl"
+prepare_tasks(output=output, max_output_tokens=32768)
+assert sum(1 for _ in output.open()) == 731
+PY
+```
+
+Set `OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`, `POLICY_BASE_URL`,
+`POLICY_API_KEY`, and `POLICY_MODEL_NAME` through your private environment or
+secret manager. Do not commit credentials. The policy endpoint must support the
+baseline's 262144-token context, 32768 output tokens, and tool calls. Register it
+and run the two-request transport preflight:
+
+```bash
+python -m benchmarks.nooa_baselines.serving endpoint \
+  --run-dir "$RUN_ROOT/model" --base-url "$POLICY_BASE_URL" \
+  --served-model "$POLICY_MODEL_NAME" --api-key-env POLICY_API_KEY
+python -m benchmarks.nooa_baselines.serving preflight --run-dir "$RUN_ROOT/model"
+```
+
+## Launch the restricted canary
+
+```bash
+python -m benchmarks.nooa_baselines.run_eval \
+  --run-root "$RUN_ROOT" --benchmark swe --phase canary --prefetch
+```
+
+For SWE, `--prefetch` prepares `$RUN_ROOT/runtime-wheelhouse/swe` in a disposable
+Linux build container before task creation, in addition to installing controller
+server environments. The bundle contains pinned portable Python and wheels for
+NOOA, BenchAgent, the Gym runtime, and all dependencies. Its manifest binds the
+source fingerprint, Python checksum, wheel archive checksum, platform, and builder
+libc version. Task setup uploads those artifacts and installs wheels with
+`--no-index --no-deps` into a private runtime. It makes no package-network requests
+and does not replace or modify benchmark task images or their Python environment.
+
+A missing, mismatched, corrupted, or incompatible runtime fails setup before the
+agent starts. Changing source or requirements requires a fresh bundle directory
+and a new run. Task installation retains checksum checks, locking, health checks,
+and atomic publication. The controller records the bundle manifest hash in
+`launch.json` and preparation output in `runtime-preparation.log`.
+
+Without `--prefetch`, the launcher validates the existing bundle before creating
+any task. To prepare explicitly, including when using the recipe directly:
+
+```bash
+export NOOA_SWE_RUNTIME_WHEELHOUSE="$RUN_ROOT/runtime-wheelhouse/swe"
+python -m responses_api_agents.nooa_agent.offline_runtime \
+  --output "$NOOA_SWE_RUNTIME_WHEELHOUSE" --target x86_64/gnu
+```
+
+The shipped SWE recipe selects Linux amd64. An explicit arm64 platform overlay
+requires a matching `aarch64/gnu` bundle and compatible benchmark images. The
+runtime checks target architecture and libc compatibility; musl targets are not
+supported by the offline builder. Prepared bundles may be transferred to another
+controller only with matching reviewed source, requirements, and target.
+
+## Check the full path before expanding
+
+A valid canary must show a fresh restricted sandbox installing NOOA, successful
+model inference, denied external hostname and literal-IP requests from that task
+sandbox, a completed SWE-bench Pro grade in its separately created grading
+sandbox, and cleanup of both owned sandboxes. Inspect the OpenSandbox deployment
+configuration and provider cleanup records as well as Gym's rollout, model-call,
+and completion receipts. Unit tests, Docker-only offline installs, and a model
+transport preflight do not establish live OpenSandbox network isolation.
+
+A completed grade with reward zero can pass the pipeline canary; a masked
+infrastructure failure cannot. Once the canary and deployment checks pass:
+
+```bash
+python -m benchmarks.nooa_baselines.run_eval \
+  --run-root "$RUN_ROOT" --benchmark swe --phase full --concurrency 16
+```
+
+Use concurrency appropriate for the endpoint and OpenSandbox capacity. The full
+phase checks the same input, model, source, and overlay provenance, reuses the
+canary's completed outcome, and validates the prepared runtime again, including the unchanged manifest hash.

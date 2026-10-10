@@ -9,8 +9,10 @@ import json
 import logging
 import re
 import shlex
+import shutil
 import tarfile
 import tempfile
+import tomllib
 from pathlib import Path
 from uuid import uuid4
 
@@ -31,15 +33,26 @@ _PYTHON_SHA256 = {
 _IMPORT_CHECK = (
     "import sys; assert sys.version_info[:3] == (3,13,14); "
     "import nooa, nooa_cli; from nooa_bench.bench_agent import BenchAgent; "
-    "import responses_api_agents.nooa_agent.runner; "
+    "import responses_api_agents.nooa_agent.sandbox_entrypoint; "
     "from responses_api_agents.nooa_agent.resource_tools import ResourceToolDispatcher; "
     "from responses_api_agents.nooa_agent.observability import GymTraceHooks"
 )
 
 
-def _runtime_archive(root: Path) -> tuple[bytes, str]:
+def _runtime_archive(root: Path, *, requirements_path: Path | None = None) -> tuple[bytes, str]:
     """Include current source, never repository metadata, caches, or user artifacts."""
-    files = {name: (root / name).read_bytes() for name in ("pyproject.toml", "README.md", "LICENSE")}
+    files = {name: (root / name).read_bytes() for name in ("README.md", "LICENSE")}
+    template = (root / "responses_api_agents/nooa_agent/runtime/pyproject.toml").read_text()
+    runtime_config = tomllib.loads(template)["tool"]["nemo-gym-runtime"]
+    core_dependencies = tomllib.loads((root / "pyproject.toml").read_text())["project"]["dependencies"]
+    core_by_name = {
+        re.split(r"[<>=!~\[ ;]", dependency, maxsplit=1)[0]: dependency for dependency in core_dependencies
+    }
+    dependencies = [core_by_name[name] for name in runtime_config["core-dependencies"]]
+    dependencies.extend(runtime_config["additional-dependencies"])
+    files["pyproject.toml"] = template.replace(
+        "dependencies = []", f"dependencies = {json.dumps(dependencies)}", 1
+    ).encode()
     for path in (root / "nemo_gym").rglob("*.py"):
         if not path.is_symlink() and not any(part.startswith(".") for part in path.relative_to(root).parts):
             files[path.relative_to(root).as_posix()] = path.read_bytes()
@@ -48,7 +61,10 @@ def _runtime_archive(root: Path) -> tuple[bytes, str]:
     for path in agent_dir.glob("*.py"):
         if not path.is_symlink():
             files[path.relative_to(root).as_posix()] = path.read_bytes()
-    requirements = (agent_dir / "requirements.txt").read_text()
+    selected_requirements = requirements_path or agent_dir / "requirements.txt"
+    if not selected_requirements.is_absolute():
+        selected_requirements = root / selected_requirements
+    requirements = selected_requirements.read_text()
     runtime_requirements = []
     for line in requirements.splitlines():
         if not line.strip() or line.startswith(("#", "-e ")):
@@ -76,18 +92,31 @@ def _runtime_archive(root: Path) -> tuple[bytes, str]:
     return output.getvalue(), digest.hexdigest()
 
 
-async def prepare_nooa_runtime(sandbox: AsyncSandbox) -> str:
+def _python_download_url(target: str) -> str:
+    arch, libc = target.split("/")
+    return (
+        "https://github.com/astral-sh/python-build-standalone/releases/download/"
+        f"{_PYTHON_RELEASE}/cpython-{_PYTHON_VERSION}%2B{_PYTHON_RELEASE}-"
+        f"{arch}-unknown-linux-{libc}-install_only.tar.gz"
+    )
+
+
+async def prepare_nooa_runtime(
+    sandbox: AsyncSandbox, *, requirements_path: Path | None = None, wheelhouse_path: Path | None = None
+) -> str:
     """Stage verified artifacts and return the target's healthy private Python.
 
     Cold setup requires Linux x86_64/aarch64 with glibc, bash, tar, gzip,
     sha256sum, flock, tee, mv with -T support, and writable /opt/nemo-gym-nooa
     and /tmp. No root or system
     package manager is invoked. The controller supplies Python; the sandbox still
-    needs outbound package/build dependency access. This is not an offline install.
+    needs outbound package/build dependency access unless wheelhouse_path selects
+    a source-bound bundle prepared outside the task. Offline setup installs only
+    local wheels, without package indexes, URL requirements or build isolation.
     A healthy preinstalled or mounted runtime is reused without writing into it.
     """
     root = Path(__file__).resolve().parents[2]
-    source, fingerprint = _runtime_archive(root)
+    source, fingerprint = _runtime_archive(root, requirements_path=requirements_path)
     scratch = f"/tmp/nemo-gym-nooa-setup-{uuid4().hex}"
     script = scratch + ".sh"
     completed = False
@@ -109,6 +138,25 @@ async def prepare_nooa_runtime(sandbox: AsyncSandbox) -> str:
                     f"stderr={(probe.stderr or '')[-2000:]}"
                 )
             arch, libc = target.split("/")
+            wheelhouse = None
+            if wheelhouse_path is not None:
+                from responses_api_agents.nooa_agent.offline_runtime import load_runtime_wheelhouse
+
+                wheelhouse = load_runtime_wheelhouse(wheelhouse_path, target=target, source_fingerprint=fingerprint)
+                libc_result = await sandbox.exec("getconf GNU_LIBC_VERSION", cwd="/", timeout_s=30)
+                libc_fields = (libc_result.stdout or "").strip().split()
+                required_glibc = str(wheelhouse["glibc"])
+                if (
+                    libc_result.return_code != 0
+                    or len(libc_fields) != 2
+                    or libc_fields[0] != "glibc"
+                    or re.fullmatch(r"[0-9]+\.[0-9]+", libc_fields[1]) is None
+                    or tuple(map(int, libc_fields[1].split("."))) < tuple(map(int, required_glibc.split(".")))
+                ):
+                    raise RuntimeError(f"Offline NOOA runtime requires glibc >= {required_glibc}; got {libc_fields}")
+                # Dependency resolution can change independently of source; never reuse
+                # a runtime installed from different wheel bytes.
+                fingerprint = hashlib.sha256(f"{fingerprint}:{wheelhouse['wheels_sha256']}".encode()).hexdigest()
             runtime = f"{_RUNTIME_ROOT}/{fingerprint}-{arch}-{libc}"
             python = f"{runtime}/python/bin/python3"
             check = shlex.join(["bash", script, "check", runtime, fingerprint, _IMPORT_CHECK])
@@ -117,19 +165,26 @@ async def prepare_nooa_runtime(sandbox: AsyncSandbox) -> str:
                 completed = True
                 return python
 
-            # Reuse mini-SWE's checksum-aware, atomic controller download cache.
-            # This controller-only helper is deliberately not needed in the worker.
-            from responses_api_agents.miniswe_sandboxed_agent.bootstrap import cached_download
-
             expected = _PYTHON_SHA256[target]
-            url = (
-                "https://github.com/astral-sh/python-build-standalone/releases/download/"
-                f"{_PYTHON_RELEASE}/cpython-{_PYTHON_VERSION}%2B{_PYTHON_RELEASE}-"
-                f"{arch}-unknown-linux-{libc}-install_only.tar.gz"
-            )
-            cached_archive = await cached_download(url, sha256=expected)
             python_archive = local / "python.tar.gz"
-            python_archive.write_bytes(cached_archive.read_bytes())
+            wheels_sha256 = None
+            if wheelhouse is not None:
+                from responses_api_agents.nooa_agent.offline_runtime import file_sha256
+
+                assert wheelhouse_path is not None
+                shutil.copyfile(wheelhouse_path / "python.tar.gz", python_archive)
+                wheels_archive = local / "wheels.tar.gz"
+                shutil.copyfile(wheelhouse_path / "wheels.tar.gz", wheels_archive)
+                wheels_sha256 = str(wheelhouse["wheels_sha256"])
+                if file_sha256(wheels_archive) != wheels_sha256:
+                    raise RuntimeError("NOOA wheelhouse changed before sandbox upload")
+                await sandbox.upload(wheels_archive, f"{scratch}/wheels.tar.gz")
+            else:
+                # Reuse mini-SWE's checksum-aware, atomic controller download cache.
+                from responses_api_agents.miniswe_sandboxed_agent.bootstrap import cached_download
+
+                cached_archive = await cached_download(_python_download_url(target), sha256=expected)
+                shutil.copyfile(cached_archive, python_archive)
             # Check the private upload snapshot too, so cache replacement cannot
             # change the bytes between verification and sandbox transfer.
             if hashlib.sha256(python_archive.read_bytes()).hexdigest() != expected:
@@ -148,6 +203,7 @@ async def prepare_nooa_runtime(sandbox: AsyncSandbox) -> str:
                     hashlib.sha256(source).hexdigest(),
                     expected,
                     _IMPORT_CHECK,
+                    *([wheels_sha256] if wheels_sha256 is not None else []),
                 ]
             )
             result = await sandbox.exec(command, cwd="/", timeout_s=1800)
