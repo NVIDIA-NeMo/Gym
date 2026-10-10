@@ -331,3 +331,71 @@ def test_outbound_calls_are_counted_while_they_wait_for_a_response(collected, mo
 
     assert asyncio.run(call()) == 0
     assert seen == [1]
+
+
+class TestDriverMetrics:
+    def test_admission_records_the_wait_and_counts_active_rollouts(self, collected):
+        async def run():
+            async with runtime.observe_event_loop("driver"):
+                metrics = runtime.driver_metrics()
+                admission = runtime.MeteredAdmission(asyncio.Semaphore(1), metrics)
+                active_seen = []
+
+                async def rollout():
+                    async with admission:
+                        active_seen.append(metrics.driver.active)
+                        await asyncio.sleep(0.05)
+
+                await asyncio.gather(*(runtime.count_resident(rollout(), metrics) for _ in range(3)))
+                return active_seen, metrics.driver.active, metrics.driver.resident, collected()
+
+        active_seen, active_after, resident_after, exported = asyncio.run(run())
+
+        assert active_seen == [1, 1, 1], "the limit of one admits one rollout at a time"
+        assert active_after == 0 and resident_after == 0
+        (admission,) = exported[runtime.DRIVER_ADMISSION_INSTRUMENT]
+        assert admission.count == 3
+        assert admission.max >= 0.09, "the third rollout waited for the two ahead of it"
+
+    def test_resident_counts_rollouts_waiting_for_admission(self, collected):
+        async def run():
+            async with runtime.observe_event_loop("driver"):
+                metrics = runtime.driver_metrics()
+                admission = runtime.MeteredAdmission(asyncio.Semaphore(1), metrics)
+                release = asyncio.Event()
+
+                async def rollout():
+                    async with admission:
+                        await release.wait()
+
+                tasks = [asyncio.ensure_future(runtime.count_resident(rollout(), metrics)) for _ in range(4)]
+                await asyncio.sleep(0.01)
+                snapshot = (metrics.driver.resident, metrics.driver.active)
+                release.set()
+                await asyncio.gather(*tasks)
+                return snapshot
+
+        assert asyncio.run(run()) == (4, 1)
+
+    def test_output_writes_record_their_duration_and_size(self, collected):
+        import time
+
+        from nemo_gym.rollout_collection import _record_output_write
+
+        async def run():
+            async with runtime.observe_event_loop("driver"):
+                _record_output_write(time.perf_counter(), b"x" * 999)
+                return collected()
+
+        exported = asyncio.run(run())
+        (size,) = exported[runtime.DRIVER_WRITE_BYTES_INSTRUMENT]
+        assert size.sum == 1000  # the row plus its newline
+        assert exported[runtime.DRIVER_WRITE_DURATION_INSTRUMENT][0].count == 1
+
+    def test_nothing_is_recorded_without_an_observer(self):
+        import time
+
+        from nemo_gym.rollout_collection import _record_output_write
+
+        assert runtime.driver_metrics() is None
+        _record_output_write(time.perf_counter(), b"row")

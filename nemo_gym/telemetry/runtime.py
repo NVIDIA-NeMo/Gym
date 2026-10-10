@@ -29,6 +29,7 @@ These metrics make that pressure visible without inspecting private asyncio inte
 * ``gym.server.requests.in_flight``, ``gym.server.requests.cancelled``, and ``gym.server.requests.failed``.
   The outermost server middleware keeps them as plain integers, and the exporter thread reads them.
 * ``gym.http.client.requests.in_flight``: outbound calls through ``server_utils.request`` still waiting for their response headers.
+* ``gym.driver.rollouts.offered``, ``gym.driver.rollouts.resident``, and ``gym.driver.rollouts.active``, plus the ``gym.driver.admission.duration``, ``gym.driver.output.write.duration``, ``gym.driver.output.write.bytes``, and ``gym.driver.materialize.duration`` histograms, from the rollout driver.
 
 Each kind of work runs where it costs the least:
 
@@ -70,6 +71,13 @@ REQUESTS_IN_FLIGHT_INSTRUMENT = "gym.server.requests.in_flight"
 REQUESTS_CANCELLED_INSTRUMENT = "gym.server.requests.cancelled"
 REQUESTS_FAILED_INSTRUMENT = "gym.server.requests.failed"
 OUTBOUND_IN_FLIGHT_INSTRUMENT = "gym.http.client.requests.in_flight"
+DRIVER_OFFERED_INSTRUMENT = "gym.driver.rollouts.offered"
+DRIVER_RESIDENT_INSTRUMENT = "gym.driver.rollouts.resident"
+DRIVER_ACTIVE_INSTRUMENT = "gym.driver.rollouts.active"
+DRIVER_ADMISSION_INSTRUMENT = "gym.driver.admission.duration"
+DRIVER_WRITE_DURATION_INSTRUMENT = "gym.driver.output.write.duration"
+DRIVER_WRITE_BYTES_INSTRUMENT = "gym.driver.output.write.bytes"
+DRIVER_MATERIALIZE_INSTRUMENT = "gym.driver.materialize.duration"
 
 EVENT_LOOP_ATTRIBUTE = "nemo.gym.event_loop"
 GC_GENERATION_ATTRIBUTE = "generation"
@@ -251,6 +259,48 @@ class _Instruments:
             description="Outbound calls through server_utils.request that are still waiting for their response headers.",
         )
         meter.create_observable_counter(
+            DRIVER_OFFERED_INSTRUMENT,
+            callbacks=[_observe(lambda runtime: [_observation(runtime.driver.offered)])],
+            unit="{rollout}",
+            description="Rollouts the driver handed to dispatch.",
+        )
+        meter.create_observable_up_down_counter(
+            DRIVER_RESIDENT_INSTRUMENT,
+            callbacks=[_observe(lambda runtime: [_observation(runtime.driver.resident)])],
+            unit="{rollout}",
+            description="Rollout tasks that exist and have not finished, whether waiting for admission or running.",
+        )
+        meter.create_observable_up_down_counter(
+            DRIVER_ACTIVE_INSTRUMENT,
+            callbacks=[_observe(lambda runtime: [_observation(runtime.driver.active)])],
+            unit="{rollout}",
+            description="Rollouts admitted past the driver's concurrency limit and running.",
+        )
+        self.admission = meter.create_histogram(
+            DRIVER_ADMISSION_INSTRUMENT,
+            unit="s",
+            description="Time one rollout waited for the driver's concurrency limit before it started.",
+            explicit_bucket_boundaries_advisory=list(DRIVER_DURATION_BOUNDARIES_S),
+        )
+        self.write_duration = meter.create_histogram(
+            DRIVER_WRITE_DURATION_INSTRUMENT,
+            unit="s",
+            description="Time to write and flush one rollout's output row.",
+            explicit_bucket_boundaries_advisory=list(DRIVER_DURATION_BOUNDARIES_S),
+        )
+        self.write_bytes = meter.create_histogram(
+            DRIVER_WRITE_BYTES_INSTRUMENT,
+            unit="By",
+            description="Size of one rollout's output row.",
+            explicit_bucket_boundaries_advisory=list(DRIVER_WRITE_BYTES_BOUNDARIES),
+        )
+        self.materialize = meter.create_histogram(
+            DRIVER_MATERIALIZE_INSTRUMENT,
+            unit="s",
+            description="Time to read, repeat, and write a run's input rows before dispatch.",
+            explicit_bucket_boundaries_advisory=list(DRIVER_DURATION_BOUNDARIES_S),
+        )
+        meter.create_observable_counter(
             GC_COLLECTIONS_INSTRUMENT,
             callbacks=[_by_generation(lambda runtime: runtime.gc.collections)],
             unit="{collection}",
@@ -302,6 +352,39 @@ class _Instruments:
 _INSTRUMENTS: "weakref.WeakKeyDictionary[Any, _Instruments]" = weakref.WeakKeyDictionary()
 
 
+class DriverCounts:
+    """Rollout totals that the driver updates with plain integer arithmetic, read by the exporter thread."""
+
+    def __init__(self) -> None:
+        self.offered = 0
+        """Rollouts handed to dispatch."""
+
+        self.resident = 0
+        """Rollout tasks that exist and have not finished, whether waiting for admission or running."""
+
+        self.active = 0
+        """Rollouts admitted past the concurrency limit and running."""
+
+
+#: Seconds. Admission can wait for minutes behind a small concurrency limit, and writing one row takes microseconds.
+DRIVER_DURATION_BOUNDARIES_S: tuple[float, ...] = (
+    0.0001,
+    0.001,
+    0.01,
+    0.1,
+    0.5,
+    1,
+    5,
+    10,
+    30,
+    60,
+    300,
+    1800,
+)
+#: Bytes. A row ranges from a short answer to a long trajectory with token IDs.
+DRIVER_WRITE_BYTES_BOUNDARIES: tuple[float, ...] = (1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000)
+
+
 class _ProcessRuntime:
     """The per-process state of the runtime metrics: the GC recorder, the request totals, and this process's handle."""
 
@@ -314,6 +397,11 @@ class _ProcessRuntime:
         self.process = psutil.Process()
         self.gc = _GcRecorder()
         self.requests = RequestCounts()
+        self.driver = DriverCounts()
+        self.admission = instruments.admission
+        self.write_duration = instruments.write_duration
+        self.write_bytes = instruments.write_bytes
+        self.materialize = instruments.materialize
         self.lag = instruments.lag
         self.tasks = instruments.tasks
         self.gc_pause = instruments.gc_pause
@@ -335,6 +423,38 @@ def request_counts() -> Optional[RequestCounts]:
     """
     runtime = _PROCESS_RUNTIME
     return runtime.requests if runtime is not None else None
+
+
+def driver_metrics() -> Optional[_ProcessRuntime]:
+    """Return the process's runtime metrics while an observer is running, for the rollout driver, else None."""
+    return _PROCESS_RUNTIME
+
+
+class MeteredAdmission:
+    """Wraps the driver's concurrency limit to record each rollout's wait and count the rollouts running inside it."""
+
+    def __init__(self, semaphore: Any, runtime: _ProcessRuntime) -> None:
+        self._semaphore = semaphore
+        self._runtime = runtime
+
+    async def __aenter__(self) -> None:
+        queued_at = time.perf_counter()
+        await self._semaphore.__aenter__()
+        self._runtime.admission.record(time.perf_counter() - queued_at)
+        self._runtime.driver.active += 1
+
+    async def __aexit__(self, *exc_info: Any) -> Any:
+        self._runtime.driver.active -= 1
+        return await self._semaphore.__aexit__(*exc_info)
+
+
+async def count_resident(awaitable: Any, runtime: _ProcessRuntime) -> Any:
+    """Await one rollout, counting it as resident until it finishes."""
+    runtime.driver.resident += 1
+    try:
+        return await awaitable
+    finally:
+        runtime.driver.resident -= 1
 
 
 def _acquire_process_runtime(meter: Any) -> _ProcessRuntime:

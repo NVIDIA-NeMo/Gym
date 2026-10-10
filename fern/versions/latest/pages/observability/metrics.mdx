@@ -113,7 +113,21 @@ A Gym server answers every request on one asyncio event loop. When synchronous w
 | `gym.server.requests.failed` | Counter | count | Requests whose handler raised past every middleware. |
 | `gym.http.client.requests.in_flight` | Up/down counter | count | Outbound calls through `server_utils.request` still waiting for their response headers. |
 
-`gym.runtime.event_loop.lag` and `gym.runtime.event_loop.tasks` carry `nemo.gym.event_loop`, which is `server` for a server's own loop and `head_server` for the head server's loop inside the supervisor.
+The rollout driver, which is `gym eval run`, reports how much work it holds and where that work waits:
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.driver.rollouts.offered` | Counter | count | Rollouts handed to dispatch. |
+| `gym.driver.rollouts.resident` | Up/down counter | count | Rollout tasks that exist and have not finished, whether waiting for admission or running. |
+| `gym.driver.rollouts.active` | Up/down counter | count | Rollouts admitted past the concurrency limit and running. |
+| `gym.driver.admission.duration` | Histogram | s | Time one rollout waited for the concurrency limit before it started. |
+| `gym.driver.output.write.duration` | Histogram | s | Time to write and flush one rollout's output row. |
+| `gym.driver.output.write.bytes` | Histogram | bytes | Size of one rollout's output row. |
+| `gym.driver.materialize.duration` | Histogram | s | Time to read, repeat, and write a run's input rows before dispatch. |
+
+Resident minus active is the number of rollouts waiting for admission. A standalone `gym eval run --no-serve` driver sets up its own telemetry from the `telemetry:` block, so it reports these metrics and the `gym.job` span too.
+
+`gym.runtime.event_loop.lag` and `gym.runtime.event_loop.tasks` carry `nemo.gym.event_loop`, which is `server` for a server's own loop, `head_server` for the head server's loop inside the supervisor, and `driver` for the rollout driver's loop.
 
 The work stays off the request path. The event loop runs one sampling coroutine per interval. Process, garbage-collection, and request totals are plain counters that the exporter's background thread reads when it exports, so a request costs a few integer updates and no OpenTelemetry call.
 
