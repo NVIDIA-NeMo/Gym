@@ -26,6 +26,19 @@ import resources_servers.genrm_compare.app as genrm
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 
 
+def comparison_result(score_1=4.0, score_2=2.0, ranking=1.0):
+    """Build the full comparison result expected by the server."""
+    scores = (score_1, score_2, ranking)
+    return (*scores, *scores, -1.0, -1.0, -1.0, 0.0, 0.0)
+
+
+def collected_comparisons(scores: list[float]) -> tuple[list[genrm.ComparisonResult], list[tuple[int, int, int]]]:
+    """Use actual aggregation in lifecycle tests while controlling judge scores."""
+    pairs = [(i, i + 1, 0) for i in range(len(scores) - 1)]
+    results = [comparison_result(scores[i], scores[j], 3.5) for i, j, _ in pairs]
+    return results, pairs
+
+
 def member(index, *, group="group", attempt=0, response_id=None):
     return genrm.GenRMCompareVerifyRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "2+2?"}]),
@@ -55,7 +68,7 @@ def test_deadline_must_be_finite_positive(config, field, value):
 
 
 async def test_judging_waits_for_full_group_and_exact_retry_replays(server):
-    judge = AsyncMock(return_value=(4.0, 2.0, 1.0))
+    judge = AsyncMock(return_value=comparison_result())
     server._run_single_comparison = judge
     first = asyncio.create_task(server.verify(member(0)))
     await asyncio.sleep(0)
@@ -73,9 +86,9 @@ async def test_disconnect_reattaches_without_replacing_answer(server, during_jud
     async def compare(*args, **kwargs):
         started.set()
         await release.wait()
-        return [1.0, 2.0], {}, [], []
+        return collected_comparisons([1.0, 2.0])
 
-    server._run_compare = AsyncMock(side_effect=compare)
+    server._collect_comparisons = AsyncMock(side_effect=compare)
     first = asyncio.create_task(server.verify(member(0)))
     await asyncio.sleep(0)
     second = asyncio.create_task(server.verify(member(1))) if during_judging else None
@@ -93,7 +106,7 @@ async def test_disconnect_reattaches_without_replacing_answer(server, during_jud
         second = asyncio.create_task(server.verify(member(1)))
     release.set()
     assert [r.reward for r in await asyncio.gather(retry, second)] == [1.0, 2.0]
-    server._run_compare.assert_awaited_once()
+    server._collect_comparisons.assert_awaited_once()
 
 
 async def test_judge_has_separate_deadline_and_drains_comparisons(server):
@@ -119,7 +132,7 @@ async def test_judge_has_separate_deadline_and_drains_comparisons(server):
 
 
 async def test_simultaneous_groups_do_not_mix(server):
-    server._run_single_comparison = AsyncMock(return_value=(4.0, 2.0, 1.0))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result())
     a = asyncio.create_task(server.verify(member(0, group="run-a")))
     b = asyncio.create_task(server.verify(member(1, group="run-b")))
     await asyncio.sleep(0)
@@ -133,7 +146,7 @@ async def test_simultaneous_groups_do_not_mix(server):
 @pytest.mark.parametrize("delay", [0, 0.008, 0.012])
 async def test_final_arrival_deadline_race_never_publishes_partial_reward(server, delay):
     server.config.cohort_collection_timeout_s = 0.01
-    server._run_single_comparison = AsyncMock(return_value=(4.0, 2.0, 1.0))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result())
     first = asyncio.create_task(server.verify(member(0)))
     await asyncio.sleep(delay)
     results = await asyncio.wait_for(asyncio.gather(first, server.verify(member(1)), return_exceptions=True), 1)
@@ -142,7 +155,7 @@ async def test_final_arrival_deadline_race_never_publishes_partial_reward(server
         assert [r.reward for r in results] == [3.0, 3.0]
     else:
         assert all(isinstance(r, HTTPException) for r in results)
-        assert not cohort.rewards
+        assert not cohort.results
     assert all(m.body is None and not m.waiters for m in cohort.members.values())
 
 
@@ -167,7 +180,7 @@ async def test_abandoned_group_expires_without_another_request(server):
     await asyncio.gather(first, return_exceptions=True)
     assert cohort.members[0].body is not None and not cohort.members[0].waiters
     await asyncio.wait_for(timer, 1)
-    assert cohort.phase == "failed" and not cohort.rewards
+    assert cohort.phase == "failed" and not cohort.results
     assert all(m.body is None and not m.waiters for m in cohort.members.values())
 
 
@@ -184,10 +197,10 @@ async def test_late_judge_result_cannot_publish_after_supersession(server):
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
                 # A backend may already have produced a reply when cancellation arrives.
-                return [99.0, 99.0], {}, [], []
-        return [1.0, 2.0], {}, [], []
+                return collected_comparisons([99.0, 99.0])
+        return collected_comparisons([1.0, 2.0])
 
-    server._run_compare = compare
+    server._collect_comparisons = compare
     old = [asyncio.create_task(server.verify(member(i))) for i in range(2)]
     await asyncio.wait_for(started.wait(), 1)
     new = await asyncio.gather(*(server.verify(member(i, attempt=1)) for i in range(2)))
@@ -195,7 +208,7 @@ async def test_late_judge_result_cannot_publish_after_supersession(server):
     assert all(isinstance(r, HTTPException) and r.status_code == 503 for r in old_results)
     assert [r.reward for r in new] == [1.0, 2.0]
     retired = next(c for c in server._verify_cohorts.values() if c.group_attempt == 0)
-    assert retired.phase == "failed" and not retired.rewards
+    assert retired.phase == "failed" and not retired.results
 
 
 async def test_failed_legacy_group_cannot_mix_replacement_with_delayed_old_member(server):
@@ -208,7 +221,7 @@ async def test_failed_legacy_group_cannot_mix_replacement_with_delayed_old_membe
     assert server._verify_cohorts[old.key] is old and old.phase == "failed"
     assert all(m.body is None and not m.waiters for m in old.members.values())
 
-    server._run_single_comparison = AsyncMock(return_value=(4.0, 2.0, 1.0))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result())
     results = await asyncio.gather(
         server.verify(member(0, group=None, response_id="new-0")),
         server.verify(member(1, group=None, response_id="old-1")),
@@ -218,7 +231,7 @@ async def test_failed_legacy_group_cannot_mix_replacement_with_delayed_old_membe
     assert all("fresh _ng_group_id" in r.detail for r in results)
     server._run_single_comparison.assert_not_awaited()
     await server._publish_verify_cohort(old.key, old, {0: 99.0, 1: 99.0})
-    assert old.phase == "failed" and not old.rewards
+    assert old.phase == "failed" and not old.results
     replacement = await asyncio.gather(
         *(server.verify(member(i, group="fresh", response_id=f"new-{i}")) for i in range(2))
     )

@@ -141,11 +141,13 @@ for the input format, explicit group IDs, and recovery limits.
 |-----------|------|---------|-------------|
 | `genrm_model_server` | ModelServerRef | *required* | Reference to the GenRM model server (default: `genrm_model`) |
 | `genrm_responses_create_params` | object | *required* | Generation parameters for GenRM calls |
+| `comparison_mode` | string | `"rollout_cohort"` | Compare rollouts with each other (`"rollout_cohort"`) or with a fixed response (`"fixed_baseline"`) |
 | `comparison_strategy` | string | `"circular"` | Pair generation strategy: `"circular"` or `"all_pairs"` |
 | `num_judges_per_comparison` | int | `1` | Number of judge passes per pair (for majority voting) |
 | `use_principle` | bool | `false` | Enable principle-based comparison |
 | `default_principle` | string | *(see config)* | Default principle when none provided in request |
 | `aggregator_method` | string | `"simple_tiebreaker"` | Score aggregation method |
+| `score_source` | string | `"overall"` | Use the GenRM overall score (`"overall"`) or the equal-weight mean of rubric scores (`"rubric_mean"`) |
 | `reasoning_bonus` | float | `0.0` | Bonus for shortest reasoning among top performers |
 | `answer_bonus` | float | `0.0` | Bonus for shortest answer among top performers |
 | `top_percentile` | float | `0.2` | Percentile threshold for applying bonuses |
@@ -162,6 +164,61 @@ for the input format, explicit group IDs, and recovery limits.
 | `judge_request_timeout_s` | float | `1800` | Per-request deadline, including connection retries |
 | `cohort_result_ttl_s` | float or null | `3600` | Terminal-record retention; null disables time expiry, but the count cap still applies |
 | `max_terminal_cohorts` | int | `4096` | Maximum number of retained terminal groups |
+
+### Fixed-baseline and rubric-mean scoring
+
+Set `comparison_mode: fixed_baseline` to compare each rollout with the reference in
+`responses_create_params.metadata.baseline_response`. Set `num_rollouts_per_prompt` to the actual
+rollouts per group and admit all members concurrently; a singleton still calls the judge.
+
+Set `score_source: rubric_mean` to use equal-weight rubric scores. Each task row must provide a
+top-level `expected_rubric_ids` list, and the prompt or principle must define the rubrics.
+All group members must share the same baseline and rubric ID set; ID order does not matter.
+
+These options work independently or together. Defaults use rollout-cohort comparisons and overall
+scores. `/compare` ignores `comparison_mode` and always compares the submitted responses with each
+other; it still requires `expected_rubric_ids` when using rubric scoring.
+
+For example, with `expected_rubric_ids: [1, 2]`, the judge must return:
+
+```json
+{"rubric_evaluations": [
+  {"rubric_id": 1, "score_1": 5, "score_2": 3, "ranking": 1},
+  {"rubric_id": 2, "score_1": 4, "score_2": 2, "ranking": 2}
+]}
+```
+
+Each expected ID must appear exactly once. IDs must be integer-valued, with finite scores in 1-5
+and rankings in 1-6. One invalid rubric rejects the whole rubric verdict.
+After exhausted parse retries, that comparison uses `default_score` and `default_ranking`.
+With neutral `default_ranking: 3.5`, its fallback aggregate is `default_score`
+before length/style adjustments; a nonneutral ranking can also affect the tiebreaker.
+Judge API failures retain the masked-failure handling described below.
+
+### Verification reward diagnostics
+
+All score aggregates include the existing tiebreaker. `/verify` returns:
+
+| Field | Meaning |
+| --- | --- |
+| `reward`, `reward_score_raw` | Selected score-source aggregate after and before length/style adjustments. |
+| `reward_length_adjustment` | Adjustment applied to the selected score source: `reward - reward_score_raw`. |
+| `reward_rubric_aggregate_valid` | Rubric aggregate before adjustments; null in overall mode or if any comparison for this rollout failed rubric parsing. |
+| `reward_overall_score_raw`, `reward_overall_score` | Overall aggregates before and after length/style adjustments. |
+| `genrm_parse_failure_rate_per_group` | Fraction of final comparison verdicts that failed overall parsing. |
+| `genrm_rubric_parse_failure_rate_per_group` | Fraction that failed rubric parsing; zero in overall mode. |
+| `reasoning_text`, `answer_text` | Reasoning and final answer extracted from the rollout. |
+
+### Token-usage metrics
+
+When the GenRM response includes usage data, `/verify` reports:
+
+- Input and output tokens per comparison: mean, p50, and p95
+- Total output tokens per group
+- Fraction of comparisons that reached `max_output_tokens`
+
+Counts include reported usage from retry attempts. Unavailable usage fields are null in `/verify`
+and omitted from `/compare` metrics. Skip null values when averaging usage and valid-rubric metrics.
 
 ## Comparison Strategies
 
