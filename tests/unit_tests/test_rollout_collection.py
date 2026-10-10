@@ -9011,6 +9011,39 @@ class TestEnvironmentServerRouting:
         with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_trajectory'\]"):
             nemo_gym.rollout_collection._episode_record(reply)
 
+    def test_episode_result_may_self_report_a_judge_failure(self) -> None:
+        """judge_failsafe (nemo_gym/judge.py) reports a caught JudgeError through a 200 verify *result*
+        carrying _ng_failure_class/_ng_failure_judge_error, not through a BaseEpisodeResponse `failure`.
+        A native single_agent_turn episode must not crash rollout collection on this shape.
+        """
+        result = {
+            "reward": 0.0,
+            "mask_sample": True,
+            "failure_kind": "judge_failed",
+            "failure_reason": "judge timed out",
+            NG_FAILURE_CLASS_KEY: "judge_failed",
+            "_ng_failure_judge_error": "judge timed out",
+        }
+        reply = self._native_identity("a") | {"result": result}
+
+        record = nemo_gym.rollout_collection._episode_record(reply)
+
+        # Preserved unchanged, so the collector's own success/failure routing (which reads
+        # NG_FAILURE_CLASS_KEY off exactly this record, downstream of _episode_record) still
+        # sends it to the failures sidecar instead of the main results jsonl.
+        assert record[NG_FAILURE_CLASS_KEY] == "judge_failed"
+        assert record["_ng_failure_judge_error"] == "judge timed out"
+        assert record["mask_sample"] is True
+
+        # Negative control: a genuinely collector-owned key alongside the two exempted ones is
+        # still rejected, so the exemption is scoped to judge_failsafe's own vocabulary, not to
+        # every "_ng_"-prefixed key.
+        spoofed = self._native_identity("b") | {
+            "result": {"reward": 1.0, NG_FAILURE_CLASS_KEY: "judge_failed", "ng_trajectory": {}}
+        }
+        with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_trajectory'\]"):
+            nemo_gym.rollout_collection._episode_record(spoofed)
+
     def test_episode_detection_needs_object_identities_and_an_object_failure(self) -> None:
         """An agent reply echoing identity fields as strings is not an episode reply; a bad failure is an error."""
         is_episode = nemo_gym.rollout_collection._is_episode_response

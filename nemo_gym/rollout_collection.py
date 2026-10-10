@@ -337,13 +337,21 @@ def _is_collector_key(key: str) -> bool:
     return key.startswith("_ng_") or key in (NG_TRAJECTORY_KEY, "ng_model_call_capture", NG_PERF_KEY)
 
 
+# judge_failsafe (nemo_gym/judge.py) reports a failed judge call through the same _ng_failure_class /
+# _ng_failure_judge_error pair _episode_record's own `failure` branch below builds for an EpisodeFailure,
+# because a caught JudgeError is a 200 verify *result*, not a BaseEpisodeResponse `failure`. These two are
+# self-classification, the same vocabulary the collector already trusts itself to write; not collector-only
+# bookkeeping like NG_TRAJECTORY_KEY/NG_PERF_KEY, which stays reserved.
+_SELF_REPORTED_FAILURE_KEYS = frozenset({NG_FAILURE_CLASS_KEY, "_ng_failure_judge_error"})
+
+
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     """Turn a ``BaseEpisodeResponse`` into the rollout record the collector stores.
 
     A handled ``failure`` becomes a failures-sidecar row, so resume retries a non-terminal one and
     never a terminal one. A ``result`` is stored as the Environment Server returned it; the collector
     adds only its own ``_ng_*`` keys, so any Environment Server type can be collected without the
-    collector knowing its result fields.
+    collector knowing its result fields. The one exception is ``_SELF_REPORTED_FAILURE_KEYS``, above.
 
     Every Environment Server type is scored the same way: through the result's top-level ``reward``,
     with optional top-level ``reward_components``. A reward nested elsewhere in the result is stored as
@@ -370,7 +378,7 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     result = response.get("result")
     if not isinstance(result, Mapping):
         raise ValueError(f"environment server reply for task {task_id!r} carries a non-object result: {result!r}")
-    reserved = sorted(key for key in result if _is_collector_key(key))
+    reserved = sorted(key for key in result if _is_collector_key(key) and key not in _SELF_REPORTED_FAILURE_KEYS)
     if reserved:
         raise ValueError(
             f"environment server result for task {task_id!r} uses keys reserved for rollout collection: {reserved}"
