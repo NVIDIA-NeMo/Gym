@@ -1,0 +1,23 @@
+sandbox:
+  default_metadata:
+    sandbox-api: substrate-ateapi
+  substrate:
+    connection:
+      # Both default to a port-forward:
+      #   kubectl port-forward -n ate-system svc/api 8080:443
+      #   kubectl port-forward -n ate-system svc/atenet-router 8000:80
+      ateapi_addr: localhost:8080
+      atenet_addr: localhost:8000
+      atespace: swebench
+      template_namespace: ate-swebench
+    create:
+      ready_timeout_s: 1200
+      # after_exec suspends the actor once each step finishes, so an idle
+      # sandbox holds no worker. Set to never to measure against always-on.
+      suspend_policy: after_exec
+    exec:
+      default_timeout_s: 1800
+      concurrency: 32
+    probe:
+      deadline_s: 300
+      stable_delay_s: 1.0

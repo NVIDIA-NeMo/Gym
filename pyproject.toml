@@ -349,6 +349,25 @@ sandbox = [
     # Updated: Tue Jun 03, 2026 with boto3>=1.34
     # License: Apache 2.0 https://github.com/boto/boto3/blob/develop/LICENSE
     "boto3>=1.34",
+
+    # The Substrate sandbox provider talks to the ateapi control plane over gRPC
+    # (grpcio + the vendored ateapi protobuf stubs) and to the atenet router and
+    # in-actor agent over HTTP (httpx). The kubernetes client mints the
+    # ServiceAccount token and reads the ClusterTrustBundle that authenticate and
+    # trust ateapi; PyYAML parses the kubeconfig those are resolved from.
+    # grpcio lower bound matches the ray-transitive pin above; protobuf lower
+    # bound matches the checked-in generated stubs.
+    # Updated: Sun Sep 07, 2026 with grpcio==1.83.1, protobuf==6.33.6, httpx==0.28.1, kubernetes==36.0.3, PyYAML==6.0.3
+    # grpcio license: Apache 2.0 https://github.com/grpc/grpc/blob/master/LICENSE
+    # protobuf license: BSD-3-Clause https://github.com/protocolbuffers/protobuf/blob/main/LICENSE
+    # httpx license: BSD-3-Clause https://github.com/encode/httpx/blob/master/LICENSE.md
+    # kubernetes license: Apache 2.0 https://github.com/kubernetes-client/python/blob/master/LICENSE
+    # PyYAML license: MIT https://github.com/yaml/pyyaml/blob/main/LICENSE
+    "grpcio>=1.81.0rc1",
+    "protobuf>=6.31",
+    "httpx>=0.27",
+    "kubernetes>=30",
+    "PyYAML>=6.0",
 ]
 
 # Keep OpenShell opt-in so its platform-specific SDK wheel cannot block installs for other providers.
