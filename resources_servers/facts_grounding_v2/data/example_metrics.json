@@ -1,0 +1,88 @@
+{
+    "name": "example",
+    "type": {
+        "unique_count": 2,
+        "total_count": 5
+    },
+    "jsonl_fpath": "resources_servers/facts_grounding_v2/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "Apache 2.0",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 304.4,
+        "Min": 107.0,
+        "Max": 606.0,
+        "Standard deviation": 230.42
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "context_document": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "context_document_chars": {
+        "Total # non-null values": 5,
+        "Average": 1651.6,
+        "Min": 561.0,
+        "Max": 3398.0,
+        "Standard deviation": 1411.78
+    },
+    "domain": {
+        "unique_count": 2,
+        "total_count": 5
+    },
+    "full_prompt": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "full_prompt_chars": {
+        "Total # non-null values": 5,
+        "Average": 2021.6,
+        "Min": 764.0,
+        "Max": 3992.0,
+        "Standard deviation": 1511.84
+    },
+    "high_level_type": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "row_sha256": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "system_instruction": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "user_request": {
+        "unique_count": 5,
+        "total_count": 5
+    }
+}

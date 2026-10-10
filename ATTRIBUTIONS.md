@@ -11,6 +11,17 @@ All third-party software is used without modification unless otherwise noted
 
 ---
 
+## Benchmark Data and Prompts
+
+- FACTS Grounding Public Examples, Google DeepMind and Google Research, Kaggle dataset
+  deepmind/FACTS-grounding-examples, version 17: Apache-2.0. The full dataset is downloaded
+  by the benchmark prepare script and is not committed.
+- FACTS Grounding v2 technical report: Cheng et al., The FACTS Leaderboard: A Comprehensive
+  Benchmark for Large Language Model Factuality, arXiv:2512.10791v1, section 6 (CC BY 4.0).
+- The official Kaggle starter notebook, prathameshbang/facts-grounding-v2-benchmark-starter,
+  version 4 (Apache-2.0), is the reference for the eligibility and grounding prompt/parser
+  behavior. The adapter port is version-pinned by the resources-server prompt hashes.
+
 ## Python Package Dependencies
 
 | Component | Version | License | URL |
