@@ -664,15 +664,18 @@ async def _request_with_retries(
                 if _max_num_tries is not None:
                     if explicit_tries >= _max_num_tries:
                         raise
-                # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
-                elif not _internal:
-                    print(
-                        f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
+                else:
+                    # Internal calls skip this print and the MAX_NUM_TRIES limit, since the head server shuts
+                    # everything down if a Gym server fails. They still count tries so `_max_connection_retries`
+                    # applies.
+                    if not _internal:
+                        print(
+                            f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
 Sleeping 0.5s and retrying...
 """
-                    )
-                    if num_tries >= MAX_NUM_TRIES:
-                        raise e
+                        )
+                        if num_tries >= MAX_NUM_TRIES:
+                            raise e
 
                     num_tries += 1
 
