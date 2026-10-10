@@ -1,25 +1,37 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import subprocess
 from pathlib import Path
 from shlex import quote
+from shlex import split as shlex_split
 from shutil import copyfile
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import ANY, AsyncMock, MagicMock, call
 
 import pytest
-from fastapi import Request
+from fastapi import HTTPException, Request
+from pydantic import TypeAdapter, ValidationError
 
 import resources_servers.terminal_bench_2_1.app as terminal_bench_app
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+)
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.terminal_bench_2_1.app import (
     _BULLSEYE_SECURITY_SNAPSHOT_SETUP,
     TerminalBench21ResourcesServer,
     TerminalBench21ResourcesServerConfig,
+    TerminalBench21RunRequest,
     TerminalBench21SeedSessionRequest,
+    TerminalBench21SessionVerifyRequest,
     TerminalBench21VerifyRequest,
+    task_verifier_timeout_sec,
+    uploaded_subdirectories,
 )
 
 
@@ -125,6 +137,480 @@ class TestApp:
             call("bash /tests/test.sh", timeout_s=timeout),
         ]
 
+
+SESSION_ID = "session-1"
+AGENT_USER_ERROR = "agent_user must be an account name, a uid, or null"
+NORMALIZED_AGENT_USERS = [
+    ("1000", 1000),
+    ("0", 0),
+    ("agent", "agent"),
+    ("root", "root"),
+    (1000, 1000),
+    (0, 0),
+    (None, None),
+    # isdecimal, not isdigit: a superscript digit is not a uid and must not make int() raise.
+    ("\u00b2", "\u00b2"),
+]
+# Booleans (pydantic lax mode would coerce `true` to uid 1) and empty / option-like names (`su` would parse them
+# as options; shlex.quote leaves "-m" unquoted).
+REJECTED_AGENT_USERS = [True, False, "", "-m", "--login", "-"]
+
+
+def _make_server(**config_overrides) -> TerminalBench21ResourcesServer:
+    config = TerminalBench21ResourcesServerConfig(
+        sandbox_provider="",
+        sandbox_config=dict(),
+        host="",
+        port=0,
+        entrypoint="",
+        name="",
+        **config_overrides,
+    )
+    return TerminalBench21ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def _request() -> SimpleNamespace:
+    return SimpleNamespace(session={SESSION_ID_KEY: SESSION_ID})
+
+
+def _response() -> NeMoGymResponse:
+    return NeMoGymResponse(
+        id="r",
+        created_at=0.0,
+        model="m",
+        object="response",
+        output=[
+            NeMoGymResponseOutputMessage(
+                id="msg",
+                content=[NeMoGymResponseOutputText(annotations=[], text="done", type="output_text")],
+                role="assistant",
+                status="completed",
+                type="message",
+            )
+        ],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+    )
+
+
+def _verify_request(task_folder: Path, **extra) -> TerminalBench21VerifyRequest:
+    return TerminalBench21VerifyRequest(
+        task_name="terminal-bench/some-task",
+        docker_image="example.invalid/some-task:latest",
+        task_folder=str(task_folder),
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=_response(),
+        **extra,
+    )
+
+
+class FakeSandbox:
+    """Records exec/upload/download/stop calls; the reward download writes a parseable reward file."""
+
+    def __init__(self, cwd: str = "/app", reward: str = "1\n"):
+        self._handle = SimpleNamespace(sandbox_id="sb-1")
+        self._cwd = cwd
+        self._reward = reward
+        self.execs: list[tuple[str, dict]] = []
+        self.uploads: list[tuple[str, str]] = []
+        # Remote path of every file inside the uploaded folder archives, in archive order.
+        self.uploaded_files: list[str] = []
+        self.downloads: list[tuple[str, str]] = []
+        self.stopped = False
+
+    async def exec(self, command, **kwargs):
+        self.execs.append((command, kwargs))
+        stdout = self._cwd if command == "pwd" else ""
+        return SimpleNamespace(stdout=stdout, stderr="", return_code=0)
+
+    async def upload(self, local_path, remote_path):
+        self.uploads.append((str(local_path), remote_path))
+        if remote_path.endswith(ARCHIVE_SUFFIX):
+            import tarfile
+
+            target = remote_path[: -len(ARCHIVE_SUFFIX)]
+            with tarfile.open(local_path, "r:gz") as tar:
+                self.uploaded_files.extend(f"{target}/{member.name}" for member in tar.getmembers())
+
+    async def download(self, remote_path, local_path):
+        self.downloads.append((remote_path, str(local_path)))
+        Path(local_path).write_text(self._reward)
+
+    async def serialize(self):
+        return {"sandbox_id": self._handle.sandbox_id}
+
+    async def stop(self):
+        self.stopped = True
+
+
+def _exec_commands(sandbox: FakeSandbox) -> list[str]:
+    return [command for command, _ in sandbox.execs]
+
+
+def _exec_kwargs(sandbox: FakeSandbox, command: str) -> dict:
+    matches = [kwargs for cmd, kwargs in sandbox.execs if cmd == command]
+    assert len(matches) == 1, (command, sandbox.execs)
+    return matches[0]
+
+
+def _exec_user(sandbox: FakeSandbox, command: str):
+    return _exec_kwargs(sandbox, command).get("user")
+
+
+# The verifier prepares /logs/verifier before every test run, then hands it to the agent account when the tests
+# run as that account.
+PREPARE_LOGS = "mkdir -p /logs/verifier"
+HAND_LOGS_TO_AGENT = "chown -R agent /logs/verifier"
+ARCHIVE_SUFFIX = ".upload.tar.gz"
+
+
+def _assert_tests_ran(exec_mock, *args, **kwargs) -> None:
+    """The verifier prepares /logs/verifier, then runs the tests with these arguments (and runs nothing else)."""
+    assert [c.args[0] for c in exec_mock.await_args_list] == [PREPARE_LOGS, args[0]]
+    exec_mock.assert_awaited_with(*args, **kwargs)
+
+
+def _mkdir(target: str) -> str:
+    """The command `_upload_folder` runs before uploading a folder archive to `target`."""
+    return f"mkdir -p {json.dumps(target)}"
+
+
+def _untar(target: str) -> str:
+    """The command `_upload_folder` runs to unpack a folder archive into `target`."""
+    archive = json.dumps(target + ARCHIVE_SUFFIX)
+    return f"tar -xzf {archive} -C {json.dumps(target)} && rm -f {archive}"
+
+
+def _make_task_folder(tmp_path: Path, with_solution: bool = False, nested_solution: bool = False) -> Path:
+    task_folder = tmp_path / "task"
+    (task_folder / "tests").mkdir(parents=True)
+    (task_folder / "tests" / "test.sh").write_text("#!/bin/bash\necho 1 > /logs/verifier/reward.txt\n")
+    if with_solution or nested_solution:
+        (task_folder / "solution").mkdir()
+        (task_folder / "solution" / "solve.sh").write_text("#!/bin/bash\ntouch /app/done\n")
+    if nested_solution:
+        (task_folder / "solution" / "pkg").mkdir()
+        (task_folder / "solution" / "pkg" / "helper.py").write_text("VALUE = 1\n")
+    return task_folder
+
+
+class TestApp:
+    def test_sanity(self) -> None:
+        _make_server()
+
+
+class TestAgentUserNormalization:
+    # The normalizer's own table lives in tests/unit_tests/test_sandbox_agent_user.py; these cover the schema wiring.
+    @pytest.mark.parametrize(("raw", "expected"), NORMALIZED_AGENT_USERS)
+    def test_request_normalizes_agent_user(self, raw, expected) -> None:
+        body = TerminalBench21SeedSessionRequest(
+            task_name="t", docker_image="img", task_folder="folder", agent_user=raw
+        )
+        assert body.agent_user == expected
+        assert type(body.agent_user) is type(expected)
+
+    @pytest.mark.parametrize("raw", REJECTED_AGENT_USERS)
+    def test_request_rejects_bools_and_option_like_agent_user(self, raw) -> None:
+        with pytest.raises(ValidationError, match=AGENT_USER_ERROR):
+            TerminalBench21SeedSessionRequest(task_name="t", docker_image="img", task_folder="folder", agent_user=raw)
+
+    def test_omitted_is_none(self) -> None:
+        body = TerminalBench21SeedSessionRequest(task_name="t", docker_image="img", task_folder="folder")
+        assert body.agent_user is None
+
+
+class TestUploadedSubdirectories:
+    def test_flat_upload_has_no_subdirectories(self) -> None:
+        assert uploaded_subdirectories("/app", ["/app/solve.sh"]) == []
+
+    def test_nested_uploads_yield_deduplicated_parents_first(self) -> None:
+        remote_paths = [
+            "/app/pkg/sub/deep.py",
+            "/app/solve.sh",
+            "/app/pkg/helper.py",
+            "/app/pkg/sub/other.py",
+            "/app/data/x.txt",
+        ]
+        assert uploaded_subdirectories("/app", remote_paths) == ["/app/pkg", "/app/pkg/sub", "/app/data"]
+
+    def test_never_includes_the_upload_root(self) -> None:
+        assert "/app" not in uploaded_subdirectories("/app", ["/app/pkg/helper.py", "/app/solve.sh"])
+
+
+class TestSeedSession:
+    @pytest.mark.parametrize(
+        ("row_extra", "expected"),
+        [({"agent_user": "agent"}, "agent"), ({}, None), ({"agent_user": 1000}, 1000), ({"agent_user": "1000"}, 1000)],
+    )
+    async def test_seed_session_echoes_agent_user(self, monkeypatch, row_extra, expected) -> None:
+        server = _make_server()
+        sandbox = FakeSandbox()
+        created_for = []
+
+        async def fake_create_sandbox(verify_request):
+            created_for.append(verify_request)
+            return sandbox
+
+        monkeypatch.setattr(server, "_create_sandbox", fake_create_sandbox)
+        # seed_session also hands the provider config to sandbox-connecting agents (mini-SWE).
+        monkeypatch.setattr(terminal_bench_app, "get_global_config_dict", lambda: {"sandbox": {"local": {}}})
+        monkeypatch.setattr(terminal_bench_app, "resolve_provider_config", lambda name, config: {"local": {}})
+        body = TerminalBench21RunRequest(task_name="t", docker_image="img", task_folder="folder", **row_extra)
+
+        result = await server.seed_session(_request(), body)
+
+        assert result.sandbox_handle == "sb-1"
+        assert result.agent_user == expected
+        assert result.user == expected
+        assert type(result.agent_user) is type(expected)
+        assert created_for == [body]
+        assert server._session_id_to_sandbox[SESSION_ID] is sandbox
+
+
+class TestVerify:
+    async def test_verify_switch_on_runs_tests_as_agent_user(self, tmp_path) -> None:
+        server = _make_server(verifier_runs_as_agent_user=True)
+        sandbox = FakeSandbox()
+        server._session_id_to_sandbox[SESSION_ID] = sandbox
+        task_folder = _make_task_folder(tmp_path)
+
+        result = await server.verify(_request(), _verify_request(task_folder, agent_user="agent"))
+
+        assert _exec_commands(sandbox) == [
+            _mkdir("/tests"),
+            _untar("/tests"),
+            PREPARE_LOGS,
+            HAND_LOGS_TO_AGENT,
+            "bash /tests/test.sh",
+        ]
+        # /tests is uploaded and /logs/verifier handed over as the image default; the tests run as the agent's
+        # account, like the vendor images' USER.
+        assert _exec_user(sandbox, _mkdir("/tests")) is None
+        assert _exec_user(sandbox, _untar("/tests")) is None
+        assert _exec_user(sandbox, PREPARE_LOGS) is None
+        assert _exec_user(sandbox, HAND_LOGS_TO_AGENT) is None
+        assert _exec_user(sandbox, "bash /tests/test.sh") == "agent"
+        assert sandbox.uploaded_files == ["/tests/test.sh"]
+        assert [remote for remote, _ in sandbox.downloads] == ["/logs/verifier/reward.txt"]
+        assert result.reward == 1.0
+        assert result.evaluation_completed is True
+        assert result.golden_patch_output is None
+        assert result.agent_user == "agent"
+        assert result.verifier_user == "agent"
+        assert sandbox.stopped is True
+        assert SESSION_ID not in server._session_id_to_sandbox
+
+    async def test_verify_default_reuses_session_sandbox_and_runs_tests_as_image_default(self, tmp_path) -> None:
+        server = _make_server()
+        sandbox = FakeSandbox()
+        server._session_id_to_sandbox[SESSION_ID] = sandbox
+
+        result = await server.verify(_request(), _verify_request(_make_task_folder(tmp_path), agent_user="agent"))
+
+        assert _exec_commands(sandbox) == [_mkdir("/tests"), _untar("/tests"), PREPARE_LOGS, "bash /tests/test.sh"]
+        assert _exec_user(sandbox, "bash /tests/test.sh") is None
+        assert result.agent_user == "agent"
+        assert result.verifier_user is None
+
+    @pytest.mark.parametrize("agent_user", [None, "root", 0])
+    async def test_verify_root_or_unset_agent_user_runs_tests_as_image_default(self, tmp_path, agent_user) -> None:
+        server = _make_server(verifier_runs_as_agent_user=True)
+        sandbox = FakeSandbox()
+        server._session_id_to_sandbox[SESSION_ID] = sandbox
+
+        result = await server.verify(_request(), _verify_request(_make_task_folder(tmp_path), agent_user=agent_user))
+
+        assert _exec_commands(sandbox) == [_mkdir("/tests"), _untar("/tests"), PREPARE_LOGS, "bash /tests/test.sh"]
+        assert _exec_user(sandbox, "bash /tests/test.sh") is None
+        assert result.verifier_user is None
+
+    async def test_verify_uploads_hidden_test_paths(self, tmp_path) -> None:
+        server = _make_server()
+        sandbox = FakeSandbox()
+        server._session_id_to_sandbox[SESSION_ID] = sandbox
+        task_folder = _make_task_folder(tmp_path)
+        (task_folder / "tests" / ".truth").mkdir()
+        (task_folder / "tests" / ".truth" / "vocab.json").write_text("{}\n")
+
+        await server.verify(_request(), _verify_request(task_folder))
+
+        assert sorted(sandbox.uploaded_files) == ["/tests/.truth/vocab.json", "/tests/test.sh"]
+
+    @pytest.mark.parametrize(
+        ("task_toml", "floor", "expected"),
+        [
+            (None, 1800, 1800.0),
+            ("[verifier]\ntimeout_sec = 300\n", 1800, 1800.0),
+            ("[verifier]\ntimeout_sec = 3600.0\n", 1800, 3600.0),
+            ("[verifier]\ntimeout_sec = 300\n", 120, 300.0),
+        ],
+    )
+    async def test_verify_timeout_is_max_of_floor_and_task_limit(self, tmp_path, task_toml, floor, expected) -> None:
+        server = _make_server(verifier_timeout_floor_sec=floor)
+        sandbox = FakeSandbox()
+        server._session_id_to_sandbox[SESSION_ID] = sandbox
+        task_folder = _make_task_folder(tmp_path)
+        if task_toml is not None:
+            (task_folder / "task.toml").write_text(task_toml)
+
+        result = await server.verify(_request(), _verify_request(task_folder))
+
+        assert _exec_kwargs(sandbox, "bash /tests/test.sh")["timeout_s"] == expected
+        assert result.verifier_timeout_sec == expected
+
+    async def test_verify_records_reward_zero_when_reward_file_unparseable(self, tmp_path) -> None:
+        server = _make_server()
+        sandbox = FakeSandbox(reward="not-a-number")
+        server._session_id_to_sandbox[SESSION_ID] = sandbox
+
+        result = await server.verify(_request(), _verify_request(_make_task_folder(tmp_path)))
+
+        assert result.reward == 0.0
+        assert result.evaluation_completed is False
+        assert result.agent_user is None
+        assert sandbox.stopped is True
+
+    async def test_golden_mode_runs_solve_sh_as_agent_user_after_chown(self, tmp_path, monkeypatch) -> None:
+        server = _make_server(is_verifying_golden_patch=True)
+        sandbox = FakeSandbox(cwd="/app")
+
+        async def fake_create_sandbox(verify_request):
+            return sandbox
+
+        monkeypatch.setattr(server, "_create_sandbox", fake_create_sandbox)
+        task_folder = _make_task_folder(tmp_path, with_solution=True)
+
+        result = await server.verify(_request(), _verify_request(task_folder, agent_user="agent"))
+
+        assert _exec_commands(sandbox) == [
+            "pwd",
+            _mkdir("/app"),
+            _untar("/app"),
+            "chown agent /app/solve.sh",
+            "bash /app/solve.sh",
+            _mkdir("/tests"),
+            _untar("/tests"),
+            PREPARE_LOGS,
+            "bash /tests/test.sh",
+        ]
+        assert _exec_user(sandbox, "chown agent /app/solve.sh") is None
+        assert _exec_user(sandbox, "bash /app/solve.sh") == "agent"
+        assert _exec_user(sandbox, "bash /tests/test.sh") is None
+        assert _exec_user(sandbox, _mkdir("/tests")) is None
+        assert sandbox.uploaded_files == ["/app/solve.sh", "/tests/test.sh"]
+        assert result.reward == 1.0
+        assert result.golden_patch_output == ""
+        assert result.agent_user == "agent"
+        assert sandbox.stopped is True
+
+    async def test_golden_mode_chowns_nested_solution_directories_and_files(self, tmp_path, monkeypatch) -> None:
+        server = _make_server(is_verifying_golden_patch=True)
+        sandbox = FakeSandbox(cwd="/app")
+
+        async def fake_create_sandbox(verify_request):
+            return sandbox
+
+        monkeypatch.setattr(server, "_create_sandbox", fake_create_sandbox)
+        task_folder = _make_task_folder(tmp_path, nested_solution=True)
+
+        result = await server.verify(_request(), _verify_request(task_folder, agent_user="agent"))
+
+        commands = _exec_commands(sandbox)
+        assert commands[:3] == ["pwd", _mkdir("/app"), _untar("/app")]
+        chown_command = commands[3]
+        assert commands[4:] == [
+            "bash /app/solve.sh",
+            _mkdir("/tests"),
+            _untar("/tests"),
+            PREPARE_LOGS,
+            "bash /tests/test.sh",
+        ]
+        chown_argv = shlex_split(chown_command)
+        # One non-recursive chown as the image default: the nested directory first, then both files.
+        assert chown_argv[:3] == ["chown", "agent", "/app/pkg"]
+        assert sorted(chown_argv[3:]) == ["/app/pkg/helper.py", "/app/solve.sh"]
+        assert "-R" not in chown_argv
+        assert _exec_user(sandbox, chown_command) is None
+        assert _exec_user(sandbox, "bash /app/solve.sh") == "agent"
+        assert _exec_user(sandbox, "bash /tests/test.sh") is None
+        assert sorted(sandbox.uploaded_files) == ["/app/pkg/helper.py", "/app/solve.sh", "/tests/test.sh"]
+        assert result.reward == 1.0
+        assert result.agent_user == "agent"
+        assert sandbox.stopped is True
+
+    async def test_golden_mode_without_agent_user_runs_solve_sh_as_image_default(self, tmp_path, monkeypatch) -> None:
+        server = _make_server(is_verifying_golden_patch=True)
+        sandbox = FakeSandbox(cwd="/app")
+
+        async def fake_create_sandbox(verify_request):
+            return sandbox
+
+        monkeypatch.setattr(server, "_create_sandbox", fake_create_sandbox)
+        task_folder = _make_task_folder(tmp_path, with_solution=True)
+
+        result = await server.verify(_request(), _verify_request(task_folder))
+
+        assert _exec_commands(sandbox) == [
+            "pwd",
+            _mkdir("/app"),
+            _untar("/app"),
+            "bash /app/solve.sh",
+            _mkdir("/tests"),
+            _untar("/tests"),
+            PREPARE_LOGS,
+            "bash /tests/test.sh",
+        ]
+        assert not any(cmd.startswith("chown") for cmd in _exec_commands(sandbox))
+        assert _exec_user(sandbox, "bash /app/solve.sh") is None
+        assert _exec_user(sandbox, "bash /tests/test.sh") is None
+        assert result.reward == 1.0
+        assert result.agent_user is None
+        assert sandbox.stopped is True
+
+    @pytest.mark.parametrize("agent_user", ["root", 0])
+    async def test_golden_mode_root_escape_hatch_skips_chown(self, tmp_path, monkeypatch, agent_user) -> None:
+        server = _make_server(is_verifying_golden_patch=True)
+        sandbox = FakeSandbox(cwd="/app")
+
+        async def fake_create_sandbox(verify_request):
+            return sandbox
+
+        monkeypatch.setattr(server, "_create_sandbox", fake_create_sandbox)
+        task_folder = _make_task_folder(tmp_path, with_solution=True)
+
+        result = await server.verify(_request(), _verify_request(task_folder, agent_user=agent_user))
+
+        assert not any(cmd.startswith("chown") for cmd in _exec_commands(sandbox))
+        # A root identity is the image default: solve.sh keeps its background services (upstream's
+        # service-preserving exec, which takes no per-command user).
+        kwargs = _exec_kwargs(sandbox, "bash /app/solve.sh")
+        assert kwargs.get("user") is None and kwargs.get("preserve_background_services") is True
+        assert result.agent_user == agent_user
+
+
+class TestTaskVerifierTimeout:
+    @pytest.mark.parametrize(
+        ("content", "expected"),
+        [
+            (None, None),
+            ("[verifier]\ntimeout_sec = 300\n", 300.0),
+            ("[verifier]\ntimeout_sec = 900.5\n", 900.5),
+            ("[verifier]\ntimeout_sec = 0\n", None),
+            ("[verifier]\ntimeout_sec = true\n", None),
+            ('[verifier]\ntimeout_sec = "300"\n', None),
+            ("[agent]\ntimeout_sec = 300\n", None),
+            ("verifier = 3\n", None),
+            ("not = [valid toml\n", None),
+        ],
+    )
+    def test_reads_only_a_positive_number(self, tmp_path, content, expected) -> None:
+        if content is not None:
+            (tmp_path / "task.toml").write_text(content)
+        assert task_verifier_timeout_sec(tmp_path) == expected
+
+
+class TestSandboxSetup:
     async def test_create_sandbox_uses_start_with_setup(self, monkeypatch, tmp_path: Path) -> None:
         sandbox = AsyncMock()
         sandbox.start_with_setup = AsyncMock(return_value=sandbox)
@@ -290,5 +776,398 @@ def test_security_snapshot_preserves_other_repositories(tmp_path: Path, distro: 
             "https://snapshot.debian.org/archive/debian-security/20260831T235959Z/ bullseye-security main"
         )
     assert sources.read_text() == unrelated + expected + "\n"
+
     subprocess.run(command, check=True)
     assert sources.read_text() == unrelated + expected + "\n"
+
+
+@pytest.fixture
+def session_server(monkeypatch, tmp_path):
+    server = TerminalBench21ResourcesServer(
+        config=TerminalBench21ResourcesServerConfig(
+            sandbox_provider="sandbox",
+            sandbox_config={},
+            host="",
+            port=0,
+            entrypoint="",
+            name="tb2",
+            session_records_dir=tmp_path / "records",
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    sandbox = SimpleNamespace(
+        _handle=SimpleNamespace(sandbox_id="original-sandbox"),
+        serialize=AsyncMock(return_value={"sandbox_id": "original-sandbox", "workdir": "/app"}),
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="tests passed", stderr="")),
+        stop=AsyncMock(),
+    )
+
+    async def download(remote_path, local_path):
+        assert remote_path == "/logs/verifier/reward.txt"
+        Path(local_path).write_text("1\n")
+
+    sandbox.download = AsyncMock(side_effect=download)
+    create = AsyncMock(return_value=sandbox)
+    upload = AsyncMock()
+    monkeypatch.setattr(TerminalBench21ResourcesServer, "_create_sandbox", create)
+    monkeypatch.setattr(TerminalBench21ResourcesServer, "_upload_folder", upload)
+    monkeypatch.setattr(terminal_bench_app, "get_global_config_dict", lambda: {"sandbox": {"local": {}}})
+    request = SimpleNamespace(session={SESSION_ID_KEY: "cookie-session"})
+    task = dict(task_name="synthetic", docker_image="original-image", task_folder=str(tmp_path))
+    return SimpleNamespace(
+        server=server, sandbox=sandbox, create=create, upload=upload, request=request, task=task, tmp_path=tmp_path
+    )
+
+
+def _response_dict():
+    return dict(
+        id="resp_test",
+        created_at=0,
+        model="model",
+        object="response",
+        output=[],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+    )
+
+
+@pytest.mark.parametrize("content", ["Write the answer", [{"type": "input_text", "text": "Write the answer"}]])
+@pytest.mark.parametrize("workflow", ["legacy", "session", "session_timeout"])
+async def test_seed_and_verify_both_contracts_use_original_sandbox(session_server, content, workflow):
+    f = session_server
+    params = {"input": [{"role": "user", "content": content}]}
+    seed = await f.server.seed_session(
+        f.request, TerminalBench21RunRequest(**f.task, responses_create_params=params, agent_timeout_sec=60)
+    )
+    assert seed.sandbox_handle == seed.sandbox_descriptor["sandbox_id"] == "original-sandbox"
+    assert seed.session_id == "cookie-session"
+    assert seed.instruction == "Write the answer"
+    assert seed.sandbox_provider == {"local": {}}
+    assert seed.agent_timeout_sec == 60
+    payload = dict(
+        responses_create_params=params,
+        response=dict(
+            id="resp_test",
+            created_at=0,
+            model="model",
+            object="response",
+            output=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        ),
+    )
+    if workflow == "legacy":
+        payload.update(f.task)
+    else:
+        payload.update(
+            session_id=seed.session_id,
+            termination={"reason": "timeout" if workflow == "session_timeout" else "completed"},
+            agent_started=True,
+            harness_metadata={"harness_version": "2.4.6", "reward": -999, "mask_sample": True},
+        )
+    body = TypeAdapter(TerminalBench21VerifyRequest | TerminalBench21SessionVerifyRequest).validate_python(payload)
+    result = await f.server.verify(f.request, body)
+    assert result.reward == 1 and result.evaluation_completed and not result.mask_sample
+    assert result.task_name == "synthetic"
+    assert f.upload.await_args.args == (
+        f.sandbox,
+        Path(f.task["task_folder"]) / "tests",
+        "/tests",
+        terminal_bench_app.TEST_SH_PATCHES,
+        "synthetic",
+    )
+    # No agent_user and no task.toml: image default, floor of 1800 s.
+    _assert_tests_ran(f.sandbox.exec, "bash /tests/test.sh", timeout_s=1800.0, env=None, user=None)
+    f.create.assert_awaited_once()  # Verification must use the seeded sandbox, never create another one.
+    f.sandbox.stop.assert_awaited_once()
+    assert not f.server._session_id_to_sandbox and not f.server._session_id_to_task
+    if workflow != "legacy":
+        assert result.termination == payload["termination"]
+        assert result.agent_started and result.harness_version == "2.4.6"
+
+
+async def test_seed_accepts_existing_task_only_request(session_server):
+    f = session_server
+    seed = await f.server.seed_session(f.request, TerminalBench21RunRequest(**f.task))
+    assert seed.sandbox_handle == "original-sandbox" and seed.instruction == ""
+    assert seed.agent_timeout_sec == 28800
+
+
+@pytest.mark.parametrize("session_id, status", [("other-session", 409), ("cookie-session", 404)])
+async def test_session_verify_requires_matching_cookie_and_seeded_task(session_server, session_id, status):
+    f = session_server
+    body = TerminalBench21SessionVerifyRequest(
+        session_id=session_id,
+        responses_create_params={"input": []},
+        response=dict(
+            id="resp_test",
+            created_at=0,
+            model="model",
+            object="response",
+            output=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        ),
+        termination={"reason": "completed"},
+    )
+    with pytest.raises(HTTPException) as error:
+        await f.server.verify(f.request, body)
+    assert error.value.status_code == status
+    f.sandbox.exec.assert_not_awaited()
+    f.sandbox.stop.assert_not_awaited()
+
+
+async def test_session_verify_records_and_graded_outcome(session_server):
+    f = session_server
+    params = {"input": [{"role": "user", "content": "Write the answer"}]}
+    seed = await f.server.seed_session(
+        f.request,
+        TerminalBench21RunRequest(
+            **f.task, responses_create_params=params, agent_timeout_sec=60, rollout_id="set/task/h-00"
+        ),
+    )
+    record = json.loads((f.tmp_path / "records" / "cookie-session.json").read_text())
+    assert record["phase"] == "open" and record["request"]["rollout_id"] == "set/task/h-00"
+    assert record["sandbox_id"] == "original-sandbox" and "responses_create_params" not in record["request"]
+    body = TerminalBench21SessionVerifyRequest(
+        session_id=seed.session_id,
+        responses_create_params=params,
+        response=_response_dict(),
+        termination={"reason": "nonzero_exit", "detail": "ContextWindowExceeded"},
+        agent_started=True,
+    )
+    result = await f.server.verify(f.request, body)
+    assert result.reward == 1 and result.evaluation_completed and not result.mask_sample
+    assert result.failure_kind is None and result.infrastructure_error is None
+    record = json.loads((f.tmp_path / "records" / "cookie-session.json").read_text())
+    assert record["phase"] == "closed" and record["termination"]["detail"] == "ContextWindowExceeded"
+    assert record["verified_response"]["reward"] == 1 and record["verified_response"]["evaluation_completed"]
+
+
+@pytest.mark.parametrize(
+    "termination, agent_started, kind",
+    [
+        ({"reason": "infrastructure_error", "detail": "Sandbox lacks setsid"}, False, "agent_run_error"),
+        ({"reason": "infrastructure_error", "detail": "runner crashed"}, True, "agent_run_error"),
+        ({"reason": "cancelled"}, True, "cancelled"),
+        ({"reason": "timeout", "detail": "setup"}, False, "agent_run_error"),
+    ],
+)
+async def test_agent_failures_release_the_sandbox_without_grading(session_server, termination, agent_started, kind):
+    f = session_server
+    params = {"input": [{"role": "user", "content": "Write the answer"}]}
+    seed = await f.server.seed_session(f.request, TerminalBench21RunRequest(**f.task, responses_create_params=params))
+    body = TerminalBench21SessionVerifyRequest(
+        session_id=seed.session_id,
+        responses_create_params=params,
+        response=_response_dict(),
+        termination=termination,
+        agent_started=agent_started,
+    )
+    result = await f.server.verify(f.request, body)
+    assert result.reward == 0 and not result.evaluation_completed and result.mask_sample
+    assert result.failure_kind == kind
+    assert result.infrastructure_error == (termination.get("detail") or termination["reason"])
+    assert result.failure_reason == result.infrastructure_error
+    f.upload.assert_not_awaited()  # the tests were never uploaded ...
+    f.sandbox.exec.assert_not_awaited()  # ... nor run
+    f.sandbox.stop.assert_awaited_once()  # but the sandbox is released
+    assert not f.server._session_id_to_sandbox and not f.server._session_id_to_task
+    record = json.loads((f.tmp_path / "records" / "cookie-session.json").read_text())
+    assert record["phase"] == "closed" and record["verified_response"]["infrastructure_error"]
+
+
+async def test_row_verifier_timeout_and_env_reach_the_test_run(session_server):
+    f = session_server
+    params = {"input": [{"role": "user", "content": "Write the answer"}]}
+    seed = await f.server.seed_session(
+        f.request,
+        TerminalBench21RunRequest(
+            **f.task,
+            responses_create_params=params,
+            verifier_timeout_sec=3600,
+            verifier_env={"VERIFIER_WALL_SEC": "3600"},
+            agent_user="cam",
+        ),
+    )
+    assert seed.user == "cam"
+    body = TerminalBench21SessionVerifyRequest(
+        session_id=seed.session_id,
+        responses_create_params=params,
+        response=_response_dict(),
+        termination={"reason": "completed"},
+        agent_started=True,
+    )
+    result = await f.server.verify(f.request, body)
+    assert result.reward == 1
+    # Default: the tests run as the image default (root) with max(1800, the row's 3600 s), even though the agent ran
+    # as "cam".
+    _assert_tests_ran(
+        f.sandbox.exec, "bash /tests/test.sh", timeout_s=3600.0, env={"VERIFIER_WALL_SEC": "3600"}, user=None
+    )
+    assert result.verifier_user is None
+    assert result.verifier_timeout_sec == 3600.0
+
+
+async def _seed_and_verify(f, **row) -> object:
+    params = {"input": [{"role": "user", "content": "Write the answer"}]}
+    seed = await f.server.seed_session(
+        f.request, TerminalBench21RunRequest(**f.task, responses_create_params=params, **row)
+    )
+    body = TerminalBench21SessionVerifyRequest(
+        session_id=seed.session_id,
+        responses_create_params=params,
+        response=_response_dict(),
+        termination={"reason": "completed"},
+        agent_started=True,
+    )
+    return await f.server.verify(f.request, body)
+
+
+async def test_switch_on_runs_tests_as_agent_user(session_server):
+    f = session_server
+    f.server.config.verifier_runs_as_agent_user = True
+    result = await _seed_and_verify(f, agent_user="cam")
+    # /logs/verifier is handed to the agent's account (as the image default), then the tests run as that account.
+    assert f.sandbox.exec.await_args_list == [
+        call("mkdir -p /logs/verifier", timeout_s=ANY),
+        call("chown -R cam /logs/verifier"),
+        call("bash /tests/test.sh", timeout_s=1800.0, env=None, user="cam"),
+    ]
+    assert result.verifier_user == "cam"
+
+
+@pytest.mark.parametrize("agent_user", ["root", 0, "0"])
+async def test_root_agent_user_runs_tests_as_image_default(session_server, agent_user):
+    f = session_server
+    f.server.config.verifier_runs_as_agent_user = True
+    result = await _seed_and_verify(f, agent_user=agent_user)
+    _assert_tests_ran(f.sandbox.exec, "bash /tests/test.sh", timeout_s=1800.0, env=None, user=None)
+    assert result.verifier_user is None
+
+
+@pytest.mark.parametrize(
+    ("task_toml", "row_limit", "expected"),
+    [
+        ("[verifier]\ntimeout_sec = 2400\n", None, 2400.0),
+        ("[verifier]\ntimeout_sec = 300\n", None, 1800.0),
+        ("[verifier]\ntimeout_sec = 2400\n", 600, 1800.0),  # the row's limit wins over task.toml
+        (None, 5000, 5000.0),
+    ],
+)
+async def test_verifier_timeout_is_max_of_floor_and_task_limit(session_server, task_toml, row_limit, expected):
+    f = session_server
+    if task_toml is not None:
+        (f.tmp_path / "task.toml").write_text(task_toml)
+    result = await _seed_and_verify(f, verifier_timeout_sec=row_limit)
+    _assert_tests_ran(f.sandbox.exec, "bash /tests/test.sh", timeout_s=expected, env=None, user=None)
+    assert result.verifier_timeout_sec == expected
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (None, None),
+        ("[verifier]\ntimeout_sec = 300\n", 300.0),
+        ("[verifier]\ntimeout_sec = 0\n", None),
+        ("[verifier]\ntimeout_sec = true\n", None),
+        ("verifier = 3\n", None),
+        ("not = [valid toml\n", None),
+    ],
+)
+def test_task_verifier_timeout_reads_only_a_positive_number(tmp_path, content, expected):
+    if content is not None:
+        (tmp_path / "task.toml").write_text(content)
+    assert task_verifier_timeout_sec(tmp_path) == expected
+
+
+async def test_missing_reward_is_masked_as_a_verifier_error(session_server):
+    f = session_server
+    f.sandbox.download = AsyncMock(side_effect=FileNotFoundError("no reward"))
+    params = {"input": [{"role": "user", "content": "Write the answer"}]}
+    seed = await f.server.seed_session(f.request, TerminalBench21RunRequest(**f.task, responses_create_params=params))
+    body = TerminalBench21SessionVerifyRequest(
+        session_id=seed.session_id,
+        responses_create_params=params,
+        response=_response_dict(),
+        termination={"reason": "completed"},
+        agent_started=True,
+    )
+    result = await f.server.verify(f.request, body)
+    assert result.reward == 0 and not result.evaluation_completed and result.mask_sample
+    assert result.failure_kind == "verifier_error" and result.infrastructure_error is None
+    assert result.failure_reason.startswith("MissingOfficialReward")
+    _assert_tests_ran(f.sandbox.exec, "bash /tests/test.sh", timeout_s=ANY, env=None, user=None)
+    f.sandbox.stop.assert_awaited_once()
+
+
+async def test_create_sandbox_can_skip_apt_preparation(monkeypatch, tmp_path: Path) -> None:
+    sandbox = AsyncMock()
+    monkeypatch.setattr(terminal_bench_app, "AsyncSandbox", lambda _provider: sandbox)
+    monkeypatch.setattr(terminal_bench_app, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(terminal_bench_app, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(terminal_bench_app, "resolve_provider_metadata", lambda *_: {})
+    server = TerminalBench21ResourcesServer(
+        config=TerminalBench21ResourcesServerConfig(
+            sandbox_provider="test",
+            sandbox_config={"provider_options": {"network_policy": {"defaultAction": "deny", "egress": []}}},
+            prepare_apt_sources=False,
+            host="",
+            port=0,
+            entrypoint="",
+            name="tb2",
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    result = await server._create_sandbox(
+        TerminalBench21SeedSessionRequest(task_name="t", docker_image="img@sha256:abc", task_folder=str(tmp_path))
+    )
+    assert result is sandbox
+    sandbox.start.assert_awaited_once()
+    sandbox.start_with_setup.assert_not_awaited()
+    spec = sandbox.start.call_args.args[0]
+    assert spec.provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
+    assert spec.image == "img@sha256:abc"
+
+
+async def test_upload_folder_ships_one_archive(tmp_path: Path) -> None:
+    import io
+    import tarfile
+
+    server = TerminalBench21ResourcesServer(
+        config=TerminalBench21ResourcesServerConfig(
+            sandbox_provider="sandbox", sandbox_config={}, host="", port=0, entrypoint="", name="tb2"
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    tests = tmp_path / "tests"
+    (tests / "hidden" / "arena-01").mkdir(parents=True)
+    (tests / "test.sh").write_text("#!/bin/bash\necho -w torch==2.7.1\n")
+    (tests / "test.sh").chmod(0o755)
+    (tests / "hidden" / "arena-01" / "case.json").write_text("{}")
+    commands = []
+    uploads = {}
+
+    async def exec_(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    async def upload(local_path, remote_path):
+        uploads[remote_path] = Path(local_path).read_bytes()
+
+    sandbox = SimpleNamespace(exec=exec_, upload=upload)
+    await server._upload_folder(
+        sandbox, tests, "/tests", terminal_bench_app.TEST_SH_PATCHES, "terminal-bench/pytorch-model-recovery"
+    )
+    assert commands[0] == 'mkdir -p "/tests"'
+    assert commands[1].startswith('tar -xzf "/tests.upload.tar.gz" -C "/tests"') and len(commands) == 2
+    with tarfile.open(fileobj=io.BytesIO(uploads["/tests.upload.tar.gz"]), mode="r:gz") as tar:
+        names = sorted(tar.getnames())
+        assert names == ["hidden/arena-01/case.json", "test.sh"]
+        member = tar.getmember("test.sh")
+        assert member.mode & 0o111  # execute bit preserved
+        content = tar.extractfile(member).read().decode()
+    assert "--index https://download.pytorch.org/whl/cpu" in content  # the task patch was applied inside the archive
