@@ -24,7 +24,7 @@ from typing import Any, Optional
 from warnings import warn
 
 from fastapi import Body, FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -32,7 +32,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
+from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
@@ -56,6 +56,7 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.token_id_capture.delivery import MASK_SAMPLE_KEY, TOKEN_CAPTURE_KEY
 from nemo_gym.tool_access import ToolAccess
 
 
@@ -107,14 +108,67 @@ class AgentCloseSessionRequest(BaseModel):
     episode_id: EpisodeId
 
 
+class TokenCapture(BaseModel):
+    """Token-level training data an agent session captured outside Gym's model server.
+
+    A component that records the harness's model calls itself, such as a capture service next to the task
+    sandbox, returns this when the agent session closes. The environment server adds ``result_fields()`` to the
+    episode result and leaves the reward unchanged.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # ATIF trajectories as JSON objects, carrying the sampled token ids and log probabilities for training.
+    atif_trajectories: list[dict[str, Any]] = Field(default_factory=list)
+    # Capture health and metrics, stored as the result's ``_ng_token_capture``.
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    # Whether the capture is unusable for training; the sample is then excluded from the loss.
+    masked: bool = False
+    mask_reason: str | None = None
+
+    @model_validator(mode="after")
+    def require_reason_exactly_when_masked(self) -> "TokenCapture":
+        if self.masked and not self.mask_reason:
+            raise ValueError("a masked token capture needs a mask_reason")
+        if not self.masked and self.mask_reason is not None:
+            raise ValueError("mask_reason is set only when the token capture is masked")
+        return self
+
+    def result_fields(self) -> dict[str, Any]:
+        """Return the fields this capture adds to an episode result.
+
+        ``atif_trajectories`` and ``_ng_token_capture`` are always present; a masked capture adds its reason to
+        ``_ng_token_capture`` and sets ``mask_sample``. An unmasked capture never clears a mask set elsewhere.
+        """
+        metrics = dict(self.metrics)
+        fields: dict[str, Any] = {"atif_trajectories": self.atif_trajectories, TOKEN_CAPTURE_KEY: metrics}
+        if self.masked:
+            metrics["error"] = self.mask_reason
+            fields[MASK_SAMPLE_KEY] = True
+        return fields
+
+
 class AgentCloseSessionResponse(BaseModel):
-    """Confirm closure and return captured observations."""
+    """Confirm closure and return captured observations and any token capture the session produced."""
 
     model_config = ConfigDict(extra="forbid")
 
     agent_session_id: str
     agent_observations: AgentObservationBundle | None = None
     resources_cookies: dict[str, str] | None = None
+    token_capture: TokenCapture | None = None
+
+
+@dataclass(frozen=True)
+class ModelEndpoint:
+    """The OpenAI-compatible endpoint a harness sends its model calls to.
+
+    ``base_url`` ends in the API version (for example ``/v1``).
+    ``model`` is set only when the endpoint dictates the model name; otherwise the harness keeps its own.
+    """
+
+    base_url: str
+    model: str | None = None
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
@@ -425,6 +479,28 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
         base_url = self.server_client._build_server_base_url(server_config)
         return f"{apply_rollout_prefix(base_url, rollout_id, token_capture=self._token_id_capture_enabled())}/v1"
+
+    def model_endpoint(
+        self,
+        *,
+        model_server: ModelServerRef | None,
+        rollout_id: Optional[str] = None,
+        base_url: Optional[str] = None,
+        session_endpoint: ModelEndpoint | None = None,
+    ) -> ModelEndpoint:
+        """Choose the endpoint for a harness's model calls.
+
+        In order: ``session_endpoint``, an endpoint the episode's session supplies (for example a component
+        that records model calls from inside the task sandbox); the Gym model server, with this rollout's
+        capture prefix; the agent's configured ``base_url``, used verbatim because it has no prefix routing.
+        """
+        if session_endpoint is not None:
+            return session_endpoint
+        if model_server is not None:
+            return ModelEndpoint(base_url=self.resolve_model_base_url(model_server.name, rollout_id))
+        if base_url:
+            return ModelEndpoint(base_url=base_url)
+        raise ValueError("No model endpoint: configure model_server or a model base URL")
 
     # TODO: right now there is no validation on the TypedDict NeMoGymResponseCreateParamsNonStreaming
     # We should explicitly add validation at this server level or we should explicitly not validate so that there is flexibility in this API.

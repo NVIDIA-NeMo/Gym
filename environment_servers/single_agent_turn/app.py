@@ -283,16 +283,18 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
         # Keep one bounded retry in final unwind without erasing a completed verdict.
         cleanup.register_cleanup("post-verification resources session", resources_cleanup.close)
+        update: dict[str, Any] = {
+            "ng_agent_observations": agent_close_response.agent_observations
+            if agent_close_response is not None
+            else None
+        }
+        if agent_close_response is not None and agent_close_response.token_capture is not None:
+            # Token capture the agent session produced outside Gym's model server sits at the result's top level.
+            update.update(agent_close_response.token_capture.result_fields())
         return SingleAgentTurnResponse(
             episode_id=request.episode_id,
             task_id=request.task.task_id,
-            result=verification.model_copy(
-                update={
-                    "ng_agent_observations": agent_close_response.agent_observations
-                    if agent_close_response is not None
-                    else None
-                }
-            ),
+            result=verification.model_copy(update=update),
         )
 
     def _agent_responses_path(self, request: SingleAgentTurnRequest) -> str:
