@@ -513,24 +513,109 @@ def test_responses_to_chat_completion_preserves_structured_function_output_text(
     ]
 
 
+@pytest.mark.parametrize("image_url", ["https://example.com/board.png", "data:image/png;base64,aW1hZ2U="])
+@pytest.mark.parametrize("text", [[], [{"type": "input_text", "text": "board before analysis"}]])
+def test_responses_to_chat_completion_image_tool_output(converter: ResponsesConverter, image_url: str, text: list):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"type": "function_call", "call_id": "view_1", "name": "view_image", "arguments": "{}"},
+                {
+                    "type": "function_call_output",
+                    "call_id": "view_1",
+                    "output": [
+                        *text,
+                        {"type": "input_image", "image_url": image_url, "detail": "high"},
+                        {"type": "input_text", "text": "board after analysis"},
+                        {"type": "input_image", "image_url": "https://example.com/frame.png", "detail": "low"},
+                    ],
+                },
+            ]
+        )
+    )
+
+    assert [m["role"] for m in params.messages] == ["assistant", "tool", "user"]
+    assert params.messages[0]["tool_calls"][0]["id"] == params.messages[1]["tool_call_id"] == "view_1"
+    assert isinstance(params.messages[1]["content"], str)
+    content = params.messages[2]["content"]
+    assert content[0]["type"] == "text" and "view_1" in content[0]["text"]
+    assert content[1:] == [
+        *[{"type": "text", "text": part["text"]} for part in text],
+        {"type": "image_url", "image_url": {"url": image_url, "detail": "high"}},
+        {"type": "text", "text": "board after analysis"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/frame.png", "detail": "low"}},
+    ]
+
+
+@pytest.mark.parametrize("next_turn", [[], [{"role": "user", "content": "Compare those results."}]])
+@pytest.mark.parametrize("text_result_type", ["function_call_output", "chat_tool"])
+def test_image_tool_outputs_follow_all_parallel_tool_results(
+    converter: ResponsesConverter, next_turn: list, text_result_type: str
+):
+    text_result = (
+        {"type": "function_call_output", "call_id": "text_3", "output": "ready"}
+        if text_result_type == "function_call_output"
+        else {"role": "tool", "tool_call_id": "text_3", "content": "ready"}
+    )
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"type": "function_call", "call_id": call_id, "name": "read", "arguments": "{}"}
+                for call_id in ["image_1", "image_2", "text_3"]
+            ]
+            + [
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": [{"type": "input_image", "image_url": f"https://example.com/{call_id}.png"}],
+                }
+                for call_id in ["image_2", "image_1"]
+            ]
+            + [text_result]
+            + next_turn
+        )
+    )
+
+    assert [m["role"] for m in params.messages[:6]] == ["assistant", "tool", "tool", "tool", "user", "user"]
+    assert [m["tool_call_id"] for m in params.messages[1:4]] == ["image_2", "image_1", "text_3"]
+    assert params.messages[3]["content"] == "ready"
+    for message, call_id in zip(params.messages[4:6], ["image_2", "image_1"]):
+        assert call_id in message["content"][0]["text"]
+        assert message["content"][1] == {
+            "type": "image_url",
+            "image_url": {"url": f"https://example.com/{call_id}.png", "detail": "auto"},
+        }
+    assert len(params.messages) == 6 + len(next_turn)
+    if next_turn:
+        assert params.messages[-1]["content"] == "Compare those results."
+
+
 @pytest.mark.parametrize(
-    ("output", "unsupported_type"),
+    ("output", "error"),
     [
-        ([{"type": "input_image", "file_id": "file_123"}], "input_image"),
-        ([{"type": "input_file", "file_id": "file_123"}], "input_file"),
+        ([{"type": "input_image", "file_id": "file_123"}], "images referenced by file_id"),
+        (
+            [{"type": "input_image", "image_url": "https://example.com/img.png", "detail": "original"}],
+            "image detail 'original'",
+        ),
+        ([{"type": "input_file", "file_id": "file_123"}], "content part type\\(s\\) 'input_file'"),
+        (
+            [
+                {"type": "input_image", "image_url": "https://example.com/img.png"},
+                {"type": "input_file", "file_id": "file_123"},
+            ],
+            "content part type\\(s\\) 'input_file'",
+        ),
     ],
 )
 def test_responses_to_chat_completion_rejects_unrepresentable_function_output(
-    converter: ResponsesConverter, output: list[dict], unsupported_type: str
+    converter: ResponsesConverter, output: list[dict], error: str
 ):
     responses_params = NeMoGymResponseCreateParamsNonStreaming(
         input=[{"type": "function_call_output", "call_id": "call_1", "output": output}]
     )
 
-    with pytest.raises(
-        NotImplementedError,
-        match=rf"Chat tool messages cannot represent content part type\(s\) '{unsupported_type}'",
-    ):
+    with pytest.raises(NotImplementedError, match=error):
         converter.responses_to_chat_completion_create_params(responses_params)
 
 
@@ -1793,6 +1878,16 @@ def test_downconverting_null_responses_only_fields_treats_them_as_absent(convert
     converted = converter.responses_to_chat_completion_create_params(params)
 
     assert converted.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
+
+
+def test_downconverting_empty_include_requests_no_additional_fields(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", include=[])
+
+    converted = converter.responses_to_chat_completion_create_params(params)
+
+    assert converted == converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(input="hi")
+    )
 
 
 def test_downconverting_json_object_text_format(converter: ResponsesConverter):

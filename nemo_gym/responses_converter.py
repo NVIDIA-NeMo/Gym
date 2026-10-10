@@ -99,6 +99,7 @@ class ResponsesConverterState(BaseModel):
     refusal_buffer: str = ""
     tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(default_factory=list)
     assistant_item_buffered: bool = False
+    image_tool_outputs: List[dict] = Field(default_factory=list)
 
     token_information: Optional[TokenIDLogProbMixin] = None
 
@@ -263,6 +264,9 @@ class ResponsesConverter(BaseModel):
             if not m.get("type") and m.get("role"):
                 m["type"] = "message"
 
+            if m["type"] != "function_call_output" and not (m["type"] == "message" and m.get("role") == "tool"):
+                self._flush_image_tool_outputs(state)
+
             match m["type"]:
                 case "message":
                     self._format_message(m, state)
@@ -291,6 +295,7 @@ class ResponsesConverter(BaseModel):
                     state.token_information = token_information
 
         state.flush_assistant()
+        self._flush_image_tool_outputs(state)
 
         # The Responses API inserts `instructions` as a system message at the start of the model's
         # context. Chat Completions has no such parameter, so map it explicitly — otherwise it is
@@ -408,7 +413,11 @@ class ResponsesConverter(BaseModel):
             content = output
         elif isinstance(output, list):
             unsupported_types = sorted(
-                {part.get("type", "<missing>") for part in output if part.get("type") != "input_text"}
+                {
+                    part.get("type", "<missing>")
+                    for part in output
+                    if part.get("type") not in {"input_text", "input_image"}
+                }
             )
             if unsupported_types:
                 raise NotImplementedError(
@@ -417,7 +426,19 @@ class ResponsesConverter(BaseModel):
                     "Chat tool messages cannot represent content part type(s) "
                     f"{', '.join(repr(part_type) for part_type in unsupported_types)}"
                 )
-            content = [{"type": "text", "text": part["text"]} for part in output]
+            if any(part["type"] == "input_image" for part in output):
+                # Chat tool messages only admit text. Keep the tool-call acknowledgement,
+                # then carry the entire ordered result in a labelled multimodal user turn.
+                # Defer that turn until all adjacent parallel tool results have been added.
+                content = "Tool output is provided in the following user message."
+                state.image_tool_outputs.append(
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": f"Output from tool call {m['call_id']}:"}, *output],
+                    }
+                )
+            else:
+                content = [{"type": "text", "text": part["text"]} for part in output]
         else:  # pragma: no cover - guarded by NeMoGymFunctionCallOutput validation
             raise TypeError(
                 "Responses function_call_output must be a string or a list of structured content parts, "
@@ -430,6 +451,11 @@ class ResponsesConverter(BaseModel):
             tool_call_id=m["call_id"],
         )
         state.messages.append(converted)
+
+    def _flush_image_tool_outputs(self, state: ResponsesConverterState) -> None:
+        for message in state.image_tool_outputs:
+            self._format_message(message, state)
+        state.image_tool_outputs.clear()
 
     def _format_message(
         self,
