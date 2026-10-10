@@ -311,6 +311,11 @@ class CallRecord(_DigestWireModel):
     # Canonicalization version of the fingerprints above; 0 means none were
     # recorded. Attribution ignores fingerprints from a different version.
     fingerprint_version: NonNegativeInt = 0
+    # Why the served response stopped, in the Chat Completions vocabulary (``stop``, ``length``,
+    # ``tool_calls``, ``content_filter``), read from the served payload when the row is committed;
+    # ``None`` when the payload stated none or the row predates the column. The rebuild reports the
+    # terminal row's value so a framework can mark a ``length`` or ``content_filter`` ending incomplete.
+    finish_reason: StrictStr | None = None
 
     @model_validator(mode="after")
     def _validate_lengths(self) -> Self:

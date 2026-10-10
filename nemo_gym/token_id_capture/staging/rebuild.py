@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Sequence
 
+from nemo_gym.token_id_capture.records import incomplete_reason_for_finish_reason
 from nemo_gym.token_id_capture.staging.digest import (
     EXTRAS_DIGEST_VERSION,
     STAGING_DIGEST_VERSION,
@@ -84,11 +85,23 @@ class LinearizedRow:
     weight_version_spans: list[WeightVersionSpan]
     link_spans: list[tuple[str, int, int]] = field(default_factory=list)
     extras_commitments: list[ExtrasCommitment] = field(default_factory=list)
+    # The terminal call's finish reason as its ledger row recorded it; ``None`` when the served
+    # payload stated none or the row predates the column.
+    terminal_finish_reason: str | None = None
 
     @property
     def call_ids(self) -> list[str]:
         """Compatibility spelling for existing framework consumers."""
         return self.model_call_ids
+
+    @property
+    def incomplete_reason(self) -> str | None:
+        """The ``incomplete_details.reason`` the rebuilt response reports, or ``None`` for a complete ending.
+
+        Only the terminal call decides: an earlier ``length`` stop did not end the chain, because a
+        later call extended it. The mapping is the one the local capture path applies.
+        """
+        return incomplete_reason_for_finish_reason(self.terminal_finish_reason)
 
 
 def _fail(code: str, detail: str) -> ReceiptVerificationError:
@@ -358,6 +371,7 @@ def verify_and_linearize(
         weight_version_spans=weight_version_spans,
         link_spans=link_spans,
         extras_commitments=extras_commitments,
+        terminal_finish_reason=chain[-1].finish_reason,
     )
 
 

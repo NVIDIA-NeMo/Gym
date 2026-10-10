@@ -60,6 +60,7 @@ def _call_record(
     chain_hash: str = CHAIN_HASH_1,
     delta_len: int | None = None,
     admitted_at: float | None = 1_755_600_000.25,
+    finish_reason: str | None = None,
 ) -> CallRecord:
     if delta_len is None:
         delta_len = len(TOKENS_1) - prev_len
@@ -79,6 +80,7 @@ def _call_record(
         chain_hash=chain_hash,
         cumulative_hash=cumulative_hash,
         fingerprint_version=FINGERPRINT_VERSION,
+        finish_reason=finish_reason,
     )
 
 
@@ -159,6 +161,25 @@ async def test_row_without_admitted_at_still_validates(store):
 
 
 @pytest.mark.asyncio
+async def test_ledger_row_round_trips_the_finish_reason(store):
+    await store.record(_commit(_call_record("c1", finish_reason="length"), [USER_1], [ASSISTANT_1]))
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    (record,) = manifest.records
+    assert record.finish_reason == "length"
+
+
+def test_a_custody_row_without_the_finish_reason_column_reads_an_unstated_reason():
+    """A row written before the column existed is still a valid manifest row."""
+    from nemo_gym.token_id_capture.lineage import _manifest_from_rows
+
+    row = {"model_call_id": "c1", **_custody_columns(_call_record("c1"), ("r1/c1",))}
+    del row["finish_reason"]
+    manifest = RolloutManifest.model_validate(_manifest_from_rows("r1", [row]))
+    (record,) = manifest.records
+    assert record.finish_reason is None
+
+
+@pytest.mark.asyncio
 async def test_same_call_commit_is_idempotent_and_conflicts_raise(store):
     await _record_call_1(store)
     await _record_call_1(store)  # identical replay is a no-op
@@ -181,6 +202,7 @@ async def test_same_call_commit_is_idempotent_and_conflicts_raise(store):
         {"weight_version": 18},
         {"response_id": "chatcmpl-other"},
         {"admitted_at": 1.0},
+        {"finish_reason": "length"},
     ],
 )
 async def test_recommit_with_changed_metadata_conflicts_even_when_index_agrees(store, changed):

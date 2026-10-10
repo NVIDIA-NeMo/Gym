@@ -188,10 +188,16 @@ def test_extract_token_fields_rejects_multiple_carriers():
         ({"output": [{"type": "message"}, {"type": "function_call"}], "status": "completed"}, "tool_calls"),
         ({"output": [{"type": "message"}]}, "stop"),
         ({"output": [{"type": "message"}], "status": "incomplete"}, None),
+        # An Anthropic Messages payload states ``stop_reason``; map it back through the converter's table.
+        ({"type": "message", "role": "assistant", "content": [], "stop_reason": "max_tokens"}, "length"),
+        ({"type": "message", "role": "assistant", "content": [], "stop_reason": "tool_use"}, "tool_calls"),
+        ({"type": "message", "role": "assistant", "content": [], "stop_reason": "end_turn"}, "stop"),
+        ({"type": "message", "role": "assistant", "content": [], "stop_reason": "refusal"}, "content_filter"),
+        ({"type": "message", "role": "assistant", "content": [], "stop_reason": None}, None),
         ({}, None),
     ],
 )
-def test_response_finish_reason_speaks_the_chat_vocabulary_for_both_payload_shapes(payload, expected):
+def test_response_finish_reason_speaks_the_chat_vocabulary_for_every_served_payload_shape(payload, expected):
     assert response_finish_reason(payload) == expected
 
 
