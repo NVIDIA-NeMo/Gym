@@ -1,0 +1,48 @@
+compute:
+  cluster:
+    type: kubernetes
+    # `tsh kube login <cluster>` (or however your cluster's kubeconfig gets set up) names the
+    # context after the identity provider/proxy, not always the bare cluster name -- check the
+    # real name with `kubectl config get-contexts`. Omit `context` to use whatever is current.
+    context: mycluster
+    namespace: mynamespace
+    gpus_per_node: 8
+    pvc_name: mypvc  # pre-existing PVC, mounted at job.output_path in every container
+
+services:
+  vllm_model:
+    container: vllm/vllm-openai:v0.9.0
+    type: vllm
+    model: Qwen/Qwen2.5-7B-Instruct
+    trust_remote_code: true
+    tensor_parallel_size: 2
+    port: 8000
+    health_check:
+      timeout_seconds: 1200
+    # env values are resolved with one of three prefixes (a bare value is an implicit `lit:`):
+    #   lit:VALUE - literal value, used as-is.
+    #   host:VAR  - read from VAR in the shell running `gym eval submit` (this machine).
+    # `runtime:VAR` (resolved from the job's own environment) is not supported by the
+    # kubernetes executor yet -- there's no shell to resolve it against.
+    env:
+      HF_TOKEN: host:HF_TOKEN
+
+driver:
+  policy_model: vllm_model
+  container: python:3.12
+  gym_install:
+    ref: main
+  env:
+    HF_TOKEN: host:HF_TOKEN
+  benchmarks:
+    gpqa:
+      run:
+        split: benchmark
+        config_paths:
+          - benchmarks/gpqa/config.yaml
+
+job:
+  output_path: /mnt/gym-output
+
+otel:
+  enabled: false  # the kubernetes executor does not wire up a collector yet

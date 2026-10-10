@@ -639,8 +639,12 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
                 # written instead of being swallowed or raising MarkupError.
                 rich.print(f"[red]failed[/red] {benchmark.benchmark}: {escape(benchmark.error or '')}")
             else:
+                executor_label = {"slurm": "Slurm job", "kubernetes": "Kubernetes Job"}.get(
+                    record.executor, f"{record.executor} job"
+                )
                 rich.print(
-                    f"[green]submitted[/green] {benchmark.benchmark} → Slurm job [bold]{benchmark.job_id}[/bold]"
+                    f"[green]submitted[/green] {benchmark.benchmark} → {executor_label} "
+                    f"[bold]{benchmark.job_id}[/bold]"
                 )
 
     if record.failed:
