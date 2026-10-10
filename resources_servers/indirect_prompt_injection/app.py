@@ -15,10 +15,10 @@
 import copy
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -59,6 +59,31 @@ logger = logging.getLogger(__name__)
 
 class IPIResourcesServerConfig(BaseResourcesServerConfig):
     pass
+
+
+class IPICheckpointState(BaseModel):
+    """One session's environment as a checkpoint stores it."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    schema_version: Literal[1]
+    environment: Dict[str, JsonValue]
+
+    @classmethod
+    def from_environment(cls, environment: Dict[str, Any]) -> "IPICheckpointState":
+        return cls(schema_version=1, environment=_json_copy(environment))
+
+    def load_environment(self) -> Dict[str, Any]:
+        return _json_copy(self.environment)
+
+
+def _json_copy(environment: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy an environment through JSON, keeping its key order and rejecting values JSON cannot carry.
+
+    Tool outputs serialize the environment as stored,
+    so a restored session must keep its key order to answer exactly as the uncheckpointed session would.
+    """
+    return json.loads(json.dumps(environment, allow_nan=False))
 
 
 class InjectionSpec(BaseModel):
@@ -109,6 +134,9 @@ class IPIVerifyResponse(BaseVerifyResponse):
 
 class IPIResourcesServer(SimpleResourcesServer):
     ray_enabled = False
+    # Tool calls mutate the session environment, so a checkpoint exports it.
+    # Verification keeps the default "wait" mode because it deletes the session's environment and cannot be replayed.
+    checkpoint_mode = "exported"
     config: IPIResourcesServerConfig
     session_id_to_env: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
@@ -186,6 +214,24 @@ class IPIResourcesServer(SimpleResourcesServer):
             )
         finally:
             self.session_id_to_env.pop(session_id, None)
+
+    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+        # A session verify already dropped, even one whose verification failed, is left out.
+        return {
+            session_id: IPICheckpointState.from_environment(self.session_id_to_env[session_id]).model_dump()
+            for session_id in session_ids
+            if session_id in self.session_id_to_env
+        }
+
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+        environments = {
+            session_id: IPICheckpointState.model_validate(state).load_environment()
+            for session_id, state in states.items()
+        }
+        self.session_id_to_env.update(environments)
+
+    async def retire_session_state(self, session_id: str) -> None:
+        self.session_id_to_env.pop(session_id, None)
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         metrics: Dict[str, Any] = {}
