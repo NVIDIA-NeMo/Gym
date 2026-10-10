@@ -193,6 +193,12 @@ class FakeSandbox:
         _reject_connection_params("Sandbox.is_running", kwargs)
         return self.running
 
+    async def get_info(self, **kwargs):
+        _reject_connection_params("Sandbox.get_info", kwargs)
+        if not self.running:
+            raise FakeSandboxNotFound(self.sandbox_id)
+        return types.SimpleNamespace(state="running")
+
     async def kill(self, **kwargs):
         self.kill_calls.append(kwargs)
         if self.kill_outcomes:
@@ -336,10 +342,14 @@ async def test_real_sdk_user_agent_and_call_shapes() -> None:
     connection = e2b.ConnectionConfig()
     products = connection.headers["User-Agent"].split()
     assert f"nemo-gym/{nemo_gym_version}" in products
-    envd_client = sandbox_async.get_envd_api(connection, "https://sandbox.example")
-    for transport in (client_async.get_transport(connection), envd_client._transport):
-        assert isinstance(transport, GymAiohttpTransport)
-    await envd_client.aclose()
+    assert isinstance(client_async.get_transport(connection), GymAiohttpTransport)
+    if hasattr(sandbox_async, "get_envd_api"):
+        envd_client = sandbox_async.get_envd_api(connection, "https://sandbox.example")
+        assert isinstance(envd_client._transport, GymAiohttpTransport)
+        await envd_client.aclose()
+    else:
+        # E2B 2.36 imports the envd transport factory directly.
+        assert isinstance(sandbox_async.get_transport(connection), GymAiohttpTransport)
 
     inspect.signature(e2b.AsyncSandbox.create).bind(
         template="base",
@@ -349,6 +359,7 @@ async def test_real_sdk_user_agent_and_call_shapes() -> None:
         metadata={},
         secure=True,
         allow_internet_access=True,
+        lifecycle={"on_timeout": "pause", "auto_resume": True},
     )
     inspect.signature(e2b.AsyncSandbox.connect).bind("sbx-existing", request_timeout=30)
     inspect.signature(e2b.AsyncSandbox.kill).bind(
@@ -356,7 +367,7 @@ async def test_real_sdk_user_agent_and_call_shapes() -> None:
         **dict.fromkeys(_API_PARAM_KEYS),
         request_timeout=30,
     )
-    inspect.signature(e2b.AsyncSandbox.is_running).bind(object(), request_timeout=30)
+    inspect.signature(e2b.AsyncSandbox.get_info).bind(object(), request_timeout=30)
     inspect.signature(e2b.AsyncTemplate.exists).bind("base")
     inspect.signature(e2b.AsyncTemplate.build).bind(
         object(),
@@ -1048,3 +1059,85 @@ def test_invalid_template_config_is_rejected(create: dict[str, object]) -> None:
 def test_invalid_config_values_are_rejected(section: str, config: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=re.escape(message)):
         E2BProvider(**{section: config})
+
+
+@pytest.mark.parametrize("auto_resume", [None, True, False])
+async def test_create_lifecycle_policy(auto_resume: bool | None) -> None:
+    provider = E2BProvider(create={"template": "base", "auto_resume": auto_resume})
+    handle = await provider.create(_spec(ttl_s=12.5))
+    assert handle.raw.create_kwargs["timeout"] == 13
+    if auto_resume is None:
+        assert "lifecycle" not in handle.raw.create_kwargs
+    else:
+        assert handle.raw.create_kwargs["lifecycle"] == {
+            "on_timeout": "pause" if auto_resume else "kill",
+            "auto_resume": auto_resume,
+        }
+
+
+@pytest.mark.parametrize("invalid", [0, 1, "false", "true", [], {}])
+def test_create_auto_resume_rejects_non_boolean(invalid: object) -> None:
+    with pytest.raises(ValueError, match="create.auto_resume must be a boolean or None"):
+        E2BProvider(create={"auto_resume": invalid})
+
+
+@pytest.mark.parametrize("auto_resume", [True, False])
+async def test_real_sdk_serializes_lifecycle_policy(monkeypatch: pytest.MonkeyPatch, auto_resume: bool) -> None:
+    pytest.importorskip("e2b")
+    import json
+
+    import httpx
+
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
+
+    bodies = []
+
+    async def capture_request(self, request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        raise ConnectionError("captured before network")
+
+    monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", _REAL_PROVIDER_REQUIRE_E2B_SDK)
+    monkeypatch.setattr(GymAiohttpTransport, "handle_async_request", capture_request)
+    provider = E2BProvider(
+        connection={"api_key": "test-key", "validate_api_key": False},
+        create={"template": "base", "auto_resume": auto_resume},
+    )
+    with pytest.raises(E2BCreateError, match="captured before network"):
+        await provider.create(_spec(ttl_s=7))
+    assert len(bodies) == 1
+    assert bodies[0]["autoPause"] is auto_resume
+    assert bodies[0]["autoResume"] == {"enabled": auto_resume}
+    assert bodies[0]["timeout"] == 7
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [("running", SandboxStatus.RUNNING), ("paused", SandboxStatus.PAUSED), ("resuming", SandboxStatus.UNKNOWN)],
+)
+async def test_status_reads_control_plane_without_waking_sandbox(
+    monkeypatch: pytest.MonkeyPatch, state: str, expected: SandboxStatus
+) -> None:
+    provider = E2BProvider(connection={"request_timeout_s": 12}, create={"template": "base"})
+    handle = await provider.create(_spec())
+
+    async def get_info(**kwargs):
+        assert kwargs == {"request_timeout": 12}
+        return types.SimpleNamespace(state=state)
+
+    async def forbidden_health_check(**kwargs):
+        pytest.fail("Status must not send traffic that resumes a paused sandbox")
+
+    monkeypatch.setattr(handle.raw, "get_info", get_info)
+    monkeypatch.setattr(handle.raw, "is_running", forbidden_health_check)
+    assert await provider.status(handle) is expected
+
+
+async def test_status_control_plane_failure_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = E2BProvider(create={"template": "base"})
+    handle = await provider.create(_spec())
+
+    async def unavailable(**kwargs):
+        raise ConnectionError("control plane unavailable")
+
+    monkeypatch.setattr(handle.raw, "get_info", unavailable)
+    assert await provider.status(handle) is SandboxStatus.UNKNOWN

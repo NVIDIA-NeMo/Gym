@@ -198,3 +198,27 @@ E2B's set-once integration hook. Because E2B 2.x does not expose transport injec
 APIs, NeMo Gym replaces its module-level HTTP transport factories with an aiohttp adapter backed
 by Gym's shared client session. The adapter accepts HTTP and HTTPS proxies; SOCKS proxies are
 rejected explicitly. E2B's ConnectRPC command streams keep their SDK-owned pyqwest transport.
+
+## AgentENV auto-pause and auto-resume
+
+Set `e2b.create.auto_resume: true` in your provider configuration to enable
+auto-pause and auto-resume on AgentENV. At the sandbox timeout, AgentENV pauses the VM,
+releasing CPU and memory while retaining its state. The next sandbox proxy request
+resumes the same VM, including its files and running processes.
+
+Set `e2b.create.auto_resume: false` to disable automatic resume and delete the
+sandbox at timeout. Gym couples these settings so disabling resume cannot leave
+a sandbox paused indefinitely. The generic E2B profile leaves `auto_resume: null`,
+which preserves the SDK/service defaults. This requires a deployment that supports
+the E2B lifecycle API.
+
+`create.timeout_s` controls the initial timeout, and `SandboxSpec.ttl_s` overrides
+it per sandbox. It is a lifetime deadline, not an idle-traffic timer: choose a
+value appropriate for long-running commands. AgentENV's proxy currently applies
+an `EnsureMinimum(300s)` timeout when it automatically resumes a sandbox; a shorter
+initial timeout does not change that server-side floor. See the
+[AgentENV proxy contract](https://github.com/kvcache-ai/AgentENV/blob/main/docs/src/internals/proxy-design.md#paused-sandbox-auto-resume).
+
+Status checks use the control plane and report `paused` without waking the VM.
+Explicit close still deletes the sandbox, including paused sandboxes. Auto-pause
+preserves storage; it does not replace cleanup after a completed or crashed run.
