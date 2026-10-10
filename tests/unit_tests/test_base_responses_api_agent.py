@@ -15,13 +15,16 @@
 from unittest.mock import MagicMock
 
 import pytest
+from omegaconf import OmegaConf
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgent,
     BaseResponsesAPIAgentConfig,
+    ModelEndpoint,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.server_utils import ServerClient
 
 
@@ -102,3 +105,62 @@ class TestBaseResponsesAPIAgent:
         assert self._agent(gc, token_id_capture=True).rollout_id_from_run(body) == "0-0"
         # Agent opt-in alone does not enable capture.
         assert self._agent({}, token_id_capture=True).rollout_id_from_run(body) is None
+
+
+class TestModelEndpoint:
+    MODEL_SERVER = ModelServerRef(type="responses_api_models", name="policy_model")
+
+    def _agent(self, *, token_capture: bool = False) -> SimpleResponsesAPIAgent:
+        config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="", token_id_capture=token_capture)
+
+        class _Agent(SimpleResponsesAPIAgent):
+            async def responses(self, body=...):
+                raise NotImplementedError
+
+            async def run(self, body=...):
+                raise NotImplementedError
+
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = OmegaConf.create(
+            {
+                "policy_model": {"responses_api_models": {"vllm_model": {"host": "model-host", "port": 8000}}},
+                "token_id_capture": {"enabled": token_capture},
+            }
+        )
+        client._build_server_base_url.side_effect = lambda server: ServerClient._build_server_base_url(client, server)
+        return _Agent(config=config, server_client=client)
+
+    def test_session_endpoint_wins_over_model_server_and_base_url(self) -> None:
+        session_endpoint = ModelEndpoint(base_url="http://127.0.0.1:4000/v1", model="served-model")
+        endpoint = self._agent().model_endpoint(
+            model_server=self.MODEL_SERVER,
+            rollout_id="3-1",
+            base_url="https://api.example.com/v1",
+            session_endpoint=session_endpoint,
+        )
+        assert endpoint == session_endpoint
+
+    def test_model_server_carries_the_rollout_prefix(self) -> None:
+        endpoint = self._agent().model_endpoint(
+            model_server=self.MODEL_SERVER, rollout_id="3-1", base_url="https://api.example.com/v1"
+        )
+        assert endpoint == ModelEndpoint(base_url="http://model-host:8000/ng-rollout/3-1/v1")
+
+    def test_model_server_without_rollout_id_is_unprefixed(self) -> None:
+        endpoint = self._agent().model_endpoint(model_server=self.MODEL_SERVER)
+        assert endpoint == ModelEndpoint(base_url="http://model-host:8000/v1")
+
+    def test_model_server_keeps_the_token_capture_route(self) -> None:
+        endpoint = self._agent(token_capture=True).model_endpoint(model_server=self.MODEL_SERVER, rollout_id="3-1")
+        assert endpoint == ModelEndpoint(base_url="http://model-host:8000/ng-rollout/3-1/training-token-capture/v1")
+
+    def test_configured_base_url_is_used_verbatim(self) -> None:
+        endpoint = self._agent(token_capture=True).model_endpoint(
+            model_server=None, rollout_id="3-1", base_url="https://api.example.com/v1"
+        )
+        assert endpoint == ModelEndpoint(base_url="https://api.example.com/v1")
+
+    @pytest.mark.parametrize("base_url", [None, ""])
+    def test_no_endpoint_configured_raises(self, base_url: str | None) -> None:
+        with pytest.raises(ValueError, match="No model endpoint"):
+            self._agent().model_endpoint(model_server=None, rollout_id="3-1", base_url=base_url)
