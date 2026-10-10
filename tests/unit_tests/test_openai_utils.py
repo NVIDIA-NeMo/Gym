@@ -71,6 +71,7 @@ from pydantic import ValidationError
 
 from nemo_gym import openai_utils as openai_utils_module
 from nemo_gym.openai_utils import (
+    CHAT_REQUEST_IGNORED_CLIENT_FIELDS,
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     MAX_NUM_TRIES,
     RESPONSES_TO_TRAIN,
@@ -1122,6 +1123,32 @@ class TestNeMoGymChatCompletionSchemas:
         for field in CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS:
             with pytest.raises(ValidationError):
                 NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": [], field: "not-a-mapping"})
+
+    def test_ignored_client_fields_are_accepted_but_not_forwarded(self) -> None:
+        # litellm (e.g. under OpenHands) sends the Bedrock-only aws_region_name on every call.
+        assert CHAT_REQUEST_IGNORED_CLIENT_FIELDS == {"aws_region_name"}
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+            {"messages": [{"role": "user", "content": "hi"}], "aws_region_name": "us-east-1"}
+        )
+
+        assert params.model_dump(exclude_unset=True) == {"messages": [{"role": "user", "content": "hi"}]}
+        assert "aws_region_name" not in params.model_dump()
+        assert "aws_region_name" not in params.model_dump_json()
+
+    def test_tool_message_accepts_legacy_name(self) -> None:
+        # litellm-based clients send {"role": "tool", "tool_call_id", "name", "content"}.
+        messages = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "ls", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "name": "ls", "content": "ok"},
+        ]
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": messages})
+
+        assert params.model_dump(exclude_unset=True)["messages"][2] == messages[2]
 
     def test_custom_tool_and_training_tool_call_round_trip(self) -> None:
         payload = {
@@ -2259,7 +2286,11 @@ def test_chat_request_field_set_matches_sdk_without_deprecated_fields() -> None:
     Deprecated fields remain disabled.
     """
     sdk_fields = set(get_type_hints(CompletionCreateParamsNonStreaming, include_extras=True))
-    expected = (sdk_fields - {"function_call", "functions"}) | CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+    expected = (
+        (sdk_fields - {"function_call", "functions"})
+        | CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+        | CHAT_REQUEST_IGNORED_CLIENT_FIELDS
+    )
     actual = set(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields)
     assert actual == expected, (
         f"openai {openai.__version__} Chat request fields changed: "
