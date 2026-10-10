@@ -39,6 +39,20 @@ class MemoryProfilingConfig(BaseModel):
     """Seconds between samples."""
 
 
+class RuntimeMetricsConfig(BaseModel):
+    """Event-loop, garbage-collection, process, and in-flight request metrics from every Gym server process.
+
+    Off by default.
+    Turn it on to find what is slowing a server down, such as a blocked event loop or long garbage-collection pauses.
+    """
+
+    enabled: bool = False
+    """Run the runtime observer in every server process."""
+
+    interval_seconds: float = Field(default=1.0, gt=0)
+    """Seconds between event-loop samples."""
+
+
 class TelemetryConfig(BaseModel, extra="allow"):
     """OpenTelemetry / nemo-lens configuration for NeMo Gym.
 
@@ -86,6 +100,9 @@ class TelemetryConfig(BaseModel, extra="allow"):
 
     memory_profiling: MemoryProfilingConfig = Field(default_factory=MemoryProfilingConfig)
     """Sample each Gym-managed server process tree and emit memory metrics."""
+
+    runtime_metrics: RuntimeMetricsConfig = Field(default_factory=RuntimeMetricsConfig)
+    """Report event-loop lag, garbage collection, process resources, and in-flight requests from every server process."""
 
     logs_enabled: bool = False
     """Bridge Python logging to OTel logs, exported with trace correlation."""

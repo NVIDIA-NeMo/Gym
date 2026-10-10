@@ -96,6 +96,7 @@ from nemo_gym.telemetry.connection_pool import (
     reset_server_name,
     set_server_name,
 )
+from nemo_gym.telemetry.runtime import observe_app_event_loop, request_counts
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
 
@@ -1238,7 +1239,21 @@ class ClientDisconnectCancellationMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        counts = request_counts()
+        if counts is None:
+            await self._handle(scope, receive, send, None)
+            return
+        counts.in_flight += 1
+        try:
+            await self._handle(scope, receive, send, counts)
+        except BaseException as error:
+            if not isinstance(error, asyncio.CancelledError):
+                counts.failed += 1
+            raise
+        finally:
+            counts.in_flight -= 1
 
+    async def _handle(self, scope: Scope, receive: Receive, send: Send, counts: Any) -> None:
         received_messages: asyncio.Queue[Message] = asyncio.Queue()
         client_disconnected = asyncio.Event()
         response_complete = asyncio.Event()
@@ -1281,6 +1296,8 @@ class ClientDisconnectCancellationMiddleware:
                     await received_messages.put(message)
                     client_disconnected.set()
                     self.num_cancelled += 1
+                    if counts is not None:
+                        counts.cancelled += 1
                     if is_global_aiohttp_client_request_debug_enabled() or self.num_cancelled % 100 == 0:
                         client = scope.get("client")
                         client_address = f"{client[0]}:{client[1]}" if client else "-:-"
@@ -1581,6 +1598,7 @@ repr(e): {repr(e)}"""
 
         app = server.setup_webserver()
         startup.mark("setup_webserver")
+        observe_app_event_loop(app, "server")
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
@@ -1737,6 +1755,8 @@ class HeadServer(BaseServer):
         uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(get_global_config_dict())
 
         app = server.setup_webserver()
+        # The head server runs on its own thread and event loop inside the supervisor process.
+        observe_app_event_loop(app, "head_server")
 
         config = uvicorn.Config(
             app,

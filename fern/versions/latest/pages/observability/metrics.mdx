@@ -87,6 +87,33 @@ A server with `num_workers` above 1 runs `run_webserver` again in every Uvicorn 
 
 There is no supervisor-side total. The supervisor learns that a server is ready from a health poll every few seconds, so its total would be the stages above plus polling delay. The total for each server is the `gym.startup.server` span in the startup trace.
 
+### Runtime Metrics
+
+These metrics are reported only when `telemetry.runtime_metrics.enabled` is true. Every server process reports them, and the `process.pid` resource attribute tells apart the Uvicorn workers of one server.
+
+A Gym server answers every request on one asyncio event loop. When synchronous work holds that loop, every other request waits, even though no single request looks slow. Requests that arrive in bursts make this worse, because each one waits for the synchronous work of the requests ahead of it.
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.runtime.event_loop.lag` | Histogram | s | How late a sleeping coroutine wakes up, sampled once per interval. This is the signal that the event loop is busy. |
+| `gym.runtime.event_loop.tasks` | Gauge | count | Asyncio tasks that exist on the loop. This counts resident work, not a queue: a task waiting on the network counts as much as a runnable one. |
+| `gym.runtime.gc.pause` | Histogram | s | Duration of one garbage collection, by `generation`. |
+| `gym.runtime.gc.collections` | Counter | count | Garbage collections, by `generation`. |
+| `gym.runtime.gc.collected` | Counter | count | Objects freed, by `generation`. |
+| `gym.runtime.gc.uncollectable` | Counter | count | Objects found but not freed, by `generation`. |
+| `gym.runtime.gc.count` | Gauge | count | Allocations counted toward the next collection, by `generation`. |
+| `process.cpu.time` | Counter | s | Process CPU time, by `cpu.mode` (`user` or `system`). |
+| `process.memory.usage` | Gauge | bytes | Resident memory of the process. |
+| `process.thread.count` | Gauge | count | Threads in the process. |
+| `process.open_file_descriptor.count` | Gauge | count | Open file descriptors, where the platform reports them. |
+| `gym.server.requests.in_flight` | Up/down counter | count | HTTP requests the server is handling. |
+| `gym.server.requests.cancelled` | Counter | count | Requests cancelled because the client disconnected before the response finished. |
+| `gym.server.requests.failed` | Counter | count | Requests whose handler raised past every middleware. |
+
+`gym.runtime.event_loop.lag` and `gym.runtime.event_loop.tasks` carry `nemo.gym.event_loop`, which is `server` for a server's own loop and `head_server` for the head server's loop inside the supervisor.
+
+The work stays off the request path. The event loop runs one sampling coroutine per interval. Process, garbage-collection, and request totals are plain counters that the exporter's background thread reads when it exports, so a request costs a few integer updates and no OpenTelemetry call.
+
 ### Memory Metrics
 
 Memory metrics are emitted only when `telemetry.memory_profiling.enabled` is true. Server points carry `nemo.gym.server.name`, `nemo.gym.server.type`, and the root `process.pid`; server memory gauges also carry `memory.type`, which is `rss` or `pss`. Host points rely on the existing `host.name` resource attribute and carry no per-sample attributes.

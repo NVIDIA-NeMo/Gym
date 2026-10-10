@@ -37,6 +37,7 @@ telemetry:
 | `traces_enabled` | `true` | Emit spans. |
 | `metrics_enabled` | `true` | Emit metrics. |
 | `memory_profiling` | disabled | Sample host capacity and each managed server process tree. See below. |
+| `runtime_metrics` | disabled | Report event-loop lag, garbage collection, process resources, and in-flight requests from every server process. See below. |
 | `logs_enabled` | `false` | Bridge Python logging to OpenTelemetry logs. |
 | `run_id` | generated | Correlates every process of one run. |
 
@@ -54,6 +55,21 @@ telemetry:
 ```
 
 The supervisor samples host used, available, and total memory plus every server process and its descendants, including Uvicorn workers and ordinary subprocesses. Collection starts after the servers become ready and stops before they are terminated. Server accounting reads Linux `/proc`; PSS is omitted when `smaps_rollup` is unavailable, while RSS falls back to `statm`.
+
+### Runtime Metrics
+
+Enable runtime metrics inside the telemetry block:
+
+```yaml
+telemetry:
+  enabled: true
+  metrics_enabled: true
+  runtime_metrics:
+    enabled: true
+    interval_seconds: 1
+```
+
+Every server process, and the head server inside the process that runs `gym env start` or `gym eval run`, then reports how busy its event loop is, how long garbage collection pauses it, its CPU, memory, threads, and open file descriptors, and how many requests it is handling. Use them to find a server whose event loop is the bottleneck. See [Runtime Metrics](/main/observability/metrics#runtime-metrics) for each metric. They are off by default and stay opt-in until their overhead has been measured on large runs.
 
 ### Why `service_name_per_server` Defaults to True
 
@@ -86,6 +102,8 @@ config file.
 | `NEMO_GYM_OTEL_METRICS_ENABLED` | `metrics_enabled` |
 | `NEMO_GYM_OTEL_MEMORY_PROFILING_ENABLED` | `memory_profiling.enabled` |
 | `NEMO_GYM_OTEL_MEMORY_PROFILING_INTERVAL_SECONDS` | `memory_profiling.interval_seconds` |
+| `NEMO_GYM_OTEL_RUNTIME_METRICS_ENABLED` | `runtime_metrics.enabled` |
+| `NEMO_GYM_OTEL_RUNTIME_METRICS_INTERVAL_SECONDS` | `runtime_metrics.interval_seconds` |
 | `NEMO_GYM_OTEL_LOGS_ENABLED` | `logs_enabled` |
 | `NEMO_GYM_OTEL_RUN_ID` | `run_id` |
 | `OTEL_SERVICE_NAME` | `service_name` |

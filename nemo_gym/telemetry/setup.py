@@ -49,7 +49,7 @@ from uuid import uuid4
 
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.telemetry.config import MemoryProfilingConfig, TelemetryConfig
+from nemo_gym.telemetry.config import MemoryProfilingConfig, RuntimeMetricsConfig, TelemetryConfig
 
 
 if TYPE_CHECKING:
@@ -107,6 +107,11 @@ _ENV_FIELD_MAP = {
 #: The ``_ENV_FIELD_MAP`` fields that nemo-lens itself reads, each with a ``NEMO_LENS_<KEY>`` fallback.
 #: Exporting one of them as ``NEMO_GYM_OTEL_<KEY>`` would shadow that fallback.
 _LENS_FIELDS = frozenset({"span_groups", "traces_enabled", "metrics_enabled", "logs_enabled", "exporter", "run_id"})
+
+_RUNTIME_METRICS_ENV_FIELD_MAP = {
+    "enabled": f"{_OTEL_PREFIX}_RUNTIME_METRICS_ENABLED",
+    "interval_seconds": f"{_OTEL_PREFIX}_RUNTIME_METRICS_INTERVAL_SECONDS",
+}
 
 _MEMORY_PROFILING_ENV_FIELD_MAP = {
     "enabled": f"{_OTEL_PREFIX}_MEMORY_PROFILING_ENABLED",
@@ -175,6 +180,19 @@ def memory_profiling_config_from_env(defaults: MemoryProfilingConfig) -> MemoryP
         {
             "enabled": _env_flag(enabled_env, defaults.enabled),
             "interval_seconds": os.environ.get(interval_env, defaults.interval_seconds),
+        }
+    )
+
+
+def runtime_metrics_config_from_env() -> RuntimeMetricsConfig:
+    """Resolve runtime metrics from the environment the supervisor exported, falling back to the defaults."""
+    defaults = RuntimeMetricsConfig()
+    return RuntimeMetricsConfig.model_validate(
+        {
+            "enabled": _env_flag(_RUNTIME_METRICS_ENV_FIELD_MAP["enabled"], defaults.enabled),
+            "interval_seconds": os.environ.get(
+                _RUNTIME_METRICS_ENV_FIELD_MAP["interval_seconds"], defaults.interval_seconds
+            ),
         }
     )
 
@@ -252,6 +270,10 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
 
     for field, env_name in _MEMORY_PROFILING_ENV_FIELD_MAP.items():
         value = getattr(telemetry_config.memory_profiling, field)
+        os.environ.setdefault(env_name, "1" if value is True else "0" if value is False else str(value))
+
+    for field, env_name in _RUNTIME_METRICS_ENV_FIELD_MAP.items():
+        value = getattr(telemetry_config.runtime_metrics, field)
         os.environ.setdefault(env_name, "1" if value is True else "0" if value is False else str(value))
 
     for field, env_name in _OTLP_ENV_FIELD_MAP.items():
@@ -373,6 +395,8 @@ def _build_resource_attributes(server_name: Optional[str], server_type: Optional
         attrs["nemo.gym.server.name"] = server_name
     if server_type:
         attrs["nemo.gym.server.type"] = server_type
+    # The Uvicorn workers of one server share its name and type, so the process ID is what tells their metrics apart.
+    attrs["process.pid"] = os.getpid()
     return attrs
 
 
