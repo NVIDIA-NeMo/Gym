@@ -107,6 +107,49 @@ logger = logging.getLogger(__name__)
 _CHAT_KEEPALIVE_SECONDS = 15.0
 _SSE_KEEPALIVE = b": keep-alive\n\n"
 
+# A model server sets this attribute on an engine refusal it propagates on purpose (a
+# context-window overflow under its propagation setting). The shared error handler lets such an
+# error through to the server's own middleware, which answers with OpenAI's error envelope, and
+# the chat-SSE error event reports it with the same message and code.
+CONTEXT_OVERFLOW_ERROR_ATTRIBUTE = "nemo_gym_context_overflow_error"
+# The envelope's string code for a marked refusal, set beside the attribute above by the server
+# that classified the engine's message: ``CONTEXT_LENGTH_EXCEEDED_ERROR_CODE`` when the message
+# names the context window, ``None`` for a refusal of the request's own output-token parameter.
+CONTEXT_OVERFLOW_ERROR_CODE_ATTRIBUTE = "nemo_gym_context_overflow_error_code"
+# OpenAI's error code for a request that exceeds the model's context window; OpenAI-compatible
+# harnesses (Codex, OpenCode) compact their history and retry when they see it.
+CONTEXT_LENGTH_EXCEEDED_ERROR_CODE = "context_length_exceeded"
+
+
+def context_overflow_error_fields(error: BaseException) -> tuple[str, str | None, str | None]:
+    """Return ``(message, code, param)`` for a marked engine refusal.
+
+    The engine's error body travels on the exception as ``response_content`` (attached by
+    ``nemo_gym.server_utils.raise_for_status``). vLLM 0.10.1 and later format it as
+    ``{"error": {"message": ..., "type": ..., "param": ..., "code": 400}}``; older engines used a
+    flat object with a top-level ``message``. The message is the engine's own sentence from
+    either shape, verbatim; any other body is returned as raw text so no information is lost.
+    The param is the engine's ``param`` when its body names one. The code is whatever the server
+    stored under ``CONTEXT_OVERFLOW_ERROR_CODE_ATTRIBUTE`` when it marked the error.
+    """
+    body = getattr(error, "response_content", b"") or b""
+    text = body.decode(errors="replace") if isinstance(body, (bytes, bytearray)) else str(body)
+    message, param = text, None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        nested = parsed.get("error")
+        if isinstance(nested, dict) and isinstance(nested.get("message"), str):
+            message = nested["message"]
+            param = nested.get("param") if isinstance(nested.get("param"), str) else None
+        elif isinstance(parsed.get("message"), str):
+            message = parsed["message"]
+            param = parsed.get("param") if isinstance(parsed.get("param"), str) else None
+    code = getattr(error, CONTEXT_OVERFLOW_ERROR_CODE_ATTRIBUTE, CONTEXT_LENGTH_EXCEEDED_ERROR_CODE)
+    return message, code, param
+
 
 # Stateless; shared by every model server's default /v1/messages handler.
 _ANTHROPIC_CONVERTER = AnthropicConverter()
@@ -441,6 +484,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 try:
                     completion = await pending
                 except Exception as exc:
+                    if getattr(exc, CONTEXT_OVERFLOW_ERROR_ATTRIBUTE, False):
+                        # Headers are committed, so the refusal the server chose to propagate is
+                        # reported as an SSE error carrying the same OpenAI envelope the HTTP path
+                        # answers with; a traceback adds nothing to a refusal.
+                        message, code, param = context_overflow_error_fields(exc)
+                        logger.warning(
+                            "chat_completions() refused a streaming request after the keepalive with %s (%s): %s",
+                            getattr(exc, "status", 400),
+                            code,
+                            message,
+                        )
+                        error = {"message": message, "type": "invalid_request_error", "param": param, "code": code}
+                        yield f"event: error\ndata: {json.dumps({'error': error})}\n\n"
+                        return
                     logger.exception("chat_completions() failed after streaming headers were sent")
                     status = getattr(exc, "status_code", None) or getattr(exc, "status", None) or 500
                     detail = exc.detail if isinstance(exc, HTTPException) else "Model request failed"
