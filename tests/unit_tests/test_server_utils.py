@@ -20,6 +20,7 @@ import socket
 from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import uvicorn
 from aiohttp import ClientOSError, ClientResponseError, RequestInfo, TCPConnector
 from fastapi import Request
@@ -41,6 +42,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import (
     NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,
     NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME,
@@ -613,6 +615,32 @@ class TestServerUtils:
         assert httpx_client_request_mock.call_count == 3
         for call in httpx_client_request_mock.call_args_list:
             assert call.kwargs["url"].startswith("http://xyz:54321")
+
+    async def test_ServerClient_post_encodes_replayed_output_logprobs(self, monkeypatch: MonkeyPatch) -> None:
+        """A request body that replays assistant output with logprobs is sent as JSON with the logprobs intact."""
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=11000),
+            global_config_dict=DictConfig({"my_server": {"a": {"b": {"host": "xyz", "port": 54321}}}}),
+        )
+        aiohttp_client_mock = MagicMock()
+        aiohttp_client_request_mock = AsyncMock(return_value="ok")
+        aiohttp_client_mock.return_value.request = aiohttp_client_request_mock
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", aiohttp_client_mock)
+
+        logprobs = [{"token": "a", "bytes": [97], "logprob": -0.5, "top_logprobs": []}]
+        assistant_message = {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "a", "annotations": [], "logprobs": logprobs}],
+        }
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": [assistant_message]})
+
+        await server_client.post(server_name="my_server", url_path="/v1/responses", json=body)
+
+        sent = orjson.loads(aiohttp_client_request_mock.call_args.kwargs["data"])
+        assert sent["input"][0]["content"][0]["logprobs"] == logprobs
 
     def _mock_ray_return_value(self, monkeypatch: MonkeyPatch, return_value: bool) -> MagicMock:
         ray_mock = MagicMock()
