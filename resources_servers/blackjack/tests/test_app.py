@@ -12,13 +12,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import random
+import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
+from omegaconf import DictConfig
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
 from nemo_gym.server_utils import ServerClient
+from resources_servers.blackjack import app as blackjack_app
 from resources_servers.blackjack.app import BlackjackEnv, _hand_value
 
 
@@ -167,3 +173,135 @@ class TestActionParser:
     @pytest.mark.asyncio
     async def test_unknown_action_defaults_stand(self):
         assert await self._decide("<action>fold</action>") == "stand"
+
+
+AUTH = {"authorization": "Bearer t"}
+RESET = {"responses_create_params": {"input": []}}
+# With this seed the player holds [8, A], a hit draws a 6 for 15, and the dealer's [8, 2] must draw on a stand.
+SEED = 0
+
+
+def _step(action: str) -> dict:
+    return {
+        "responses_create_params": {"input": []},
+        "response": _response(f"<action>{action}</action>").model_dump(mode="json"),
+    }
+
+
+def _control(checkpoint_id: str = "c1", **extra) -> dict:
+    return {"checkpoint_id": checkpoint_id, "deadline_ts": time.time() + 5, **extra}
+
+
+def _checkpointed_env() -> tuple[BlackjackEnv, httpx.AsyncClient]:
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
+    config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="blackjack")
+    env = BlackjackEnv(config=config, server_client=server_client)
+    return env, httpx.AsyncClient(transport=httpx.ASGITransport(app=env.setup_webserver()), base_url="http://r")
+
+
+@pytest.fixture
+def seeded_deals(monkeypatch):
+    unseeded = random.Random
+    monkeypatch.setattr(blackjack_app.random, "Random", lambda: unseeded(SEED))
+
+
+async def _commit_after_one_hit(tmp_path: Path, *, corrupt: bool = False) -> tuple[BlackjackEnv, dict, dict]:
+    env, client = _checkpointed_env()
+    async with client:
+        await client.post("/ng-rollout/r-a1/reset", json=RESET)
+        hit = (await client.post("/ng-rollout/r-a1/step", json=_step("hit"))).json()
+        await client.post("/ng-control/v1/checkpoint/prepare", json=_control(), headers=AUTH)
+        if corrupt:
+            for state in env.session_state.values():
+                state["player"] = ["joker"]
+        commit = await client.post(
+            "/ng-control/v1/checkpoint/commit", json=_control(checkpoint_dir=str(tmp_path)), headers=AUTH
+        )
+        assert commit.json()["episode_ids"] == ["r-a1"]
+        return env, dict(client.cookies), hit
+
+
+async def _restore(client: httpx.AsyncClient, tmp_path: Path) -> None:
+    scope = [{"rollout_id": "r"}, {"rollout_id": "r", "attempt": 1}]
+    await client.post(
+        "/ng-control/v1/checkpoint/restore",
+        json=_control("r1", checkpoint_dir=str(tmp_path), episode_ids=scope),
+        headers=AUTH,
+    )
+
+
+@pytest.mark.usefixtures("seeded_deals")
+class TestCheckpointing:
+    @pytest.mark.asyncio
+    async def test_restored_game_ends_exactly_like_an_uncheckpointed_one(self, tmp_path):
+        _, client = _checkpointed_env()
+        async with client:
+            await client.post("/ng-rollout/u/reset", json=RESET)
+            uncheckpointed_hit = (await client.post("/ng-rollout/u/step", json=_step("hit"))).json()
+            uncheckpointed = (await client.post("/ng-rollout/u/step", json=_step("stand"))).json()
+
+        _, cookies, hit = await _commit_after_one_hit(tmp_path)
+        restored, fresh_client = _checkpointed_env()
+        async with fresh_client:
+            fresh_client.cookies.update(cookies)
+            await _restore(fresh_client, tmp_path)
+            await fresh_client.post("/ng-control/v1/checkpoint/resume", json=_control("r1"), headers=AUTH)
+            final = (await fresh_client.post("/ng-rollout/r-a2/step", json=_step("stand"))).json()
+
+        assert hit == uncheckpointed_hit and hit["terminated"] is False
+        assert final == uncheckpointed
+        assert final["terminated"] is True
+        # The dealer drew after the restore, so the restored generator dealt the cards.
+        assert len(final["info"]["dealer"].split(",")) > 2
+        assert restored.session_state == {}
+
+    @pytest.mark.asyncio
+    async def test_invalid_state_installs_nothing(self, tmp_path):
+        await _commit_after_one_hit(tmp_path, corrupt=True)
+        restored, fresh_client = _checkpointed_env()
+        async with fresh_client:
+            with pytest.raises(ValueError, match="invalid blackjack session state"):
+                await _restore(fresh_client, tmp_path)
+            status = (await fresh_client.get("/ng-control/v1/checkpoint/status", headers=AUTH)).json()
+        assert restored.session_state == {}
+        assert status["report"]["counts"]["sessions"] == 0
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            {"player": ["8"], "dealer": ["2"]},
+            {"player": ["8"], "dealer": ["2"], "rng_state": [3, [1, 2], None]},
+            {"player": "8A", "dealer": ["2"], "rng_state": [3, [], None]},
+        ],
+    )
+    def test_restore_rejects_malformed_state(self, state):
+        with pytest.raises(ValueError, match="invalid blackjack session state"):
+            _make_env().restore_env_state(state)
+
+    @pytest.mark.asyncio
+    async def test_retired_session_is_gone(self):
+        env, client = _checkpointed_env()
+        async with client:
+            await client.post("/ng-rollout/r-a1/reset", json=RESET)
+            await client.post(
+                "/ng-control/v1/checkpoint/retire",
+                json=_control(episode_ids=[{"rollout_id": "r", "attempt": 1}]),
+                headers=AUTH,
+            )
+            stale = await client.post("/ng-rollout/r-a1/step", json=_step("hit"))
+        # The retire stopped and released the game; a late step is not served from it and does not recreate it.
+        assert stale.status_code >= 400
+        assert env.session_state == {}
+
+    @pytest.mark.asyncio
+    async def test_session_the_server_dropped_is_left_out(self, tmp_path):
+        env, client = _checkpointed_env()
+        async with client:
+            await client.post("/ng-rollout/r-a1/reset", json=RESET)
+            env.session_state.clear()
+            await client.post("/ng-control/v1/checkpoint/prepare", json=_control(), headers=AUTH)
+            commit = await client.post(
+                "/ng-control/v1/checkpoint/commit", json=_control(checkpoint_dir=str(tmp_path)), headers=AUTH
+            )
+        assert commit.json()["manifest"]["record_count"] == 0
