@@ -159,6 +159,19 @@ class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     swebench_tests_timeout: int = 1800
     swebench_agent_timeout: int = 2700
     concurrency: int = 256
+    sanitize_git_history: bool = Field(
+        default=False,
+        description=(
+            "Before the agent starts, keep only the git history reachable from HEAD in the task repository: delete "
+            "every other ref, reflog and remote and prune unreachable objects. Some task images ship the full "
+            "upstream clone checked out at the base commit, so the fix commit is reachable through other refs. "
+            "Grading runs in a fresh sandbox and is unaffected."
+        ),
+    )
+    sanitize_git_history_timeout_s: int = Field(
+        default=300,
+        description="Budget for pruning; past it the history is replaced by a single commit of the current tree.",
+    )
 
 
 class AnySweServerConfig(BaseModel):
@@ -369,6 +382,37 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         }
 
     @staticmethod
+    def _git_history_sanitizer_script(repo_path: str, timeout_s: int) -> str:
+        """POSIX shell script that leaves ``repo_path`` with only the history reachable from HEAD.
+
+        Deletes every ref except the checked-out branch (a detached HEAD gets a branch first), all reflogs and
+        remotes, then ``git gc --prune=now`` drops the unreachable objects so neither ``git log --all`` nor
+        ``git fsck --unreachable`` can reach a future commit. If gc exceeds the budget, the history is replaced by
+        one commit of the current tree instead. The working tree is untouched either way.
+        """
+        return (
+            "set -u\n"
+            f"cd {shlex.quote(repo_path)} || exit 0\n"
+            "[ -d .git ] || exit 0\n"
+            "before=$(git rev-list --count --all 2>/dev/null || echo 0)\n"
+            "cur=$(git symbolic-ref -q --short HEAD || true)\n"
+            'if [ -z "$cur" ]; then git checkout -q -B anyswe_base >/dev/null 2>&1; cur=anyswe_base; fi\n'
+            "git remote 2>/dev/null | xargs -r -n1 git remote remove 2>/dev/null\n"
+            'git for-each-ref --format="%(refname)" | grep -v -x "refs/heads/$cur" '
+            "| xargs -r -n1 git update-ref -d 2>/dev/null\n"
+            "rm -rf .git/logs .git/refs/remotes .git/refs/tags 2>/dev/null\n"
+            "git reflog expire --expire=now --all 2>/dev/null\n"
+            "rm -f .git/FETCH_HEAD .git/ORIG_HEAD 2>/dev/null\n"
+            f'gc="git gc --prune=now --quiet"; command -v timeout >/dev/null 2>&1 && gc="timeout {int(timeout_s)} $gc"\n'
+            "if ! $gc 2>/dev/null; then\n"
+            '  echo ">>>>> git gc failed or exceeded the budget; replacing history with a single commit"\n'
+            "  rm -rf .git && git init -q && git add -A >/dev/null 2>&1 && "
+            "git -c user.email=anyswe@localhost -c user.name=anyswe commit -q -m base --allow-empty >/dev/null 2>&1\n"
+            "fi\n"
+            'echo ">>>>> git history sanitized: $before -> $(git rev-list --count --all 2>/dev/null) commits reachable"\n'
+        )
+
+    @staticmethod
     def _instance_dict(params: AnySweInstanceConfig) -> Dict[str, Any]:
         value = params.problem_info["instance_dict"]
         return json.loads(value) if isinstance(value, str) else dict(value)
@@ -524,6 +568,21 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 )
                 if unpacked.return_code != 0:
                     raise RuntimeError(f"agent runtime extraction failed: {(unpacked.stderr or '')[:300]}")
+            if params.sanitize_git_history:
+                sanitized = await sandbox.exec(
+                    self._git_history_sanitizer_script(
+                        params.sandbox_spec.get("workdir", "/testbed"), params.sanitize_git_history_timeout_s
+                    ),
+                    timeout_s=params.sanitize_git_history_timeout_s + 120,
+                    user="root",
+                )
+                (params.persistent_dir / "git_sanitize.txt").write_text(
+                    "\n".join(part for part in (sanitized.stdout, sanitized.stderr) if part)[-20_000:]
+                )
+                if sanitized.return_code != 0:
+                    raise RuntimeError(
+                        f"git history sanitizer failed: {(sanitized.stderr or sanitized.stdout or '')[-300:]}"
+                    )
             if _dataset_family(params.problem_info.get("dataset_name", "")) == "r2e":
                 await sandbox.exec(
                     "rm -rf /r2e_tests /root/r2e_tests /testbed/r2e_tests; "

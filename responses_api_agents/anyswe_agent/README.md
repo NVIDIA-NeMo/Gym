@@ -75,6 +75,18 @@ Each archive must contain the runtime's `bin/python` at its root.
 Private task images can pass registry credentials through
 `sandbox_spec.provider_options.image_auth`.
 
+## Git history
+
+Some task images (for example R2E-Gym, SWE-Gym and SWE-rebench) contain the full
+upstream clone checked out at the base commit, so the fix commit is still
+reachable through other branches, tags or remotes (`git log --all`). Set
+`sanitize_git_history: true` to keep only the history reachable from `HEAD` in
+the agent's sandbox: every other ref, reflog and remote is deleted and the
+unreachable objects are pruned. If pruning takes longer than
+`sanitize_git_history_timeout_s` (default 300), the history is replaced by a
+single commit of the current tree. The option is off by default. Grading runs in
+a fresh sandbox and is unaffected.
+
 ## Reward
 
 SWE-bench and SWE-bench Multilingual use the official `make_test_spec` and
