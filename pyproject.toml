@@ -670,6 +670,12 @@ include = [
 # SWE harnesses create mutable runtime trees inside their package directory.
 # Package discovery must never race or ship those caches and rollout outputs.
 exclude = [
+    # Sandboxed harness agents keep one results directory per rollout; a long run leaves tens of
+    # thousands, and walking them stalls every package build.
+    "responses_api_agents.claude_code_sandboxed_agent.results",
+    "responses_api_agents.claude_code_sandboxed_agent.results.*",
+    "responses_api_agents.opencode_sandboxed_agent.results",
+    "responses_api_agents.opencode_sandboxed_agent.results.*",
     "responses_api_agents.swe_agents.results",
     "responses_api_agents.swe_agents.results.*",
     "responses_api_agents.swe_agents.swe_openhands_setup",
