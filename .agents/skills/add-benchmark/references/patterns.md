@@ -130,17 +130,24 @@ Static validation and data preparation render the prompt into the Responses inpu
 such as `expected_answer` out of the rendered prompt. Preserve stable task IDs and canonical splits across conversion.
 
 A preparation module exposes `prepare(...) -> Path`, validates source rows, writes deterministic JSONL, and raises on
-malformed source data instead of silently dropping it. The generated module is the starting pattern:
+malformed source data instead of silently dropping it. Adapt the generated starting module to stage output beside its
+destination and replace it only after every row validates, preserving a known-good output on failure:
 
 ```python
+from tempfile import TemporaryDirectory
+
+
 def prepare(source: Path = SOURCE_PATH, output: Path = OUTPUT_PATH) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
-    with source.open(encoding="utf-8") as src, output.open("w", encoding="utf-8") as dst:
-        for line_number, line in enumerate(src, start=1):
-            row = json.loads(line)
-            if not isinstance(row.get("question"), str):
-                raise ValueError(f"invalid source row {line_number}")
-            dst.write(json.dumps(row) + "\n")
+    with TemporaryDirectory(dir=output.parent) as directory:
+        pending = Path(directory) / output.name
+        with source.open(encoding="utf-8") as src, pending.open("w", encoding="utf-8") as dst:
+            for line_number, line in enumerate(src, start=1):
+                row = json.loads(line)
+                if not isinstance(row.get("question"), str):
+                    raise ValueError(f"invalid source row {line_number}")
+                dst.write(json.dumps(row) + "\n")
+        pending.replace(output)
     return output
 ```
 
