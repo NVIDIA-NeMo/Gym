@@ -1875,13 +1875,15 @@ class TestApp:
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
     @patch("asyncio.to_thread")
-    async def test_run_forwards_rollout_diagnostic_paths_to_ray_child(
+    async def test_run_forwards_required_rollout_env_to_ray_child(
         self,
         mock_to_thread,
         mock_remote,
         mock_get_first_server_config_dict,
         monkeypatch,
     ) -> None:
+        monkeypatch.setenv("NEMO_GYM_CONFIG_DICT", "global_aiohttp_connector_limit: 64")
+        monkeypatch.setenv("NEMO_GYM_CONFIG_PATH", "osworld_nano_omni_agent")
         monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", "/workspace/output/r6f/osworld-model-io.jsonl")
         monkeypatch.setenv("OSWORLD_TASK_ARTIFACT_ROOT", "/workspace/output/r6f/osworld-tasks")
         monkeypatch.setenv("OSWORLD_VM_EXEC_LOG", "/workspace/output/r6f/osworld-vm-exec.jsonl")
@@ -1893,6 +1895,8 @@ class TestApp:
 
         runtime_env = mock_remote.options.call_args.kwargs["runtime_env"]
         expected_env = {
+            "NEMO_GYM_CONFIG_DICT": "global_aiohttp_connector_limit: 64",
+            "NEMO_GYM_CONFIG_PATH": "osworld_nano_omni_agent",
             "OSWORLD_MODEL_IO_LOG": "/workspace/output/r6f/osworld-model-io.jsonl",
             "OSWORLD_TASK_ARTIFACT_ROOT": "/workspace/output/r6f/osworld-tasks",
             "OSWORLD_VM_EXEC_LOG": "/workspace/output/r6f/osworld-vm-exec.jsonl",
