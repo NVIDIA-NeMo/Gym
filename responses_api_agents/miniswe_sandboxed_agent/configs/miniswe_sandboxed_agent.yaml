@@ -1,0 +1,22 @@
+# mini-SWE 2.4.6 on an episode session: the resources server seeds the sandbox and the
+# environment server calls /v1/responses with the task instruction as the input.
+# Step limit and command timeout follow the Terminal Bench 4 profile (Artificial Analysis settings).
+miniswe_sandboxed_agent:
+  responses_api_agents:
+    miniswe_sandboxed_agent:
+      entrypoint: app.py
+      num_workers: 1
+      # Unbound template: `gym eval run` binds the resources server at prepare.
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      harness:
+        step_limit: 500
+        step_timeout_sec: 30
+      agent_timeout_sec: 28800
+      agent_max_timeout_sec: null
+      artifacts_dir: results/miniswe_sandboxed_agent
+      datasets: []

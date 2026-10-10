@@ -683,6 +683,9 @@ class TestSeparateVerification:
         uploads = [remote for _, remote in verifier.uploads]
         assert any(remote.endswith(".tar.gz") for remote in uploads)  # tests/ and /logs/artifacts archives
         assert "/app/output/report.json" in uploads
+        # Restored artifact directories are world-writable, as Harbor leaves them, so a verifier that
+        # drops privileges can still write scratch files next to the agent's output.
+        assert any(c["command"] == "mkdir -p /app/output && chmod 777 /app/output" for c in verifier.execs)
         run = next(c for c in verifier.execs if "test.sh" in c["command"] and "timeout" in c["command"])
         assert "timeout --signal=KILL 300 bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1" in run["command"]
         assert (run["env"], run["user"], run["cwd"]) == ({"CHECK": "strict"}, "root", None)
@@ -758,3 +761,44 @@ class TestSeparateVerification:
         payload = client.post("/verify", json=verify_body()).json()
         assert payload["mask_sample"] is True and payload["failure_kind"] == "provider_unavailable"
         assert agent.stopped and verifier.stopped
+
+
+class TestTransfersWithoutRoot:
+    def test_falls_back_to_the_default_user_when_root_is_refused(self, tmp_path):
+        import asyncio
+
+        from resources_servers.harbor.sandbox_io import upload_dir
+
+        class NoRoot(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                self.execs.append({"command": command, "user": user})
+                if user == "root":
+                    return SandboxExecResult(
+                        stdout="",
+                        stderr="fork/exec /usr/bin/bash: operation not permitted (switching to uid=0 requires CAP_SETUID)",
+                        return_code=1,
+                    )
+                return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+        sandbox = NoRoot()
+        source = tmp_path / "src"
+        source.mkdir()
+        (source / "a.txt").write_text("a")
+        asyncio.run(upload_dir(sandbox, source, "/tests"))
+        users = [call["user"] for call in sandbox.execs if "tar -xzf" in call["command"]]
+        assert users == ["root", None]
+
+    def test_other_root_failures_propagate(self, tmp_path):
+        import asyncio
+
+        from resources_servers.harbor.sandbox_io import SandboxTransferError, upload_dir
+
+        class Broken(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                return SandboxExecResult(stdout="", stderr="tar: corrupt archive", return_code=2)
+
+        source = tmp_path / "src"
+        source.mkdir()
+        (source / "a.txt").write_text("a")
+        with pytest.raises(SandboxTransferError, match="corrupt archive"):
+            asyncio.run(upload_dir(Broken(), source, "/tests"))
