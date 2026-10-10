@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from nooa import Agent, strategy
-from nooa.errors import GenerationError
+from nooa.errors import GenerationError, LoopDetectedError
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
@@ -515,3 +515,170 @@ async def test_generation_error_without_output_limit_or_with_transport_failure_i
         )
     assert caught.value.result.termination_reason is None
     assert isinstance(caught.value.__cause__, GenerationError)
+
+
+@pytest.mark.asyncio
+async def test_recovered_model_failure_does_not_veto_success() -> None:
+    runner, _ = make_runner()
+    runner._server_client.post = AsyncMock(
+        side_effect=[ConnectionError("temporary quota failure"), FakeHTTPResponse(model_response())]
+    )
+
+    async def recover(agent, request):
+        try:
+            await agent.llm.acall([{"role": "user", "content": "first"}])
+        except ConnectionError:
+            pass
+        await agent.llm.acall([{"role": "user", "content": "retry"}])
+        return "recovered"
+
+    runner._invocation_adapter = recover
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+            model_url_path="/v1/responses",
+        )
+    )
+    assert result.return_value == "recovered"
+    assert result.termination_reason is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovered", [False, True])
+async def test_policy_budget_after_model_error_is_gradable_only_after_recovery(recovered: bool) -> None:
+    from responses_api_agents.nooa_agent.gym_llm import PolicyCallBudgetExceeded
+
+    runner, _ = make_runner()
+    runner._max_policy_calls = 2 if recovered else 1
+    runner._server_client.post = AsyncMock(
+        side_effect=[ConnectionError("temporary model failure"), FakeHTTPResponse(model_response())]
+    )
+
+    async def exhaust(agent, request):
+        try:
+            await agent.llm.acall([{"role": "user", "content": "first"}])
+        except ConnectionError:
+            pass
+        if recovered:
+            await agent.llm.acall([{"role": "user", "content": "retry"}])
+        await agent.llm.acall([{"role": "user", "content": "past the budget"}])
+
+    runner._invocation_adapter = exhaust
+    request = NOOARunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+        model_url_path="/v1/responses",
+    )
+    if recovered:
+        result = await runner.run(request)
+        assert result.termination_reason == "policy_budget_exceeded"
+    else:
+        with pytest.raises(NOOARunFailure) as caught:
+            await runner.run(request)
+        assert isinstance(caught.value.__cause__, PolicyCallBudgetExceeded)
+        assert caught.value.result.termination_reason is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", [LoopDetectedError("unchanged action loop"), asyncio.CancelledError()])
+async def test_terminal_exception_is_not_replaced_by_earlier_model_error(terminal: BaseException) -> None:
+    runner, _ = make_runner()
+    runner._server_client.post = AsyncMock(side_effect=ConnectionError("earlier quota failure"))
+
+    async def stop(agent, request):
+        try:
+            await agent.llm.acall([{"role": "user", "content": "question"}])
+        except ConnectionError:
+            pass
+        raise terminal
+
+    runner._invocation_adapter = stop
+    expected = asyncio.CancelledError if isinstance(terminal, asyncio.CancelledError) else NOOARunFailure
+    with pytest.raises(expected) as caught:
+        await runner.run(
+            NOOARunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+                model_url_path="/v1/responses",
+            )
+        )
+    if isinstance(terminal, asyncio.CancelledError):
+        assert caught.value is terminal
+        assert caught.value.nooa_result.termination_reason is None
+    else:
+        assert caught.value.__cause__ is terminal
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("main_failed", [False, True])
+@pytest.mark.parametrize("summary_failed", [False, True])
+async def test_summary_transport_state_is_separate_from_main(main_failed: bool, summary_failed: bool) -> None:
+    from nooa.agents.summarization import _in_summary_fork
+
+    runner, _ = make_runner()
+    main_error = ConnectionError("unrecovered main call")
+    responses = [
+        main_error if main_failed else FakeHTTPResponse(model_response()),
+        ConnectionError("contained summary call") if summary_failed else FakeHTTPResponse(model_response()),
+    ]
+    runner._server_client.post = AsyncMock(side_effect=responses)
+
+    async def complete(agent, request):
+        try:
+            await agent.llm.acall([{"role": "user", "content": "main"}])
+        except ConnectionError:
+            pass
+        token = _in_summary_fork.set(True)
+        try:
+            try:
+                await agent.llm.acall([{"role": "user", "content": "summary"}])
+            except ConnectionError:
+                pass
+        finally:
+            _in_summary_fork.reset(token)
+        return "completed"
+
+    runner._invocation_adapter = complete
+    request = NOOARunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+        model_url_path="/v1/responses",
+    )
+    if main_failed:
+        with pytest.raises(NOOARunFailure) as caught:
+            await runner.run(request)
+        assert caught.value.__cause__ is main_error
+    else:
+        result = await runner.run(request)
+        assert result.return_value == "completed"
+
+
+@pytest.mark.asyncio
+async def test_required_resource_failure_stays_fatal_after_model_recovery() -> None:
+    runner, _ = make_runner()
+    resource_error = ConnectionError("required resource unavailable")
+    resource_tools.request.side_effect = resource_error
+    runner._server_client.post = AsyncMock(
+        side_effect=[ConnectionError("temporary model failure"), FakeHTTPResponse(model_response())]
+    )
+
+    async def recover(agent, request):
+        try:
+            await agent.get_weather(city="Paris")
+        except ConnectionError:
+            pass
+        try:
+            await agent.llm.acall([{"role": "user", "content": "first"}])
+        except ConnectionError:
+            pass
+        await agent.llm.acall([{"role": "user", "content": "retry"}])
+        return "apparently successful"
+
+    runner._invocation_adapter = recover
+    with pytest.raises(NOOARunFailure) as caught:
+        await runner.run(
+            NOOARunRequest(
+                responses_create_params=responses_create_params("Paris"),
+                model_url_path="/v1/responses",
+                tool_access=grant(),
+            )
+        )
+    assert caught.value.__cause__ is resource_error
+    assert caught.value.result.termination_reason is None

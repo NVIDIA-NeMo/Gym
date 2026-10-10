@@ -31,7 +31,7 @@ fi
 # Resolve Gym and NOOA together so neither can silently replace the other's pins.
 uv pip install --python "$run_root/controller-venv/bin/python" \
   -e '.[dev,sandbox]' \
-  'nooa @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/051472343211914222e24ce36d8752f4e86bbe43.tar.gz'
+  'nooa @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/19caab169b018476ac433d040f6ae3f06aeff101.tar.gz'
 uv pip freeze --python "$run_root/controller-venv/bin/python" > "$run_root/controller-packages.txt"
 "$run_root/controller-venv/bin/python" -c 'import nooa; import nemo_gym; from opensandbox import Sandbox; print("controller imports passed")'
 touch "$run_root/controller-ready"

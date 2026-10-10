@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
+import signal
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -172,13 +175,122 @@ async def test_main_initializes_shared_transport_and_always_closes_it(monkeypatc
     monkeypatch.setattr(entrypoint, "execute", execute)
     monkeypatch.setattr(asyncio.get_running_loop(), "add_signal_handler", MagicMock())
     source, destination = tmp_path / "input.json", tmp_path / "result.json"
+    paths = {"stop_path": tmp_path / "stop", "completion_path": tmp_path / "completion.json"}
     source.write_text(payload().model_dump_json())
     if fails:
         with pytest.raises(RuntimeError, match="bootstrap failure"):
-            await entrypoint._main(source, destination)
+            await entrypoint._main(source, destination, **paths)
         assert not destination.exists()
+        assert not paths["completion_path"].exists()
     else:
-        await entrypoint._main(source, destination)
+        await entrypoint._main(source, destination, **paths)
         assert entrypoint.SandboxResult.model_validate_json(destination.read_text()).observations.source == "nooa"
         assert not destination.with_suffix(".tmp").exists()
+        assert json.loads(paths["completion_path"].read_text()) == {"task_completed": True}
     assert events == ["open", "execute", "close"]
+
+
+async def wait_for_file(path: Path) -> None:
+    async with asyncio.timeout(2):
+        while not path.exists():
+            await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_method", ["file", "signal"])
+async def test_completed_worker_holds_services_until_stop(monkeypatch, tmp_path: Path, stop_method: str) -> None:
+    source, destination = tmp_path / "input.json", tmp_path / "result.json"
+    stop, completion = tmp_path / "stop", tmp_path / "completion.json"
+    source.write_text(payload().model_dump_json())
+    result = entrypoint.SandboxResult(
+        response=run_result().episode.response,
+        observations=AgentObservationBundle(source="nooa"),
+        model_cookies={},
+        resource_cookies={},
+    )
+    client = MagicMock(close=AsyncMock())
+    monkeypatch.setattr(entrypoint, "set_global_aiohttp_client", MagicMock(return_value=client))
+    monkeypatch.setattr(entrypoint, "execute", AsyncMock(return_value=result))
+    register_signal = MagicMock()
+    monkeypatch.setattr(asyncio.get_running_loop(), "add_signal_handler", register_signal)
+    worker = asyncio.create_task(entrypoint._main(source, destination, stop_path=stop, completion_path=completion))
+    try:
+        await wait_for_file(completion)
+        assert json.loads(completion.read_text()) == {"task_completed": True}
+        assert entrypoint.SandboxResult.model_validate_json(destination.read_text()) == result
+        client.close.assert_awaited_once()
+        assert not worker.done()
+        if stop_method == "file":
+            stop.touch()
+        else:
+            assert register_signal.call_args.args[0] == signal.SIGTERM
+            register_signal.call_args.args[1]()
+        await asyncio.wait_for(worker, timeout=2)
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["stop-file", "signal", "fatal"])
+async def test_failure_or_interrupted_execution_never_waits_for_verification(
+    monkeypatch, tmp_path: Path, outcome: str
+) -> None:
+    source, destination = tmp_path / "input.json", tmp_path / "result.json"
+    stop, completion = tmp_path / "stop", tmp_path / "completion.json"
+    source.write_text(payload().model_dump_json())
+    started = asyncio.Event()
+
+    async def run(request):
+        started.set()
+        result = run_result()
+        if outcome == "fatal":
+            raise NOOARunFailure(ValueError("failed invocation"), result)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as error:
+            error.nooa_result = result
+            raise
+
+    monkeypatch.setattr(entrypoint, "InProcessNOOARunner", MagicMock(return_value=MagicMock(run=run)))
+    client = MagicMock(close=AsyncMock())
+    monkeypatch.setattr(entrypoint, "set_global_aiohttp_client", MagicMock(return_value=client))
+    register_signal = MagicMock()
+    monkeypatch.setattr(asyncio.get_running_loop(), "add_signal_handler", register_signal)
+    worker = asyncio.create_task(entrypoint._main(source, destination, stop_path=stop, completion_path=completion))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        if outcome == "stop-file":
+            stop.touch()
+        elif outcome == "signal":
+            register_signal.call_args.args[1]()
+        # Do not cancel on timeout: cancellation itself would checkpoint the
+        # worker and could hide a broken durable-stop watcher.
+        done, _ = await asyncio.wait({worker}, timeout=2)
+        assert worker in done
+        await worker
+        result = entrypoint.SandboxResult.model_validate_json(destination.read_text())
+        assert result.error.kind == ("fatal" if outcome == "fatal" else "cancelled")
+        assert result.observations.gaps[0].code == "test"
+        assert result.response is not None
+        assert json.loads(completion.read_text()) == {"task_completed": True}
+        client.close.assert_awaited_once()
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_stop_before_worker_start_fences_execution(monkeypatch, tmp_path: Path) -> None:
+    stop = tmp_path / "stop"
+    stop.touch()
+    execute = AsyncMock()
+    monkeypatch.setattr(entrypoint, "execute", execute)
+    await entrypoint._main(
+        tmp_path / "missing-input.json",
+        tmp_path / "result.json",
+        stop_path=stop,
+        completion_path=tmp_path / "completion.json",
+    )
+    execute.assert_not_awaited()
+    assert not (tmp_path / "completion.json").exists()

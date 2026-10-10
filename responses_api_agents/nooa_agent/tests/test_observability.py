@@ -65,6 +65,7 @@ async def test_model_transport_preserves_scoped_ownership_on_failed_and_successf
             await llm.acall([{"role": "user", "content": "task"}])
     finally:
         trace.after_agent_call(context=child, exception=failure)
+    assert state.fatal_error is failure
     try:
         await llm.acall([{"role": "user", "content": "task"}])
     finally:

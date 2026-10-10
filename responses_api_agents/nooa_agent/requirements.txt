@@ -1,4 +1,4 @@
 -e nemo-gym[dev,sandbox] @ ../../
 jsonschema>=4.25.1,<5
-# Includes the public scoped lifecycle hooks used for Gym observability.
-nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@051472343211914222e24ce36d8752f4e86bbe43
+# Includes ordered assistant history, scoped lifecycle hooks, and summary-fork isolation.
+nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@19caab169b018476ac433d040f6ae3f06aeff101

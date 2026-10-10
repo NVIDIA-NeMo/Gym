@@ -48,12 +48,12 @@ filesystem paths. Keep GDP's canonical flat input for later judging.
 
 ## Optional BenchAgent baseline
 
-The default TaskAgent keeps NOOA revision
-`051472343211914222e24ce36d8752f4e86bbe43`. Run BenchAgent in a new output directory
+The default TaskAgent uses NOOA revision
+`19caab169b018476ac433d040f6ae3f06aeff101`. Run BenchAgent in a new output directory
 and separate environments so existing TaskAgent results and dependencies remain
 reproducible. The optional profile pins **all three** packages, `nooa`,
 `nooa-cli` and `nooa-bench`, to
-`564a34014a354f11009cf7dda44a81b039a04273` in
+`19caab169b018476ac433d040f6ae3f06aeff101` in
 `responses_api_agents/nooa_agent/runtime/benchagent-requirements.txt`.
 
 First complete standard serial `gym env prefetch --config "$BENCHMARK_SETUP_CONFIG"`
@@ -78,8 +78,8 @@ AGENT_PYTHON="$RUN_ROOT/server-venvs/swe/responses_api_agents/nooa_agent/.venv/b
 ```
 
 Retain the standard setup completion markers and verify imports in every server
-environment before reuse. The explicit override replaces the default NOOA pin
-only in these new environments. After this installation, omit `--prefetch` from
+environment before reuse. The explicit override keeps the core, CLI and BenchAgent
+packages on the same NOOA revision in these new environments. After this installation, omit `--prefetch` from
 the launch: ordinary prefetch installs the default agent requirements again.
 The launcher must find every server environment complete to reuse them.
 
