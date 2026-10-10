@@ -1,0 +1,14 @@
+config_paths:
+  - resources_servers/frontiermath/configs/frontiermath.yaml
+
+indic_frontiermath_simple_agent:
+  _inherit_from: frontiermath_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: indic_frontiermath
+          type: benchmark
+          jsonl_fpath: benchmarks/indic/frontier_math/data/indic_frontiermath_raw.jsonl
+          prepare_script: benchmarks/indic/frontier_math/prepare.py
+          prompt_config: benchmarks/indic/frontier_math/prompts/default.yaml
+          num_repeats: 1

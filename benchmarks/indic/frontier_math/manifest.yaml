@@ -1,0 +1,28 @@
+name: indic/frontier_math
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: Translations of 12 public FrontierMath problems with exact text-answer grading
+modality: text
+licensing: unknown
+authors:
+  - anushakamathofficial
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: unknown
+resources_server: frontiermath
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+  - name: indic_frontiermath
+    type: benchmark
+    jsonl_fpath: benchmarks/indic/frontier_math/data/indic_frontiermath_raw.jsonl
+    prepare_script: benchmarks/indic/frontier_math/prepare.py
+    prompt_config: benchmarks/indic/frontier_math/prompts/default.yaml
+    num_repeats: 1
+canonical_split: benchmark
+standard_prompt_config: benchmarks/indic/frontier_math/prompts/default.yaml
+lifecycle: active
