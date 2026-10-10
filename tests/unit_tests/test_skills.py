@@ -141,8 +141,8 @@ class TestRepositorySkills:
             content, frontmatter, body_start = _skill_frontmatter(skill_md)
             if skill_dir.name in WORKFLOW_ONLY_SKILLS:
                 assert frontmatter.get("disable-model-invocation") is True
-                assert frontmatter.get("user_invocable") is False
-                assert set(frontmatter) <= allowed_frontmatter | {"disable-model-invocation", "user_invocable"}
+                assert frontmatter.get("user-invocable") is False
+                assert set(frontmatter) <= allowed_frontmatter | {"disable-model-invocation", "user-invocable"}
             else:
                 assert set(frontmatter) <= allowed_frontmatter
 
