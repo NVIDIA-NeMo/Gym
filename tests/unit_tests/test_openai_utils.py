@@ -31,7 +31,8 @@ from unittest.mock import AsyncMock, call
 
 import openai
 import pytest
-from aiohttp import ClientResponseError, ClientTimeout
+from aiohttp import ClientResponseError, ClientSession, ClientTimeout, web
+from aiohttp.test_utils import TestServer
 from openai.types.chat.completion_create_params import CompletionCreateParamsNonStreaming
 from openai.types.responses import (
     EasyInputMessage,
@@ -115,6 +116,13 @@ from nemo_gym.openai_utils import (
 from nemo_gym.responses_converter import (
     _RESPONSE_NON_BOUNDARY_TYPES,
     _RESPONSE_OUTPUT_BOUNDARY_TYPES,
+)
+
+
+TRANSIENT_GATEWAY_AUTH_BODY = (
+    b'{"error":{"message":"Authentication Error, Error querying the database: FATAL: remaining '
+    b'connection slots are reserved for roles with the SUPERUSER attribute",'
+    b'"type":"authentication_error","code":"401"}}'
 )
 
 
@@ -335,9 +343,30 @@ class TestOpenAIUtils:
         "body,expected",
         [
             (b'{"error":{"code":"invalid_api_key"}}', True),
+            (
+                b'{"error":{"code":"invalid_api_token","message":"Error querying the database"}}',
+                True,
+            ),
             (b'{"error":{"type":"authentication_error"}}', True),
             (b'{"detail":{"error":{"code":"invalid_api_key"}}}', True),
             (b"Incorrect API key provided", True),
+            (
+                b'{"error":{"type":"authentication_error","message":"Invalid API key; too many clients"}}',
+                True,
+            ),
+            (TRANSIENT_GATEWAY_AUTH_BODY, False),
+            (
+                '{"error":{"type":"AUTHENTICATION_ERROR","message":"ERROR QUERYING THE DATABASE"}}',
+                False,
+            ),
+            (
+                b'{"error":{"type":"authentication_error","message":"remaining connection slots are reserved"}}',
+                False,
+            ),
+            (
+                b'{"error":{"type":"authentication_error","message":"sorry, too many clients already"}}',
+                False,
+            ),
             (b'{"error":"unauthorized"}', False),
             (b'{"error":{"message":"model not available"}}', False),
         ],
@@ -351,7 +380,15 @@ class TestOpenAIUtils:
             (429, b'{"error":{"code":"budget_exceeded"}}'),
             (429, b'{"error":{"type":"insufficient_quota"}}'),
             (401, b'{"error":{"code":"invalid_api_key"}}'),
+            (
+                401,
+                b'{"error":{"code":"invalid_api_token","message":"Error querying the database"}}',
+            ),
             (403, b'{"error":{"type":"authentication_error"}}'),
+            (
+                403,
+                b'{"error":{"type":"authentication_error","message":"Incorrect API key; too many clients"}}',
+            ),
         ],
     )
     async def test_permanent_quota_and_auth_errors_fail_fast(self, monkeypatch, status, body):
@@ -372,6 +409,80 @@ class TestOpenAIUtils:
         assert first.value.response_content == body
         request.assert_awaited_once()
         sleep.assert_not_awaited()
+
+    @pytest.mark.parametrize("status", [401, 403])
+    async def test_gateway_auth_backend_failure_retries_and_recovers(self, monkeypatch, status):
+        received = []
+
+        async def handler(request):
+            received.append((await request.json(), request.headers["Authorization"]))
+            if len(received) == 1:
+                return web.Response(status=status, body=TRANSIENT_GATEWAY_AUTH_BODY)
+            return web.json_response({"id": "recovered"})
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", handler)
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        async with TestServer(app) as server, ClientSession() as session:
+            monkeypatch.setattr("nemo_gym.server_utils.get_global_aiohttp_client", lambda: session)
+            client = NeMoGymAsyncOpenAI(
+                api_key="abc",
+                base_url=str(server.make_url("/v1")),
+                max_http_attempts=2,
+            )
+            payload = {
+                "model": "judge",
+                "messages": [{"role": "user", "content": "preserved answer"}],
+            }
+            original = deepcopy(payload)
+
+            assert await client.create_chat_completion(**payload) == {"id": "recovered"}
+            assert await client.create_chat_completion(**payload) == {"id": "recovered"}
+
+        assert received == [(original, "Bearer abc")] * 3
+        assert payload == original
+        sleep.assert_awaited_once_with(0.5)
+
+    @pytest.mark.parametrize("attempts", [1, 3])
+    @pytest.mark.parametrize("internal", [False, True])
+    async def test_exhausted_gateway_auth_retries_preserve_body_without_tripping(
+        self, monkeypatch, attempts, internal
+    ):
+        calls = 0
+        recovered = False
+
+        async def handler(request):
+            nonlocal calls
+            calls += 1
+            if not recovered:
+                return web.Response(status=401, body=TRANSIENT_GATEWAY_AUTH_BODY)
+            return web.json_response({"id": "recovered"})
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", handler)
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        async with TestServer(app) as server, ClientSession() as session:
+            monkeypatch.setattr("nemo_gym.server_utils.get_global_aiohttp_client", lambda: session)
+            client = NeMoGymAsyncOpenAI(
+                api_key="abc",
+                base_url=str(server.make_url("/v1")),
+                max_http_attempts=attempts,
+                internal=internal,
+            )
+            with pytest.raises(ClientResponseError) as exc_info:
+                await client.create_chat_completion(model="judge", messages=[])
+
+            assert not isinstance(exc_info.value, PermanentEndpointError)
+            assert exc_info.value.status == 401
+            assert exc_info.value.response_content == TRANSIENT_GATEWAY_AUTH_BODY
+            assert calls == attempts
+            assert sleep.await_args_list == [call(0.5)] * (attempts - 1)
+
+            recovered = True
+            assert await client.create_chat_completion(model="judge", messages=[]) == {"id": "recovered"}
+            assert calls == attempts + 1
 
     async def test_generic_quota_exceeded_429_still_retries(self, monkeypatch):
         failure = SimpleNamespace(
