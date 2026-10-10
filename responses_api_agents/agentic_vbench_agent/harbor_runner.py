@@ -105,6 +105,10 @@ def job_config(
         "n_concurrent_trials": 1,
         "retry": {"max_retries": 0},
         "verifier_timeout_multiplier": verifier_timeout_multiplier,
+        # Agent setup installs Node and OpenCode from the network inside the task container;
+        # under registry slowdowns the 360 s default fails before the agent even starts.
+        # Setup time is outside the agent budget, so a longer allowance changes no score.
+        "agent_setup_timeout_multiplier": AGENT_SETUP_TIMEOUT_MULTIPLIER,
         "environment": {
             "import_path": "responses_api_agents.agentic_vbench_agent." + environment_class,
             "delete": True,
@@ -133,6 +137,7 @@ def job_config(
 # subagents (primary agent only). "on" keeps the built-ins and registers a media-analysis
 # subagent whose description makes delegation an explicit option; the task prompt and the
 # primary agent's system prompt are unchanged in every mode.
+AGENT_SETUP_TIMEOUT_MULTIPLIER = 3.0
 OPENCODE_SUBAGENT_MODES = ("default", "off", "on")
 OPENCODE_BUILTIN_SUBAGENTS = ("general", "explore", "scout")
 OPENCODE_MEDIA_SUBAGENT = {
