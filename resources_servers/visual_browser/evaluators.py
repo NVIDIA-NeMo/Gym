@@ -47,7 +47,7 @@ class WebVoyagerEvidenceEvaluator:
         )
         return WebVerifierResult(
             valid_sample=False,
-            failure_kind="external_judge_required",
+            failure_kind="web:external_judge_required",
             evidence=evidence,
             verifier_version="visual-browser-webvoyager-gemini-v1",
             metadata={"final_answer": final_answer or "", "screenshots": len(evidence)},

@@ -29,6 +29,7 @@ from responses_api_agents.web_agent.app import (
     _nano_omni_parse_retry_messages,
     _parse_response_action,
     _redact_old_images,
+    _web_failure_kind,
 )
 
 
@@ -166,7 +167,7 @@ async def test_nano_omni_parse_retry_injects_feedback_and_retry_temperature(capl
                     "terminated": True,
                 }
             ],
-            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "external_judge_required"}}],
+            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "web:external_judge_required"}}],
             "/verify": [
                 {
                     "reward": 1.0,
@@ -235,7 +236,7 @@ async def test_native_nonterminal_action_that_terminates_retains_final_observati
                     "terminated": True,
                 }
             ],
-            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "external_judge_required"}}],
+            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "web:external_judge_required"}}],
             "/verify": [
                 {
                     "reward": 1.0,
@@ -284,7 +285,7 @@ async def test_native_length_response_ends_as_valid_truncation_without_parse_ret
         {
             "/seed_session": [_seed("Huggingface--18")],
             "/v1/responses": [_length_model_response()],
-            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "external_judge_required"}}],
+            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "web:external_judge_required"}}],
             "/verify": [
                 {
                     "reward": 0.0,
@@ -780,7 +781,7 @@ async def test_webvoyager_routes_final_evidence_to_external_judge(caplog):
                 {
                     "result": {
                         "valid_sample": False,
-                        "failure_kind": "external_judge_required",
+                        "failure_kind": "web:external_judge_required",
                     }
                 }
             ],
@@ -983,6 +984,49 @@ def _context_overflow(status=500):
 @pytest.mark.parametrize("status", [401, 403, 404, 422, 429])
 def test_context_error_wording_does_not_override_authentication_or_request_errors(status):
     assert not _is_model_context_overflow(_context_overflow(status))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["insufficient_quota", "budget_exceeded", "rate_limit_exceeded", None])
+async def test_model_quota_failure_stops_outer_retries_but_transient_429_remains_retryable(code):
+    agent = _agent(model_turn_max_retries=1, model_retry_delay_secs=0)
+    calls = []
+    failure = ClientResponseError(request_info=MagicMock(), history=(), status=429, message="model unavailable")
+    failure.response_content = json.dumps({"error": {"code": code, "message": "quota exceeded"}}).encode()
+
+    async def post_json(*, url_path, **kwargs):
+        calls.append(url_path)
+        if url_path == "/seed_session":
+            payload = _seed()
+        elif url_path == "/v1/responses":
+            raise failure
+        elif url_path == "/close":
+            payload = {"closed": True, "session_id": "session-a"}
+        else:
+            raise AssertionError(f"unexpected request: {url_path}")
+        response = _FakeHttpResponse(payload)
+        return response, await response.json()
+
+    agent._post_json = AsyncMock(side_effect=post_json)
+    request = MagicMock()
+    request.cookies = {}
+    result = await agent.run(
+        request,
+        WebAgentRunRequest(
+            responses_create_params={"input": "Solve"},
+            web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0"),
+        ),
+    )
+
+    permanent = code in {"insufficient_quota", "budget_exceeded"}
+    assert calls.count("/v1/responses") == (1 if permanent else 2)
+    assert calls[-1] == "/close"
+    assert result.mask_sample is True
+    assert result.model_dump()["_ng_failure_class"] == (
+        "configuration_error" if permanent else "retryable_infrastructure"
+    )
+    if permanent:
+        assert result.failure_kind == "web:model_quota_exhausted"
 
 
 @pytest.mark.asyncio
@@ -1295,7 +1339,7 @@ async def test_run_classifies_seed_precondition_as_terminal_masked_failure():
     dumped = result.model_dump()
 
     assert result.mask_sample is True
-    assert result.failure_kind == "benchmark_precondition"
+    assert result.failure_kind == "web:benchmark_precondition"
     assert dumped["_ng_failure_class"] == "benchmark_precondition"
     assert dumped["_ng_failure_terminal"] is True
     assert result.verifier_result.metadata["http_status"] == 422
@@ -1334,7 +1378,7 @@ async def test_run_classifies_missing_evaluator_as_terminal_configuration_failur
     dumped = result.model_dump()
 
     assert result.mask_sample is True
-    assert result.failure_kind == "evaluator_configuration"
+    assert result.failure_kind == "web:evaluator_configuration"
     assert dumped["_ng_failure_class"] == "configuration_error"
     assert dumped["_ng_failure_terminal"] is True
     assert result.verifier_result.metadata["error_kind"] == "evaluator_configuration"
@@ -1386,6 +1430,18 @@ async def test_close_failure_is_a_separate_outcome_and_retry_keeps_identity():
     assert artifacts.cleanup_failure_kind is None
 
 
+@pytest.mark.parametrize(
+    "kind,expected",
+    [
+        ("session_lost", "session_lost"),
+        ("configuration_error:http_400", "configuration_error:http_400"),
+        ("capacity_unavailable", "web:capacity_unavailable"),
+    ],
+)
+def test_web_failure_kind_keeps_shared_names_and_namespaces_the_rest(kind: str, expected: str) -> None:
+    assert _web_failure_kind(kind) == expected
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "runtime_status,action_error",
@@ -1426,7 +1482,7 @@ async def test_environment_access_failure_is_masked_instead_of_judged(
                     },
                 }
             ],
-            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "external_judge_required"}}],
+            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "web:external_judge_required"}}],
             "/close": [{"closed": True}],
         },
     )
@@ -1447,7 +1503,7 @@ async def test_environment_access_failure_is_masked_instead_of_judged(
         result = await agent.run(request, body)
 
     assert result.mask_sample is True
-    assert result.failure_kind == runtime_status
+    assert result.failure_kind == f"web:{runtime_status}"
     assert result.reward == 0.0
     assert result.task_success is False
     # Judging a forced stop would score a site-access failure as a policy failure.
@@ -1478,7 +1534,7 @@ async def test_browser_target_closed_after_action_is_judged_as_policy_failure(ca
                     },
                 }
             ],
-            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "external_judge_required"}}],
+            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "web:external_judge_required"}}],
             "/verify": [
                 {
                     "reward": 0.0,

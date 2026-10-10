@@ -22,11 +22,18 @@ from pydantic import ConfigDict, Field, PrivateAttr
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import SESSION_LOST, SESSION_RELEASE_FAILED, TRANSPORT_TIMEOUT
+from nemo_gym.failure_kinds import (
+    SESSION_LOST,
+    SESSION_RELEASE_FAILED,
+    TRANSPORT_TIMEOUT,
+    is_namespaced,
+    is_registered,
+)
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    _error_body_is_permanent_quota,
     accumulate_response_usage,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
@@ -290,6 +297,12 @@ def _is_model_context_overflow(exc: Exception) -> bool:
     )
 
 
+def _web_failure_kind(kind: str) -> str:
+    """Keep Gym's shared failure names and namespace web-only ones as ``web:<kind>``."""
+
+    return kind if is_registered(kind) or is_namespaced(kind) else f"web:{kind}"
+
+
 def _failure_route(exc: Exception) -> tuple[str, bool, str, dict[str, Any]]:
     """Map a bounded exception to sidecar retry and terminal semantics."""
 
@@ -306,12 +319,19 @@ def _failure_route(exc: Exception) -> tuple[str, bool, str, dict[str, Any]]:
     retryable = payload.get("retryable")
     if _is_model_context_overflow(exc):
         metadata["error_kind"] = "model_context_overflow"
-        failure_kind = "model_context_overflow"
+        failure_kind = "web:model_context_overflow"
     if isinstance(error_kind, str):
         metadata["error_kind"] = error_kind
-        failure_kind = error_kind
+        failure_kind = _web_failure_kind(error_kind)
     else:
         error_kind = None
+
+    # Model servers preserve the HTTP body across RPC, not the Python
+    # PermanentEndpointError subclass. Reuse the model client's exact spent-key
+    # classification so the outer policy loop does not retry a tripped client.
+    if exc.status == 429 and _error_body_is_permanent_quota(json.dumps(payload)):
+        metadata["error_kind"] = "model_quota_exhausted"
+        return "configuration_error", True, "web:model_quota_exhausted", metadata
 
     if retryable is False:
         terminal = True
@@ -319,7 +339,7 @@ def _failure_route(exc: Exception) -> tuple[str, bool, str, dict[str, Any]]:
             failure_class = "benchmark_precondition"
         else:
             failure_class = "configuration_error"
-        failure_kind = error_kind or f"{failure_class}:http_{exc.status}"
+        failure_kind = _web_failure_kind(error_kind) if error_kind else f"{failure_class}:http_{exc.status}"
     elif retryable is not True and exc.status in {400, 401, 403, 422}:
         # Backward-compatible fallback for an older resource server that does
         # not yet emit the structured retryability envelope.
@@ -930,7 +950,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                 if runtime_status == CAPTCHA_BUDGET_EXHAUSTED_STATUS:
                     # The browser could not reach the site, so nothing the policy
                     # did is measurable. Mask instead of scoring a forced stop.
-                    environment_failure_kind = runtime_status
+                    environment_failure_kind = _web_failure_kind(runtime_status)
                     LOG.warning(
                         "event=web_environment_access_failed benchmark=%s task=%s step=%d failure_kind=%s",
                         task.benchmark.value,
@@ -1121,7 +1141,7 @@ class WebAgent(SimpleResponsesAPIAgent):
         if verifier_result is None:
             verifier_result = WebVerifierResult(
                 valid_sample=False,
-                failure_kind="missing_verifier_result",
+                failure_kind="web:missing_verifier_result",
             )
 
         return WebAgentRunResponse(

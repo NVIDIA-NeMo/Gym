@@ -299,7 +299,7 @@ def test_webvoyager_evaluator_exposes_evidence_only_for_external_judging() -> No
         browser_context=context,
     )
     assert result.valid_sample is False
-    assert result.failure_kind == "external_judge_required"
+    assert result.failure_kind == "web:external_judge_required"
     assert result.metadata == {"final_answer": "done", "screenshots": 0}
     evaluator.close()
 
