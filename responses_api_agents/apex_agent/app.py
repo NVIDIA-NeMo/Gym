@@ -542,14 +542,21 @@ class ApexAgent(SimpleResponsesAPIAgent):
             f"{_GUEST_ROOT}/stirrup_runtime.py": _STIRRUP_RUNTIME_PATH.read_text(encoding="utf-8"),
             f"{_GUEST_ROOT}/runner_config.json": json.dumps(runner_config),
         }
+        env = {
+            "HF_HUB_OFFLINE": "1",
+            "LOGURU_LEVEL": "WARNING",
+            "NO_PROXY": "127.0.0.1,localhost",
+        }
+        if prebuilt_world:
+            # A prebuilt world starts its runner and ~8 MCP servers at once, all importing the same read-only venv.
+            # Their concurrent __pycache__ writes copy directories up into the fakeroot --writable-tmpfs overlay,
+            # and that race can turn .py files into empty directories, so the runner dies with ModuleNotFoundError
+            # and the world never becomes healthy. Without bytecode writes there is nothing to copy up.
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
         return SandboxSpec(
             image=image or self._image or self.config.image,
             workdir=_GUEST_ROOT,
-            env={
-                "HF_HUB_OFFLINE": "1",
-                "LOGURU_LEVEL": "WARNING",
-                "NO_PROXY": "127.0.0.1,localhost",
-            },
+            env=env,
             files=files,
             metadata=metadata,
             provider_options=provider_options,
