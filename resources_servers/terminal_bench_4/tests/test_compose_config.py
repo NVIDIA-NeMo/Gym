@@ -5,7 +5,12 @@ from copy import deepcopy
 
 import pytest
 
-from resources_servers.terminal_bench_4.compose_config import _bytes, resolve_compose
+from resources_servers.terminal_bench_4.compose_config import (
+    MAIN_COMMAND,
+    _bytes,
+    resolve_compose,
+    resolve_image_startup,
+)
 
 
 def image_record(**config):
@@ -90,3 +95,24 @@ def test_memory_units():
     assert _bytes("512") == 512
     with pytest.raises(ValueError, match="memory size"):
         _bytes("unlimited")
+
+
+@pytest.mark.parametrize("entrypoint", [None, [], ["/start", "--flag"], ["/bin/sh", "-c", "echo '$HOME'"]])
+@pytest.mark.parametrize("cmd", [None, [], ["bash"], ["python3"], ["serve"]])
+def test_standalone_main_uses_same_startup_resolution_as_compose(entrypoint, cmd):
+    record = image_record(Entrypoint=entrypoint, Cmd=cmd)
+    service = {"command": list(MAIN_COMMAND)}
+    resolve_image_startup(service, record["config"])
+    compose = resolve_compose({"services": {}}, "image", {"image": record})["services"]["main"]
+    assert service["entrypoint"] == compose["entrypoint"] == (entrypoint or [])
+    assert service["command"] == compose["command"] == ["sh", "-c", "sleep infinity"]
+
+
+@pytest.mark.parametrize("command", [[], "", ["explicit", "command"], "explicit command"])
+@pytest.mark.parametrize("entrypoint", [[], "", ["/explicit-entrypoint"], "/explicit-entrypoint"])
+def test_compose_explicit_main_overrides_remain_unchanged(command, entrypoint):
+    overlay = {"services": {"main": {"command": command, "entrypoint": entrypoint}}}
+    record = image_record(Entrypoint=["/image-start"], Cmd=["image-command"])
+    main = resolve_compose(overlay, "image", {"image": record})["services"]["main"]
+    assert main["entrypoint"] == entrypoint
+    assert main["command"] == command

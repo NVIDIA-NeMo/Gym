@@ -4,11 +4,15 @@
 """Resource-owned preparation, deadlines, one finalizer, and cleanup."""
 
 import asyncio
+import os
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
+from resources_servers.terminal_bench_4.archive_workers import ArchiveWorkers, run_local
 from resources_servers.terminal_bench_4.collection import collect
 from resources_servers.terminal_bench_4.environment import Environment
 from resources_servers.terminal_bench_4.models import AgentTermination
@@ -52,6 +56,7 @@ class Session:
     recorded_resources: list = field(default_factory=list)
     owns_slot: bool = False
     slots: Any = None
+    archive_workers: ArchiveWorkers | None = None
     config: Any = None
     persist: Callable = field(default=lambda: None, repr=False)
 
@@ -60,6 +65,20 @@ def exception(session, error, error_type=None):
     record = {"exception_type": error_type or type(error).__name__, "exception_message": str(error)}
     session.result.setdefault("exception_info", record)
     session.diagnostics.append({"phase": session.phase, "subphase": session.subphase, **record})
+
+
+def discard_tree(path: Path) -> dict[str, int]:
+    """Remove a host tree, returning how many regular files and bytes it held (blocking; run in a worker)."""
+    files = size = 0
+    for root, _, names in os.walk(path):
+        for name in names:
+            try:
+                size += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                continue
+            files += 1
+    shutil.rmtree(path)
+    return {"files": files, "bytes": size}
 
 
 async def cleanup(session):
@@ -84,6 +103,16 @@ async def cleanup(session):
             )
         except Exception as exc:
             exception(session, exc)
+    # The collected workspace only carries the task's declared artifacts from the agent sandbox to the verifier's.
+    # Declared workdirs reach hundreds of MB per attempt, so once both sandboxes are gone it is discarded, always.
+    artifacts = session.directory / "artifacts"
+    if artifacts.exists():
+        record = {"operation": "artifacts_discarded"}
+        try:
+            record.update(await run_local(partial(discard_tree, artifacts), session.archive_workers))
+        except Exception as exc:
+            record["error"] = str(exc)
+        session.diagnostics.append(record)
     if session.owns_slot:
         session.slots.release()
         session.owns_slot = False
@@ -103,11 +132,22 @@ async def prepare_session(session, loader):
     # type probe fails and the optional file download is attempted instead.
     for relative in ("agent", "verifier", "artifacts/logs/artifacts"):
         (session.directory / relative).mkdir(parents=True, exist_ok=True)
-    session.result = {"runtime": "gym-tb4-native", "runtime_version": NATIVE_VERSION, "started_at": now()}
+    session.result = {
+        "runtime": "gym-tb4-native",
+        "runtime_version": NATIVE_VERSION,
+        "started_at": now(),
+    }
     await session.slots.acquire()
     session.owns_slot = True
-    session.task = await loader.load(session.request.task_name, session.request.task_ref)
-    session.environment = Environment(session.task, session.config.environment, session.session_id, session.directory)
+    if session.task is None:
+        session.task = await loader.load(session.request.task_name, session.request.task_ref)
+    session.environment = Environment(
+        session.task,
+        session.config.environment,
+        session.session_id,
+        session.directory,
+        archive_workers=session.archive_workers,
+    )
     # Construct and validate the verifier configuration before allocating
     # either environment, but allocate its resources only after collection.
     session.verifier_environment = Environment(
@@ -116,6 +156,7 @@ async def prepare_session(session, loader):
         session.session_id + "__verifier__trial",
         session.directory,
         verifier=True,
+        archive_workers=session.archive_workers,
     )
     if session.config.environment.efs_logs_host_path:
         session.shared_logs = SharedLogs(session.environment)
@@ -170,14 +211,34 @@ async def finalize_session(session, *, grade):
             error_type = (
                 "AgentTimeoutError" if session.termination.reason == "timeout" else "NonZeroAgentExitCodeError"
             )
-            exception(session, session.termination.detail or session.termination.reason, error_type)
+            # Diagnostics only. The termination is reported on its own field; if collection, restore or the
+            # verifier fails afterwards, that failure must become the reported failure_reason instead of the
+            # run's exit (39 verifier/collect failures of a 6 h budget pulse were labelled AgentTimeoutError).
+            session.diagnostics.append(
+                {
+                    "phase": session.phase,
+                    "subphase": session.subphase,
+                    "exception_type": error_type,
+                    "exception_message": session.termination.detail or session.termination.reason,
+                }
+            )
         session.subphase = "collect"
         session.persist()
         try:
-            await download_dir(session.environment.main, "/logs/agent", session.directory / "agent")
+            await download_dir(
+                session.environment.main,
+                "/logs/agent",
+                session.directory / "agent",
+                archive_workers=session.archive_workers,
+            )
         except Exception as exc:
             session.diagnostics.append({"operation": "agent_logs", "error": str(exc)})
-        await collect(session.environment, session.directory / "artifacts", session.diagnostics)
+        await collect(
+            session.environment,
+            session.directory / "artifacts",
+            session.diagnostics,
+            archive_workers=session.archive_workers,
+        )
         try:
             await session.environment.stop()
         except Exception as exc:
@@ -211,13 +272,16 @@ async def finalize_session(session, *, grade):
                         "error": session.verifier_environment.efs_logs_fallback,
                     }
                 )
-            await restore(session.verifier_environment, session.directory / "artifacts")
+            await restore(
+                session.verifier_environment, session.directory / "artifacts", archive_workers=session.archive_workers
+            )
             session.subphase = "verifier_execution"
             session.persist()
             session.result["verifier_result"] = await run_verifier(
                 session.verifier_environment,
                 session.directory,
                 session.diagnostics,
+                archive_workers=session.archive_workers,
             )
         finally:
             session.result["verifier"]["finished_at"] = now()
