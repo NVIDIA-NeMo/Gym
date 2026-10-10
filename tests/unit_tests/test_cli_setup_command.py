@@ -700,6 +700,31 @@ class TestGetNemoGymVersionSpec:
 
 
 class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
+    @pytest.mark.parametrize("log_directory", ["logs", "gym logs"])
+    def test_tee_logs_preserves_path_output_and_exit_status(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, log_directory: str
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        log_dir = tmp_path / log_directory
+        expected_output = b"stdout\nstderr\n"
+
+        for invocation, exit_code in enumerate((0, 7), start=1):
+            process = run_command(
+                command=f"printf 'stdout\\n'; printf 'stderr\\n' >&2; exit {exit_code}",
+                working_dir_path=tmp_path,
+                server_name="policy_model",
+                global_config_dict={"uv_cache_dir": str(tmp_path / "cache"), "nemo_gym_log_dir": str(log_dir)},
+                stdout_target=subprocess.PIPE,
+                stderr_target=subprocess.PIPE,
+            )
+            stdout, stderr = process.communicate(timeout=10)
+
+            assert process.returncode == exit_code, stderr.decode(errors="replace")
+            assert stdout == expected_output
+            assert stderr == b""
+            assert (log_dir / "policy_model.log").read_bytes() == expected_output * invocation
+        assert set(tmp_path.iterdir()) == {log_dir}
+
     def test_tee_logs_with_server_name(self, monkeypatch: MonkeyPatch) -> None:
         Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
 
