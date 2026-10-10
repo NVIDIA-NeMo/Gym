@@ -1,0 +1,13 @@
+agent:
+  type: pi
+  version: 0.83.0
+  api: anthropic-messages
+  adaptive_thinking: true
+  thinking: max
+  context_window: 1000000
+  max_tokens: 65536
+model:
+  model_name: claude-opus-4-8
+  model_kwargs:
+    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+    api_key: ${ANTHROPIC_API_KEY:-}
