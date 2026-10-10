@@ -1,0 +1,111 @@
+bc_v4_8_rs:
+  resources_servers:
+    single_step_tool_use_with_argument_comparison:
+      allowed_agents: [tool_simulation_agent]
+      entrypoint: app.py
+      domain: agent
+      tool_call_comparator_config:
+        word_count_similarity_threshold: 0.5
+        # Exactly one call is expected per row. With the call count part of the verdict and no
+        # superset allowed, a response that makes several calls scores 0.
+        parallel_tool_call_rewarding: true
+        validate_against_declared_tool_schema: true
+        use_f1_for_list: true
+        use_strong_list_reward: true
+        list_f1_threshold: 0.8
+        list_f1_min_precision: 1.0
+        list_f1_min_recall: 1.0
+        list_f1_max_actual_to_expected_ratio: 1.0
+        list_f1_reject_duplicate_actual_values: true
+        keep_quotes: true
+        # bash_command and update_progress are graded on the tool name alone. An empty include
+        # list filters every argument off both sides, so the comparison reduces to {} vs {}.
+        # This mirrors chat messages, which always score 1.0: the content of a shell command or a
+        # progress board is not a target that the golden call can meaningfully constrain.
+        # browse is graded on its URLs only. Its free-text goal is optional in the tool schema, so
+        # neither its value nor its presence is compared.
+        argument_filters:
+          bash_command:
+            included_argument_names: []
+          update_progress:
+            included_argument_names: []
+          browse:
+            included_argument_names: [urls]
+        argument_comparison_overrides:
+          search:
+            queries:
+              # sim = |intersection| / (|expected| + |actual|), so sim == F1 / 2 and its ceiling
+              # is 0.5, reached only when the two word bags are identical. A threshold AT the
+              # ceiling makes each query an exact word-bag match:
+              #   - delete any word     -> |intersection| falls, sim < 0.5 -> fail
+              #   - add any word        -> |actual| grows,       sim < 0.5 -> fail
+              #   - substitute a word   -> both happen,          sim < 0.5 -> fail
+              # At 0.45, substituting one token of ten (a wrong year or entity) still gave
+              # sim = 9/20 = 0.45 and passed. Word bags are unordered, so word order does not matter.
+              #
+              # The precision / recall / ratio / unmatched-word guards below cannot fire at 0.5,
+              # because an exact match implies precision == recall == 1.0. They take effect again
+              # if the threshold is lowered.
+              word_count_similarity_threshold: 0.5
+              word_count_min_precision: 0.6
+              word_count_min_recall: 0.5
+              word_count_max_actual_to_expected_ratio: 1.25
+              word_count_max_unmatched_actual_words: 4
+              # The relaxed list rule (one extra query allowed, none missing) applies only when
+              # the golden call holds 4 or more queries. Shorter golden lists need an exact set.
+              list_f1_relaxed_min_expected_len: 4
+              list_f1_max_unmatched_expected: 0
+              list_f1_max_unmatched_actual: 1
+              keep_quotes: true
+              coerce_actual_string_to_list: true
+              coerce_actual_string_to_singleton_list: true
+              validate_list_item_schema: true
+              reject_empty_string_list_items: true
+      verified: false
+      description: >-
+        BrowseComp-style single-step verifier for search-agent trajectories. Search queries
+        must match the golden word bag exactly, list arguments use strong list-F1 guardrails,
+        browse URLs must match exactly, and bash_command / update_progress score on tool name
+        alone. A response with more than one tool call scores 0.
+      value: Exact-match search queries for reward profiling, eliminating partial-credit reward hacking.
+bc_v4_8_agent:
+  responses_api_agents:
+    tool_simulation_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: bc_v4_8_rs
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/single_step_tool_use_with_argument_comparison/data/train.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: single_step_tool_use_with_argument_comparison
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/single_step_tool_use_with_argument_comparison/data/validation.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: single_step_tool_use_with_argument_comparison
+          version: 0.0.1
+          artifact_fpath: validation.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/single_step_tool_use_with_argument_comparison/data/example.jsonl
+        num_repeats: 1
+
+bc_v4_8_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: bc_v4_8_agent
