@@ -23,6 +23,12 @@ harbor_agent_general:
 
       harbor_jobs_dir: ${harbor_jobs_dir}
 
+      ## Optional variables installed only for the lifetime of one Harbor Ray
+      ## task. Use this when task/agent configs contain ${VAR} references.
+      ## Values are passed as task arguments rather than Ray runtime_env values,
+      ## because Ray persists runtime_env values in its setup logs.
+      harbor_worker_env: {}
+
       ## Follows harbor.models.job.config:DatasetConfig spec.
       harbor_dataset:
         ...
@@ -41,6 +47,28 @@ harbor_agent_general:
 ```
 
 See [configs](./configs) for specific examples.
+
+> [!important]
+> The bridge converts Harbor's `agent/trajectory.json`, so the selected Harbor
+> agent must declare `capabilities.atif=True` and actually emit that file. Harbor
+> can run additional native agents, such as Pi, that do not emit ATIF; those
+> trials are not currently convertible into Gym rollouts by this bridge. Harbor
+> also has no generic image-capability flag, so local-image support must be
+> validated per agent and model provider.
+
+To inspect the exact agents and ATIF capabilities in the installed Harbor
+version:
+
+```bash
+python - <<'PY'
+from harbor.agents.factory import AgentFactory
+from harbor.models.trial.config import AgentConfig
+
+for name in AgentFactory.registered_names():
+    cls = AgentFactory.get_agent_class_from_config(AgentConfig(name=name))
+    print(f"{name}: atif={cls.capabilities.atif}")
+PY
+```
 
 ## Example
 

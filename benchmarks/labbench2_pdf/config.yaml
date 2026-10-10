@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - environments/labbench2_pdf/config.yaml
+
+labbench2_pdf_benchmark_harbor_agent:
+  _inherit_from: harbor_agent_general
+  responses_api_agents:
+    harbor_agent_general:
+      datasets:
+        - name: labbench2_pdf
+          type: benchmark
+          jsonl_fpath: benchmarks/labbench2_pdf/data/labbench2_pdf_benchmark.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/labbench2_pdf/prepare.py
+          num_repeats: 1

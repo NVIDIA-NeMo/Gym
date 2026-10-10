@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+harbor_agent_general:
+  responses_api_agents:
+    harbor_agent_general:
+      entrypoint: app.py
+      domain: agent
+      description: OpenCode through Harbor over benchmark-relevant LabBench2 PDFs (Docker profile).
+      concurrency: 4
+      harbor_ray_task_num_cpus: 0.25
+      harbor_jobs_dir: "results/labbench2_pdf/harbor_jobs"
+
+      harbor_dataset:
+        path: "environments/labbench2_pdf/data/tasks_docker"
+
+      harbor_environment:
+        type: docker
+
+      # Harbor and OpenCode run in a Ray worker. Values come from Gym's
+      # gitignored root env.yaml; the Harbor task/job keeps only ${VAR}
+      # references rather than embedding endpoint credentials.
+      harbor_worker_env:
+        OPENAI_API_KEY: ${oc.select:policy_api_key,''}
+        OPENAI_BASE_URL: ${oc.select:policy_base_url,''}
+        JUDGE_API_KEY: ${oc.select:judge_api_key,''}
+        JUDGE_BASE_URL: ${oc.select:judge_base_url,''}
+        JUDGE_MODEL: ${oc.select:judge_model_name,''}
+
+      harbor_agent:
+        name: opencode
+        # OpenCode consumes the first segment as its provider name; preserve
+        # Gym's complete policy_model_name as the upstream model ID.
+        model_name: openai/${oc.select:policy_model_name,''}
+        override_setup_timeout_sec: 900
+        env:
+          OPENAI_API_KEY: \${OPENAI_API_KEY}
+          OPENAI_BASE_URL: \${OPENAI_BASE_URL}
+
+      harbor_verifier:
+        disable: false
