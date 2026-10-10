@@ -670,6 +670,14 @@ include = [
 # SWE harnesses create mutable runtime trees inside their package directory.
 # Package discovery must never race or ship those caches and rollout outputs.
 exclude = [
+    "responses_api_agents.anyswe_agent.anyswe_*_deps",
+    "responses_api_agents.anyswe_agent.anyswe_*_deps.*",
+    "responses_api_agents.anyswe_agent.anyswe_results_*",
+    "responses_api_agents.anyswe_agent.anyswe_results_*.*",
+    "responses_api_agents.anyterminal_agent.deps",
+    "responses_api_agents.anyterminal_agent.deps.*",
+    "responses_api_agents.anyterminal_agent.results",
+    "responses_api_agents.anyterminal_agent.results.*",
     "responses_api_agents.swe_agents.results",
     "responses_api_agents.swe_agents.results.*",
     "responses_api_agents.swe_agents.swe_openhands_setup",
