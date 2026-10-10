@@ -78,6 +78,9 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
         sif_path: str,
         *,
         working_dir: str = "/testbed",
+        home_dir: str = "/root",
+        isolated_home: bool = False,
+        disable_network: bool = False,
         allowed_commands: list[str] | None = None,
         memory_limit_mb: int | None = None,
         extra_mounts: list[str] | None = None,
@@ -87,6 +90,9 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
         super().__init__(allowed_commands=allowed_commands)
         self._sif_path = sif_path
         self._working_dir = working_dir.rstrip("/")
+        self._home_dir = home_dir.rstrip("/")
+        self._isolated_home = isolated_home
+        self._disable_network = disable_network
         self._memory_limit_mb = memory_limit_mb
         self._extra_mounts = extra_mounts or []
         self._capture_git_diff = capture_git_diff
@@ -104,6 +110,9 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
         return {
             "sif_path": self._sif_path,
             "working_dir": self._working_dir,
+            "home_dir": self._home_dir,
+            "isolated_home": self._isolated_home,
+            "disable_network": self._disable_network,
             "allowed_commands": None,
             "memory_limit_mb": self._memory_limit_mb,
             "extra_mounts": self._extra_mounts,
@@ -130,15 +139,13 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
             mount_args.append(extra)
         mount_str = " ".join(mount_args)
 
-        # NOTE: ``HOME`` inside the container is set via the ``--home`` flag
-        # (not ``--env HOME=...``). Apptainer 1.4+ rejects setting HOME via
-        # ``--env`` because that flag forwards values through the
-        # ``APPTAINERENV_HOME`` mechanism, which it explicitly disallows for
-        # HOME with a startup-time stderr warning. That warning is harmless
-        # in isolation but our ``echo ready`` health-check below treats any
-        # non-empty stderr as fatal, so the agent fails to enter the shell
-        # even though apptainer would otherwise run fine. ``--home`` is the
-        # supported way to set ``$HOME`` in the container.
+        # ``--home host:container`` binds the requested home but does not
+        # reliably rewrite HOME when the image's runtime user has a different
+        # passwd entry (the AA image stayed at /root in a real compute-node
+        # probe). Apptainer rejects ``--env HOME=...`` via APPTAINERENV_HOME, so
+        # isolated-home sessions set HOME on the command executed *inside* the
+        # container instead. This avoids the startup warning while making the
+        # shell and every child process observe the mounted path.
         env_args = " ".join(
             f"--env {var}={shlex.quote(os.environ.get(var, ''))}"
             for var in self._env_passthrough
@@ -146,15 +153,25 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
         )
         env_section = env_args
 
+        if self._isolated_home:
+            host_home = self._temp_dir / "home"
+            host_home.mkdir()
+            home_spec = f"{host_home}:{self._home_dir}"
+        else:
+            home_spec = self._home_dir
+        network_section = "--net --network none" if self._disable_network else ""
+        shell_command = f"env HOME={shlex.quote(self._home_dir)} bash" if self._isolated_home else "bash"
+
         exec_cmd = (
             f"apptainer exec "
             f"--writable-tmpfs --cleanenv --pid "
             f"--no-mount home,tmp,bind-paths "
-            f"--home /root "
+            f"--home {shlex.quote(home_spec)} "
+            f"{network_section} "
             f"{env_section} "
             f"{mount_str} "
             f"{shlex.quote(self._sif_path)} "
-            f"bash"
+            f"{shell_command}"
         )
 
         if self._memory_limit_mb and self._memory_limit_mb > 0:
