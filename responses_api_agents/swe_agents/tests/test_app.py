@@ -2402,6 +2402,118 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             result = wrapper._build_apptainer_command(params, cmd_args)
             assert "/swebench_setup" in result
 
+    @staticmethod
+    def _symlinked_setup_tree(tmp_path: Path, name: str) -> tuple[Path, Path]:
+        """A setup tree stored under ``shared/`` and reached through a symlink under ``linked/``."""
+        real = tmp_path / "shared" / name
+        real.mkdir(parents=True)
+        link = tmp_path / "linked" / name
+        link.parent.mkdir(exist_ok=True)
+        link.symlink_to(real)
+        return link, real
+
+    def test_real_path_bind_mounts(self, tmp_path) -> None:
+        tmp_path = tmp_path.resolve()
+        link, real = self._symlinked_setup_tree(tmp_path, "swe_swebench_setup")
+        assert swe_app._real_path_bind_mounts(link) == [f"--mount type=bind,src={real},dst={real}"]
+        assert swe_app._real_path_bind_mounts(str(link), ro=True) == [f"--mount type=bind,src={real},dst={real},ro"]
+        # A symlinked parent directory counts too.
+        assert swe_app._real_path_bind_mounts(link / "SWE-bench") == [
+            f"--mount type=bind,src={real}/SWE-bench,dst={real}/SWE-bench"
+        ]
+        assert swe_app._real_path_bind_mounts(real) == []
+
+    def test_symlinked_openhands_setup_is_also_bound_at_its_real_path(self, monkeypatch, tmp_path) -> None:
+        tmp_path = tmp_path.resolve()
+        link, real = self._symlinked_setup_tree(tmp_path, "swe_openhands_setup")
+        for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+            (real / "OpenHands" / subdir).mkdir(parents=True)
+        (real / "miniforge3").mkdir()
+        wrapper = _create_wrapper(monkeypatch)
+        params = _make_instance_config(str(tmp_path), openhands_setup_dir=link)
+        cmd_args = ExecuteContainerCommandArgs(
+            command="echo hello", expected_file_pattern="/tmp/*.json", mode="agent", timeout=300
+        )
+
+        result = wrapper._build_apptainer_command(params, cmd_args)
+
+        oh = real / "OpenHands"
+        expected = [
+            f"--mount type=bind,src={oh},dst={oh},ro",
+            f"--mount type=bind,src={oh}/.eval_sessions,dst={oh}/.eval_sessions",
+            f"--mount type=bind,src={oh}/logs,dst={oh}/logs",
+            f"--mount type=bind,src={oh}/evaluation/oh,dst={oh}/evaluation/oh",
+            f"--mount type=bind,src={real}/miniforge3,dst={real}/miniforge3,ro",
+        ]
+        for mount in expected:
+            assert mount in result
+        # The read-only parent is bound before its writable subdirectories.
+        assert result.index(expected[0]) < result.index(expected[1])
+        # The existing binds at the configured (link) path are unchanged.
+        assert f"--mount type=bind,src={link}/OpenHands,dst={link}/OpenHands,ro" in result
+
+    def test_no_real_path_binds_without_symlinks(self, monkeypatch, tmp_path) -> None:
+        tmp_path = tmp_path.resolve()
+        wrapper = _create_wrapper(monkeypatch)
+        params = _make_instance_config(str(tmp_path))
+        oh_dir = Path(params.openhands_setup_dir) / "OpenHands"
+        for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+            (oh_dir / subdir).mkdir(parents=True, exist_ok=True)
+        (Path(params.openhands_setup_dir) / "miniforge3").mkdir(parents=True, exist_ok=True)
+        agent = wrapper._build_apptainer_command(
+            params,
+            ExecuteContainerCommandArgs(
+                command="echo hello", expected_file_pattern="/tmp/*.json", mode="agent", timeout=300
+            ),
+        )
+        # Only the existing binds: /openhands_setup/... plus the same-path bind.
+        assert agent.count(f"src={oh_dir},") == 2
+        assert agent.count(f"src={params.openhands_setup_dir}/miniforge3,") == 2
+        evaluation = wrapper._build_apptainer_command(
+            params,
+            ExecuteContainerCommandArgs(
+                command="run_eval", expected_file_pattern="/tmp/*.json", mode="eval", timeout=300
+            ),
+        )
+        assert evaluation.count(f"src={params.swebench_setup_dir},") == 2
+
+    @pytest.mark.parametrize(
+        "dataset_name,setup_field",
+        [
+            ("princeton-nlp/SWE-bench_Verified", "swebench_setup_dir"),
+            ("SWE-bench_Multilingual", "swebench_multilingual_setup_dir"),
+            ("R2E-Gym/R2E-Gym-Subset", "r2e_gym_setup_dir"),
+        ],
+    )
+    def test_symlinked_eval_setup_is_also_bound_at_its_real_path(
+        self, monkeypatch, tmp_path, dataset_name, setup_field
+    ) -> None:
+        tmp_path = tmp_path.resolve()
+        link, real = self._symlinked_setup_tree(tmp_path, setup_field)
+        wrapper = _create_wrapper(monkeypatch)
+        problem_info = {
+            "problem_statement": "Fix",
+            "instance_id": "django__django-12345",
+            "base_commit": "abc",
+            "dataset_name": dataset_name,
+            "split": "test",
+            "instance_dict": "{}",
+            "container_formatter": ["docker://custom/{instance_id}"],
+        }
+        params = _make_instance_config(str(tmp_path), problem_info=problem_info, **{setup_field: link})
+        oh_dir = Path(params.openhands_setup_dir) / "OpenHands"
+        for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+            (oh_dir / subdir).mkdir(parents=True, exist_ok=True)
+        (Path(params.openhands_setup_dir) / "miniforge3").mkdir(parents=True, exist_ok=True)
+        cmd_args = ExecuteContainerCommandArgs(
+            command="run_eval", expected_file_pattern="/tmp/*.json", mode="eval", timeout=300
+        )
+
+        result = wrapper._build_apptainer_command(params, cmd_args)
+
+        assert f"--mount type=bind,src={link},dst={link}" in result
+        assert f"--mount type=bind,src={real},dst={real}" in result
+
     def test_memory_limit(self, monkeypatch) -> None:
         # No cgroups in the enroot sandbox, so the memory limit is enforced by
         # the gym-side RSS watchdog (_memory_watchdog), not a static ulimit

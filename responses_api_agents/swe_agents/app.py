@@ -396,6 +396,22 @@ def _resolve_remote_commit(repo: Optional[str], ref: str) -> str:
     )
 
 
+def _real_path_bind_mounts(path: Union[str, Path], ro: bool = False) -> List[str]:
+    """Bind ``path`` at its symlink-resolved location too, when it is reached through a symlink.
+
+    The setup trees are also bound at their own absolute host path because the interpreters and venvs inside them
+    record absolute paths at install time. Those recorded paths are the REAL paths: ``uv`` venvs point
+    ``bin/python`` and ``pyvenv.cfg`` at the resolved interpreter, and miniforge's console-script shebangs use the
+    resolved prefix. When the configured path goes through a symlink (a symlinked ``cache_dir`` or home directory,
+    or a setup tree linked to a shared copy), only the link path existed inside the container and every interpreter
+    lookup failed. Returns no mounts when ``path`` is not reached through a symlink.
+    """
+    real = os.path.realpath(path)
+    if real == os.path.abspath(path):
+        return []
+    return [f"--mount type=bind,src={real},dst={real}{',ro' if ro else ''}"]
+
+
 @contextmanager
 def file_lock(file_path: Path, label: str, max_wait: float = 3600.0, poll_interval: float = 5.0):
     """Cross-node lock using mkdir (atomic on Lustre/NFS, unlike fcntl.flock)."""
@@ -3454,6 +3470,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
                 ]
             )
+            # The same tree at its symlink-resolved path: read-only parent first, then the writable subdirectories.
+            real_openhands_mounts = _real_path_bind_mounts(openhands_dir, ro=True)
+            if real_openhands_mounts:
+                real_openhands_dir = os.path.realpath(openhands_dir)
+                real_openhands_mounts += [
+                    f"--mount type=bind,src={real_openhands_dir}/{subdir},dst={real_openhands_dir}/{subdir}"
+                    for subdir in (".eval_sessions", "logs", "evaluation/oh")
+                ]
+            mount_args.extend(real_openhands_mounts)
             if params.install_openhands_capture_overlay and command.mode == "agent":
                 # Mount ``sitecustomize.py`` into capture-enabled agent containers.
                 # The module patches the OpenHands ``nemo-gym`` client at startup.
@@ -3476,6 +3501,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             miniforge3_path = Path(params.openhands_setup_dir) / "miniforge3"
             mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
             mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
+            mount_args.extend(_real_path_bind_mounts(miniforge3_path, ro=True))
 
         # Add SWE-bench setup directory mount if available (for evaluation)
         # swe-bench-ext, nv-internal-1, and deepswe don't use the swebench harness
@@ -3484,6 +3510,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # This is needed because uv venv has hardcoded absolute paths
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst=/swebench_setup")
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst={params.swebench_setup_dir}")
+            mount_args.extend(_real_path_bind_mounts(params.swebench_setup_dir))
 
         if command.mode == "eval" and "SWE-bench_Multilingual" in data_point["dataset_name"]:
             mount_args.append(
@@ -3492,6 +3519,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             mount_args.append(
                 f"--mount type=bind,src={params.swebench_multilingual_setup_dir},dst={params.swebench_multilingual_setup_dir}"
             )
+            mount_args.extend(_real_path_bind_mounts(params.swebench_multilingual_setup_dir))
 
         if command.mode == "eval" and data_point["dataset_name"] == "nv-internal-1":
             run_script_path = params.persistent_dir / "run_script.sh"
@@ -3510,6 +3538,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # print(f"Mounting R2E-Gym setup directory from: {self.r2e_gym_setup_dir}", flush=True)
             mount_args.append(f"--mount type=bind,src={params.r2e_gym_setup_dir},dst=/r2egym_setup")
             mount_args.append(f"--mount type=bind,src={params.r2e_gym_setup_dir},dst={params.r2e_gym_setup_dir}")
+            mount_args.extend(_real_path_bind_mounts(params.r2e_gym_setup_dir))
 
         if command.mode == "eval" and "SWE-rebench" in data_point["dataset_name"]:
             rebench_setup_dir = params.swe_rebench_setup_dir
