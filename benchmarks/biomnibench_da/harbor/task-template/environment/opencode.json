@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "*": "allow"
+  },
+  "provider": {
+    "nvinf": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "NVIDIA Inference",
+      "options": {
+        "baseURL": "https://inference-api.nvidia.com/v1",
+        "apiKey": "{env:NVINF_API_KEY}"
+      }
+    },
+    "vllm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Self-Hosted vLLM",
+      "options": {
+        "baseURL": "{env:VLLM_API_BASE}"
+      }
+    }
+  }
+}
