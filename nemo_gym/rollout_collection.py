@@ -1678,18 +1678,20 @@ def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name:
     """Count a finished attempt only after the recovery store accepts its outcome."""
     if not is_span_group_enabled(GymSpanGroup.ROLLOUT):
         return
+    # These are the dispatch's original routing fields, captured before the
+    # canonical persisted record maps kinds to sidecar classes. Keep main's
+    # dashboard contract: a routing class is not an inferred failure kind.
     failure_class = result.get(NG_FAILURE_CLASS_KEY) if outcome != "scored" else None
     failure_kind = failure_type = None
     if failure_class is not None:
-        record = result.get("_ng_failure_record")
-        if isinstance(record, dict):
-            # The shared record is authoritative, including an explicitly absent
-            # kind. Producer diagnostics can contain stale flat failure fields.
-            failure_kind = record["failure"].get("failure_kind")
-            failure_type = record.get("exception_type")
+        if "_ng_failure_kind" in result:
+            # Native failures have one shared kind rather than a legacy routing
+            # class. Do not let an unregistered free-text kind escape via class.
+            failure_class = _metric_failure_kind(failure_class)
+            failure_kind = result["_ng_failure_kind"]
         else:
             failure_kind = result.get("failure_kind")
-            failure_type = result.get("_ng_failure_type")
+        failure_type = result.get("_ng_failure_type")
     record_rollout_completed(
         outcome,
         dispatch_name=dispatch_name,
@@ -2964,6 +2966,14 @@ class RolloutCollectionHelper(BaseModel):
                     result.pop("_ng_omitted", None)
                 verification_response = completed.verification_response
                 diagnostics = completed.diagnostics or _failure_diagnostics(result)
+                metric_result = diagnostics
+                if not metric_result and isinstance(result, RolloutFailure):
+                    # Custom typed dispatchers may provide no legacy diagnostics.
+                    metric_result = {
+                        NG_FAILURE_CLASS_KEY: result.sidecar_failure_class,
+                        "_ng_failure_kind": result.failure.failure_kind,
+                        "_ng_failure_type": result.exception_type,
+                    }
                 if verification_response is None:
                     verification_response = _judge_failure_response(result)
                 # Custom dispatch implementations may return an already-completed
@@ -3087,7 +3097,7 @@ class RolloutCollectionHelper(BaseModel):
                     # A returned suppression without a failure is an intentional
                     # omission. Known kill-shaped failures were converted above.
                     store.record_omission(row, str(result.get("error") or "Producer requested no result persistence"))
-                    _record_rollout_outcome(result, "omitted", dispatch_name)
+                    _record_rollout_outcome(metric_result, "omitted", dispatch_name)
                     if batch_tracker is not None:
                         # This attempt supersedes any failure reported before resume.
                         batch_failure_rows = [
@@ -3109,13 +3119,13 @@ class RolloutCollectionHelper(BaseModel):
                     )
                     store.record_outcome(result)
                     outcome = "omitted" if store.disposition(row) == "omitted" else "failed"
-                    _record_rollout_outcome(result, outcome, dispatch_name)
+                    _record_rollout_outcome(metric_result, outcome, dispatch_name)
                     if batch_tracker is not None:
                         batch_failure_rows.append(_batch_status_row(result, batch_agent_refs))
                 else:
                     # Success → main jsonl.
                     store.record_outcome(result, sync=capture_build_can_retire(token_capture_build))
-                    _record_rollout_outcome(result, "scored", dispatch_name)
+                    _record_rollout_outcome(metric_result, "scored", dispatch_name)
                     if batch_tracker is not None:
                         batch_completed_rows.append(_batch_status_row(result, batch_agent_refs))
                     try:

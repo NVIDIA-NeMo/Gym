@@ -114,14 +114,14 @@ def test_failure_fields_on_a_scored_row_are_not_labels(collected_metrics, monkey
 
 
 @pytest.mark.parametrize("kind", [None, "verifier_error", "tb4:sandbox_gone", "unbounded text"])
-def test_shared_failure_record_is_authoritative(collected_metrics, monkeypatch, kind):  # noqa: F811
+def test_original_routing_labels_are_not_replaced_by_saved_record(collected_metrics, monkeypatch, kind):  # noqa: F811
     _rollout_group_only(monkeypatch)
     rollout_collection._record_rollout_outcome(
         {
             "_ng_failure_class": "agent_run_error",
-            "failure_kind": "judge_failed",
-            "_ng_failure_type": "StaleEcho",
-            "_ng_failure_record": {"failure": {"failure_kind": kind}, "exception_type": "TimeoutError"},
+            "failure_kind": kind,
+            "_ng_failure_type": "TimeoutError",
+            "_ng_failure_record": {"failure": {"failure_kind": "judge_failed"}, "exception_type": "StaleEcho"},
         },
         "failed",
         "env",
@@ -155,10 +155,8 @@ async def test_persisted_outcomes_count_once_and_resumed_cache_is_not_counted(
     await rollout_collection.RolloutCollectionHelper().run_from_config(runner_config)
     expected = {
         _key(**{OUTCOME: "scored", DISPATCH: "my_agent"}): 1,
-        _key(**{OUTCOME: "failed", DISPATCH: "my_agent", CLASS: "kill_shaped", KIND: "kill_shaped"}): 1,
-        _key(
-            **{OUTCOME: "omitted", DISPATCH: "my_agent", CLASS: "skipped", KIND: gym_metrics.UNREGISTERED_FAILURE_KIND}
-        ): 1,
+        _key(**{OUTCOME: "failed", DISPATCH: "my_agent", CLASS: "kill_shaped"}): 1,
+        _key(**{OUTCOME: "omitted", DISPATCH: "my_agent", CLASS: "skipped"}): 1,
     }
     assert _by_attrs(collected_metrics) == expected
     output = Path(runner_config.output_jsonl_fpath)
@@ -187,3 +185,118 @@ async def test_outcome_rejected_by_storage_is_not_counted(runner_config, collect
     with pytest.raises(OSError, match="Cannot save outcome"):
         await rollout_collection.RolloutCollectionHelper().run_from_config(runner_config)
     assert _by_attrs(collected_metrics) == {}
+
+
+@pytest.mark.parametrize("routing", [False, True])
+@pytest.mark.parametrize(
+    ("failure_class", "kind"),
+    [
+        ("agent_run_error", None),
+        ("infrastructure_error", None),
+        ("skipped", None),
+        ("agent_run_error", "verifier_error"),
+        ("infrastructure_error", "verifier_error"),
+        ("agent_run_error", "private task 123 failed at host 10.0.0.1"),
+        ("infrastructure_error", "private task 123 failed at host 10.0.0.1"),
+    ],
+)
+async def test_legacy_counter_keeps_routing_class_and_only_explicit_kind(
+    runner_config,
+    collected_metrics,
+    monkeypatch,
+    routing,
+    failure_class,
+    kind,  # noqa: F811
+):
+    _rollout_group_only(monkeypatch)
+    runner_config.route_failures_to_sidecar = routing
+
+    async def post(**kwargs):
+        if kwargs["json"]["_ng_task_index"] != 0:
+            return FakeResponse(200, {"reward": 1.0, "response": {}})
+        failure = {
+            "_ng_failure_class": failure_class,
+            "_ng_failure_type": "TimeoutError",
+            "_ng_failure_terminal": failure_class == "skipped",
+        }
+        if kind is not None:
+            failure["failure_kind"] = kind
+        return FakeResponse(200, failure)
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    await rollout_collection.RolloutCollectionHelper().run_from_config(runner_config)
+    attrs = {
+        OUTCOME: "omitted" if failure_class == "skipped" else "failed",
+        DISPATCH: "my_agent",
+        CLASS: failure_class,
+        TYPE: "TimeoutError",
+    }
+    if kind is not None:
+        attrs[KIND] = "verifier_error" if kind == "verifier_error" else gym_metrics.UNREGISTERED_FAILURE_KIND
+    assert _by_attrs(collected_metrics) == {
+        _key(**attrs): 1,
+        _key(**{OUTCOME: "scored", DISPATCH: "my_agent"}): 2,
+    }
+
+
+@pytest.mark.parametrize(("status", "failure_class"), [(500, "agent_run_error"), (502, "agent_request_failed")])
+async def test_transport_counter_does_not_invent_a_kind(
+    runner_config, collected_metrics, monkeypatch, status, failure_class
+):  # noqa: F811
+    from tests.unit_tests.test_rollout_collection import http_error
+
+    _rollout_group_only(monkeypatch)
+
+    async def post(**kwargs):
+        if kwargs["json"]["_ng_task_index"] == 0:
+            raise http_error(status, "private error text")
+        return FakeResponse(200, {"reward": 1.0, "response": {}})
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    await rollout_collection.RolloutCollectionHelper().run_from_config(runner_config)
+    assert _by_attrs(collected_metrics) == {
+        _key(**{OUTCOME: "failed", DISPATCH: "my_agent", CLASS: failure_class, TYPE: "ClientResponseError"}): 1,
+        _key(**{OUTCOME: "scored", DISPATCH: "my_agent"}): 2,
+    }
+
+
+@pytest.mark.parametrize("kind", [None, "verifier_error", "private task 123 failed"])
+async def test_native_failure_kind_cannot_become_free_text_counter_class(
+    runner_config, collected_metrics, monkeypatch, kind
+):  # noqa: F811
+    import orjson
+    from omegaconf import OmegaConf
+
+    _rollout_group_only(monkeypatch)
+    Path(runner_config.input_jsonl_fpath).write_bytes(
+        b"".join(
+            orjson.dumps({"task_id": {"taskset": "native", "task_id": str(i)}, "task_input": {}}) + b"\n"
+            for i in range(2)
+        )
+    )
+    runner_config.environment_server_routes = {"native": "environment"}
+
+    async def post(**kwargs):
+        body = kwargs["json"]
+        reply = {"episode_id": body["episode_id"], "task_id": body["task"]["task_id"]}
+        if body["task"]["task_id"]["task_id"] == "0":
+            reply["failure"] = {"failure_reason": "Unavailable", "terminal": False, "failure_kind": kind}
+        else:
+            reply["result"] = {"reward": 1.0}
+        return FakeResponse(200, reply)
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    client.global_config_dict = OmegaConf.create({"environment": {"environment_servers": {"custom": {}}}})
+    await rollout_collection.RolloutCollectionHelper().run_from_config(runner_config)
+    label = (
+        "environment_server_failed"
+        if kind is None
+        else ("verifier_error" if kind == "verifier_error" else "unregistered")
+    )
+    attrs = {OUTCOME: "failed", DISPATCH: "environment", CLASS: label}
+    if kind is not None:
+        attrs[KIND] = label
+    assert _by_attrs(collected_metrics) == {
+        _key(**attrs): 1,
+        _key(**{OUTCOME: "scored", DISPATCH: "environment"}): 1,
+    }

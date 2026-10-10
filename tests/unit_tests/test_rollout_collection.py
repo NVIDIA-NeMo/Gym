@@ -1905,7 +1905,7 @@ class TestRolloutCollection:
                 "outcome": "failed",
                 "dispatch_name": "my_agent",
                 "failure_class": AGENT_RUN_ERROR_FAILURE_CLASS,
-                "failure_kind": AGENT_RUN_ERROR_FAILURE_CLASS,
+                "failure_kind": None,
                 "failure_type": failures[0]["_ng_failure_type"],
             },
             {
@@ -2365,7 +2365,6 @@ class TestRolloutCollection:
             (("nemo.gym.rollout.dispatch.name", "my_agent"), ("nemo.gym.rollout.outcome", "omitted")): 1,
             (
                 ("nemo.gym.failure_class", "infrastructure_error"),
-                ("nemo.gym.failure_kind", "unregistered"),
                 ("nemo.gym.failure_type", "SandboxTimeoutException"),
                 ("nemo.gym.rollout.dispatch.name", "my_agent"),
                 ("nemo.gym.rollout.outcome", "failed"),

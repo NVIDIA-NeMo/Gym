@@ -62,16 +62,20 @@ reverification and the GDPVal multistage driver do not call the recorder.
 unscored completions), ``failed`` (saved failures, including kill-shaped) or ``omitted`` (saved
 intentional omissions, including terminal skips and bare no-persist replies). The historical
 ``scored`` label does not guarantee a measured reward. Rows drained by the dispatch budget never
-ran and are not counted. Reused cached results do not increment the counter. A failed ``/run`` is a ``failed``
-attempt with class ``agent_request_failed`` only with ``route_failures_to_sidecar`` on; otherwise
-it aborts the run and is not counted. Coverage comes from the output files, not this counter.
+ran and are not counted. Reused cached results do not increment the counter. Request errors count
+only when failure routing saves them: an unavailable server uses class agent_request_failed,
+while an agent that ran and failed uses agent_run_error (including HTTP 500). Otherwise the
+request error aborts collection and is not counted. Coverage comes from the output files.
 
 Attributes are bounded: ``nemo.gym.rollout.dispatch.name`` (the environment server, or the agent
 when rows name no environment server) and, on attempts that carry a failure class,
 ``nemo.gym.failure_class``, ``nemo.gym.failure_kind`` (registered or ``<server>:<kind>``
 namespaced, any other value recorded as ``unregistered``) and ``nemo.gym.failure_type`` (exception
-class name). The canonical saved failure record supplies kind and exception type, with legacy fields
-used only when that record is absent. Free-text reasons are never attributes.
+class name). Labels come from the dispatch's original routing fields, before persistence maps
+kinds to sidecar classes. Legacy routing classes remain unchanged and a missing producer kind
+adds no kind label, even when the saved record uses a class as its compatibility fallback.
+Native failures derive their class from their shared kind, using the same bounded-name rule.
+Free-text failure kinds and reasons never become class labels.
 """
 
 import logging
