@@ -384,7 +384,17 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             "echo '>>>>> Patch Apply Failed'; exit 1; fi\n"
         )
 
-    async def _grade_sandbox_patch(self, params: AnySweInstanceConfig, patch: str) -> tuple[bool, Optional[str]]:
+    @staticmethod
+    def _stage_patch(params: AnySweInstanceConfig, patch: bytes) -> Path:
+        """Write the patch, byte for byte plus the trailing newline ``git apply`` wants, for ``sandbox.upload``.
+
+        ``SandboxSpec.files`` holds text, so a diff of a CRLF or non-UTF-8 file would not survive it unchanged.
+        """
+        staged = params.persistent_dir / "patch.apply.diff"
+        staged.write_bytes(patch if patch.endswith(b"\n") else patch + b"\n")
+        return staged
+
+    async def _grade_sandbox_patch(self, params: AnySweInstanceConfig, patch: bytes) -> tuple[bool, Optional[str]]:
         if _dataset_family(params.problem_info.get("dataset_name", "")) == "r2e":
             return await self._grade_r2e_patch(params, patch)
 
@@ -396,16 +406,11 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         eval_script = (
             'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n' + self._apply_patch_script() + test_spec.eval_script
         )
-        spec = self._sandbox_spec(
-            params,
-            files={
-                "/root/patch.diff": patch if patch.endswith("\n") else patch + "\n",
-                "/tmp/anyswe_eval.sh": eval_script,
-            },
-        )
+        spec = self._sandbox_spec(params, files={"/tmp/anyswe_eval.sh": eval_script})
         sandbox = AsyncSandbox(params.resolved_sandbox_provider, spec)
         try:
             await sandbox.start()
+            await sandbox.upload(self._stage_patch(params, patch), "/root/patch.diff")
             result = await sandbox.exec(
                 "bash /tmp/anyswe_eval.sh",
                 cwd="/testbed",
@@ -425,14 +430,14 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             prediction = {
                 "instance_id": params.instance_id,
                 "model_name_or_path": params.body.model or "anyswe",
-                "model_patch": patch,
+                "model_patch": patch.decode("utf-8", errors="replace"),
             }
             report = get_eval_report(test_spec, prediction, log_file.name, include_tests_status=True)[
                 params.instance_id
             ]
         return bool(report["resolved"]), None
 
-    async def _grade_r2e_patch(self, params: AnySweInstanceConfig, patch: str) -> tuple[bool, Optional[str]]:
+    async def _grade_r2e_patch(self, params: AnySweInstanceConfig, patch: bytes) -> tuple[bool, Optional[str]]:
         instance = self._instance_dict(params)
         eval_script = instance.get("eval_script") or params.problem_info.get("eval_script")
         if not eval_script:
@@ -443,16 +448,11 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 "else echo 'R2E eval script not found'; exit 127; fi"
             )
         script = 'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n' + self._apply_patch_script() + str(eval_script)
-        spec = self._sandbox_spec(
-            params,
-            files={
-                "/root/patch.diff": patch if patch.endswith("\n") else patch + "\n",
-                "/tmp/anyswe_eval.sh": script,
-            },
-        )
+        spec = self._sandbox_spec(params, files={"/tmp/anyswe_eval.sh": script})
         sandbox = AsyncSandbox(params.resolved_sandbox_provider, spec)
         try:
             await sandbox.start()
+            await sandbox.upload(self._stage_patch(params, patch), "/root/patch.diff")
             result = await sandbox.exec(
                 "bash /tmp/anyswe_eval.sh",
                 cwd="/testbed",
@@ -569,7 +569,9 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             await sandbox.stop()
 
         patch_path = params.persistent_dir / "patch.diff"
-        patch = patch_path.read_text() if patch_path.exists() else ""
+        # Grading gets the exact bytes; the decoded text is for metrics only.
+        patch_bytes = patch_path.read_bytes() if patch_path.exists() else b""
+        patch = patch_bytes.decode("utf-8", errors="replace")
         response_path = params.persistent_dir / "response.json"
         saved = NeMoGymResponse.model_validate_json(response_path.read_text()) if response_path.exists() else None
 
@@ -598,7 +600,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         resolved = False
         if patch.strip() and error_kind is None:
             try:
-                resolved, error_kind = await self._grade_sandbox_patch(params, patch)
+                resolved, error_kind = await self._grade_sandbox_patch(params, patch_bytes)
             except SandboxCreateError as exc:
                 error_kind = "sandbox"
                 (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
