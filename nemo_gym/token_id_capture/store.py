@@ -20,8 +20,8 @@ Evaluation records use a separate file.
 Every entry line is ``fsync``ed before ``put`` returns — that is the durability
 guarantee. The state index is written atomically but fsynced only on lifecycle
 transitions (freeze, mark, drop); it is reconstructible from the JSONL tail.
-A per-rollout file lock serializes writers to the same rollout.
-Different rollouts can write concurrently.
+A file lock serializes writers to the same rollout.
+Rollouts share a fixed set of striped lock files, so different rollouts usually write concurrently.
 """
 
 from __future__ import annotations
@@ -32,7 +32,9 @@ import hashlib
 import logging
 import os
 import tempfile
+import threading
 import time
+import zlib
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -45,6 +47,21 @@ from nemo_gym.token_id_capture.records import TokenEntry
 
 
 logger = logging.getLogger(__name__)
+
+# Rollouts share LOCK_STRIPES lock files under LOCK_DIR, and a lock file is never deleted. A lock file per
+# rollout could never be deleted safely: a process waiting on the old file and a process that creates a new
+# one would both hold the rollout's lock. Both values are part of the on-disk format: every process that
+# shares a capture directory must use the same ones.
+# Two writers collide when their rollouts share a stripe, so the stripe count must stay well above the number
+# of writers that hold locks at once across every process sharing the directory (worker threads times
+# processes), not the number of rollouts in flight. Lock files are created on first use, so a directory never
+# holds more than LOCK_STRIPES of them, each empty.
+LOCK_STRIPES = 65536
+LOCK_DIR = ".locks"
+
+# The rollout lock this thread holds in each capture directory, by resolved lock directory;
+# see ``TokenCaptureStore._locked``.
+_lock_holder = threading.local()
 
 
 def validate_rollout_id(rollout_id: str) -> str:
@@ -59,7 +76,9 @@ class TokenCaptureStore:
 
     def __init__(self, root: str | Path) -> None:
         self._root = Path(root)
-        self._root.mkdir(parents=True, exist_ok=True)
+        (self._root / LOCK_DIR).mkdir(parents=True, exist_ok=True)
+        # Resolved so that every handle on one directory shares a key in the nesting guard.
+        self._lock_dir = (self._root / LOCK_DIR).resolve()
 
     @property
     def root(self) -> Path:
@@ -80,15 +99,35 @@ class TokenCaptureStore:
         return self._root / f"{validate_rollout_id(rollout_id)}.tokens.state.json"
 
     def lock_path_for(self, rollout_id: str) -> Path:
-        return self._root / f"{validate_rollout_id(rollout_id)}.tokens.lock"
+        """Return the striped lock file that serializes this rollout's writers."""
+        # crc32, not ``hash``: string hashing is randomized per process, and every process must agree.
+        stripe = zlib.crc32(validate_rollout_id(rollout_id).encode()) % LOCK_STRIPES
+        return self._root / LOCK_DIR / f"{stripe:05d}.lock"
 
     @contextmanager
     def _locked(self, rollout_id: str, *, shared: bool = False):
+        """Hold the rollout's lock.
+
+        Never take a second rollout's lock in the same capture directory while holding one. Two rollouts can
+        share a stripe, and two ``flock`` calls on one file through separate handles block each other even
+        within one thread, so nesting could deadlock. Nesting raises instead. Locks of different capture
+        directories share no files, so holding one while taking another is allowed.
+        """
+        held = getattr(_lock_holder, "held", None)
+        if held is None:
+            held = _lock_holder.held = {}
+        if self._lock_dir in held:
+            raise RuntimeError(
+                f"cannot lock rollout {rollout_id!r} while holding the lock of rollout {held[self._lock_dir]!r} "
+                f"in the same capture directory {self._root}"
+            )
         with self.lock_path_for(rollout_id).open("a+b") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+            held[self._lock_dir] = rollout_id
             try:
                 yield
             finally:
+                del held[self._lock_dir]
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _read_state(self, rollout_id: str) -> dict[str, Any]:
@@ -338,7 +377,7 @@ class TokenCaptureStore:
             )
 
     async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:
-        """Delete snapshot payloads while retaining its tombstone and lock."""
+        """Delete snapshot payloads while retaining its fence."""
         return await asyncio.to_thread(self._drop, rollout_id, snapshot_id, version)
 
     def _drop(self, rollout_id: str, snapshot_id: str, version: int) -> bool:
@@ -370,7 +409,6 @@ class TokenCaptureStore:
 
         This compatibility helper supports administrative cleanup.
         Normal consumers use conditional ``drop``.
-        The lock file remains so concurrent callers keep using one inode.
         """
         with self._locked(rollout_id):
             self.path_for(rollout_id).unlink(missing_ok=True)
@@ -384,7 +422,7 @@ class TokenCaptureStore:
 
         Callers choose the retention policy.
         ``drop`` already removed entries and JSONL payloads.
-        This removes state, locks, intents, and incomplete markers.
+        This removes state, intents, and incomplete markers. Striped lock files are shared and stay.
         """
         cutoff = time.time() - older_than_seconds
         removed = 0
@@ -405,7 +443,6 @@ class TokenCaptureStore:
                 state_path.unlink(missing_ok=True)
                 self.intents_path_for(rollout_id).unlink(missing_ok=True)
                 self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-                self.lock_path_for(rollout_id).unlink(missing_ok=True)
                 removed += 1
         if removed:
             self._fsync_root()
@@ -452,7 +489,7 @@ class TokenCaptureStore:
                 state_path.unlink(missing_ok=True)
                 self.intents_path_for(rollout_id).unlink(missing_ok=True)
                 self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-                # Preserve the inode so waiting and subsequent writers use the same lock.
+                # Striped lock files are shared and stay.
                 removed += 1
         if removed:
             self._fsync_root()
