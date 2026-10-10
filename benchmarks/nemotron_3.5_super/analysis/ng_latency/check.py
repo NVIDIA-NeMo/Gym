@@ -120,9 +120,13 @@ def _check_terminus(
             and (c.get("attrs") or {}).get("parse_error") is not True  # after a parse error Harbor runs no batch
         ]
         empty = sum(1 for c in decisions if not (c.get("attrs") or {}).get("parsed_commands"))
+        # Harbor appends the exec time after the screen read: a loop cancelled (sandbox cap, sandbox error) right
+        # after its last batch leaves that batch without one.
+        cut = any(a.get("status") != "ok" for a in by_name.get("agent", []))
+        expected_batches = len(batches) + empty
         check.require(
-            len(exec_times) == len(batches) + empty,
-            f"count: command_exec_times={len(exec_times)} batches={len(batches)} empty decisions={empty}",
+            len(exec_times) == expected_batches or (cut and len(exec_times) + 1 == expected_batches),
+            f"count: command_exec_times={len(exec_times)} batches={len(batches)} empty decisions={empty} loop cut={cut}",
         )
         next_batch = 0
         for i, (expected, decision) in enumerate(zip(exec_times, decisions)):
@@ -169,9 +173,12 @@ def _check_terminus(
         answered = [
             c for c in calls if c.get("status") in ("ok", "incomplete") and c["attrs"].get("server_span_id") in by_id
         ]
-        usages = [u for u in record["usages"] if isinstance(u, dict)]
+        # One entry per response Harbor received, in order; None where it discarded the response (empty or
+        # length-capped) and answered with a compaction. The positions stay aligned.
+        usages = record["usages"]
         check.require(len(usages) == len(answered), f"count: usages={len(usages)} answered calls={len(answered)}")
         for i, (usage, call) in enumerate(zip(usages, answered)):
+            usage = usage if isinstance(usage, dict) else {}
             tokens = by_id[call["attrs"]["server_span_id"]]["attrs"].get("tokens") or {}
             check.compare(usage.get("input_tokens"), tokens.get("input"), label=f"call[{i}].input")
             check.compare(
@@ -215,17 +222,33 @@ def _check_gym(record: dict[str, Any], by_name: dict[str, list[dict[str, Any]]])
             ]
             return sum(values) if values else None
 
-        check.compare(metrics.get("num_calls"), len(servers), label="num_calls")
+        # Gym counts every capture record, including the one of an attempt the harness abandoned at its timeout
+        # and retried: the collector folds those into one call, so the server spans may be fewer by the number
+        # of such attempts, and the captured latency larger by up to their duration.
+        abandoned = [
+            a for a in by_name.get("model_call_attempt", []) if a.get("status") in ("timeout", "error", "cancelled")
+        ]
+        abandoned_ms = sum((_duration_s(a) or 0.0) * 1000.0 for a in abandoned)
+        num_calls = metrics.get("num_calls")
+        if num_calls is not None:
+            check.require(
+                len(servers) <= num_calls <= len(servers) + len(abandoned),
+                f"num_calls: captured={num_calls} server spans={len(servers)} abandoned attempts={len(abandoned)}",
+            )
         check.compare(metrics.get("tokens_in"), _sum("input"), label="tokens_in")
         check.compare(metrics.get("tokens_out"), _sum("completion_total"), label="tokens_out")
         check.compare(metrics.get("tokens_reasoning"), _sum("reasoning"), label="tokens_reasoning")
         latencies = [s["duration_ns"] / 1e6 for s in servers if s.get("duration_ns") is not None]
-        check.compare(
-            metrics.get("latency_total_ms"),
-            sum(latencies) if latencies else None,
-            tolerance=0.01 * max(1, len(latencies)),
-            label="latency_total_ms",
-        )
+        captured_ms = metrics.get("latency_total_ms")
+        if captured_ms is not None and latencies:
+            total_ms = sum(latencies)
+            tolerance = 0.01 * len(latencies) + WALL_TOLERANCE_S * 1000.0 * len(abandoned)
+            check.require(
+                total_ms - tolerance <= captured_ms <= total_ms + abandoned_ms + tolerance,
+                f"latency_total_ms: captured={captured_ms} server spans={total_ms} abandoned attempts up to {abandoned_ms}",
+            )
+        else:
+            check.compare(captured_ms, sum(latencies) if latencies else None, label="latency_total_ms")
         results.append(check.result())
 
     # The rollout span's monotonic duration against Gym's wall-clock latency of the same call.
@@ -292,7 +315,11 @@ def _check_engine_and_verify(
             if parent is not None and parent["name"] == "model_call" and not _is_sandbox(parent):
                 harness_s = _duration_s(parent)
                 if harness_s is not None and server_s is not None:
-                    check.require(server_s <= harness_s + TOLERANCE_S, f"server {server_s} > harness call {harness_s}")
+                    # The server stamps its end after the event loop resumes it; at 48 concurrent rollouts that
+                    # trailed the client's receipt by up to 17 ms, hence the wall tolerance here.
+                    check.require(
+                        server_s <= harness_s + WALL_TOLERANCE_S, f"server {server_s} > harness call {harness_s}"
+                    )
         results.append(check.result())
 
     verify = by_name.get("verify", [])

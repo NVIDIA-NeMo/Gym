@@ -20,7 +20,7 @@ from tests.unit_tests.latency.conftest import T0, opencode_row, terminus_row
 
 def _run(tmp_path: Path, rows: list[dict]) -> Path:
     run_dir = tmp_path / "replica_0"
-    run_dir.mkdir()
+    run_dir.mkdir(parents=True)
     (run_dir / "rollouts.jsonl").write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in rows))
     build_run_timeline(run_dir, tokenize_url=None)
     return run_dir
@@ -171,3 +171,103 @@ def test_a_killed_opencode_process_does_not_fail_the_token_accounting(tmp_path: 
     row["response"]["usage"]["input_tokens"] = 1  # the export stopped counting
     report = run_checks(_run(tmp_path, [row]))
     assert report["passed"], report["failed_checks"]
+
+
+def _with_capture_metrics(row: dict, *, extra_calls: int = 0, extra_latency_ms: float = 0.0) -> dict:
+    """Gym's own aggregate of the capture records, as the collector writes it: sums over the server fields of the
+    row's calls, plus the records of attempts the collector folded into a call."""
+    calls = [c for c in row["ng_trajectory"]["model_calls"] if c.get("server_started_at") is not None]
+
+    def total(key: str) -> int:
+        return sum((c.get("token_stats") or {}).get(key) or 0 for c in calls)
+
+    row["ng_model_call_capture"] = {
+        "metrics": {
+            "num_calls": len(calls) + extra_calls,
+            "tokens_in": total("prompt_tokens"),
+            "tokens_out": total("completion_tokens"),  # the provider's total, reasoning included
+            "tokens_reasoning": total("reasoning_tokens"),
+            "latency_total_ms": sum(c.get("server_duration_ms") or 0.0 for c in calls) + extra_latency_ms,
+        }
+    }
+    return row
+
+
+def test_harbors_usage_list_keeps_a_none_for_a_response_it_rejected(tmp_path: Path) -> None:
+    """Harbor appends None to its usages for a response it discarded and answered with a compaction (an empty or
+    length-capped response); the check keeps the positions aligned and compares nothing for that entry. The
+    derivation calls such a response unusable for its real reason: the output cap, not a context overflow."""
+    row = terminus_row()
+    t = T0
+    rejected = copy.deepcopy(row["ng_trajectory"]["model_calls"][0])
+    rejected.update(
+        model_call_id="cap-r",
+        client_call_id="t2-r",
+        started_at=t + 71.0,
+        completed_at=t + 71.5,
+        duration_ms=500.0,
+        processed_at=None,
+        server_started_at=t + 71.01,
+        server_completed_at=t + 71.49,
+        server_duration_ms=480.0,
+        status="incomplete",
+        context_overflow=True,
+        parsed_tool_calls=None,
+        task_complete=None,
+        token_stats={
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "reasoning_tokens": None,
+            "cached_tokens": None,
+        },
+    )
+    rejected["response_metadata"] = {
+        **rejected["response_metadata"],
+        "response_id": "resp_r",
+        "finish_reason": "max_output_tokens",
+        "engine": None,
+    }
+    rejected["attempts"] = [
+        {**rejected["attempts"][0], "started_at": t + 71.0, "completed_at": t + 71.5, "duration_ms": 500.0}
+    ]
+    row["ng_trajectory"]["model_calls"].append(rejected)
+    row["model_call_times"].append(0.5)
+    row["usages"].append(None)
+    row["num_compactions"] = 1
+    report = run_checks(_run(tmp_path, [_with_capture_metrics(row)]))
+    assert report["passed"], report["failed_checks"]
+    m = derive_trial(project_rollout(row), row, replica="replica_0")["metrics"]
+    assert m["unusable_model_outputs"] == {"total": 1, "by_reason": {"length_cap": 1}}
+
+
+def test_a_loop_cut_after_its_last_batch_leaves_one_batch_without_an_exec_time(tmp_path: Path) -> None:
+    """Harbor appends a batch's exec time after the screen read; a loop cancelled at the sandbox cap right after
+    its last batch leaves that batch without one. The same mismatch on a loop that ended normally still fails."""
+    row = terminus_row()
+    row["ng_trajectory"]["invocations"][0].update(status="incomplete", error_type="TimeoutError")
+    row["command_exec_times"].pop()
+    assert run_checks(_run(tmp_path, [row]))["passed"]
+    row = terminus_row()
+    row["command_exec_times"].pop()
+    assert "terminus_command_exec_times" in run_checks(_run(tmp_path / "b", [row]))["failed_checks"]
+
+
+def test_capture_sums_allow_for_the_record_of_a_timed_out_attempt(tmp_path: Path) -> None:
+    """Gym's capture aggregate counts every record it wrote, including the one of an attempt the harness abandoned
+    at its timeout and retried (the collector folds the two records into one call); the fixture's second step has a
+    14 s timed-out attempt."""
+    row = _with_capture_metrics(terminus_row(), extra_calls=1, extra_latency_ms=14_000.0)
+    assert run_checks(_run(tmp_path, [row]))["passed"]
+
+
+def test_a_server_duration_slightly_over_the_harness_call_is_scheduling_not_a_defect(tmp_path: Path) -> None:
+    """At 48 concurrent rollouts the model server's completion stamp can trail the client's receipt by the event
+    loop's scheduling (13-17 ms seen in 16k calls); the physical bound is checked with the wall tolerance."""
+    row = terminus_row()
+    row["ng_trajectory"]["model_calls"][0]["server_duration_ms"] = 10_020.0
+    assert run_checks(_run(tmp_path, [_with_capture_metrics(row)]))["passed"]
+    row["ng_trajectory"]["model_calls"][0]["server_duration_ms"] = 10_080.0
+    assert (
+        "engine_within_server_within_call"
+        in run_checks(_run(tmp_path / "b", [_with_capture_metrics(row)]))["failed_checks"]
+    )

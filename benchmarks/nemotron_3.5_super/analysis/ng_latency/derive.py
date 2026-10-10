@@ -121,7 +121,9 @@ DEFINITIONS: dict[str, str] = {
     "produced_action": "responses that were a valid final answer or a valid tool action",
     "no_action_turn": "completed step responses with neither, by reason (parse_failure, empty, other)",
     "unusable_model_outputs": (
-        "no_action_turn plus completed responses of kind other and context-overflow rejections, by reason"
+        "no_action_turn plus completed responses of kind other and responses the harness discarded and answered "
+        "with a compaction, by reason: context_overflow (Gym's empty answer to an over-context request) or "
+        "length_cap (the response hit the output cap)"
     ),
     "tool_calls": "tool_call spans (per command for Terminus, per tool for OpenCode)",
     "tool_batches": "Terminus command batches",
@@ -718,18 +720,18 @@ def _model_section(
     unusable: dict[str, int] = {}
     for call in step_calls if linked else []:
         server = linked.get(call["span_id"])
+        if call["attrs"].get("context_overflow") is True:
+            # The harness discarded the response and compacted: Gym's empty answer to an over-context request, or
+            # a response that ran into the output cap. A length finish the harness did use is judged like any other.
+            attrs = (server or {}).get("attrs") or {}
+            stop = attrs.get("stop_reason") or attrs.get("gym_finish_reason")
+            reason = "length_cap" if stop in ("length", "max_output_tokens") else "context_overflow"
+            unusable[reason] = unusable.get(reason, 0) + 1
+            continue
         if server is None or server.get("status") != "ok":
             continue
         kind = server["attrs"].get("response_kind")
         chars = (server["attrs"].get("tokens") or {}).get("output")
-        overflow = (
-            call["attrs"].get("context_overflow") is True
-            or server["attrs"].get("gym_finish_reason") == "length"
-            or server["attrs"].get("stop_reason") == "length"
-        )
-        if overflow:  # Gym answers a context-length rejection with an empty 200: no action was possible
-            unusable["context_overflow"] = unusable.get("context_overflow", 0) + 1
-            continue
         if ctx.kind == "terminus2":
             is_tool = (call["attrs"].get("parsed_commands") or 0) > 0
             is_final = terminus_is_final(call)
