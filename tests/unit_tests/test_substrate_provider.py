@@ -55,6 +55,7 @@ class _Recorder:
         probe_status: int = 200,
         create_error: Exception | None = None,
         exec_delay_s: float = 0.0,
+        pause_delay_s: float = 0.0,
     ) -> None:
         self.control_calls: list[tuple[str, Any]] = []
         self.http_paths: list[str] = []
@@ -64,9 +65,15 @@ class _Recorder:
         self._probe_status = probe_status
         self._create_error = create_error
         self._exec_delay_s = exec_delay_s
+        self._pause_delay_s = pause_delay_s
+        # Interleaved control and HTTP activity, in completion order.
+        self.events: list[tuple[str, str]] = []
 
     async def control(self, rpc: str, request: Any) -> Any:
         self.control_calls.append((rpc, request))
+        if rpc == "PauseActor" and self._pause_delay_s:
+            await asyncio.sleep(self._pause_delay_s)
+        self.events.append(("control", rpc))
         if rpc == "CreateActor" and self._create_error is not None:
             raise self._create_error
         if rpc == "GetActor":
@@ -89,6 +96,7 @@ class _Recorder:
         limited: bool = True,
     ) -> httpx.Response:
         self.http_paths.append(path)
+        self.events.append(("http", path))
         if path == "/exec":
             if self._exec_delay_s:
                 await asyncio.sleep(self._exec_delay_s)
@@ -247,6 +255,50 @@ async def test_idle_delay_defers_the_pause_and_a_new_exec_cancels_it() -> None:
 
     # Two back-to-back steps, one pause, after the idle delay.
     assert recorder.rpcs().count("PauseActor") == 1
+
+
+async def test_exec_waits_for_a_pause_already_in_flight() -> None:
+    recorder = _Recorder(pause_delay_s=0.05)
+    provider = _make_provider(recorder, suspend_policy="pause_after_exec", idle_before_suspend_s=0.01)
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+
+    await provider.exec(handle, "step 1")
+    await asyncio.sleep(0.02)  # the idle delay has elapsed; PauseActor is now in flight
+    await provider.exec(handle, "step 2")
+
+    # The second exec went out only after the pause completed, so the router
+    # saw a PAUSED actor to resume, never a PAUSING one.
+    execs = [i for i, event in enumerate(recorder.events) if event == ("http", "/exec")]
+    pause = recorder.events.index(("control", "PauseActor"))
+    assert execs[0] < pause < execs[1]
+
+
+async def test_exec_retries_while_the_actor_is_mid_transition(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(substrate_provider, "_TRANSITION_RETRY_DELAY_S", 0.0)
+    recorder = _Recorder()
+    provider = _make_provider(recorder)
+    execs = 0
+
+    def router(request: httpx.Request) -> httpx.Response:
+        nonlocal execs
+        if request.url.path != "/exec":
+            return httpx.Response(200)
+        execs += 1
+        if execs == 1:
+            return httpx.Response(
+                503,
+                text="actor nemo-gym/gym-x unavailable: AssignWorker prerequisite not met for Actor: "
+                "nemo-gym/gym-x (got: ACTOR_STATE_PAUSING, want ACTOR_STATE_SUSPENDED or ACTOR_STATE_PAUSED)",
+            )
+        return httpx.Response(200, json={"stdout": "ok", "stderr": "", "exit_code": 0})
+
+    provider._http = substrate_provider.SubstrateProvider._http.__get__(provider)
+    provider._http_client = httpx.AsyncClient(transport=httpx.MockTransport(router), base_url="http://router")
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+
+    result = await provider.exec(handle, "true", timeout_s=5)
+
+    assert (result.return_code, result.error_type, execs) == (0, None, 2)
 
 
 async def test_exec_retries_a_capacity_503_until_the_router_has_room() -> None:

@@ -127,7 +127,9 @@ snapshot stays on the node, so the next step resumes without a download but has
 to land on the same node. The delay keeps back-to-back steps, such as an eval's
 test runs, from each paying a checkpoint and a restore; an exec that arrives
 during the delay cancels the pause, and an actor is never paused while a request
-to it is in flight.
+to it is in flight. An exec that arrives while a pause is already under way
+waits for it to finish, because the router cannot resume an actor that is still
+pausing.
 
 `after_exec` calls `SuspendActor` instead: the snapshot is pushed to object
 storage and any node can resume it. This pays a checkpoint upload per idle
