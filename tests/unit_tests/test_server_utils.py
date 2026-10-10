@@ -1925,7 +1925,7 @@ class TestRunWebserverProxyKwargs:
     def test_proxy_headers_disabled_by_default_single_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
 
-        # An undeclared server with no Ray cluster to join runs without Ray.
+        # Servers that don't declare ray_enabled = True run without Ray.
         self.ray_loader_mock.assert_not_called()
         assert kwargs["proxy_headers"] is False
         assert [] == kwargs["forwarded_allow_ips"]
@@ -1944,11 +1944,10 @@ class TestRunWebserverProxyKwargs:
         assert kwargs["proxy_headers"] is False
         assert [] == kwargs["forwarded_allow_ips"]
 
-    def test_undeclared_server_joins_a_configured_cluster(self, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr(nemo_gym.server_utils, "ray_is_installed", lambda: True)
+    def test_undeclared_server_does_not_join_a_configured_cluster(self, monkeypatch: MonkeyPatch) -> None:
         self._capture_uvicorn_kwargs(monkeypatch, {"ray_head_node_address": "10.0.0.1:6379"}, num_workers=1)
 
-        self.ray_loader_mock.assert_called_once()
+        self.ray_loader_mock.assert_not_called()
 
     def test_ray_disabled_skips_initialization(self, monkeypatch: MonkeyPatch) -> None:
         self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1, ray_enabled=False)

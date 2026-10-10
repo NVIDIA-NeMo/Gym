@@ -1,4 +1,4 @@
--e nemo-gym[dev] @ ../../
+-e nemo-gym[dev,ray] @ ../../
 
 # The Sandbox provider SDKs OSWorld's backends actually use. Only these two;
 # this managed server environment does not carry every optional provider.

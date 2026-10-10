@@ -400,25 +400,27 @@ def _configured_servers(global_config_dict: DictConfig) -> Iterator[_ConfiguredS
         yield _ConfiguredServer(top_level_path, first_key, second_key, server_config_dict, entrypoint_fpath, dir_path)
 
 
-def _ray_server_names(configured_servers: List[_ConfiguredServer]) -> List[str]:
-    """Names of the configured servers that need this run to start or join Ray.
+# Ray reads this when it's imported. Set to "0", it makes Ray calls fail instead of starting a private cluster.
+RAY_ENABLE_AUTO_CONNECT_ENV_VAR_NAME = "RAY_ENABLE_AUTO_CONNECT"
 
-    Servers that declare `ray_enabled = True` always count, and Ray must be installed for them. Servers whose
-    declaration can't be read from source count only when Ray is installed: without it, they run without Ray.
+
+def _ray_server_names(configured_servers: List[_ConfiguredServer]) -> List[str]:
+    """Names of the configured servers that declare `ray_enabled = True`, so this run must start or join Ray.
+
+    A declaration that can't be read from the entrypoint's source, such as one inherited from another module,
+    doesn't count. Such a server fails at startup with an error asking it to declare `ray_enabled = True` itself.
     """
-    declarations = {
-        server.top_level_path: entrypoint_ray_enabled(server.dir_path / server.entrypoint_fpath)
+    ray_server_names = [
+        server.top_level_path
         for server in configured_servers
-    }
-    required = [name for name, declaration in declarations.items() if declaration is True]
-    if not ray_is_installed():
-        if required:
-            raise ConfigError(
-                f"These servers use Ray, but Ray isn't installed where `gym` runs: {', '.join(required)}. "
-                "Install with:\n  pip install nemo-gym[ray]"
-            )
-        return []
-    return [name for name, declaration in declarations.items() if declaration is not False]
+        if entrypoint_ray_enabled(server.dir_path / server.entrypoint_fpath) is True
+    ]
+    if ray_server_names and not ray_is_installed():
+        raise ConfigError(
+            f"These servers use Ray, but Ray isn't installed where `gym` runs: {', '.join(ray_server_names)}. "
+            "Install with:\n  pip install nemo-gym[ray]"
+        )
+    return ray_server_names
 
 
 def _server_launch_command(
@@ -549,7 +551,7 @@ class RunHelper:  # pragma: no cover
         # Note: initialize_ray modifies the global config dict - updates `ray_head_node_address`
         ray_server_names = _ray_server_names(configured_servers)
         if ray_server_names:
-            print(f"Initializing Ray for servers that may use it: {', '.join(ray_server_names)}")
+            print(f"Initializing Ray for servers that use it: {', '.join(ray_server_names)}")
             initialize_ray()
 
         # Start the HTTP/2 PING sidecar (if `sidecar.enabled`) and point model URLs at it. This
@@ -584,6 +586,10 @@ class RunHelper:  # pragma: no cover
                 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config_dict_yaml_str,
                 NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: top_level_path,
             }
+            if top_level_path not in ray_server_names:
+                # A server that uses Ray without declaring it then fails on its first Ray call, rather than
+                # starting a private cluster in each of its processes.
+                extra_env[RAY_ENABLE_AUTO_CONNECT_ENV_VAR_NAME] = "0"
             process = run_command(command, dir_path, server_name=top_level_path, extra_env=extra_env)
             self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.

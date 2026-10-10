@@ -337,18 +337,18 @@ gym env start --config $config_paths
 ```
 
 Ray is involved in two places:
-1. **Main process** (`RunHelper.start()` in `nemo_gym/cli/env.py`): before launching servers, Gym reads each server's `ray_enabled` declaration from its entrypoint. It starts or joins Ray only if a server declares `ray_enabled = True`, or doesn't declare it while Ray is installed. Otherwise no Ray cluster is created.
-2. **Server process** (`server_utils.py`): each server process, including Uvicorn managers and workers, connects only when its implementation's `ray_enabled` declaration resolves to true.
+1. **Main process** (`RunHelper.start()` in `nemo_gym/cli/env.py`): before launching servers, Gym reads each server's `ray_enabled` declaration from its entrypoint. It starts or joins Ray only if a server declares `ray_enabled = True`. Otherwise no Ray cluster is created.
+2. **Server process** (`server_utils.py`): each server process, including Uvicorn managers and workers, connects only when its implementation declares `ray_enabled = True`.
 
-Server implementations declare whether they use Ray as a class attribute:
+`ray_enabled` defaults to `False`. Server implementations that use Ray declare it as a class attribute:
 ```python
 class MyResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
+    ray_enabled = True
 ```
 
-Declare `ray_enabled` on the class your entrypoint calls `run_webserver()` on, even if a parent class already declares it. Gym reads only that class's own source before launching servers.
+Declare `ray_enabled = True` on the class your entrypoint calls `run_webserver()` on, even if a parent class already declares it. Gym reads only that class's own source before launching servers, and a server whose `ray_enabled` resolves to `True` only through inheritance fails at startup with an error asking you to declare it.
 
-A server that leaves `ray_enabled` undeclared (`None`) joins the run's Ray cluster when Ray is installed and a cluster exists, and logs a warning. Otherwise it runs without Ray. A future release will interpret `None` as disabled, so new and maintained servers should declare `True` or `False` explicitly.
+Gym launches servers that don't declare `ray_enabled = True` with `RAY_ENABLE_AUTO_CONNECT=0`. If such a server calls Ray anyway, the call fails with "Ray has not been started yet" instead of starting a private Ray cluster in each server process. Declare `ray_enabled = True` to fix it.
 
 ### Installing Ray
 Servers that use Ray need Ray installed both where `gym` runs and in their own environment. Install it with the `ray` extra:
@@ -356,6 +356,8 @@ Servers that use Ray need Ray installed both where `gym` runs and in their own e
 ```bash
 pip install "nemo-gym[ray]"
 ```
+
+A server that declares `ray_enabled = True` requests the extra in its own dependency file, for example `-e nemo-gym[dev,ray] @ ../../` in `requirements.txt`, so its environment gets Ray. Gym pins the server's Ray to the exact version installed where `gym` runs.
 
 If a configured server declares `ray_enabled = True` and Ray isn't installed where `gym` runs, `gym env start` stops before launching any server and names the servers that need it. Ray is still a core dependency today; the extra lets environments request it explicitly ahead of making it optional.
 
