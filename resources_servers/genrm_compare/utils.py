@@ -319,50 +319,44 @@ def parse_genrm_output(
 # =============================================================================
 
 
-def extract_from_response_obj(response_obj: Dict[str, Any]) -> Tuple[str, str]:
-    """Extract reasoning and output text from a Response API object.
+def _response_field(value: object, key: str, default: object = None) -> object:
+    """Read a scoring field without copying unrelated model or training metadata."""
+    if isinstance(value, dict):
+        return value.get(key, default)
+    if isinstance(value, BaseModel):
+        return getattr(value, key, default)
+    return default
 
-    Parses the nested Response API structure to find:
-    - Reasoning content from "reasoning" type items
-    - Output text from "message" type items with "output_text" content
 
-    Args:
-        response_obj: Raw Response API object with "output" field
+def extract_from_response_obj(response_obj: Dict[str, Any] | BaseModel) -> Tuple[str, str]:
+    """Extract reasoning summaries and final answer text from models or response dictionaries.
 
-    Returns:
-        Tuple of (reasoning_content, output_text)
+    Cohort compaction and batch comparison share this field selection so their
+    judge input and length/style adjustments stay consistent. Read attributes
+    directly: dumping a model would also copy potentially large training arrays.
     """
     reasoning_content = ""
     output_text = ""
-
-    if not isinstance(response_obj, dict):
-        return reasoning_content, output_text
-
-    output = response_obj.get("output", [])
+    output = _response_field(response_obj, "output", [])
     if not isinstance(output, list):
         return reasoning_content, output_text
 
     for item in output:
-        if not isinstance(item, dict):
-            continue
-
-        item_type = item.get("type", "")
-
+        item_type = _response_field(item, "type", "")
         if item_type == "reasoning":
-            # Extract from summary field
-            summary = item.get("summary", [])
+            summary = _response_field(item, "summary", [])
             if isinstance(summary, list):
-                for s in summary:
-                    if isinstance(s, dict) and isinstance(s.get("text"), str):
-                        reasoning_content += s.get("text", "")
-
+                for part in summary:
+                    text = _response_field(part, "text")
+                    if isinstance(text, str):
+                        reasoning_content += text
         elif item_type == "message":
-            # Extract from content field
-            content = item.get("content", [])
+            content = _response_field(item, "content", [])
             if isinstance(content, list):
-                for c in content:
-                    if isinstance(c, dict) and c.get("type") == "output_text" and isinstance(c.get("text"), str):
-                        output_text += c.get("text", "")
+                for part in content:
+                    text = _response_field(part, "text")
+                    if _response_field(part, "type") == "output_text" and isinstance(text, str):
+                        output_text += text
 
     return reasoning_content, output_text
 
