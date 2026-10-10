@@ -14,8 +14,8 @@
 # limitations under the License.
 from typing import Dict
 
-from fastapi import FastAPI, Request
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -23,6 +23,10 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
     SimpleResourcesServer,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -56,6 +60,7 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
     ray_enabled = False
     config: StatefulCounterResourcesServerConfig
     session_id_to_counter: Dict[str, int] = Field(default_factory=dict)
+    _closed_session_ids: set[str] = PrivateAttr(default_factory=set)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -65,13 +70,37 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
 
         return app
 
-    async def seed_session(self, request: Request, body: StatefulCounterSeedSessionRequest) -> BaseSeedSessionResponse:
+    async def seed_session(
+        self, request: Request, body: ResourcesSeedSessionRequest | StatefulCounterSeedSessionRequest
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        if isinstance(body, ResourcesSeedSessionRequest):
+            # An Environment Server names the session; tool calls and verify find it through the cookie.
+            session_id = body.resources_session_id
+            request.session[SESSION_ID_KEY] = session_id
+            if session_id in self._closed_session_ids:
+                raise HTTPException(409, f"Resources session is already closed: {session_id}")
+            task = StatefulCounterSeedSessionRequest.model_validate(body.task_data)
+            self.session_id_to_counter.setdefault(session_id, task.initial_count)
+            return ResourcesSeedSessionResponse(resources_session_id=session_id)
+
         session_id = request.session[SESSION_ID_KEY]
         self.session_id_to_counter.setdefault(session_id, body.initial_count)
         return BaseSeedSessionResponse()
 
-    async def increment_counter(self, request: Request, body: IncrementCounterRequest) -> IncrementCounterResponse:
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        self._closed_session_ids.add(body.resources_session_id)
+        self.session_id_to_counter.pop(body.resources_session_id, None)
+        return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
+
+    def _open_session_id(self, request: Request) -> str:
         session_id = request.session[SESSION_ID_KEY]
+        if session_id in self._closed_session_ids:
+            # A late tool call must not recreate a closed session.
+            raise HTTPException(409, f"Resources session is already closed: {session_id}")
+        return session_id
+
+    async def increment_counter(self, request: Request, body: IncrementCounterRequest) -> IncrementCounterResponse:
+        session_id = self._open_session_id(request)
         counter = self.session_id_to_counter.setdefault(session_id, 0)
 
         counter += body.count
@@ -81,7 +110,7 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
         return IncrementCounterResponse(success=True)
 
     async def get_counter_value(self, request: Request) -> GetCounterValueResponse:
-        session_id = request.session[SESSION_ID_KEY]
+        session_id = self._open_session_id(request)
         counter = self.session_id_to_counter.setdefault(session_id, 0)
         return GetCounterValueResponse(count=counter)
 

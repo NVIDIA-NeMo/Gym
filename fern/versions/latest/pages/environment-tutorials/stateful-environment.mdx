@@ -27,7 +27,7 @@ Inputs
 
 Flow (state is stored per session_id inside the ResourcesServer)
   1) POST ResourcesServer /seed_session {"initial_count": 3}
-     - stores session_id_to_counter[session_id] = 3
+     - stores session_id_to_counter[session_id] = 3 (a repeated seed keeps it)
   2) POST ModelServer /v1/responses -> function_call: increment_counter({"count": 2})
   3) POST ResourcesServer /increment_counter {"count": 2}
      - counter becomes 5 for this session_id
@@ -42,7 +42,7 @@ Flow (state is stored per session_id inside the ResourcesServer)
 
 ## Implementation
 
-**File (simplified from [`resources_servers/example_session_state_mgmt/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_session_state_mgmt/app.py), with improved `seed_session` pattern):**
+**File (simplified from [`resources_servers/example_session_state_mgmt/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_session_state_mgmt/app.py); [Serve Environment Server Sessions](#serve-environment-server-sessions) adds the typed seed and close):**
 
 ```python
 # simplified
@@ -99,7 +99,7 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
         body: StatefulCounterSeedSessionRequest
     ) -> BaseSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]  # Get unique session ID
-        self.session_id_to_counter[session_id] = body.initial_count
+        self.session_id_to_counter.setdefault(session_id, body.initial_count)
         return BaseSeedSessionResponse()
 
     # Stateful tool - modifies session state
@@ -149,11 +149,44 @@ Use `SESSION_ID_KEY` from the request session middleware to maintain per-episode
 3. Store state in an instance-level dictionary keyed by session ID
 
 <Note>
-In `seed_session`, use direct assignment (`self.session_id_to_counter[session_id] = body.initial_count`) rather than `setdefault`. Using `setdefault` would silently ignore re-seed attempts if the session already exists, which can cause subtle bugs when the same session ID is reused across episodes. Note: the current `example_session_state_mgmt` implementation still uses `setdefault` in `seed_session` — the direct assignment shown here is the preferred pattern.
+In `seed_session`, use `setdefault`: seeding a session that already exists must keep its state. Every new episode gets a new session ID, so a repeated seed for the same ID is a retry of the same episode, for example after a lost response, and must not reset the counter.
 
-In tool methods like `increment_counter` and `get_counter_value`, `setdefault` is appropriate — it provides a safe fallback of `0` if the session was somehow not initialized.
+In tool methods like `increment_counter` and `get_counter_value`, `setdefault` provides a fallback of `0` if the session was not seeded.
 
 </Note>
+
+### Serve Environment Server Sessions
+
+An Environment Server, such as the [single-agent-turn Environment Server](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/single_agent_turn), seeds a session with a `ResourcesSeedSessionRequest`: it names the session with `resources_session_id` and carries the task's fields in `task_data`. After verification it closes the session through `/close_session`, which calls the server's `close_resources_session`. The example accepts both kinds of seed:
+
+```python
+async def seed_session(
+    self, request: Request, body: ResourcesSeedSessionRequest | StatefulCounterSeedSessionRequest
+) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+    if isinstance(body, ResourcesSeedSessionRequest):
+        # Tool calls and verification find the session through the cookie, so bind it to the session's name.
+        session_id = body.resources_session_id
+        request.session[SESSION_ID_KEY] = session_id
+        if session_id in self._closed_session_ids:
+            raise HTTPException(409, f"Resources session is already closed: {session_id}")
+        task = StatefulCounterSeedSessionRequest.model_validate(body.task_data)
+        self.session_id_to_counter.setdefault(session_id, task.initial_count)
+        return ResourcesSeedSessionResponse(resources_session_id=session_id)
+
+    # An agent's /run seeds with its own row, as before.
+    session_id = request.session[SESSION_ID_KEY]
+    self.session_id_to_counter.setdefault(session_id, body.initial_count)
+    return BaseSeedSessionResponse()
+
+async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+    self._closed_session_ids.add(body.resources_session_id)
+    self.session_id_to_counter.pop(body.resources_session_id, None)
+    return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
+```
+
+A close must succeed for a session that is already closed or was never seeded, and must keep a later seed or tool call from creating the session again. The example's tool methods return 409 for a closed session. `check_resources_session_contract` from `nemo_gym.testing.session_conformance` checks these rules from a server's tests.
+
+`configs/example_session_state_mgmt_single_agent_turn.yaml` runs the example through `single_agent_turn_legacy`, which grants the agent direct HTTP access to the counter tools. Because the counter starts at the task's `initial_count`, a reward of `1.0` shows that the seed, the agent's tool calls, and verification reached the same session.
 
 ---
 
