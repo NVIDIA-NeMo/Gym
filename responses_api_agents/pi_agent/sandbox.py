@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
-from nemo_gym.base_responses_api_agent import AgentSessionState
+from nemo_gym.base_responses_api_agent import AgentSessionState, ModelEndpoint
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox.utils import read_text, upload_text
@@ -47,6 +47,8 @@ class PiSandboxSession(AgentSessionState):
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
+    # The sandbox session capture's endpoint, when one is configured and started.
+    model_endpoint: ModelEndpoint | None = None
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
         """Stage adapter input using the shared text-transfer utility."""
