@@ -138,7 +138,7 @@ def _request_messages(body: Any) -> list[dict]:
     Lineage uses model-authored turns to identify the parent call.
     Chat and Anthropic use ``messages``.
     Responses uses ``input``.
-    The request envelope is prepended as a pseudo-turn because it also shapes the prompt.
+    The request envelope is prepended as pseudo-turns because it also shapes the prompt.
     """
     if body is None:
         return []
@@ -158,7 +158,7 @@ def _request_messages(body: Any) -> list[dict]:
 
 # This role cannot collide with a dialect role.
 # It is not assistant-authored and does not affect the lookup fingerprint.
-_ENVELOPE_ROLE = "_ng_request_envelope"
+_TOOLS_ROLE = "_ng_request_tools"
 
 
 def _request_envelope(getter: Any) -> list[dict]:
@@ -167,13 +167,25 @@ def _request_envelope(getter: Any) -> list[dict]:
     Instructions and tools can be siblings of the message list.
     The chat template renders both into the prompt.
     Including them prevents prefix reuse across different request envelopes.
+
+    Tools and instructions are separate items because the conversation digest
+    treats them differently. A tool schema is hashed in full. Instructions take
+    the ``system`` role so the digest counts their position but not their
+    content: Responses ``instructions`` and Anthropic ``system`` are the same
+    harness-owned text as a Chat system message, and harnesses rewrite volatile
+    fields in it (OpenCode's prompt carries today's date) between calls.
+
+    Tools come first so a Responses request yields the same item sequence as
+    the equivalent Chat request, whose system message leads ``messages``.
     """
-    instructions = getter("instructions", None)
+    envelope: list[dict] = []
     tools = getter("tools", None)
-    if not instructions and not tools:
-        return []
-    envelope = {"instructions": _plain(instructions), "tools": _plain(tools)}
-    return [{"role": _ENVELOPE_ROLE, "content": json.dumps(envelope, sort_keys=True, default=str)}]
+    if tools:
+        envelope.append({"role": _TOOLS_ROLE, "content": json.dumps(_plain(tools), sort_keys=True, default=str)})
+    instructions = getter("instructions", None)
+    if instructions:
+        envelope.append({"role": "system", "content": instructions})
+    return envelope
 
 
 def _plain(value: Any) -> Any:

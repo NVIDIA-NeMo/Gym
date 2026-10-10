@@ -41,6 +41,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel, ValidationError
 
 from nemo_gym.base_responses_api_model import (
+    _ANTHROPIC_CONVERTER,
     BaseResponsesAPIModelConfig,
     CaptureStore,
     SimpleResponsesAPIModel,
@@ -2145,42 +2146,44 @@ def test_separate_model_worker_instances_share_committed_lineage(tmp_path):
     assert entries[1].parent_call_id == entries[0].model_call_id
 
 
-def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
-    """Reject lineage across a changed system prompt.
+def test_served_calls_link_across_a_regenerated_system_prompt(tmp_path):
+    """Keep lineage across a regenerated system prompt but not across a removed one.
 
     Anthropic sends the system prompt beside the message list.
-    Reusing the old prefix would continue instructions that the harness did not send.
+    Claude Code regenerates it per request with today's date, so its content
+    cannot gate the parent link. Its presence still does: dropping it is a
+    different prompt.
     """
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     store = TokenCaptureStore(tmp_path)
 
     def call(rollout, system, messages):
-        client.post(
-            f"/ng-rollout/{rollout}/training-token-capture/v1/messages",
-            json={"system": system, "messages": messages, **_MSG_ARGS},
-        )
+        body = {"messages": messages, **_MSG_ARGS}
+        if system is not None:
+            body["system"] = system
+        client.post(f"/ng-rollout/{rollout}/training-token-capture/v1/messages", json=body)
 
     first = [{"role": "user", "content": "hello"}]
-    call("sys0", "SYSTEM ONE", first)
+    call("sys0", "SYSTEM ONE. Today is Wed Sep 23 2026.", first)
     served = store.read_entries("sys0")[0]
     content = served.output_items[0]["content"]
     echoed = content if isinstance(content, str) else content[0]["text"]
     second = first + [{"role": "assistant", "content": echoed}, {"role": "user", "content": "more"}]
 
-    # Same conversation, different instructions.
-    call("sys0", "SYSTEM TWO", second)
+    # Same conversation, regenerated instructions.
+    call("sys0", "SYSTEM ONE. Today is Thu Sep 24 2026.", second)
     entries = store.read_entries("sys0")
     assert len(entries) == 2
-    assert entries[1].parent_call_id is None
-    assert entries[1].parent_resolution == ParentResolutionStatus.UNRESOLVED
+    assert entries[1].parent_call_id == entries[0].model_call_id
+    assert entries[1].parent_resolution == ParentResolutionStatus.RESOLVED
 
-    # Unchanged instructions preserve the link.
+    # Same conversation, instructions removed.
     call("sys1", "SYSTEM ONE", first)
-    call("sys1", "SYSTEM ONE", second)
-    linked = store.read_entries("sys1")
-    assert len(linked) == 2
-    assert linked[1].parent_call_id == linked[0].model_call_id
-    assert linked[1].parent_resolution == ParentResolutionStatus.RESOLVED
+    call("sys1", None, second)
+    unlinked = store.read_entries("sys1")
+    assert len(unlinked) == 2
+    assert unlinked[1].parent_call_id is None
+    assert unlinked[1].parent_resolution == ParentResolutionStatus.UNRESOLVED
 
 
 async def test_lineage_lookup_failure_is_persisted_as_unresolved(tmp_path):
@@ -2262,6 +2265,57 @@ def test_the_envelope_is_stable_across_dict_and_model_tools():
     as_dicts = _request_messages({"messages": [], "tools": [{"name": "search"}]})
     as_models = _request_messages({"messages": [], "tools": [_Tool(name="search")]})
     assert as_dicts == as_models
+
+
+def test_the_parent_link_survives_a_date_change_in_every_dialects_instructions():
+    """Keep lineage across a regenerated system prompt on the Chat, Responses, and Anthropic paths.
+
+    OpenCode (Chat) sends its prompt as a system message, Codex-style agents (Responses) as
+    ``instructions``, and Claude Code (Anthropic) as ``system``. All three carry today's date, so
+    a rollout that crosses midnight UTC must still resolve its parent. Removing the instructions
+    or changing a tool schema is still a different request and must not resolve.
+    """
+    user = {"role": "user", "content": "fix the bug"}
+    tools = [{"type": "function", "name": "bash", "parameters": {"type": "object"}}]
+
+    def chat(prompt):
+        return _request_messages(
+            {"messages": [{"role": "system", "content": prompt}, user, _ASSISTANT_TURN], "tools": tools}
+        )
+
+    def responses(prompt, tools=tools):
+        return _request_messages({"instructions": prompt, "input": [user, _ASSISTANT_TURN], "tools": tools})
+
+    def anthropic(prompt):
+        body = {
+            "model": "m",
+            "max_tokens": 16,
+            "system": prompt,
+            "messages": [user, _ASSISTANT_TURN],
+            "tools": [{"name": "bash", "input_schema": {"type": "object"}}],
+        }
+        return _request_messages(_ANTHROPIC_CONVERTER.anthropic_request_to_responses(body))
+
+    day1, day2 = (
+        "You are a coding agent. Today is Wed Sep 23 2026.",
+        "You are a coding agent. Today is Thu Sep 24 2026.",
+    )
+    next_turn = [{"role": "user", "content": "next"}]
+    for shape in (chat, responses, anthropic):
+        lineage = RolloutLineage()
+        lineage.record("call-1", shape(day1), [1, 2, 3], "d1")
+        assert lineage.resolve(shape(day2) + next_turn).status == ParentResolutionStatus.RESOLVED, shape.__name__
+
+    # The instructions still count by position, and tool schemas still count in full.
+    lineage = RolloutLineage()
+    lineage.record("call-1", responses(day1), [1, 2, 3], "d1")
+    without_instructions = _request_messages({"input": [user, _ASSISTANT_TURN], "tools": tools})
+    assert lineage.resolve(without_instructions + next_turn).status == ParentResolutionStatus.UNRESOLVED
+    other_tool = responses(day2, tools=[{"type": "function", "name": "python", "parameters": {"type": "object"}}])
+    assert lineage.resolve(other_tool + next_turn).status == ParentResolutionStatus.UNRESOLVED
+
+    # A Responses request normalizes to the same digest as the equivalent Chat request.
+    assert conversation_digest(chat(day1)) == conversation_digest(responses(day1))
 
 
 def test_fingerprint_matches_across_openai_and_anthropic_tool_shapes():
