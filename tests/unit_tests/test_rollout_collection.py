@@ -5104,6 +5104,74 @@ class TestRolloutCollection:
 
         assert source.closed is False
 
+    @pytest.mark.parametrize(
+        ("setting", "expected"),
+        [({"mask_incomplete_when_attributed": False}, False), ({}, True)],
+        ids=["configured false", "absent"],
+    )
+    async def test_run_from_config_forwards_mask_incomplete_when_attributed_to_the_finalizer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, setting: dict, expected: bool
+    ) -> None:
+        """``run_from_config`` hands ``token_id_capture.mask_incomplete_when_attributed`` to the finalizer.
+
+        The collection loop reads the setting once from the global config and passes it to
+        ``finalize_rollout_token_capture`` as a keyword argument for every finalized rollout. The
+        finalizer defaults that argument to ``True``, so only its call arguments show whether the
+        configured value arrived.
+        """
+        # The owned file store stands in for a source another test may have installed process-wide.
+        monkeypatch.setattr(nemo_gym.rollout_collection, "installed_token_source", lambda: None)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "token_id_capture": {
+                    "enabled": True,
+                    "all_agents": True,
+                    "dir": str(tmp_path / "captures"),
+                    "rebuild_response": True,
+                    **setting,
+                }
+            },
+        )
+        # Wrapping the real finalizer records its call arguments while the rollout still takes the real path.
+        finalize = AsyncMock(wraps=finalize_rollout_token_capture)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "finalize_rollout_token_capture", finalize)
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            orjson.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    AGENT_REF_KEY_NAME: {"name": "agent"},
+                }
+            )
+            + b"\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                [example] = examples
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(
+                        row=example, result={"response": {"output": [], "usage": {}}}, rollout_latency_ms=None
+                    )
+                )
+                return [future]
+
+        # The store holds no records for the rollout, so the wrapped finalizer masks it and warns.
+        with pytest.warns(UserWarning, match="capture contains no token records"):
+            await Helper().run_from_config(config)
+
+        finalize.assert_awaited_once()
+        assert finalize.await_args.kwargs["mask_incomplete_when_attributed"] is expected
+
     async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
