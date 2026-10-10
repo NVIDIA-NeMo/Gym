@@ -407,10 +407,9 @@ class TokenCaptureStore:
         """Synchronous ``retire``.
 
         Two phases, each ending in one directory sync: write every missing fence, then remove the records. The
-        first sync also runs when the batch only has records left to remove, because their fences may have been
-        written by an overlapping or crashed retire that has not synced yet, and a removal must never become
-        durable before its fence. A batch with no fence to write and nothing to remove changes nothing and
-        syncs nothing.
+        first sync runs for every non-empty batch, even one that writes no fence, because the fences it finds
+        may have been written by an overlapping or crashed retire that has not synced yet: a removal must never
+        become durable before its fence, and the call must not return before the fence is durable.
         """
         removed, absent, to_clear = [], [], []
         unsynced = False
@@ -425,7 +424,9 @@ class TokenCaptureStore:
                     (removed if had_records else absent).append(rollout_id)
                     if had_records:
                         to_clear.append(rollout_id)
-            if unsynced or to_clear:
+            # Sync every non-empty batch, even one that wrote no fence: an overlapping or crashed retire may have
+            # written a fence this batch found without syncing it, and this call must not report it durable early.
+            if unsynced or to_clear or removed or absent:
                 self._fsync_root()
                 unsynced = False
             if to_clear:
@@ -433,7 +434,10 @@ class TokenCaptureStore:
                 unsynced = True
                 for rollout_id in to_clear:
                     with self._locked(rollout_id):
-                        self._remove_record_files(rollout_id)
+                        # The lock was released after phase one. If a delete cleared the fence since, the rollout
+                        # ID may already be in use again, and its records belong to the new attempt.
+                        if self._read_state(rollout_id).get("retired", False):
+                            self._remove_record_files(rollout_id)
                 self._fsync_root()
                 unsynced = False
         finally:
