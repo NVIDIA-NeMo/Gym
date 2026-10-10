@@ -28,6 +28,7 @@ from threading import Thread
 from time import sleep, time
 from typing import Dict, List, Optional, Tuple
 
+import psutil
 import rich
 import uvicorn
 from devtools import pprint
@@ -49,15 +50,18 @@ from nemo_gym.cli.utils import (
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
+    DEFAULT_SERVER_STARTUP_ATTEMPTS,
     DRY_RUN_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     QUERY_KEY_NAME,
+    SERVER_STARTUP_ATTEMPTS_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
+    reassign_auto_assigned_ports,
 )
 from nemo_gym.registry import discover_environments, read_environment_details
 from nemo_gym.server_status import StatusCommand
@@ -75,6 +79,14 @@ from nemo_gym.server_utils import (
 _GRACEFUL_SHUTDOWN_TIMEOUT_SEC: int = 1
 # Grace period after SIGKILL for the kernel to reap the child and avoid <defunct> entries.
 _FORCE_KILL_REAP_TIMEOUT_SEC: int = 2
+
+
+def _process_descendants(process: Popen) -> List[psutil.Process]:
+    """The server under a process's `bash -c` wrapper. Signalling only the wrapper leaves the server running."""
+    try:
+        return psutil.Process(process.pid).children(recursive=True)
+    except (psutil.Error, TypeError, ValueError):
+        return []
 
 
 def _resolve_server_dir(rel_path: Path) -> Path:
@@ -146,6 +158,10 @@ class TestConfig(RunConfig):
         return _resolve_server_dir(self._dir_path)
 
 
+class ServerExitedError(RuntimeError):
+    """The head server or a server process exited while it should be running."""
+
+
 class RunHelper:  # pragma: no cover
     _head_server: uvicorn.Server
     _head_server_thread: Thread
@@ -156,6 +172,32 @@ class RunHelper:  # pragma: no cover
     _server_client: ServerClient
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
+        """Start the head server and every configured server, restarting all of them if one exits during startup.
+
+        Gym picks a server's port at config-parse time, but the server binds it only after its venv setup, so
+        another process can take it in between. Every server holds every other server's address, so one server
+        cannot move alone: all servers are stopped, every Gym-picked port is re-picked, and all are started again.
+        """
+        attempt = 1
+        while True:
+            try:
+                return self._start_once(global_config_dict_parser_config)
+            except ServerExitedError as e:
+                global_config_dict = get_global_config_dict()
+                max_attempts = global_config_dict.get(
+                    SERVER_STARTUP_ATTEMPTS_KEY_NAME, DEFAULT_SERVER_STARTUP_ATTEMPTS
+                )
+                self.shutdown()
+                if attempt >= max_attempts:
+                    raise
+                reassigned = reassign_auto_assigned_ports(global_config_dict)
+                print(
+                    f"Server startup failed (attempt {attempt}/{max_attempts}); restarting all servers with new "
+                    f"ports {reassigned}:\n{e}"
+                )
+                attempt += 1
+
+    def _start_once(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
         # Fail fast before starting Ray if nothing is configured to run (covers env run and the
@@ -257,6 +299,8 @@ class RunHelper:  # pragma: no cover
         print("Waiting for head server to spin up")
         poll_count = 0
         while True:
+            if not self._head_server_thread.is_alive():
+                raise ServerExitedError("Head server finished unexpectedly!")
             status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
             if status == "success":
                 break
@@ -293,7 +337,7 @@ class RunHelper:  # pragma: no cover
 
     def poll(self) -> None:
         if not self._head_server_thread.is_alive():
-            raise RuntimeError("Head server finished unexpectedly!")
+            raise ServerExitedError("Head server finished unexpectedly!")
 
         for process_name, process in self._processes.items():
             if process.poll() is not None:
@@ -312,7 +356,7 @@ Process `{process_name}` stdout:
 Process `{process_name}` stderr:
 {proc_err}"""
 
-                raise RuntimeError(print_str)
+                raise ServerExitedError(print_str)
 
     def wait_for_dry_run_spinup(self) -> None:
         sleep_interval = 3
@@ -359,8 +403,15 @@ Process `{process_name}` stderr:
 
     def shutdown(self) -> None:
         print("Sending interrupt signals to servers...")
+        # Collected before signalling: once a wrapper exits, its children are reparented and can't be found.
+        descendants = [child for process in self._processes.values() for child in _process_descendants(process)]
         for process in self._processes.values():
             process.send_signal(SIGINT)
+        for child in descendants:
+            try:
+                child.send_signal(SIGINT)
+            except psutil.Error:
+                pass
 
         print("Waiting for processes to finish...")
         killed_process_names: List[str] = []
@@ -391,6 +442,16 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
                 f"within {_FORCE_KILL_REAP_TIMEOUT_SEC}s after SIGKILL; "
                 "they may remain as zombies until this process exits."
             )
+        _, alive = psutil.wait_procs(descendants, timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
+        for child in alive:
+            try:
+                child.kill()
+            except psutil.Error:
+                pass
+        _, unreaped = psutil.wait_procs(alive, timeout=_FORCE_KILL_REAP_TIMEOUT_SEC)
+        if unreaped:
+            print(f"WARNING: server processes {[child.pid for child in unreaped]} survived SIGKILL.")
+
         self._processes = dict()
 
         self._head_server.should_exit = True
