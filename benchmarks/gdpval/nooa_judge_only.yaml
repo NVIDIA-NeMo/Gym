@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Run ONLY from Gym183ef8601aad3a3c5b933065b05c8cb87442560e.
+# Protocol: EFB3737282b3890c83cc50306955f59e326362d9c7c,
+# configs/benchmarks/gym/gdpval/{bench,refs}.yaml; no scorer changes.
+# Inherit Gym183ef860's native judge panel, including its distinct fixed-model
+# proxies and per-provider media limits. Do not replace it with EFB's older
+# panel-only override: that would route every member through the Gemini proxy.
+config_paths:
+  - benchmarks/gdpval/config.yaml
+
+# The disabled policy endpoint must not delay judge-only startup. Preflight
+# the actual judge routes with documents and audio/video before collection.
+model_endpoint_readiness_timeout_seconds: 0
+count_failure_classes_as_zero: []
+
+# Required by Stirrup's config, unused in judge_only. Any accidental policy call
+# fails locally instead of spending model tokens or regenerating a candidate.
+policy_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: http://127.0.0.1:9/v1
+      openai_api_key: unused-judge-only
+      openai_model: no-policy-inference
+
+gdpval_judge_model:
+  responses_api_models:
+    openai_model:
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:JUDGE_API_KEY}
+      max_concurrent_requests: 10
+
+# Bound the fixed-model proxies used by the inherited three-member panel.
+gdpval_gpt55_judge_model:
+  responses_api_models:
+    openai_model:
+      max_concurrent_requests: 4
+gdpval_gemini31_judge_model:
+  responses_api_models:
+    openai_model:
+      max_concurrent_requests: 2
+gdpval_claude48_judge_model:
+  responses_api_models:
+    openai_model:
+      max_concurrent_requests: 4
+
+gdpval_stirrup_agent:
+  responses_api_agents:
+    stirrup_agent:
+      judge_only: true
+      execute_only: false
+      rerun_incomplete: true
+      concurrency: 16
+      count_eval_missing_as_loss: false
+
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      reward_mode: comparison
+      num_comparison_trials: 4
+      judge_sampling_seed: 42
+      persist_raw_judge_responses: true
+      preconvert_max_concurrent: 2
+      count_eval_missing_as_loss: false
+
+num_repeats: 1
+multistage:
+  enabled: true
+  retry_inprocess: true
+  stages:
+    - num_tasks: 45
+      partial_completion:
+        min_success_fraction: 0.9
+        min_per_reference_success_fraction: 0.5
+        min_successful_rows_per_reference: 1
+        waivable_failure_classes: [timeout_exceeded, transient]
+        tolerate_unresolved: true
+    - num_tasks: 220
+      num_models: 4
+      partial_completion:
+        min_success_fraction: 0.95
+        min_per_reference_success_fraction: 0.5
+        min_successful_rows_per_reference: 1
+        waivable_failure_classes: [timeout_exceeded, transient]
+        tolerate_unresolved: true

@@ -260,7 +260,9 @@ class GymTraceHooks:
                     )
                 )
             else:
-                record = event.observation.model_copy(deep=True)
+                # NOOA execution results can retain module objects in their REPL locals.
+                # Copy the observation shell; output is replaced with serialized evidence below.
+                record = event.observation.model_copy()
                 invocation = invocations[record.invocation_id]
                 record.output = visible_outputs.get((record.invocation_id, record.tool_call_id), record.output)
                 if not any(

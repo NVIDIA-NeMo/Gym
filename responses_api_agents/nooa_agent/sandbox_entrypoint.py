@@ -19,7 +19,7 @@ from nemo_gym.server_utils import (
     request,
     set_global_aiohttp_client,
 )
-from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
+from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
 from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunFailure, NOOARunRequest, NOOARunResult
 
@@ -33,6 +33,7 @@ class SandboxInput(BaseModel):
     model_base_url: AnyHttpUrl
     model_server_name: str
     max_policy_calls: int | None = Field(default=None, gt=0)
+    context_window: int | None = Field(default=None, gt=0)
 
 
 class RunnerError(BaseModel):
@@ -102,6 +103,7 @@ async def execute(payload: SandboxInput) -> SandboxResult:
             server_client=_ModelClient(str(payload.model_base_url)),
             model_server_name=payload.model_server_name,
             max_policy_calls=payload.max_policy_calls,
+            context_window=payload.context_window,
         )
         with rollout_context(payload.request.rollout_id):
             result = await runner.run(payload.request)

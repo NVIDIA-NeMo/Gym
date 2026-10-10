@@ -77,6 +77,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 server_client=self.server_client,
                 model_server_name=self.config.model_server.name,
                 max_policy_calls=self.config.max_policy_calls,
+                context_window=self.config.context_window,
             )
         super().model_post_init(context)
 
@@ -123,10 +124,15 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 model_base_url=model_base_url,
                 model_server_name=self.config.model_server.name,
                 max_policy_calls=self.config.max_policy_calls,
+                context_window=self.config.context_window,
             )
             state.runner = runner
             try:
-                runner.python = await prepare_nooa_runtime(sandbox)
+                runner.python = (
+                    await prepare_nooa_runtime(sandbox, requirements_path=self.config.runtime_requirements_file)
+                    if self.config.runtime_requirements_file is not None
+                    else await prepare_nooa_runtime(sandbox)
+                )
                 await runner.prepare()
             except BaseException as error:
                 # Main retains this state for close while rejecting activation
