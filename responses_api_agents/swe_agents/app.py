@@ -1652,6 +1652,25 @@ def _parse_replay_messages(problem_info: Dict[str, Any]) -> Optional[list]:
     return None
 
 
+def _swe_sampling_seed(body: NeMoGymResponseCreateParamsNonStreaming, agent_framework: str) -> Optional[int]:
+    """Validate the optional episode seed supplied by the training client."""
+    metadata = body.metadata or {}
+    if "sampling_seed" not in metadata:
+        return None
+    raw = metadata["sampling_seed"]
+    if not isinstance(raw, str) or not re.fullmatch(r"[0-9]{1,19}", raw) or int(raw) >= 2**63:
+        raise ValueError("metadata.sampling_seed must be a decimal integer between 0 and 2**63 - 1")
+    if agent_framework != "openhands":
+        raise ValueError("metadata.sampling_seed currently requires the OpenHands agent framework")
+    if metadata.get("replay_messages") or any(
+        (item.get("type") if isinstance(item, dict) else getattr(item, "type", None))
+        in ("function_call", "function_call_output")
+        for item in body.input
+    ):
+        raise ValueError("Seeded SWE requests cannot resume a partial trajectory without its model-call counter")
+    return int(raw)
+
+
 def _extract_replay_system_content(replay_messages_list: list) -> Optional[str]:
     """First non-empty system-role message content in a chat-completion message list."""
     for m in replay_messages_list:
@@ -1775,6 +1794,23 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         data_point = self.config.problem_info
         agent_run_id = self.config.agent_run_id
+
+        sampling_seed = _swe_sampling_seed(self.config.body, self.config.agent_framework)
+        sampling_cmd = ""
+        if sampling_seed is not None:
+            if self.config.problem_info.get("replay_messages"):
+                raise ValueError(
+                    "Seeded SWE requests cannot resume a partial trajectory without its model-call counter"
+                )
+            capability_check = (
+                "import sys; from openhands.agenthub.nemo_gym_client import NEMO_GYM_SAMPLING_SEED_PROTOCOL_VERSION; "
+                "sys.exit(0 if NEMO_GYM_SAMPLING_SEED_PROTOCOL_VERSION == 1 else "
+                "'Seeded SWE requests require OpenHands sampling-seed protocol version 1')"
+            )
+            sampling_cmd = (
+                f"export NEMO_GYM_SAMPLING_SEED={sampling_seed} && "
+                f"/openhands_setup/OpenHands/.venv/bin/python -c {shlex.quote(capability_check)} && "
+            )
 
         agent_config = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs/oh_config.toml")
 
@@ -1934,6 +1970,7 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
             f"{camel_case_tool_names_cmd}"
             f"echo {shlex.quote(config_str)} >{config_file_path} && "
             f"{baseline_fix_cmd}"
+            f"{sampling_cmd}"
             # f" export EVAL_OUTPUT_DIR={eval_dir_in_openhands} && "
             f"./evaluation/benchmarks/swe_bench/scripts/run_infer.sh "
             f"    llm.model "  # name of llm config section in config.toml
@@ -3691,6 +3728,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     def _setup_params(
         self, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> Tuple[SWEBenchWrapperInstanceConfig, BaseDatasetHarnessProcessor]:
+        _swe_sampling_seed(body, self.config.agent_framework)
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
         instance_id = problem_info.get("instance_id", "unknown")
 
