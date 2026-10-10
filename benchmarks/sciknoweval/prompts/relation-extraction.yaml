@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The required list format stays in the instruction verbatim: upstream's parse_tuples /
+# parse_triplets read the whole response string and assume it starts with '[', so the format is a
+# contract, not a muzzle. Only "DO NOT output any other characters" is dropped, and the list is
+# pinned to the last line so the evaluator can lift it out of a chain of thought.
+
+system: |-
+  {instruction}
+
+user: |-
+  {problem}
+
+  You may reason through the text first. The last line of your response should be in the following format: 'Answer: <list>', where <list> is on a single line in exactly the format described above.

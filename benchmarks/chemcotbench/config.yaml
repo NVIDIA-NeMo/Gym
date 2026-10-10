@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- resources_servers/chemcotbench/configs/chemcotbench.yaml
+chemcotbench_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      max_steps: 1
+chemcotbench:
+  resources_servers:
+    chemcotbench:
+      datasets:
+      - name: chemcotbench
+        type: benchmark
+        jsonl_fpath: benchmarks/chemcotbench/data/test.jsonl
+        prepare_script: benchmarks/chemcotbench/prepare.py
+        num_repeats: 1
