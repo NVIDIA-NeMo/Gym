@@ -198,7 +198,7 @@ class TestFernDocsLinks(unittest.TestCase):
                 canonical_links += line.count("/tutorials/evaluation-tutorials")
 
         self.assertEqual([], broken_links)
-        self.assertEqual(8, canonical_links)
+        self.assertEqual(15, canonical_links)
 
     def test_main_training_tutorial_links_include_the_tutorials_section(self):
         """`training-tutorials` sits under the same `section: Tutorials` as `evaluation-tutorials`.
