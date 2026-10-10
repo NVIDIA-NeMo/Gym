@@ -286,6 +286,14 @@ def test_is_runtime_failure() -> None:
     assert apptainer_provider._is_runtime_failure("FATAL: no instance found") is True
     assert apptainer_provider._is_runtime_failure("instance not found") is True
     assert apptainer_provider._is_runtime_failure("ls: cannot access") is False
+    assert apptainer_provider._is_runtime_failure("FATAL   : container creation failed") is True
+    assert apptainer_provider._is_runtime_failure("some output\nFATAL:   exec failed") is True
+    # The user's own stderr must not be classified as an apptainer failure.
+    assert apptainer_provider._is_runtime_failure("fatal: not a git repository (or any parent)") is False
+    assert apptainer_provider._is_runtime_failure("Error: file /testbed/foo.py does not exist") is False
+    assert apptainer_provider._is_runtime_failure("ERROR: tests/test_x.py::test_y - AssertionError", 1) is False
+    # "ERROR:" lines only count together with apptainer's own exit code.
+    assert apptainer_provider._is_runtime_failure("ERROR  : could not open image", 255) is True
 
 
 def test_constructor_requires_binary(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -651,6 +659,23 @@ async def test_exec_command_failure_is_not_runtime_error(
     result = await provider.exec(_make_handle(tmp_path), "ls /nope")
 
     assert result.return_code == 2
+    assert result.error_type is None
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "fatal: not a git repository (or any of the parent directories): .git",
+        "FileNotFoundError: path /testbed/data.csv does not exist",
+    ],
+)
+async def test_exec_user_stderr_is_not_runtime_error(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stderr: str
+) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (128, "", stderr))
+    result = await provider.exec(_make_handle(tmp_path), "git log")
+
+    assert result.return_code == 128
     assert result.error_type is None
 
 
