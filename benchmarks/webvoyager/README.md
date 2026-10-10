@@ -37,6 +37,10 @@ browser-tool contract but does not repair malformed JSON, complete missing
 delimiters, infer aliases, or silently clamp action arguments. They averaged
 417.5/552, or 75.63%, with a five-task run-to-run difference.
 
+These runs used the source's dates, rendered for 2026-07-26. By the time they
+ran, 6 (Qwen, 2026-09-02) and 8 (Nano Omni, 2026-09-06) Booking questions named
+dates that had passed, and all of them failed; see [Dated questions](#dated-questions).
+
 These results are rollout evidence for the runtime and fixed-denominator
 reconciliation, not stable leaderboard claims. Live-site state,
 proxy/CAPTCHA availability, judge behavior, and exact policy serving assets
@@ -62,6 +66,33 @@ trajectories that complete and are judged unsuccessful remain valid
 zero-reward samples. Providers must release leases idempotently and enforce an
 external TTL as a backstop for process or node loss.
 
+## Dated questions
+
+79 Booking and Google Flights questions name absolute check-in, departure, or
+return dates. The live sites cannot search a date that has passed, so such a
+task becomes unsolvable and fails, usually at the step limit. The maintained
+source renders these questions from its `template/webvoyager.template.jsonl`
+for 2026-07-26: hotel stays start 30 to 117 days and flights 45 to 132 days
+after that reference date.
+
+`prepare.py` downloads the hash-pinned template from the same source commit,
+checks that it reproduces every source question for 2026-07-26, and renders
+the questions again for `reference_date` in `provenance.yaml`. Only the dates
+change, and prepared rows keep the source question in
+`original_metadata.ques`. The reference date must be a whole number of weeks
+after 2026-07-26, so every date keeps its weekday, including the two "weekend"
+questions. Preparation fails when any rendered date is not after today.
+
+For a later run, pick a reference date at or shortly before the run date:
+
+```bash
+./.venv/bin/python benchmarks/webvoyager/prepare.py --no-env --reference-date 2026-11-08
+```
+
+A run on its reference date sees the same lead times as a run of the source on
+2026-07-26. The reference date changes the task text, so report it, or the
+prepared file's SHA-256, with every result.
+
 ## Standard Gym flow
 
 ### Install and prepare
@@ -81,7 +112,8 @@ uv run --project resources_servers/visual_browser playwright install chromium
 
 Install missing Xvfb or xclip system packages before starting the browser. The
 prepare command downloads the maintained source, verifies its SHA-256 and exact
-552-task denominator, and writes `benchmarks/webvoyager/data/webvoyager.jsonl`.
+552-task denominator, renders the dated questions for the reference date in
+`provenance.yaml`, and writes `benchmarks/webvoyager/data/webvoyager.jsonl`.
 
 ### Configure external services
 

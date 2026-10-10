@@ -10,6 +10,16 @@ dataset:
   sha256: "f635a9b27fa1980a63b39bbf64ae8e9e766159cb70fa765451d3d3c0b948ff98" # pragma: allowlist secret
   raw_url: https://raw.githubusercontent.com/jayl940712/webarena_benchmarks/6a2977939b157b0ab9de7799bb089c721f1ac115/webvoyager.jsonl
   task_count: 552
+  # The source renders its 79 dated Booking and Google Flights questions from
+  # this template for source_reference_date (template/update_time.txt).
+  date_template:
+    path: template/webvoyager.template.jsonl
+    sha256: "5bcc746efa51c661ed8c65b22b72c6dac14738c6b2c633ddfc1e90973ec0ca17" # pragma: allowlist secret
+    raw_url: https://raw.githubusercontent.com/jayl940712/webarena_benchmarks/6a2977939b157b0ab9de7799bb089c721f1ac115/template/webvoyager.template.jsonl
+    source_reference_date: "2026-07-26"
+  # prepare.py renders those questions again for this date, 11 weeks later, so
+  # weekdays are unchanged; the closest rendered date is 2026-11-10.
+  reference_date: "2026-10-11"
 reference_recipe:
   repository: osworld_internal
   branch: nemotron-v3

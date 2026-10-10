@@ -5,6 +5,7 @@ import hashlib
 import json
 import stat
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -31,62 +32,161 @@ class _DownloadResponse:
         return self.payload
 
 
+BOOKING_TEMPLATE = {
+    "web_name": "Booking",
+    "id": "Booking--5",
+    "ques_template": "Search a hotel with free WiFi and air conditioning in Bali from {dates}.",
+    "date_policy": {"type": "hotel_stay", "min_days_from_today": 30, "duration_days": 3},
+    "render": {"dates": "month_day_to_day_year"},
+    "web": "https://www.booking.com/",
+}
+# The source's question for 2026-07-26: entry 0 starts 30 days later.
+BOOKING_SOURCE_QUESTION = "Search a hotel with free WiFi and air conditioning in Bali from August 25 to 28, 2026."
+
+
 def _source_rows(count: int = webvoyager_prepare.EXPECTED_TASKS) -> bytes:
-    rows = (
-        json.dumps(
-            {
-                "web_name": "Allrecipes",
-                "id": f"Allrecipes--{index}",
-                "ques": f"Find recipe {index}",
-                "web": "https://www.allrecipes.com/",
-            }
-        )
-        for index in range(count)
+    rows = [
+        {
+            "web_name": "Allrecipes",
+            "id": f"Allrecipes--{index}",
+            "ques": f"Find recipe {index}",
+            "web": "https://www.allrecipes.com/",
+        }
+        for index in range(count - 1)
+    ]
+    rows.append(
+        {"web_name": "Booking", "id": "Booking--5", "ques": BOOKING_SOURCE_QUESTION, "web": "https://www.booking.com/"}
     )
-    return ("\n".join(rows) + "\n").encode()
+    return ("\n".join(json.dumps(row) for row in rows) + "\n").encode()
+
+
+def _pin_inputs(monkeypatch, tmp_path, payload: bytes, templates=(BOOKING_TEMPLATE,)) -> tuple[Path, Path]:
+    source = tmp_path / "webvoyager.jsonl"
+    source.write_bytes(payload)
+    template = tmp_path / "webvoyager.template.jsonl"
+    template.write_text("".join(json.dumps(entry) + "\n" for entry in templates), encoding="utf-8")
+    monkeypatch.setattr(webvoyager_prepare, "SOURCE_SHA256", hashlib.sha256(payload).hexdigest())
+    monkeypatch.setattr(webvoyager_prepare, "DATE_TEMPLATE_SHA256", hashlib.sha256(template.read_bytes()).hexdigest())
+    monkeypatch.setattr(webvoyager_prepare, "_today", lambda: date(2026, 10, 12))
+    return source, template
 
 
 def test_prepare_downloads_and_reuses_the_hash_pinned_source(monkeypatch, tmp_path) -> None:
     payload = _source_rows()
     destination = tmp_path / "webvoyager_source.jsonl"
     calls = []
-    monkeypatch.setattr(webvoyager_prepare, "SOURCE_SHA256", hashlib.sha256(payload).hexdigest())
+    digest = hashlib.sha256(payload).hexdigest()
+    url = webvoyager_prepare.SOURCE_URL
     monkeypatch.setattr(
         webvoyager_prepare.urllib.request,
         "urlopen",
         lambda url, timeout: calls.append((url, timeout)) or _DownloadResponse(payload),
     )
 
-    assert webvoyager_prepare._download_source(destination) == destination
+    assert webvoyager_prepare._download("WebVoyager source", url, digest, destination) == destination
     assert destination.read_bytes() == payload
-    assert calls == [(webvoyager_prepare.SOURCE_URL, 60)]
+    assert calls == [(url, 60)]
 
     monkeypatch.setattr(
         webvoyager_prepare.urllib.request,
         "urlopen",
         lambda *_args, **_kwargs: pytest.fail("a valid cached source must not be downloaded again"),
     )
-    assert webvoyager_prepare._download_source(destination) == destination
+    assert webvoyager_prepare._download("WebVoyager source", url, digest, destination) == destination
+
+    monkeypatch.setattr(
+        webvoyager_prepare.urllib.request, "urlopen", lambda *_args, **_kwargs: _DownloadResponse(b"x")
+    )
+    with pytest.raises(ValueError, match="WebVoyager source hash mismatch"):
+        webvoyager_prepare._download("WebVoyager source", url, digest, tmp_path / "other.jsonl")
+    assert not (tmp_path / "other.jsonl").exists()
 
 
 def test_prepare_enforces_the_maintained_552_task_population(monkeypatch, tmp_path) -> None:
-    source = tmp_path / "webvoyager.jsonl"
-    payload = _source_rows()
-    source.write_bytes(payload)
+    source, template = _pin_inputs(monkeypatch, tmp_path, _source_rows())
     output = tmp_path / "prepared.jsonl"
-    monkeypatch.setattr(webvoyager_prepare, "SOURCE_SHA256", hashlib.sha256(payload).hexdigest())
 
-    assert webvoyager_prepare.prepare(source=source, output=output) == output
+    assert webvoyager_prepare.prepare(source=source, output=output, date_template=template) == output
     rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == webvoyager_prepare.EXPECTED_TASKS
     assert rows[0]["responses_create_params"]["input"] == []
     assert rows[0]["web_task"]["runtime_profile"] == "visual_browser"
 
-    payload = _source_rows(webvoyager_prepare.EXPECTED_TASKS - 1)
-    source.write_bytes(payload)
-    monkeypatch.setattr(webvoyager_prepare, "SOURCE_SHA256", hashlib.sha256(payload).hexdigest())
+    source, template = _pin_inputs(monkeypatch, tmp_path, _source_rows(webvoyager_prepare.EXPECTED_TASKS - 1))
     with pytest.raises(ValueError, match=f"exactly {webvoyager_prepare.EXPECTED_TASKS} tasks"):
-        webvoyager_prepare.prepare(source=source, output=output)
+        webvoyager_prepare.prepare(source=source, output=output, date_template=template)
+
+
+def test_prepare_renders_dated_questions_for_the_reference_date(monkeypatch, tmp_path) -> None:
+    source, template = _pin_inputs(monkeypatch, tmp_path, _source_rows())
+    output = tmp_path / "prepared.jsonl"
+
+    webvoyager_prepare.prepare(source=source, output=output, date_template=template, reference_date="2026-10-11")
+
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    booking = rows[-1]["web_task"]
+    # 11 weeks after the source's 2026-07-26: the same weekdays, 30 days ahead.
+    assert (
+        booking["intent"] == "Search a hotel with free WiFi and air conditioning in Bali from November 10 to 13, 2026."
+    )
+    assert booking["original_metadata"]["ques"] == BOOKING_SOURCE_QUESTION
+    assert rows[0]["web_task"]["intent"] == "Find recipe 0"
+
+
+def test_prepare_refuses_reference_dates_that_change_weekdays_or_have_passed(monkeypatch, tmp_path) -> None:
+    source, template = _pin_inputs(monkeypatch, tmp_path, _source_rows())
+    output = tmp_path / "prepared.jsonl"
+
+    with pytest.raises(ValueError, match="whole number of weeks"):
+        webvoyager_prepare.prepare(source=source, output=output, date_template=template, reference_date="2026-10-12")
+    monkeypatch.setattr(webvoyager_prepare, "_today", lambda: date(2026, 11, 10))
+    with pytest.raises(ValueError, match=r"Booking--5 \(2026-11-10\)"):
+        webvoyager_prepare.prepare(source=source, output=output, date_template=template, reference_date="2026-10-11")
+    assert not output.exists()
+
+
+def test_date_template_must_reproduce_the_source_question(monkeypatch, tmp_path) -> None:
+    edited = {**BOOKING_TEMPLATE, "ques_template": "Search a hotel in Bali from {dates}."}
+    source, template = _pin_inputs(monkeypatch, tmp_path, _source_rows(), templates=(edited,))
+
+    with pytest.raises(ValueError, match="does not reproduce Booking--5 for 2026-07-26"):
+        webvoyager_prepare.prepare(source=source, output=tmp_path / "prepared.jsonl", date_template=template)
+
+
+# Expected strings are the source repository's template/render_webvoyager.py output.
+@pytest.mark.parametrize(
+    ("style", "start", "end", "expected"),
+    [
+        ("month_day", date(2026, 9, 22), None, "September 22"),
+        ("month_day_ordinal", date(2026, 9, 12), None, "September 12th"),
+        ("month_day_year", date(2026, 9, 1), None, "September 1, 2026"),
+        ("month_day_ordinal_year", date(2026, 9, 22), None, "September 22nd, 2026"),
+        ("abbr_month_day", date(2026, 9, 1), None, "Sep. 1"),
+        ("day_month_year", date(2026, 9, 12), None, "12 September 2026"),
+        ("end_month_day_year", date(2026, 9, 9), date(2026, 9, 12), "September 12, 2026"),
+        ("month_day_range", date(2026, 9, 9), date(2026, 9, 12), "September 9-12"),
+        ("month_day_range", date(2026, 12, 30), date(2027, 1, 2), "December 30-January 2"),
+        ("month_day_range_year", date(2026, 9, 9), date(2026, 9, 12), "September 9-12, 2026"),
+        ("month_day_range_year", date(2026, 12, 30), date(2027, 1, 2), "December 30, 2026 - January 2, 2027"),
+        ("ordinal_month_day_range", date(2026, 9, 29), date(2026, 10, 2), "September 29th - October 2nd"),
+        ("month_day_to_day", date(2026, 9, 9), date(2026, 9, 12), "September 9 to 12"),
+        ("month_day_to_day", date(2026, 9, 29), date(2026, 10, 2), "September 29 to October 2"),
+        ("month_day_to_day_year", date(2026, 9, 9), date(2026, 9, 12), "September 9 to 12, 2026"),
+        ("month_day_to_day_year", date(2026, 9, 29), date(2026, 10, 2), "September 29, 2026 to October 2, 2026"),
+        ("day_month_range_year", date(2026, 9, 9), date(2026, 9, 12), "9 September to 12 September 2026"),
+        ("day_month_range_year", date(2026, 12, 30), date(2027, 1, 2), "30 December 2026 to 2 January 2027"),
+        ("numeric_dmy_range", date(2026, 12, 30), date(2027, 1, 2), "30/12/2026 - 02/01/2027"),
+        ("sentence_range_year", date(2026, 9, 29), date(2026, 10, 2), "September 29, 2026, to October 2, 2026"),
+        (
+            "between_ordinal_range_year",
+            date(2026, 12, 30),
+            date(2027, 1, 2),
+            "December 30th, 2026, and January 2nd, 2027",
+        ),
+    ],
+)
+def test_date_styles_match_the_source_renderer(style, start, end, expected) -> None:
+    assert webvoyager_prepare._render_date_value(style, start, end) == expected
 
 
 def test_provenance_matches_the_automatic_download_and_profiles() -> None:
@@ -100,7 +200,19 @@ def test_provenance_matches_the_automatic_download_and_profiles() -> None:
         "sha256": webvoyager_prepare.SOURCE_SHA256,
         "raw_url": webvoyager_prepare.SOURCE_URL,
         "task_count": webvoyager_prepare.EXPECTED_TASKS,
+        "date_template": {
+            "path": "template/webvoyager.template.jsonl",
+            "sha256": webvoyager_prepare.DATE_TEMPLATE_SHA256,
+            "raw_url": webvoyager_prepare.DATE_TEMPLATE_URL,
+            "source_reference_date": "2026-07-26",
+        },
+        "reference_date": webvoyager_prepare.REFERENCE_DATE.isoformat(),
     }
+    commit_root = (
+        f"https://raw.githubusercontent.com/jayl940712/webarena_benchmarks/{webvoyager_prepare.SOURCE_COMMIT}/"
+    )
+    assert webvoyager_prepare.DATE_TEMPLATE_URL == commit_root + "template/webvoyager.template.jsonl"
+    assert (webvoyager_prepare.REFERENCE_DATE - webvoyager_prepare.SOURCE_REFERENCE_DATE).days % 7 == 0
     assert set(provenance["policy_profiles"]) == set(webvoyager_prepare.PROFILE_CONFIGS)
     assert {
         profile: config["sampling"] for profile, config in provenance["policy_profiles"].items()
@@ -248,7 +360,7 @@ def test_prepare_rejects_parallel_sessions_on_one_display(tmp_path) -> None:
 def test_prepare_prints_copyable_cli_commands(monkeypatch, capsys, tmp_path) -> None:
     prepared = tmp_path / "prepared.jsonl"
     prepared.write_text("{}\n", encoding="utf-8")
-    monkeypatch.setattr("benchmarks.webvoyager.prepare.prepare", lambda source, output: prepared)
+    monkeypatch.setattr("benchmarks.webvoyager.prepare.prepare", lambda source, output, **_dates: prepared)
     monkeypatch.setattr(sys, "argv", ["prepare.py", "--no-env"])
 
     prepare_main()
