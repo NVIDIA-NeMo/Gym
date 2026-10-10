@@ -60,7 +60,7 @@ from nemo_gym.config_types import (
 from nemo_gym.deliverables import is_deliverable
 from nemo_gym.episode_types import is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.failure_kinds import CANCELLED, is_namespaced, is_registered, validate_failure_kind
+from nemo_gym.failure_kinds import CANCELLED, is_namespaced, is_registered
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -1708,7 +1708,6 @@ def _metric_failure_kind(failure_kind: Any) -> Optional[str]:
     """The kind as a bounded label: registered or namespaced names pass, anything else is one bucket."""
     if not isinstance(failure_kind, str):
         return None
-    validate_failure_kind(failure_kind)
     if is_registered(failure_kind) or is_namespaced(failure_kind):
         return failure_kind
     return UNREGISTERED_FAILURE_KIND

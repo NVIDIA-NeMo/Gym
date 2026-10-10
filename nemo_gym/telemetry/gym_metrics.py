@@ -90,6 +90,13 @@ HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT = "gym.http.connection_pool.connect_tota
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
 HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_outcome"
 HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
+ROLLOUT_COMPLETED_INSTRUMENT = "gym.rollout.completed_total"
+ROLLOUT_OUTCOME_ATTRIBUTE = "nemo.gym.rollout.outcome"
+FAILURE_CLASS_ATTRIBUTE = "nemo.gym.failure_class"
+FAILURE_KIND_ATTRIBUTE = "nemo.gym.failure_kind"
+FAILURE_TYPE_ATTRIBUTE = "nemo.gym.failure_type"
+DISPATCH_NAME_ATTRIBUTE = "nemo.gym.rollout.dispatch.name"
+UNREGISTERED_FAILURE_KIND = "unregistered"
 
 #: Milliseconds. Provisioning a remote sandbox takes tens of seconds and a long command can run
 #: for minutes; the SDK's default boundaries end at 10 s and would put most of both in +Inf.
@@ -300,21 +307,6 @@ def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[st
         logger.debug("nemo-lens: failed to register %s", HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT, exc_info=True)
 
 
-def _reset_for_testing() -> None:
-    """Drop cached instruments. Test-only."""
-    with _INSTRUMENT_LOCK:
-        _INSTRUMENTS.clear()
-
-
-ROLLOUT_COMPLETED_INSTRUMENT = "gym.rollout.completed_total"
-ROLLOUT_OUTCOME_ATTRIBUTE = "nemo.gym.rollout.outcome"
-FAILURE_CLASS_ATTRIBUTE = "nemo.gym.failure_class"
-FAILURE_KIND_ATTRIBUTE = "nemo.gym.failure_kind"
-FAILURE_TYPE_ATTRIBUTE = "nemo.gym.failure_type"
-DISPATCH_NAME_ATTRIBUTE = "nemo.gym.rollout.dispatch.name"
-UNREGISTERED_FAILURE_KIND = "unregistered"
-
-
 def record_rollout_completed(
     outcome: str,
     *,
@@ -334,3 +326,9 @@ def record_rollout_completed(
     _record_counter(
         ROLLOUT_COMPLETED_INSTRUMENT, "Rollout attempts the driver finished handling, by outcome.", attributes
     )
+
+
+def _reset_for_testing() -> None:
+    """Drop cached instruments. Test-only."""
+    with _INSTRUMENT_LOCK:
+        _INSTRUMENTS.clear()

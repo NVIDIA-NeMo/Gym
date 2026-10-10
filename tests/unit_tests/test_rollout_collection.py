@@ -37,7 +37,6 @@ from pydantic import ValidationError
 import nemo_gym.batch_status
 import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
-from nemo_gym import rollout_collection
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import observe_materialized_rows
 from nemo_gym.config_types import AmbiguousEnvironmentServerError, ConfigError, ConfigPathNotFoundError
@@ -1852,9 +1851,9 @@ class TestRolloutCollection:
             require_complete=require_complete,
         )
         outcomes: list[dict] = []
-        monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: True)
         monkeypatch.setattr(
-            rollout_collection,
+            nemo_gym.rollout_collection,
             "record_rollout_completed",
             lambda outcome, **kw: outcomes.append({"outcome": outcome, **kw}),
         )
