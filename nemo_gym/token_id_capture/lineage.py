@@ -114,6 +114,7 @@ _CUSTODY_FIELDS = (
     "output_fingerprint",
     "continuation_fingerprint",
     "fingerprint_version",
+    "finish_reason",
 )
 
 
@@ -141,6 +142,7 @@ def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[s
         "output_fingerprint": record.output_fingerprint or None,
         "continuation_fingerprint": record.continuation_fingerprint or None,
         "fingerprint_version": record.fingerprint_version,
+        "finish_reason": record.finish_reason,
     }
 
 
@@ -213,6 +215,8 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     output_fingerprint=row.get("output_fingerprint") or None,
                     continuation_fingerprint=row.get("continuation_fingerprint") or None,
                     fingerprint_version=int(row.get("fingerprint_version") or 0),
+                    # A row written before the column existed reads as an unstated reason.
+                    finish_reason=row.get("finish_reason") or None,
                 )
             )
     manifest = RolloutManifest(rollout_id=rollout_id, records=records, failures=failures)
