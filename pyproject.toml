@@ -383,7 +383,7 @@ telemetry = [
     # Pinned to a Lens commit via [tool.uv.sources] until 0.2.0 ships to PyPI; then drop that
     # entry and use a version range. NeMo-RL pins this same commit; the two must agree,
     # since an RL job installs Gym into its environment and resolves one nemo-lens.
-    # Updated: Thu Oct 1, 2026 with nemo-lens @ b0f977d4
+    # Updated: Thu Oct 8, 2026 with nemo-lens v0.3.0 @ 7bcc03ce
     # License: Apache 2.0 https://github.com/NVIDIA-NeMo/Lens/blob/main/LICENSE
     "nemo-lens[sdk]",
 
@@ -535,7 +535,7 @@ exclude-dependencies = [
 # venvs that `gym env test` / `gym env start` build, which inherit it through the editable
 # nemo-gym install exactly as override-dependencies does.
 [tool.uv.sources]
-nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "b0f977d414b2f89938604a0b7eaa78ee08bc8700" }
+nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "7bcc03ce3565d2be6858b819b049bcc4c3ec05b4" }
 
 [tool.setuptools.package-data]
 # The built-in asset trees (resources_servers, responses_api_agents, responses_api_models,
