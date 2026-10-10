@@ -1,0 +1,22 @@
+config_paths:
+  - responses_api_agents/agentdyn_agent/configs/agentdyn_agent.yaml
+
+agentdyn_benchmark:
+  _inherit_from: agentdyn_agent
+  responses_api_agents:
+    agentdyn_agent:
+      # Abandon a rollout that will not finish, and mask it rather than score it. CaMeL
+      # interprets model-generated Python with no step or time budget of its own, so a program
+      # that never terminates would otherwise hold the rollout forever; with rollouts
+      # serialized, that stalls the whole run. Healthy rollouts finish far inside this bound.
+      # After `max_abandoned_rollouts` (default 2) the agent exits to release the stuck
+      # threads, the stack shuts down, and `gym eval run --resume` re-dispatches what is left.
+      rollout_timeout_seconds: 3600
+      datasets:
+        - name: agentdyn
+          type: benchmark
+          jsonl_fpath: benchmarks/agentdyn/data/agentdyn_v1_2_2.jsonl
+          prepare_script: benchmarks/agentdyn/prepare.py
+          prompt_config: null
+          num_repeats: 1
+          license: MIT
