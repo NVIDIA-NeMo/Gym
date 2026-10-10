@@ -27,6 +27,7 @@ from nemo_gym.token_id_capture.records import (  # noqa: F401  (re-exported for 
     LEDGER_ROW_MISSING_RESPONSE_ID_REASON,
     UNCOMMITTED_CALL_REASON,
     UNRESOLVED_PARENT_REASON,
+    UNSERVED_CALL_FAILURE_REASONS,
 )
 from nemo_gym.token_id_capture.staging.digest import (
     EMPTY_EXTRAS_DIGEST,
@@ -61,9 +62,9 @@ def staging_key(rollout_id: str, model_call_id: str) -> str:
 
 # Reasons specific to worker commit coordinates. The shared reasons
 # (``UNRESOLVED_PARENT_REASON``, ``UNCOMMITTED_CALL_REASON``, ``ENGINE_REFUSED_CALL_REASON``,
-# ``LEDGER_ROW_MISSING_RESPONSE_ID_REASON``, ``LEDGER_ROW_MISSING_CHAIN_HASH_REASON``)
-# live in the core records module
-# and are re-exported here.
+# ``LEDGER_ROW_MISSING_RESPONSE_ID_REASON``, ``LEDGER_ROW_MISSING_CHAIN_HASH_REASON``) and the
+# set ``UNSERVED_CALL_FAILURE_REASONS`` (the reasons a receipt treats as off-chain) live in the
+# core records module and are re-exported here.
 
 # The worker's response carried no ``ng_commit_coords`` acknowledgement.
 WORKER_MISSING_COMMIT_COORDS_REASON = "worker_response_missing_commit_coordinates"
