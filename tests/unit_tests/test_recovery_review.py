@@ -1519,7 +1519,7 @@ def test_legacy_alias_through_directory_alias_is_one_input(tmp_path):
         ("_ng_dispatch_drained", True),
         ("_ng_unknown_collector_key", "stale bookkeeping"),
         ("_ng_task_id", {"taskset": "foreign", "task_id": "42"}),
-        ("_ng_run_id", "stale_run"),
+        ("_ng_migrated_invalid_judge_response", True),
     ],
 )
 async def test_legacy_reply_cannot_echo_collector_bookkeeping(runner_config, monkeypatch, routing, key, value):
