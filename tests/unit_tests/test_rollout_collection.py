@@ -7342,7 +7342,7 @@ class TestFinalizeRolloutTokenCapture:
         self._capture(store)
         built = await finalize_rollout_token_capture(self._record(), store)
 
-        store.delete("0-0")
+        store.delete_now(["0-0"])
         replacement = TokenEntry(
             rollout_id="0-0",
             model_call_id="new",

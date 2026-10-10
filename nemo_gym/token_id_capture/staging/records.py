@@ -356,6 +356,15 @@ class RolloutManifest(_WireModel):
     failures: list[ManifestFailure] = Field(default_factory=list)
 
 
+class RolloutRemoval(_WireModel):
+    """The result of retiring or deleting rollouts in a capture store or ledger."""
+
+    # Rollouts whose captured data existed and was removed.
+    removed: list[Identifier] = Field(default_factory=list)
+    # Rollouts with no captured data: already removed, or never recorded a call.
+    absent: list[Identifier] = Field(default_factory=list)
+
+
 class RolloutReceipt(_DigestWireModel):
     """Token-free immutable manifest the framework assembles at rollout end."""
 
