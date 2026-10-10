@@ -314,6 +314,15 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     - Batch /compare: Direct comparison of N response_objs (e.g. for rollout_collection or tests).
     """
 
+    # Cohorts are keyed by prompt, not by session, so there is no session state to export.
+    # Verification must replay: a member waits for its siblings,
+    # so waiting on it would deadlock a checkpoint while siblings are still generating.
+    # After a crash, every member that had not recorded its reward re-verifies and rebuilds the cohort.
+    # A crash between a cohort's result and all of its members recording it leaves the rest waiting for siblings
+    # that will not re-verify; they fail after cohort_collection_timeout_s and are retried from input.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
+
     ray_enabled = False
 
     config: GenRMCompareConfig
