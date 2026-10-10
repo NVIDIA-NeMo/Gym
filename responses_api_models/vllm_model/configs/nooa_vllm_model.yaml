@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: nooa_app.py
