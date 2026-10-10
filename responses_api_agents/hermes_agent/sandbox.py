@@ -14,7 +14,7 @@ from shlex import quote
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
-from nemo_gym.base_responses_api_agent import AgentSessionState
+from nemo_gym.base_responses_api_agent import AgentSessionState, ModelEndpoint
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox.utils import read_text, upload_text
@@ -77,6 +77,8 @@ class HermesSandboxSession(AgentSessionState):
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
+    # The sandbox session capture's endpoint, set at seed when a capture is configured and started.
+    capture_endpoint: ModelEndpoint | None = None
 
     async def install_runtime(self, *, install_timeout: float) -> None:
         """Reuse or install the pinned runtime and stage the Hermes harness files."""

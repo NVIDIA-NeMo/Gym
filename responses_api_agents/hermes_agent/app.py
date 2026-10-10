@@ -27,10 +27,15 @@ from uuid import uuid4
 
 import model_tools  # noqa: F401  # fail-fast if hermes-agent isn't installed  # pyright: ignore[reportMissingImports]
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 from toolsets import TOOLSETS  # pyright: ignore[reportMissingImports]
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import (
+    SandboxSession,
+    harness_not_run_observations,
+    harness_not_run_response,
+)
+from nemo_gym.agent_utils.sandbox_session_capture import SandboxSessionCaptureConfig
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -223,7 +228,8 @@ def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Opti
 
 class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
-    model_server: ModelServerRef
+    # Hermes calls the Gym model server, or in agent sessions the sandbox session capture's endpoint; never both.
+    model_server: ModelServerRef | None = None
     model: Optional[str] = None
     concurrency: int = 32
     max_turns: int = 90
@@ -245,6 +251,20 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     api_key: Optional[str] = None
     delegation_max_iterations: int = 50
     checkpoints_enabled: bool = False
+    # Runs a capture component in each agent session's sandbox; sandboxed Hermes sends its model calls to the
+    # capture's endpoint, and the session close returns what it captured. Requires model_server: null and model.
+    sandbox_session_capture: SandboxSessionCaptureConfig | None = None
+
+    @model_validator(mode="after")
+    def _one_model_endpoint(self) -> "HermesAgentConfig":
+        if self.sandbox_session_capture is not None and self.model_server is not None:
+            raise ValueError("Hermes cannot use model_server with sandbox_session_capture; set model_server: null")
+        if self.model_server is None:
+            if self.sandbox_session_capture is None:
+                raise ValueError("Hermes needs model_server or sandbox_session_capture")
+            if not self.model:
+                raise ValueError("Hermes needs model when model_server is null")
+        return self
 
 
 class HermesAgentRunRequest(BaseRunRequest):
@@ -315,7 +335,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             source="hermes", gaps=[ObservationGap(code="observation_capture_failed")]
         )
         return AgentCloseSessionResponse(
-            agent_session_id=state.request.agent_session_id, agent_observations=observations
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=observations,
+            token_capture=state.session.token_capture(),
         )
 
     def _ensure_sigterm_handler(self) -> None:
@@ -340,11 +362,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
         except (NotImplementedError, OSError):
             pass  # not supported on this platform (e.g. Windows, non-main thread)
 
-    def _build_config(self, mcp_accesses: list[MCPToolAccess] | None = None) -> str:
+    def _build_config(self, mcp_accesses: list[MCPToolAccess] | None = None, *, model: str | None = None) -> str:
         import yaml
 
         config: dict[str, Any] = {
-            "model": self._model_name(),
+            "model": model or self._model_name(),
             "provider": "auto",
             "toolsets": ["hermes-cli"],
             "agent": {"max_turns": self.config.max_turns},
@@ -443,10 +465,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 session_dir=session_dir,
                 owns_sandbox=owns_sandbox,
                 harness="Hermes",
+                session_capture=self.config.sandbox_session_capture,
             ),
         )
         try:
             await state.install_runtime(install_timeout=self.config.sandbox_install_timeout_seconds)
+            # Started at seed so its endpoint is known when the activation builds the Hermes input.
+            state.capture_endpoint = await state.session.start_session_capture()
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -457,7 +482,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
         return state
 
     def _model_name(self) -> str:
-        return self.config.model or str(self.config.model_server.name)
+        if self.config.model:
+            return self.config.model
+        # The config validator requires model when there is no model server.
+        assert self.config.model_server is not None
+        return str(self.config.model_server.name)
 
     def _sandbox_observations(
         self,
@@ -467,6 +496,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
         runtime_info: HarnessProcessInfo | None,
     ) -> AgentObservationBundle:
         gaps = [] if runtime_info is not None else [ObservationGap(code="runtime_info_unavailable")]
+        model_ref = self.config.model_server
+        if model_ref is None:
+            # A sandbox session capture serves the calls, so their response IDs do not identify Gym model server calls.
+            gaps.append(
+                ObservationGap(
+                    code="model_call_join_key_unavailable", detail="a sandbox session capture serves model calls"
+                )
+            )
         if isinstance(raw_observations, dict):
             try:
                 records: list[AgentInvocation | ToolCallObservation | ContextCompactionObservation] = []
@@ -480,9 +517,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
                             status=raw_invocation.get("status", "unknown"),
                             # Every call goes to the configured Model Server, so a response ID identifies the call.
                             model_calls=[
-                                ModelCallRef(model_ref=self.config.model_server, response_id=response_id)
+                                ModelCallRef(model_ref=model_ref, response_id=response_id)
                                 for response_id in response_ids
-                                if isinstance(response_id, str) and response_id
+                                if model_ref is not None and isinstance(response_id, str) and response_id
                             ],
                             conversation=normalize_hermes_messages(
                                 raw_invocation.get("messages") or [],
@@ -553,6 +590,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
         agent_session_id: str,
         state: HermesSandboxSession,
     ) -> AgentEpisode:
+        if state.session.session_capture_failed:
+            # Nothing would be captured, so Hermes does not run; close returns the masked capture.
+            token_capture = state.session.token_capture()
+            reason = (token_capture.mask_reason if token_capture else None) or "sandbox session capture did not start"
+            return AgentEpisode(
+                response=harness_not_run_response(body, model=self._model_name(), reason=reason),
+                observations=harness_not_run_observations(source="hermes", reason=reason),
+            )
         params = self._conversation_params(body)
         mcp_accesses = [
             access for access in self.effective_tool_accesses(state.request) if isinstance(access, MCPToolAccess)
@@ -561,21 +606,26 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if enabled_toolsets is not None:
             # A restricted tool list would otherwise hide the tools this episode was granted.
             enabled_toolsets = [*enabled_toolsets, *(access.name for access in mcp_accesses)]
+        # The sandbox reaches the capture or the Model Server directly; the rollout prefix keeps Model Server calls
+        # correlated.
+        endpoint = self.model_endpoint(
+            model_server=self.config.model_server,
+            rollout_id=state.request.episode_id.capture_key,
+            session_endpoint=state.capture_endpoint,
+        )
+        model_name = endpoint.model or self._model_name()
         payload = {
             "agent_session_id": agent_session_id,
             "chat_template_kwargs_enabled": self.config.chat_template_kwargs_enabled,
-            "config_yaml": self._build_config(mcp_accesses),
+            "config_yaml": self._build_config(mcp_accesses, model=model_name),
             "disabled_toolsets": self.config.disabled_toolsets,
             "enabled_toolsets": enabled_toolsets,
             "mcp_servers": [access.name for access in mcp_accesses],
             "required_mcp_servers": [access.name for access in mcp_accesses if access.required],
             **params,
             "max_turns": self.config.max_turns,
-            "model": self._model_name(),
-            # The sandbox reaches the Model Server directly; the rollout prefix keeps its calls correlated.
-            "model_base_url": self.resolve_model_base_url(
-                self.config.model_server.name, state.request.episode_id.capture_key
-            ),
+            "model": model_name,
+            "model_base_url": endpoint.base_url,
             "terminal_timeout": self.config.terminal_timeout,
         }
         output = await state.execute(
@@ -590,7 +640,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         response = self._response_from_result(
             body=body,
             result=result,
-            model_name=self._model_name(),
+            model_name=model_name,
             n_input=len(params["history"]) + 1,
         )
         # Verifiers see Gym's MCP naming; the model's own names stay in the captured model calls.
@@ -772,9 +822,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         from run_agent import AIAgent  # from hermes-agent on path  # pyright: ignore[reportMissingImports]
 
+        if self.config.model_server is None:
+            raise HTTPException(
+                422, "Hermes host execution needs model_server; sandbox_session_capture runs in agent sessions"
+            )
         params = self._conversation_params(body)
 
-        base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
+        base_url = self.model_endpoint(model_server=self.config.model_server, rollout_id=rollout_id).base_url
         model_name = self._model_name()
 
         agent = AIAgent(

@@ -110,6 +110,7 @@ hermes_agent:
 | `terminal_timeout` | `60` | sets `TERMINAL_TIMEOUT` (process-global); per-command wall-clock seconds |
 | `sandbox_provider` | `null` | named provider used to create an agent-owned sandbox when Resources does not supply `sandbox_access` |
 | `sandbox_config` | `{}` | `SandboxSpec` fields used with `sandbox_provider`; ignored when Resources supplies a sandbox |
+| `sandbox_session_capture` | `null` | `SandboxSessionCaptureConfig`: each agent session starts this capture component in its sandbox, sandboxed Hermes sends its model calls to the capture's endpoint (with the capture's model name when it supplies one), and the session close returns `token_capture`; requires `model_server: null` and `model`. If the capture does not start, Hermes does not run and the activation returns a failed response. Host execution still needs `model_server` |
 | `sandbox_runner_timeout_seconds` | `21600` | bounds one sandbox activation; the episode deadline still applies |
 | `system_prompt` | `null` | joined with request `instructions` and the first input system message, in that order; appended to Hermes' built-in prompt |
 | `session_close_retry_window_seconds` | `300` | session close receipt retention from successful cleanup; retries do not extend expiry |
