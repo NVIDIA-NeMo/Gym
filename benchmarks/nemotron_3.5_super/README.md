@@ -302,6 +302,34 @@ bash benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh
 ```
 
 
+### Automatic cached continuation
+
+The adjacent `sbatch_external_vllm.capabilities.json` declares
+`cached_continuation: 1` for callers that need to reject unsupported launcher
+revisions before submission. This version covers the controls and exit codes below.
+
+For evaluations that may exceed one allocation, set
+`GYM_MAX_AUTO_CONTINUATIONS` to the maximum number of additional allocations
+(default `0`, disabled), and set `ROLLOUTS_FPATH` to a unique, fixed `.jsonl`
+path on shared storage. The launcher enables Gym's `resume_from_cache`; do not
+also pass that override explicitly. The same Slurm job ID and rollout cache
+are reused, while each allocation retains separate timestamped logs.
+
+The main job requests `USR1` ten minutes before walltime and requeues itself.
+This requires a cluster that allows job-owner requeue. Requeue errors and the
+continuation limit terminate the job; the CPU sandbox cleanup job remains
+dependent on the end of the main job.
+
+After an evaluation process exits successfully, the launcher compares rollout
+rows with materialized input rows. Complete coverage proceeds to export. Missing
+coverage requests continuation only within `GYM_MAX_AUTO_RETRY_FAILURE_PERCENT`
+(default `10`, inclusive); a subsequent incomplete pass must increase the
+successful row count. This is a completion check and does not qualify accuracy.
+Ordinary evaluator/server failures are propagated without automatic retry.
+Coverage exit codes are `75` (retryable), `76` (too many missing rows), `77`
+(no progress), and `78` (invalid coverage); exhausted continuations exit `124`.
+Do not share the output path between concurrent jobs or different datasets.
+
 ### Interactive development on GPUs with Ray cluster
 Example run:
 ```bash

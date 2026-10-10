@@ -7,6 +7,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -886,6 +887,131 @@ srun() { printf '%s\0' "$@"; printf '\0'; return "$TEST_SERVER_STATUS"; }
         self.assertEqual(self.settings(args, "num_samples_in_parallel"), [])
         self.assertEqual(self.settings(args, "resume_from_cache"), [])
         self.assertIn("++output_jsonl_fpath=results/launcher-test/slurm_job_id_12345/date_20260909_120000.jsonl", args)
+
+    def test_continuation_settings_apply_only_to_main_job(self) -> None:
+        for maximum in (0, 2):
+            with self.subTest(maximum=maximum):
+                _, _, _, calls = self.capture_submission(
+                    "--config",
+                    "benchmark.yaml",
+                    env={"GYM_MAX_AUTO_CONTINUATIONS": str(maximum), "ROLLOUTS_FPATH": "results/fixed.jsonl"},
+                )
+                self.assertEqual("--requeue" in calls[0], maximum > 0)
+                self.assertEqual("--signal=B:USR1@600" in calls[0], maximum > 0)
+                self.assertNotIn("--requeue", calls[1])
+                self.assertFalse(any(arg.startswith("--signal=") for arg in calls[1]))
+
+    def test_continuation_runs_coverage_helper_and_reuses_fixed_output(self) -> None:
+        Path(self.workdir, "benchmarks").symlink_to(SCRIPT.parent.parent, target_is_directory=True)
+        Path(self.workdir, "fixed_materialized_inputs.jsonl").write_text("{}\n" * 100)
+        for successful, expected_status in ((90, 75), (90, 77), (100, 0)):
+            with self.subTest(successful=successful, status=expected_status):
+                Path(self.workdir, "fixed.jsonl").write_text("{}\n" * successful)
+                command, _ = self.generate_commands(
+                    env={
+                        "GYM_MAX_AUTO_CONTINUATIONS": "2",
+                        "ROLLOUTS_FPATH": "fixed.jsonl",
+                    }
+                )
+                command = command.replace("source /opt/Gym_venv/bin/activate", ":").replace("cd /opt/Gym\n", ":\n")
+                stubs = r"""
+GYM_MODEL_PARAMS=(++example=true)
+gym() { if [[ $2 == run ]]; then printf '%s\0' "$@"; fi; }
+getent() { printf '10.0.0.1 node0\n'; }
+python() { "$TEST_PYTHON" "$@"; }
+"""
+                status, stdout, stderr = self.run_shell(
+                    stubs + command, env={"TEST_PYTHON": sys.executable, "ROLLOUTS_FPATH": "fixed.jsonl"}
+                )
+                self.assertEqual(status, expected_status, stderr)
+                args = stdout.rstrip("\0").split("\0")
+                self.assertEqual(self.settings(args, "resume_from_cache"), ["++resume_from_cache=true"])
+                self.assertIn("++output_jsonl_fpath=fixed.jsonl", args)
+
+    def test_invalid_continuation_never_submits(self) -> None:
+        base = {"GYM_MAX_AUTO_CONTINUATIONS": "2", "ROLLOUTS_FPATH": "results/fixed.jsonl"}
+        for overrides, arguments in (
+            ({"GYM_MAX_AUTO_CONTINUATIONS": "-1"}, ["--config", "benchmark.yaml"]),
+            ({"GYM_MAX_AUTO_CONTINUATIONS": "02"}, ["--config", "benchmark.yaml"]),
+            ({"GYM_MAX_AUTO_RETRY_FAILURE_PERCENT": "101"}, ["--config", "benchmark.yaml"]),
+            ({"ROLLOUTS_FPATH": ""}, ["--config", "benchmark.yaml"]),
+            ({}, []),
+            ({}, ["--config", "benchmark.yaml", "++resume_from_cache=false"]),
+            ({}, ["--config", "benchmark.yaml", "+resume_from_cache=true"]),
+        ):
+            with self.subTest(overrides=overrides, arguments=arguments):
+                status, stdout, _ = self.run_shell(
+                    'sbatch() { printf "unexpected-submission"; }; launcher=$1; shift; source "$launcher" "$@"',
+                    str(SCRIPT),
+                    *arguments,
+                    env=base | overrides,
+                )
+                self.assertEqual(status, 1)
+                self.assertNotIn("unexpected-submission", stdout)
+
+    def test_batch_continuation_is_bounded_and_preserves_failures(self) -> None:
+        self.require_batch_bash()
+        stubs = r"""
+scontrol() {
+    if [[ $1 == requeue ]]; then
+        printf 'requeue=%s\n' "$2"
+        return "$TEST_REQUEUE_STATUS"
+    fi
+    printf '%s\n' node0 node1
+}
+srun() {
+    if [[ $1 == --overlap ]]; then
+        while [[ ! -f server-ready ]]; do "$TEST_SLEEP" 0.01; done
+        if [[ $TEST_SIGNAL == 1 ]]; then
+            trap 'exit 0' TERM
+            kill -USR1 "$$"
+            while true; do "$TEST_SLEEP" 0.01; done
+        fi
+        return "$TEST_EVAL_STATUS"
+    fi
+    trap 'exit 0' TERM
+    touch server-ready
+    while true; do "$TEST_SLEEP" 0.01; done
+}
+"""
+        for maximum, restart, eval_status, send_signal, requeue_status, expected in (
+            (2, 0, 75, 0, 0, 0),
+            (2, 1, 75, 0, 0, 0),
+            (2, 2, 75, 0, 0, 124),
+            (0, 0, 75, 0, 0, 75),
+            (2, 0, 76, 0, 0, 76),
+            (2, 0, 77, 0, 0, 77),
+            (2, 0, 78, 0, 0, 78),
+            (2, 0, 1, 0, 0, 1),
+            (2, 0, 0, 0, 0, 0),
+            (2, 0, 75, 0, 9, 9),
+            (2, 0, 0, 1, 0, 0),
+            (2, 2, 0, 1, 0, 124),
+        ):
+            with self.subTest(maximum=maximum, restart=restart, status=eval_status, signal=send_signal):
+                Path(self.workdir, "server-ready").unlink(missing_ok=True)
+                _, _, command, _ = self.capture_submission(
+                    "--config",
+                    "benchmark.yaml",
+                    env={"GYM_MAX_AUTO_CONTINUATIONS": str(maximum), "ROLLOUTS_FPATH": "results/fixed.jsonl"},
+                )
+                status, stdout, stderr = self.run_shell(
+                    stubs + command,
+                    env={
+                        "SLURM_JOB_NODELIST": "test-nodes",
+                        "SLURM_SUBMIT_DIR": "/test",
+                        "SLURM_CPUS_ON_NODE": "64",
+                        "vllm_command": "unused",
+                        "eval_command": "unused",
+                        "SLURM_RESTART_COUNT": str(restart),
+                        "TEST_EVAL_STATUS": str(eval_status),
+                        "TEST_SIGNAL": str(send_signal),
+                        "TEST_REQUEUE_STATUS": str(requeue_status),
+                    },
+                )
+                self.assertEqual(status, expected, stderr)
+                should_requeue = maximum > restart and (eval_status == 75 or send_signal)
+                self.assertEqual(stdout.count("requeue=12345\n"), int(bool(should_requeue)))
 
     def test_explicit_concurrency_arguments_are_preserved(self):
         """Pass explicit concurrency values through to Gym without replacing or duplicating them."""

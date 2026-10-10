@@ -81,6 +81,35 @@ else
     EXPORT_CSV_TO_MODEL_DIR=0
 fi
 
+# Opt in to autonomous cached continuation of this same job and output path.
+GYM_MAX_AUTO_CONTINUATIONS=${GYM_MAX_AUTO_CONTINUATIONS:-0}
+GYM_MAX_AUTO_RETRY_FAILURE_PERCENT=${GYM_MAX_AUTO_RETRY_FAILURE_PERCENT:-10}
+for setting in GYM_MAX_AUTO_CONTINUATIONS GYM_MAX_AUTO_RETRY_FAILURE_PERCENT; do
+    if [[ ! ${!setting} =~ ^(0|[1-9][0-9]{0,8})$ ]]; then
+        echo "$setting must be a nonnegative decimal integer" >&2
+        exit 1
+    fi
+done
+if (( GYM_MAX_AUTO_RETRY_FAILURE_PERCENT > 100 )); then
+    echo "GYM_MAX_AUTO_RETRY_FAILURE_PERCENT must be at most 100" >&2
+    exit 1
+fi
+continuation_sbatch_args=()
+if (( GYM_MAX_AUTO_CONTINUATIONS > 0 )); then
+    if (( ! should_run_eval )) || [[ ${ROLLOUTS_FPATH:-} != *.jsonl ]]; then
+        echo "Automatic continuation requires evaluation arguments and a fixed ROLLOUTS_FPATH ending in .jsonl" >&2
+        exit 1
+    fi
+    # Explicit false would defeat continuation; duplicate Hydra keys are ambiguous.
+    for argument in "$@"; do
+        if [[ $argument =~ ^\+{0,2}resume_from_cache= ]]; then
+            echo "Automatic continuation owns resume_from_cache; remove the explicit override" >&2
+            exit 1
+        fi
+    done
+    continuation_sbatch_args=(--requeue --signal=B:USR1@600)
+fi
+
 # Fixed vLLM Port configurations
 PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT=5600
 DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
@@ -158,6 +187,9 @@ read -r -a nodes <<< "\$ALL_NODES"
     fi
 } > "\$inference_metrics_config"
 gym_config_args+=(--config "\$inference_metrics_config")
+if (( $GYM_MAX_AUTO_CONTINUATIONS > 0 )); then
+    gym_config_args+=(++resume_from_cache=true)
+fi
 
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
@@ -188,6 +220,10 @@ gym eval run \
     ++port_range_high=64000 \
     "\${GYM_MODEL_PARAMS[@]}"
 
+if (( $GYM_MAX_AUTO_CONTINUATIONS > 0 )); then
+    python benchmarks/nemotron_3.5_super/check_continuation.py \
+        "\$rollouts_fpath" --max-missing-percent $GYM_MAX_AUTO_RETRY_FAILURE_PERCENT
+fi
 
 if (( $EXPORT_TO_CSV )); then
     python benchmarks/nemotron_3.5_super/export_to_csv.py \
@@ -629,6 +665,21 @@ EOF
 batch_command=$(cat <<EOF
 set -euo pipefail
 
+requeue_with_cache() {
+    trap '' USR1
+    restart_count=\${SLURM_RESTART_COUNT:-0}
+    if (( restart_count >= $GYM_MAX_AUTO_CONTINUATIONS )); then
+        echo "Stopping after \$restart_count automatic continuation allocations" >&2
+        exit 124
+    fi
+    echo "\$1; requeueing Slurm job \$SLURM_JOB_ID with Gym cache resume" >&2
+    scontrol requeue "\$SLURM_JOB_ID"
+    exit 0
+}
+if (( $GYM_MAX_AUTO_CONTINUATIONS > 0 )); then
+    trap 'requeue_with_cache "Allocation is nearing its walltime"' USR1
+fi
+
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 
 ALL_NODES="\${nodes[*]}" \
@@ -649,6 +700,10 @@ cleanup_server() {
     job_status=\$?
     trap - EXIT INT TERM
     set +e
+    if [[ -n "\${eval_step:-}" ]]; then
+        kill "\$eval_step" 2>/dev/null || true
+        wait "\$eval_step" 2>/dev/null || true
+    fi
     kill "\$server_step" 2>/dev/null || true
     wait "\$server_step" 2>/dev/null || true
     exit "\$job_status"
@@ -698,6 +753,9 @@ if (( $should_run_eval )); then
         exit "\$completed_status"
     fi
 
+    if (( $GYM_MAX_AUTO_CONTINUATIONS > 0 && completed_status == 75 )); then
+        requeue_with_cache "Coverage is incomplete within the automatic continuation threshold"
+    fi
     exit "\$completed_status"
 fi
 
@@ -729,6 +787,7 @@ main_job_id=$(
         --parsable \
         --nodes=$NUM_NODES \
         --time="${SBATCH_TIMELIMIT:-04:00:00}" \
+        "${continuation_sbatch_args[@]}" \
         --job-name=gym-$EXPERIMENT_NAME-$USER \
         --output=slurm-logs/%j-%x.log \
         --ntasks-per-node=1 \
