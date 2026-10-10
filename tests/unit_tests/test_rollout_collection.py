@@ -361,6 +361,106 @@ class TestRolloutCollection:
             "response_status": "completed",
         }
 
+    def test_an_open_step_pairs_with_the_last_capture_not_the_first(self) -> None:
+        """OpenCode steps carry no ids and pair with captured calls in time order. A step the process never finished
+        (killed at the sandbox cap) has no time of its own; it must sort last, or every earlier step pairs with the
+        next request's send time and the merge inverts its bounds."""
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        result = {
+            "ng_trajectory": {
+                "task_id": "t",
+                "rollout_id": "0-0",
+                "invocations": [{"invocation_id": "root", "status": "incomplete", "started_at": 100.0}],
+                "model_calls": [
+                    {
+                        "invocation_id": "root",
+                        "completed_at": 110.0,
+                        "processed_at": 111.0,
+                        "clock_domain": "sandbox:x",
+                    },
+                    {"invocation_id": "root", "clock_domain": "sandbox:x"},
+                ],
+            },
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": "c1",
+                        "client_session_id": "root",
+                        "client_sent_at_ms": 105_000,
+                        "started_at": 105.2,
+                        "completed_at": 109.8,
+                        "latency_total_ms": 4600.0,
+                    },
+                    {
+                        "model_call_id": "c2",
+                        "client_session_id": "root",
+                        "client_sent_at_ms": 125_000,
+                        "started_at": 125.2,
+                        "completed_at": 130.0,
+                        "latency_total_ms": 4800.0,
+                    },
+                ]
+            },
+        }
+        trajectory = _build_trajectory_record(row, result)
+        finished, open_step = trajectory.model_calls
+        assert (finished.model_call_id, finished.started_at, finished.completed_at) == ("c1", 105.0, 110.0)
+        assert (open_step.model_call_id, open_step.started_at, open_step.completed_at) == ("c2", 125.0, None)
+        assert not any(gap.code == "model_call_join_unverified" for gap in trajectory.gaps)
+
+    def test_a_send_time_after_the_steps_own_end_is_an_unverified_pairing_not_a_lost_trajectory(self) -> None:
+        """When order pairing hands a step a request sent after the step had already ended, the harness's bounds
+        stay, the send time is dropped and the pairing is marked unverified; the trajectory is still produced."""
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        result = {
+            "ng_trajectory": {
+                "task_id": "t",
+                "rollout_id": "0-0",
+                "invocations": [
+                    {"invocation_id": "root", "status": "completed", "started_at": 100.0, "completed_at": 140.0}
+                ],
+                "model_calls": [
+                    {
+                        "invocation_id": "root",
+                        "completed_at": 110.0,
+                        "processed_at": 111.0,
+                        "clock_domain": "sandbox:x",
+                    },
+                    {
+                        "invocation_id": "root",
+                        "completed_at": 120.0,
+                        "processed_at": 121.0,
+                        "clock_domain": "sandbox:x",
+                    },
+                ],
+            },
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": "c1",
+                        "client_session_id": "root",
+                        "client_sent_at_ms": 105_000,
+                        "started_at": 105.2,
+                        "completed_at": 109.8,
+                        "latency_total_ms": 4600.0,
+                    },
+                    {
+                        "model_call_id": "c2",
+                        "client_session_id": "root",
+                        "client_sent_at_ms": 125_000,
+                        "started_at": 125.2,
+                        "completed_at": 130.0,
+                        "latency_total_ms": 4800.0,
+                    },
+                ]
+            },
+        }
+        trajectory = _build_trajectory_record(row, result)
+        first, second = trajectory.model_calls
+        assert (first.started_at, first.completed_at, first.server_started_at) == (105.0, 110.0, 105.2)
+        assert (second.started_at, second.completed_at, second.server_started_at) == (None, 120.0, 125.2)
+        assert any(gap.code == "model_call_join_unverified" and gap.detail == "c2" for gap in trajectory.gaps)
+
     def test_trajectory_projection_failure_preserves_rollout(self) -> None:
         row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
         result = {

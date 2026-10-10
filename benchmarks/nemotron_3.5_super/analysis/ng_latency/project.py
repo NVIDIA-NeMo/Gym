@@ -228,6 +228,10 @@ class _Projection:
             status = _EXEC_STATUS.get(str(exec_outcome), None) or _INVOCATION_STATUS.get(
                 str(invocation.get("status")), "unknown"
             )
+            if status == "incomplete" and invocation.get("error_type") == "TimeoutError":
+                status = (
+                    "timeout"  # Harbor's loop cancelled at the sandbox cap (OpenCode's exec outcome says so itself)
+                )
             if self.kind == "opencode" and exec_outcome in ("timeout", "failed", "sandbox_error") and exited is None:
                 # The process was killed: the span ends at the last event OpenCode persisted, so agent time is a
                 # lower bound for this rollout.
@@ -527,7 +531,7 @@ class _Projection:
             session_id = str(compaction.get("invocation_id")) if compaction.get("invocation_id") else None
             outcome = str(compaction.get("outcome") or "unknown")
             status = {"completed": "ok", "failed": "error", "aborted": "cancelled"}.get(outcome, "unknown")
-            self.add(
+            span = self.add(
                 timed_span(
                     "compaction",
                     clock=clock_for(
@@ -550,6 +554,30 @@ class _Projection:
                     },
                 )
             )
+            self._adopt_compaction_calls(span, compaction, session_id)
+
+    def _adopt_compaction_calls(self, compaction: Span, record: dict[str, Any], session_id: Optional[str]) -> None:
+        """The compaction is the parent of the model calls made for it. Terminus names them (``model_calls`` refs,
+        renamed by the collector to the merged ids); OpenCode does not, so a call with a compaction purpose that
+        starts inside the compaction's window in the same session is its child. An OpenCode call moves together
+        with its harness step."""
+        named = {
+            str(ref.get("model_call_id"))
+            for ref in record.get("model_calls") or []
+            if isinstance(ref, dict) and ref.get("model_call_id")
+        }
+        by_id = {s.span_id: s for s in self.spans}
+        for call in [s for s in self.spans if s.name == "model_call"]:
+            inside = (
+                str(call.attrs.get("purpose") or "").startswith("compaction")
+                and (session_id is None or call.ids.invocation_id == session_id)
+                and call.start_wall_s >= compaction.start_wall_s
+                and (compaction.end_wall_s is None or call.start_wall_s <= compaction.end_wall_s)
+            )
+            if call.ids.model_call_id in named or inside:
+                parent = by_id.get(call.parent_span_id or "")
+                target = parent if parent is not None and parent.name == "model_step" else call
+                target.parent_span_id = compaction.span_id
 
     # -- clocks -----------------------------------------------------------------------------------------------------
     def clock_offsets(self) -> dict[str, dict[str, Any]]:

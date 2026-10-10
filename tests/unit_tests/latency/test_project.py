@@ -120,3 +120,44 @@ def test_a_killed_opencode_process_and_a_missing_probe_are_flagged(opencode_reco
 
 def test_rows_without_observability_records_project_to_nothing():
     assert project_rollout({"_ng_task_index": 1, "_ng_rollout_index": 0, "reward": 0.0}) is None
+
+
+def test_a_terminus_agent_stopped_by_the_sandbox_cap_is_a_timeout(terminus_record):
+    """Harbor's loop is cancelled at the sandbox cap: the invocation ends incomplete with a TimeoutError. The agent
+    span says timeout, like an OpenCode process killed at the same cap, so the report counts both alike."""
+    terminus_record["ng_trajectory"]["invocations"][0].update(status="incomplete", error_type="TimeoutError")
+    agent = next(s for s in project_rollout(terminus_record)["spans"] if s["name"] == "agent")
+    assert agent["status"] == "timeout" and agent["attrs"]["error_type"] == "TimeoutError"
+
+
+def test_compaction_model_calls_are_children_of_their_compaction(terminus_record, opencode_record):
+    """The document asks for compaction as a parent span with its child work beneath it. Terminus names the calls it
+    made during a compaction; OpenCode does not, so a summary step inside the compaction's window is its child."""
+    spans = project_rollout(terminus_record)["spans"]
+    [compaction] = [s for s in spans if s["name"] == "compaction"]
+    summary = next(s for s in spans if s["name"] == "model_call" and s["attrs"]["purpose"] == "compaction_summary")
+    assert summary["parent_span_id"] == compaction["span_id"]
+    assert all(
+        s["parent_span_id"] != compaction["span_id"] for s in spans if s["name"] == "model_call" and s is not summary
+    )
+
+    calls = opencode_record["ng_trajectory"]["model_calls"]
+    calls[2]["model_call_purpose"] = "compaction_summary"
+    opencode_record["ng_trajectory"]["compactions"].append(
+        {
+            "invocation_id": "root",
+            "observed_at": calls[2]["started_at"] - 0.5,
+            "completed_at": calls[2]["completed_at"] + 0.5,
+            "trigger": "overflow",
+            "outcome": "completed",
+            "clock_domain": calls[2]["clock_domain"],
+        }
+    )
+    spans = project_rollout(opencode_record)["spans"]
+    [compaction] = [s for s in spans if s["name"] == "compaction"]
+    by_id = {s["span_id"]: s for s in spans}
+    summary = next(s for s in spans if s["name"] == "model_call" and s["ids"]["model_call_id"] == "cap-3")
+    step = by_id[summary["parent_span_id"]]
+    assert step["name"] == "model_step" and step["parent_span_id"] == compaction["span_id"]
+    other = next(s for s in spans if s["name"] == "model_call" and s["ids"]["model_call_id"] == "cap-1")
+    assert by_id[other["parent_span_id"]]["parent_span_id"] != compaction["span_id"]

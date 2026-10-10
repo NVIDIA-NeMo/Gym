@@ -33,7 +33,7 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 import orjson
 from aiohttp import ClientError
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
@@ -425,7 +425,13 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         if call.model_call_id is None and call.client_call_id is None and call.invocation_id is not None:
             unpaired_steps[call.invocation_id].append(index)
     for steps in unpaired_steps.values():
-        steps.sort(key=lambda i: (model_calls[i].started_at or model_calls[i].completed_at or 0.0))
+        # A step the process never finished has no time of its own; it sorts last, so it pairs with the last
+        # request rather than pushing every earlier step onto the next request's send time.
+        steps.sort(
+            key=lambda i: (
+                model_calls[i].started_at or model_calls[i].completed_at or model_calls[i].processed_at or float("inf")
+            )
+        )
     for raw_call in _fold_repeated_client_calls([c for c in raw_calls if isinstance(c, dict)]):
         model_call_id = raw_call.get("model_call_id")
         metadata = {
@@ -528,6 +534,20 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                         )
                     )
             merged.update(update)
+            if (
+                paired_by_order
+                and merged.get("started_at") is not None
+                and merged.get("completed_at") is not None
+                and merged["started_at"] > merged["completed_at"]
+            ):
+                # The request was sent after the step had already ended: the pairing is wrong. The step keeps its
+                # own bounds, the send time goes, and the pairing is marked unverified.
+                merged["started_at"] = None
+                gaps.append(
+                    ObservationGap(
+                        code="model_call_join_unverified", invocation_id=projected.invocation_id, detail=model_call_id
+                    )
+                )
             # A harness record without any bounds of its own (it only named the call) takes the server's bounds.
             # One with wall bounds but no monotonic duration (an OpenCode step: two sandbox-clock timestamps)
             # keeps duration_ms empty; the server's duration stays beside it in server_duration_ms.
@@ -539,7 +559,13 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 ):
                     if merged.get(server_key) is not None:
                         merged[key] = merged[server_key]
-            projected = TrajectoryModelCall.model_validate(merged)
+            try:
+                projected = TrajectoryModelCall.model_validate(merged)
+            except ValidationError:
+                # One call the merge cannot reconcile must not cost the rollout its trajectory: the harness's own
+                # record stands, the server's view of that call is left out, and the gap names it.
+                gaps.append(ObservationGap(code="model_call_merge_invalid", detail=model_call_id))
+                continue
             model_calls[position] = projected
 
     for raw_gap in capture.get("gaps") or []:
