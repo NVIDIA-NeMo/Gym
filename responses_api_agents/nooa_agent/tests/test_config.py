@@ -61,7 +61,6 @@ def agent_config(**overrides: Any) -> NOOAAgentConfig:
         "host": "127.0.0.1",
         "port": 9000,
         "entrypoint": "app.py",
-        "resources_server": {"type": "resources_servers", "name": "resources"},
         "model_server": {"type": "responses_api_models", "name": "policy"},
         "nooa": invocation_config().model_dump(),
     }
@@ -162,3 +161,15 @@ def test_load_agent_class_reports_relative_import_as_config_error() -> None:
         load_agent_class(".relative.agents:Agent")
 
     assert isinstance(exc_info.value.__cause__, TypeError)
+
+
+@pytest.mark.parametrize("field", ["resources_server", "run_timeout_secs"])
+def test_episode_policy_is_not_agent_configuration(field: str) -> None:
+    with pytest.raises(ValidationError, match=field):
+        agent_config(**{field: 1})
+
+
+def test_native_sessions_require_one_worker() -> None:
+    assert agent_config(num_workers=1).num_workers == 1
+    with pytest.raises(ValidationError, match="num_workers=1"):
+        agent_config(num_workers=2)

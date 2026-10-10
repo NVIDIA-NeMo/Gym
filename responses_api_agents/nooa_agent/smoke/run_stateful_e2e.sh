@@ -16,6 +16,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 POLICY_MODEL_TYPE="${POLICY_MODEL_TYPE:-vllm_model}"
 GYM_PID=""
 
+
 : "${POLICY_BASE_URL:?Set POLICY_BASE_URL to the real model endpoint}"
 : "${POLICY_API_KEY:?Set POLICY_API_KEY for the real model endpoint}"
 : "${POLICY_MODEL_NAME:?Set POLICY_MODEL_NAME to the served model name}"
@@ -61,6 +62,23 @@ command -v "$PYTHON_BIN" >/dev/null || { echo "Python executable is not availabl
 [[ "$E2E_DIR" == /* && "$E2E_DIR" != "/" ]] || { echo "E2E_DIR must be an absolute non-root path" >&2; exit 2; }
 
 mkdir -p "$RESULTS_DIR" "$WORKSPACE_DIR" "$VENV_ROOT"
+# Native task rows carry their own sampling settings; the collector rejects
+# sampling CLI overrides for already materialized inputs.
+"$PYTHON_BIN" - \
+  "$ROOT_DIR/resources_servers/example_session_state_mgmt/data/example_nooa_native.jsonl" \
+  "$RESULTS_DIR/native-input.jsonl" <<'PYTHON'
+import json
+import sys
+from pathlib import Path
+
+with Path(sys.argv[1]).open() as source, Path(sys.argv[2]).open("w") as target:
+    for line in source:
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        row["task_input"]["responses_create_params"].update(temperature=0, max_output_tokens=2048)
+        target.write(json.dumps(row) + "\n")
+PYTHON
 unset UV_RUN_RECURSION_DEPTH
 export RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
 
@@ -85,12 +103,11 @@ GYM_PID=$!
 "$GYM_BIN" eval run \
   --no-serve \
   --agent example_session_state_mgmt_nooa_agent \
-  --input "$ROOT_DIR/resources_servers/example_session_state_mgmt/data/example.jsonl" \
+  --input "$RESULTS_DIR/native-input.jsonl" \
   --output "$RESULTS_DIR/rollouts.jsonl" \
   --limit 1 \
   --concurrency 1 \
-  --temperature 0 \
-  --max-output-tokens 2048 \
+  "++environment_server_routes.nooa-counter=example_session_state_mgmt_environment_server" \
   "++head_server.host=127.0.0.1" \
   "++head_server.port=$HEAD_PORT"
 

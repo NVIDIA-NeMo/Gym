@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# NOOA alone exposes finish; other harnesses use their existing environment.
+nooa_single_agent_turn:
+  environment_servers:
+    nooa_single_agent_turn:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      agent_server:
+        type: responses_api_agents
+        name: ???
+      max_concurrent_episodes: null
+      queue_timeout_seconds: null
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180

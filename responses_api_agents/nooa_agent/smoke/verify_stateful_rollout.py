@@ -32,8 +32,7 @@ def main() -> None:
     assert response["usage"]["input_tokens"] > 0
     assert response["usage"]["output_tokens"] > 0
     assert rollout["reward"] == 1.0
-    assert rollout["initial_count"] == 3
-    assert rollout["expected_count"] == 6
+    # Native results contain the verifier response, not a copy of task seed metadata.
 
     resource_names = {"increment_counter", "get_counter_value"}
     calls = [item for item in response["output"] if item.get("type") == "function_call"]

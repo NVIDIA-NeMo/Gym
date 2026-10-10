@@ -16,368 +16,189 @@
 from __future__ import annotations
 
 import asyncio
-from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
-from uuid import uuid4
 
-import aiohttp
-from fastapi import Body, Request, Response
-from pydantic import ConfigDict, Field
+from fastapi import Body, FastAPI, HTTPException, Request
+from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyResponse,
+from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionRequest,
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSessionState,
+    SimpleResponsesAPIAgent,
 )
-from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.tool_access import DirectHTTPToolAccess
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
-from responses_api_agents.nooa_agent.observability import finalize_observation_gaps
-from responses_api_agents.nooa_agent.result import finalize_run_result, set_response_lifecycle
+from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
 from responses_api_agents.nooa_agent.runner import (
-    EmbeddedNOOARunner,
+    InProcessNOOARunner,
     NOOARunFailure,
+    NOOARunner,
     NOOARunRequest,
     NOOARunResult,
 )
 
 
-NOOA_TERMINATION_REASON_KEY = "nooa_termination_reason"
-NOOA_TERMINATION_ERROR_KEY = "nooa_termination_error"
-
-
-@dataclass(slots=True)
-class _RunContext:
-    model_url_path: str
-    model_cookies: dict[str, str]
-    resource_cookies: dict[str, str]
-    task_id: str
-    rollout_id: str
+@dataclass
+class NOOASessionState(AgentSessionState):
+    tool_access: DirectHTTPToolAccess | None = None
+    resources_cookies: dict[str, str] = field(default_factory=dict)
+    model_cookies: dict[str, str] = field(default_factory=dict)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    closing: bool = False
+    activation_key: tuple[NeMoGymResponseCreateParamsNonStreaming, str] | None = None
+    execution: asyncio.Task[NeMoGymResponse] | None = None
     result: NOOARunResult | None = None
-
-
-_RUN_CONTEXT: ContextVar[_RunContext | None] = ContextVar("nooa_agent_run_context", default=None)
-
-
-class _EpisodeTimeoutExceeded(TimeoutError):
-    """Marks expiration of the configured NOOA episode budget."""
-
-    def __init__(self, result: NOOARunResult | None = None) -> None:
-        super().__init__("NOOA episode timed out")
-        self.result = result
-
-
-class NOOACookieConflictError(ValueError):
-    """Raised when model and resources services return different values for one cookie."""
-
-
-def _identity(body: NOOAAgentRunRequest, rollout_id: str | None = None) -> dict[str, str]:
-    row = body.model_dump()
-    task_id = next(
-        (
-            str(row[key])
-            for key in ("task_id", "problem_id", "instance_id", "_ng_task_index")
-            if row.get(key) is not None
-        ),
-        "unknown",
-    )
-    rollout_id = rollout_id or maybe_rollout_id_from_run_body(body)
-    if rollout_id is None and row.get("_ng_task_index") is not None and row.get("_ng_rollout_index") is not None:
-        rollout_id = f"{row['_ng_task_index']}-{row['_ng_rollout_index']}"
-    return {"task_id": task_id, "rollout_id": rollout_id or uuid4().hex}
-
-
-def _evidence(result: NOOARunResult, observations: AgentObservationBundle) -> dict[str, Any]:
-    fields: dict[str, Any] = {"ng_agent_observations": observations.model_dump(mode="json")}
-    if result.trajectory is not None:
-        fields["ng_trajectory"] = result.trajectory.model_copy(update={"gaps": observations.gaps}).model_dump(
-            mode="json"
-        )
-    return fields
-
-
-def _is_transient_infrastructure_error(error: BaseException) -> bool:
-    """Apply Stirrup's retry policy to downstream HTTP and connection failures."""
-
-    if isinstance(error, aiohttp.ClientResponseError):
-        return 500 <= error.status < 600
-    if isinstance(error, aiohttp.ClientConnectionError):
-        return True
-    if isinstance(error, (TimeoutError, ConnectionError)):
-        return True
-    return any(
-        _is_transient_infrastructure_error(nested)
-        for nested in (error.__cause__, error.__context__)
-        if nested is not None
-    )
-
-
-class NOOAAgentRunRequest(BaseRunRequest):
-    """Run request that preserves benchmark-specific fields for the NOOA agent."""
-
-    model_config = ConfigDict(extra="allow")
-
-
-class NOOAAgentVerifyResponse(BaseVerifyResponse):
-    """Verification response containing NOOA agent observations and benchmark fields."""
-
-    model_config = ConfigDict(extra="allow")
-
-    ng_agent_observations: AgentObservationBundle | None = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-    )
-
-
-def _merge_cookies(current: dict[str, str], response: Any) -> None:
-    current.update({name: morsel.value for name, morsel in response.cookies.items()})
-
-
-def _merge_downstream_cookies(model_cookies: dict[str, str], resource_cookies: dict[str, str]) -> dict[str, str]:
-    conflicts = sorted(
-        name
-        for name in model_cookies.keys() & resource_cookies.keys()
-        if model_cookies[name] != resource_cookies[name]
-    )
-    if conflicts:
-        names = ", ".join(repr(name) for name in conflicts)
-        raise NOOACookieConflictError(
-            f"NOOA model and resources services returned conflicting values for cookie(s): {names}"
-        )
-    return model_cookies | resource_cookies
+    runner: NOOARunner | None = None
 
 
 class NOOAAgent(SimpleResponsesAPIAgent):
-    """Embedded NOOA adapter that keeps Gym authoritative for every external interaction."""
+    """Run one NOOA activation per Environment Server-owned episode."""
 
     ray_enabled = False
-
     config: NOOAAgentConfig
     runner: Any = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, context: Any) -> None:
-        self.runner = EmbeddedNOOARunner(
+        self.runner = InProcessNOOARunner(
             invocation=self.config.nooa,
             server_client=self.server_client,
             model_server_name=self.config.model_server.name,
-            resources_server_name=self.config.resources_server.name,
             max_policy_calls=self.config.max_policy_calls,
         )
         super().model_post_init(context)
 
-    _set_response_lifecycle = staticmethod(set_response_lifecycle)
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.router.routes = [route for route in app.router.routes if getattr(route, "path", None) != "/run"]
+        app.post("/v1/agent_sessions/finish")(self.finish_agent_session)
+        return app
 
-    def _finalize_run_result(self, run_result: NOOARunResult) -> tuple[NeMoGymResponse, AgentObservationBundle]:
-        return finalize_run_result(run_result)
+    async def run(self, body: object) -> None:
+        raise NotImplementedError("Use the nooa_single_agent_turn Environment Server")
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> NOOASessionState:
+        accesses = self.effective_tool_accesses(body)
+        if any(access.required and not isinstance(access, DirectHTTPToolAccess) for access in accesses):
+            raise HTTPException(422, "NOOA supports direct HTTP tool grants only")
+        direct = [access for access in accesses if isinstance(access, DirectHTTPToolAccess)]
+        if len(direct) > 1:
+            raise HTTPException(422, "NOOA supports at most one direct HTTP tool grant")
+        access = direct[0] if direct else None
+        return NOOASessionState(
+            request=body,
+            tool_access=access,
+            resources_cookies=dict(access.cookies) if access else {},
+        )
 
     async def responses(
-        self,
-        request: Request,
-        response: Response,
-        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
-        run_context = _RUN_CONTEXT.get()
-        is_run_request = run_context is not None
-        if run_context is None:
-            run_body = NOOAAgentRunRequest(responses_create_params=body)
-            cookies = dict(request.cookies)
-            run_context = _RunContext(
-                model_url_path=self.url_path_for_request("/v1/responses", request),
-                model_cookies=dict(cookies),
-                resource_cookies=dict(cookies),
-                **_identity(run_body, request.path_params.get("rollout_id")),
-            )
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is None:
+            raise HTTPException(409, "NOOA requires an agent session")
+        state = self._require_agent_session(session_id)
+        assert isinstance(state, NOOASessionState)
+        if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
+            raise HTTPException(409, "Agent session does not match the rollout route")
+        if body.tools and state.tool_access is None:
+            raise HTTPException(422, "Resource tools require a direct HTTP grant")
+        route = self.url_path_for_request("/v1/responses", request)
+        async with state.lock:
+            if state.closing:
+                raise HTTPException(409, "Agent session is closing")
+            key = (body.model_copy(deep=True), route)
+            if state.activation_key is not None and state.activation_key != key:
+                raise HTTPException(409, "Session already has another activation")
+            if state.execution is None:
+                state.activation_key = key
+                state.execution = asyncio.create_task(self._execute_session(state, body, route))
+            execution = state.execution
+        return await asyncio.shield(execution)
 
-        # /run owns the episode timeout so it can distinguish budget expiry from
-        # downstream timeouts. Direct /v1/responses requests enforce it here.
-        timeout = None if is_run_request else self.config.run_timeout_secs
-        async with asyncio.timeout(timeout):
-            run_result = await self.runner.run(
-                NOOARunRequest(
-                    responses_create_params=body,
-                    model_url_path=run_context.model_url_path,
-                    model_cookies=run_context.model_cookies,
-                    resource_cookies=run_context.resource_cookies,
-                    task_id=run_context.task_id,
-                    rollout_id=run_context.rollout_id,
+    async def _execute_session(
+        self, state: NOOASessionState, body: NeMoGymResponseCreateParamsNonStreaming, route: str
+    ) -> NeMoGymResponse:
+        try:
+            with rollout_context(state.request.episode_id.capture_key):
+                state.result = await (state.runner or self.runner).run(
+                    NOOARunRequest(
+                        responses_create_params=body,
+                        model_url_path=route,
+                        model_cookies=state.model_cookies,
+                        resource_cookies=state.resources_cookies,
+                        tool_access=state.tool_access,
+                        task_id=state.request.task_id.task_id,
+                        rollout_id=state.request.episode_id.capture_key,
+                    )
                 )
-            )
-        if is_run_request:
-            run_context.result = run_result
-        else:
-            for name, value in _merge_downstream_cookies(
-                run_result.model_cookies, run_result.resource_cookies
-            ).items():
-                response.set_cookie(name, value)
-        return run_result.episode.response
-
-    async def run(
-        self,
-        request: Request,
-        response: Response,
-        body: NOOAAgentRunRequest,
-    ) -> NOOAAgentVerifyResponse:
-        record = body.model_dump()
-        try:
-            result = await self._execute_rollout(request, body, record)
-        except NOOACookieConflictError:
-            raise
-        # Preserve the terminal episode timeout: the generic classifier treats its
-        # TimeoutError base class as transient.
-        except _EpisodeTimeoutExceeded as error:
-            result = self._failure_response(
-                record,
-                f"NOOA episode exceeded run_timeout_secs={self.config.run_timeout_secs}s",
-                failure_class="timeout_exceeded",
-                terminal=True,
-                partial=error.result,
-            )
-        except Exception as error:  # noqa: BLE001 -- isolate one rollout from the batch
-            failure_class = "transient" if _is_transient_infrastructure_error(error) else "legitimate"
-            result = self._failure_response(
-                record,
-                f"{type(error).__name__}: {error}",
-                failure_class=failure_class,
-                partial=error.result if isinstance(error, NOOARunFailure) else None,
-            )
-
-        for name, value in (result.model_extra or {}).pop("_response_cookies", {}).items():
-            response.set_cookie(name, value)
-        return result
-
-    async def _execute_rollout(
-        self,
-        request: Request,
-        body: NOOAAgentRunRequest,
-        record: dict[str, Any],
-    ) -> NOOAAgentVerifyResponse:
-        resource_cookies = dict(request.cookies)
-        seed = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=record,
-            cookies=resource_cookies,
-        )
-        await raise_for_status(seed)
-        _merge_cookies(resource_cookies, seed)
-
-        run_context = _RunContext(
-            model_url_path=self.url_path_for_run("/v1/responses", body),
-            model_cookies=dict(request.cookies),
-            resource_cookies=resource_cookies,
-            **_identity(body),
-        )
-        token = _RUN_CONTEXT.set(run_context)
-        try:
-            try:
-                async with asyncio.timeout(self.config.run_timeout_secs) as episode_timeout:
-                    await self.responses(request, Response(), body.responses_create_params)
-                    if run_context.result is None:
-                        raise RuntimeError("NOOA responses execution completed without a run result")
-                    run_result = run_context.result
-            except TimeoutError as error:
-                if not episode_timeout.expired():
-                    raise
-                raise _EpisodeTimeoutExceeded(getattr(error.__cause__, "nooa_result", None)) from error
-        finally:
-            _RUN_CONTEXT.reset(token)
-
-        try:
-            projected, observations = self._finalize_run_result(run_result)
-            response_json = projected.model_dump(mode="json")
-            if self.config.skip_verification:
-                result: dict[str, Any] = record | {
-                    "response": response_json,
-                    "reward": float(self.config.skip_verification_reward),
-                    "verification_skipped": True,
-                }
-            else:
-                verify = await self.server_client.post(
-                    server_name=self.config.resources_server.name,
-                    url_path="/verify",
-                    json=record | {"response": response_json},
-                    cookies=resource_cookies,
-                )
-                await raise_for_status(verify)
-                _merge_cookies(resource_cookies, verify)
-                result = record | await get_response_json(verify)
-            if run_result.termination_reason is not None:
-                result[NOOA_TERMINATION_REASON_KEY] = run_result.termination_reason
-                result[NOOA_TERMINATION_ERROR_KEY] = run_result.termination_error
-            result.update(_evidence(run_result, observations))
-            result["_response_cookies"] = _merge_downstream_cookies(
-                run_result.model_cookies, run_result.resource_cookies
-            )
-            return NOOAAgentVerifyResponse.model_validate(result)
-        except NOOACookieConflictError:
+        except asyncio.CancelledError as error:
+            state.result = getattr(error, "nooa_result", None)
+            if state.result is not None:
+                state.result.termination_reason = "cancelled"
             raise
         except Exception as error:
-            raise NOOARunFailure(error, run_result) from error
+            if isinstance(error, NOOARunFailure):
+                state.result = error.result
+                state.result.termination_reason = "infrastructure_error"
+                state.result.termination_error = str(error)
+            if is_transient_infrastructure_error(error):
+                raise HTTPException(503, "NOOA dependency request failed") from error
+            raise
+        return finalize_run_result(state.result)[0]
 
-    def _failure_response(
-        self,
-        record: dict[str, Any],
-        error: str,
-        *,
-        failure_class: str,
-        terminal: bool = False,
-        partial: NOOARunResult | None = None,
-    ) -> NOOAAgentVerifyResponse:
-        response = NeMoGymResponse(
-            id="nooa_agent_failure",
-            created_at=0.0,
-            model="nooa",
-            object="response",
-            output=[
-                {
-                    "id": "nooa_failure_message",
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [{"type": "output_text", "text": "", "annotations": []}],
-                }
-            ],
-            parallel_tool_calls=False,
-            tool_choice="none",
-            tools=[],
-        )
-        routing: dict[str, Any] = {
-            NG_FAILURE_CLASS_KEY: failure_class,
-            "error": error,
-        }
-        if terminal:
-            routing[NG_TERMINAL_KEY] = True
-        if partial is not None:
-            response = self._set_response_lifecycle(partial.episode.response, failure_class, error)
-            observations = finalize_observation_gaps(
-                partial.episode.observations, termination_reason=failure_class, termination_error=error
-            )
-            routing.update(_evidence(partial, observations))
-            routing["_response_cookies"] = _merge_downstream_cookies(partial.model_cookies, partial.resource_cookies)
-        else:
-            response = self._set_response_lifecycle(response, failure_class, error)
-        return NOOAAgentVerifyResponse.model_validate(
-            record | {"response": response.model_dump(mode="json"), "reward": 0.0} | routing
-        )
+    async def finish_agent_session(
+        self, request: Request, body: AgentCloseSessionRequest
+    ) -> AgentCloseSessionResponse:
+        """Freeze completed execution and collect evidence without stopping task services."""
+        current = self._agent_session_id_from_request(request)
+        if current is not None and current != body.agent_session_id:
+            raise HTTPException(409, "agent_session_id does not match the session cookie")
+        async with self._locked_agent_session(body.agent_session_id) as record:
+            if record.episode_id != body.episode_id:
+                raise HTTPException(409, "episode_id does not match the seeded agent session")
+            if record.close_response is not None:
+                return record.close_response.model_copy(deep=True)
+            state = record.state
+            if record.closing or not isinstance(state, NOOASessionState):
+                raise HTTPException(409, "Agent session is closing or unavailable")
+            async with state.lock:
+                if state.execution is None or not state.execution.done():
+                    raise HTTPException(409, "Agent execution has not finished")
+                # A failed execution must take the normal bounded close path.
+                state.execution.result()
+                state.closing = True
+            return self._session_evidence(state)
 
-    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        if self.config.skip_verification:
-            return await super().aggregate_metrics(body)
-        async with asyncio.timeout(self.config.run_timeout_secs):
-            response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/aggregate_metrics",
-                json=body,
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        assert isinstance(state, NOOASessionState)
+        async with state.lock:
+            state.closing = True
+            execution = state.execution
+        if execution is not None:
+            if not execution.done():
+                execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+        return self._session_evidence(state)
+
+    def _session_evidence(self, state: NOOASessionState) -> AgentCloseSessionResponse:
+        observations = None
+        if state.result is not None:
+            _, observations = finalize_run_result(state.result)
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=observations,
+            resources_cookies=dict(
+                state.result.resource_cookies if state.result is not None else state.resources_cookies
             )
-            await raise_for_status(response)
-            return AggregateMetrics.model_validate(await get_response_json(response))
+            if state.tool_access is not None
+            else None,
+        )
 
 
 if __name__ == "__main__":
