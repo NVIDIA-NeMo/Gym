@@ -459,6 +459,7 @@ def _redact_old_images(
 
 
 class WebAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: WebAgentConfig
     _cleanup_tasks: set[asyncio.Task[None]] = PrivateAttr(default_factory=set)
 
