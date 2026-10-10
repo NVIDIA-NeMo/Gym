@@ -17,6 +17,8 @@ import json
 import shlex
 import shutil
 import socket
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Callable
 from unittest.mock import AsyncMock
@@ -190,6 +192,8 @@ def test_config_validation() -> None:
         apptainer_provider.ApptainerExecConfig(timeout_grace_s=-1)
     with pytest.raises(ValueError, match="concurrency"):
         apptainer_provider.ApptainerExecConfig(concurrency=0)
+    with pytest.raises(ValueError, match="memory_limit_mib"):
+        apptainer_provider.ApptainerExecConfig(memory_limit_mib=0)
     with pytest.raises(ValueError, match="timeout_s"):
         apptainer_provider.ApptainerProbeConfig(timeout_s=0)
     with pytest.raises(ValueError, match="deadline_s"):
@@ -604,6 +608,56 @@ async def test_exec_user_mapping(
         assert argv[-1] == expected
     else:
         assert argv[-1] == "whoami"
+
+
+async def test_exec_memory_limit_is_off_by_default(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    await provider.exec(_make_handle(tmp_path), "python big.py")
+    assert rec.calls[0]["argv"][-3:] == ["sh", "-c", "python big.py"]
+
+
+@pytest.mark.parametrize(
+    ("user", "expected"),
+    [
+        (None, "ulimit -d 2097152 2>/dev/null; python big.py"),
+        ("root", "ulimit -d 2097152 2>/dev/null; python big.py"),
+        # Under ``su`` the limit is set by the inner shell that runs the command.
+        (
+            "alice",
+            f"su -s /bin/sh -c {shlex.quote('ulimit -d 2097152 2>/dev/null; python big.py')} alice",
+        ),
+    ],
+)
+async def test_exec_memory_limit_prefixes_the_command(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, user: Any, expected: str
+) -> None:
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""), exec={"memory_limit_mib": 2048})
+    await provider.exec(_make_handle(tmp_path), "python big.py", user=user)
+    assert rec.calls[0]["argv"][-3:] == ["sh", "-c", expected]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_DATA covers mmap only on Linux")
+async def test_exec_memory_limit_command_fails_a_runaway_allocation_in_a_real_shell(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Run the exact shell command the provider hands to `apptainer exec ... sh -c` with the host shell:
+    # a child allocation past the cap fails inside the command, a small one still succeeds.
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""), exec={"memory_limit_mib": 256})
+    script = (
+        f"{shlex.quote(sys.executable)} -c 'bytearray(32 << 20); print(\"small ok\")' && "
+        f"{shlex.quote(sys.executable)} -c 'bytearray(1 << 30); print(\"big ok\")'"
+    )
+    await provider.exec(_make_handle(tmp_path), script)
+    shell_command = rec.calls[0]["argv"][-1]
+
+    result = subprocess.run(["sh", "-c", shell_command], capture_output=True, text=True, timeout=60)
+
+    assert "small ok" in result.stdout
+    assert "big ok" not in result.stdout
+    assert "MemoryError" in result.stderr
+    assert result.returncode != 0
 
 
 async def test_exec_passes_stdin(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
