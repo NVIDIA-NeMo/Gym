@@ -1,0 +1,28 @@
+schema_version = "1.0"
+
+artifacts = ["/logs/agent/trajectory.json"]
+
+[task]
+name = "anthropic/{id}"
+version = "1.0"
+
+[environment]
+docker_image = "{docker_image}"
+workdir = "/app"
+## FIXME: Restricting network prevents Harbor from installing specified agents.
+# network_mode = "allowlist"
+# allowed_hosts = {allowed_domains}
+
+[agent]
+timeout_sec = 3600
+
+[verifier]
+timeout_sec = 90
+
+[verifier.env]
+JUDGE_MODEL = "${{JUDGE_MODEL}}"
+JUDGE_MODEL_API_BASE = "${{JUDGE_MODEL_API_BASE}}"
+JUDGE_MODEL_API_KEY = "${{JUDGE_MODEL_API_KEY:-}}"
+JUDGE_ATTEMPTS = "${{JUDGE_ATTEMPTS:-3}}"
+JUDGE_TIMEOUT = "${{JUDGE_TIMEOUT:-300}}"
+JUDGE_MAX_TOKENS = "${{JUDGE_MAX_TOKENS:-16384}}"
