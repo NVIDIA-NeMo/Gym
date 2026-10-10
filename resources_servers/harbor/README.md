@@ -16,8 +16,10 @@ Reward rule: when `test.sh` ran, the sample counts. A missing or invalid reward 
 `failure_kind`. Only a Gym-side failure (sandbox lost, transfer failed) sets `mask_sample`.
 
 Supported today: single-step tasks with a prebuilt `docker_image` or a base-image-only Dockerfile
-(`FROM` plus `WORKDIR`/`ENV`/`USER`/`LABEL`), shared verifier mode. Dockerfile builds, separate verifier
-containers, multi-step tasks and in-sandbox MCP tools come in later milestones.
+(`FROM` plus `WORKDIR`/`ENV`/`USER`/`LABEL`); shared verifier mode, and separate verifier mode when
+`[verifier.environment]` names a prebuilt image (the agent's `/logs/artifacts` and `artifacts` entries are
+copied into the verifier sandbox first). Dockerfile builds, Compose environments, multi-step tasks and
+in-sandbox MCP tools come in later milestones.
 
 ## Run
 
