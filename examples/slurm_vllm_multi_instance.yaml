@@ -32,8 +32,7 @@ services:
     env:
       HF_TOKEN: host:HF_TOKEN
       TRUST_REMOTE_CODE: lit:1
-      NEL_INVOCATION_ID: runtime:NEL_INVOCATION_ID      
-      CUDA_VISIBLE_DEVICES: runtime:CUDA_VISIBLE_DEVICES
+      NEL_INVOCATION_ID: runtime:NEL_INVOCATION_ID
 
 driver:
   policy_model: vllm_model

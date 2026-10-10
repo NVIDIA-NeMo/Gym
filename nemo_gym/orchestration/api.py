@@ -122,6 +122,9 @@ class BaseServiceConfig(_HostEnvRefs, _StrictModel):
     # that cannot share a GPU with the policy, or a prefill/decode split. Pools take
     # contiguous node ranges in declaration order. None means the whole allocation.
     node_pool: str | None = None
+    # Services sharing a node get disjoint GPUs by default (see plan_gpus). True lets this
+    # one see every GPU instead, e.g. two small models each capped by --gpu-memory-utilization.
+    share_gpus: bool = False
     health_check: HealthCheckConfig | None = None
     # Values may be prefixed `lit:` (literal), `host:VAR` (read from the submitting
     # machine's env), or `runtime:VAR` (resolved from the job's own env at run time).
@@ -329,7 +332,8 @@ ServiceConfig = Annotated[
 
 class NodePool(_StrictModel):
     partition: str
-    nodes: int = 1
+    # "auto": Gym packs the pool's vLLM services onto as few nodes as fit (see _resolve_auto_pool).
+    nodes: int | Literal["auto"] = 1
     ntasks_per_node: int = 1
     # Structured field the executor uses for smart deployment decisions (e.g. multi-instance vLLM).
     gpus_per_node: int | None = None
@@ -531,6 +535,9 @@ class SubmitConfig(_StrictModel):
 
         sole_compute = next(iter(compute_names))
         compute = self.compute[sole_compute]
+        if isinstance(compute, SlurmComputeConfig):
+            for pool_name in [name for name, pool in compute.node_pools.items() if pool.nodes == "auto"]:
+                _resolve_auto_pool(self, compute, pool_name)
         total_nodes = (
             sum(p.nodes for p in compute.node_pools.values()) if isinstance(compute, SlurmComputeConfig) else 1
         )
@@ -639,6 +646,7 @@ class SubmitConfig(_StrictModel):
                     # vLLM doesn't require auth; dummy key satisfies clients that require the header.
                     benchmark.run["policy_api_key"] = "dummy"  # pragma: allowlist secret
 
+        plan_gpus(self)
         return self
 
     def _validate_pd_services(self, compute: "ComputeConfig") -> None:
@@ -734,3 +742,220 @@ class SubmitConfig(_StrictModel):
                 "allocation.",
                 stacklevel=2,
             )
+
+
+_CUDA_VISIBLE_DEVICES = "CUDA_VISIBLE_DEVICES"
+_GPU_INDEX_LIST_RE = re.compile(r"^\d+(,\d+)*$")
+
+
+def _manual_gpus(service: BaseServiceConfig) -> list[int] | None:
+    value = service.env.get(_CUDA_VISIBLE_DEVICES)
+    if value is None or not _GPU_INDEX_LIST_RE.match(value):
+        return None
+    return [int(index) for index in value.split(",")]
+
+
+def _takes_own_gpus(service: BaseServiceConfig) -> bool:
+    # A CUDA_VISIBLE_DEVICES that is not an index list (e.g. runtime:VAR) names unknown GPUs.
+    if service.share_gpus or (isinstance(service, RayServiceConfig) and service.num_gpus == 0):
+        return False
+    return _CUDA_VISIBLE_DEVICES not in service.env or _manual_gpus(service) is not None
+
+
+def _gpus_needed_per_node(service: VllmServiceConfig, nodes: int, gpus_per_node: int) -> int | None:
+    """GPUs this service uses on each of its nodes, or None when Ray places it across nodes."""
+    tp_pp = service.tensor_parallel_size * service.pipeline_parallel_size
+    if nodes <= 1:
+        return tp_pp * service.number_of_instances
+    if service.number_of_instances > 1 and not effective_ray_serve(service, nodes, [gpus_per_node]):
+        return tp_pp * (service.number_of_instances // nodes)
+    return None
+
+
+def plan_gpus(config: "SubmitConfig") -> dict[str, dict[str, str]]:
+    """The CUDA_VISIBLE_DEVICES to render, keyed by node pool and then service.
+
+    A pool is planned only when a vLLM service on it shares it with another service that wants
+    its own GPUs (a vLLM or a ray service). Each vLLM takes the lowest free indices in declaration
+    order; a ray service there gets the rest. Every other service keeps seeing every GPU. A
+    prefill/decode tier owns its nodes, so a pool holding one is never planned.
+    """
+    compute = next(iter(config.compute.values()))
+    pools = {name: pool for name, pool in compute.node_pools.items() if pool.nodes}
+    if not pools:
+        return {}
+    single_node = sum(pool.nodes for pool in pools.values()) == 1
+    policy = config.services.get(config.driver.policy_model or "")
+    # A ray head runs beside the driver, which runs on the policy's first node.
+    driver_pool = policy.node_pool if policy is not None and policy.node_pool else next(iter(pools))
+
+    plan: dict[str, dict[str, str]] = {}
+    for pool_name, pool in pools.items():
+        if pool.gpus_per_node is None:
+            continue
+        on_pool = {
+            name: service
+            for name, service in config.deployed_services.items()
+            if single_node
+            or (
+                pool_name in (*service.node_pools, driver_pool)
+                if isinstance(service, RayServiceConfig)
+                else service.node_pool == pool_name
+            )
+        }
+        if any(isinstance(s, VllmPDTierConfig) for s in on_pool.values()):
+            continue
+        claimants = {
+            n: s
+            for n, s in on_pool.items()
+            if isinstance(s, (VllmServiceConfig, RayServiceConfig)) and _takes_own_gpus(s)
+        }
+        vllms = {n: s for n, s in claimants.items() if isinstance(s, VllmServiceConfig)}
+        if not vllms or len(claimants) < 2:
+            continue
+        needs = {n: _gpus_needed_per_node(s, pool.nodes, pool.gpus_per_node) for n, s in vllms.items()}
+        if None in needs.values():
+            continue
+        manual = {n: gpus for n, s in claimants.items() if (gpus := _manual_gpus(s)) is not None}
+        needs.update({n: len(gpus) for n, gpus in manual.items()})
+
+        total = sum(needs.values())
+        if total > pool.gpus_per_node:
+            breakdown = ", ".join(f"{n} {k}" for n, k in needs.items())
+            raise ValueError(
+                f"The services sharing node pool '{pool_name}' need {total} GPUs per node ({breakdown}), but it "
+                f"has {pool.gpus_per_node}. Pin a service to its own node_pool, add a node, or set "
+                "share_gpus: true on services that may share GPUs."
+            )
+
+        owner: dict[int, str] = {}
+        for name, gpus in manual.items():
+            for index in gpus:
+                if index >= pool.gpus_per_node:
+                    raise ValueError(
+                        f"Service '{name}' sets CUDA_VISIBLE_DEVICES={','.join(map(str, gpus))}, but node pool "
+                        f"'{pool_name}' has only GPUs 0-{pool.gpus_per_node - 1}."
+                    )
+                if owner.get(index, name) != name:
+                    raise ValueError(
+                        f"Services '{owner[index]}' and '{name}' both set GPU {index} in CUDA_VISIBLE_DEVICES on "
+                        f"node pool '{pool_name}'. Give them disjoint GPUs, or set share_gpus: true on one."
+                    )
+                owner[index] = name
+
+        free = [index for index in range(pool.gpus_per_node) if index not in owner]
+        assigned: dict[str, str] = {}
+        for name in vllms:
+            if name not in manual:
+                mine, free = free[: needs[name]], free[needs[name] :]
+                assigned[name] = ",".join(map(str, mine))
+        for name in claimants.keys() - vllms.keys() - manual.keys():
+            assigned[name] = ",".join(map(str, free))
+        # Manual values are re-rendered too, where Slurm cannot reset them (see slurm_script._with_gpus).
+        assigned.update({name: ",".join(map(str, gpus)) for name, gpus in manual.items()})
+        plan[pool_name] = assigned
+    return plan
+
+
+def _resolve_auto_pool(config: SubmitConfig, compute: SlurmComputeConfig, pool_name: str) -> None:
+    """Size a `nodes: auto` pool and pin each of its vLLM services to a node of it.
+
+    The policy goes first, on the pool's first node, where the driver reaches it on localhost.
+    The rest go biggest first into the first node with room. A service bigger than one node
+    gets ceil(need / gpus_per_node) whole nodes to itself. More than one node splits the pool
+    into sub-pools named `<pool>-<i>`, which the rest of the executor places like any pool.
+    """
+    pool = compute.node_pools[pool_name]
+    gpus_per_node = pool.gpus_per_node
+    if gpus_per_node is None:
+        raise ValueError(
+            f"Node pool '{pool_name}' has nodes: auto but no gpus_per_node, so Gym cannot size it. "
+            "Set gpus_per_node, or give the pool an explicit node count."
+        )
+    pd_users = [
+        name
+        for name, service in config.services.items()
+        if isinstance(service, VllmPDServiceConfig)
+        and pool_name in (service.node_pool, service.prefill.node_pool, service.decode.node_pool)
+    ]
+    if pd_users:
+        raise ValueError(
+            f"Node pool '{pool_name}' has nodes: auto, but vllm_pd service {', '.join(map(repr, pd_users))} "
+            "uses it. A prefill/decode pool needs an explicit node count."
+        )
+    sole_pool = len(compute.node_pools) == 1
+    members = {
+        name: service
+        for name, service in config.services.items()
+        if isinstance(service, VllmServiceConfig)
+        and (service.node_pool == pool_name or (sole_pool and service.node_pool is None))
+    }
+    if not members:
+        raise ValueError(
+            f"Node pool '{pool_name}' has nodes: auto but no vLLM service runs on it, so there is nothing to "
+            "size it by. Pin a service to it with node_pool, or give it an explicit node count."
+        )
+
+    def need(service: VllmServiceConfig) -> int:
+        if service.share_gpus:
+            return 0
+        manual = _manual_gpus(service)
+        if manual is not None:
+            return len(manual)
+        return service.tensor_parallel_size * service.pipeline_parallel_size * service.number_of_instances
+
+    policy = config.driver.policy_model
+    order = sorted(members, key=lambda name: (name != policy, -need(members[name])))
+    # One slot per sub-pool: the services on it, the manual indices they hold, the GPUs the
+    # rest take, and its node count (more than one only for a service bigger than a node).
+    bins: list[dict[str, Any]] = []
+    for name in order:
+        gpus = need(members[name])
+        manual = set() if members[name].share_gpus else set(_manual_gpus(members[name]) or [])
+        auto = 0 if manual else gpus
+        if gpus > gpus_per_node:
+            if manual:
+                raise ValueError(
+                    f"Service '{name}' sets {gpus} GPUs in CUDA_VISIBLE_DEVICES, but node pool '{pool_name}' has "
+                    f"{gpus_per_node} per node."
+                )
+            bins.append({"names": [name], "manual": set(), "auto": gpus, "nodes": -(-gpus // gpus_per_node)})
+            continue
+        for slot in bins:
+            if (
+                slot["nodes"] == 1
+                and not slot["manual"] & manual
+                and len(slot["manual"] | manual) + slot["auto"] + auto <= gpus_per_node
+            ):
+                slot["names"].append(name)
+                slot["manual"] |= manual
+                slot["auto"] += auto
+                break
+        else:
+            bins.append({"names": [name], "manual": manual, "auto": auto, "nodes": 1})
+
+    if len(bins) == 1 and bins[0]["nodes"] == 1:
+        compute.node_pools[pool_name] = pool.model_copy(update={"nodes": 1})
+        return
+
+    sub_pools = {f"{pool_name}-{index}": slot for index, slot in enumerate(bins)}
+    clashes = sorted(set(sub_pools) & set(compute.node_pools))
+    if clashes:
+        raise ValueError(f"Node pool '{pool_name}' has nodes: auto, but its sub-pool names {clashes} are taken.")
+    resolved: dict[str, NodePool] = {}
+    for name, existing in compute.node_pools.items():
+        if name != pool_name:
+            resolved[name] = existing
+            continue
+        for sub, slot in sub_pools.items():
+            resolved[sub] = pool.model_copy(update={"nodes": slot["nodes"]})
+            for member in slot["names"]:
+                members[member].node_pool = sub
+    compute.node_pools = resolved
+    for service in config.services.values():
+        if isinstance(service, RayServiceConfig) and pool_name in service.node_pools:
+            at = service.node_pools.index(pool_name)
+            service.node_pools[at : at + 1] = list(sub_pools)
+            if pool_name in service.resources:
+                resources = service.resources.pop(pool_name)
+                service.resources.update({sub: dict(resources) for sub in sub_pools})
