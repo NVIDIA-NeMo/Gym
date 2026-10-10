@@ -71,6 +71,7 @@ These options are shared across many commands.
 | --- | --- |
 | `--config PATH` | Load a Gym config YAML. Repeatable. Maps to `+config_paths=[...]`. |
 | `--benchmark NAME` | Select a registered benchmark by name instead of a config path. |
+| `--environment NAME` | Select a registered environment by name instead of a config path. Repeatable. |
 | `--resources-server NAME` | Select a registered resources server by name. |
 | `--model-type NAME` | Select a registered model server type by name (such as `openai_model` or `vllm_model`). |
 | `--agent-type NAME[/FLAVOR]` | Run the environment with a different agent harness. Refer to [Swapping the agent](#swapping-the-agent). |
@@ -80,7 +81,7 @@ These options are shared across many commands.
 | `-h`, `--help` | Show help for any group or command. |
 
 <Tip>
-The `--benchmark`, `--resources-server`, `--model-type`, and `--agent-type` selectors resolve a component name to its config file for you, so you do not need to know the project's directory layout. If you mistype a name, the CLI suggests the closest match. To point at a config file directly, use `--config <path>` instead.
+The `--benchmark`, `--environment`, `--resources-server`, `--model-type`, and `--agent-type` selectors resolve a component name to its config file for you, so you do not need to know the project's directory layout. If you mistype a name, the CLI suggests the closest match. To point at a config file directly, use `--config <path>` instead.
 </Tip>
 
 
