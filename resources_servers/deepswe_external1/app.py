@@ -47,6 +47,33 @@ from resources_servers.deepswe_external1.task_data import TaskData
 logger = logging.getLogger(__name__)
 
 
+# Applies /logs/artifacts/model.patch in the verifier the way the DeepSWE v1.0 graders did it: first reset every
+# file the patch touches to the base commit (or delete it when it does not exist there), then `git apply`. Image
+# builds modify tracked files in place (lockfiles, go.sum, generated sources); the agent's commit captures those
+# edits together with its own, so applying the diff onto the pristine verifier tree without the reset fails.
+APPLY_CANDIDATE_PATCH = r"""
+import pathlib, re, subprocess, sys
+base = sys.argv[1]
+patch = pathlib.Path("/logs/artifacts/model.patch")
+paths = set()
+header = re.compile(r'^diff --git (?:"a/((?:[^"\\]|\\.)*)"|a/(\S+)) (?:"b/((?:[^"\\]|\\.)*)"|b/(\S+))$')
+for line in patch.read_bytes().decode("utf-8", "replace").splitlines():
+    if line.startswith("diff --git "):
+        match = header.match(line)
+        if match:
+            paths.update(part for part in match.groups() if part)
+for path in sorted(paths):
+    if subprocess.run(["git", "cat-file", "-e", f"{base}:{path}"], capture_output=True).returncode == 0:
+        subprocess.run(["git", "checkout", base, "--", path], capture_output=True)
+    else:
+        pathlib.Path(path).unlink(missing_ok=True)
+result = subprocess.run(["git", "apply", "--whitespace=nowarn", str(patch)], capture_output=True, text=True)
+sys.stdout.write(result.stdout)
+sys.stderr.write(result.stderr)
+sys.exit(result.returncode)
+"""
+
+
 class InvalidSubmissionError(RuntimeError):
     """The seeded repository no longer contains a collectable submission."""
 
@@ -186,8 +213,10 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
 
         async def setup(started: AsyncSandbox) -> None:
             command = (
-                "set -eu; cd /app; git config --global --add safe.directory /app; "
-                'test "$(git rev-parse --show-toplevel)" = /app; '
+                # The workdir may be a symlink to the real clone (e.g. /app -> /workspace/repo), so compare real paths.
+                f"set -eu; cd {definition.workdir}; git config --global --add safe.directory {definition.workdir}; "
+                f'git config --global --add safe.directory "$(readlink -f {definition.workdir})"; '
+                f'test "$(readlink -f "$(git rev-parse --show-toplevel)")" = "$(readlink -f {definition.workdir})"; '
                 f"git cat-file -e {definition.base_commit}^{{commit}}; "
             )
             if agent:
@@ -271,14 +300,18 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
             # Setup already validated this repository/base. Confirm submission damage
             # rather than blaming the agent for a transport failure or missing artifact.
             integrity = await sandbox.exec(
-                'test "$(git -C /app rev-parse --show-toplevel)" = /app && '
-                f"git -C /app cat-file -e {task.data.base_commit}^{{commit}} && "
-                "git -C /app cat-file -e HEAD^{commit}",
+                f'test "$(readlink -f "$(git -C {task.data.workdir} rev-parse --show-toplevel)")" = "$(readlink -f {task.data.workdir})" && '
+                f"git -C {task.data.workdir} cat-file -e {task.data.base_commit}^{{commit}} && "
+                f"git -C {task.data.workdir} cat-file -e HEAD^{{commit}}",
                 timeout_s=30,
             )
             if integrity.return_code != 0 and not integrity.error_type:
                 raise InvalidSubmissionError("Submission repository, base commit or HEAD is unavailable") from error
             raise
+
+    def _verifier_workdir(self, task: InlineTask) -> str:  # type: ignore[override]
+        # Rows declare /app or /workspace/repo; test.sh and grader.py of each task already target that path.
+        return task.data.workdir
 
     async def _stage_verifier(self, sandbox: AsyncSandbox, task: InlineTask, model_patch: bytes) -> None:
         # Files were supplied through SandboxSpec.files at B's creation, like Swemer.
@@ -292,6 +325,21 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
         )
         if result.return_code != 0:
             raise RuntimeError(f"Failed to prepare DeepSWE verifier: {result.stderr or ''}")
+        if model_patch and not task.data.grader_applies_model_patch:
+            # v1.1 graders grade the working tree as-is, so the candidate patch has to be in place before test.sh.
+            # A patch that does not apply at the base commit is graded as such (the base tree fails FAIL_TO_PASS),
+            # the same outcome the v1.0 graders give a non-applying model.patch.
+            applied = await sandbox.exec(
+                f"cd {task.data.workdir} && python3 -I - {task.data.base_commit} <<'NEMO_GYM_APPLY'\n"
+                f"{APPLY_CANDIDATE_PATCH}\nNEMO_GYM_APPLY",
+                timeout_s=300,
+            )
+            if applied.return_code != 0:
+                logger.warning(
+                    "Task %s: candidate patch did not apply in the verifier; grading the base tree: %s",
+                    task.data.task_id,
+                    ((applied.stderr or "") + (applied.stdout or ""))[-2000:],
+                )
 
     async def _verify_task(
         self, request: Request, body: DeepsweExternal1VerifyRequest, task: InlineTask

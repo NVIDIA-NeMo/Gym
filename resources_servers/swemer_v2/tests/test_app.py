@@ -214,8 +214,14 @@ class TestGrade:
 
 
 class TestSupportedFrameworks:
-    def test_covers_exactly_phase_one(self) -> None:
-        assert SUPPORTED_FRAMEWORKS == frozenset({"pytest", "go", "jest", "mocha", "vitest"})
+    def test_covers_the_swe_bench_ext_backed_list(self) -> None:
+        # The original 5 must stay (every existing training row is one of them) ...
+        assert {"pytest", "go", "jest", "mocha", "vitest"} <= SUPPORTED_FRAMEWORKS
+        # ... and the widened set is exactly what swemer_v1 grades through the same swe_bench_ext parsers.
+        from resources_servers.swemer_v1.verification import SUPPORTED_FRAMEWORKS as V1_FRAMEWORKS
+
+        assert SUPPORTED_FRAMEWORKS == V1_FRAMEWORKS
+        assert "bazel" not in SUPPORTED_FRAMEWORKS and "jasmine" not in SUPPORTED_FRAMEWORKS
 
 
 class TestVerifyResponseShape:

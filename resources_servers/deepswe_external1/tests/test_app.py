@@ -105,7 +105,7 @@ async def test_collection_distinguishes_invalid_submission_from_infrastructure(
             return SandboxExecResult("", "provider unavailable", 125, error_type="ProviderError")
         if failure == "collect_error" and command == task.config.verifier.collect[0].command:
             return SandboxExecResult("", "simulated collect failure", 1)
-        checking_integrity = command.startswith('test "$(git -C /app rev-parse --show-toplevel)"')
+        checking_integrity = command.startswith('test "$(readlink -f "$(git -C /app rev-parse --show-toplevel)")"')
         command = command.replace("/app", shlex.quote(str(repo))).replace(
             "/logs/artifacts", shlex.quote(str(artifacts))
         )
@@ -595,3 +595,39 @@ def test_server_has_no_filesystem_task_store_or_store_configuration(task: Inline
     assert not hasattr(server, "_task_store")
     assert "tasks_dir" not in type(server.config).model_fields
     assert "expected_task_count" not in type(server.config).model_fields
+
+
+@pytest.mark.parametrize("workdir", ["/app", "/workspace/repo"])
+async def test_stage_applies_candidate_patch_when_the_grader_does_not(task: InlineTask, workdir: str) -> None:
+    data = task.data.model_copy(update={"grader_applies_model_patch": False, "workdir": workdir})
+    inline = InlineTask(data)
+    server = make_server(inline)
+    ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+    box = sandbox("B", [])
+    box.exec.side_effect = [ok, ok]
+    await server._stage_verifier(box, inline, b"candidate")
+    assert box.exec.await_count == 2
+    apply_command = box.exec.await_args_list[1].args[0]
+    assert apply_command.startswith(f"cd {workdir} && python3 -I - {data.base_commit}")
+    assert 'git", "apply"' in apply_command and "/logs/artifacts/model.patch" in apply_command
+    assert 'git", "checkout", base' in apply_command  # touched files are reset to the base commit first
+    assert box.exec.await_args_list[1].kwargs == {"timeout_s": 300}
+
+    # Nothing to apply for a null patch; the default (v1.0 grader applies it) never adds the step.
+    box.exec.reset_mock()
+    box.exec.side_effect = [ok]
+    await server._stage_verifier(box, inline, b"")
+    assert box.exec.await_count == 1
+    box.exec.reset_mock()
+    box.exec.side_effect = [ok]
+    await server._stage_verifier(box, task, b"candidate")
+    assert box.exec.await_count == 1
+
+    # A patch that does not apply is a graded outcome, not an infrastructure error.
+    box.exec.reset_mock()
+    box.exec.side_effect = [
+        ok,
+        SimpleNamespace(return_code=1, stdout="", stderr="error: patch failed", error_type=None),
+    ]
+    await server._stage_verifier(box, inline, b"candidate")
+    assert box.exec.await_count == 2
