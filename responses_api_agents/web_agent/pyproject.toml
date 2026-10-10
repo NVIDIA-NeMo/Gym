@@ -5,7 +5,11 @@
 name = "nemo-gym-web-agent"
 version = "0.0.0"
 requires-python = ">=3.12"
-dependencies = ["nemo-gym[dev]"]
+dependencies = [
+    "nemo-gym[dev]",
+    # Qwen computer-use screenshots are resized with Pillow.
+    "pillow",
+]
 
 [build-system]
 build-backend = "setuptools.build_meta"
