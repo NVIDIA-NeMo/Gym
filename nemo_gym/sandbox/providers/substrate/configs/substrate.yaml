@@ -12,11 +12,11 @@ sandbox:
       template_namespace: nemo-gym
     create:
       ready_timeout_s: 1200
-      # pause_after_exec parks the actor on its node once a step finishes and
-      # the actor has been idle for idle_before_suspend_s, so an idle sandbox
-      # holds no worker while back-to-back steps pay no checkpoint. after_exec
-      # suspends to object storage instead. Set never to measure against
-      # always-on.
+      # pause_after_exec parks the actor on its node once create or a step
+      # finishes and the actor has been idle for idle_before_suspend_s, so an
+      # idle sandbox holds no worker while back-to-back steps pay no
+      # checkpoint. after_exec suspends to object storage instead. Set never
+      # to measure against always-on.
       suspend_policy: pause_after_exec
       idle_before_suspend_s: 1.0
     exec:

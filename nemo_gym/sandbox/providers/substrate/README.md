@@ -126,9 +126,11 @@ sandbox:
 ### `suspend_policy`
 
 `pause_after_exec` calls `PauseActor` once the actor has been idle for
-`idle_before_suspend_s` after a step: the actor's worker is freed and its
-snapshot stays on the node, so the next step resumes without a download but has
-to land on the same node. The delay keeps back-to-back steps, such as an eval's
+`idle_before_suspend_s` after a step, and after `create()` has made it ready:
+the actor's worker is freed and its snapshot stays on the node, so the next
+step resumes without a download but has to land on the same node. A new
+sandbox therefore holds no worker through the policy's first think time; its
+first command resumes it like any later one. The delay keeps back-to-back steps, such as an eval's
 test runs, from each paying a checkpoint and a restore; an exec that arrives
 during the delay cancels the pause, and an actor is never paused while a request
 to it is in flight. An exec that arrives while a pause is already under way

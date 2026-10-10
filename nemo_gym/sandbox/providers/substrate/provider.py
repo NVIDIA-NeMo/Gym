@@ -219,13 +219,14 @@ class SubstrateCreateConfig:
     # pause_after_exec: PauseActor instead. The snapshot stays on the node, so
     #   the next resume skips the download but has to land on the same node.
     # Either way the next exec goes through the router, which resumes the
-    # actor before routing, so nothing has to resume it explicitly.
+    # actor before routing, so nothing has to resume it explicitly. Parking
+    # happens after create() and after every exec, upload and download.
     suspend_policy: str = "never"
 
-    # An exec must be followed by this much idle time before the actor is
-    # suspended or paused, so back-to-back steps (an eval's test runs, say) do
-    # not each pay a checkpoint and a restore. 0 suspends inline as the exec
-    # returns.
+    # A create or an exec must be followed by this much idle time before the
+    # actor is suspended or paused, so back-to-back steps (an eval's test
+    # runs, say) do not each pay a checkpoint and a restore. 0 suspends inline
+    # as the call returns.
     idle_before_suspend_s: float = 1.0
 
     delete_on_close: bool = True
@@ -575,6 +576,14 @@ class SubstrateProvider:
             await self._cleanup_failed_create(handle)
             raise
 
+        # The first command comes after the policy's first think time. Until
+        # then the actor would hold a worker for nothing, so it is parked the
+        # same way as after a command; the first exec resumes it through the
+        # router.
+        try:
+            await self._suspend_when_idle(actor)
+        except Exception as e:  # noqa: BLE001 - the sandbox is ready; parking is best effort
+            LOGGER.warning("substrate: parking %s after create failed: %s", actor.name, e)
         return handle
 
     def _warn_unsupported(self, spec: SandboxSpec) -> None:
