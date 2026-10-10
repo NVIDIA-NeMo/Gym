@@ -55,12 +55,18 @@ def _nested_settings(annotation: Any) -> type[HarborSettings] | None:
 
 
 class HarborHealthcheck(HarborSettings):
+    """Mirrors Harbor's ``HealthcheckConfig``: plain numbers with Harbor's defaults and no bounds.
+
+    Published tasks pin values at the lower bound (``retries = 0``: one attempt once the start
+    period ends), and Harbor loads them; bounding the fields here rejected those tasks.
+    """
+
     command: str
-    interval_sec: float = Field(default=5, ge=0)
-    timeout_sec: float = Field(default=30, gt=0)
-    start_period_sec: float = Field(default=0, ge=0)
-    start_interval_sec: float = Field(default=5, ge=0)
-    retries: int = Field(default=3, gt=0)
+    interval_sec: float = 5.0
+    timeout_sec: float = 30.0
+    start_period_sec: float = 0.0
+    start_interval_sec: float = 5.0
+    retries: int = 3
 
 
 class HarborMCPServer(HarborSettings):

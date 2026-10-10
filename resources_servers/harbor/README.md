@@ -18,8 +18,15 @@ Reward rule: when `test.sh` ran, the sample counts. A missing or invalid reward 
 Supported today: single-step tasks with a prebuilt `docker_image` or a base-image-only Dockerfile
 (`FROM` plus `WORKDIR`/`ENV`/`USER`/`LABEL`); shared verifier mode, and separate verifier mode when
 `[verifier.environment]` names a prebuilt image (the agent's `/logs/artifacts` and `artifacts` entries are
-copied into the verifier sandbox first). Dockerfile builds, Compose environments, multi-step tasks and
-in-sandbox MCP tools come in later milestones.
+copied into the verifier sandbox first, sidecar hooks and artifacts included). Compose environments start as
+a sandbox group when a `compose-images.json` with the sidecar images' recorded OCI configuration sits next to
+the task folders (or `compose_image_configs` points at one); on OpenSandbox the provider block also needs
+`networking.enabled: true` (with `loopback_forwarding`) and `runtime_requirements.shm_size_metadata_key`, as
+`benchmarks/terminal_bench_4/resources.yaml` shows. `[environment.healthcheck]` is polled at seed.
+Tasks that declare GPUs run on the `gpu_sandbox_provider` block when one is set. The task's
+`[[environment.mcp_servers]]` and `skills_dir` are written to `/tmp/.nemo-gym/task.json` in the agent's
+sandbox for harnesses that drive task MCP servers from inside it (mini-SWE does). Dockerfile builds and
+multi-step tasks come in later milestones.
 
 ## Run
 

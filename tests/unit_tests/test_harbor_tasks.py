@@ -134,6 +134,24 @@ class TestTaskConfig:
             "verifier.environment.nope",
         ]
 
+    def test_healthcheck_at_harbor_lower_bounds_loads(self):
+        # The ``[environment.healthcheck]`` block published by billxbf/mimo-v26-* (hub content hash
+        # 00a4f9b1136d…, 564 sampled tasks, six datasets); only the base64 payload inside ``command`` is
+        # elided. Harbor's HealthcheckConfig takes plain numbers, so ``retries = 0`` must load.
+        block = """
+[environment.healthcheck]
+# one-time setup before the agent (environment/setup/setup.sh)
+command = "bash -c 'test -f /var/lib/mimo/ready || { mkdir -p /var/lib/mimo && echo H4sI... | base64 -d | tar xz -C /var/lib/mimo && bash /var/lib/mimo/setup.sh; }'"
+timeout_sec = 1200.0
+retries = 0
+interval_sec = 5.0
+"""
+        config = HarborTaskConfig.model_validate(tomllib.loads(block))
+        check = config.environment.healthcheck
+        assert check.retries == 0 and check.timeout_sec == 1200.0 and check.interval_sec == 5.0
+        assert (check.start_period_sec, check.start_interval_sec) == (0.0, 5.0)
+        assert check.command.startswith("bash -c 'test -f /var/lib/mimo/ready")
+
     def test_mcp_server_needs_command_or_url(self):
         with pytest.raises(ValueError, match="stdio needs"):
             HarborTaskConfig.model_validate({"environment": {"mcp_servers": [{"name": "t", "transport": "stdio"}]}})
@@ -196,7 +214,7 @@ class TestLoadTask:
         assert task.workdir == "/app"
         assert task.user is None
         assert task.needs_sandbox and task.has_solution
-        assert task.instruction == "Create a file called hello.txt."
+        assert task.instruction == "Create a file called hello.txt.\n"
         assert task.digest == content_hash(task.path)
 
     def test_task_toml_wins_over_dockerfile(self, tmp_path):
@@ -307,7 +325,7 @@ class TestMaterialize:
         assert row["task_id"] == {"taskset": "hello", "task_id": "hello-world"}
         params = row["task_input"]["responses_create_params"]
         assert params["input"][0]["role"] == "user"
-        assert params["input"][0]["content"] == "Create a file called hello.txt."
+        assert params["input"][0]["content"] == "Create a file called hello.txt.\n"
         assert params["metadata"] == {"agent_timeout_sec": "120.0"}
         assert row["task_input"]["task_data"] == {DIGEST_KEY: task.digest}
 
@@ -829,6 +847,23 @@ class TestSeparateVerifierFields:
             HarborTaskConfig.model_validate({"artifacts": [{"source": "/a", "destination": "/abs"}]})
 
 
+class TestInstruction:
+    def test_leading_canary_lines_are_dropped_and_the_rest_kept_verbatim(self, tmp_path):
+        from nemo_gym.tasks.harbor.task import read_instruction
+
+        path = tmp_path / "instruction.md"
+        path.write_text(
+            "<!-- harbor-canary GUID 26b5c67b -->\n# HARBOR-CANARY marker\n\nDo the thing.\n\nKeep  spacing.\n"
+        )
+        assert read_instruction(path) == "Do the thing.\n\nKeep  spacing.\n"
+        path.write_text("Plain task\n")
+        assert read_instruction(path) == "Plain task\n"
+        # No canary: the file is the prompt verbatim, a leading blank line included (Terminal-Bench 2.1's
+        # query-optimize starts that way, and the legacy server passed it through).
+        path.write_text("\nStarts after a blank line.\n")
+        assert read_instruction(path) == "\nStarts after a blank line.\n"
+
+
 class TestCli:
     def test_prepare_local_folder(self, tmp_path):
         folder = tmp_path / "ds"
@@ -874,11 +909,12 @@ class TestCli:
             write_task(folder / name)
         (folder / "grouped" / "environment" / "docker-compose.yaml").write_text("services: {}\n")
         prepared = prepare_target(str(folder), output_root=tmp_path / "out", exclude=["gpu-*"])
-        assert [task.task_id for task in prepared.tasks] == ["keep"]
+        # Compose tasks run like any other since Compose groups landed.
+        assert [task.task_id for task in prepared.tasks] == ["grouped", "keep"]
+        assert prepared.tasks[0].needs_compose
         out = capsys.readouterr().out
         assert "Skipping gpu-task: excluded by --exclude-tasks 'gpu-*'" in out
-        assert "Skipping grouped: Compose environments are not supported yet" in out
-        assert len((prepared.rows_path).read_text().splitlines()) == 1
+        assert len((prepared.rows_path).read_text().splitlines()) == 2
         with pytest.raises(ValueError, match="No runnable task"):
             prepare_target(str(folder), output_root=tmp_path / "out2", exclude=["*"])
         only = prepare_target(str(folder), output_root=tmp_path / "out3", only=["gpu-*"])

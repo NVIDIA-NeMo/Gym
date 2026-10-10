@@ -156,12 +156,16 @@ class OracleAgent(SimpleResponsesAPIAgent):
         settings = task.config
         timeout = min(settings.agent.timeout_sec, self.config.max_solve_timeout_s)
         try:
-            await upload_dir(session.sandbox, task.path / "solution", SOLUTION_DIR)
+            await upload_dir(session.sandbox, task.path / "solution", SOLUTION_DIR, make_readable=True)
+            # The folder may already exist root-owned and world-writable (Harbor's /logs mount, or a
+            # derived image); only its writability matters.
             prepared = await _exec_as_root(
-                session.sandbox, f"mkdir -p {SOLVE_LOG_DIR} && chmod 777 {SOLVE_LOG_DIR}", timeout_s=60
+                session.sandbox,
+                f"mkdir -p {SOLVE_LOG_DIR} 2>/dev/null; chmod 777 {SOLVE_LOG_DIR} 2>/dev/null; test -w {SOLVE_LOG_DIR}",
+                timeout_s=60,
             )
             if prepared.return_code:
-                raise SandboxTransferError(f"Could not create {SOLVE_LOG_DIR}: {prepared.stderr or prepared.stdout}")
+                raise SandboxTransferError(f"{SOLVE_LOG_DIR} is not writable: {prepared.stderr or prepared.stdout}")
         except SandboxTransferError as exc:
             # The sandbox user cannot place the solution where solve.sh expects it (for example an image
             # that runs as a non-root user without the capability to switch to root). Report it as an

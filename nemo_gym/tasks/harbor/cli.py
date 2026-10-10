@@ -26,6 +26,7 @@ import yaml
 from nemo_gym import component_search_roots
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.tasks.harbor.hub import datasets_dir, fetch_ref, is_hub_ref
+from nemo_gym.tasks.harbor.image_configs import record_compose_images
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
 from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError, discover_tasks
 
@@ -111,8 +112,8 @@ def prepare_target(
     lets a fetch replace task folders whose content differs from the Harbor store.
     ``PreparedTaskset.skipped``) so the rest of the dataset still prepares.
 
-    Tasks matching an ``exclude`` glob, and Compose tasks (which the harbor server cannot
-    run yet), are left out of the rows and listed on stdout.
+    Tasks matching an ``exclude`` glob, or not matching an ``only`` glob, are left out of the
+    rows and listed on stdout.
     """
     if is_hub_ref(target):
         folder = fetch_ref(target, refresh_registry=refresh_registry, force=force)
@@ -129,6 +130,9 @@ def prepare_target(
         print(f"Skipping {task_id}: {reason}")
     if not tasks:
         raise ValueError(f"No runnable task left in {folder}")
+    images = record_compose_images(tasks, tasks[0].path.parent)
+    if images is not None:
+        print(f"Compose image configurations recorded in {images}")
     output_dir = Path(output_root) / taskset
     rows_path = output_dir / "tasks.jsonl"
     write_rows(tasks, taskset, rows_path)
@@ -162,8 +166,6 @@ def select_tasks(
             skipped.append((task.task_id, "not in --only-tasks"))
         elif pattern is not None:
             skipped.append((task.task_id, f"excluded by --exclude-tasks {pattern!r}"))
-        elif task.needs_compose:
-            skipped.append((task.task_id, "Compose environments are not supported yet"))
         else:
             kept.append(task)
     return kept, skipped

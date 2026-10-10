@@ -323,7 +323,7 @@ class TestSetupCommands:
         assert response.status_code == 200, response.text
         commands = [call["command"] for call in sandbox.execs]
         assert commands[0] == "mkdir -p /app"
-        assert commands[1:3] == server.config.sandbox_setup_commands
+        assert commands[2:4] == server.config.sandbox_setup_commands
         assert all(call["user"] == "root" for call in sandbox.execs[1:3])
 
     def test_failing_setup_command_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
@@ -342,6 +342,20 @@ class TestSetupCommands:
 
 
 class TestSeedWorkdirAndResources:
+    def test_seed_creates_the_logs_folders_and_per_task_env(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.config.sandbox_env_by_task = {"hello": {"CIRCLE_NODE_TOTAL": "3"}, "other": {"X": "1"}}
+        monkeypatch.setattr(
+            "resources_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        assert TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task)).status_code == 200
+        commands = [c["command"] for c in sandbox.execs]
+        assert commands[0] == "mkdir -p /app"
+        logs = next(c for c in sandbox.execs if "/logs/artifacts" in c["command"])
+        assert "chmod 777 /logs/agent /logs/verifier /logs/artifacts" in logs["command"] and logs["user"] == "root"
+        spec = server._sandbox_spec(task, "/app")
+        assert spec.env["CIRCLE_NODE_TOTAL"] == "3" and "X" not in spec.env
+
     def test_image_workdir_used_when_task_sets_none(self, tmp_path, monkeypatch):
         server, task, sandbox, created = make_server(tmp_path, monkeypatch)
         # A task with a real Dockerfile and a prebuilt image declares no workdir; the image's WORKDIR is used.
@@ -802,3 +816,216 @@ class TestTransfersWithoutRoot:
         (source / "a.txt").write_text("a")
         with pytest.raises(SandboxTransferError, match="corrupt archive"):
             asyncio.run(upload_dir(Broken(), source, "/tests"))
+
+
+COMPOSE_TOML = """
+schema_version = "1.4"
+
+artifacts = [{ source = "/var/log/api", service = "api" }]
+
+[verifier]
+timeout_sec = 300.0
+environment_mode = "separate"
+
+[verifier.environment]
+docker_image = "org/verifier:1"
+
+[[verifier.collect]]
+command = "dump-topics > /logs/artifacts/topics.txt"
+service = "kafka"
+
+[agent]
+timeout_sec = 120.0
+
+[environment]
+docker_image = "org/agent:1"
+cpus = 1
+skills_dir = "/app/.skills"
+
+[[environment.mcp_servers]]
+name = "playwright"
+transport = "sse"
+url = "http://api:3080/sse"
+
+[environment.healthcheck]
+command = "test -f /tmp/ready"
+interval_sec = 0.01
+start_interval_sec = 0.01
+timeout_sec = 5.0
+retries = 3
+"""
+
+COMPOSE_YAML = """
+services:
+  main:
+    image: org/agent:1
+  api:
+    image: org/api:1
+    expose: ["3080"]
+  kafka:
+    image: org/kafka:1
+"""
+
+IMAGE_CONFIGS = {
+    "org/agent:1": {"os": "linux", "architecture": "amd64", "image": "org/agent@sha256:" + "a" * 64, "config": {}},
+    "org/api:1": {
+        "os": "linux",
+        "architecture": "amd64",
+        "image": "org/api@sha256:" + "b" * 64,
+        "config": {"Cmd": ["serve"]},
+    },
+    "org/kafka:1": {
+        "os": "linux",
+        "architecture": "amd64",
+        "image": "org/kafka@sha256:" + "c" * 64,
+        "config": {"Cmd": ["kafka"], "User": "appuser"},
+    },
+}
+
+
+@dataclass
+class HealthySandbox(AgentSandbox):
+    """Main service whose healthcheck passes on the third probe."""
+
+    probes: int = 0
+
+    async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        if command == "test -f /tmp/ready":
+            self.probes += 1
+            self.execs.append({"command": command, "user": user})
+            return SandboxExecResult(stdout="", stderr="", return_code=0 if self.probes >= 3 else 1)
+        return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+
+class FakeCompose:
+    def __init__(self, services):
+        self.services = services
+        self.stopped = False
+
+    async def stop(self):
+        self.stopped = True
+
+
+class TestComposeAndRouting:
+    def compose_server(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        (task.path / "task.toml").write_text(COMPOSE_TOML)
+        (task.path / "environment" / "docker-compose.yaml").write_text(COMPOSE_YAML)
+        (task.path.parent / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        monkeypatch.setattr(
+            "resources_servers.harbor.app.get_global_config_dict",
+            lambda: {"sandbox": {"opensandbox": {}}, "sandbox_gpu": {"opensandbox": {}}},
+        )
+        main, api, kafka = HealthySandbox(), FakeSandbox(), FakeSandbox()
+        compose = FakeCompose({"main": main, "api": api, "kafka": kafka})
+        documents = []
+
+        async def start_compose(task, session_id):
+            documents.append(server._compose_document(task))
+            return compose
+
+        monkeypatch.setattr(server, "_create_compose", start_compose)
+        return server, task, compose, documents
+
+    def test_compose_task_seeds_a_group_and_leaves_task_context(self, tmp_path, monkeypatch):
+        server, task, compose, documents = self.compose_server(tmp_path, monkeypatch)
+        client = TestClient(server.setup_webserver())
+
+        response = client.post("/seed_session", json=seed_body(task))
+
+        assert response.status_code == 200, response.text
+        document = documents[0]
+        assert set(document["services"]) == {"main", "api", "kafka"}
+        # The non-root sidecar keeps its image user and gets no host injection.
+        assert "user" not in document["services"]["kafka"] and document["services"]["kafka"]["x-sandbox"] == {
+            "hosts": []
+        }
+        main = compose.services["main"]
+        # The healthcheck was polled until it passed, then the task context was written for the harness.
+        assert main.probes == 3
+        context_write = next(c for c in main.execs if "/tmp/.nemo-gym/task.json" in c["command"])
+        assert context_write["user"] == "root"
+        assert "playwright" in context_write["command"] and "/app/.skills" in context_write["command"]
+        payload = response.json()
+        assert payload["sandbox_access"]["connection"]["provider_config_ref"] == "sandbox"
+
+    def test_separate_verifier_collects_from_sidecars_and_stops_the_group(self, tmp_path, monkeypatch):
+        server, task, compose, _ = self.compose_server(tmp_path, monkeypatch)
+        kafka, api = compose.services["kafka"], compose.services["api"]
+        api.__class__ = AgentSandbox  # gives it `present`
+        api.present = {"/var/log/api": "dir"}
+        verifier = FakeSandbox()
+
+        async def create_verifier(task):
+            return verifier
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        client = TestClient(server.setup_webserver())
+        assert client.post("/seed_session", json=seed_body(task)).status_code == 200
+
+        payload = client.post("/verify", json=verify_body()).json()
+
+        assert payload["reward"] == 1.0, payload
+        hook = next(c for c in kafka.execs if "dump-topics" in c["command"])
+        assert hook["command"].startswith("sh -c ")
+        assert any("/var/log/api" in c["command"] for c in api.execs)
+        assert compose.stopped and verifier.stopped
+        assert (
+            client.post(
+                "/close_session",
+                json={"resources_session_id": "rs-1", "episode_id": {"rollout_id": "r1", "attempt": 0}},
+            ).status_code
+            == 200
+        )
+
+    def test_gpu_tasks_route_to_the_gpu_provider(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        (task.path / "task.toml").write_text(TASK_TOML.replace("cpus = 1", 'cpus = 1\ngpus = 1\ngpu_types = ["H100"]'))
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        server.config.gpu_sandbox_provider = "sandbox_gpu"
+        monkeypatch.setattr(
+            "resources_servers.harbor.app.get_global_config_dict",
+            lambda: {"sandbox": {"opensandbox": {}}, "sandbox_gpu": {"opensandbox": {}}},
+        )
+        assert server._provider_ref(task) == "sandbox_gpu"
+        spec = server._sandbox_spec(task, "/app")
+        assert spec.resources.gpu == 1 and spec.resources.gpu_type is None
+        server.config.request_gpu_type = True
+        assert server._sandbox_spec(task, "/app").resources.gpu_type == "H100"
+        client = TestClient(server.setup_webserver())
+        response = client.post("/seed_session", json=seed_body(task))
+        assert response.status_code == 200, response.text
+        assert response.json()["sandbox_access"]["connection"]["provider_config_ref"] == "sandbox_gpu"
+
+    def test_failed_healthcheck_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
+        server, task, compose, _ = self.compose_server(tmp_path, monkeypatch)
+        compose.services["main"].probes = -100  # never reaches 3 within 3 retries
+        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
+        assert response.status_code == 503 and "Healthcheck failed" in response.json()["detail"]
+        assert compose.stopped
+
+
+def test_image_rewrites_apply_to_agent_and_verifier_images(tmp_path, monkeypatch):
+    server, task, _, _ = make_server(tmp_path, monkeypatch)
+    (task.path / "task.toml").write_text(SEPARATE_TOML)
+    task = load_task(task.path)
+    server.config.image_rewrites = {"org/agent:1": "mirror/agent:derived", "org/verifier:1": "mirror/verifier:derived"}
+    monkeypatch.setattr(
+        "resources_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+    )
+    server.config.image_rewrite_auth = {"username": "u", "password": "p"}
+    spec = server._sandbox_spec(task, "/app")
+    assert spec.image == "mirror/agent:derived" and spec.provider_options["image_auth"] == {
+        "username": "u",
+        "password": "p",
+    }
+    server.config.image_rewrites = {}
+    assert "image_auth" not in server._sandbox_spec(task, "/app").provider_options
+    server.config.image_rewrites = {"org/agent:1": "mirror/agent:derived", "org/verifier:1": "mirror/verifier:derived"}
+    verifier = server._sandbox_spec(
+        task, None, environment=task.config.verifier.environment, image=_verifier_image(task), role="verifier", ttl=1
+    )
+    assert verifier.image == "mirror/verifier:derived"

@@ -4,6 +4,7 @@
 """Load one task folder, or a folder of task folders, from disk."""
 
 import logging
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,7 +52,7 @@ class HarborTask:
 
     @property
     def needs_compose(self) -> bool:
-        """The task's environment is a Compose group, which the harbor server cannot start yet."""
+        """The task's environment is a Compose group: ``main`` plus the sidecars its overlay declares."""
         return any(
             (self.path / "environment" / name).is_file()
             for name in ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
@@ -64,6 +65,28 @@ class HarborTask:
 
 def is_task_folder(path: Path) -> bool:
     return (Path(path) / TASK_FILE).is_file()
+
+
+_CANARY_LINE = re.compile(r"^(<!--.*canary.*-->|#.*canary.*)$", re.IGNORECASE)
+
+
+def read_instruction(path: Path) -> str:
+    """``instruction.md`` as the agent sees it: leading canary marker lines and blank lines dropped.
+
+    Harbor tasks open with an HTML comment or heading carrying a canary GUID for contamination
+    tracking. It is not part of the task, so it is removed the way Gym's Terminal Bench servers
+    always did; everything after it is kept byte for byte.
+    """
+    lines = path.read_text().split("\n")
+    removed_canary = False
+    while lines and _CANARY_LINE.match(lines[0].strip()):
+        lines.pop(0)
+        removed_canary = True
+    # Only the blank lines that separated the canary from the task go with it. A file with no canary is
+    # the author's prompt byte for byte, leading newline included, as the legacy servers passed it.
+    while removed_canary and lines and not lines[0].strip():
+        lines.pop(0)
+    return "\n".join(lines)
 
 
 def load_task(path: Path) -> HarborTask:
@@ -84,7 +107,7 @@ def load_task(path: Path) -> HarborTask:
     if not (path / "tests").is_dir():
         raise HarborTaskError(f"{path} has no tests/ folder")
     try:
-        instruction = instruction_path.read_text().strip()
+        instruction = read_instruction(instruction_path)
     except UnicodeDecodeError as exc:
         raise HarborTaskError(f"{instruction_path}: {exc}") from exc
 
