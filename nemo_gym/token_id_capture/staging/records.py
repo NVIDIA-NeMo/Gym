@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, ValidationInfo, model_validator
 
 from nemo_gym.token_id_capture.records import (  # noqa: F401  (re-exported for staging consumers)
     LEDGER_ROW_MISSING_CHAIN_HASH_REASON,
@@ -42,6 +42,9 @@ CaptureMode = Literal["token_in", "text"]
 Identifier = Annotated[StrictStr, Field(min_length=1)]
 NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
 DigestHex = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
+
+# Only the explicit local builder supplies this identity; it is never a wire field.
+_BUILD_STAGING_DIGEST = object()
 
 
 def staging_key(rollout_id: str, model_call_id: str) -> str:
@@ -166,7 +169,7 @@ class StagedCallBaseSnapshot(_DigestWireModel):
         return staging_key(self.rollout_id, self.model_call_id)
 
     @model_validator(mode="after")
-    def _validate_base_integrity(self) -> Self:
+    def _validate_base_integrity(self, info: ValidationInfo) -> Self:
         if self.parent_call_id is None and self.prev_len != 0:
             raise ValueError("a parentless staged call must have prev_len == 0")
         if self.parent_call_id is not None and self.prev_len == 0:
@@ -205,7 +208,9 @@ class StagedCallBaseSnapshot(_DigestWireModel):
             chain_hash=self.chain_hash,
             cumulative_hash=self.cumulative_hash,
         )
-        if self.digest != actual_digest:
+        if info.context is _BUILD_STAGING_DIGEST:
+            self.digest = actual_digest
+        elif self.digest != actual_digest:
             raise ValueError("digest does not match staged call contents")
         return self
 
@@ -214,6 +219,62 @@ class StagedCallRecord(StagedCallBaseSnapshot):
     """One normalized token delta made durable by a framework staging sink."""
 
     extras: dict[str, Any] | None = None
+
+    @classmethod
+    def from_components(
+        cls,
+        *,
+        rollout_id: str,
+        model_call_id: str,
+        parent_call_id: str | None,
+        mode: CaptureMode,
+        prev_len: int,
+        delta_len: int,
+        cum_len: int,
+        weight_version: int,
+        token_ids_delta: list[int],
+        token_mask_delta: list[float],
+        generation_log_probs_delta: list[float],
+        extras: dict[str, Any] | None,
+        extras_digest: str,
+        chain_hash: str,
+        cumulative_hash: str,
+    ) -> Self:
+        """Validate local components and compute their digest exactly once.
+
+        Runs normal field, integrity, and extras validators. Wire constructors
+        still require a supplied digest and verify it against the contents.
+        """
+        # Pydantic StrictFloat accepts integers. Local builders historically
+        # hashed before model construction and required exact Python floats.
+        for name, values in (
+            ("token_mask_delta", token_mask_delta),
+            ("generation_log_probs_delta", generation_log_probs_delta),
+        ):
+            if any(type(value) is not float for value in values):
+                raise ValueError(f"{name} values must be Python floats")
+        return cls.model_validate(
+            {
+                "rollout_id": rollout_id,
+                "model_call_id": model_call_id,
+                "parent_call_id": parent_call_id,
+                "mode": mode,
+                "prev_len": prev_len,
+                "delta_len": delta_len,
+                "cum_len": cum_len,
+                "weight_version": weight_version,
+                "token_ids_delta": token_ids_delta,
+                "token_mask_delta": token_mask_delta,
+                "generation_log_probs_delta": generation_log_probs_delta,
+                "extras": extras,
+                "extras_digest": extras_digest,
+                "chain_hash": chain_hash,
+                "cumulative_hash": cumulative_hash,
+                # Replaced by the integrity validator, after field validation.
+                "digest": "0" * 64,
+            },
+            context=_BUILD_STAGING_DIGEST,
+        )
 
     @model_validator(mode="after")
     def _validate_extras_integrity(self) -> Self:

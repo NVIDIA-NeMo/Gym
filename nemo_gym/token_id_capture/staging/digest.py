@@ -32,7 +32,12 @@ import hashlib
 import math
 import struct
 from collections.abc import Mapping, Sequence
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any
+
+
+if TYPE_CHECKING:
+    from nemo_gym.token_id_capture.staging.records import StagedCallRecord
 
 
 STAGING_SCHEMA_VERSION = 2
@@ -86,10 +91,13 @@ def _encode_present_digest(value: str, *, field: str) -> bytes:
 
 def encode_token_ids(token_ids: Sequence[int]) -> bytes:
     """Encode token IDs as a length followed by unsigned big-endian values."""
-    encoded = bytearray(_encode_uint(len(token_ids), field="token_ids length"))
+    length = _encode_uint(len(token_ids), field="token_ids length")
     for token_id in token_ids:
-        encoded.extend(_encode_uint(token_id, field="token_id"))
-    return bytes(encoded)
+        if type(token_id) is not int or not 0 <= token_id <= (2**64 - 1):
+            raise ValueError(f"token_id must be an unsigned 64-bit integer, got {token_id!r}")
+    # Pack the column in C rather than allocating and extending once per token.
+    # Explicit big-endian widths preserve the v2 wire bytes on every host.
+    return length + struct.pack(f">{len(token_ids)}Q", *token_ids)
 
 
 def hash_token_ids(token_ids: Sequence[int]) -> str:
@@ -123,18 +131,19 @@ def compute_chain_hash(parent_chain_hash: str | None, token_ids_delta: Sequence[
 
 
 def _encode_float32_values(values: Sequence[float], *, field: str) -> bytes:
-    encoded = bytearray(_encode_uint(len(values), field=f"{field} length"))
+    length = _encode_uint(len(values), field=f"{field} length")
     for value in values:
         if type(value) is not float or not math.isfinite(value):
             raise ValueError(f"{field} values must be finite Python floats, got {value!r}")
-        try:
-            packed = struct.pack(">f", value)
-        except (OverflowError, struct.error) as error:
-            raise ValueError(f"{field} value cannot be represented as float32: {value!r}") from error
-        if not math.isfinite(struct.unpack(">f", packed)[0]):
-            raise ValueError(f"{field} value overflows float32: {value!r}")
-        encoded.extend(packed)
-    return bytes(encoded)
+    format_string = f">{len(values)}f"
+    try:
+        packed = struct.pack(format_string, *values)
+    except (OverflowError, struct.error) as error:
+        raise ValueError(f"{field} value cannot be represented as float32") from error
+    # Some runtimes round a finite float64 to float32 infinity instead of raising.
+    if not all(map(math.isfinite, struct.unpack(format_string, packed))):
+        raise ValueError(f"{field} value overflows float32")
+    return length + packed
 
 
 def _encode_extra(value: Any) -> bytes:
@@ -241,26 +250,172 @@ def compute_staging_digest(
         raise ValueError("prompt-carry log probabilities must be 0.0")
     if cum_len != prev_len + delta_len:
         raise ValueError(f"cum_len {cum_len} does not equal prev_len + delta_len ({prev_len + delta_len})")
+    _encode_uint(delta_len, field="delta_len")
+    _encode_uint(cum_len, field="cum_len")
     _validate_digest(extras_digest, field="extras_digest")
 
+    identity = _staging_identity(
+        schema_version, digest_version, extras_digest_version, rollout_id, model_call_id, parent_call_id, mode
+    )
+    return _hash_staging_columns(
+        identity=identity,
+        prev_len=prev_len,
+        weight_version=weight_version,
+        token_bytes=encode_token_ids(token_ids_delta)[8:],
+        mask_bytes=_encode_float32_values(token_mask_delta, field="token_mask_delta")[8:],
+        logprob_bytes=_encode_float32_values(generation_log_probs_delta, field="generation_log_probs_delta")[8:],
+        extras_digest=extras_digest,
+        chain_hash=chain_hash,
+        cumulative_hash=cumulative_hash,
+    )
+
+
+def _staging_identity(
+    schema_version: int,
+    digest_version: int,
+    extras_digest_version: int,
+    rollout_id: str,
+    model_call_id: str,
+    parent_call_id: str | None,
+    mode: str,
+) -> bytes:
     payload = bytearray(struct.pack(">BBB", schema_version, digest_version, extras_digest_version))
     payload.extend(_encode_text(rollout_id))
     payload.extend(_encode_text(model_call_id))
     payload.extend(_encode_optional_text(parent_call_id))
     payload.extend(_encode_text(mode))
-    payload.extend(_encode_uint(prev_len, field="prev_len"))
-    payload.extend(_encode_uint(delta_len, field="delta_len"))
-    payload.extend(_encode_uint(cum_len, field="cum_len"))
-    payload.extend(_encode_uint(weight_version, field="weight_version"))
-    payload.extend(_encode_bytes(encode_token_ids(token_ids_delta)))
-    payload.extend(_encode_bytes(_encode_float32_values(token_mask_delta, field="token_mask_delta")))
-    payload.extend(
-        _encode_bytes(_encode_float32_values(generation_log_probs_delta, field="generation_log_probs_delta"))
-    )
-    payload.extend(bytes.fromhex(extras_digest))
-    payload.extend(_encode_present_digest(chain_hash, field="chain_hash"))
-    payload.extend(_encode_present_digest(cumulative_hash, field="cumulative_hash"))
-    return hashlib.sha256(_CALL_DIGEST_DOMAIN + bytes(payload)).hexdigest()
+    return bytes(payload)
+
+
+def _hash_staging_columns(
+    *,
+    identity: bytes,
+    prev_len: int,
+    weight_version: int,
+    token_bytes: bytes,
+    mask_bytes: bytes,
+    logprob_bytes: bytes,
+    extras_digest: str,
+    chain_hash: str,
+    cumulative_hash: str,
+) -> str:
+    """Hash validated columns using the unchanged, length-delimited v2 layout."""
+    delta_len = len(token_bytes) // 8
+    if len(token_bytes) % 8 or len(mask_bytes) != delta_len * 4 or len(logprob_bytes) != delta_len * 4:
+        raise ValueError("encoded staging columns have inconsistent lengths")
+    digest = hashlib.sha256(_CALL_DIGEST_DOMAIN)
+    digest.update(identity)
+    digest.update(_encode_uint(prev_len, field="prev_len"))
+    digest.update(_encode_uint(delta_len, field="delta_len"))
+    digest.update(_encode_uint(prev_len + delta_len, field="cum_len"))
+    digest.update(_encode_uint(weight_version, field="weight_version"))
+    for column in (token_bytes, mask_bytes, logprob_bytes):
+        digest.update(struct.pack(">QQ", len(column) + 8, delta_len))
+        digest.update(column)
+    digest.update(bytes.fromhex(extras_digest))
+    digest.update(_encode_present_digest(chain_hash, field="chain_hash"))
+    digest.update(_encode_present_digest(cumulative_hash, field="cumulative_hash"))
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class EncodedPrefixDigest:
+    """Immutable per-call cache of validated v2 prefix columns.
+
+    ``extend`` returns a candidate; adopt it only after the cut is staged and
+    sealed. The cache is process-local, never serialized as checkpoint state.
+    Hashing still covers the full prefix, but old columns are not re-encoded.
+    """
+
+    _identity: bytes
+    _prev_len: int
+    _weight_version: int
+    _parent_chain_hash: str | None
+    _parent_token_bytes: bytes
+    _token_bytes: bytes
+    _mask_bytes: bytes
+    _logprob_bytes: bytes
+    _extras_digest: str
+    digest: str
+
+    @classmethod
+    def from_record(
+        cls,
+        record: StagedCallRecord,
+        *,
+        parent_chain_hash: str | None,
+        parent_token_ids: Sequence[int],
+    ) -> EncodedPrefixDigest:
+        """Copy a validated record into immutable columns and verify its binding."""
+        if len(parent_token_ids) != record.prev_len:
+            raise ValueError("prefix cache parent length does not match record")
+        cache = cls(
+            _identity=_staging_identity(
+                record.schema_version,
+                record.digest_version,
+                record.extras_digest_version,
+                record.rollout_id,
+                record.model_call_id,
+                record.parent_call_id,
+                record.mode,
+            ),
+            _prev_len=record.prev_len,
+            _weight_version=record.weight_version,
+            _parent_chain_hash=parent_chain_hash,
+            _parent_token_bytes=encode_token_ids(parent_token_ids)[8:],
+            _token_bytes=encode_token_ids(record.token_ids_delta)[8:],
+            _mask_bytes=_encode_float32_values(record.token_mask_delta, field="token_mask_delta")[8:],
+            _logprob_bytes=_encode_float32_values(
+                record.generation_log_probs_delta, field="generation_log_probs_delta"
+            )[8:],
+            _extras_digest=record.extras_digest,
+            digest=record.digest,
+        )
+        if cache._compute_digest() != record.digest:
+            raise ValueError("prefix cache contents or parent do not match record digest")
+        return cache
+
+    def extend(
+        self, *, generated_token_ids: Sequence[int], generated_logprobs: Sequence[float]
+    ) -> EncodedPrefixDigest:
+        """Validate new generated tokens and return an independently owned candidate."""
+        if len(generated_token_ids) != len(generated_logprobs):
+            raise ValueError("generated token IDs and log probabilities must have equal lengths")
+        if not generated_token_ids:
+            return self
+        candidate = replace(
+            self,
+            _token_bytes=self._token_bytes + encode_token_ids(generated_token_ids)[8:],
+            _mask_bytes=self._mask_bytes + struct.pack(">f", 1.0) * len(generated_token_ids),
+            _logprob_bytes=self._logprob_bytes
+            + _encode_float32_values(generated_logprobs, field="generation_log_probs_delta")[8:],
+        )
+        return replace(candidate, digest=candidate._compute_digest())
+
+    def _compute_digest(self) -> str:
+        delta_len = len(self._token_bytes) // 8
+        chain = hashlib.sha256(_CHAIN_DIGEST_DOMAIN)
+        if self._parent_chain_hash is None:
+            chain.update(b"\x00")
+        else:
+            chain.update(_encode_present_digest(self._parent_chain_hash, field="parent_chain_hash"))
+        chain.update(struct.pack(">Q", delta_len))
+        chain.update(self._token_bytes)
+        cumulative = hashlib.sha256(_TOKEN_DIGEST_DOMAIN)
+        cumulative.update(struct.pack(">Q", self._prev_len + delta_len))
+        cumulative.update(self._parent_token_bytes)
+        cumulative.update(self._token_bytes)
+        return _hash_staging_columns(
+            identity=self._identity,
+            prev_len=self._prev_len,
+            weight_version=self._weight_version,
+            token_bytes=self._token_bytes,
+            mask_bytes=self._mask_bytes,
+            logprob_bytes=self._logprob_bytes,
+            extras_digest=self._extras_digest,
+            chain_hash=chain.hexdigest(),
+            cumulative_hash=cumulative.hexdigest(),
+        )
 
 
 def build_staging_delta(

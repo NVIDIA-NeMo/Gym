@@ -404,3 +404,93 @@ def test_staging_namespace_has_no_serving_or_framework_dependencies() -> None:
             "assert not bad, f'forbidden imports: {bad}'"
         )
         subprocess.run([sys.executable, "-c", code], check=True)
+
+
+@pytest.mark.parametrize("length", [0, 1, 128, 8192, 73728])
+def test_bulk_column_encodings_match_scalar_v2_bytes(length: int) -> None:
+    import random
+    import struct
+
+    from nemo_gym.token_id_capture.staging.digest import _encode_float32_values
+
+    rng = random.Random(4319)
+    tokens = [rng.randrange(2**64) for _ in range(length)]
+    values = [rng.uniform(-100, 0) for _ in range(length)]
+    if length:
+        tokens[0] = 2**64 - 1
+        values[0] = -0.0
+    if length > 1:
+        values[1:4] = [2**-149, float.fromhex("0x1.fffffep127"), -(2**-150)]
+    header = struct.pack(">Q", length)
+    assert encode_token_ids(tokens) == header + b"".join(struct.pack(">Q", value) for value in tokens)
+    assert _encode_float32_values(values, field="test") == header + b"".join(
+        struct.pack(">f", value) for value in values
+    )
+
+
+@pytest.mark.parametrize("bad", [True, 1.0, -1, 2**64])
+def test_bulk_token_encoding_retains_strict_uint_validation(bad: object) -> None:
+    with pytest.raises(ValueError, match="unsigned 64-bit"):
+        encode_token_ids([1, bad])
+
+
+@pytest.mark.parametrize("bad", [True, 1, math.nan, math.inf, -math.inf, 1e39, -1e39])
+def test_bulk_float_encoding_retains_strict_finite_float32_validation(bad: object) -> None:
+    from nemo_gym.token_id_capture.staging.digest import _encode_float32_values
+
+    with pytest.raises(ValueError, match="finite Python floats|float32"):
+        _encode_float32_values([0.0, bad], field="test")
+
+
+def _local_record_components() -> dict:
+    payload = _record_payload()
+    for field in ("digest", "schema_version", "digest_version", "extras_digest_version"):
+        payload.pop(field)
+    return payload
+
+
+def test_local_record_builder_hashes_once_and_preserves_wire_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import Mock
+
+    from nemo_gym.token_id_capture.staging import records
+
+    expected = _record_payload()
+    components = _local_record_components()
+    compute = Mock(wraps=records.compute_staging_digest)
+    monkeypatch.setattr(records, "compute_staging_digest", compute)
+    record = StagedCallRecord.from_components(**components)
+    assert compute.call_count == 1
+    assert record.model_dump() == expected
+    assert StagedCallSnapshot.model_validate_json(record.model_dump_json()).model_dump() == expected
+    assert compute.call_count == 2
+    corrupted = {**expected, "generation_log_probs_delta": [0.0, -0.75]}
+    with pytest.raises(ValidationError, match="digest does not match"):
+        StagedCallSnapshot.model_validate(corrupted)
+    expected.pop("digest")
+    with pytest.raises(ValidationError, match="digest"):
+        StagedCallSnapshot.model_validate(expected)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("token_ids_delta", [True, 11]),
+        ("token_ids_delta", [10, 2**64]),
+        ("generation_log_probs_delta", [0.0, math.nan]),
+        ("generation_log_probs_delta", [0.0, 1e39]),
+        ("generation_log_probs_delta", [-0.1, -0.25]),
+        ("token_mask_delta", [0.0, 0.5]),
+        ("delta_len", 3),
+        ("parent_call_id", None),
+        ("extras", {"changed": True}),
+    ],
+)
+def test_local_record_builder_keeps_integrity_checks(field: str, value: object) -> None:
+    with pytest.raises(ValidationError):
+        StagedCallRecord.from_components(**{**_local_record_components(), field: value})
+
+
+@pytest.mark.parametrize("field", ["token_mask_delta", "generation_log_probs_delta"])
+def test_local_record_builder_does_not_normalize_integer_float_columns(field: str) -> None:
+    with pytest.raises(ValueError, match="Python floats"):
+        StagedCallRecord.from_components(**{**_local_record_components(), field: [0, 1]})
