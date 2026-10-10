@@ -61,6 +61,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     PermanentEndpointError,
 )
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.token_id_capture import (
     CaptureContext,
@@ -1317,6 +1318,37 @@ class TestApp:
             await server.chat_completions(request, body)
 
         assert server._resolve_client(request) is refusing
+
+    def test_rollout_id_routing_pins_every_call_of_a_rollout(self, monkeypatch: MonkeyPatch) -> None:
+        """Calls under /ng-rollout/<id>/ share one endpoint even when each call carries a fresh session."""
+        workers = [self._setup_server(monkeypatch) for _ in range(2)]
+        for worker in workers:
+            worker._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(4)]
+
+        def index_for(worker, rollout_id, session_id):
+            request = MagicMock()
+            request.session = {SESSION_ID_KEY: session_id}
+            with rollout_context(rollout_id):
+                selected = worker._resolve_client(request)
+            return next(i for i, client in enumerate(worker._clients) if client is selected)
+
+        # Same rollout, different per-call sessions (cookie-less client) -> same endpoint, on every worker.
+        first = index_for(workers[0], "12-3", "session-a")
+        assert index_for(workers[0], "12-3", "session-b") == first
+        assert index_for(workers[1], "12-3", "session-c") == first
+
+        # Different rollouts are still spread over the endpoints.
+        spread = {index_for(workers[0], f"{task}-{gen}", f"s-{task}-{gen}") for task in range(16) for gen in range(8)}
+        assert len(spread) == 4
+
+        # No rollout prefix -> the session cookie decides, as before.
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "plain-session"}
+        plain = workers[0]._resolve_client(request)
+        request_again = MagicMock()
+        request_again.session = {SESSION_ID_KEY: "plain-session"}
+        assert workers[0]._resolve_client(request_again) is plain
+        assert "plain-session" in workers[0]._session_id_to_client
 
     @mark.parametrize("forward", [False, True])
     async def test_chat_completions_forwards_session_id_as_conversation_id(

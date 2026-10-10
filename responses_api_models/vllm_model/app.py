@@ -1768,7 +1768,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
-        session_id = request.session[SESSION_ID_KEY]
+        session_id = self._client_affinity_key(request)
         client = self._session_id_to_client.get(session_id)
         if self.config.route_around_failing_endpoints:
             hashed = self._hashed_client(session_id)
@@ -1877,6 +1877,22 @@ class VLLMModel(SimpleResponsesAPIModel):
             LOG.warning("endpoint %s answered a call; it serves sessions again", client.base_url)
         health.consecutive_failures = 0
         health.failed_at = None
+
+    @staticmethod
+    def _client_affinity_key(request: Request) -> str:
+        """Key that pins related model calls to one backend endpoint.
+
+        Prefer the rollout id that ``RolloutContextMiddleware`` extracted from a
+        ``/ng-rollout/<id>/...`` URL. Harnesses that call this server as a plain API
+        endpoint (e.g. CLI coding agents) keep no cookies between calls, so each call
+        gets a fresh session id and would land on a random endpoint, defeating vLLM's
+        prefix cache across the turns of one rollout. Callers without a rollout prefix
+        keep the session-cookie affinity.
+        """
+        rollout_id = current_rollout_id()
+        if rollout_id:
+            return f"rollout:{rollout_id}"
+        return request.session[SESSION_ID_KEY]
 
 
 if __name__ == "__main__":
