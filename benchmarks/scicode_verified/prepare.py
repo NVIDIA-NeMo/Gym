@@ -24,23 +24,27 @@ MANIFEST_FPATH = DATA_DIR / "manifest.json"
 TEST_DATA_FPATH = DATA_DIR / "test_data_cleaned.h5"
 
 HF_DATASET_ID = "shhu2001/SciCode-Verified"
-HF_REVISION = "eea11a866be6860725258702b39ef8651ed26abd"
-UPSTREAM_GIT_REVISION = "ddab4a92f8d80a7113ab946628e994b52354d838"
+HF_REVISION = "eea11a866be6860725258702b39ef8651ed26abd"  # pragma: allowlist secret
+UPSTREAM_GIT_REVISION = "ddab4a92f8d80a7113ab946628e994b52354d838"  # pragma: allowlist secret
 DATASET_VERSION = "v2"
 
 EXPECTED_PROBLEMS = 64
 EXPECTED_TOTAL_SUBPROBLEMS = 290
 EXPECTED_SCORED_SUBPROBLEMS = 287
-EXPECTED_PROBLEMS_JSONL_MD5 = "5c604d8dbf52642bd94e13b92c8f52eb"
-EXPECTED_PROBLEMS_JSONL_SHA256 = "427771cb8bceb5058e8b510af0ee2c8210827a1491e0cdf8e6db56d4ed1440ba"
-EXPECTED_MANIFEST_SHA256 = "5e17afe722e127d120d6e48793cdf0379d430068eea8efb94a25503c6b3e83f9"
-EXPECTED_H5_MD5 = "2b41a7df40ddc23ce651ec05b8ecb6f8"
+EXPECTED_PROBLEMS_JSONL_MD5 = "5c604d8dbf52642bd94e13b92c8f52eb"  # pragma: allowlist secret
+EXPECTED_PROBLEMS_JSONL_SHA256 = (
+    "427771cb8bceb5058e8b510af0ee2c8210827a1491e0cdf8e6db56d4ed1440ba"  # pragma: allowlist secret
+)
+EXPECTED_MANIFEST_SHA256 = (
+    "5e17afe722e127d120d6e48793cdf0379d430068eea8efb94a25503c6b3e83f9"  # pragma: allowlist secret
+)
+EXPECTED_H5_MD5 = "2b41a7df40ddc23ce651ec05b8ecb6f8"  # pragma: allowlist secret
 
 # Official SciCode skip steps. They are inserted into cumulative context but never generated or scored.
 PREFILLED_STEP_SHA256 = {
-    "13.6": "795a2b57c2d9bb12ca4eaf16d6b8e1f202015a89a886628858abf42a1b18a94e",
-    "62.1": "bc9931d88a7d5950091b72a996a25b8be6c936fd136b01005e22c3d45b0008a2",
-    "76.3": "4758300d96ea726cdc0fbf749f1bc437030d2a3e8b43bde232ecdeaf636cd367",
+    "13.6": "795a2b57c2d9bb12ca4eaf16d6b8e1f202015a89a886628858abf42a1b18a94e",  # pragma: allowlist secret
+    "62.1": "bc9931d88a7d5950091b72a996a25b8be6c936fd136b01005e22c3d45b0008a2",  # pragma: allowlist secret
+    "76.3": "4758300d96ea726cdc0fbf749f1bc437030d2a3e8b43bde232ecdeaf636cd367",  # pragma: allowlist secret
 }
 PREFILLED_STEP_LOCATIONS = {
     ("13", 5): "13.6",

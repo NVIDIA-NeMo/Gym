@@ -83,8 +83,13 @@ def _mock_release(monkeypatch, tmp_path):
 
 
 def test_release_constants_are_pinned_to_v2() -> None:
-    assert scicode_verified_prepare.HF_REVISION == "eea11a866be6860725258702b39ef8651ed26abd"
-    assert scicode_verified_prepare.UPSTREAM_GIT_REVISION == "ddab4a92f8d80a7113ab946628e994b52354d838"
+    assert (
+        scicode_verified_prepare.HF_REVISION == "eea11a866be6860725258702b39ef8651ed26abd"  # pragma: allowlist secret
+    )
+    assert (
+        scicode_verified_prepare.UPSTREAM_GIT_REVISION
+        == "ddab4a92f8d80a7113ab946628e994b52354d838"  # pragma: allowlist secret
+    )
     assert scicode_verified_prepare.EXPECTED_PROBLEMS == 64
     assert scicode_verified_prepare.EXPECTED_TOTAL_SUBPROBLEMS == 290
     assert scicode_verified_prepare.EXPECTED_SCORED_SUBPROBLEMS == 287

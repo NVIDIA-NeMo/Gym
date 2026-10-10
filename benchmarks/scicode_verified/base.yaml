@@ -7,7 +7,7 @@ scicode_verified_resources_server:
     scicode:
       allowed_agents: [scicode_agent]
       test_data_fpath: benchmarks/scicode_verified/data/test_data_cleaned.h5
-      test_data_md5: 2b41a7df40ddc23ce651ec05b8ecb6f8
+      test_data_md5: 2b41a7df40ddc23ce651ec05b8ecb6f8 # pragma: allowlist secret
       timeout_secs: 1800.0
       # Canonical SciCode-Verified scoring requires explicit 2024-era and 2025-era interpreters.
       # Supply their paths in an env.yaml overlay as documented in this benchmark's README.
