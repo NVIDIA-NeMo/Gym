@@ -29,6 +29,7 @@ Templated on responses_api_agents/proof_refinement_agent (the multi-turn run() s
 
 import logging
 import statistics
+from time import time
 from typing import Any, Dict, List
 
 from fastapi import Request, Response
@@ -57,6 +58,14 @@ from nemo_gym.openai_utils import (
     accumulate_response_usage,
 )
 from nemo_gym.prompt import PromptConfig, load_prompt_config
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    ModelCallRef,
+    ObservationGap,
+    TrajectoryRecord,
+    TrajectoryTurn,
+)
 from nemo_gym.server_utils import raise_for_status
 
 
@@ -214,6 +223,14 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         usage = zero_usage
         usage_complete = True
         step_usage = []
+        rollout_id = maybe_rollout_id_from_run_body(body)
+        collect_trajectory = self._model_call_capture_enabled() and rollout_id is not None
+        # The rollout collector prefers the source problem_id as its canonical
+        # task identity when one is present in the input row.
+        task_id = body.problem_id
+        invocations: list[AgentInvocation] = []
+        turns: list[TrajectoryTurn] = []
+        trajectory_gaps: list[ObservationGap] = []
         response_create_params = body.responses_create_params.model_dump(exclude_unset=True, exclude_none=True)
         response_create_params.pop("input", None)
         response_create_params["model"] = body.responses_create_params.model or self.config.model_server.name
@@ -244,13 +261,16 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                 problem_steps_str=problem_steps_str, next_step_str=next_step_str, dependencies=dependencies
             )
 
+            invocation_id = f"substep-{cur_step + 1}"
+            model_input = [{"role": "user", "content": user_content}]
             try:
+                turn_timestamp = time()
                 gen_response = await self.server_client.post(
                     server_name=self.config.name,
                     url_path=self.url_path_for_run("/v1/responses", body),
                     json={
                         **response_create_params,
-                        "input": [{"role": "user", "content": user_content}],
+                        "input": model_input,
                     },
                     cookies=cookies,
                 )
@@ -261,12 +281,55 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                     out_of_context = True
                     step_record["status"] = "context_window_exceeded"
                     solutions[f"{body.problem_id}.{cur_step + 1}"] = OUT_OF_CONTEXT
+                    if collect_trajectory:
+                        trajectory_gaps.append(
+                            ObservationGap(
+                                code="turn_model_call_scope_incomplete",
+                                invocation_id=invocation_id,
+                                detail="context_window_exceeded",
+                            )
+                        )
                     continue
                 raise
 
             cookies = gen_response.cookies
             last_response_json = await gen_response.json()
             model_response = NeMoGymResponse.model_validate(last_response_json)
+            if collect_trajectory:
+                model_calls = []
+                if model_response.id:
+                    model_calls = [ModelCallRef(model_ref=self.config.model_server, response_id=model_response.id)]
+                else:
+                    trajectory_gaps.append(
+                        ObservationGap(
+                            code="turn_model_call_scope_incomplete",
+                            invocation_id=invocation_id,
+                            detail="response_id_unavailable",
+                        )
+                    )
+                output = model_response.output
+                invocations.append(
+                    AgentInvocation(
+                        invocation_id=invocation_id,
+                        status="completed" if model_response.status == "completed" else "incomplete",
+                        model_calls=model_calls,
+                        conversation=[*model_input, *output],
+                    )
+                )
+                turns.append(
+                    TrajectoryTurn(
+                        invocation_id=invocation_id,
+                        task_id=task_id,
+                        rollout_id=rollout_id,
+                        turn_no=1,
+                        timestamp=turn_timestamp,
+                        question=model_input,
+                        answer=[item for item in output if item.type != "reasoning"],
+                        reasoning_content=[item for item in output if item.type == "reasoning"] or None,
+                        step_count=1,
+                        model_calls=model_calls,
+                    )
+                )
             step_record["status"] = "generated"
             step_record["usage"] = model_response.usage.model_dump() if model_response.usage is not None else None
             usage_complete = usage_complete and model_response.usage is not None
@@ -284,6 +347,14 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         verify_request_data["response"]["usage"] = usage.model_dump() if usage_complete else None
         verify_request_data["token_usage_version"] = TOKEN_USAGE_VERSION
         verify_request_data["step_usage"] = step_usage
+        if collect_trajectory and turns:
+            verify_request_data["ng_trajectory"] = TrajectoryRecord(
+                task_id=task_id,
+                rollout_id=rollout_id,
+                invocations=invocations,
+                turns=turns,
+                gaps=trajectory_gaps,
+            ).model_dump(mode="json")
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",

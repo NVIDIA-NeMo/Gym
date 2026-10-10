@@ -27,7 +27,7 @@ import asyncio
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 from scicode_integration.runner import build_test_program, run_substep, sanitize_test
 
 from nemo_gym import PARENT_DIR
@@ -38,6 +38,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.rollout_observability import TrajectoryRecord
 
 
 # Agent sentinel for a sub-step it could not generate (ran out of context); always fails.
@@ -61,10 +62,11 @@ class ScicodeRunRequest(BaseRunRequest):
 
 
 class ScicodeVerifyRequest(ScicodeRunRequest, BaseVerifyRequest):
-    pass
+    ng_trajectory: Optional[TrajectoryRecord] = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ScicodeVerifyResponse(BaseVerifyResponse):
+    ng_trajectory: Optional[TrajectoryRecord] = Field(default=None, exclude_if=lambda value: value is None)
     # Retain the agent's compact accounting records through verification. None
     # distinguishes historical final-step-only rollouts from whole-problem usage.
     token_usage_version: Optional[int] = None
