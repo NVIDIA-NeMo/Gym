@@ -48,6 +48,30 @@ Bounded attributes identify the binding connector limit, queue outcome, and dest
 ``gym.http.connection_pool.connect_total`` (observable counter): all connection attempts
 (``connect()`` calls), including attempts that later fail or are abandoned.
 Compare its value with the queue-duration histogram count to calculate the queued fraction.
+
+Rollout outcomes
+----------------
+``gym.rollout.completed_total`` (counter): one per rollout attempt the collection driver finished
+handling, recorded after the recovery store accepts the saved outcome. An attempt is one dispatch of
+one row in one collection run; a retry on a later resume run is another attempt, and an HTTP-level
+re-send of ``/run`` inside one dispatch is not. Only ``run_from_config`` (``gym eval run`` with
+serving) records it: ``--no-serve`` initialises no telemetry, and ``run_examples`` callers,
+reverification and the GDPVal multistage driver do not call the recorder.
+
+``nemo.gym.rollout.outcome`` is ``scored`` (main output, including masked, forced-zero and supported
+unscored completions), ``failed`` (saved failures, including kill-shaped) or ``omitted`` (saved
+intentional omissions, including terminal skips and bare no-persist replies). The historical
+``scored`` label does not guarantee a measured reward. Rows drained by the dispatch budget never
+ran and are not counted. Reused cached results do not increment the counter. A failed ``/run`` is a ``failed``
+attempt with class ``agent_request_failed`` only with ``route_failures_to_sidecar`` on; otherwise
+it aborts the run and is not counted. Coverage comes from the output files, not this counter.
+
+Attributes are bounded: ``nemo.gym.rollout.dispatch.name`` (the environment server, or the agent
+when rows name no environment server) and, on attempts that carry a failure class,
+``nemo.gym.failure_class``, ``nemo.gym.failure_kind`` (registered or ``<server>:<kind>``
+namespaced, any other value recorded as ``unregistered``) and ``nemo.gym.failure_type`` (exception
+class name). The canonical saved failure record supplies kind and exception type, with legacy fields
+used only when that record is absent. Free-text reasons are never attributes.
 """
 
 import logging
@@ -68,6 +92,13 @@ HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT = "gym.http.connection_pool.connect_tota
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
 HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_outcome"
 HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
+ROLLOUT_COMPLETED_INSTRUMENT = "gym.rollout.completed_total"
+ROLLOUT_OUTCOME_ATTRIBUTE = "nemo.gym.rollout.outcome"
+FAILURE_CLASS_ATTRIBUTE = "nemo.gym.failure_class"
+FAILURE_KIND_ATTRIBUTE = "nemo.gym.failure_kind"
+FAILURE_TYPE_ATTRIBUTE = "nemo.gym.failure_type"
+DISPATCH_NAME_ATTRIBUTE = "nemo.gym.rollout.dispatch.name"
+UNREGISTERED_FAILURE_KIND = "unregistered"
 
 #: Milliseconds. Provisioning a remote sandbox takes tens of seconds and a long command can run
 #: for minutes; the SDK's default boundaries end at 10 s and would put most of both in +Inf.
@@ -276,6 +307,27 @@ def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[st
         )
     except Exception:
         logger.debug("nemo-lens: failed to register %s", HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT, exc_info=True)
+
+
+def record_rollout_completed(
+    outcome: str,
+    *,
+    dispatch_name: str,
+    failure_class: str | None = None,
+    failure_kind: str | None = None,
+    failure_type: str | None = None,
+) -> None:
+    """Count one finished rollout attempt in ``gym.rollout.completed_total``."""
+    attributes: dict[str, Any] = {ROLLOUT_OUTCOME_ATTRIBUTE: outcome, DISPATCH_NAME_ATTRIBUTE: dispatch_name}
+    if failure_class:
+        attributes[FAILURE_CLASS_ATTRIBUTE] = failure_class
+    if failure_kind:
+        attributes[FAILURE_KIND_ATTRIBUTE] = failure_kind
+    if failure_type:
+        attributes[FAILURE_TYPE_ATTRIBUTE] = failure_type
+    _record_counter(
+        ROLLOUT_COMPLETED_INSTRUMENT, "Rollout attempts the driver finished handling, by outcome.", attributes
+    )
 
 
 def _reset_for_testing() -> None:

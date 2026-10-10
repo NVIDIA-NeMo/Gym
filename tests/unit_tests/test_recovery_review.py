@@ -948,11 +948,15 @@ async def test_reverify_protects_source_companions(
         else:
             destination.hardlink_to(target)
     requested = destination.with_name(destination.name.removeprefix("unsafe_")) if force else destination
+    copied_inputs = output.with_name("copied_inputs.jsonl")
+    copied_inputs.write_bytes(materialized_path_for(output).read_bytes())
     before = snapshot(output)
-    with pytest.raises(ConfigError, match="source rollout artifacts"):
+    with pytest.raises(
+        ConfigError, match="Manifest-backed|Cannot overwrite a manifest-backed|source rollout artifacts"
+    ):
         await reverify.RolloutReverificationHelper().run_from_config(
             reverify.RolloutReverificationConfig(
-                materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
+                materialized_inputs_jsonl_fpath=str(copied_inputs),
                 rollouts_jsonl_fpath=str(output),
                 output_jsonl_fpath=str(requested),
                 resume_from_cache=mode == "resume",
@@ -1289,11 +1293,13 @@ async def test_reverify_failure_source_protects_entire_parent_run(
         "metrics": aggregate_metrics_path_for(output),
         "lock": output.with_name(output.stem + "_run.lock"),
     }[artifact]
+    copied_inputs = output.with_name("copied_inputs.jsonl")
+    copied_inputs.write_bytes(materialized_path_for(output).read_bytes())
     before = snapshot(output)
     with pytest.raises(ConfigError, match="Manifest-backed|source rollout artifacts"):
         await reverify.RolloutReverificationHelper().run_from_config(
             reverify.RolloutReverificationConfig(
-                materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
+                materialized_inputs_jsonl_fpath=str(copied_inputs),
                 rollouts_jsonl_fpath=str(source),
                 output_jsonl_fpath=str(destination),
                 resume_from_cache=mode == "resume",
@@ -1329,6 +1335,8 @@ async def test_collector_accepts_only_intentional_gaps_without_scoring_them(
     output = Path(runner_config.output_jsonl_fpath)
     _check_saved_completion(output)
     assert f"{3 - num_omitted}/3 samples completed, {num_omitted} intentionally omitted" in caplog.text
+    assert caplog.text.count("Evaluation accepted with intentional omissions") == 1
+    assert "Exiting successfully" not in caplog.text
     store = RolloutStore.read(output)
     assert store.coverage()["complete"] is False
     assert store.coverage()["intentionally_omitted"] == num_omitted
@@ -1414,3 +1422,84 @@ def test_completion_requires_explicit_retry_and_progress_signals(runner_config, 
     runner_config.require_complete = True
     with pytest.raises(TypeError, match="required keyword-only argument"):
         runner_config.check_completion(expected=3, results=[], **signals)
+
+
+@pytest.mark.parametrize("routing", [False, True])
+@pytest.mark.parametrize("failure_class", [None, "agent_run_error", "skipped"])
+async def test_legacy_reply_cannot_assign_omission_disposition(runner_config, monkeypatch, routing, failure_class):
+    runner_config.route_failures_to_sidecar = routing
+
+    async def post(**kwargs):
+        result = {"reward": 1.0, "response": {}}
+        if kwargs["json"]["_ng_task_index"] == 0:
+            result["_ng_omitted"] = True
+            if failure_class is not None:
+                result["_ng_failure_class"] = failure_class
+                result["_ng_failure_terminal"] = failure_class == "skipped"
+        return FakeResponse(200, result)
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    store = RolloutStore.read(Path(runner_config.output_jsonl_fpath))
+    coverage = store.coverage()
+    assert coverage["successful"] == (3 if failure_class is None else 2)
+    assert coverage["failed"] == int(failure_class == "agent_run_error")
+    assert coverage["intentionally_omitted"] == int(failure_class == "skipped")
+    assert len(store.pending(3)) == int(failure_class == "agent_run_error")
+    saved = store.selected("success") + store.selected("failure") + store.selected("omitted")
+    assert all("_ng_omitted" not in result for result in saved)
+
+
+@pytest.mark.parametrize("artifact", ["failures", "materialized"])
+@pytest.mark.parametrize("mode", ["overwrite", "resume", "append"])
+@pytest.mark.parametrize("symlink", [False, True])
+async def test_reverify_cannot_write_another_runs_companion(
+    prepared_run, fake_reverification, artifact, mode, symlink
+):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        first, second = store.pending(3)
+        store.record_dispatches([first, second])
+        store.record_outcome(first | {"reward": 1.0, "response": {}})
+        store.record_outcome(second | {"_ng_failure_class": "judge_failed", "response": {}})
+    # Neither the provided inputs nor source rollouts belong to the protected run.
+    inputs = output.with_name("unrelated_inputs.jsonl")
+    inputs.write_bytes(materialized_path_for(output).read_bytes())
+    source = output.with_name("unrelated_results.jsonl")
+    source.write_bytes(output.read_bytes())
+    target = {"failures": failures_path_for, "materialized": materialized_path_for}[artifact](output)
+    if symlink:
+        alias = output.with_name("destination_alias.jsonl")
+        alias.symlink_to(target)
+        target = alias
+    before = snapshot(output)
+    reverify = fake_reverification
+    with pytest.raises(ConfigError, match="Manifest-backed|Cannot overwrite a manifest-backed"):
+        await reverify.RolloutReverificationHelper().run_from_config(
+            reverify.RolloutReverificationConfig(
+                materialized_inputs_jsonl_fpath=str(inputs),
+                rollouts_jsonl_fpath=str(source),
+                output_jsonl_fpath=str(target),
+                overwrite=mode == "overwrite",
+                resume_from_cache=mode == "resume",
+                append=mode == "append",
+                judge_failed_only=mode == "append",
+                disable_aggregation=True,
+                upload_rollouts=False,
+            )
+        )
+    assert snapshot(output) == before
+    assert RolloutStore.read(output).coverage()["failed"] == 1
+
+
+def test_legacy_alias_through_directory_alias_is_one_input(tmp_path):
+    original_dir = tmp_path / "original"
+    original_dir.mkdir()
+    target = original_dir / "run.jsonl"
+    target.write_text("{}\n")
+    alias = original_dir / "latest.jsonl"
+    alias.symlink_to(target)
+    failures_path_for(alias).write_text("{}\n")
+    directory_alias = tmp_path / "shortcut"
+    directory_alias.symlink_to(original_dir, target_is_directory=True)
+    assert collection._expand_input_glob(f"{alias},{directory_alias / alias.name}") == [str(alias)]

@@ -512,18 +512,9 @@ def run_lock(output: Path, *, checkpoint_dir: Path | None = None) -> Iterator[No
         yield
 
 
-def warn_if_only_omissions(*, expected: int, completed: int, intentionally_omitted: int) -> bool:
+def has_only_intentional_gaps(*, expected: int, completed: int, intentionally_omitted: int) -> bool:
     """Accept omissions only alongside completed tasks, without inventing scores."""
-    if completed > 0 and intentionally_omitted > 0 and completed + intentionally_omitted == expected:
-        logger.warning(
-            "Evaluation finished with intentional omissions: %s/%s samples completed, %s intentionally omitted. "
-            "Exiting successfully; omitted tasks have no measured score.",
-            completed,
-            expected,
-            intentionally_omitted,
-        )
-        return True
-    return False
+    return completed > 0 and intentionally_omitted > 0 and completed + intentionally_omitted == expected
 
 
 class IncompleteEvaluationError(RuntimeError):

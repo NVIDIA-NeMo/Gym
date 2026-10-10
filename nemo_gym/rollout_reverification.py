@@ -977,7 +977,7 @@ def _prepare_output_fpaths(
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
     # Inspect both spellings, but retain the destination for atomic publication:
     # replacing an output symlink must not replace its target.
-    for target in {output_fpath, output_fpath.resolve()}:
+    for target in {output_fpath, resolve_rollout_owner(output_fpath)}:
         if manifest_path_for(target).exists() or journal_path_for(target).exists():
             if overwrite:
                 raise ConfigError(
@@ -1042,13 +1042,13 @@ class RolloutReverificationHelper(BaseModel):
     async def run_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
         # Judge-only recovery can migrate source failures or seed old rewards;
         # leave those manifest-aware semantics to the dedicated follow-up.
-        for name, is_source in (
-            (config.output_jsonl_fpath, False),
-            (config.rollouts_jsonl_fpath if config.judge_failed_only else None, True),
+        for name in (
+            config.output_jsonl_fpath,
+            config.rollouts_jsonl_fpath if config.judge_failed_only else None,
         ):
             if name is not None:
                 path = _resolve_under_cwd_or_install(name)
-                path = resolve_rollout_owner(path) if is_source else path.resolve()
+                path = resolve_rollout_owner(path)
                 if manifest_path_for(path).exists() or journal_path_for(path).exists():
                     raise ConfigError(
                         "Manifest-backed reverification is a follow-up for judge-only recovery or in-place output. "

@@ -62,7 +62,13 @@ from nemo_gym.config_types import (
 from nemo_gym.deliverables import is_deliverable
 from nemo_gym.episode_types import EpisodeFailure, EpisodeId, TaskId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.failure_kinds import CANCELLED, ENVIRONMENT_PROTOCOL_VIOLATION, ENVIRONMENT_SERVER_FAILED
+from nemo_gym.failure_kinds import (
+    CANCELLED,
+    ENVIRONMENT_PROTOCOL_VIOLATION,
+    ENVIRONMENT_SERVER_FAILED,
+    is_namespaced,
+    is_registered,
+)
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -116,17 +122,18 @@ from nemo_gym.rollout_recovery import (
     RunManifest,
     atomic_output_file,
     atomic_write_json,
+    has_only_intentional_gaps,
     is_terminal_failure,
     manifest_path_for,
     observed_elapsed,
     run_lock,
-    warn_if_only_omissions,
 )
 from nemo_gym.rollout_recovery import (
     _get_max_rollout_attempts as _get_max_rollout_attempts,
 )
 from nemo_gym.rollout_store import RolloutStore
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry.gym_metrics import UNREGISTERED_FAILURE_KIND, record_rollout_completed
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -1138,10 +1145,18 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
                     if r.get(NG_FAILURE_CLASS_KEY) is None and not r.get(NG_NO_PERSIST_KEY)
                 }
             )
-        if (
-            warn_if_only_omissions(expected=expected, completed=completed, intentionally_omitted=intentionally_omitted)
-            or not self.require_complete
+        if has_only_intentional_gaps(
+            expected=expected, completed=completed, intentionally_omitted=intentionally_omitted
         ):
+            logger.warning(
+                "Evaluation accepted with intentional omissions: %s/%s samples completed, %s intentionally omitted. "
+                "Omitted tasks have no measured score.",
+                completed,
+                expected,
+                intentionally_omitted,
+            )
+            return
+        if not self.require_complete:
             return
         if completed < expected:
             raise IncompleteEvaluationError(
@@ -1659,6 +1674,40 @@ _SERVER_DID_NOT_RUN_STATUSES = frozenset({429, 502, 503, 504})
 _MAX_FAILURE_BODY_CHARS = 2000
 
 
+def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name: str) -> None:
+    """Count a finished attempt only after the recovery store accepts its outcome."""
+    if not is_span_group_enabled(GymSpanGroup.ROLLOUT):
+        return
+    failure_class = result.get(NG_FAILURE_CLASS_KEY) if outcome != "scored" else None
+    failure_kind = failure_type = None
+    if failure_class is not None:
+        record = result.get("_ng_failure_record")
+        if isinstance(record, dict):
+            # The shared record is authoritative, including an explicitly absent
+            # kind. Producer diagnostics can contain stale flat failure fields.
+            failure_kind = record["failure"].get("failure_kind")
+            failure_type = record.get("exception_type")
+        else:
+            failure_kind = result.get("failure_kind")
+            failure_type = result.get("_ng_failure_type")
+    record_rollout_completed(
+        outcome,
+        dispatch_name=dispatch_name,
+        failure_class=failure_class,
+        failure_kind=_metric_failure_kind(failure_kind),
+        failure_type=failure_type if isinstance(failure_type, str) else None,
+    )
+
+
+def _metric_failure_kind(failure_kind: Any) -> Optional[str]:
+    """The kind as a bounded label: registered or namespaced names pass, anything else is one bucket."""
+    if not isinstance(failure_kind, str):
+        return None
+    if is_registered(failure_kind) or is_namespaced(failure_kind):
+        return failure_kind
+    return UNREGISTERED_FAILURE_KIND
+
+
 def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dict[str, Any]:
     """One sidecar row for a `/run` call that came back without a result.
 
@@ -1732,6 +1781,8 @@ def _failure_outcome(row: Dict, failure: Dict, stage: str) -> RolloutFailure:
 def _normalize_rollout_outcome(row: Dict, result: Any) -> Dict | RolloutFailure:
     if not isinstance(result, dict):
         raise InvalidRolloutResult("Agent /run must return a JSON object.")
+    # This marker belongs to the persistence layer, not legacy producer replies.
+    result.pop("_ng_omitted", None)
     try:
         native = _materialized_taskset(row) is not None
         if "failure" in result and "episode_id" in result and not native:
@@ -1779,7 +1830,7 @@ def _failure_diagnostics(result: Any) -> Dict:
     # Legacy producers use different names for errors, trace paths, and other
     # evidence. Preserve their fields, but never turn placeholder scores or
     # generation into a completed result. Actual judge input is restored separately.
-    excluded = {"reward", "response", NG_NO_PERSIST_KEY}
+    excluded = {"reward", "response", NG_NO_PERSIST_KEY, "_ng_omitted"}
     if result.get("type") == "failure":
         # The envelope is a sidecar row; only _ng_failure_record is the typed model.
         excluded.add("type")
@@ -2909,6 +2960,8 @@ class RolloutCollectionHelper(BaseModel):
                         rows.append(row)
                         results.append(result)
                     continue
+                if isinstance(result, dict):
+                    result.pop("_ng_omitted", None)
                 verification_response = completed.verification_response
                 diagnostics = completed.diagnostics or _failure_diagnostics(result)
                 if verification_response is None:
@@ -3029,10 +3082,12 @@ class RolloutCollectionHelper(BaseModel):
                 if upload_spool is not None:
                     upload_spool.write(orjson.dumps(_rollout_for_export(result)) + b"\n")
 
+                dispatch_name = self._dispatch_name(row)
                 if no_persist:
                     # A returned suppression without a failure is an intentional
                     # omission. Known kill-shaped failures were converted above.
                     store.record_omission(row, str(result.get("error") or "Producer requested no result persistence"))
+                    _record_rollout_outcome(result, "omitted", dispatch_name)
                     if batch_tracker is not None:
                         # This attempt supersedes any failure reported before resume.
                         batch_failure_rows = [
@@ -3053,11 +3108,14 @@ class RolloutCollectionHelper(BaseModel):
                         f"class={failure_class} execution {row.get(ATTEMPT_INDEX_KEY_NAME, 0)} error={detail}"
                     )
                     store.record_outcome(result)
+                    outcome = "omitted" if store.disposition(row) == "omitted" else "failed"
+                    _record_rollout_outcome(result, outcome, dispatch_name)
                     if batch_tracker is not None:
                         batch_failure_rows.append(_batch_status_row(result, batch_agent_refs))
                 else:
                     # Success → main jsonl.
                     store.record_outcome(result, sync=capture_build_can_retire(token_capture_build))
+                    _record_rollout_outcome(result, "scored", dispatch_name)
                     if batch_tracker is not None:
                         batch_completed_rows.append(_batch_status_row(result, batch_agent_refs))
                     try:
@@ -3075,7 +3133,6 @@ class RolloutCollectionHelper(BaseModel):
                     if rollout_id is not None and capture_build_can_retire(token_capture_build):
                         await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 
-                dispatch_name = self._dispatch_name(row)
                 counts_left[dispatch_name] -= 1
                 if counts_left[dispatch_name] <= 0:
                     counts_left.pop(dispatch_name)

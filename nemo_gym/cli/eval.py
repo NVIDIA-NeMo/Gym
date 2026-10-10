@@ -664,13 +664,13 @@ def e2e_rollout_collection():  # pragma: no cover
 def _check_saved_completion(output: Path) -> None:
     """Distinguish a valid partial run from successful CLI completion."""
     from nemo_gym.rollout_records import coverage_path_for
-    from nemo_gym.rollout_recovery import IncompleteEvaluationError, warn_if_only_omissions
+    from nemo_gym.rollout_recovery import IncompleteEvaluationError, has_only_intentional_gaps
 
     coverage = coverage_path_for(output.resolve())
     if coverage.exists():
         report = json.loads(coverage.read_text())
         if report.get("complete") is False:
-            if warn_if_only_omissions(
+            if has_only_intentional_gaps(
                 expected=report["expected"],
                 completed=report["successful"],
                 intentionally_omitted=report.get("intentionally_omitted", 0),

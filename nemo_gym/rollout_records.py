@@ -86,7 +86,7 @@ def resolve_rollout_path(output: Path, *, read_only: bool = False) -> Path:
     ):
         # Do not mix or silently discard two competing sets of legacy files.
         if not any(companion(resolved).exists() or companion(resolved).is_symlink() for companion in companions):
-            return output.absolute()
+            return output.parent.resolve() / output.name
     raise ConfigError(
         f"Recovery artifacts exist beside the rollout alias ({misplaced[0]}). "
         "Use the original Gym revision, or move all companions beside the resolved output "
@@ -95,18 +95,19 @@ def resolve_rollout_path(output: Path, *, read_only: bool = False) -> Path:
 
 
 def resolve_rollout_owner(path: Path) -> Path:
-    """Find a run's main output when a reader is given its failure sidecar.
+    """Find a run's main output when given its failure sidecar or saved inputs.
 
-    An output named ``*_failures`` with its own history owns that history;
+    An output with its own history owns that history regardless of its name;
     strip the suffix only when the parent run has a manifest or journal.
     """
     output = resolve_rollout_path(path, read_only=True)
     if not any(companion(output).exists() for companion in (manifest_path_for, journal_path_for)):
-        if output.stem.endswith("_failures"):
-            parent = output.with_name(output.stem.removesuffix("_failures") + output.suffix)
-            parent = resolve_rollout_path(parent, read_only=True)
-            if any(companion(parent).exists() for companion in (manifest_path_for, journal_path_for)):
-                return parent
+        for suffix in ("_failures", "_materialized_inputs"):
+            if output.stem.endswith(suffix):
+                parent = output.with_name(output.stem.removesuffix(suffix) + output.suffix)
+                parent = resolve_rollout_path(parent, read_only=True)
+                if any(companion(parent).exists() for companion in (manifest_path_for, journal_path_for)):
+                    return parent
     return output
 
 

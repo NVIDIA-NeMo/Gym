@@ -39,12 +39,16 @@ results using `gym eval aggregate`. Judge-only recovery of manifest-backed runs 
 back into those runs remain follow-ups; see [evaluation resume](/main/evaluation/resume).
 
 For manifest- or journal-backed sources, the output and its supporting files cannot overwrite the source run's
-manifest, saved inputs, results, failures or other recovery files, including when `--rollouts` names the run's `_failures` file. These checks include output aliases and the
-`unsafe_` prefix used by `--force`.
+manifest, saved inputs, results, failures or other recovery files, including when `--rollouts` names the run's
+`_failures` file. These checks include output aliases and the `unsafe_` prefix used by `--force`. Outputs also cannot
+overwrite another manifest-backed run's results, failures or saved inputs.
 
 For legacy outputs with no manifest or journal, `--resume` and `--append` preserve an existing symlink and an unambiguous
 set of sidecars beside that link. If both the link and its target have companion files, Gym refuses to choose between
 them; back up and reconcile the files first. New outputs put companions beside the resolved target.
+This preservation guarantee excludes `--retry-invalid-judge-responses`: its legacy migration replaces the output
+path atomically and can replace a symlink with a regular file. Back up and reconcile legacy alias-side companions
+beside the target, then use the original target path when requesting that migration.
 </Note>
 
 ### Relay ATIF trajectories

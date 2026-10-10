@@ -334,7 +334,12 @@ If at least one task completed and the only gaps are intentional omissions, the 
 completed, expected and omitted counts. If every task is omitted, it exits with **76**: there are no completed tasks to
 report, and retrying cannot help. For example, check whether the deliverables folder is mounted if a judge-only run
 skips every task. After fixing the cause, use a new output path; resume preserves intentional omissions.
-Omissions keep their separate coverage disposition: they are not completed answers and receive no measured score. GDPVal's explicitly accepted partial-stage omissions follow the same exit policy.
+Omissions keep their separate coverage disposition: they are not completed answers and receive no measured score.
+GDPVal's explicitly accepted partial-stage omissions follow the same exit policy.
+
+For external producers, a bare `_ng_no_persist` reply now means an intentional omission in the core collector.
+Older collection versions wrote nothing for that reply and dispatched the task again on resume. GDPVal multistage
+still retries bare `_ng_no_persist` replies; its behavior is unchanged.
 None of the nonzero statuses reports a complete evaluation.
 
 The Slurm auto-resume chain continues after 75 without spending an infrastructure retry and stops after 76.
@@ -344,9 +349,10 @@ Custom collection drivers calling `check_completion` must explicitly pass `retry
 help) and `made_progress` (whether this invocation saved new outcomes). Both are required; cached outcomes alone do
 not establish progress.
 
-Code 0 means collection finished, possibly with the intentional omissions described above. Inspect coverage to learn
-how many tasks actually completed. An explicit Ctrl-C in `gym eval run` retains the existing cancellation behavior: it can return 0 with partial artifacts when `require_complete=false`. Inspect coverage to determine
-completion after cancellation. Ordinary errors keep their existing failure status. The library still supports returning
+Code 0 means collection finished, possibly with the intentional omissions described above. An explicit Ctrl-C in
+`gym eval run` retains the existing cancellation behavior: it can return 0 with partial artifacts when
+`require_complete=false`. To learn how many tasks actually completed, inspect the core collector's coverage file, or
+GDPVal's stage summaries (multistage does not write that coverage file). Ordinary errors keep their existing failure status. The library still supports returning
 partial results when `require_complete=false`; CLI status is checked separately. Checkpoint-triggered stops must use the
 same incomplete statuses when that integration lands. End-to-end checkpoint restoration still requires validation
 with the checkpoint stack.

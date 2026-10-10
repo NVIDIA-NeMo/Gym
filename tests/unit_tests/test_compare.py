@@ -1554,3 +1554,27 @@ class TestReportEdgeCases:
         markdown = render_markdown(result)
         assert "## Warnings" in markdown
         assert "extra" in markdown
+
+
+@pytest.mark.parametrize("legacy_alias_sidecars", [False, True])
+def test_comparison_uses_reverification_metrics_through_alias(tmp_path, legacy_alias_sidecars):
+    from nemo_gym.path_utils import failures_path_for
+    from nemo_gym.rollout_reverification import _prepare_output_fpaths
+
+    target = tmp_path / "original.jsonl"
+    target.touch()
+    alias = tmp_path / "latest.jsonl"
+    alias.symlink_to(target)
+    if legacy_alias_sidecars:
+        failures_path_for(alias).touch()
+    output = _prepare_output_fpaths("", str(alias), True, False, False).output
+    aggregate_metrics_path_for(output).write_bytes(orjson.dumps([_entry()]))
+    loaded = load_agg_metrics_file(str(alias), role="baseline")
+    assert build_loaded_run(loaded, AGENT).key_metrics == {"mean/reward": 0.5}
+
+
+def test_explicit_comparison_metrics_override_keeps_its_path(tmp_path):
+    from nemo_gym.comparison.loading import resolve_aggregate_metrics_fpath
+
+    override = tmp_path / "custom_metrics.json"
+    assert resolve_aggregate_metrics_fpath(str(tmp_path / "absent.jsonl"), str(override)) == override
