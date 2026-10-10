@@ -15,7 +15,10 @@ GYM_BIN="${GYM_BIN:-gym}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 POLICY_MODEL_TYPE="${POLICY_MODEL_TYPE:-vllm_model}"
 GYM_PID=""
-
+MODEL_OVERRIDES=()
+if [[ "$POLICY_MODEL_TYPE" == "vllm_model" ]]; then
+  MODEL_OVERRIDES+=("++policy_model.responses_api_models.vllm_model.entrypoint=nooa_app.py")
+fi
 
 : "${POLICY_BASE_URL:?Set POLICY_BASE_URL to the real model endpoint}"
 : "${POLICY_API_KEY:?Set POLICY_API_KEY for the real model endpoint}"
@@ -88,6 +91,7 @@ cd "$WORKSPACE_DIR"
   "$GYM_BIN" env start \
   --config "$ROOT_DIR/resources_servers/example_session_state_mgmt/configs/example_session_state_mgmt_nooa.yaml" \
   --model-type "$POLICY_MODEL_TYPE" \
+  "${MODEL_OVERRIDES[@]}" \
   --model-url "$POLICY_BASE_URL" \
   --model-api-key "$POLICY_API_KEY" \
   --model "$POLICY_MODEL_NAME" \
