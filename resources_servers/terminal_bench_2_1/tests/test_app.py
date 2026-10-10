@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import subprocess
+from io import StringIO
 from pathlib import Path
 from shlex import quote
 from shutil import copyfile
@@ -16,6 +17,8 @@ from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.terminal_bench_2_1.app import (
     _BULLSEYE_SECURITY_SNAPSHOT_SETUP,
+    GOLDEN_PATCH_SOLVE_SH_PATCHES,
+    TEST_SH_PATCHES,
     TerminalBench21ResourcesServer,
     TerminalBench21ResourcesServerConfig,
     TerminalBench21SeedSessionRequest,
@@ -292,3 +295,100 @@ def test_security_snapshot_preserves_other_repositories(tmp_path: Path, distro: 
     assert sources.read_text() == unrelated + expected + "\n"
     subprocess.run(command, check=True)
     assert sources.read_text() == unrelated + expected + "\n"
+
+
+PINNED_TASKS = terminal_bench_app.PARENT_DIR / "benchmarks/terminal_bench_2_1/data/inkling-small-tasks/tasks"
+TASK = "terminal-bench/example"
+PATCHES = {TASK: [("apt-get update", "apt-get update && echo patched")]}
+
+
+def _server() -> TerminalBench21ResourcesServer:
+    return TerminalBench21ResourcesServer(
+        config=TerminalBench21ResourcesServerConfig(
+            sandbox_provider="test",
+            sandbox_config={},
+            host="",
+            port=0,
+            entrypoint="",
+            name="terminal_bench_2_1_resources_server",
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+
+def _recording_sandbox(uploads: dict[str, str]) -> AsyncMock:
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = MagicMock(return_code=0)
+
+    async def upload(*, local_path: str, remote_path: str) -> None:
+        uploads[remote_path] = Path(local_path).read_text()
+
+    sandbox.upload.side_effect = upload
+    return sandbox
+
+
+class TestPatchedUpload:
+    async def test_matching_patch_changes_only_the_uploaded_script(self, tmp_path: Path) -> None:
+        (tmp_path / "test.sh").write_text("apt-get update\npytest\n")
+        (tmp_path / "test_outputs.py").write_text("apt-get update  # not a script\n")
+        uploads: dict[str, str] = {}
+
+        await _server()._upload_folder(_recording_sandbox(uploads), tmp_path, "/tests", PATCHES, TASK)
+
+        assert uploads["/tests/test.sh"] == "apt-get update && echo patched\npytest\n"
+        assert uploads["/tests/test_outputs.py"] == "apt-get update  # not a script\n"
+
+    async def test_patch_may_match_any_one_script_in_the_folder(self, tmp_path: Path) -> None:
+        (tmp_path / "helper.sh").write_text("echo helper\n")
+        (tmp_path / "test.sh").write_text("apt-get update\n")
+        uploads: dict[str, str] = {}
+
+        await _server()._upload_folder(_recording_sandbox(uploads), tmp_path, "/tests", PATCHES, TASK)
+
+        assert uploads["/tests/helper.sh"] == "echo helper\n"
+        assert uploads["/tests/test.sh"] == "apt-get update && echo patched\n"
+
+    @pytest.mark.parametrize("scripts", [{"test.sh": "echo no installs here\n"}, {"notes.txt": "apt-get update\n"}])
+    async def test_patch_matching_no_script_warns_naming_task_and_pattern_and_uploads_unchanged(
+        self, tmp_path: Path, scripts: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for name, content in scripts.items():
+            (tmp_path / name).write_text(content)
+        uploads: dict[str, str] = {}
+        warnings = StringIO()
+        monkeypatch.setattr(terminal_bench_app, "stderr", warnings)
+
+        await _server()._upload_folder(_recording_sandbox(uploads), tmp_path, "/tests", PATCHES, TASK)
+
+        assert uploads == {f"/tests/{name}": content for name, content in scripts.items()}
+        warning = warnings.getvalue()
+        assert "WARNING: terminal-bench/example: patches matched no .sh file" in warning
+        assert "apt-get update" in warning
+
+    async def test_task_without_patches_uploads_unchanged(self, tmp_path: Path) -> None:
+        (tmp_path / "test.sh").write_text("apt-get update\n")
+        uploads: dict[str, str] = {}
+
+        await _server()._upload_folder(
+            _recording_sandbox(uploads), tmp_path, "/tests", PATCHES, "terminal-bench/other"
+        )
+
+        assert uploads == {"/tests/test.sh": "apt-get update\n"}
+
+
+def _configured_patches() -> list[tuple[str, str, str]]:
+    return [
+        (subfolder, task, old)
+        for subfolder, table in (("tests", TEST_SH_PATCHES), ("solution", GOLDEN_PATCH_SOLVE_SH_PATCHES))
+        for task, patches in table.items()
+        for old, _ in patches
+    ]
+
+
+@pytest.mark.skipif(not PINNED_TASKS.exists(), reason="run benchmarks.terminal_bench_2_1.prepare_inkling_small first")
+@pytest.mark.parametrize(
+    ("subfolder", "task", "old"), _configured_patches(), ids=lambda value: str(value).replace("\n", " ")[:40]
+)
+def test_configured_patches_match_the_pinned_task_scripts(subfolder: str, task: str, old: str) -> None:
+    scripts = (PINNED_TASKS / task.split("/", 1)[1] / subfolder).rglob("*.sh")
+    assert any(old in script.read_text() for script in scripts)

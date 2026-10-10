@@ -3,7 +3,7 @@
 
 import logging
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -26,6 +26,7 @@ from responses_api_agents.terminus_2_sandboxed_agent.app import (
     NeMoGymTerminus2,
     Terminus2Agent,
     Terminus2AgentConfig,
+    Terminus2AgentRunRequest,
     _instruction,
 )
 
@@ -230,7 +231,10 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output(reasoning
 @pytest.mark.parametrize("dump_trajectory", [False, True])
 @pytest.mark.parametrize("debug", [False, True])
 @pytest.mark.parametrize("interleaved_thinking", [False, True])
-async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_trajectory, debug, interleaved_thinking):
+@pytest.mark.parametrize("terminal_hidden_mounts", [[], ["/mnt/s3-data", "/mnt/.s3-gate"]])
+async def test_execute_runs_terminus_in_seeded_sandbox(
+    monkeypatch, dump_trajectory, debug, interleaved_thinking, terminal_hidden_mounts
+):
     config = Terminus2AgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -248,6 +252,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         model_context_limit=32_000,
         model_output_limit=4_000,
         interleaved_thinking=interleaved_thinking,
+        terminal_hidden_mounts=terminal_hidden_mounts,
         llm_request_timeout=60,
         sandbox_provider="opensandbox",
         sandbox_timeout=10,
@@ -284,6 +289,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
             assert instruction == "solve this"
             assert self.kwargs["dump_trajectory"] is dump_trajectory
             assert self.kwargs["interleaved_thinking"] is interleaved_thinking
+            assert self.kwargs["terminal_hidden_mounts"] == terminal_hidden_mounts
             await environment.exec("tmux run")
             self.kwargs["llm"]._times_spent.extend([2.0, 4.0])
             self.kwargs["llm"]._num_compactions = 2
@@ -351,3 +357,104 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         ("tmux setup", {"timeout_s": None, "cwd": None, "user": None, "env": None}),
         ("tmux run", {"timeout_s": None, "cwd": None, "user": None, "env": None}),
     ]
+
+
+def _run_fixture(monkeypatch, *, failure: str | None):
+    """Build an agent whose run() uses fakes; `failure` is "setup", "verify" or None."""
+    config = Terminus2AgentConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="app.py",
+        name="terminus_2_1_agent",
+        resources_server=ResourcesServerRef(type="resources_servers", name="terminal_bench_2_1_resources_server"),
+        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        max_turns=100,
+        enable_summarize=True,
+        proactive_summarization_threshold=8000,
+        tmux_pane_width=160,
+        tmux_pane_height=40,
+        dump_trajectory=False,
+        debug=False,
+        model_context_limit=32_000,
+        model_output_limit=4_000,
+        interleaved_thinking=True,
+        terminal_hidden_mounts=["/mnt/s3-data", "/mnt/.s3-gate"],
+        llm_request_timeout=60,
+        sandbox_provider="opensandbox",
+        sandbox_timeout=10,
+        remote_tmux_binary_path=None,
+    )
+    monkeypatch.setattr(app_module.harbor_logger, "setLevel", MagicMock())
+    server_client = MagicMock(spec=ServerClient)
+    seed_response = SimpleNamespace(cookies={}, json=AsyncMock(return_value={"sandbox_handle": "sandbox-1"}))
+    server_client.post = AsyncMock(side_effect=[seed_response, SimpleNamespace(cookies={})])
+    server = Terminus2Agent(config=config, server_client=server_client)
+
+    async def sandbox_exec(command, **kwargs):
+        return SimpleNamespace(stdout="", stderr="", return_code=0)
+
+    sandbox = SimpleNamespace(exec=sandbox_exec, stop=AsyncMock())
+
+    class FakeTerminus:
+        def __init__(self, **kwargs):
+            self._times_spent = []
+            self._num_proactive_compactions = 0
+
+        async def setup(self, environment):
+            if failure == "setup":
+                raise RuntimeError("Private terminal mount bootstrap failed: Private terminal requires tmux")
+
+        async def run(self, instruction, environment, context):
+            context.n_input_tokens = 1
+            context.n_output_tokens = 1
+
+    class FakeContext:
+        n_input_tokens = None
+        n_cache_tokens = None
+        n_output_tokens = None
+
+    verify_failure = RuntimeError("verifier unavailable")
+    monkeypatch.setattr(
+        app_module, "raise_for_status", AsyncMock(side_effect=[None, verify_failure] if failure == "verify" else None)
+    )
+    monkeypatch.setattr(app_module, "NeMoGymTerminus2", FakeTerminus)
+    monkeypatch.setattr(app_module, "AgentContext", FakeContext)
+    monkeypatch.setattr(app_module, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+    monkeypatch.setattr(app_module.Terminus2AgentVerifyResponse, "model_validate", lambda value: value)
+    monkeypatch.setattr(Terminus2Agent, "base_url_for_run", lambda *_args, **_kwargs: "http://model")
+    monkeypatch.setattr(Terminus2Agent, "_connect_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model")
+
+    async def request_json():
+        return {"task_id": "task"}
+
+    request = SimpleNamespace(cookies={}, json=request_json, session={app_module.SESSION_ID_KEY: "session-1"})
+    body = Terminus2AgentRunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="solve"))
+    return server, server_client, sandbox, request, body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["setup", "verify"])
+async def test_run_releases_sandbox_and_session_reference_when_a_step_before_grading_fails(monkeypatch, failure):
+    server, server_client, sandbox, request, body = _run_fixture(monkeypatch, failure=failure)
+
+    expected = "Private terminal requires tmux" if failure == "setup" else "verifier unavailable"
+    with pytest.raises(RuntimeError, match=expected):
+        await server.run(request, body)
+
+    sandbox.stop.assert_awaited_once()
+    assert server._session_sandboxes == {}
+    called = [call.kwargs["url_path"] for call in server_client.post.await_args_list]
+    assert called == (["/seed_session"] if failure == "setup" else ["/seed_session", "/verify"])
+
+
+@pytest.mark.asyncio
+async def test_run_stops_sandbox_once_and_returns_merged_result_on_success(monkeypatch):
+    server, _, sandbox, request, body = _run_fixture(monkeypatch, failure=None)
+
+    result = await server.run(request, body)
+
+    sandbox.stop.assert_awaited_once()
+    assert server._session_sandboxes == {}
+    assert result["reward"] == 1.0
+    assert result["terminus2_completed"] is True

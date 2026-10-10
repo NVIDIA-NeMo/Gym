@@ -1,1 +1,4 @@
 terminal-bench-2-1
+data/inkling-small-tasks/
+data/.inkling-small-prepare.lock
+data/inkling-clone-*/

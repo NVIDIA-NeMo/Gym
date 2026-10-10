@@ -83,6 +83,10 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
 
 
 GOLDEN_PATCH_SOLVE_SH_PATCHES = {
+    # This install is in solution/solve.sh, not tests/test.sh.
+    "terminal-bench/mcmc-sampling-stan": [
+        ("sudo apt-get install -y \\\n    gfortran", "sudo apt-get install -y \\\n    cmake \\\n    gfortran"),
+    ],
     "terminal-bench/build-cython-ext": [
         (
             "pip install setuptools==80.9.0 cython==3.1.3",
@@ -92,20 +96,25 @@ GOLDEN_PATCH_SOLVE_SH_PATCHES = {
     "terminal-bench/build-pov-ray": [
         ("wget=1.21.4-1ubuntu4.1", "wget"),
         ("ncompress=5.0-1", "ncompress"),
+        # The official host rejects downloads and the previous mirror is unreachable.
+        # These archived copies retain the SHA-256 pins below.
+        # https://github.com/harbor-framework/terminal-bench-2/pull/77
         (
             "wget https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVDOC.TAR.Z",
             "wget --tries=5 --timeout=60 --output-document=POVDOC.TAR.Z "
-            "http://grumbeer.dyndns.org/ftp/cdroms/freebsd/freebsd-2.1.7-2/ports/distfiles/povdoc.tar.Z",
+            "https://web.archive.org/web/20180330013814id_/"
+            "http://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVDOC.TAR.Z",
         ),
         (
             "wget https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVSCN.TAR.Z",
             "wget --tries=5 --timeout=60 --output-document=POVSCN.TAR.Z "
-            "http://grumbeer.dyndns.org/ftp/cdroms/freebsd/freebsd-2.1.7-2/ports/distfiles/povscn.tar.Z",
+            "https://web.archive.org/web/20180330013815id_/"
+            "http://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVSCN.TAR.Z",
         ),
         (
             "wget https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVSRC.TAR.Z",
             """wget --tries=5 --timeout=60 --output-document=POVSRC.TAR.Z \\
-  http://grumbeer.dyndns.org/ftp/cdroms/freebsd/freebsd-2.1.7-2/ports/distfiles/povsrc.tar.Z
+  https://web.archive.org/web/20180330013813id_/http://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVSRC.TAR.Z
 cat <<'EOF' | sha256sum --check -
 e70e44d1fe8835c4dff7c7a55bd6629b15e6a15b2ab7f2f49ee9e2dc016cc470  POVDOC.TAR.Z
 4272e2d4724d8dfd916d68827194577221d17b733d99e84e7040f3a9f7eb92a7  POVSCN.TAR.Z
@@ -116,8 +125,13 @@ EOF""",
 }
 
 TEST_SH_PATCHES = {
-    "terminal-bench/mcmc-sampling-stan": [
-        ("sudo apt-get install -y \\\n    gfortran", "sudo apt-get install -y \\\n    cmake \\\n    gfortran"),
+    # Agent installs without recommends can leave curl present but its CA bundle
+    # absent. Install the verifier's HTTPS dependency explicitly at grading time.
+    "terminal-bench/compile-compcert": [
+        ("apt-get install -y curl binutils", "apt-get install -y curl ca-certificates binutils"),
+    ],
+    "terminal-bench/extract-moves-from-video": [
+        ("apt-get install -y curl", "apt-get install -y curl ca-certificates"),
     ],
     "terminal-bench/pytorch-model-recovery": [
         ("-w torch==2.7.1", "-w torch==2.7.1 --index https://download.pytorch.org/whl/cpu"),
@@ -229,7 +243,11 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
     @contextmanager
     def _patch_golden_patch_solve_sh(
-        self, task_name: str, local_fpath: Path, patches: Dict[str, List[Tuple[str, str]]]
+        self,
+        task_name: str,
+        local_fpath: Path,
+        patches: Dict[str, List[Tuple[str, str]]],
+        unmatched: set[str],
     ):
         if task_name not in patches or local_fpath.suffix != ".sh":
             yield local_fpath
@@ -237,7 +255,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         content = local_fpath.read_text()
         for old, new in patches[task_name]:
-            content = content.replace(old, new)
+            if old in content:
+                unmatched.discard(old)
+                content = content.replace(old, new)
 
         with NamedTemporaryFile(mode="w+", suffix=".sh", delete_on_close=False) as temp_file:
             temp_file.write(content)
@@ -256,6 +276,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if not local_dirpath.is_absolute():
             local_dirpath = PARENT_DIR / local_dirpath
 
+        # A patch may match any one script in the folder. One that matches none means the task's scripts changed
+        # (the default benchmark clones upstream unpinned), so warn rather than fail: the stale repair is simply
+        # not applied. A unit test checks that every patch matches the pinned task scripts.
+        unmatched = {old for old, _ in patches.get(task_name, [])}
         for file in glob("**", root_dir=str(local_dirpath), recursive=True):
             local_fpath = local_dirpath / file
             if not local_fpath.is_file():
@@ -265,8 +289,15 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             mkdir_result = await sandbox.exec(f"mkdir -p {Path(target_fpath).parent}")
             assert mkdir_result.return_code == 0, mkdir_result
 
-            with self._patch_golden_patch_solve_sh(task_name, local_fpath, patches) as new_local_fpath:
+            with self._patch_golden_patch_solve_sh(task_name, local_fpath, patches, unmatched) as new_local_fpath:
                 await sandbox.upload(local_path=new_local_fpath, remote_path=target_fpath)
+
+        if unmatched:
+            print(
+                f"WARNING: {task_name}: patches matched no .sh file under {local_dirpath}; the task scripts may have "
+                f"changed, so these repairs were not applied. Unmatched: {sorted(unmatched)}",
+                file=stderr,
+            )
 
     async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
         task_folder = Path(body.task_folder)

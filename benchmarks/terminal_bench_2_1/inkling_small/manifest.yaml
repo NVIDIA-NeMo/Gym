@@ -1,0 +1,31 @@
+name: terminal_bench_2_1/inkling_small
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: Terminal-Bench 2.1 with the Terminus 2 agent configured for Inkling-Small, using pinned
+  task inputs and a terminal-interaction note appended to every task prompt.
+modality: text
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../inkling_small.yaml
+resources_server: terminal_bench_2_1
+agent_server: terminus_2_sandboxed_agent
+datasets:
+- name: terminal_bench_2_1_inkling_small
+  type: benchmark
+  jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark_inkling_small.jsonl
+  prepare_script: benchmarks/terminal_bench_2_1/prepare_inkling_small.py
+  num_repeats: 8
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

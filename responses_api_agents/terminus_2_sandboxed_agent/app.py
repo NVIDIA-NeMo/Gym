@@ -16,6 +16,8 @@ from uuid import uuid4
 
 from fastapi import Request
 from harbor.agents.terminus_2 import Terminus2
+from harbor.agents.terminus_2.terminus_2 import Command
+from harbor.agents.terminus_2.tmux_session import TmuxSession
 from harbor.llms.base import BaseLLM, ContextLengthExceededError, LLMResponse
 from harbor.models.agent.context import AgentContext
 from harbor.models.metric.usage_info import UsageInfo
@@ -63,6 +65,7 @@ from responses_api_agents.terminus_2_sandboxed_agent.terminal import (
     TerminusTmuxSession,
     TerminusXMLParser,
 )
+from responses_api_agents.terminus_2_sandboxed_agent.terminal_mounts import private_terminal_bootstrap
 
 
 class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
@@ -79,6 +82,7 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     model_context_limit: int
     model_output_limit: int | None
     interleaved_thinking: bool
+    terminal_hidden_mounts: list[str] = Field(default_factory=list)
 
     llm_request_timeout: int
 
@@ -335,9 +339,19 @@ class NeMoGymLLM(BaseLLM):
 class NeMoGymTerminus2(Terminus2):
     """Terminus 2 with NeMo Gym model calls and optional Harbor file trajectories."""
 
-    def __init__(self, *args: Any, llm: NeMoGymLLM, dump_trajectory: bool, **kwargs: Any):
+    def __init__(
+        self,
+        *args: Any,
+        llm: NeMoGymLLM,
+        dump_trajectory: bool,
+        terminal_hidden_mounts: list[str] | None = None,
+        **kwargs: Any,
+    ):
         self._nemo_gym_llm = llm
         self._dump_trajectory_enabled = dump_trajectory
+        self._terminal_mount_bootstrap = (
+            private_terminal_bootstrap(terminal_hidden_mounts) if terminal_hidden_mounts else None
+        )
         self._times_spent = []
         self._num_proactive_compactions = 0
         self._completed_command_batches = 0
@@ -355,6 +369,12 @@ class NeMoGymTerminus2(Terminus2):
         raise ValueError(f"Unknown parser_name: {self._parser_name}. Use 'json' or 'xml'.")
 
     async def setup(self, environment: NeMoGymSandboxEnvironment) -> None:
+        if self._terminal_mount_bootstrap is not None:
+            # Starting tmux here makes the session below inherit the private mounts. Direct
+            # sandbox execution (including grading) keeps its original view.
+            result = await environment.exec(self._terminal_mount_bootstrap, user="root", timeout_sec=25)
+            if result.return_code != 0:
+                raise RuntimeError(f"Private terminal mount bootstrap failed: {result.stdout}\n{result.stderr}")
         self._session = TerminusTmuxSession(
             session_name=self.name(),
             environment=environment,
@@ -370,7 +390,20 @@ class NeMoGymTerminus2(Terminus2):
             extra_env=self._extra_env,
             user=environment.default_user,
         )
-        await self._session.start()
+        setup_succeeded = False
+        try:
+            await self._session.start()
+            setup_succeeded = True
+        finally:
+            if self._terminal_mount_bootstrap is not None:
+                try:
+                    result = await environment.exec("tmux kill-session -t gym-internal-mount-bootstrap", user="root")
+                    if result.return_code != 0:
+                        raise RuntimeError(f"Private terminal mount bootstrap cleanup failed: {result.stderr}")
+                except Exception:
+                    if setup_succeeded:
+                        raise
+                    self.logger.warning("Private terminal bootstrap cleanup failed after setup failure", exc_info=True)
 
     def _dump_trajectory_with_continuation_index(self, continuation_index: int) -> None:
         if self._dump_trajectory_enabled:
@@ -393,7 +426,7 @@ class NeMoGymTerminus2(Terminus2):
             self._nemo_gym_llm.observations.decision_response = response
         return response
 
-    async def _execute_commands(self, commands, session):
+    async def _execute_commands(self, commands: list[Command], session: TmuxSession) -> tuple[bool, str]:
         start_time = perf_counter()
         try:
             res = await super()._execute_commands(commands, session)
@@ -526,6 +559,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 llm=llm,
                 dump_trajectory=self.config.dump_trajectory,
                 interleaved_thinking=self.config.interleaved_thinking,
+                terminal_hidden_mounts=self.config.terminal_hidden_mounts,
             )
 
             await environment.exec("mkdir -p /logs/agent", user="root")
@@ -651,21 +685,24 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         session_key = request.session[SESSION_ID_KEY]
         self._session_sandboxes[session_key] = sandbox
 
-        response, metrics = await self._execute(request, body.responses_create_params, sandbox)
-
-        verification = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=body.model_dump() | {"response": response.model_dump()},
-            cookies=cookies,
-        )
-        await raise_for_status(verification)
-
-        self._session_sandboxes.pop(session_key)
+        # Any failure before grading (for example terminal setup) must still release the sandbox, because
+        # /verify, which normally stops it, never runs. The exception still propagates to the caller.
         try:
-            await sandbox.stop()
-        except:
-            print("Failed to stop sandbox", format_exc(), file=sys.stderr)
+            response, metrics = await self._execute(request, body.responses_create_params, sandbox)
+
+            verification = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=body.model_dump() | {"response": response.model_dump()},
+                cookies=cookies,
+            )
+            await raise_for_status(verification)
+        finally:
+            self._session_sandboxes.pop(session_key, None)
+            try:
+                await sandbox.stop()
+            except Exception:
+                print("Failed to stop sandbox", format_exc(), file=sys.stderr)
 
         result = await get_response_json(verification)
         result.update(metrics)
