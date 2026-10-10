@@ -4309,7 +4309,9 @@ class RolloutAggregationHelper(BaseModel):
         input_paths = _expand_input_glob(config.input_glob)
         if not input_paths:
             raise ConfigPathNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
-        output_fpath = Path(config.output_jsonl_fpath)
+        # Readers and writers must agree before creating any companions. Keep
+        # unambiguous legacy alias layouts, but reject competing companion sets.
+        output_fpath = resolve_rollout_path(Path(config.output_jsonl_fpath), read_only=True)
         # Metrics-only aggregation may target the source basename. Its report
         # must not replace the collector's run-specific completion snapshot.
         report_path = coverage_path_for(

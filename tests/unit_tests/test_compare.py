@@ -1578,3 +1578,131 @@ def test_explicit_comparison_metrics_override_keeps_its_path(tmp_path):
 
     override = tmp_path / "custom_metrics.json"
     assert resolve_aggregate_metrics_fpath(str(tmp_path / "absent.jsonl"), str(override)) == override
+
+
+@pytest.mark.parametrize("merge", [False, True])
+@pytest.mark.parametrize("stale_metrics", [False, True])
+async def test_compare_reads_fresh_metrics_after_aggregation_through_alias(
+    tmp_path, monkeypatch, merge, stale_metrics
+):
+    from unittest.mock import AsyncMock
+
+    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollout_records import coverage_path_for
+    from tests.unit_tests.test_rollout_collection import (
+        FakeResponse,
+        compute_aggregate_metrics,
+        failing_row,
+        install_fake_server_client,
+    )
+
+    source = tmp_path / "source.jsonl"
+    source.write_bytes(orjson.dumps(failing_row(0) | {"reward": 1.0, "response": {}}) + b"\n")
+    target = tmp_path / "merged.jsonl" if merge else source
+    if merge:
+        target.touch()
+    alias = tmp_path / "latest.jsonl"
+    alias.symlink_to(target)
+    if stale_metrics:
+        aggregate_metrics_path_for(target).write_bytes(
+            orjson.dumps([_entry(agent="my_agent", key_metrics={"mean/reward": 0.0})])
+        )
+
+    async def post(**kwargs):
+        assert kwargs["url_path"] == "/aggregate_metrics"
+        return FakeResponse(
+            200, compute_aggregate_metrics([dict(row) for row in kwargs["json"].verify_responses]).model_dump()
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    metrics = await RolloutAggregationHelper().run_from_config(
+        RolloutAggregationConfig(
+            input_glob=str(source), output_jsonl_fpath=str(alias), merge_shards=merge, disable_health_check=True
+        )
+    )
+    assert metrics == aggregate_metrics_path_for(target)
+    assert (
+        build_loaded_run(load_agg_metrics_file(str(alias), role="baseline"), "my_agent").key_metrics["mean/reward"]
+        == 1.0
+    )
+    assert not aggregate_metrics_path_for(alias).exists()
+    coverage = coverage_path_for(target if merge else target.with_stem(target.stem + "_aggregate"))
+    assert coverage.exists()
+    assert alias.is_symlink()
+
+
+async def test_aggregation_and_compare_retain_legacy_alias_sidecars(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from nemo_gym.path_utils import failures_path_for
+    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollout_records import coverage_path_for
+    from tests.unit_tests.test_rollout_collection import (
+        FakeResponse,
+        compute_aggregate_metrics,
+        failing_row,
+        install_fake_server_client,
+    )
+
+    target = tmp_path / "source.jsonl"
+    target.write_bytes(orjson.dumps(failing_row(0) | {"reward": 1.0, "response": {}}) + b"\n")
+    alias = tmp_path / "latest.jsonl"
+    alias.symlink_to(target)
+    failures_path_for(alias).touch()
+
+    async def post(**kwargs):
+        return FakeResponse(
+            200, compute_aggregate_metrics([dict(row) for row in kwargs["json"].verify_responses]).model_dump()
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    result = await RolloutAggregationHelper().run_from_config(
+        RolloutAggregationConfig(
+            input_glob=str(alias), output_jsonl_fpath=str(alias), merge_shards=False, disable_health_check=True
+        )
+    )
+    assert result == aggregate_metrics_path_for(alias)
+    assert (
+        build_loaded_run(load_agg_metrics_file(str(alias), role="baseline"), "my_agent").key_metrics["mean/reward"]
+        == 1.0
+    )
+    assert coverage_path_for(alias.with_stem(alias.stem + "_aggregate")).exists()
+    assert not aggregate_metrics_path_for(target).exists()
+
+
+@pytest.mark.parametrize("merge", [False, True])
+async def test_aggregate_destination_with_competing_alias_companions_is_unchanged(tmp_path, monkeypatch, merge):
+    from unittest.mock import AsyncMock
+
+    from nemo_gym.comparison.loading import resolve_aggregate_metrics_fpath
+    from nemo_gym.path_utils import failures_path_for
+    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from tests.unit_tests.test_rollout_collection import (
+        FakeResponse,
+        compute_aggregate_metrics,
+        failing_row,
+        install_fake_server_client,
+    )
+
+    async def post(**kwargs):
+        return FakeResponse(
+            200, compute_aggregate_metrics([dict(row) for row in kwargs["json"].verify_responses]).model_dump()
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    source = tmp_path / "source.jsonl"
+    source.write_bytes(orjson.dumps(failing_row(0) | {"reward": 1.0, "response": {}}) + b"\n")
+    target = tmp_path / "target.jsonl"
+    target.write_text("target data\n")
+    alias = tmp_path / "latest.jsonl"
+    alias.symlink_to(target)
+    failures_path_for(alias).write_text("alias evidence\n")
+    failures_path_for(target).write_text("target evidence\n")
+    before = {p: p.read_bytes() for p in tmp_path.iterdir()}
+    with pytest.raises(ConfigError, match="beside the rollout alias"):
+        await RolloutAggregationHelper().run_from_config(
+            RolloutAggregationConfig(input_glob=str(source), output_jsonl_fpath=str(alias), merge_shards=merge)
+        )
+    with pytest.raises(ConfigError, match="beside the rollout alias"):
+        resolve_aggregate_metrics_fpath(str(alias), None)
+    assert {p: p.read_bytes() for p in tmp_path.iterdir()} == before
