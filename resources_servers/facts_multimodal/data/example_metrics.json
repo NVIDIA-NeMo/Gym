@@ -1,0 +1,83 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/facts_multimodal/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "Apache 2.0",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 25.0,
+        "Min": 16.0,
+        "Max": 41.0,
+        "Standard deviation": 9.95
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "prompt": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "image_url": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "image_path": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "image_mime_type": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "image_data_url": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "prompt_category": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "image_category": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "user_intent_majority": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "external_information_majority": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "reasoning_requirement_majority": {
+        "unique_count": 3,
+        "total_count": 5
+    }
+}

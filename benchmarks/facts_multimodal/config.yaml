@@ -1,0 +1,26 @@
+config_paths:
+  - resources_servers/facts_multimodal/configs/facts_multimodal.yaml
+
+# Shared with the resources server. `gym eval prepare` forwards this to
+# prepare(), which determines the `input_image.image_url` values in JSONL.
+prepare_script_args:
+  use_base64_images: ${oc.select:use_base64_images,true}
+
+# Gym-native FACTS Multimodal benchmark. It inherits the resources-server,
+# policy-agent, and judge wiring, then replaces the example dataset with the
+# prepared public benchmark subset. `policy_model` is intentionally supplied
+# by `gym env start --model-type inference_provider` (or another compatible
+# model-type overlay), so policy endpoint credentials remain swappable.
+facts_multimodal_benchmark_simple_agent:
+  _inherit_from: facts_multimodal_simple_agent
+  responses_api_agents:
+    simple_agent:
+      max_steps: 1
+      datasets:
+      - name: facts_multimodal
+        type: benchmark
+        jsonl_fpath: benchmarks/facts_multimodal/data/facts_multimodal_benchmark.jsonl
+        prepare_script: benchmarks/facts_multimodal/prepare.py
+        prompt_config: null
+        license: Apache 2.0
+        num_repeats: 1
