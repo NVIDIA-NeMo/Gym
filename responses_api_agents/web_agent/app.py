@@ -1133,16 +1133,22 @@ class WebAgent(SimpleResponsesAPIAgent):
                 time.monotonic() - judge_started,
             )
 
+        # An unreachable site or a missing verdict measured nothing about the
+        # policy. Route the row to the failures sidecar so resume retries it with
+        # a fresh session, within the collector's attempt limit.
+        retry_routing: dict[str, Any] = {}
         if environment_failure_kind is not None:
             verifier_result = WebVerifierResult(
                 valid_sample=False,
                 failure_kind=environment_failure_kind,
             )
+            retry_routing = {NG_FAILURE_CLASS_KEY: "retryable_infrastructure"}
         if verifier_result is None:
             verifier_result = WebVerifierResult(
                 valid_sample=False,
                 failure_kind="web:missing_verifier_result",
             )
+            retry_routing = {NG_FAILURE_CLASS_KEY: "retryable_infrastructure"}
 
         return WebAgentRunResponse(
             responses_create_params=base_body,
@@ -1166,6 +1172,7 @@ class WebAgent(SimpleResponsesAPIAgent):
             cleanup_failure_kind=artifacts.cleanup_failure_kind,
             cleanup_failure_reason=artifacts.cleanup_failure_reason,
             **judge_failure_metadata,
+            **retry_routing,
         )
 
     async def _verify_webvoyager(

@@ -1506,6 +1506,10 @@ async def test_environment_access_failure_is_masked_instead_of_judged(
     assert result.failure_kind == f"web:{runtime_status}"
     assert result.reward == 0.0
     assert result.task_success is False
+    # Unmeasured, so it goes to the failures sidecar and resume retries it.
+    dumped = result.model_dump()
+    assert dumped["_ng_failure_class"] == "retryable_infrastructure"
+    assert "_ng_failure_terminal" not in dumped
     # Judging a forced stop would score a site-access failure as a policy failure.
     assert "/verify" not in [path for _server, path, _body in calls]
     assert "/close" in [path for _server, path, _body in calls]
