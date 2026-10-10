@@ -99,6 +99,7 @@ from nemo_gym.token_id_capture.control_routes import install_rollout_control_rou
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
 from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolver
 from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.token_id_capture.sink import record_ledger_failure
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -1447,7 +1448,8 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         )
         return
     try:
-        await ledger.record_failure(
+        await record_ledger_failure(
+            ledger,
             context.rollout_id,
             context.model_call_id,
             UNCOMMITTED_CALL_REASON,

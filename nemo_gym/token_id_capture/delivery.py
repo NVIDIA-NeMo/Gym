@@ -36,6 +36,7 @@ from __future__ import annotations
 import warnings
 
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.token_id_capture import capture_metrics
 from nemo_gym.token_id_capture.consumer import trajectories_from_source
 from nemo_gym.token_id_capture.protocols import TokenSource
 
@@ -235,14 +236,18 @@ async def retire_rollout_token_capture(
         warnings.warn(f"rollout {rollout_id} has no frozen capture identity to retire.", stacklevel=2)
         return False
     try:
-        return await source.drop(
-            rollout_id,
-            snapshot_id=str(snapshot["snapshot_id"]),
-            version=int(snapshot["version"]),
-        )
+        with capture_metrics.timed("source.drop", component=source):
+            retired = await source.drop(
+                rollout_id,
+                snapshot_id=str(snapshot["snapshot_id"]),
+                version=int(snapshot["version"]),
+            )
     except Exception:
         warnings.warn(f"could not retire the records for rollout {rollout_id}.", stacklevel=2)
         return False
+    if not retired:
+        capture_metrics.count("retire_skipped", "stale_snapshot")
+    return retired
 
 
 def capture_build_can_retire(built: dict | None) -> bool:

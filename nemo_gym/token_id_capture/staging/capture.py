@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from nemo_gym.token_id_capture import capture_metrics
 from nemo_gym.token_id_capture.staging.digest import (
     EXTRAS_DIGEST_VERSION,
     STAGING_DIGEST_VERSION,
@@ -169,59 +170,62 @@ class RolloutTokenCapture:
         self._claim_completion(call)
         admission = call.admission
         try:
-            if admission.mode == "token_in" and prompt_token_ids[: admission.prev_len] != call.prefix_token_ids:
-                raise ValueError("generation prompt does not begin with the gate-authorized token prefix")
-            token_ids_delta, token_mask_delta, logprobs_delta = build_staging_delta(
-                prompt_token_ids=prompt_token_ids,
-                generated_token_ids=generated_token_ids,
-                generated_log_probs=generated_logprobs,
-                prev_len=admission.prev_len,
-            )
-            delta_len = len(token_ids_delta)
-            cum_len = admission.prev_len + delta_len
-            # For a continuation, the comparison above verifies that the prompt starts with the required prefix.
-            # Appending the generated IDs therefore yields the complete sequence for both hashes.
-            chain_hash = compute_chain_hash(admission.parent_chain_hash, token_ids_delta)
-            cumulative_hash = hash_token_ids(list(prompt_token_ids) + list(generated_token_ids))
-            extras_digest = compute_extras_digest(extras)
-            digest = compute_staging_digest(
-                schema_version=admission.schema_version,
-                digest_version=STAGING_DIGEST_VERSION,
-                extras_digest_version=EXTRAS_DIGEST_VERSION,
-                rollout_id=admission.rollout_id,
-                model_call_id=admission.model_call_id,
-                parent_call_id=admission.parent_call_id,
-                mode=admission.mode,
-                prev_len=admission.prev_len,
-                delta_len=delta_len,
-                cum_len=cum_len,
-                weight_version=call.weight_version,
-                token_ids_delta=token_ids_delta,
-                token_mask_delta=token_mask_delta,
-                generation_log_probs_delta=logprobs_delta,
-                extras_digest=extras_digest,
-                chain_hash=chain_hash,
-                cumulative_hash=cumulative_hash,
-            )
-            record = StagedCallRecord(
-                rollout_id=admission.rollout_id,
-                model_call_id=admission.model_call_id,
-                parent_call_id=admission.parent_call_id,
-                mode=admission.mode,
-                prev_len=admission.prev_len,
-                delta_len=delta_len,
-                cum_len=cum_len,
-                weight_version=call.weight_version,
-                digest=digest,
-                token_ids_delta=token_ids_delta,
-                token_mask_delta=token_mask_delta,
-                generation_log_probs_delta=logprobs_delta,
-                extras=extras,
-                extras_digest=extras_digest,
-                chain_hash=chain_hash,
-                cumulative_hash=cumulative_hash,
-            )
+            with capture_metrics.timed("staging.build_record") as timer:
+                if admission.mode == "token_in" and prompt_token_ids[: admission.prev_len] != call.prefix_token_ids:
+                    raise ValueError("generation prompt does not begin with the gate-authorized token prefix")
+                token_ids_delta, token_mask_delta, logprobs_delta = build_staging_delta(
+                    prompt_token_ids=prompt_token_ids,
+                    generated_token_ids=generated_token_ids,
+                    generated_log_probs=generated_logprobs,
+                    prev_len=admission.prev_len,
+                )
+                delta_len = len(token_ids_delta)
+                cum_len = admission.prev_len + delta_len
+                # For a continuation, the comparison above verifies that the prompt starts with the required prefix.
+                # Appending the generated IDs therefore yields the complete sequence for both hashes.
+                chain_hash = compute_chain_hash(admission.parent_chain_hash, token_ids_delta)
+                cumulative_hash = hash_token_ids(list(prompt_token_ids) + list(generated_token_ids))
+                extras_digest = compute_extras_digest(extras)
+                digest = compute_staging_digest(
+                    schema_version=admission.schema_version,
+                    digest_version=STAGING_DIGEST_VERSION,
+                    extras_digest_version=EXTRAS_DIGEST_VERSION,
+                    rollout_id=admission.rollout_id,
+                    model_call_id=admission.model_call_id,
+                    parent_call_id=admission.parent_call_id,
+                    mode=admission.mode,
+                    prev_len=admission.prev_len,
+                    delta_len=delta_len,
+                    cum_len=cum_len,
+                    weight_version=call.weight_version,
+                    token_ids_delta=token_ids_delta,
+                    token_mask_delta=token_mask_delta,
+                    generation_log_probs_delta=logprobs_delta,
+                    extras_digest=extras_digest,
+                    chain_hash=chain_hash,
+                    cumulative_hash=cumulative_hash,
+                )
+                record = StagedCallRecord(
+                    rollout_id=admission.rollout_id,
+                    model_call_id=admission.model_call_id,
+                    parent_call_id=admission.parent_call_id,
+                    mode=admission.mode,
+                    prev_len=admission.prev_len,
+                    delta_len=delta_len,
+                    cum_len=cum_len,
+                    weight_version=call.weight_version,
+                    digest=digest,
+                    token_ids_delta=token_ids_delta,
+                    token_mask_delta=token_mask_delta,
+                    generation_log_probs_delta=logprobs_delta,
+                    extras=extras,
+                    extras_digest=extras_digest,
+                    chain_hash=chain_hash,
+                    cumulative_hash=cumulative_hash,
+                )
+                timer.tokens = cum_len
         except (TypeError, ValueError, OverflowError):
+            capture_metrics.count("capture_failed", "build")
             LOGGER.exception(
                 "token capture could not build rollout %s call %s",
                 admission.rollout_id,
@@ -238,16 +242,18 @@ class RolloutTokenCapture:
             # is passed exactly when the caller supplied attachments so such a
             # sink fails loudly (TypeError -> capture_failed) instead of having
             # its attachments silently dropped by a retry without them.
-            if attachments is None:
-                result = self._sink.stage(record)
-            else:
-                result = self._sink.stage(record, attachments=attachments)
+            with capture_metrics.timed("staging_sink.stage", component=self._sink, tokens=cum_len):
+                if attachments is None:
+                    result = self._sink.stage(record)
+                else:
+                    result = self._sink.stage(record, attachments=attachments)
             if not isinstance(result, StageResult):
                 raise TypeError(f"StagingSink.stage returned {type(result).__name__}, expected StageResult")
         except Exception:
             # The sink is framework code outside Gym's exception hierarchy.
             # This deliberately broad boundary keeps capture failure from
             # failing the model completion.
+            capture_metrics.count("capture_failed", "staging_sink_error")
             LOGGER.exception(
                 "token staging failed for rollout %s call %s",
                 admission.rollout_id,
@@ -255,6 +261,7 @@ class RolloutTokenCapture:
             )
             return self._failed_coords(call)
         if not result.ok:
+            capture_metrics.count("capture_failed", "staging_sink_rejected")
             LOGGER.warning(
                 "token staging sink rejected rollout %s call %s: %s",
                 admission.rollout_id,
