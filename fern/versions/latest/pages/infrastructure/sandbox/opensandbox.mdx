@@ -130,6 +130,30 @@ The provider constructor accepts four optional config sections:
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
 | `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, and the dedicated `status_poll_timeout_s` budget for background status polls. |
 
+## Image policy and setup commands
+
+Two blocks belong to the deployment, not to any task or server. `images.rewrites` is an ordered list of
+`{from, to}` prefix rules applied to every image a sandbox asks for, for a mirror or a derived image that adds
+what the platform needs. `images.auth` maps an image prefix to `{username, password}`; the longest matching
+prefix is sent with the pull, unless the spec carries its own `image_auth`. `setup.commands` run as root in
+every new sandbox after it is ready and before it is handed out, within `setup.timeout_s` each; a failing
+command fails the create and is not retried. `setup.env` is set in every sandbox under the spec's own
+variables, for platform knobs such as the exec daemon's grace period. Keep task-specific settings out of these
+blocks: they apply to everything the provider creates.
+
+```yaml
+sandbox:
+  opensandbox:
+    images:
+      rewrites:
+        - {from: "harborframework/", to: "registry.example/mirror/"}
+      auth:
+        "registry.example/": {username: ${registry_username}, password: ${registry_password}}
+    setup:
+      commands:
+        - "command -v python3 >/dev/null || (apt-get update && apt-get install -y --no-install-recommends python3)"
+```
+
 ## SandboxSpec Provider Options
 
 Set OpenSandbox-specific create options under `SandboxSpec.provider_options`, or under `sandbox_spec.provider_options` in an agent config:

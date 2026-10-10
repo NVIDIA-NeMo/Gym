@@ -749,6 +749,11 @@ def _env_init(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("select a resources server or a manifest-backed workload, not both")
     if scaffold_options and not scaffold_selected:
         args._parser.error("--profile, --reuse-verifier, and reward options require --environment or --benchmark")
+    print(
+        "`gym env init` is deprecated for new datasets: use `gym dataset init <name>` for a Harbor-shaped dataset. "
+        "It remains for custom resources servers until tasksets can host their own tools (RFC gym-harbor-tasks, M23).",
+        file=sys.stderr,
+    )
     target = "nemo_gym.cli.env:init_environment" if scaffold_selected else "nemo_gym.cli.env:init_resources_server"
     dispatch(target, overrides)
 
@@ -794,6 +799,15 @@ def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
         "gitlab": "nemo_gym.cli.dataset:download_jsonl_dataset_cli",
     }
     dispatch(targets[args.storage], overrides)
+
+
+def _dataset_init(args: argparse.Namespace, overrides: list[str]) -> None:
+    from nemo_gym.tasks.harbor.scaffold import init_dataset
+
+    folder = init_dataset(Path(args.root), args.name, image=args.image)
+    print(f"Wrote {folder}")
+    print(f"Next: gym dataset validate {folder}  # the reference solution must score 1")
+    print(f"      gym eval run {folder} --agent <harness> --model-type openai_model --model <model> --model-url <url>")
 
 
 def _dataset_validate(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -924,6 +938,26 @@ COMMANDS = {
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("output", "output_jsonl_fpath", "Output JSONL file.", aliases=("-o",)),
             SEARCH_DIR,
+        ),
+    ),
+    "dataset init": Command(
+        target=_dataset_init,
+        summary="Scaffold a Harbor-shaped dataset: dataset.toml and one task, ready to validate and run.",
+        flags=(
+            Flag(register=lambda p: p.add_argument("name", metavar="NAME", help="Dataset folder name.")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--root",
+                    default=".",
+                    metavar="DIR",
+                    help="Where to create the folder (default: current directory).",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--image", default="python:3.12-slim", metavar="IMAGE", help="The task's prebuilt image."
+                )
+            ),
         ),
     ),
     "dataset validate": Command(

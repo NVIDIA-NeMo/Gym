@@ -840,6 +840,30 @@ class TestSeparateVerifierFields:
         assert config.verifier.collect[0].service == "kafka" and config.verifier.collect[0].timeout_sec == 10
         assert not config.is_shared_verifier
 
+    def test_verifier_mode_is_inferred_as_harbor_does(self):
+        """A [verifier.environment] block alone selects separate mode; only an explicit "shared" keeps it."""
+        config = HarborTaskConfig.model_validate({"verifier": {"environment": {"docker_image": "org/verifier:1"}}})
+        assert not config.is_shared_verifier
+        config = HarborTaskConfig.model_validate(
+            {"verifier": {"environment_mode": "separate"}, "artifacts": ["/app/out"]}
+        )
+        assert not config.is_shared_verifier
+        assert HarborTaskConfig.model_validate({"verifier": {"environment_mode": "shared"}}).is_shared_verifier
+        assert HarborTaskConfig.model_validate({"verifier": {"timeout_sec": 30}}).is_shared_verifier
+
+    def test_separate_mode_without_artifacts_loads_with_a_warning(self, tmp_path, caplog):
+        separate = HELLO_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+        with caplog.at_level("WARNING", logger="nemo_gym.tasks.harbor.task"):
+            task = load_task(write_task(tmp_path / "t", toml=separate))
+        assert not task.config.is_shared_verifier
+        assert any("declares no artifacts" in record.message for record in caplog.records)
+        with_artifacts = separate.replace(
+            'schema_version = "1.4"\n', 'schema_version = "1.4"\nartifacts = ["/logs/artifacts"]\n'
+        )
+        caplog.clear()
+        assert not load_task(write_task(tmp_path / "t", toml=with_artifacts)).config.is_shared_verifier
+        assert not any("declares no artifacts" in record.message for record in caplog.records)
+
     def test_artifact_paths_stay_contained(self):
         with pytest.raises(ValueError, match="inside"):
             HarborTaskConfig.model_validate({"artifacts": ["/app/../etc/passwd"]})
@@ -1006,6 +1030,29 @@ class TestCli:
         _, tokens = build_run(self._prepared(tmp_path), agent, sandbox=None, overrides=[override])
         assert [token for token in tokens if "use_absolute_ip" in token] == [override]
 
+    def test_build_run_merges_caller_overlays_after_component_defaults(self, tmp_path):
+        """A later config_paths entry wins and replaces lists, so a run overlay must come after the
+        component and provider defaults or `setup.commands: []` in opensandbox.yaml would erase it."""
+        from nemo_gym.cli.main import _merge_config_paths
+
+        folder = tmp_path / "ds"
+        tasks = [load_task(write_task(folder / "a"))]
+        prepared = PreparedTaskset("ds", folder, tasks, tmp_path / "out" / "tasks.jsonl", tmp_path / "out")
+        prepared.output_dir.mkdir(parents=True)
+        agent = AgentSelection(tmp_path / "agent.yaml", "hermes_agent", "hermes_agent")
+        overlay = tmp_path / "overlay.yaml"
+
+        _, tokens = build_run(
+            prepared, agent, sandbox="opensandbox", overrides=[f"+config_paths=[{overlay}]", "+split=train"]
+        )
+
+        merged = [token for token in _merge_config_paths(tokens) if token.startswith("+config_paths=[")]
+        assert len(merged) == 1
+        paths = merged[0][len("+config_paths=[") : -1].split(",")
+        assert paths[-1] == str(overlay)
+        assert any(path.endswith("opensandbox.yaml") for path in paths[:-1])
+        assert any(path.endswith("harbor.yaml") for path in paths[:-1])
+
 
 class TestValidationSummary:
     def test_summarizes_rollouts(self, tmp_path):
@@ -1079,6 +1126,85 @@ class TestValidationSummary:
 
         report = summarize_validation(tmp_path / "none.jsonl", [])
         assert report.ok is False and "no rollouts written" in report.text
+
+
+class TestDatasetConfig:
+    """`dataset.toml`'s [gym] table beside the task folders shapes the effective task.toml."""
+
+    def test_absent_or_foreign_file_leaves_the_task_alone(self, tmp_path):
+        folder = tmp_path / "ds"
+        plain = load_task(write_task(folder / "hello"))
+        (folder / "dataset.toml").write_text('[dataset]\nname = "x"\nversion = "1.0"\n')
+        again = load_task(folder / "hello")
+        assert again.config == plain.config and again.digest == plain.digest
+
+    def test_per_task_override_merges_env_and_replaces_fields(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(
+            folder / "hello", toml=HELLO_TOML.replace("[environment]", '[environment]\nenv = { A = "1", B = "2" }')
+        )
+        write_task(folder / "other")
+        (folder / "dataset.toml").write_text(
+            '[gym.tasks."hello".environment]\nenv = { B = "override", CIRCLE_NODE_TOTAL = "3" }\ngpu_types = ["H100"]\n'
+        )
+        hello, other = load_task(folder / "hello"), load_task(folder / "other")
+        assert hello.env == {"A": "1", "B": "override", "CIRCLE_NODE_TOTAL": "3"}
+        assert hello.config.environment.gpu_types == ["H100"]
+        assert other.env == {} and other.config.environment.gpu_types is None
+        # The digest pins the task folder's content; the dataset file is not part of it.
+        assert hello.digest == content_hash(folder / "hello")
+
+    def test_defaults_scale_timeouts_and_resources(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "hello")
+        (folder / "dataset.toml").write_text("[gym.defaults]\ntimeout_multiplier = 2.0\nresource_multiplier = 1.5\n")
+        task = load_task(folder / "hello")
+        assert (task.config.agent.timeout_sec, task.config.verifier.timeout_sec) == (240.0, 240.0)
+        environment = task.config.environment
+        assert (environment.cpus, environment.memory_mb, environment.storage_mb, environment.gpus) == (
+            2,
+            3072,
+            15360,
+            0,
+        )
+
+    @pytest.mark.parametrize(
+        "text,match",
+        [
+            ('[gym.tasks."hello".environment]\nimage_tag = "x"\n', "image_tag"),
+            ('[gym.tasks."hello"]\ncommands = ["rm -rf /"]\n', "commands"),
+            ("[gym.defaults]\ntimeout_multiplier = 0\n", "timeout_multiplier"),
+            ("[gym\n", "dataset.toml"),
+        ],
+    )
+    def test_bad_dataset_files_are_rejected_with_the_file_named(self, tmp_path, text, match):
+        folder = tmp_path / "ds"
+        write_task(folder / "hello")
+        (folder / "dataset.toml").write_text(text)
+        with pytest.raises(HarborTaskError, match=match):
+            load_task(folder / "hello")
+
+
+class TestDatasetInit:
+    """The scaffold is read back by the loader, so `gym dataset init` cannot drift from what runs."""
+
+    def test_scaffold_loads_validates_and_materializes(self, tmp_path):
+        from nemo_gym.tasks.harbor.dataset_config import read_dataset_config
+        from nemo_gym.tasks.harbor.scaffold import init_dataset
+
+        folder = init_dataset(tmp_path, "my-dataset", image="ubuntu:24.04")
+        assert folder == tmp_path / "my-dataset"
+        (task,) = discover_tasks(folder)
+        assert task.task_id == "hello" and task.image == "ubuntu:24.04" and task.has_solution
+        assert task.config.agent.timeout_sec == 600 and task.config.environment.cpus == 1
+        assert read_dataset_config(folder).is_empty  # defaults only, and the per-task example is a comment
+        rows = write_rows([task], folder.name, tmp_path / "out" / "tasks.jsonl")
+        assert rows[0]["task_id"] == {"taskset": "my-dataset", "task_id": "hello"}
+        for script in (folder / "hello" / "tests" / "test.sh", folder / "hello" / "solution" / "solve.sh"):
+            assert script.stat().st_mode & 0o111
+            assert subprocess.run(["bash", "-n", str(script)], capture_output=True).returncode == 0
+        with pytest.raises(FileExistsError):
+            init_dataset(tmp_path, "my-dataset")
 
 
 def test_harbor_task_data_schema_names_the_digest_key():

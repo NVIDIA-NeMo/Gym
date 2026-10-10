@@ -9,6 +9,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
 from nemo_gym.tasks.harbor.digest import content_hash
 from nemo_gym.tasks.harbor.dockerfile import base_image_only
 from nemo_gym.tasks.harbor.models import HarborTaskConfig
@@ -101,6 +102,11 @@ def load_task(path: Path) -> HarborTask:
         config = HarborTaskConfig.model_validate(data)
     except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError) as exc:
         raise HarborTaskError(f"{path / TASK_FILE}: {exc}") from exc
+    # The dataset's own settings sit beside the task folders and shape the effective task.toml.
+    try:
+        config = apply_dataset_config(config, path.name, read_dataset_config(path.parent))
+    except ValueError as exc:
+        raise HarborTaskError(str(exc)) from exc
     instruction_path = path / INSTRUCTION_FILE
     if not instruction_path.is_file():
         raise HarborTaskError(f"{path} has no {INSTRUCTION_FILE}")
@@ -110,6 +116,13 @@ def load_task(path: Path) -> HarborTask:
         instruction = read_instruction(instruction_path)
     except UnicodeDecodeError as exc:
         raise HarborTaskError(f"{instruction_path}: {exc}") from exc
+    if not config.is_shared_verifier and not config.artifacts:
+        # Harbor accepts this shape: the separate verifier still receives /logs/artifacts.
+        logger.warning(
+            "%s uses separate verification but declares no artifacts; the verifier grades a fresh container "
+            "that receives only what the agent writes under /logs/artifacts",
+            path / TASK_FILE,
+        )
 
     environment = config.environment
     image = environment.docker_image

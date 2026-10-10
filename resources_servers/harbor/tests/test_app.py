@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
 import io
 import json
 import tarfile
@@ -12,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor import DIGEST_KEY, load_task
@@ -315,36 +317,14 @@ class TestSeed:
         assert spec.metadata["harbor_task"] == "hello"
 
 
-class TestSetupCommands:
-    def test_setup_commands_run_as_root_after_workdir(self, tmp_path, monkeypatch):
-        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
-        server.config.sandbox_setup_commands = ["sed -i s/a/b/ /etc/apt/sources.list", "apt-get update || true"]
-        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
-        assert response.status_code == 200, response.text
-        commands = [call["command"] for call in sandbox.execs]
-        assert commands[0] == "mkdir -p /app"
-        assert commands[2:4] == server.config.sandbox_setup_commands
-        assert all(call["user"] == "root" for call in sandbox.execs[1:3])
-
-    def test_failing_setup_command_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
-        class Failing(FakeSandbox):
-            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
-                if command == "false":
-                    return SandboxExecResult(stdout="", stderr="nope", return_code=1)
-                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
-
-        sandbox = Failing()
-        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, sandbox)
-        server.config.sandbox_setup_commands = ["false"]
-        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
-        assert response.status_code == 503
-        assert "nope" in response.json()["detail"] and sandbox.stopped
-
-
 class TestSeedWorkdirAndResources:
     def test_seed_creates_the_logs_folders_and_per_task_env(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
-        server.config.sandbox_env_by_task = {"hello": {"CIRCLE_NODE_TOTAL": "3"}, "other": {"X": "1"}}
+        # Per-task environment comes from the dataset's own file, applied by the loader; the server sees plain tasks.
+        (task.path.parent / "dataset.toml").write_text(
+            '[gym.tasks."hello".environment]\nenv = { CIRCLE_NODE_TOTAL = "3" }\n[gym.tasks."other".environment]\nenv = { X = "1" }\n'
+        )
+        task = load_task(task.path)
         monkeypatch.setattr(
             "resources_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
         )
@@ -384,18 +364,19 @@ class TestSeedWorkdirAndResources:
         assert created == [("hello", None)]
         assert response.json()["sandbox_access"]["workdir"] == "/work"
 
-    def test_resources_override_and_cpu_env(self, tmp_path, monkeypatch):
+    def test_resources_override_and_no_injected_env(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         monkeypatch.setattr(
             "resources_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
         )
         spec = server._sandbox_spec(task, "/app")
-        assert spec.resources.cpu == 1.0 and spec.env["OMP_NUM_THREADS"] == "1"
+        # Like Docker and Harbor, the sandbox gets exactly the task's [environment].env and nothing derived.
+        assert spec.resources.cpu == 1.0 and spec.env == {}
 
         server.config.sandbox_resources_override = {"cpu": 4, "memory_mib": 16384, "disk_gib": 30}
         spec = server._sandbox_spec(task, "/app")
         assert (spec.resources.cpu, spec.resources.memory_mib, spec.resources.disk_gib) == (4.0, 16384, 30)
-        assert spec.env["OMP_NUM_THREADS"] == "4"
+        assert spec.env == {}
 
         # The override merges over the task's resources, so a GPU request survives a CPU/memory override.
         task.config.environment.gpus = 1
@@ -404,9 +385,6 @@ class TestSeedWorkdirAndResources:
         assert spec.resources.gpu == 1 and spec.resources.cpu == 4.0
         task.config.environment.gpus = None
         task.config.environment.gpu_types = None
-
-        server.config.derive_cpu_env = False
-        assert "OMP_NUM_THREADS" not in server._sandbox_spec(task, "/app").env
 
 
 class TestVerify:
@@ -1008,24 +986,25 @@ class TestComposeAndRouting:
         assert compose.stopped
 
 
-def test_image_rewrites_apply_to_agent_and_verifier_images(tmp_path, monkeypatch):
-    server, task, _, _ = make_server(tmp_path, monkeypatch)
-    (task.path / "task.toml").write_text(SEPARATE_TOML)
-    task = load_task(task.path)
-    server.config.image_rewrites = {"org/agent:1": "mirror/agent:derived", "org/verifier:1": "mirror/verifier:derived"}
-    monkeypatch.setattr(
-        "resources_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
-    )
-    server.config.image_rewrite_auth = {"username": "u", "password": "p"}
-    spec = server._sandbox_spec(task, "/app")
-    assert spec.image == "mirror/agent:derived" and spec.provider_options["image_auth"] == {
-        "username": "u",
-        "password": "p",
+def test_server_config_holds_only_deployment_settings():
+    """A setting belongs here only if every dataset on the same deployment wants the same value.
+
+    Task facts stay in task.toml, dataset settings in dataset.toml's [gym] table, image mirrors and
+    setup commands in the sandbox provider. Adding a field means changing this set in the same PR.
+    """
+    own = set(HarborResourcesServerConfig.model_fields) - set(BaseResourcesServerConfig.model_fields)
+    assert own == {
+        "tasksets",
+        "sandbox_provider",
+        "sandbox_ready_timeout_s",
+        "sandbox_ttl_slack_s",
+        "sandbox_provider_options",
+        "sandbox_metadata",
+        "sandbox_resources_override",
+        "gpu_sandbox_provider",
+        "request_gpu_type",
+        "verifier_grace_s",
+        "artifacts_dir",
     }
-    server.config.image_rewrites = {}
-    assert "image_auth" not in server._sandbox_spec(task, "/app").provider_options
-    server.config.image_rewrites = {"org/agent:1": "mirror/agent:derived", "org/verifier:1": "mirror/verifier:derived"}
-    verifier = server._sandbox_spec(
-        task, None, environment=task.config.verifier.environment, image=_verifier_image(task), role="verifier", ttl=1
-    )
-    assert verifier.image == "mirror/verifier:derived"
+    source = inspect.getsource(HarborResourcesServerConfig).lower()
+    assert not any(word in source for word in ("terminal", "tb4", "tb2", "swe", "nextjs", "hello-world"))

@@ -2504,3 +2504,133 @@ async def test_shared_memory_metadata_reaches_create_api(fake_opensandbox_sdk, s
     provider = OpenSandboxProvider(attribution={"enabled": False}, probe={"command": None})
     await provider.create(SandboxSpec(image="image:tag", metadata={"nemo.nvidia.com/shm": size}))
     assert FakeSandbox.created_kwargs["metadata"]["nemo.nvidia.com/shm"] == size
+
+
+def test_images_config_rewrites_prefixes_and_picks_the_longest_auth_prefix() -> None:
+    images = opensandbox_provider.OpenSandboxImagesConfig(
+        rewrites=[{"from": "harborframework/", "to": "registry.example/mirror/"}],
+        auth={
+            "registry.example/": {"username": "outer", "password": TEST_REGISTRY_PASSWORD},
+            "registry.example/mirror/": {"username": "inner", "password": TEST_REGISTRY_PASSWORD},
+        },
+    )
+    assert images.resolve(None) == (None, None)
+    assert images.resolve("python:3.11") == ("python:3.11", None)
+    image, auth = images.resolve("harborframework/tb:abc@sha256:0")
+    assert image == "registry.example/mirror/tb:abc@sha256:0" and auth["username"] == "inner"
+    image, auth = images.resolve("registry.example/other:1")
+    assert image == "registry.example/other:1" and auth["username"] == "outer"
+
+
+async def test_direct_create_applies_the_provider_image_policy(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None},
+        images={
+            "rewrites": [{"from": "harborframework/", "to": "registry.example/mirror/"}],
+            "auth": {"registry.example/": {"username": "mirror", "password": TEST_REGISTRY_PASSWORD}},
+        },
+    )
+    await provider.create(SandboxSpec(image="harborframework/tb:abc"))
+    image = FakeSandbox.created_kwargs["image"]
+    assert image.image == "registry.example/mirror/tb:abc" and image.auth.username == "mirror"
+
+    # A spec's own credentials win over the provider's, and an unrewritten image with no matching prefix is plain.
+    await provider.create(
+        SandboxSpec(
+            image="harborframework/tb:abc", provider_options={"image_auth": {"username": "spec", "password": "x"}}
+        )
+    )
+    assert FakeSandbox.created_kwargs["image"].auth.username == "spec"
+    await provider.create(SandboxSpec(image="python:3.11"))
+    assert FakeSandbox.created_kwargs["image"] == "python:3.11"
+
+
+async def test_direct_create_runs_setup_commands_as_root_and_a_failure_fails_the_create(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None},
+        setup={
+            "commands": ["apt-get update", "false"],
+            "timeout_s": 12,
+            "env": {"EXECD_API_GRACE_SHUTDOWN": "50ms", "A": "provider"},
+        },
+    )
+    calls: list[tuple[str, str | None, float | None]] = []
+    cleaned: list[str] = []
+
+    async def exec_(handle, command, **kwargs):
+        calls.append((command, kwargs.get("user"), kwargs.get("timeout_s")))
+        return opensandbox_provider.SandboxExecResult(
+            stdout="", stderr="boom" if command == "false" else "", return_code=int(command == "false")
+        )
+
+    async def cleanup(handle):
+        cleaned.append(handle.sandbox_id)
+
+    monkeypatch.setattr(provider, "exec", exec_)
+    monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
+    with pytest.raises(opensandbox_provider.OpenSandboxSetupError, match="setup command failed.*false"):
+        await provider.create(SandboxSpec(image="python:3.11", env={"A": "spec"}))
+    assert calls == [("apt-get update", "root", 12), ("false", "root", 12)]
+    assert cleaned == ["sandbox-1"]
+    # The provider's environment sits under the spec's own variables.
+    assert FakeSandbox.created_kwargs["env"] == {"EXECD_API_GRACE_SHUTDOWN": "50ms", "A": "spec"}
+
+
+def test_a_failed_setup_command_is_never_a_retryable_create_error() -> None:
+    # The operator's command failed; a transient-looking marker in its stderr must not re-run the create.
+    error = opensandbox_provider.OpenSandboxSetupError("setup command failed: false; stderr: gateway timeout")
+    assert opensandbox_provider._is_retryable_create_error(error) is False
+    assert opensandbox_provider._is_retryable_sdk_operation_error(error) is False
+
+
+async def test_direct_create_does_not_retry_a_failed_setup_command(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None},
+        create={"retries": 3, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        setup={"commands": ["false"], "timeout_s": 12},
+    )
+    calls: list[str] = []
+    cleaned: list[str] = []
+
+    async def exec_(handle, command, **kwargs):
+        calls.append(command)
+        return opensandbox_provider.SandboxExecResult(stdout="", stderr="gateway timeout", return_code=1)
+
+    async def cleanup(handle):
+        cleaned.append(handle.sandbox_id)
+
+    monkeypatch.setattr(provider, "exec", exec_)
+    monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
+    with pytest.raises(opensandbox_provider.OpenSandboxSetupError):
+        await provider.create(SandboxSpec(image="python:3.11"))
+    assert calls == ["false"] and cleaned == ["sandbox-1"]
+
+
+async def test_a_cancelled_create_still_cleans_up_the_new_sandbox(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None}, setup={"commands": ["sleep 600"]})
+    cleaned: list[str] = []
+    started = asyncio.Event()
+
+    async def exec_(handle, command, **kwargs):
+        started.set()
+        await asyncio.sleep(3600)
+
+    async def cleanup(handle):
+        # The cleanup itself is awaited to completion, not abandoned with the cancelled task.
+        await asyncio.sleep(0)
+        cleaned.append(handle.sandbox_id)
+
+    monkeypatch.setattr(provider, "exec", exec_)
+    monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
+    task = asyncio.create_task(provider.create(SandboxSpec(image="python:3.11")))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleaned == ["sandbox-1"]

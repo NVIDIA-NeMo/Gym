@@ -43,6 +43,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
+from nemo_gym.sandbox.utils import rewrite_image
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -78,6 +79,10 @@ class OpenSandboxCreateTimeoutError(OpenSandboxCreateError):
 
 class OpenSandboxCreateVerificationError(SandboxCreateVerificationError):
     """Raised when a newly-created sandbox cannot execute a probe command."""
+
+
+class OpenSandboxSetupError(RuntimeError):
+    """A provider setup command failed in a new sandbox. Not retried: the command is the operator's."""
 
 
 class SandboxBackendUnreachableError(RuntimeError):
@@ -220,6 +225,9 @@ def _sdk_error_attributes(
 
 def _is_retryable_create_error(exception: BaseException) -> bool:
     """Return whether a sandbox create failure is likely transient."""
+    if isinstance(exception, OpenSandboxSetupError):
+        # The operator's own command failed; its stderr may carry a transient-looking marker.
+        return False
     if isinstance(exception, SandboxCreateVerificationError):
         return True
     if isinstance(exception, SandboxCreateError):
@@ -708,6 +716,41 @@ class OpenSandboxNetworkingConfig:
 
 
 @dataclass
+class OpenSandboxImagesConfig:
+    """Operator image policy for every sandbox this provider creates.
+
+    ``rewrites`` are ordered ``{from, to}`` prefix rules (a mirror, or a derived image that adds what a
+    deployment needs); ``auth`` maps an image prefix to ``{username, password}``, longest prefix wins.
+    Tasks and servers keep naming the published image; the deployment decides what is pulled.
+    """
+
+    rewrites: list[dict[str, str]] = field(default_factory=list)
+    auth: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def resolve(self, image: str | None) -> tuple[str | None, dict[str, str] | None]:
+        resolved = rewrite_image(image, self.rewrites)
+        if resolved is None:
+            return None, None
+        prefix = max((p for p in self.auth if resolved.startswith(p)), key=len, default=None)
+        return resolved, dict(self.auth[prefix]) if prefix is not None else None
+
+
+@dataclass
+class OpenSandboxSetupConfig:
+    """Commands run as root in every new sandbox before it is handed out.
+
+    For repairs the deployment owns rather than the task: an end-of-life distro pointed at its archive,
+    a tool the platform needs in every image. A failing command fails the create.
+    """
+
+    commands: list[str] = field(default_factory=list)
+    timeout_s: float = 600.0
+    # Environment set in every sandbox this provider creates, under the spec's own variables. For
+    # platform knobs such as the exec daemon's grace period, never for task or dataset settings.
+    env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class OpenSandboxRuntimeRequirementsConfig:
     """Operator-supplied capability probes and create-time runtime metadata."""
 
@@ -740,6 +783,8 @@ class OpenSandboxProvider:
         networking: OpenSandboxNetworkingConfig | Mapping[str, Any] | None = None,
         shared_storage: OpenSandboxSharedStorageConfig | Mapping[str, Any] | None = None,
         runtime_requirements: OpenSandboxRuntimeRequirementsConfig | Mapping[str, Any] | None = None,
+        images: OpenSandboxImagesConfig | Mapping[str, Any] | None = None,
+        setup: OpenSandboxSetupConfig | Mapping[str, Any] | None = None,
     ) -> None:
         self._connection = _coerce_config(connection, OpenSandboxConnectionConfig)
         self._create = _coerce_config(create, OpenSandboxCreateConfig)
@@ -749,6 +794,8 @@ class OpenSandboxProvider:
         self._networking = _coerce_config(networking, OpenSandboxNetworkingConfig)
         self._shared_storage = _coerce_config(shared_storage, OpenSandboxSharedStorageConfig)
         self._runtime_requirements = _coerce_config(runtime_requirements, OpenSandboxRuntimeRequirementsConfig)
+        self._images = _coerce_config(images, OpenSandboxImagesConfig)
+        self._setup = _coerce_config(setup, OpenSandboxSetupConfig)
         # Reuse the adapter for this provider's SDK clients. The aiohttp adapter
         # borrows Gym's global session; only the legacy httpx adapter owns a pool.
         self._transport: Any | None = None
@@ -1308,6 +1355,15 @@ class OpenSandboxProvider:
 
         raise RuntimeError("OpenSandbox command submission retry loop did not run")
 
+    async def _run_setup_commands(self, handle: SandboxHandle) -> None:
+        for command in self._setup.commands:
+            result = await self.exec(handle, command, user="root", timeout_s=self._setup.timeout_s)
+            if result.return_code != 0:
+                raise OpenSandboxSetupError(
+                    f"Sandbox {handle.sandbox_id!r} setup command failed (exit {result.return_code}): "
+                    f"{command}\n{(result.stderr or result.stdout or '')[-500:]}"
+                )
+
     async def _verify_created_handle(self, handle: SandboxHandle) -> None:
         if self._probe.command is None:
             return
@@ -1500,7 +1556,7 @@ class OpenSandboxProvider:
         options = OpenSandboxProviderOptions.from_mapping(spec.provider_options)
 
         kwargs: dict[str, Any] = {
-            "env": spec.env,
+            "env": {**self._setup.env, **(spec.env or {})} or None,
             "metadata": spec.metadata,
             "resource": _resource_map(spec.resources),
             "extensions": self._resolve_extensions(options.extensions),
@@ -1513,7 +1569,8 @@ class OpenSandboxProvider:
         elif options.resource_requests is not None:
             kwargs["resource_requests"] = _resource_map(SandboxResources.from_mapping(options.resource_requests))
         if spec.image is not None:
-            kwargs["image"] = _to_image_spec(spec.image, options.image_auth)
+            image, auth = self._images.resolve(spec.image)
+            kwargs["image"] = _to_image_spec(image, options.image_auth or auth)
         if options.snapshot_id is not None:
             kwargs["snapshot_id"] = options.snapshot_id
         if spec.ttl_s is not None:
@@ -1569,8 +1626,11 @@ class OpenSandboxProvider:
             if self._create.skip_health_check:
                 handle = await self._connect_after_create(created_handle, spec)
             await self._verify_created_handle(handle)
-        except Exception:
-            await self._cleanup_failed_create_handle(created_handle)
+            await self._run_setup_commands(handle)
+        except BaseException:
+            # Also on cancellation (a caller's timeout, shutdown): otherwise the pod lives to its TTL.
+            # The shield lets the cleanup finish even if this task is cancelled again meanwhile.
+            await asyncio.shield(self._cleanup_failed_create_handle(created_handle))
             raise
         if self._create.renew_interval_s is not None:
             self._start_renewal(handle, spec.ttl_s)
