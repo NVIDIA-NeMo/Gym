@@ -34,6 +34,7 @@ import logging
 import re
 import time
 import uuid
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -59,8 +60,10 @@ from nemo_gym._checkpoint.generation_cut import (
     GenerationCutPrefixAck,
     GenerationCutReceipt,
 )
+from nemo_gym._checkpoint.telemetry import checkpoint_span
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.episode_types import EpisodeId
+from nemo_gym.telemetry.gym_metrics import record_checkpoint_event
 from nemo_gym.token_id_capture.fingerprint import conversation_digest
 from nemo_gym.token_id_capture.sink import CaptureContext
 from nemo_gym.token_id_capture.staging.records import CaptureAdmission, GenerationCutContinuation
@@ -450,16 +453,24 @@ class PolicyGate:
         inventory = GenerationCutInventory.build(
             checkpoint_id=request.checkpoint_id, server_name=self.server_name, active_prefixes=list(prefixes.values())
         )
-        try:
-            # Half of what remains: a cut is optional, and the stages after this one need time too.
-            async with asyncio.timeout(max(0.0, request.deadline_ts - time.time()) / 2):
-                receipt = await self.cut_requester(backend, inventory)
-            receipt.validate_for(inventory)
-            acks = {ack.ticket_id: ack for ack in receipt.prefixes}
-        except Exception:
-            # A missing cut only costs regeneration after restore; never block the checkpoint on it.
-            LOGGER.warning("generation cut failed on %s; those calls regenerate after restore", backend, exc_info=True)
-            acks = {ticket_id: GenerationCutPrefixAck.failure(prefix) for ticket_id, prefix in prefixes.items()}
+        with checkpoint_span("gym.checkpoint.generation_cut") as span:
+            span.set(calls=len(prefixes))
+            try:
+                # Half of what remains: a cut is optional, and the stages after this one need time too.
+                async with asyncio.timeout(max(0.0, request.deadline_ts - time.time()) / 2):
+                    receipt = await self.cut_requester(backend, inventory)
+                receipt.validate_for(inventory)
+                acks = {ack.ticket_id: ack for ack in receipt.prefixes}
+            except Exception:
+                # A missing cut only costs regeneration after restore; never block the checkpoint on it.
+                LOGGER.warning(
+                    "generation cut failed on %s; those calls regenerate after restore", backend, exc_info=True
+                )
+                acks = {ticket_id: GenerationCutPrefixAck.failure(prefix) for ticket_id, prefix in prefixes.items()}
+            dispositions = Counter(ack.disposition for ack in acks.values())
+            span.set(**{f"cut_{disposition}": count for disposition, count in dispositions.items()})
+        for disposition, count in dispositions.items():
+            record_checkpoint_event("generation_cut", count, disposition=disposition)
         failed = sum(ack.disposition != "durable_prefix" for ack in acks.values())
         if failed:
             LOGGER.warning(
