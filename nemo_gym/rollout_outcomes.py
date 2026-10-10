@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
 from nemo_gym.episode_types import EpisodeFailure, EpisodeId
+from nemo_gym.failure_kinds import AGENT_REQUEST_FAILED, ENVIRONMENT_SERVER_FAILED
 
 
 class RolloutFailure(BaseModel):
@@ -45,9 +46,24 @@ class RolloutFailure(BaseModel):
     http_status: int | None = Field(default=None, ge=100, le=599)
     exception_type: str | None = Field(default=None, max_length=2000)
 
+    @property
+    def sidecar_failure_class(self) -> str:
+        """Route unclassified failures without inventing a canonical failure kind."""
+        return self.failure.failure_kind or (
+            ENVIRONMENT_SERVER_FAILED if self.source == "environment" else AGENT_REQUEST_FAILED
+        )
+
     @model_validator(mode="after")
     def validate_delivery(self) -> Self:
         """Require established delivery for failures reported by the environment."""
         if self.source == "environment" and self.delivery != "delivered":
             raise ValueError("An environment-reported failure requires delivery='delivered'")
         return self
+
+
+class InvalidRolloutResult(ValueError):
+    """An agent returned a body that cannot represent a completed result."""
+
+
+class StaleRolloutResult(InvalidRolloutResult):
+    """A response from another attempt may be transient after a transport retry."""

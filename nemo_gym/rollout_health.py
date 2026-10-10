@@ -21,6 +21,7 @@ from typing import Any
 
 import orjson
 
+from nemo_gym.config_types import ConfigError
 from nemo_gym.health.checks import (
     _INCOMPLETE_MODEL_CALL_GAPS,
     _LENGTH_LIMIT_FINISH_REASONS,
@@ -64,6 +65,11 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
+from nemo_gym.rollout_store import raw_outcomes_are_selected
+
+
+class JournalHealthUnavailable(ConfigError):
+    """This history contains superseded outcomes and requires an exported projection."""
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
@@ -483,13 +489,19 @@ def run_health_checks(
 ) -> HealthCheckResult:
     """Run the RFC's map/group/reduce pipeline and write both reports."""
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
-    paths = [rollout_paths] if isinstance(rollout_paths, Path) else list(rollout_paths)
+    paths = list([rollout_paths] if isinstance(rollout_paths, Path) else rollout_paths)
     if not paths:
         raise ValueError("at least one rollout JSONL path is required")
     for path in paths:
+        if not raw_outcomes_are_selected(path):
+            raise JournalHealthUnavailable(
+                "Health reports for histories with superseded outcomes are a follow-up to evaluation resume. "
+                "Run health checks on a merged selected-result projection from `gym eval aggregate`."
+            )
         if not path.is_file():
             raise FileNotFoundError(f"Rollout JSONL not found: {path}")
 
+    paths = [path.resolve() for path in paths]
     lines = _index_jsonl(paths)
     worker_inputs = [
         _WorkerInput(

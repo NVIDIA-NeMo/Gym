@@ -86,7 +86,15 @@ _AGGREGATE_PROXY_TIMEOUT_SECS = 600.0
 # Result/routing keys this server itself produces. Input rows may carry stale copies
 # (e.g. a rollouts or failures JSONL re-fed as a dataset); they must never collide with
 # the fresh values or leak through the verify echo into the dispatcher's routing.
-_RESERVED_RESULT_KEYS = ("reward", "response", "error", NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY)
+_RESERVED_RESULT_KEYS = (
+    "reward",
+    "response",
+    "error",
+    "failure_reason",
+    NG_FAILURE_CLASS_KEY,
+    NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
+)
 
 
 class RemoteAgentError(RuntimeError):
@@ -464,7 +472,11 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         n = self._num_failures
         if n <= _FAILURE_PRINT_HEAD or n % _FAILURE_PRINT_INTERVAL == 0:
             print(f"[remote_agent] rollout failed (failure #{n}): {error}", flush=True)
-        routing: Dict[str, Any] = {NG_FAILURE_CLASS_KEY: REMOTE_AGENT_FAILURE_CLASS, "error": error}
+        routing: Dict[str, Any] = {
+            NG_FAILURE_CLASS_KEY: REMOTE_AGENT_FAILURE_CLASS,
+            "failure_reason": error,
+            "error": error,
+        }
         if terminal:
             routing[NG_TERMINAL_KEY] = True
         # Dict-merge with later keys winning: `record` is sanitized of reserved keys, but merge

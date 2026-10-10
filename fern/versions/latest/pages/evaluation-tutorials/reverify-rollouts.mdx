@@ -32,6 +32,21 @@ You need the two artifact files that `gym eval run` writes alongside the main ro
 
 Both files are required. `rollouts.jsonl` alone is not sufficient because many resources servers drop verifier-specific fields from the verify response; those fields are preserved in `*_materialized_inputs.jsonl`.
 
+<Note>
+Ordinary re-scoring supports fresh manifest-backed runs when their files contain no superseded attempts. Write the
+new scores to a separate output. If a saved answer was superseded by a newer attempt, first export the selected
+results using `gym eval aggregate`. Judge-only recovery of manifest-backed runs and appending reverified results
+back into those runs remain follow-ups; see [evaluation resume](/main/evaluation/resume).
+
+For manifest- or journal-backed sources, the output and its supporting files cannot overwrite the source run's
+manifest, saved inputs, results, failures or other recovery files, including when `--rollouts` names the run's `_failures` file. These checks include output aliases and the
+`unsafe_` prefix used by `--force`.
+
+For legacy outputs with no manifest or journal, `--resume` and `--append` preserve an existing symlink and an unambiguous
+set of sidecars beside that link. If both the link and its target have companion files, Gym refuses to choose between
+them; back up and reconcile the files first. New outputs put companions beside the resolved target.
+</Note>
+
 ### Relay ATIF trajectories
 
 The initial external-trajectory path accepts the completed, text-only ATIF v1.7 profile emitted by NeMo Relay. It does not load the Relay runtime. You need:
@@ -186,7 +201,14 @@ gym eval reverify \
 # Output written to: results/unsafe_rollouts_reverified.jsonl
 ```
 
-## Recover judge failures
+## Recover judge failures from legacy runs
+
+<Note>
+The `--judge-failed-only` and in-place `--append` examples in this section apply only to legacy runs without a recovery
+manifest. New manifest-backed runs currently retry unfinished tasks from their inputs with
+[evaluation resume](/main/evaluation/resume); judge-only recovery for those runs is a separate follow-up.
+Ordinary re-scoring into a separate output remains available when the saved source has no superseded outcomes.
+</Note>
 
 When a run uses an LLM-as-judge verifier, the judge is a second model call made *after* the expensive policy inference. If that judge call fails (bad key, unreachable or rate-limited endpoint), the sample fails even though the policy `response` is already computed and stored in `<rollouts>_failures.jsonl`. `--judge-failed-only` re-runs the judge on **only** those rollouts, reusing the stored responses — no inference — and merges the recovered rows back with the ones that already scored, so the metrics match a clean run.
 

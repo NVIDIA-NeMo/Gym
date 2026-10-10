@@ -642,7 +642,7 @@ def e2e_rollout_collection():  # pragma: no cover
         rh.shutdown()
 
     if health_check_enabled and collection_completed:
-        from nemo_gym.rollout_health import format_health_report, run_health_checks
+        from nemo_gym.rollout_health import JournalHealthUnavailable, format_health_report, run_health_checks
 
         try:
             health_result = run_health_checks(
@@ -650,10 +650,45 @@ def e2e_rollout_collection():  # pragma: no cover
                 workers=rollout_collection_config.health_check_workers,
                 ignored_checks=rollout_collection_config.health_check_ignored_checks,
             )
+        except JournalHealthUnavailable as error:
+            print(f"Rollout health checks skipped: {error}")
         except Exception:
             logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
         else:
             print(format_health_report(health_result))
+
+    if collection_completed:
+        _check_saved_completion(output_fpath)
+
+
+def _check_saved_completion(output: Path) -> None:
+    """Distinguish a valid partial run from successful CLI completion."""
+    from nemo_gym.rollout_records import coverage_path_for
+    from nemo_gym.rollout_recovery import IncompleteEvaluationError, warn_if_only_omissions
+
+    coverage = coverage_path_for(output.resolve())
+    if coverage.exists():
+        report = json.loads(coverage.read_text())
+        if report.get("complete") is False:
+            if warn_if_only_omissions(
+                expected=report["expected"],
+                completed=report["successful"],
+                intentionally_omitted=report.get("intentionally_omitted", 0),
+            ):
+                return
+            retryable = report.get("retryable", 1) > 0
+            guidance = (
+                "Resume unfinished work after resolving failures."
+                if retryable
+                else "No tasks are eligible for retry: inspect terminal failures, omissions and exhausted budgets."
+            )
+            raise IncompleteEvaluationError(
+                f"{report['successful']}/{report['expected']} samples completed. "
+                f"Partial artifacts retained at {output}. {guidance}",
+                retryable=retryable,
+                # Older coverage reports predate per-invocation progress.
+                made_progress=report.get("outcomes_recorded", 1) > 0,
+            )
 
 
 @exit_cleanly_on_config_error
@@ -664,6 +699,7 @@ def collect_rollouts():  # pragma: no cover
     rch = RolloutCollectionHelper()
 
     asyncio.run(rch.run_from_config(config))
+    _check_saved_completion(Path(config.output_jsonl_fpath))
 
 
 @exit_cleanly_on_config_error

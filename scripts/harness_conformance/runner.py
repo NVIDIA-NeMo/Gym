@@ -16,6 +16,7 @@ from pathlib import Path
 import psutil
 
 from nemo_gym import harness_capabilities
+from nemo_gym.config_types import ConfigError
 from nemo_gym.harness_capabilities.behavior import inspect_behavior
 from nemo_gym.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
 from nemo_gym.harness_capabilities.cli import digest_file, inspect_bundle, json_rows
@@ -214,7 +215,7 @@ def run_suite(
             execution_error |= execution["returncode"] != 0 or execution["timed_out"]
             try:
                 result = inspect_episode(scenario, directory, execution)
-            except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
+            except (ConfigError, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
                 execution_error = True
                 result = {
                     "scenario": scenario.name,
@@ -289,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
     scenarios = tuple(s for s in SCENARIOS if not args.scenario or s.name in args.scenario)
     try:
         _, code = run_suite(harnesses=harnesses, scenarios=scenarios, output=args.output, timeout=args.timeout)
-    except (OSError, ValueError, TypeError, KeyError) as exc:
+    except (ConfigError, OSError, ValueError, TypeError, KeyError) as exc:
         print(f"runner_error: {exc}", file=sys.stderr)
         return 2
     if os.environ.get("GITHUB_ACTIONS") == "true":

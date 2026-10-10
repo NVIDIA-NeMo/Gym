@@ -38,7 +38,17 @@ class TestNamingConvention:
 
     def test_every_name_states_the_layer_that_observed_the_failure(self) -> None:
         """`transport_timeout` and `agent_timeout` are different failures, not one."""
-        domains = ("transport_", "agent_", "judge_", "verifier_", "provider_", "session_", "cohort_", "persistence_")
+        domains = (
+            "transport_",
+            "agent_",
+            "environment_",
+            "judge_",
+            "verifier_",
+            "provider_",
+            "session_",
+            "cohort_",
+            "persistence_",
+        )
         lifecycle = {"cancelled", "kill_shaped", "shutdown"}
 
         undomained = {n for n in FAILURE_KINDS if not n.startswith(domains)} - lifecycle
@@ -135,10 +145,15 @@ class TestNamesTheRepoAlreadyProduces:
     """Labels main emits today must be in the vocabulary, or it describes nothing."""
 
     def test_rollout_collection_row_routing_classes(self) -> None:
-        from nemo_gym.rollout_collection import AGENT_REQUEST_FAILED_FAILURE_CLASS, AGENT_RUN_ERROR_FAILURE_CLASS
+        from nemo_gym.rollout_collection import (
+            AGENT_REQUEST_FAILED_FAILURE_CLASS,
+            AGENT_RUN_ERROR_FAILURE_CLASS,
+            ENVIRONMENT_SERVER_FAILURE_CLASS,
+        )
 
         assert is_registered(AGENT_RUN_ERROR_FAILURE_CLASS)
         assert is_registered(AGENT_REQUEST_FAILED_FAILURE_CLASS)
+        assert is_registered(ENVIRONMENT_SERVER_FAILURE_CLASS)
 
     def test_the_judge_failsafe_class(self) -> None:
         from nemo_gym.rollout_reverification import JUDGE_FAILED_FAILURE_CLASS
