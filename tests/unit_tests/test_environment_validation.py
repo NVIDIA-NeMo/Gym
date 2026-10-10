@@ -380,7 +380,7 @@ def test_infers_custom_agent_profile_from_entrypoint_ast(
     ("implementation", "profile"),
     [
         ("browsecomp_agent", "custom-gym-agent-loop"),
-        ("harbor_agent", "external-agent-loop"),
+        ("mini_swe_agent", "external-agent-loop"),
         ("labbench2_vlm_agent", "custom-gym-verifier"),
     ],
 )

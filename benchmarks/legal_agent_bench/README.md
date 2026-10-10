@@ -65,7 +65,7 @@ Then run against them from a second activated terminal:
 ```bash
 gym eval run --no-serve \
   --benchmark legal_agent_bench \
-  --agent legal_agent_bench_benchmark_harbor_agent \
+  --agent legal_agent_bench_benchmark_agent \
   --input benchmarks/legal_agent_bench/data/legal_agent_bench_benchmark.jsonl \
   --output results/legal_agent_bench_benchmark.jsonl \
   --concurrency 1 \
@@ -96,5 +96,5 @@ uv run pytest -q \
   resources_servers/legal_agent_bench/tests
 ```
 
-Generated indexes, collation metrics, Harbor jobs, source documents, and skills
+Generated indexes, collation metrics, rollout logs, source documents, and skills
 must not be committed.

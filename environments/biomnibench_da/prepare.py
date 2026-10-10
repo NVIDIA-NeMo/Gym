@@ -1,38 +1,37 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Download and materialize BiomniBench-DA as Harbor tasks for NeMo Gym harbor_agent.
+"""Download and materialize BiomniBench-DA as Harbor tasks for the NeMo Gym harbor_tasks Resources Server.
 
 Downloads the upstream ``phylobio/BiomniBench-DA`` dataset from HuggingFace (unless
 already present locally), then materializes it into Harbor task trees with an
 OpenAI-compatible LLM judge, upstream-faithful content otherwise. Supports two
 deployment profiles via ``--environment-type``:
 
-- ``docker``: bind-mount source task data at ``/app/data`` via docker-compose.yaml
-- ``singularity``: copy data into ``environment/files/data`` + ``setup.sh`` staging
+- ``sandbox`` (default): copy task data into ``environment/data``; the harbor_tasks server uploads it to
+  ``/app/data`` after starting the prebuilt image in any Gym sandbox provider (Docker, Apptainer, OpenSandbox, ...)
+- ``docker``: bind-mount source task data at ``/app/data`` via docker-compose.yaml, for Harbor's own ``harbor run``
 
 Examples::
 
-  # Download (if needed) + materialize an example, docker profile
+  # Download (if needed) + materialize an example
   python environments/biomnibench_da/prepare.py \\
     --download \\
     --build-docker-image \\
-    --environment-type docker \\
     --tasks da-10-1 \\
     --include-singletons --include-uncovered \\
     --output-dir environments/biomnibench_da/data/example \\
     --overwrite
 
-  # Materialize the full default (train+test) split, singularity profile,
+  # Materialize the full default (train+test) split,
   # assuming the dataset was already downloaded to --local-dir
   python environments/biomnibench_da/prepare.py \\
     --local-dir environments/biomnibench_da/data/source \\
-    --environment-type singularity \\
-    --output-dir environments/biomnibench_da/data/tasks_singularity \\
+    --output-dir environments/biomnibench_da/data/tasks \\
     --overwrite
 
-Also writes ``<output-dir>/rollout_input.jsonl`` — one ``ng_collect_rollouts`` row per
-materialized task (``instance_id`` form ``<dataset-name>::<task-name>``).
+Also writes ``<output-dir>/rollout_input.jsonl``: one Gym row per materialized task, naming it by
+``harbor_dataset`` (``--dataset-name``) and ``task_name`` and carrying its instruction.
 """
 
 from __future__ import annotations
@@ -59,34 +58,10 @@ DEFAULT_TRAIN_FRACTION = 0.2
 DEFAULT_CONTAINER_DATA_DIR = "/app/data"
 DEFAULT_DOCKER_IMAGE = "biomnibench-da-runtime:smoke"
 DEFAULT_ROLLOUT_INPUT_NAME = "rollout_input.jsonl"
-DEFAULT_AGENT_NAME = "harbor_agent"
+DEFAULT_AGENT_NAME = "biomnibench_da_agent"
 ENV_ROOT = Path(__file__).resolve().parent
 DEFAULT_LOCAL_DIR = ENV_ROOT / "data" / "source"
 DEFAULT_DOCKERFILE = str(ENV_ROOT / "docker" / "biomnibench-da-runtime.Dockerfile")
-
-SINGULARITY_SETUP_SH = """#!/bin/bash
-# BiomniBench-DA Singularity bootstrap: Harbor server deps + task data staging.
-set -e
-if ! python3 -c "import uvicorn, fastapi" 2>/dev/null; then
-  echo "[harbor] Installing server dependencies (Python/uvicorn)..." >&2
-  if python3 -m pip install uvicorn fastapi 2>/dev/null; then
-    :
-  elif python3 -m pip install --user uvicorn fastapi 2>/dev/null; then
-    :
-  elif command -v apt-get >/dev/null 2>&1; then
-    apt-get update -qq 2>/dev/null && apt-get install -y -qq python3-uvicorn python3-fastapi python3-pydantic 2>/dev/null || true
-  elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache py3-uvicorn 2>/dev/null || true
-  fi
-  if ! python3 -c "import uvicorn, fastapi" 2>/dev/null && command -v pip3 >/dev/null 2>&1; then
-    pip3 install --break-system-packages uvicorn fastapi 2>/dev/null || pip3 install uvicorn fastapi 2>/dev/null || true
-  fi
-fi
-if [ -d "${HARBOR_STAGING:-}/data" ]; then
-  mkdir -p /app/data
-  cp -r "${HARBOR_STAGING}/data/." /app/data/
-fi
-"""
 
 SINGLETON_THRESHOLD = 1
 MIN_TRAIN_FOR_SKILL = 1
@@ -162,10 +137,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--environment-type",
-        choices=["docker", "singularity"],
-        default="docker",
-        help="docker: bind-mount data via docker-compose.yaml. "
-        "singularity: stage data under environment/files/ for HPC.",
+        choices=["sandbox", "docker"],
+        default="sandbox",
+        help="sandbox: copy data into environment/data for the harbor_tasks server. "
+        "docker: bind-mount data via docker-compose.yaml for Harbor's own `harbor run`.",
     )
     parser.add_argument(
         "--docker-image",
@@ -240,18 +215,28 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
 def build_rollout_input_rows(
     registry_tasks: list[dict[str, Any]],
     *,
+    output_dir: Path,
     dataset_name: str,
     agent_name: str,
 ) -> list[dict[str, Any]]:
-    """Build ng_collect_rollouts rows for each materialized Harbor task."""
-    return [
-        {
-            "instance_id": f"{dataset_name}::{task['name']}",
-            "responses_create_params": {"input": []},
-            "agent_ref": {"name": agent_name},
-        }
-        for task in registry_tasks
-    ]
+    """Build harbor_tasks rows: the task's dataset alias and name, and its instruction as the user message."""
+    rows = []
+    for task in registry_tasks:
+        task_dir = output_dir / task["path"]
+        toml = tomllib.loads((task_dir / "task.toml").read_text(encoding="utf-8"))
+        rows.append(
+            {
+                "task_id": task["name"],
+                "harbor_dataset": dataset_name,
+                "task_name": task["name"],
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": (task_dir / "instruction.md").read_text(encoding="utf-8")}],
+                    "metadata": {"harbor_agent_timeout_sec": str(toml["agent"]["timeout_sec"])},
+                },
+                "agent_ref": {"name": agent_name},
+            }
+        )
+    return rows
 
 
 def prepare_output_dir(path: Path, overwrite: bool) -> None:
@@ -296,8 +281,8 @@ def is_docker_bind(args: argparse.Namespace) -> bool:
     return args.environment_type == "docker"
 
 
-def is_singularity_copy(args: argparse.Namespace) -> bool:
-    return args.environment_type == "singularity"
+def is_sandbox_copy(args: argparse.Namespace) -> bool:
+    return args.environment_type == "sandbox"
 
 
 def source_task_data_dir(source_task_id: str, args: argparse.Namespace) -> Path:
@@ -384,33 +369,13 @@ def write_docker_compose_yaml(
     path.write_text(text, encoding="utf-8")
 
 
-def write_singularity_setup_sh(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(SINGULARITY_SETUP_SH, encoding="utf-8")
-    path.chmod(0o755)
-
-
-def stage_singularity_data(dst_env: Path) -> None:
-    """Relocate environment/data -> environment/files/data for Singularity staging."""
-    src_data = dst_env / "data"
-    files_data = dst_env / "files" / "data"
-    if not src_data.is_dir():
-        return
-    files_data.parent.mkdir(parents=True, exist_ok=True)
-    if files_data.exists():
-        shutil.rmtree(files_data)
-    shutil.copytree(src_data, files_data)
-    shutil.rmtree(src_data)
-    write_singularity_setup_sh(dst_env / "files" / "setup.sh")
-
-
 def materialize_environment(
     source_dir: Path,
     dst_env: Path,
     source_task_id: str,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    """Create task environment/ for docker bind mounts or singularity file staging."""
+    """Create task environment/ for docker bind mounts or sandbox file upload."""
     env_info: dict[str, Any] = {
         "environment_type": args.environment_type,
         "container_data_dir": DEFAULT_CONTAINER_DATA_DIR,
@@ -431,10 +396,9 @@ def materialize_environment(
         src_env = source_dir / "environment"
         if src_env.is_dir():
             shutil.copytree(src_env, dst_env, dirs_exist_ok=True)
-        stage_singularity_data(dst_env)
-        compose_path = dst_env / "docker-compose.yaml"
-        if compose_path.exists():
-            compose_path.unlink()
+        # environment/data/ uploads to <workdir>/data; a build spec here would turn that upload off.
+        for build_spec in ("docker-compose.yaml", "docker-compose.yml", "Dockerfile"):
+            (dst_env / build_spec).unlink(missing_ok=True)
 
     if is_docker_bind(args):
         compose_path = dst_env / "docker-compose.yaml"
@@ -1094,8 +1058,10 @@ def rewrite_task_toml(
     env = parsed.get("environment", {})
     lines.append("[environment]")
     lines.append(f"build_timeout_sec = {env.get('build_timeout_sec', 600.0)}")
-    if args.docker_image and (is_docker_bind(args) or is_singularity_copy(args)):
+    if args.docker_image:
         lines.append(f"docker_image = {json.dumps(args.docker_image)}")
+    if is_sandbox_copy(args):
+        lines.append('workdir = "/app"')
     if args.storage_mb_override:
         lines.append(f"storage_mb = {args.storage_mb_override}")
     else:
@@ -1259,6 +1225,7 @@ def main() -> None:
     rollout_input_fpath = args.rollout_input_fpath or (args.output_dir / DEFAULT_ROLLOUT_INPUT_NAME)
     rollout_rows = build_rollout_input_rows(
         registry_tasks,
+        output_dir=args.output_dir,
         dataset_name=args.dataset_name,
         agent_name=args.agent_name,
     )
@@ -1337,7 +1304,7 @@ def main() -> None:
         print(f"Data: bind mount -> {DEFAULT_CONTAINER_DATA_DIR} via docker-compose.yaml")
         print(f"Runtime image: {args.docker_image}")
     else:
-        print("Data: copied to environment/files/data with setup.sh staging for Singularity")
+        print(f"Data: copied to environment/data, uploaded to {DEFAULT_CONTAINER_DATA_DIR} by harbor_tasks")
         print(f"Runtime image: {args.docker_image}")
 
 

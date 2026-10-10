@@ -29,12 +29,14 @@ def _write_task_index(parent: Path, count: int) -> tuple[Path, list[str]]:
         rows.append(
             {
                 "agent_ref": {
-                    "name": "legal_agent_bench_harbor_agent",
+                    "name": "legal_agent_bench_agent",
                     "type": "responses_api_agents",
                 },
-                "instance_id": f"legal_agent_bench::{task_name}",
+                "harbor_dataset": "legal_agent_bench",
+                "task_id": task_name,
+                "task_name": task_name,
                 "responses_create_params": {
-                    "input": [],
+                    "input": [{"role": "user", "content": f"<!-- lab_task_id:{task_name} -->"}],
                     "temperature": 1.0,
                     "top_p": 0.95,
                 },
@@ -72,7 +74,7 @@ def test_prepare_writes_deterministic_complete_benchmark_index(monkeypatch, tmp_
 
     rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == EXPECTED_TASK_COUNT
-    assert [row["instance_id"].split("::", 1)[1] for row in rows] == task_names
+    assert [row["task_name"] for row in rows] == task_names
     assert all(
         row["agent_ref"]
         == {
@@ -129,7 +131,7 @@ def test_benchmark_config_is_isolated_and_resolves_shared_cache_paths() -> None:
     benchmark = BenchmarkConfig.from_config_path(CONFIG_FPATH, strict=False)
     assert benchmark is not None
     assert benchmark.name == "legal_agent_bench"
-    assert benchmark.agent_name == "legal_agent_bench_benchmark_harbor_agent"
+    assert benchmark.agent_name == "legal_agent_bench_benchmark_agent"
     assert benchmark.num_repeats == 1
     assert benchmark.dataset.prompt_config is None
     assert benchmark.dataset.jsonl_fpath == Path("benchmarks/legal_agent_bench/data/legal_agent_bench_benchmark.jsonl")
@@ -141,12 +143,15 @@ def test_benchmark_config_is_isolated_and_resolves_shared_cache_paths() -> None:
     )
     resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial_config)
     assert "legal_agent_bench" not in resolved
-    assert "legal_agent_bench_harbor_agent" not in resolved
+    assert "legal_agent_bench_agent" not in resolved
 
     resource = resolved.legal_agent_bench_benchmark_resources_server.resources_servers.legal_agent_bench
-    agent = resolved.legal_agent_bench_benchmark_harbor_agent.responses_api_agents.harbor_agent
-    assert agent.harbor_datasets.legal_agent_bench.local_dataset_path == resource.harbor_tasks_dir
-    assert agent.harbor_agent_kwargs.skills_dir == resource.harness_skills_dir
-    assert agent.harbor_agent_kwargs.max_turns == 60
+    agent = resolved.legal_agent_bench_benchmark_agent.responses_api_agents.harbor_harness_agent
+    environment = resolved.legal_agent_bench_benchmark_environment_server.environment_servers.single_agent_turn_legacy
+    assert resource.harbor_datasets.legal_agent_bench.path == resource.harbor_tasks_dir
+    assert agent.harbor_agent.kwargs.skills_dir == resource.harness_skills_dir
+    assert agent.harbor_agent.kwargs.max_turns == 60
+    assert agent.resources_server.name == "legal_agent_bench_benchmark_resources_server"
+    assert environment.agent_server.name == "legal_agent_bench_benchmark_agent"
     assert len(agent.datasets) == 1
     assert agent.datasets[0].type == "benchmark"

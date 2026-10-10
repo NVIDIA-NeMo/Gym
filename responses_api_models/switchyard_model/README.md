@@ -59,7 +59,7 @@ provider.
 Note that `switchyard_model` is the *route* name, not a provider model id — Switchyard maps it to a
 concrete target. Which model actually served a call comes back on the response, and is recorded per
 call when `observability_enabled` is set. Be aware that some agents overwrite the top-level
-response `model` with the configured policy model name (`harbor_agent` does), so routing
+response `model` with the configured policy model name (Harbor agents do), so routing
 attribution should be read from the model-call capture records rather than the rollout response.
 
 ## Routing-condition record

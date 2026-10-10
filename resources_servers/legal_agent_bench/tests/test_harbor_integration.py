@@ -7,15 +7,12 @@ import asyncio
 import json
 import threading
 import time
-from asyncio import Semaphore
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
 
-from resources_servers.legal_agent_bench.harbor_bridge import REPO_ROOT, LegalAgentBenchHarborBridge
 from resources_servers.legal_agent_bench.legal_harbor_agent import (
     LegalAgentBenchHarborAgent,
     OpenAICompatibleAdapter,
@@ -38,7 +35,6 @@ from resources_servers.legal_agent_bench.verifier import (
     _write_report,
     score_rubric,
 )
-from responses_api_agents.harbor_agent.app import HarborAgentConfig
 
 
 BENCH_DIR = Path(__file__).resolve().parents[1]
@@ -52,44 +48,31 @@ def _write_skills(skills_dir: Path) -> None:
     (skills_dir / ".nemo_gym_asset.json").write_text(json.dumps(marker), encoding="utf-8")
 
 
-def _bridge() -> LegalAgentBenchHarborBridge:
-    config = HarborAgentConfig(
-        name="legal_agent_bench_harbor_agent",
-        host="127.0.0.1",
-        port=0,
-        entrypoint="../../resources_servers/legal_agent_bench/harbor_bridge.py",
-        concurrency=1,
-        model_server={"type": "responses_api_models", "name": "policy_model"},
-        harbor_datasets={"legal_agent_bench": {"local_dataset_path": "/tmp/tasks"}},
-        harbor_environment_type="docker",
-        harbor_jobs_dir="results/legal_agent_bench/harbor_jobs",
-    )
-    return LegalAgentBenchHarborBridge.model_construct(
-        config=config,
-        server_client=MagicMock(),
-        sem=Semaphore(1),
-    )
-
-
-def test_folder_config_is_public_docker_only() -> None:
+def test_folder_config_runs_the_lab_harness_through_harbor_tasks() -> None:
     config = OmegaConf.to_container(OmegaConf.load(BENCH_DIR / "configs" / "legal_agent_bench.yaml"), resolve=False)
     resource = config["legal_agent_bench"]["resources_servers"]["legal_agent_bench"]
-    agent = config["legal_agent_bench_harbor_agent"]["responses_api_agents"]["harbor_agent"]
-
+    agent = config["legal_agent_bench_agent"]["responses_api_agents"]["harbor_harness_agent"]
+    environment = config["legal_agent_bench_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
     assert resource["reward_mode"] == "full_task"
     assert resource["auto_prepare_assets"] is True
-    assert agent["harbor_environment_type"] == "docker"
-    assert agent["harbor_environment_import_path"] is None
-    assert "docker_image" not in json.dumps(agent)
+    assert resource["runtime_image"] == "legal-agent-bench-runtime:latest"
+    assert set(resource["harbor_datasets"]) == {"legal_agent_bench"}
+    assert agent["harbor_agent"]["import_path"].endswith("legal_harbor_agent:LegalAgentBenchHarborAgent")
+    assert environment["resources_server"]["name"] == "legal_agent_bench"
+    assert environment["agent_server"]["name"] == "legal_agent_bench_agent"
 
 
 def test_pinned_snapshot_has_1749_tasks_and_five_committed_examples() -> None:
     examples = [json.loads(line) for line in (BENCH_DIR / "data" / "example.jsonl").read_text().splitlines()]
-    expected_ids = {f"legal_agent_bench::{flatten_task_id(source_id)}" for source_id in SMOKE_TASK_IDS}
+    expected_ids = {flatten_task_id(source_id) for source_id in SMOKE_TASK_IDS}
 
     assert EXPECTED_TASK_COUNT == 1749
     assert len(examples) == 5
-    assert {row["instance_id"] for row in examples} == expected_ids
+    assert {row["task_name"] for row in examples} == expected_ids
+    assert {row["harbor_dataset"] for row in examples} == {"legal_agent_bench"}
+    for row in examples:
+        [message] = row["responses_create_params"]["input"]
+        assert message["content"].startswith("<!-- lab_task_id:")
 
 
 def test_committed_example_rollouts_are_complete_and_match_examples() -> None:
@@ -97,7 +80,8 @@ def test_committed_example_rollouts_are_complete_and_match_examples() -> None:
     rollouts = [json.loads(line) for line in (BENCH_DIR / "data" / "example_rollouts.jsonl").read_text().splitlines()]
 
     assert len(rollouts) == 5
-    assert {row["instance_id"] for row in rollouts} == {row["instance_id"] for row in examples}
+    # The committed rollouts predate harbor_tasks and still name tasks as legal_agent_bench::<task_name>.
+    assert {row["instance_id"].split("::", 1)[1] for row in rollouts} == {row["task_name"] for row in examples}
     for row in rollouts:
         assert row["response"]["status"] == "completed"
         assert row["response"]["error"] is None
@@ -109,20 +93,6 @@ def test_committed_example_rollouts_are_complete_and_match_examples() -> None:
         rewards = row["metadata"]["verifier_result"]["rewards"]
         assert rewards["judge_error_count"] == 0
         assert 0.0 < rewards["criteria_pass_rate"] <= 1.0
-
-
-def test_lab_bridge_restores_standard_routes_and_absolute_paths(monkeypatch, tmp_path) -> None:
-    bridge = _bridge()
-    routes = {route.path for route in bridge.setup_webserver().routes}
-    timestamp = datetime(2026, 7, 8, tzinfo=timezone.utc)
-    jobs_before = bridge._get_jobs_output_dir("org/model", "legal_agent_bench", timestamp)
-    monkeypatch.chdir(tmp_path)
-    jobs_after = bridge._get_jobs_output_dir("org/model", "legal_agent_bench", timestamp)
-
-    assert {"/v1/responses", "/run", "/aggregate_metrics"} <= routes
-    assert jobs_before == jobs_after
-    assert jobs_before.is_absolute()
-    assert jobs_before.is_relative_to(REPO_ROOT)
 
 
 def test_agent_discovers_exactly_three_skills_lazily(tmp_path) -> None:
@@ -155,11 +125,23 @@ def test_agent_rejects_unknown_requested_skill(tmp_path) -> None:
         agent._skill_names()
 
 
+class _Environment:
+    def __init__(self, files: str = "") -> None:
+        self.commands: list[str] = []
+        self.uploads: list[tuple[Path, str]] = []
+        self.files = files
+
+    async def exec(self, command, *_args, **_kwargs):
+        self.commands.append(command)
+        return MagicMock(stdout=self.files, stderr="", return_code=0)
+
+    async def upload_dir(self, source, destination):
+        self.uploads.append((Path(source), destination))
+
+
 @pytest.mark.asyncio
-async def test_container_hydration_uploads_configured_skills_and_documents(tmp_path) -> None:
+async def test_agent_setup_uploads_only_the_configured_skills(tmp_path) -> None:
     skills = tmp_path / "skills"
-    documents = tmp_path / "documents"
-    documents.mkdir()
     _write_skills(skills)
     agent = LegalAgentBenchHarborAgent(
         logs_dir=tmp_path / "logs",
@@ -167,21 +149,32 @@ async def test_container_hydration_uploads_configured_skills_and_documents(tmp_p
         api_base="http://policy/v1",
         skills_dir=skills,
     )
+    environment = _Environment()
+    await agent.setup(environment)
+    # Task documents belong to the Resources Server, which stages them before the agent gets the sandbox.
+    assert environment.uploads == [(skills, "/workspace/skills")]
 
-    class Environment:
-        def __init__(self):
-            self.uploads = []
 
-        async def exec(self, *_args, **_kwargs):
-            return MagicMock(stdout="", stderr="", return_code=0)
+@pytest.mark.asyncio
+async def test_tool_executor_lists_staged_documents_from_the_sandbox(monkeypatch) -> None:
+    from resources_servers.legal_agent_bench.legal_harbor_agent import HarborToolExecutor
 
-        async def upload_dir(self, source, destination):
-            self.uploads.append((Path(source), destination))
+    executor = HarborToolExecutor(_Environment(files="./b.docx\n./a/b.pdf\n"))
 
-    environment = Environment()
-    await agent._hydrate_environment(environment, documents)
+    async def preflight_tool(tool_name, arguments):
+        return "ok", {}
 
-    assert environment.uploads == [(documents, "/workspace/vdr"), (skills, "/workspace/skills")]
+    monkeypatch.setattr(executor, "_run_container_tool", preflight_tool)
+    await executor.preflight()
+    assert executor.get_metrics()["total_vdr_files"] == 2
+    assert executor.get_metrics()["documents_skipped_list"] == ["a/b.pdf", "b.docx"]
+
+
+def test_task_prompt_is_the_instruction_without_marker_and_title() -> None:
+    from resources_servers.legal_agent_bench.legal_harbor_agent import _task_prompt
+
+    instruction = "<!-- lab_task_id:area/task -->\n\n# Title\n\nReview the drafts.\n\nOutput: `memo.docx`.\n"
+    assert _task_prompt(instruction) == "Review the drafts.\n\nOutput: `memo.docx`."
 
 
 @pytest.mark.asyncio

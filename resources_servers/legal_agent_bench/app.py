@@ -1,21 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Resource server lifecycle for Legal Agent Bench."""
+"""Resources Server for Legal Agent Bench: LAB Harbor tasks served and graded through harbor_tasks."""
 
 from __future__ import annotations
 
+import json
+import shlex
 from typing import Literal
 
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field, NonNegativeInt, PositiveFloat, PositiveInt
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
+from resources_servers.harbor_tasks.app import (
+    HarborTaskSession,
+    HarborTasksResourcesServer,
+    HarborTasksResourcesServerConfig,
 )
 from resources_servers.legal_agent_bench.prepare import (
+    DEFAULT_RUNTIME_IMAGE,
     DEFAULT_RUNTIME_TASKS_DIR,
     DEFAULT_SKILLS_DIR,
     DEFAULT_TASKS_DIR,
@@ -40,13 +42,20 @@ JUDGE_CONFIG_TO_ENV = {
 }
 
 
-class LegalAgentBenchResourcesServerConfig(BaseResourcesServerConfig):
+VDR_DIR = "/workspace/vdr"
+
+
+class LegalAgentBenchResourcesServerConfig(HarborTasksResourcesServerConfig):
     model_config = ConfigDict(extra="allow")
 
     harbor_tasks_cache_dir: str = str(DEFAULT_TASKS_DIR)
     harbor_tasks_dir: str = str(DEFAULT_RUNTIME_TASKS_DIR)
     harness_skills_dir: str = str(DEFAULT_SKILLS_DIR)
     auto_prepare_assets: bool = True
+    runtime_image: str = Field(
+        default=DEFAULT_RUNTIME_IMAGE,
+        description="Prebuilt image from any task's environment/Dockerfile; every LAB task shares it.",
+    )
     reward_mode: RewardMode = "full_task"
     judge_base_url: str | None = Field(default=None, description="OpenAI-compatible base URL for the LAB judge.")
     judge_api_key: str | None = Field(default=None, description="API key for the LAB judge endpoint.")
@@ -77,8 +86,8 @@ class LegalAgentBenchResourcesServerConfig(BaseResourcesServerConfig):
     judge_parallelism: PositiveInt = Field(default=6, description="Maximum concurrent LAB judge requests per task.")
 
 
-class LegalAgentBenchResourcesServer(SimpleResourcesServer):
-    """Prepare immutable source assets and a credential-isolated runtime tree."""
+class LegalAgentBenchResourcesServer(HarborTasksResourcesServer):
+    """Prepare immutable source assets and a credential-isolated runtime tree, then serve it as Harbor tasks."""
 
     ray_enabled = False
 
@@ -96,13 +105,23 @@ class LegalAgentBenchResourcesServer(SimpleResourcesServer):
             self.config.harbor_tasks_dir,
             verifier_env=verifier_env,
             reward_mode=self.config.reward_mode,
+            docker_image=self.config.runtime_image,
             cache_is_validated=True,
         )
         return super().setup_webserver()
 
-    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        # Harbor executes the task-local verifier and the agent bridge returns its reward.
-        return BaseVerifyResponse(**body.model_dump(), reward=0.0)
+    async def prepare_sandbox(self, session: HarborTaskSession) -> None:
+        """Stage the task's documents; the agent reads them from the sandbox, never from the task directory."""
+        task_dir = session.task.paths.task_dir
+        docs_dir = task_dir / json.loads((task_dir / "task.json").read_text(encoding="utf-8")).get(
+            "docs_dir", "documents"
+        )
+        environment = session.environment
+        await environment.exec(f"rm -rf {VDR_DIR} && mkdir -p /workspace", user="root")
+        await environment.upload_dir(docs_dir, VDR_DIR)
+        result = await environment.exec(f"chmod -R a+rwX {shlex.quote(VDR_DIR)}", user="root")
+        if result.return_code != 0:
+            raise RuntimeError(f"Cannot stage Legal Agent Bench documents: {result.stderr or result.stdout}")
 
 
 def _build_verifier_env(config: LegalAgentBenchResourcesServerConfig) -> dict[str, str]:

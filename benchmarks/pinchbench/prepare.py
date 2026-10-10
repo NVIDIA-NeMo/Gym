@@ -14,7 +14,7 @@
 # limitations under the License.
 """Prepare the full 147-task PinchBench benchmark dataset.
 
-The PinchBench skill is not vendored (same convention as `harbor_agent` / `mini_swe_agent`:
+The PinchBench skill is not vendored (same convention as `mini_swe_agent`:
 pin an upstream ref, don't copy task files). This clones it at the SAME ref the per-task
 image bakes in — `Dockerfile.benchmark`'s `PINCHBENCH_SKILL_REF` — so the prompts written
 here describe the tasks `benchmark.py` actually loads inside the sandbox.

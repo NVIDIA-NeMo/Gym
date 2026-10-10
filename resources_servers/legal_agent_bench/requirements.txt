@@ -1,2 +1,4 @@
--e nemo-gym[dev,ray] @ ../../
+-e nemo-gym[dev,sandbox] @ ../../
 requests>=2.32.5
+# Harbor: Apache 2.0 https://github.com/laude-institute/harbor/blob/main/LICENSE
+harbor==0.24.0

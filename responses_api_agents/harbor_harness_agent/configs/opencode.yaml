@@ -1,0 +1,43 @@
+# Harbor's OpenCode agent: `--agent-type harbor_harness_agent/opencode`.
+# OpenCode is installed and runs inside the task sandbox, so the Gym model server must be reachable from the sandbox
+# (for the local Docker provider, for example, run sandboxes on the host network).
+harbor_harness_agent_opencode:
+  responses_api_agents:
+    harbor_harness_agent:
+      entrypoint: app.py
+      domain: agent
+      description: Harbor's OpenCode agent in a Resources-owned task sandbox
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      token_id_capture: true
+
+      # Follows harbor.models.trial.config:AgentConfig.
+      harbor_agent:
+        name: opencode
+        model_name: gym/${policy_model_name}
+        override_timeout_sec: null
+        max_timeout_sec: null
+        kwargs:
+          # OpenCode's `openai` provider speaks the Responses API streaming protocol; the Gym model server is used
+          # through Chat Completions instead, as responses_api_agents/opencode_sandboxed_agent does.
+          opencode_config:
+            provider:
+              gym:
+                npm: "@ai-sdk/openai-compatible"
+                name: NeMo Gym
+                options:
+                  baseURL: "{env:OPENAI_BASE_URL}"
+                  # The Gym model server does not check this key; the SDK requires one.
+                  apiKey: gym
+          # Harbor registers model_name's model under this provider and merges this config over it.
+        env: {}
+
+      # The `gym` provider reads the rollout-prefixed model server URL from OPENAI_BASE_URL inside the sandbox.
+      model_base_url_kwarg: null
+      model_base_url_env: [OPENAI_BASE_URL]
+      agent_timeout_multiplier: 1.0
+      logs_dir: results/harbor_harness_agent

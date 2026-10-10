@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from nemo_gym.server_utils import ServerClient
@@ -20,6 +22,8 @@ def _server(tmp_path, **overrides) -> LegalAgentBenchResourcesServer:
         harbor_tasks_cache_dir=str(tmp_path / "cache"),
         harbor_tasks_dir=str(tmp_path / "runtime"),
         harness_skills_dir=str(tmp_path / "skills"),
+        harbor_datasets={"legal_agent_bench": {"path": str(tmp_path / "runtime")}},
+        sandbox_provider="sandbox",
         **overrides,
     )
     return LegalAgentBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -79,6 +83,7 @@ def test_startup_prepares_assets_then_rebuilds_runtime(tmp_path) -> None:
         str(tmp_path / "runtime"),
         verifier_env=judge_env,
         reward_mode="full_task",
+        docker_image="legal-agent-bench-runtime:latest",
         cache_is_validated=True,
     )
     assert "/verify" in {route.path for route in app.routes}
@@ -90,6 +95,8 @@ def test_judge_model_is_preserved_through_openai_compatible_prefix() -> None:
         host="127.0.0.1",
         port=0,
         entrypoint="app.py",
+        harbor_datasets={},
+        sandbox_provider="sandbox",
         judge_base_url="https://judge.example/v1",
         judge_api_key="test-key",  # pragma: allowlist secret
         judge_model_name="provider/model-name",
@@ -99,3 +106,26 @@ def test_judge_model_is_preserved_through_openai_compatible_prefix() -> None:
     assert env["LAB_JUDGE_BASE_URL"] == "https://judge.example/v1"
     assert env["LAB_JUDGE_API_KEY"] == "test-key"  # pragma: allowlist secret
     assert env["LAB_JUDGE_MODEL"] == "openai-compatible/provider/model-name"
+
+
+def test_seed_stages_task_documents_into_the_sandbox(tmp_path) -> None:
+    task_dir = tmp_path / "runtime" / "area__task-one"
+    (task_dir / "documents").mkdir(parents=True)
+    (task_dir / "task.json").write_text("{}", encoding="utf-8")
+
+    class Environment:
+        def __init__(self) -> None:
+            self.commands: list[str] = []
+            self.uploads: list[tuple] = []
+
+        async def exec(self, command, **kwargs):
+            self.commands.append(command)
+            return SimpleNamespace(stdout="", stderr="", return_code=0)
+
+        async def upload_dir(self, source, destination):
+            self.uploads.append((source, destination))
+
+    environment = Environment()
+    session = SimpleNamespace(task=SimpleNamespace(paths=SimpleNamespace(task_dir=task_dir)), environment=environment)
+    asyncio.run(_server(tmp_path).prepare_sandbox(session))
+    assert environment.uploads == [(task_dir / "documents", "/workspace/vdr")]

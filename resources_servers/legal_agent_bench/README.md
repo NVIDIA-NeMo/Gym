@@ -6,9 +6,14 @@ through NeMo Gym and Harbor. The integration is pinned to upstream commit
 `f46ef86e4788545622db25dcffa3aebb7a139929`: 1,749 tasks and the public
 `docx`, `pptx`, and `xlsx` skills.
 
-NeMo Gym schedules rollouts, the custom Harbor agent works with each task's
-documents inside Docker, and the task-local verifier scores every rubric
-criterion with an OpenAI-compatible judge model.
+This server prepares the LAB tasks as Harbor tasks and serves them through
+[`harbor_tasks`](../harbor_tasks/README.md): it starts each task's sandbox,
+stages the task documents at `/workspace/vdr`, and grades the sandbox with the
+task-local verifier, which scores every rubric criterion with an
+OpenAI-compatible judge model. The LAB harness (`legal_harbor_agent.py`, a
+Harbor agent) runs in that sandbox through
+[`harbor_harness_agent`](../../responses_api_agents/harbor_harness_agent/README.md),
+and the single-agent-turn Environment Server drives each episode.
 
 ## Requirements
 
@@ -18,9 +23,14 @@ criterion with an OpenAI-compatible judge model.
 - At least 10 GB of free working space for preparation and the first Docker build
 
 The pinned source download is about 579 MiB; allow a few GiB of free working
-space during preparation. The first task also builds a
-document-tooling Docker image and can take several minutes. Later tasks reuse
-Docker layers.
+space during preparation. Every task starts the same document-tooling image,
+`legal-agent-bench-runtime:latest` (the `runtime_image` setting). Build it once
+after the first `gym env start` has prepared the tasks; it takes several minutes:
+
+```bash
+docker build -t legal-agent-bench-runtime:latest \
+  "$(ls -d resources_servers/legal_agent_bench/data/runtime/harbor_tasks/legal_agent_bench/*/ | head -1)environment"
+```
 
 From a fresh clone, create the repository environment:
 
@@ -124,7 +134,7 @@ In a second activated terminal, collect one rollout:
 
 ```bash
 gym eval run --no-serve \
-  --agent legal_agent_bench_harbor_agent \
+  --agent legal_agent_bench_agent \
   --input resources_servers/legal_agent_bench/data/example.jsonl \
   --output results/legal_agent_bench_smoke_rollout.jsonl \
   --concurrency 1 \
@@ -168,7 +178,8 @@ The default paths are:
 - Generated tasks: `data/cache/harbor_tasks/legal_agent_bench`
 - Public skills: `data/cache/harness/skills`
 - Credential-bearing runtime tasks: `data/runtime/harbor_tasks/legal_agent_bench`
-- Harbor jobs: `results/legal_agent_bench/harbor_jobs`
+- Verifier logs per rollout: `results/legal_agent_bench/harbor_tasks/<rollout>/verifier`
+- Agent logs and trajectory per rollout: `results/legal_agent_bench/harbor_harness_agent/<rollout>/agent`
 - Rollout output: the path passed to `gym eval run`
 
 The runtime tree hardlinks immutable documents from the cache when the
@@ -176,9 +187,9 @@ filesystem permits it, avoiding a second copy of the large document corpus.
 Set `auto_prepare_assets: false` to require a prepopulated valid cache and avoid
 network access at startup.
 
-Each successful Harbor trial contains `result.json`, `verifier/reward.json`,
-`verifier/scores.json`, `verifier/transcript.jsonl`, `agent/trajectory.json`,
-and `agent/artifacts/lab-run/transcript.jsonl`. The agent config artifact
+Each rollout's verifier directory contains `reward.json`, `scores.json`, and
+`transcript.jsonl`; its agent directory contains `trajectory.json` and
+`artifacts/lab-run/transcript.jsonl`. The agent config artifact
 should list exactly `docx`, `pptx`, and `xlsx`.
 
 ## Troubleshooting
@@ -188,10 +199,10 @@ should list exactly `docx`, `pptx`, and `xlsx`.
 - A missing judge setting produces a verifier error in the trial artifacts.
   Confirm the endpoint permits the exact `judge_model_name`.
 - Treat a nonzero `judge_error_count` or `verifier_error` as a judge or
-  infrastructure failure, not an ordinary model failure, even though Harbor
-  receives a numeric zero reward so it can preserve a complete trial result.
-- If Docker appears idle on the first rollout, inspect `docker ps` and the
-  `gym env start` terminal; Harbor is normally building the task image.
+  infrastructure failure, not an ordinary model failure, even though the
+  rollout receives a numeric zero reward so it keeps a complete result.
+- A seed failure naming `legal-agent-bench-runtime:latest` means the runtime
+  image has not been built; see Requirements.
 - Do not copy or publish `data/runtime/`: it can contain local judge credentials.
 - Results are revision-specific and should not be compared directly with runs
   that use a different task snapshot or skill set.

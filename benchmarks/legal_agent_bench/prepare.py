@@ -15,7 +15,7 @@ from resources_servers.legal_agent_bench.prepare import EXPECTED_TASK_COUNT, IND
 BENCHMARK_DIR = Path(__file__).resolve().parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "legal_agent_bench_benchmark.jsonl"
-BENCHMARK_AGENT_NAME = "legal_agent_bench_benchmark_harbor_agent"
+BENCHMARK_AGENT_NAME = "legal_agent_bench_benchmark_agent"
 
 
 def _render_benchmark_index(source_index: Path) -> str:
