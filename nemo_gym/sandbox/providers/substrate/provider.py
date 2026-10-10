@@ -27,7 +27,6 @@ from typing import Any
 
 import grpc
 import httpx
-from tenacity import AsyncRetrying, retry_if_exception, stop_after_delay, wait_random_exponential
 
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
@@ -48,7 +47,7 @@ _TOKEN_TTL_S = 3600
 # Actors are reachable through the atenet router by a name derived from the
 # actor and its atespace. The router resolves it, resuming the actor first if
 # it is suspended.
-ACTOR_DNS_SUFFIX = "actors.resources.substrate.ate.dev"
+TARGET_ACTOR_HEADER = "ate-target-actor"
 
 # Reported when no process exit code exists, because the command never ran or
 # the sandbox itself failed.
@@ -83,30 +82,6 @@ class SubstrateCreateVerificationError(SandboxCreateVerificationError):
     """Raised when a created actor never becomes ready."""
 
 
-def _is_grpc_precondition(exception: BaseException, marker: str) -> bool:
-    return (
-        isinstance(exception, grpc.aio.AioRpcError)
-        and exception.code() == grpc.StatusCode.FAILED_PRECONDITION
-        and marker in (exception.details() or "")
-    )
-
-
-def _is_transitional_delete_error(exception: BaseException) -> bool:
-    """ateapi rejects a delete while the actor is suspending or resuming. The
-    router owns the actor's traffic (a parked request can resume it at any
-    moment), so the client cannot pick a quiet moment - it retries instead."""
-    return _is_grpc_precondition(exception, "not in a deletable status")
-
-
-def _log_control_retry(rpc: str, retry_state: Any) -> None:
-    LOGGER.warning(
-        "Retrying %s after attempt %s; next_sleep_s=%s",
-        rpc,
-        retry_state.attempt_number,
-        getattr(retry_state.next_action, "sleep", None),
-    )
-
-
 def template_name_for_image(image: str) -> str:
     """Derive the ActorTemplate name that serves `image`.
 
@@ -124,10 +99,6 @@ def normalize_image(image: str) -> str:
         if image.startswith(prefix):
             return image[len(prefix) :]
     return image
-
-
-def actor_dns_name(atespace: str, name: str) -> str:
-    return f"{name}.{atespace}.{ACTOR_DNS_SUFFIX}"
 
 
 def _read_kube_config() -> dict[str, Any]:
@@ -190,15 +161,18 @@ class SubstrateCreateConfig:
     ready_timeout_s: float = 1200.0
 
     # never: leave the actor running between calls.
-    # after_exec: suspend once each exec returns, so an idle sandbox costs
-    #   nothing. The next exec goes through the router, which resumes the actor
-    #   before routing, so nothing has to resume it explicitly.
+    # after_exec: SuspendActor once each exec returns. The snapshot goes to
+    #   object storage and the worker is freed.
+    # pause_after_exec: PauseActor instead. The snapshot stays on the node, so
+    #   the next resume skips the download but has to land on the same node.
+    # Either way the next exec goes through the router, which resumes the
+    # actor before routing, so nothing has to resume it explicitly.
     suspend_policy: str = "never"
 
     delete_on_close: bool = True
 
     def __post_init__(self) -> None:
-        allowed = {"never", "after_exec"}
+        allowed = {"never", "after_exec", "pause_after_exec"}
         if self.suspend_policy not in allowed:
             raise ValueError(f"create.suspend_policy must be one of {sorted(allowed)}, got {self.suspend_policy!r}")
 
@@ -240,8 +214,9 @@ class _SubstrateActor:
     suspended: bool = False
 
     @property
-    def dns_name(self) -> str:
-        return actor_dns_name(self.atespace, self.name)
+    def target(self) -> str:
+        """Routing key the atenet router expects: ``<atespace>/<actor>``."""
+        return f"{self.atespace}/{self.name}"
 
     @property
     def object_ref(self) -> Any:
@@ -360,7 +335,7 @@ class SubstrateProvider:
         # ClusterTrustBundle is served under different versions depending on the
         # cluster, and the client only has the ones its own version knows about.
         errors = []
-        for api_name in ("CertificatesV1beta1Api", "CertificatesV1alpha1Api"):
+        for api_name in ("CertificatesV1Api", "CertificatesV1beta1Api", "CertificatesV1alpha1Api"):
             api = getattr(k8s_client, api_name, None)
             if api is None:
                 continue
@@ -407,13 +382,13 @@ class SubstrateProvider:
     ) -> httpx.Response:
         """Call the in-actor agent through the router.
 
-        The Host header is the routing key, and is also what makes the router
-        resume the actor when it is suspended.
+        The ate-target-actor header names the actor, and is also what makes
+        the router resume a suspended or paused actor before forwarding.
         """
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(base_url=f"http://{self._connection.atenet_addr}")
 
-        headers = {"Host": actor.dns_name}
+        headers = {TARGET_ACTOR_HEADER: actor.target}
         # Join the caller's trace (W3C traceparent) so the router's resume and
         # atelet's restore/checkpoint spans nest under the client exec span.
         try:
@@ -612,15 +587,20 @@ class SubstrateProvider:
         which resumes the actor before forwarding. The cost is a checkpoint here
         and a restore on the next call, both on the critical path.
         """
-        if self._create_config.suspend_policy != "after_exec":
+        policy = self._create_config.suspend_policy
+        if policy == "after_exec":
+            rpc, request = "SuspendActor", ateapi_pb2.SuspendActorRequest(actor=actor.object_ref)
+        elif policy == "pause_after_exec":
+            rpc, request = "PauseActor", ateapi_pb2.PauseActorRequest(actor=actor.object_ref)
+        else:
             return
         try:
-            await self._control("SuspendActor", ateapi_pb2.SuspendActorRequest(actor=actor.object_ref))
+            await self._control(rpc, request)
             actor.suspended = True
         except grpc.aio.AioRpcError as e:
             # A failed suspend costs density, not correctness: the actor stays
             # running and the next exec still works.
-            LOGGER.warning("substrate: suspending %s failed: %s", actor.name, e.details())
+            LOGGER.warning("substrate: %s on %s failed: %s", rpc, actor.name, e.details())
 
     async def _write_file(self, handle: SandboxHandle, target_path: str, content: bytes) -> None:
         response = await self._http(
@@ -663,28 +643,19 @@ class SubstrateProvider:
 
     async def close(self, handle: SandboxHandle) -> None:
         actor: _SubstrateActor = handle.raw
-        # DeleteActor only accepts a suspended actor, so suspend first and
-        # tolerate it already being suspended.
-        try:
-            await self._control("SuspendActor", ateapi_pb2.SuspendActorRequest(actor=actor.object_ref))
-        except grpc.aio.AioRpcError as e:
-            if e.code() not in (grpc.StatusCode.NOT_FOUND, grpc.StatusCode.FAILED_PRECONDITION):
-                LOGGER.warning("substrate: suspending %s before delete: %s", actor.name, e.details())
-
         if not self._create_config.delete_on_close:
+            # Keep the sandbox for inspection, but not its worker.
+            try:
+                await self._control("SuspendActor", ateapi_pb2.SuspendActorRequest(actor=actor.object_ref))
+            except grpc.aio.AioRpcError as e:
+                if e.code() not in (grpc.StatusCode.NOT_FOUND, grpc.StatusCode.FAILED_PRECONDITION):
+                    LOGGER.warning("substrate: suspending %s on close: %s", actor.name, e.details())
             return
 
-        retry_policy = AsyncRetrying(
-            retry=retry_if_exception(_is_transitional_delete_error),
-            stop=stop_after_delay(120.0),
-            wait=wait_random_exponential(multiplier=1.0, max=10.0),
-            before_sleep=lambda rs: _log_control_retry("DeleteActor", rs),
-            reraise=True,
-        )
+        # any_state removes a running, paused or mid-transition actor outright;
+        # nothing about a finished sandbox is worth a final snapshot.
         try:
-            async for attempt in retry_policy:
-                with attempt:
-                    await self._control("DeleteActor", ateapi_pb2.DeleteActorRequest(actor=actor.object_ref))
+            await self._control("DeleteActor", ateapi_pb2.DeleteActorRequest(actor=actor.object_ref, any_state=True))
         except grpc.aio.AioRpcError as e:
             if e.code() != grpc.StatusCode.NOT_FOUND:
                 raise RuntimeError(f"deleting actor {actor.name!r} failed: {e.details()}") from e

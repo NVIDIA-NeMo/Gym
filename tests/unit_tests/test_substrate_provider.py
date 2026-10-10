@@ -181,15 +181,33 @@ async def test_exec_router_5xx_is_reported_as_sandbox_failure() -> None:
     assert "SuspendActor" not in recorder.rpcs()
 
 
-async def test_close_suspends_then_deletes() -> None:
+async def test_exec_pause_policy_pauses_after_exec() -> None:
+    recorder = _Recorder()
+    provider = _make_provider(recorder, suspend_policy="pause_after_exec")
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+
+    await provider.exec(handle, "echo hi")
+
+    assert recorder.rpcs().count("PauseActor") == 1
+    assert "SuspendActor" not in recorder.rpcs()
+
+
+async def test_close_deletes_in_any_state() -> None:
     recorder = _Recorder()
     provider = _make_provider(recorder)
     handle = await provider.create(SandboxSpec(image=IMAGE))
 
     await provider.close(handle)
 
-    rpcs = recorder.rpcs()
-    assert rpcs.index("SuspendActor") < rpcs.index("DeleteActor")
+    deletes = [request for rpc, request in recorder.control_calls if rpc == "DeleteActor"]
+    assert len(deletes) == 1 and deletes[0].any_state
+    assert "SuspendActor" not in recorder.rpcs()
+
+
+def test_router_target_is_atespace_slash_actor() -> None:
+    actor = substrate_provider._SubstrateActor(atespace="swebench", name="gym-abc", template="t", image="i")
+    assert substrate_provider.TARGET_ACTOR_HEADER == "ate-target-actor"
+    assert actor.target == "swebench/gym-abc"
 
 
 @pytest.mark.parametrize(

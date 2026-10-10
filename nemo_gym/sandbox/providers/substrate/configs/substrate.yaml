@@ -8,13 +8,14 @@ sandbox:
       #   kubectl port-forward -n ate-system svc/atenet-router 8000:80
       ateapi_addr: localhost:8080
       atenet_addr: localhost:8000
-      atespace: swebench
-      template_namespace: ate-swebench
+      atespace: nemo-gym
+      template_namespace: nemo-gym
     create:
       ready_timeout_s: 1200
-      # after_exec suspends the actor once each step finishes, so an idle
-      # sandbox holds no worker. Set to never to measure against always-on.
-      suspend_policy: after_exec
+      # pause_after_exec parks the actor on its node once each step finishes,
+      # so an idle sandbox holds no worker. after_exec suspends to object
+      # storage instead. Set never to measure against always-on.
+      suspend_policy: pause_after_exec
     exec:
       default_timeout_s: 1800
       concurrency: 32
