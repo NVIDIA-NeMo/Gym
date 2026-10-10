@@ -5,6 +5,22 @@ image_tools_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      # `license` is REQUIRED on train/validation datasets: DatasetConfig asserts
+      # it, and without it pydantic falls through to BenchmarkDatasetConfig and
+      # the server is silently demoted to an "almost-server" that never starts
+      # (see resources_servers/image_tools/configs/image_tools_pivot.yaml for the
+      # same convention on the pivot agent).
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/image_tools/data/grpo_train.jsonl
+        num_repeats: 1
+        license: NVIDIA Internal Use Only, Do Not Distribute
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/image_tools/data/grpo_validation.jsonl
+        num_repeats: 1
+        license: NVIDIA Internal Use Only, Do Not Distribute
       resource_servers_by_agent:
         string_match_simple_agent:
           type: resources_servers
@@ -29,9 +45,9 @@ image_tools_simple_agent:
       crop_max_pixels: 1048576
       max_tool_calls: 20
       max_tool_calls_per_turn: 1
-      tool_success_reward: 0.02
-      tool_success_reward_cap: 0.20
-      invalid_tool_call_penalty: -0.05
+      tool_success_reward: 0.01
+      tool_success_reward_cap: 0.05
+      invalid_tool_call_penalty: -0.01
       duplicate_tool_call_penalty: -0.02
       force_final_after_duplicate: true
       terminate_on_invalid_tool_call: true
