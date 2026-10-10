@@ -213,3 +213,18 @@ operation. A few tests exercise the real subprocess plumbing with harmless binar
 (`echo`, `cat`, `sleep`), each guarded with `@pytest.mark.skipif(shutil.which(...) is None)`;
 real end-to-end tests are additionally guarded on a reachable Docker daemon. Async tests need
 no decorator (`asyncio_mode = "auto"`).
+
+## Docker Compose
+
+The provider implements Compose service networking, native shared-memory and
+capability flags, configurable shared volumes, optional TCP localhost forwarding,
+and collection reconnect. It uses the existing Docker CLI and no additional
+controller dependencies. All services must use the same daemon and a network
+that permits peer communication. See the [Docker Compose guide](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/docker#docker-compose)
+for a complete example and deployment requirements.
+
+Run the live integration explicitly against a reachable Docker daemon:
+
+```bash
+GYM_TEST_DOCKER_COMPOSE=1 pytest tests/unit_tests/test_docker_compose_provider.py -k live -q
+```

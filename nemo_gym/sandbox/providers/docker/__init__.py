@@ -14,6 +14,7 @@
 
 """Docker provider package."""
 
+from nemo_gym.sandbox.providers.docker._compose import DockerNetworkingConfig, DockerSharedStorageConfig
 from nemo_gym.sandbox.providers.docker.provider import (
     DockerCreateConfig,
     DockerCreateError,
@@ -31,4 +32,6 @@ __all__ = [
     "DockerExecConfig",
     "DockerProbeConfig",
     "DockerProvider",
+    "DockerNetworkingConfig",
+    "DockerSharedStorageConfig",
 ]

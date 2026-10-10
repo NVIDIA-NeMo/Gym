@@ -54,13 +54,15 @@ gym env start \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml
 ```
 
-The provider constructor accepts three optional config sections:
+The provider constructor accepts five optional config sections:
 
 | Section | Purpose |
 | --- | --- |
 | `create` | Keep-alive command, `docker run` start timeout, `--init` zombie reaping, isolation flags (network, read-only root, dropped capabilities, security options, pids limit), and CPU/memory limit behavior. |
 | `exec` | Per-command timeout, the shell used for `<shell> -c <command>` (auto-detected when unset), extra `docker exec` flags, and subprocess concurrency. |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
+| `networking` | Optional Compose localhost forwarding, Python executable, and setup command. |
+| `shared_storage` | Daemon-host directory backing Compose shared volumes. |
 
 ## SandboxSpec Provider Options
 
@@ -146,3 +148,88 @@ The neutral `user` argument to `exec()` maps onto `--user`:
 By default `exec_shell` is unset, so the provider auto-detects `bash` once the container is ready (conda and SWE-bench setup commands use `source`, which POSIX `sh`/dash lack) and falls back to `sh`. Pin `exec_shell` to `/bin/sh` or `/bin/bash` to skip the per-create probe.
 
 Command failures return `SandboxExecResult` with the command's exit code. A command timeout returns code `125` with `error_type="timeout"`, and a docker runtime failure — daemon down or container gone, detected via stderr markers — returns code `125` with `error_type="sandbox"`. A timed-out command's in-container process is reaped when the sandbox is closed, since `docker rm -f` stops the whole process tree.
+
+## Docker Compose
+
+The Docker provider implements the [Compose adapter](/infrastructure/sandbox/compose)
+using the existing Docker CLI. No Compose executable, image inspection, or new
+Python dependency is needed. Supply upstream-resolved YAML with explicit startup
+commands, as with the other providers:
+
+```yaml
+services:
+  api:
+    image: python:3.13-slim
+    entrypoint: [python3, -m, http.server, "8000"]
+    shm_size: 67108864
+    ports:
+      - target: 8000
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000')"]
+      interval: 1s
+  main:
+    image: python:3.13-slim
+    entrypoint: [sleep, infinity]
+    depends_on:
+      api:
+        condition: service_healthy
+```
+
+```python
+from nemo_gym.sandbox import AsyncSandboxCompose
+
+async with AsyncSandboxCompose({"docker": {}}, "compose.yaml") as collection:
+    result = await collection.services["main"].exec(
+        "python3 -c \"import urllib.request; "
+        "print(urllib.request.urlopen('http://api:8000').status)\""
+    )
+    endpoint = await collection.services["api"].endpoint(8000)
+```
+
+Services run on the same Docker daemon and network. The provider resolves their
+container addresses and installs service names and aliases in `/etc/hosts` as root.
+The default is Docker's existing `bridge`; set `create.network` to an existing
+network to select another. Gym does not create or reconfigure Docker networks.
+The network must permit communication between containers. `host`, `none`, and
+`container:...` provider network settings are rejected for Compose collections.
+Different services may use the same container port; published host ports are dynamic.
+
+`shm_size` and `cap_add` become Docker's native `--shm-size` and `--cap-add` create
+flags. Startup checks the resulting container configuration and fails if an override
+prevented Docker from applying the requested values. Shared memory is configured
+at creation; no remount or privileged command inside the container is required.
+Capability availability remains subject to the Docker runtime and host policy.
+
+For shared volumes, configure an absolute path on the **Docker daemon host**:
+
+```python
+provider = {
+    "docker": {
+        "shared_storage": {"host_path": "/srv/gym-compose"},
+        "networking": {
+            "loopback_forwarding": True,
+            "python_executable": "python3",
+        },
+    }
+}
+```
+
+The adapter maps named volumes to collection-specific subdirectories, performs
+copy-up, honors read-only mounts, and removes its managed directories on stop.
+External and bind sources use the adapter's `volume_sources` mapping relative to
+that root. The configured root and external data are preserved.
+
+`network_mode: service:<name>` uses the adapter's existing TCP localhost-forwarding
+semantics. Enable `networking.loopback_forwarding` and provide Python 3.8+ in the
+forwarding service; an optional `networking.setup_command` can prepare it. Only the
+target's declared TCP ports are forwarded. This does not share a full network
+namespace or support UDP. The collection owns the relay process and closes it
+with the containers. Explicit `timeout_s=None` service and relay calls are unbounded
+and do not consume command-concurrency slots. Ordinary provider calls use
+`exec.default_timeout_s`; the sandbox facade retains its usual 180-second default.
+
+A collection can be serialized and reconnected through the existing sandbox API.
+The receiving provider must access the same Docker daemon. Container identity,
+execution environment, working directory, and published endpoints are restored
+without creating containers. Keep the creating collection alive until consumers
+finish, then stop it to release its relay tasks and managed volume directories.
