@@ -54,6 +54,16 @@ async def test_missing_resources_sandbox_is_rejected(setup) -> None:
     sandbox.stop.assert_not_awaited()
 
 
+async def test_sandbox_session_forwards_configured_context_window(setup) -> None:
+    instance, sandbox, _, _ = setup
+    instance.config.context_window = 262144
+    await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    state = instance._require_agent_session("session")
+    assert state.runner.context_window == 262144
+    await close(instance)
+    sandbox.disconnect.assert_awaited_once()
+
+
 async def test_runtime_staging_failure_keeps_borrowed_connection_for_close(setup) -> None:
     instance, sandbox, staging, _ = setup
     staging.side_effect = RuntimeError("unsupported runtime")

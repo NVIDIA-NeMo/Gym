@@ -74,6 +74,9 @@ remote infrastructure without changing the agent recipe.
 
 The overall deadline belongs to the Environment Server (`default_episode_timeout_seconds`). The standard
 task contract has no separate NOOA agent deadline.
+The Terminal-Bench NOOA recipe uses a 30,000-second whole-episode deadline and retains task-specific
+verifier timeouts. It does not reproduce Terminal-Bench's separate per-task agent deadlines, so
+results must record this timing difference.
 NOOA has no model-call limit by default (`max_policy_calls: null`). Set a positive `max_policy_calls` to opt into a
 shared model-call budget for the rollout. The optional `resources_server` agent reference identifies the Resources
 server that owns the dataset and its schema. Runtime tool and sandbox access comes from the standard environment's
