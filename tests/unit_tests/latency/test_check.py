@@ -33,6 +33,7 @@ def test_consistent_records_pass_every_check(tmp_path: Path) -> None:
     names = {c["name"] for c in report["checks"]}
     assert names >= {
         "agent_span_count",
+        "span_integrity",
         "terminus_model_call_times",
         "terminus_command_exec_times",
         "terminus_time_taken",
@@ -134,3 +135,26 @@ def test_engine_time_longer_than_the_server_span_is_reported(tmp_path: Path) -> 
     row["ng_trajectory"]["model_calls"][0]["response_metadata"]["engine"]["generation_time_ms"] = 20_000.0
     report = run_checks(_run(tmp_path, [row]))
     assert report["failed_checks"] == ["engine_within_server_within_call"]
+
+
+def test_span_integrity_catches_inverted_spans_duplicate_ids_dangling_parents_and_open_statuses(
+    tmp_path: Path,
+) -> None:
+    """The event-integrity rules of the verification protocol: start <= end on every closed span, span ids unique
+    within the rollout, parent references resolving inside it, a terminal status on every model request attempt."""
+    run_dir = _run(tmp_path, [terminus_row()])
+    path = run_dir / "metrics" / "rollouts_timeline.jsonl"
+    rows = [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
+    spans = next(r for r in rows if r.get("kind") == "rollout")["spans"]
+    setup, verify = (next(s for s in spans if s["name"] == n) for n in ("agent_setup", "verify"))
+    verify["span_id"] = setup["span_id"]
+    tools = [s for s in spans if s["name"] == "tool_call"]
+    tools[0]["end_wall_s"] = tools[0]["start_wall_s"] - 1.0
+    tools[-1]["parent_span_id"] = "nowhere"
+    next(s for s in spans if s["name"] == "model_call_attempt")["status"] = "unknown"
+    path.write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in rows))
+    report = run_checks(run_dir)
+    assert report["failed_checks"] == ["span_integrity"], report["failed_checks"]
+    details = "\n".join([c for c in report["checks"] if c["name"] == "span_integrity"][0]["details"])
+    for needle in ("used 2 times", "before start", "parent nowhere", "status unknown"):
+        assert needle in details, details

@@ -309,6 +309,50 @@ def _check_engine_and_verify(
     return results
 
 
+_TERMINAL_STATUSES = ("ok", "error", "timeout", "cancelled", "incomplete")
+
+
+def _check_integrity(
+    rollout_id: str, spans: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]
+) -> list[CheckResult]:
+    """Event integrity of the raw timeline: every closed span has start <= end, span ids are unique within the
+    rollout, parent references resolve inside it and every span names it, model calls and their request attempts
+    carry a completion, error, timeout, cancellation or incomplete status (never unknown or open), a tool call is
+    closed unless its status says why not, and a child timed on its parent's clock lies inside it (an attempt
+    inside its logical call, a Terminus command inside its batch)."""
+    check = _Check("span_integrity")
+    for span_id, uses in sorted(Counter(s["span_id"] for s in spans).items()):
+        check.require(uses == 1, f"span id {span_id} used {uses} times")
+    for span in spans:
+        label = f"{span['name']} {span['span_id']}"
+        start, end = span.get("start_wall_s"), span.get("end_wall_s")
+        check.require(start is not None, f"{label}: no start")
+        if start is not None and end is not None:
+            check.require(end >= start, f"{label}: end {end} before start {start}")
+        parent_id = span.get("parent_span_id")
+        parent = by_id.get(parent_id) if parent_id else None
+        check.require(parent_id is None or parent is not None, f"{label}: parent {parent_id} not in this rollout")
+        span_rollout = (span.get("ids") or {}).get("rollout_id")
+        check.require(span_rollout == rollout_id, f"{label}: rollout id {span_rollout} is not {rollout_id}")
+        status = span.get("status")
+        if span["name"] in ("model_call", "model_call_attempt"):
+            check.require(status in _TERMINAL_STATUSES, f"{label}: status {status}")
+            check.require(end is not None or status != "ok", f"{label}: open with status ok")
+        if span["name"] == "tool_call":
+            check.require(end is not None or status in _TERMINAL_STATUSES[1:], f"{label}: open with status {status}")
+        if (
+            parent is not None
+            and start is not None
+            and end is not None
+            and parent.get("end_wall_s") is not None
+            and (span["name"], parent["name"]) in (("model_call_attempt", "model_call"), ("tool_call", "tool_batch"))
+            and span.get("clock", {}).get("domain") == parent.get("clock", {}).get("domain")
+        ):
+            inside = start >= parent["start_wall_s"] - TOLERANCE_S and end <= parent["end_wall_s"] + TOLERANCE_S
+            check.require(inside, f"{label}: outside its {parent['name']}")
+    return [check.result()]
+
+
 def _check_lifecycle(by_name: dict[str, list[dict[str, Any]]]) -> list[CheckResult]:
     check = _Check("agent_span_count")
     agents = by_name.get("agent", [])
@@ -321,6 +365,7 @@ def check_record(record: dict[str, Any], timeline: dict[str, Any]) -> list[Check
     by_name = _by_name(spans)
     by_id = {s["span_id"]: s for s in spans}
     results = _check_lifecycle(by_name)
+    results += _check_integrity(timeline.get("rollout_id") or "", spans, by_id)
     results += _check_terminus(record, by_name, by_id)
     results += _check_gym(record, by_name)
     results += _check_opencode(record, by_name)
