@@ -1,0 +1,134 @@
+{
+    "name": "example",
+    "type": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "jsonl_fpath": "resources_servers/long_transduction/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 155.0,
+        "Min": 119.0,
+        "Max": 181.0,
+        "Standard deviation": 22.58
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 5,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "uuids_per_line": {
+        "Total # non-null values": 1,
+        "Average": 8.0,
+        "Min": 8.0,
+        "Max": 8.0,
+        "Standard deviation": 0.0
+    },
+    "n_lines": {
+        "Total # non-null values": 1,
+        "Average": 37.0,
+        "Min": 37.0,
+        "Max": 37.0,
+        "Standard deviation": 0.0
+    },
+    "expected_output": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "question": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "approx_prompt_tokens": {
+        "Total # non-null values": 5,
+        "Average": 1984.6,
+        "Min": 1773.0,
+        "Max": 2047.0,
+        "Standard deviation": 118.9
+    },
+    "target_tokens": {
+        "Total # non-null values": 5,
+        "Average": 2048.0,
+        "Min": 2048.0,
+        "Max": 2048.0,
+        "Standard deviation": 0.0
+    },
+    "n_expressions": {
+        "Total # non-null values": 2,
+        "Average": 104.5,
+        "Min": 91.0,
+        "Max": 118.0,
+        "Standard deviation": 19.09
+    },
+    "n_variables": {
+        "Total # non-null values": 1,
+        "Average": 128.0,
+        "Min": 128.0,
+        "Max": 128.0,
+        "Standard deviation": 0.0
+    },
+    "max_operands": {
+        "Total # non-null values": 1,
+        "Average": 16.0,
+        "Min": 16.0,
+        "Max": 16.0,
+        "Standard deviation": 0.0
+    },
+    "n_rows": {
+        "Total # non-null values": 2,
+        "Average": 14.5,
+        "Min": 10.0,
+        "Max": 19.0,
+        "Standard deviation": 6.36
+    },
+    "n_cols": {
+        "Total # non-null values": 2,
+        "Average": 14.5,
+        "Min": 10.0,
+        "Max": 19.0,
+        "Standard deviation": 6.36
+    },
+    "perm_fraction": {
+        "Total # non-null values": 1,
+        "Average": 0.4,
+        "Min": 0.4,
+        "Max": 0.4,
+        "Standard deviation": 0.0
+    },
+    "vocab_fraction": {
+        "Total # non-null values": 1,
+        "Average": 0.125,
+        "Min": 0.125,
+        "Max": 0.125,
+        "Standard deviation": 0.0
+    },
+    "n_vocab": {
+        "Total # non-null values": 1,
+        "Average": 2.0,
+        "Min": 2.0,
+        "Max": 2.0,
+        "Standard deviation": 0.0
+    }
+}
