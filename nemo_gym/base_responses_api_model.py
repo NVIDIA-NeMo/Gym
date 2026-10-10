@@ -28,6 +28,7 @@ routing.
 
 import asyncio
 import fcntl
+import hashlib
 import inspect
 import json
 import logging
@@ -35,6 +36,7 @@ import os
 import re
 import time
 from abc import abstractmethod
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, ClassVar, Iterable, Literal, Mapping, NotRequired, Optional, TypedDict
@@ -229,6 +231,63 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "a request carrying one with 422, and the client retries the whole request. Off by default "
             "so a backend with free-form tool support keeps them."
         ),
+    )
+    # /v1/messages only. A generation that ends with reasoning but no text or tool call (e.g. a
+    # reasoning model that stops inside an unclosed <think>) converts to a thinking-only Anthropic
+    # message. Clients such as the Claude Code CLI then append a "no visible output, please continue"
+    # nudge and re-send a rewritten history. With N > 0 the server instead answers such a turn with a
+    # retryable HTTP 529 overloaded_error, so the client SDK re-issues the unchanged request; after N
+    # retries for the same request body the thinking-only message is returned as before. The tally is
+    # per server process, so with several uvicorn workers a request can be retried up to N per worker.
+    # 0 (default) disables.
+    anthropic_thinking_only_max_retries: int = Field(default=0, ge=0)
+
+
+# Thinking-only retry tally keyed by the digest of the inbound request body (a client retry re-sends the
+# same body). Bounded so a long-lived server cannot grow it without limit.
+_THINKING_ONLY_RETRIES: "OrderedDict[str, int]" = OrderedDict()
+_THINKING_ONLY_RETRIES_MAX_KEYS = 4096
+
+
+def _has_visible_output(anthropic_response: Mapping[str, Any]) -> bool:
+    """True when an Anthropic message carries a non-empty text block or a tool_use block."""
+    for block in anthropic_response.get("content") or []:
+        block_type = block.get("type")
+        if block_type == "tool_use":
+            return True
+        if block_type == "text" and (block.get("text") or "").strip():
+            return True
+    return False
+
+
+def _thinking_only_retry_due(body: Mapping[str, Any], max_retries: int) -> bool:
+    """Count one thinking-only turn for this request body; True while the client should still retry."""
+    digest = hashlib.sha256(orjson.dumps(body, option=orjson.OPT_SORT_KEYS, default=str)).hexdigest()
+    seen = _THINKING_ONLY_RETRIES.pop(digest, 0)
+    if seen >= max_retries:
+        return False  # serve the thinking-only message; the tally for this body starts over
+    _THINKING_ONLY_RETRIES[digest] = seen + 1
+    while len(_THINKING_ONLY_RETRIES) > _THINKING_ONLY_RETRIES_MAX_KEYS:
+        _THINKING_ONLY_RETRIES.popitem(last=False)
+    return True
+
+
+def _thinking_only_retry_response() -> Response:
+    """Anthropic-format error that the Anthropic SDKs retry.
+
+    The SDK retries on ``x-should-retry: true`` and on every status >= 500 (529 is Anthropic's
+    ``overloaded_error``), honoring a short ``retry-after``. The decision is made on the HTTP status
+    before any body is read, so ``stream: true`` requests are retried the same way.
+    """
+    payload = {
+        "type": "error",
+        "error": {"type": "overloaded_error", "message": "model returned a thinking-only turn; retry"},
+    }
+    return Response(
+        content=orjson.dumps(payload),
+        status_code=529,
+        media_type="application/json",
+        headers={"x-should-retry": "true", "retry-after": "1"},
     )
 
 
@@ -512,6 +571,18 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         response = await self._invoke_responses(request, params)
         model_name = body.get("model") or response.model
         anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)
+        max_retries = self.config.anthropic_thinking_only_max_retries
+        if max_retries > 0 and not _has_visible_output(anthropic_response):
+            if _thinking_only_retry_due(body, max_retries):
+                logger.warning("Thinking-only turn on /v1/messages; answering HTTP 529 so the client retries")
+                # The generation was sampled; finalize it so token capture records it as served
+                # rather than leaving an uncommitted call behind.
+                await self._finalize_served_response(anthropic_response)
+                return _thinking_only_retry_response()
+            logger.warning(
+                "Thinking-only turn repeated %d times for one request on /v1/messages; returning it as is",
+                max_retries,
+            )
         if body.get("stream"):
             return await self._stream_served_response(
                 anthropic_response,

@@ -113,6 +113,21 @@ gym eval run --no-serve \
     --limit 1
 ```
 
+## Retry thinking-only turns
+
+A reasoning model sometimes ends a turn with reasoning but no text or tool call (for example, it stops inside an unclosed `<think>`). That turn maps to an Anthropic message with only a `thinking` block. Claude Code answers such a message by appending a "no visible output, please continue" nudge and re-sending the conversation, which changes the history the policy saw.
+
+Set `anthropic_thinking_only_max_retries` on the model server to answer a thinking-only turn with HTTP 529 `overloaded_error` (`x-should-retry: true`) instead. Anthropic SDK clients retry 529 with the unchanged request. After the configured number of retries for the same request body, the thinking-only message is returned as before, so a model that keeps producing such turns still ends the session.
+
+```yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      anthropic_thinking_only_max_retries: 4
+```
+
+The retry count is kept per model-server process. With several uvicorn workers, a retried request can land on another worker, so one request can be retried up to `anthropic_thinking_only_max_retries` times per worker. The default, `0`, disables the retry.
+
 ## Smoke-test `/v1/messages`
 
 Launch a model server, take its URL from the `gym env start` log (`'url': 'http://127.0.0.1:<port>'`), then:
