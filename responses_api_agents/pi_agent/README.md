@@ -14,6 +14,8 @@ The benchmark owns task data, preparation, verification, and task sandbox settin
 The harness owns its runtime and model/tool loop. The Environment Server binds the two
 and closes the agent before verification.
 
+For Terminal-Bench 2.1, see the [single-task run commands](../../benchmarks/terminal_bench_2_1/README.md#pi-in-a-task-sandbox).
+
 Run from the Gym repository root with Gym and the benchmark's preparation dependencies
 installed. For SWE-bench Pro, save this composition as `run.yaml`:
 
@@ -49,10 +51,14 @@ gym eval run --no-serve \
   -o rollouts.jsonl --limit 3 --concurrency 3
 ```
 
-The collector calls Environment Server `/run`: seed Resources, seed the agent, call its
-rollout-prefixed `/v1/responses`, close the agent, verify, then close Resources. Prepared
-flat rows use `single_agent_turn_legacy` with this native session lifecycle; no additional
-materialization script is needed. Collection does not call the agent's compatibility `/run`.
+Environment Server is the default entry point for rollout execution. With the single-agent
+session-based configuration, the collector calls Environment Server `/run`: seed Resources,
+seed the agent, call its rollout-prefixed `/v1/responses`, close the agent, verify, then close Resources. Prepared
+flat rows use `single_agent_turn_legacy`, an input/output adapter over `single_agent_turn`.
+This composition is benchmark-independent: Environment Server owns the episode sequence.
+For tasks with a Resources-owned sandbox, the harness borrows that sandbox.
+The adapter converts row formats; execution uses Resources/Agent session APIs. Collection
+does not call the agent's compatibility `/run`. No additional materializer is needed.
 Pass the same configuration to startup and `--no-serve` collection; collection does not
 inherit routing settings from the running servers.
 
@@ -76,7 +82,7 @@ Use one agent worker, an exact `pi_version` (default **0.80.2**), and a Gym `mod
 For a Resources-owned task sandbox, supply direct `SandboxAccess` with an absolute
 task working directory. Without access, configure agent-owned creation as noted below.
 Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is required
-only for its compatibility `/run`, not native sessions.
+only for its compatibility `/run`, not agent sessions.
 
 Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with Python 3.8+,
 bash, tar/gzip, and SHA-256 utilities. Session setup uses POSIX sh to install missing Python/Bash
@@ -104,15 +110,15 @@ extra-argument, and environment overrides; those remain available on the local p
 
 ## Requests and settings
 
-Native sandbox input is one text user message, optionally preceded by a system message. Both sandbox
+Sandbox session input is one text user message, optionally preceded by a system message. Both sandbox
 and local execution combine the configured system prompt, request `instructions`, and input
 system message in that order. Sampling and chat-template settings belong on the Gym Model Server.
-Native sandbox sessions reject unsupported request controls before execution.
+Sandbox sessions reject unsupported request controls before execution.
 
 Set the agent configuration's `max_output_tokens` for a per-model-call output cap, including
 reasoning tokens. An adapter-owned Pi extension applies it as `max_tokens`, preserving any
 smaller upstream cap. Limits must be positive JavaScript-safe integers. Request-level
-`max_output_tokens` is rejected in native sessions because a total-response budget is not implemented. Model Server
+`max_output_tokens` is rejected in sandbox sessions because a total-response budget is not implemented. Model Server
 configuration must not replace the agent's cap with a larger value. Enforcement is tested with Pi 0.80.2.
 
 ## Lifecycle and ownership
@@ -125,10 +131,27 @@ configuration must not replace the agent's cap with a larger value. Enforcement 
 4. Environment Server calls the rollout-prefixed `/v1/responses` route with the agent-session cookie.
 5. Pi runs in the sandbox, uses its built-in tools, and sends Chat Completions to
    the rollout-prefixed Gym model-server URL. The sandbox must be able to reach that URL.
-6. Agent close confirms supervisor and descendant cleanup, returns observations,
+6. Agent close confirms harness termination, returns observations,
    removes session files, and disconnects. A failed or missing cleanup receipt blocks close.
 7. Environment Server asks Resources to verify and close the task session. The benchmark
    owns its verification procedure and sandbox teardown.
+
+After a successful harness exit in a borrowed sandbox, task processes remain alive
+for verification; Resources stops them when it destroys the sandbox. Services must
+not depend on the agent's temporary session files. Timeout, cancellation, failed exits,
+and agent-owned sandboxes retain full descendant cleanup.
+
+Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, shared with Hermes.
+The adapter stages its worker input and collects its own output. The shared session
+uploads the supervisor at activation and owns its control files and log access; the common lifecycle
+confirms process cleanup, captures artifacts, then releases the provider connection or
+owned sandbox. Concurrent closes share that work, failed cleanup remains retryable,
+and interrupted activations keep captured observations after session files are removed.
+`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.py`
+runs inside the sandbox. Benchmark Resources session identity/verdict state stays separate.
+Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
+`worker_exit_code_unavailable` observation gaps. Positive cleanup confirmation remains
+required; the adapter validates the captured terminal events without inventing an exit code.
 
 Each sandbox session supports one activation and a matching episode and rollout identity.
 Identical request retries join the running activation or replay its result; changed requests
@@ -187,7 +210,7 @@ and blocks verification. Cleanup is cooperative, not a security boundary against
 Local settings retain `output_token_policy` (`fixed` or `remaining_context`),
 `auto_compaction`, and an optional per-call `bash_timeout`. The dedicated
 `pi_sandboxed_agent` also uses this local adapter inside its sandbox and supplies
-`mcp_servers` for authenticated Gym tools. Native sessions continue to reject
+`mcp_servers` for authenticated Gym tools. Sandbox sessions continue to reject
 required Resources tool access rather than silently ignoring it.
 
 Calls without an agent session retain local CLI compatibility. They do not use the

@@ -49,7 +49,8 @@ def run(params: dict) -> int:
                 events.flush()
 
         # A detached tool can inherit stdout. Drain available data after Codex exits,
-        # without waiting for that tool to close its pipe; the supervisor reaps it.
+        # without waiting for that tool to close its pipe. Resources may retain
+        # task services through verification after a successful harness exit.
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
             while True:
