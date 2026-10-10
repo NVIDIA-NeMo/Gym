@@ -43,6 +43,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
@@ -56,6 +57,7 @@ from resources_servers.swe_internal_v1.verification import (
     run_verification,
     verification_files,
 )
+from resources_servers.swebench.agent_network import agent_network_policy
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.legacy_container_setup import (
     LEGACY_CONTAINER_ENV,
@@ -83,6 +85,11 @@ class SweInternalV1ResourcesServerConfig(BaseResourcesServerConfig):
     apply_anti_cheating: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
+    # Deny all egress from the agent's sandbox except sandbox_model_server's host (the
+    # agent's own network_access cannot apply to a sandbox this server created). See
+    # resources_servers/swebench/agent_network.py. Evaluation sandboxes are unaffected.
+    enforce_agent_no_network: bool = False
+    sandbox_model_server: ModelServerRef | None = None
 
 
 class SweInternalV1InstanceRequest(BaseModel):
@@ -173,7 +180,7 @@ class SweInternalV1ResourcesServer(SimpleResourcesServer):
         )
 
     async def _create_sandbox(
-        self, body: SweInternalV1InstanceRequest, files: dict[str, str] | None = None
+        self, body: SweInternalV1InstanceRequest, files: dict[str, str] | None = None, *, for_agent: bool = False
     ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -191,6 +198,12 @@ class SweInternalV1ResourcesServer(SimpleResourcesServer):
             env = LEGACY_CONTAINER_ENV | env
             files = legacy_container_files() | (files or {})
 
+        provider_options = dict(self.config.sandbox_config.get("provider_options", {}))
+        if for_agent and self.config.enforce_agent_no_network:
+            provider_options["network_policy"] = agent_network_policy(
+                provider_config, self.config.sandbox_model_server
+            )
+
         spec = SandboxSpec(
             image=body.image_ref,
             ttl_s=self.config.sandbox_config.get("ttl_s"),
@@ -205,7 +218,7 @@ class SweInternalV1ResourcesServer(SimpleResourcesServer):
                 "instance_id": body.instance_id[:63],
             },
             resources=sandbox_resources,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
+            provider_options=provider_options,
         )
         sandbox = AsyncSandbox(provider_config)
         if legacy_setup:
@@ -303,7 +316,7 @@ class SweInternalV1ResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked.pop(session_id, None)
         self._session_id_to_base_commit.pop(session_id, None)
 
-        sandbox = await self._create_sandbox(body)
+        sandbox = await self._create_sandbox(body, for_agent=True)
         await self._ensure_git_repo(sandbox, body.workdir)
         await self._restore_missing_blobs(sandbox, body.workdir)
         if self.config.apply_anti_cheating:
