@@ -1,0 +1,73 @@
+---
+title: "NOOA sessions and SWE-bench Pro"
+description: "Run NOOA through the native Environment Server and a Resources-owned sandbox."
+---
+
+NOOA uses Gym's native agent sessions. The `nooa_single_agent_turn` Environment Server seeds Resources, opens and invokes
+NOOA, finishes the activation, asks Resources to verify, then closes the agent and Resources. Call the Environment Server's `/run`; NOOA
+no longer implements `/run` or assigns rewards. Sessions support one activation, with identical retries sharing it.
+Use one agent-server worker; independent sessions can still execute concurrently.
+
+## Execution modes
+
+`nooa.execution_mode: embedded` runs NOOA in the agent server. Its Python execution can access files, processes,
+and network on that host; embedded mode provides no sandbox protection.
+
+`nooa.execution_mode: sandboxed` runs the complete NOOA agent in the Resources-provided sandbox. Resources must
+return direct `SandboxAccess`; NOOA never provisions or destroys the sandbox. NOOA prepares its runtime under
+`/opt/nemo-gym-nooa`, keeps session files under `/tmp/nemo-gym-nooa`, and executes in the supplied task workdir.
+The initial worker exports its result and stops before verification; the NOOA session stays open through grading.
+
+The sandbox needs Linux, a supported portable Python target, writable `/opt`, `tar`, one of `curl`, `wget` or an existing `python3`, and outbound
+HTTPS for runtime installation. Model and Resources URLs must be reachable from the sandbox. A host-loopback URL
+is not automatically rewritten. No host virtual environment or provider credentials are copied into the runner.
+
+## Resource tools and observations
+
+Direct HTTP tool grants arrive through the native session. Generated `self.*` resource methods, `GymResponsesLLM`,
+and `GymTraceHooks` execute alongside NOOA. Model and resource cookies remain separate; final resource cookies
+return on close for verification. Model/resource infrastructure failures fail the episode instead of becoming a
+reward-zero response. Policy-budget exhaustion remains a gradable partial response.
+
+Hooks capture Python execution and nested resource calls. Sandbox results are exported on completion or handled
+errors; a hard kill can lose in-memory events. Sandbox-written results are agent-reported evidence, not trusted
+training records. Resources remains responsible for rewards.
+
+## Native stateful example
+
+Use `resources_servers/example_session_state_mgmt/configs/example_session_state_mgmt_nooa.yaml` for an embedded
+real-model smoke of the instance-method resource bindings. Its explicit native rows are in
+`resources_servers/example_session_state_mgmt/data/example_nooa_native.jsonl`; other agents retain the original rows.
+The smoke requires `POLICY_BASE_URL`, `POLICY_API_KEY`, and `POLICY_MODEL_NAME`:
+
+```bash
+bash responses_api_agents/nooa_agent/smoke/run_stateful_e2e.sh
+```
+
+The script routes `nooa-counter` tasks to `example_session_state_mgmt_environment_server` and checks the server-side
+counter reward, model usage, resource calls, and trajectory. This example does not exercise sandbox provisioning.
+
+## SWE-bench Pro
+
+The recipe reuses the existing Resources-owned task sandbox, patch extraction, and separate grading sandbox:
+
+```bash
+python benchmarks/swebench/pro/prepare_nooa.py
+gym env start --config benchmarks/swebench/pro/nooa.yaml \
+  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml --model-type vllm_model
+
+gym eval run --no-serve --agent swebench_pro_nooa_agent \
+  --input benchmarks/swebench/data/swebench_pro_nooa.jsonl \
+  --output /tmp/nooa-swebench-pro.jsonl --limit 1 --concurrency 1 \
+  '++environment_server_routes.swebench-pro-nooa=swebench_pro_nooa'
+```
+
+Provide model settings through the usual `env.yaml` or model CLI flags. For Docker, configure Gym's published model
+and Resources addresses to be reachable from the container before running. Preparation preserves upstream grading
+metadata in `task_input.task_data`; only the Responses request reaches NOOA. Swap the provider configuration for
+remote infrastructure without changing the agent recipe.
+
+The overall deadline belongs to the Environment Server (`default_episode_timeout_seconds`), not the agent.
+NOOA has no model-call limit by default (`max_policy_calls: null`). Set a positive `max_policy_calls` to opt into a
+shared model-call budget for the rollout. The old `resources_server` and `run_timeout_secs` agent configuration
+fields are removed; tool transport is supplied by native session grants.

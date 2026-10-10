@@ -16,3 +16,6 @@ the outer `execute_python` call from nested resource calls.
 `nooa.execution_mode: sandboxed` runs the complete NOOA agent in the task sandbox supplied by Resources.
 NOOA stages its own runtime and closes its worker before disconnecting; Resources owns sandbox creation and teardown.
 Native sessions use the NOOA-specific `nooa_single_agent_turn` environment.
+
+See [NOOA sessions and SWE-bench Pro](../../fern/versions/latest/pages/evaluation-tutorials/nooa-swe-bench-pro.mdx)
+for setup, recipes, service lifecycle and observation limits.
