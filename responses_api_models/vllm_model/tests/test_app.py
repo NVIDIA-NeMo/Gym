@@ -80,6 +80,7 @@ from responses_api_models.vllm_model.app import (
     _redacted_error_repr,
     _transport_images,
     _transport_log_context,
+    fold_nonleading_system_messages,
 )
 
 
@@ -6809,3 +6810,65 @@ class TestPreserveEnvelopeIdFollowsCaptureContext:
             assert model._preserve_envelope_id() is False
         finally:
             reset_token_sink(token)
+
+
+class TestFoldNonleadingSystemMessages:
+    @staticmethod
+    def _model(**overrides: Any) -> VLLMModel:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="vllm_model",
+            base_url="http://localhost:9999/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy-model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            **overrides,
+        )
+        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @staticmethod
+    def _messages() -> list[dict[str, Any]]:
+        return [
+            {"role": "system", "content": "You are a coding agent."},
+            {"role": "developer", "content": "Prefer small diffs."},
+            {"role": "user", "content": "Fix the bug."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "Bash", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+            {"role": "system", "content": "Background task finished."},
+        ]
+
+    def test_leading_system_block_kept_later_system_becomes_user(self) -> None:
+        messages = fold_nonleading_system_messages(self._messages())
+
+        assert [m["role"] for m in messages] == ["system", "developer", "user", "assistant", "tool", "user"]
+        assert messages[-1]["content"] == "Background task finished."  # only the role changes
+
+    def test_without_leading_system_every_system_message_is_folded(self) -> None:
+        messages = [{"role": "user", "content": "hi"}, {"role": "system", "content": "note"}]
+        assert [m["role"] for m in fold_nonleading_system_messages(messages)] == ["user", "user"]
+
+    def test_preprocess_applies_fold_only_when_enabled(self) -> None:
+        default = self._model()._preprocess_chat_completion_create_params(MagicMock(), {"messages": self._messages()})
+        assert [m["role"] for m in default["messages"]][-1] == "system"
+
+        folded = self._model(fold_nonleading_system_messages=True)._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": self._messages()}
+        )
+        assert [m["role"] for m in folded["messages"]] == ["system", "developer", "user", "assistant", "tool", "user"]
+
+    def test_fold_runs_after_developer_to_system_replacement(self) -> None:
+        model = self._model(fold_nonleading_system_messages=True, replace_developer_role_with_system=True)
+        result = model._preprocess_chat_completion_create_params(MagicMock(), {"messages": self._messages()})
+        assert [m["role"] for m in result["messages"]] == ["system", "system", "user", "assistant", "tool", "user"]
+
+    async def test_responses_native_rejects_fold(self) -> None:
+        model = self._model(fold_nonleading_system_messages=True, is_responses_native=True)
+        with raises(NotImplementedError):
+            await model._responses_native(MagicMock(), NeMoGymResponseCreateParamsNonStreaming(input="hi"))

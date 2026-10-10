@@ -233,6 +233,23 @@ def _redacted_error_repr(error: ClientResponseError) -> str:
     )
 
 
+def fold_nonleading_system_messages(messages: list[dict]) -> list[dict]:
+    """Re-role system/developer messages that appear after the leading system block as ``user`` (in place).
+
+    The leading run of system/developer messages is left alone; every later one becomes a user message
+    with identical content. See ``VLLMModelConfig.fold_nonleading_system_messages``.
+    """
+    leading = True
+    for message in messages:
+        role = message.get("role")
+        if leading and role in ("system", "developer"):
+            continue
+        leading = False
+        if role in ("system", "developer"):
+            message["role"] = "user"
+    return messages
+
+
 ReasoningFieldMode = Literal["both", "reasoning", "reasoning_content"]
 
 
@@ -277,6 +294,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # ``uses_reasoning_parser``.
     preserve_reasoning_in_assistant_content: bool = False
     replace_developer_role_with_system: bool = False
+    # Turn system/developer messages that come after the leading system block into user messages.
+    # Some harnesses inject such messages mid-conversation (e.g. Claude Code appends background-task
+    # notices as role=system after tool turns), and chat templates that only admit a system message at
+    # the start reject the whole request. Only the role changes; the text stays in chronological position.
+    fold_nonleading_system_messages: bool = False
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
     sequential_reasoning_allowed: bool = True
@@ -590,6 +612,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise NotImplementedError
         if self.config.replace_developer_role_with_system:
             raise NotImplementedError
+        if self.config.fold_nonleading_system_messages:
+            raise NotImplementedError
         if not self.config.sequential_reasoning_allowed:
             raise NotImplementedError
 
@@ -711,6 +735,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             for message_dict in body_dict["messages"]:
                 if message_dict.get("role") == "developer":
                     message_dict["role"] = "system"
+        if self.config.fold_nonleading_system_messages:
+            fold_nonleading_system_messages(body_dict["messages"])
 
         body_dict["model"] = self.config.model
 
