@@ -480,7 +480,7 @@ class TestRunClaudeCode:
         leaked = home / ".claude_code_agent"
         assert not leaked.exists() or not any(leaked.iterdir())
 
-    def test_timeout_returns_empty(self, tmp_path: Path) -> None:
+    def test_timeout_keeps_the_partial_transcript(self, tmp_path: Path) -> None:
         agent = _make_agent(timeout=1)
         state = {"killed": False, "communicate_calls": 0}
 
@@ -493,7 +493,12 @@ class TestRunClaudeCode:
             async def communicate(self):
                 state["communicate_calls"] += 1
                 return (
-                    _event("system", subtype="status", status="compacting", session_id="session-1").encode(),
+                    "\n".join(
+                        [
+                            _event("system", subtype="status", status="compacting", session_id="session-1"),
+                            _event("assistant", message={"content": [{"type": "text", "text": "partial"}]}),
+                        ]
+                    ).encode(),
                     b"",
                 )
 
@@ -510,7 +515,7 @@ class TestRunClaudeCode:
         ):
             output_items, model, metadata = asyncio.run(agent._run_claude_code("hello"))
 
-        assert output_items == []
+        assert output_items == _output(_event("assistant", message={"content": [{"type": "text", "text": "partial"}]}))
         assert state == {"killed": True, "communicate_calls": 1}
         assert model == "claude-sonnet-4-6"
         assert metadata["status"] == "incomplete"
@@ -1044,3 +1049,57 @@ class TestConfigYaml:
         assert inner.get("token_id_capture", False) is False
         assert inner["concurrency"] == 32
         assert inner["max_turns"] == 30
+
+
+class TestCaptureFriendlyTranscript:
+    """Under training-token capture the transcript must hash like the captured call and name the served id."""
+
+    def _events(self) -> str:
+        return "\n".join(
+            json.dumps(e)
+            for e in [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "id": "resp_served123",
+                        "content": [
+                            {"type": "thinking", "thinking": "let me look"},
+                            {"type": "text", "text": "Reading the file."},
+                        ],
+                        "usage": {"input_tokens": 5, "output_tokens": 7},
+                    },
+                },
+                {"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "usage": {}},
+            ]
+        )
+
+    def test_fold_thinking_default_prefixes_text(self) -> None:
+        items, meta = parse_stream_json(self._events())
+        messages = [i for i in items if getattr(i, "type", None) == "message"]
+        assert messages and messages[0].content[0].text.startswith("<think>")
+        assert not any(getattr(i, "type", None) == "reasoning" for i in items)
+        assert meta["terminal_response_id"] == "resp_served123"
+
+    def test_no_fold_emits_reasoning_item_and_bare_text(self) -> None:
+        items, meta = parse_stream_json(self._events(), fold_thinking=False)
+        types = [getattr(i, "type", None) for i in items]
+        assert types == ["reasoning", "message"]
+        assert items[0].summary[0].text == "let me look"
+        assert items[1].content[0].text == "Reading the file."
+        assert meta["terminal_response_id"] == "resp_served123"
+
+    @pytest.mark.parametrize("capture", [False, True])
+    def test_response_id_is_the_served_id_only_under_capture(self, capture: bool) -> None:
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            token_id_capture=capture,
+        )
+        agent.server_client.global_config_dict = {"token_id_capture": {"enabled": capture}}
+        items, meta = parse_stream_json(self._events(), fold_thinking=not capture)
+        body = NeMoGymResponseCreateParamsNonStreaming(input="fix it")
+        with patch.object(agent, "_run_claude_code", AsyncMock(return_value=(items, "m", meta))):
+            response = asyncio.run(agent._create_response(body))
+        if capture:
+            assert response.id == "resp_served123"
+        else:
+            assert response.id != "resp_served123" and response.id.startswith("resp_")

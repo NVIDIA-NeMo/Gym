@@ -45,7 +45,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    NeMoGymSummary,
 )
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap
 from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
@@ -71,8 +73,16 @@ def _extract_thinking(content: list[Any]) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
-    """Convert claude -p --output-format=stream-json stdout into (output_items, usage)."""
+def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[Any], dict]:
+    """Convert claude -p --output-format=stream-json stdout into (output_items, usage).
+
+    ``fold_thinking=True`` (eval default) prefixes each assistant message with the model's thinking as
+    ``<think>...</think>`` text. Under training-token capture that must be off: Gym attributes the finished
+    transcript to a captured model call by hashing the model-authored text, and the captured call's message
+    holds the bare text (reasoning travels as a separate item). Thinking is then emitted as a ``reasoning``
+    item, which the fingerprint deliberately ignores. The last assistant message's served ``id`` is reported as
+    ``terminal_response_id`` so attribution can also match by response id.
+    """
     raw_events: list[dict] = []
     for line in stdout.splitlines():
         line = line.strip()
@@ -92,6 +102,7 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
     result_metadata: dict[str, Any] = {}
     compacting_sessions: set[str] = set()
     compaction_attempts: list[dict[str, str]] = []
+    terminal_response_id: Optional[str] = None
 
     for event in raw_events:
         etype = event.get("type")
@@ -121,9 +132,21 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
             if not isinstance(content, list):
                 content = []
 
+            served_id = message.get("id")
+            if isinstance(served_id, str) and served_id:
+                terminal_response_id = served_id
+
             think = _extract_thinking(content)
-            if think:
+            if think and fold_thinking:
                 buffered_think = (buffered_think + "\n" + think) if buffered_think else think
+            elif think:
+                output_items.append(
+                    NeMoGymResponseReasoningItem(
+                        id=f"rs_{uuid4().hex}",
+                        summary=[NeMoGymSummary(text=think, type="summary_text")],
+                        type="reasoning",
+                    )
+                )
 
             text = _extract_text(content)
             if text:
@@ -201,6 +224,8 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
         {"invocation_id": session_id, "outcome": "unknown"} for session_id in compacting_sessions
     )
     metadata: dict = {"input_tokens": total_input, "output_tokens": total_output}
+    if terminal_response_id:
+        metadata["terminal_response_id"] = terminal_response_id
     if num_turns is not None:
         metadata["num_turns"] = num_turns
     if compaction_attempts:
@@ -495,13 +520,17 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         proc.kill()
                 stdout, _ = await communication
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
-                _, run_metadata = parse_stream_json(stdout.decode(errors="replace"))
+                # Keep the transcript streamed so far: it is the agent's actual partial work, and under
+                # training-token capture it is what the terminal call is attributed to.
+                output_items, run_metadata = parse_stream_json(
+                    stdout.decode(errors="replace"), fold_thinking=not self._token_id_capture_enabled()
+                )
                 run_metadata.update(
                     status="incomplete",
                     error_type="timeout",
                     duration_ms=(monotonic() - process_started_at) * 1000,
                 )
-                return [], model, run_metadata
+                return output_items, model, run_metadata
             except asyncio.CancelledError:
                 if proc.returncode is None:
                     with suppress(ProcessLookupError):
@@ -514,7 +543,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
             stdout_text = stdout.decode(errors="replace")
             LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout_text[:2000])
-            output_items, run_metadata = parse_stream_json(stdout_text)
+            output_items, run_metadata = parse_stream_json(
+                stdout_text, fold_thinking=not self._token_id_capture_enabled()
+            )
             run_metadata.setdefault("duration_ms", (monotonic() - process_started_at) * 1000)
             status, error_type = _invocation_outcome(run_metadata, proc.returncode)
             run_metadata["status"] = status
@@ -634,8 +665,15 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         input_tokens = run_metadata.get("input_tokens", 0)
         output_tokens = run_metadata.get("output_tokens", 0)
 
+        # Under capture, name the response by the last served id so terminal attribution can match it directly.
+        terminal_response_id = run_metadata.get("terminal_response_id")
+        response_id = (
+            str(terminal_response_id)
+            if self._token_id_capture_enabled() and isinstance(terminal_response_id, str) and terminal_response_id
+            else f"resp_{uuid4().hex}"
+        )
         return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
+            id=response_id,
             created_at=int(time()),
             model=model_name,
             object="response",
