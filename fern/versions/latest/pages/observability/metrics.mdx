@@ -53,16 +53,16 @@ Reused cached results do not increment it. Coverage comes from the output files,
 results and supported unscored completions included), `failed` (a saved failure), or `omitted` (a saved
 intentional omission, including terminal skips and bare no-persist replies). Kill-shaped failures are saved
 as failures so they remain eligible for retry. The historical `scored` label does not guarantee a measured reward.
-Rows drained by the dispatch budget
-never ran and are not counted. Every point carries `nemo.gym.rollout.dispatch.name`, the
+Rows drained by the dispatch budget never ran and are not counted. Every point carries `nemo.gym.rollout.dispatch.name`, the
 environment server or, when rows name none, the agent. Attempts with a failure class also carry
 `nemo.gym.failure_class`, `nemo.gym.failure_kind` (a registered or `<server>:<kind>` namespaced
 kind, otherwise `unregistered`) and `nemo.gym.failure_type` (the exception class name). Free-text
 failure reasons never become attributes. The shared saved failure record supplies the kind and exception type;
 older records use their legacy fields.
 
-A failed `/run` is counted as `failed` with class `agent_request_failed` only when
-`route_failures_to_sidecar` is on; otherwise it aborts the run. The collector records the counter when telemetry is enabled; `gym eval run --no-serve` does not initialize
+Transport failures count as saved failures only when failure routing is enabled; otherwise the request error
+aborts collection. The failure class distinguishes an unavailable server from an agent that ran and failed.
+The collector records the counter when telemetry is enabled; `gym eval run --no-serve` does not initialize
 telemetry by default. Direct `run_examples` callers, GDPVal multistage and rollout reverification do not record it.
 
 ### Memory Metrics

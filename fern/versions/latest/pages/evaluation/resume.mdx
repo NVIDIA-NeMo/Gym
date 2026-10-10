@@ -352,7 +352,7 @@ not establish progress.
 Code 0 means collection finished, possibly with the intentional omissions described above. An explicit Ctrl-C in
 `gym eval run` retains the existing cancellation behavior: it can return 0 with partial artifacts when
 `require_complete=false`. To learn how many tasks actually completed, inspect the core collector's coverage file, or
-GDPVal's stage summaries (multistage does not write that coverage file). Ordinary errors keep their existing failure status. The library still supports returning
-partial results when `require_complete=false`; CLI status is checked separately. Checkpoint-triggered stops must use the
+GDPVal's stage summaries (multistage does not write that coverage file). Ordinary errors keep their existing failure
+status. The library still supports returning partial results when `require_complete=false`; CLI status is checked separately. Checkpoint-triggered stops must use the
 same incomplete statuses when that integration lands. End-to-end checkpoint restoration still requires validation
 with the checkpoint stack.
