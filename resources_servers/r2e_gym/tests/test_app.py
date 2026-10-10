@@ -486,7 +486,7 @@ class TestAgentSandbox:
         assert (
             seed.index("_hide_tests_from_agent(")
             < seed.index("apply_anti_cheat_setup(")
-            < seed.index("self._session_id_to_sandbox[session_id] = sandbox")
+            < seed.index("return REPO_DIRECTORY")
         )
         assert "_create_sandbox(body)" in seed and "files=" not in seed, "the agent sandbox gets no row files"
 

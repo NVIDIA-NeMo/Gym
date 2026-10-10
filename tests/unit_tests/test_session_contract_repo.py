@@ -57,6 +57,13 @@ def test_agents_serve_sessions_through_the_base_hooks() -> None:
 def test_resources_servers_close_through_the_base_route() -> None:
     """The base serves /close_session before subclass routes, so a server's own registration never runs."""
     violations = []
+    # A shared base class, such as SandboxSessionResourcesServer, can serve the close for its subclasses.
+    closing_bases = {
+        cls.name
+        for path in _sources("resources_servers")
+        for cls in _classes(path)
+        if "close_resources_session" in _methods(cls)
+    }
     for path in _sources("resources_servers"):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
@@ -76,6 +83,7 @@ def test_resources_servers_close_through_the_base_route() -> None:
                 seed is not None
                 and "ResourcesSeedSessionRequest" in ast.unparse(seed)
                 and "close_resources_session" not in methods
+                and not any(isinstance(base, ast.Name) and base.id in closing_bases for base in cls.bases)
             ):
                 violations.append(
                     f"{_location(path, cls)} accepts a typed seed but does not override close_resources_session"
