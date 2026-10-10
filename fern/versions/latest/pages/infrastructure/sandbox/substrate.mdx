@@ -1,0 +1,51 @@
+---
+title: "Substrate Provider"
+description: "Run NeMo Gym sandboxes as Agent Substrate actors that pause while the policy model thinks."
+position: 9
+---
+
+The `substrate` provider runs each sandbox as an [Agent Substrate](https://github.com/agent-substrate/substrate)
+actor. Substrate pauses an actor when it is idle and resumes it on the next
+request, so a cluster can hold many more sandboxes than it has running workers.
+That matters for agentic environments such as `mini_swe_agent_2`, where a
+sandbox spends most of a rollout waiting on the model.
+
+## How it works
+
+- Control calls (`CreateActor`, `PauseActor`, `SuspendActor`, `DeleteActor`) go to
+  Substrate's `ateapi` over gRPC, authenticated with a Kubernetes ServiceAccount token.
+- Commands and file transfers go to a small HTTP server inside the actor, through
+  the `atenet` router. The router resumes a paused actor before forwarding, and the
+  provider retries requests the router could not place while the pool is full.
+- Each benchmark image needs an `ActorTemplate`, built ahead of a run with
+  Substrate's `demos/sandbox/gym-templates.sh`. The template mounts the sandbox
+  server from an image volume, so the benchmark image runs untouched.
+
+## Configuration
+
+```yaml
+sandbox:
+  substrate:
+    connection:
+      ateapi_addr: localhost:8080
+      atenet_addr: localhost:8000
+      atespace: nemo-gym
+      template_namespace: nemo-gym
+    create:
+      suspend_policy: pause_after_exec   # never | after_exec | pause_after_exec
+      idle_before_suspend_s: 1.0
+    exec:
+      default_timeout_s: 1800
+      concurrency: 32
+```
+
+`pause_after_exec` pauses the actor once it has been idle for `idle_before_suspend_s`
+after a step; `after_exec` suspends it to object storage instead; `never` is the
+always-on control.
+
+Set the router's `--route-timeout` above your longest exec and
+`--parked-request-budget` to how long a step may wait for a worker slot, and size
+the `WorkerPool` so each worker holds several actors.
+
+See the provider README in `nemo_gym/sandbox/providers/substrate/` for the
+template generator, the trust model, and what the provider does not honor.

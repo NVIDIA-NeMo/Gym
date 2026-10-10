@@ -364,7 +364,7 @@ sandbox = [
     # kubernetes license: Apache 2.0 https://github.com/kubernetes-client/python/blob/master/LICENSE
     # PyYAML license: MIT https://github.com/yaml/pyyaml/blob/main/LICENSE
     "grpcio>=1.81.0rc1",
-    "protobuf>=6.31",
+    "protobuf>=6.33.5",  # the generated ateapi stubs refuse an older runtime
     "httpx>=0.27",
     "kubernetes>=30",
     "PyYAML>=6.0",

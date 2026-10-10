@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Regenerate the Substrate control-API stubs from a Substrate checkout.
 #
 #   scripts/generate_ateapi_stubs.sh /path/to/substrate
@@ -22,4 +24,7 @@ uv run --with "${GRPCIO_TOOLS}" python -m grpc_tools.protoc \
 sed -i.bak 's/^import ateapi_pb2 as ateapi__pb2/from . import ateapi_pb2 as ateapi__pb2/' "${OUT}/ateapi_pb2_grpc.py"
 rm -f "${OUT}/ateapi_pb2_grpc.py.bak"
 
-echo "generated from substrate $(git -C "${SUBSTRATE}" rev-parse HEAD)"
+COMMIT="$(git -C "${SUBSTRATE}" rev-parse HEAD)"
+sed -i.bak "s/^SUBSTRATE_COMMIT = .*/SUBSTRATE_COMMIT = \"${COMMIT}\"/" "${OUT}/__init__.py"
+rm -f "${OUT}/__init__.py.bak"
+echo "generated from substrate ${COMMIT}"
