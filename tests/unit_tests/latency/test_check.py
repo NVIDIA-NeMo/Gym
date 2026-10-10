@@ -158,3 +158,16 @@ def test_span_integrity_catches_inverted_spans_duplicate_ids_dangling_parents_an
     details = "\n".join([c for c in report["checks"] if c["name"] == "span_integrity"][0]["details"])
     for needle in ("used 2 times", "before start", "parent nowhere", "status unknown"):
         assert needle in details, details
+
+
+def test_a_killed_opencode_process_does_not_fail_the_token_accounting(tmp_path: Path) -> None:
+    """OpenCode's export under-counts a process killed at the cap (steps it had not finalised carry no tokens), so
+    the usage-against-capture comparison is skipped when the agent did not end normally; cached <= input and every
+    other check still apply."""
+    row = opencode_row()
+    records = row["ng_agent_observations"]["records"]
+    records[1] = {**records[1], "outcome": "timeout"}
+    row["ng_trajectory"]["invocations"][0]["process_exited_at"] = None
+    row["response"]["usage"]["input_tokens"] = 1  # the export stopped counting
+    report = run_checks(_run(tmp_path, [row]))
+    assert report["passed"], report["failed_checks"]

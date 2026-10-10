@@ -161,3 +161,32 @@ def test_compaction_model_calls_are_children_of_their_compaction(terminus_record
     assert step["name"] == "model_step" and step["parent_span_id"] == compaction["span_id"]
     other = next(s for s in spans if s["name"] == "model_call" and s["ids"]["model_call_id"] == "cap-1")
     assert by_id[other["parent_span_id"]]["parent_span_id"] != compaction["span_id"]
+
+
+def test_an_opencode_step_the_killed_process_never_finished_is_incomplete(opencode_record):
+    """The request was in flight when the sandbox cap killed the process: the step has a send time and no end. The
+    harness never saw it finish, so the call is incomplete, not ok; the server's own view (cancelled) stands beside."""
+    records = opencode_record["ng_agent_observations"]["records"]
+    records[1] = {**records[1], "outcome": "timeout"}
+    opencode_record["ng_trajectory"]["invocations"][0]["process_exited_at"] = None
+    calls = opencode_record["ng_trajectory"]["model_calls"]
+    last = calls[2]
+    calls.append(
+        {
+            **last,
+            "model_call_id": "cap-4",
+            "started_at": last["completed_at"] + 2.0,
+            "completed_at": None,
+            "duration_ms": None,
+            "processed_at": None,
+            "server_started_at": last["server_completed_at"] + 2.1,
+            "server_completed_at": last["server_completed_at"] + 6.0,
+            "server_duration_ms": 3_900.0,
+            "status": None,
+            "response_metadata": {**last["response_metadata"], "response_id": "resp-4", "error_category": "cancelled"},
+        }
+    )
+    spans = project_rollout(opencode_record)["spans"]
+    call = next(s for s in spans if s["name"] == "model_call" and s["ids"]["model_call_id"] == "cap-4")
+    server = next(s for s in spans if s["name"] == "model_call_server" and s["ids"]["model_call_id"] == "cap-4")
+    assert (call["status"], call["end_wall_s"], server["status"]) == ("incomplete", None, "cancelled")

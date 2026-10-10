@@ -326,7 +326,10 @@ class _Projection:
                     steps.append(step)
             logical: Optional[Span] = None
             if start is not None:
-                status = call.get("status") or ("incomplete" if call.get("context_overflow") else "ok")
+                # No status from the harness: a rejected request is incomplete, and so is a call it never saw end
+                # (the OpenCode process was killed with the request in flight).
+                never_ended = completed is None and _f(call.get("duration_ms")) is None
+                status = call.get("status") or ("incomplete" if call.get("context_overflow") or never_ended else "ok")
                 logical = self.add(
                     timed_span(
                         "model_call",

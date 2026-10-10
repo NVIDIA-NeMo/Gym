@@ -256,7 +256,10 @@ def _check_opencode(record: dict[str, Any], by_name: dict[str, list[dict[str, An
     usage = response.get("usage") if isinstance(response, dict) else None
     servers = by_name.get("model_call_server", [])
     main_servers = [s for s in servers if not (s.get("ids") or {}).get("parent_invocation_id")]
-    if usage and main_servers:
+    # OpenCode's export under-counts a process killed at the cap (the steps it had not finalised carry no tokens),
+    # so the sum is compared only when the agent ended normally.
+    agent = by_name.get("agent", [])
+    if usage and main_servers and agent and agent[0].get("status") == "ok":
         # OpenCode's export sums its own input counts, which exclude cache reads; the captured prompt tokens
         # include them. The two sources are independent (OpenCode's database vs the model server's capture).
         cached = (usage.get("input_tokens_details") or {}).get("cached_tokens") or 0
