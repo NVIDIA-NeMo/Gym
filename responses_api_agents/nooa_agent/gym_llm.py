@@ -23,6 +23,7 @@ from typing import Any, Literal, Protocol
 
 import aiohttp
 from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall, UnifiedLLM
+from nooa.unifiedllm.limits import REPLY_CAP_KEYS, ContextLimits
 from pydantic import BaseModel
 
 from nemo_gym.config_types import ModelServerRef
@@ -233,8 +234,9 @@ class GymResponsesLLM(UnifiedLLM):
         model: str = "gym-policy",
         on_call: Callable[[GymModelCall], None] | None = None,
         sampling_overrides: dict[str, Any] | None = None,
+        context_window: int | None = None,
     ) -> None:
-        super().__init__(model=model)
+        super().__init__(model=model, context_window=context_window)
         self._server_client = server_client
         self._model_server_name = model_server_name
         self._model_url_path = model_url_path
@@ -244,6 +246,21 @@ class GymResponsesLLM(UnifiedLLM):
         self._cookies = cookies
         self._calls = 0
         self._lock = asyncio.Lock()
+
+    def get_context_limits(
+        self, overrides: dict[str, Any] | None = None, *, fallback_reserve: int = 0
+    ) -> ContextLimits:
+        """Reserve the same reply cap that the Gym request will actually send."""
+        params = dict(overrides or {})
+        cap = self._sampling_overrides.get("max_output_tokens")
+        if cap is not None:
+            params = {key: value for key, value in params.items() if key not in REPLY_CAP_KEYS}
+            if params.get("extra_body"):
+                params["extra_body"] = {
+                    key: value for key, value in params["extra_body"].items() if key not in REPLY_CAP_KEYS
+                }
+            params["max_tokens"] = cap
+        return super().get_context_limits(params, fallback_reserve=fallback_reserve)
 
     @property
     def calls(self) -> int:

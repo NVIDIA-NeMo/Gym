@@ -15,65 +15,27 @@
 
 from __future__ import annotations
 
-import importlib
-import inspect
-from collections.abc import Awaitable, Callable
-from typing import Any, Literal
+from pathlib import Path
 
-from nooa import Agent
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field, field_validator
 
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-
-
-NOOAInvocationAdapter = Callable[
-    [Agent, NeMoGymResponseCreateParamsNonStreaming],
-    Awaitable[object],
-]
-
-
-class NOOAInvocationConfig(BaseModel):
-    """Configuration for constructing and invoking a NOOA agent."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    agent_class: str
-    invocation_adapter: str
-    execution_mode: Literal["embedded", "sandboxed"] = "embedded"
-    init_kwargs: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("agent_class")
-    @classmethod
-    def validate_agent_class_path(cls, value: str) -> str:
-        parts = value.split(":")
-        if len(parts) != 2:
-            raise ValueError("agent_class must use the format 'module.path:ClassName'")
-
-        module_name, class_name = parts
-        if not module_name or not class_name or "." in class_name:
-            raise ValueError("agent_class must use the format 'module.path:ClassName'")
-        return value
-
-    @field_validator("invocation_adapter")
-    @classmethod
-    def validate_invocation_adapter_path(cls, value: str) -> str:
-        parts = value.split(":")
-        if len(parts) != 2:
-            raise ValueError("invocation_adapter must use the format 'module.path:function_name'")
-
-        module_name, function_name = parts
-        if not module_name or not function_name or "." in function_name:
-            raise ValueError("invocation_adapter must use the format 'module.path:function_name'")
-        return value
-
-    @field_validator("init_kwargs")
-    @classmethod
-    def validate_init_kwargs(cls, init_kwargs: dict[str, Any]) -> dict[str, Any]:
-        if "llm" in init_kwargs:
-            raise ValueError("init_kwargs.llm is reserved; Gym always injects the rollout LLM")
-        return init_kwargs
+from responses_api_agents.nooa_agent.invocation import (
+    NOOAInvocationAdapter as NOOAInvocationAdapter,
+)
+from responses_api_agents.nooa_agent.invocation import (
+    NOOAInvocationConfig as NOOAInvocationConfig,
+)
+from responses_api_agents.nooa_agent.invocation import (
+    load_agent_class as load_agent_class,
+)
+from responses_api_agents.nooa_agent.invocation import (
+    load_invocation_adapter as load_invocation_adapter,
+)
+from responses_api_agents.nooa_agent.invocation import (
+    validate_invocation as validate_invocation,
+)
 
 
 class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
@@ -83,8 +45,15 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
 
     model_server: ModelServerRef
     nooa: NOOAInvocationConfig
+    runtime_requirements_file: Path | None = Field(
+        default=None,
+        description="Explicit task-runtime requirements profile; default retains the agent's original NOOA pin.",
+    )
     max_policy_calls: int | None = Field(
         default=None, gt=0, description="Optional shared model-call limit per rollout; null disables the limit."
+    )
+    context_window: int | None = Field(
+        default=None, gt=0, description="Known policy context window used by NOOA's context planner."
     )
 
     @field_validator("num_workers")
@@ -93,57 +62,3 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         if value not in (None, 1):
             raise ValueError("NOOA sessions require num_workers=1")
         return value
-
-
-def load_agent_class(path: str) -> type[Agent]:
-    """Import and validate a ``module:Class`` NOOA agent reference."""
-
-    module_name, _, class_name = path.partition(":")
-    try:
-        module = importlib.import_module(module_name)
-    except (ImportError, TypeError) as error:
-        raise ValueError(f"could not import NOOA agent module {module_name!r}") from error
-
-    try:
-        candidate = getattr(module, class_name)
-    except AttributeError as error:
-        raise ValueError(f"module {module_name!r} has no attribute {class_name!r}") from error
-
-    if not inspect.isclass(candidate) or not issubclass(candidate, Agent):
-        raise ValueError(f"{path!r} must resolve to a subclass of nooa.Agent")
-    return candidate
-
-
-def load_invocation_adapter(path: str) -> NOOAInvocationAdapter:
-    """Import and validate an async ``module:function`` invocation adapter."""
-
-    module_name, _, function_name = path.partition(":")
-    try:
-        module = importlib.import_module(module_name)
-    except (ImportError, TypeError) as error:
-        raise ValueError(f"could not import NOOA invocation adapter module {module_name!r}") from error
-
-    try:
-        candidate = getattr(module, function_name)
-    except AttributeError as error:
-        raise ValueError(f"module {module_name!r} has no attribute {function_name!r}") from error
-
-    if not callable(candidate) or not inspect.iscoroutinefunction(candidate):
-        raise ValueError(f"{path!r} must resolve to an async function")
-    try:
-        inspect.signature(candidate).bind(object(), object())
-    except TypeError as error:
-        raise ValueError(f"invocation adapter must accept positional agent and request arguments: {error}") from error
-    return candidate
-
-
-def validate_invocation(config: NOOAInvocationConfig) -> tuple[type[Agent], NOOAInvocationAdapter]:
-    """Validate agent construction and the Responses invocation adapter at startup."""
-
-    agent_class = load_agent_class(config.agent_class)
-    try:
-        inspect.signature(agent_class).bind(llm=object(), **config.init_kwargs)
-    except TypeError as error:
-        raise ValueError(f"init_kwargs do not match {config.agent_class}: {error}") from error
-
-    return agent_class, load_invocation_adapter(config.invocation_adapter)

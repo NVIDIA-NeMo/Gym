@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nemo-gym-nooa-runtime"
+version = "0.1.0"
+description = "Gym HTTP and NOOA execution bridge inside an existing task sandbox"
+requires-python = ">=3.13.14"
+license = {file = "LICENSE"}
+# Runtime dependencies are populated from the core constraints at archive creation.
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nemo_gym*", "responses_api_agents.nooa_agent*"]
+
+[tool.nemo-gym-runtime]
+# HTTP transport/schema/config/profiling imports used by the task entry point.
+# Constraints and license documentation are inherited from the root pyproject.
+core-dependencies = [
+    "openai", "anthropic", "pydantic", "pydantic_core", "fastapi", "anyio", "itsdangerous",
+    "uvicorn", "hydra-core", "omegaconf", "rich", "aiohttp", "orjson",
+    "urllib3", "yappi", "pydot",
+]
+# Directly imported by server_utils; also a dependency of NOOA's LiteLLM.
+# License: Apache-2.0. No task-environment packages are installed or modified.
+additional-dependencies = ["requests"]

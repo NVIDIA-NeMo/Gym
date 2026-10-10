@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Full public SWE-bench Pro baseline. Call prepare_nooa.prepare_native with
+# output=Path("benchmarks/swebench/data/swebench_pro_nooa_baseline.jsonl") and
+# max_output_tokens=32768 before collecting the pinned 731-task dataset.
+# Set POLICY_BASE_URL, POLICY_API_KEY, POLICY_MODEL_NAME, OPENSANDBOX_DOMAIN,
+# OPENSANDBOX_API_KEY, and NOOA_SWE_BASELINE_RUN_DIR in the launch environment.
+# Set NEMO_GYM_MAX_ROLLOUT_ATTEMPTS=1 for this one-attempt baseline.
+# The shared policy service must serve a 262144-token context window.
+config_paths:
+  - benchmarks/swebench/pro/nooa.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+  - responses_api_models/vllm_model/configs/nooa_vllm_model.yaml
+
+policy_base_url: ${oc.env:POLICY_BASE_URL}
+policy_api_key: ${oc.env:POLICY_API_KEY}
+policy_model_name: ${oc.env:POLICY_MODEL_NAME}
+use_absolute_ip: true
+observability_enabled: true
+model_call_capture_dir: ${oc.env:NOOA_SWE_BASELINE_RUN_DIR}/model-calls
+
+# Native task rows keep the benchmark prompt and grading metadata unchanged.
+# The collector intentionally rejects run-level Responses overrides for them;
+# pin sampling on every outbound model request instead.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      propagate_context_overflow_errors: true
+      sampling_overrides:
+        temperature: 1.0
+        top_p: 1.0
+        max_tokens: 32768
+
+agent_name: swebench_pro_nooa_agent
+environment_server_routes:
+  swebench-pro-nooa: swebench_pro_nooa
+input_jsonl_fpath: benchmarks/swebench/data/swebench_pro_nooa_baseline.jsonl
+output_jsonl_fpath: ${oc.env:NOOA_SWE_BASELINE_RUN_DIR}/rollouts.jsonl
+limit: null
+num_repeats: 1
+# Keep completed grades (including zero rewards) when resuming the SAME run.
+# Do not reuse this run directory after changing inputs, source, or settings.
+resume_from_cache: true
+route_failures_to_sidecar: true
+count_failure_classes_as_zero: []
+num_samples_in_parallel: 16
+max_resident_rollout_tasks: ${num_samples_in_parallel}
+
+swebench_pro_nooa_agent:
+  responses_api_agents:
+    nooa_agent:
+      max_policy_calls: null
+      context_window: 262144
+
+swebench_pro_nooa_resources_server:
+  resources_servers:
+    swebench_pro:
+      evaluation_timeout: 3600
+      verification_attempt_timeout: 4500
+      verification_total_timeout: 9600
+      verification_stop_timeout: 120
+      # Retry an inconclusive verifier once; never regenerate a graded failure.
+      inconclusive_verification_retries: 1
+      sandbox_config:
+        # Exceeds the entire episode and its cleanup allowance.
+        ttl_s: 28800
+        resources:
+          cpu: 4
+          memory_mib: 61440
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 4
+            memory_mib: 61440
+            disk_gib: 30
+
+swebench_pro_nooa:
+  environment_servers:
+    nooa_single_agent_turn:
+      max_concurrent_episodes: ${num_samples_in_parallel}
+      queue_timeout_seconds: 300
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180

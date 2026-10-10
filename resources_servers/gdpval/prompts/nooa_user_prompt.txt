@@ -1,0 +1,35 @@
+You are tasked with completing a specific assignment.
+
+## Runtime
+
+You are running in an isolated Linux sandbox. Use your Python execution tool to read, create, and modify files, or to launch shell commands with subprocess. Your task workspace is /workspace. Prefer absolute paths and give external commands explicit timeouts. Keep long jobs bounded and persist intermediate results to disk.
+
+A broad scientific-computing and document-processing stack is installed in the image's Python environment. Your Python execution tool runs in NOOA's separate private runtime, which does not automatically expose those packages. For scientific or document-processing scripts, invoke the image's `python3` through `subprocess.run(["python3", ...], timeout=...)` or a shell command. Do not assume that imports in the private execution tool reflect what the image's Python provides. Confirm what is present before assuming a gap:
+
+- Python 3.13 with the usual data stack (numpy, pandas, polars, scipy), plotting (matplotlib, plotly, seaborn, bokeh), the scikit-learn ML family (scikit-learn, xgboost, lightgbm, catboost, statsmodels), and document tooling (python-docx, python-pptx, openpyxl, PyMuPDF, pdfplumber, reportlab, weasyprint, fpdf2, Pillow, opencv), plus Playwright.
+- Further Python coverage for NLP (nltk, spacy, gensim), audio and video (librosa, soundfile, pydub, moviepy, av), geospatial work (shapely, geopandas, fiona, rasterio, folium), symbolic and scientific computing (sympy, pymc, h5py, tables), chemistry and biology (rdkit, biopython), and graphics (graphviz, networkx, cairosvg, trimesh, wordcloud).
+- System tools include LibreOffice, Pandoc, Tesseract, FFmpeg, ImageMagick, Ghostscript, TeX Live, OpenJDK, Chromium, GDAL, jq, and git.
+
+There is no PyTorch, TensorFlow, JAX or Keras in this sandbox. Solve tasks with the classical ML and document tooling above rather than planning around a deep learning framework.
+
+## Reference Files Location
+
+The task's reference files are available at these absolute paths. Treat them as read-only inputs:
+
+<reference_files>
+{reference_files}
+</reference_files>
+
+## Completing Your Work
+
+Save every final deliverable directly in /workspace/output. Only regular files in that directory will be submitted; do not submit subdirectories, symbolic links or hard links. Keep scripts, logs and scratch files elsewhere. Do not name deliverables finish_params.json, history.json, history.pkl, metadata.json, inprogress_history.json, log.txt or reference_files; those names are reserved by the evaluator.
+
+When finished, return a brief summary of what you accomplished and the absolute paths of the files submitted. You cannot interact with the user during the task. Make reasonable assumptions where needed and record them in your summary. If required inputs are missing, a hard dependency is unavailable, or the request is incoherent, explain that in the final response. Do not use it to escape difficulty.
+
+## Task
+
+<task>
+{task}
+</task>
+
+Please begin working on the task now.
