@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+mmlu_pro_pi_resources_server:
+  resources_servers:
+    mcqa:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      grading_mode: lenient_answer_colon_md
+
+mmlu_pro_pi_agent:
+  responses_api_agents:
+    pi_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: mmlu_pro_pi_resources_server
+      # Pi calls the hosted endpoint directly; no Gym model server is used.
+      model_server: null
+      model: nvidia-preview/nvidia/nvidia/nemotron-3.5-super-text-preview
+      command: pi
+      pi_version: 0.87.1
+      concurrency: 2
+      timeout: 300
+      extra_args: [--no-tools, --no-extensions, --no-skills]
+      models_config:
+        providers:
+          nvidia-preview:
+            baseUrl: https://inference-api.nvidia.com/v1
+            api: openai-completions
+            apiKey: $NVIDIA_INFERENCE_HUB_API_KEY
+            compat:
+              supportsStore: false
+              supportsDeveloperRole: false
+              supportsReasoningEffort: false
+              supportsStrictMode: false
+              maxTokensField: max_tokens
+            models:
+              - id: nvidia/nvidia/nemotron-3.5-super-text-preview
+                name: Nemotron 3.5 Super Text Preview
+                reasoning: false
+                input: [text]
+                # Conservative run budget, not a claim about the endpoint's maximum context.
+                contextWindow: 32768
+                maxTokens: 8192
+      datasets:
+        - name: mmlu_pro
+          type: benchmark
+          jsonl_fpath: benchmarks/mmlu_pro/data/mmlu_pro_benchmark.jsonl
+          prompt_config: benchmarks/prompts/eval/aai/mcq-10choices.yaml
+          prepare_script: benchmarks/mmlu_pro/prepare.py
+          num_repeats: 1
