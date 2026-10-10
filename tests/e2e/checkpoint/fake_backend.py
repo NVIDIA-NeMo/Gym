@@ -10,7 +10,9 @@ The default script is one ``get_weather`` call.
 Control routes:
 
 - ``POST /_ctl/hold {"after_calls": n}``: every call after the first ``n`` waits until released.
-- ``POST /_ctl/release``: release held calls.
+- ``POST /_ctl/release``: release held calls, and stop gating.
+- ``POST /_ctl/gate``: from now on every call waits until a step releases it.
+- ``POST /_ctl/step {"calls": n}``: release the ``n`` longest-waiting gated calls; returns how many were released.
 - ``POST /_ctl/script {"tool_calls": [...]}``: set the scripted tool calls.
 - ``GET /_ctl/calls``: every request received, with its message count and capture admission.
 - ``GET /_ctl/cuts``: the model call IDs cut by each generation-cut round.
@@ -51,7 +53,15 @@ TRANSFER_QUEUE = FakeTransferQueue()
 CAPTURE = RolloutTokenCapture(sink=TRANSFER_QUEUE, weight_version_fn=lambda: 7)
 # Calls that are generating, with their prompt and the tokens produced so far: a checkpoint may cut them.
 ACTIVE: dict[str, tuple[ActiveCall, list[int], list[int]]] = {}
-STATE: dict[str, Any] = {"calls": [], "cuts": [], "hold_after": None, "released": asyncio.Event()}
+STATE: dict[str, Any] = {
+    "calls": [],
+    "cuts": [],
+    "hold_after": None,
+    "released": asyncio.Event(),
+    "gated": False,
+    # Gated calls waiting for a step, oldest first.
+    "waiting": [],
+}
 SCRIPT: list[dict[str, Any]] = list(DEFAULT_SCRIPT)
 
 app = FastAPI()
@@ -77,7 +87,26 @@ async def hold(body: dict) -> dict:
 async def release() -> dict:
     STATE["hold_after"] = None
     STATE["released"].set()
+    STATE["gated"] = False
+    waiting, STATE["waiting"] = STATE["waiting"], []
+    for event in waiting:
+        event.set()
     return {"ok": True}
+
+
+@app.post("/_ctl/gate")
+async def gate() -> dict:
+    STATE["gated"] = True
+    return {"ok": True}
+
+
+@app.post("/_ctl/step")
+async def step(body: dict) -> dict:
+    released = STATE["waiting"][: body["calls"]]
+    del STATE["waiting"][: body["calls"]]
+    for event in released:
+        event.set()
+    return {"released": len(released), "waiting": len(STATE["waiting"])}
 
 
 @app.post("/_ctl/script")
@@ -189,6 +218,10 @@ async def chat(request: Request) -> dict:
     hold_after = STATE["hold_after"]
     if hold_after is not None and index >= hold_after:
         await STATE["released"].wait()
+    if STATE["gated"]:
+        event = asyncio.Event()
+        STATE["waiting"].append(event)
+        await event.wait()
 
     coords = None
     if capture is not None:

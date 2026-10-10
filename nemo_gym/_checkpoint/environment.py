@@ -14,7 +14,7 @@ a retire of one that already ran would wait for its cleanup, whose calls wait fo
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -55,6 +55,21 @@ class EnvironmentParticipant(CheckpointParticipant):
         self._restored: dict[str, EpisodeRecord] = {}
         # Set by a restore and cleared by the resume after it.
         self._awaiting_resume = False
+        # With several workers, restored boundaries stay with the coordinator until a replacement claims one.
+        self.claim_restored: Optional[Callable[[str], Awaitable[Optional[dict[str, Any]]]]] = None
+
+    @staticmethod
+    def claim_key(record: CheckpointRecord) -> Optional[str]:
+        return next_attempt(record.episode_id).capture_key
+
+    async def claim(self, episode_id: EpisodeId) -> None:
+        """Take this attempt's restored boundary from the coordinator, if there is one; call before ``begin``."""
+        if self.claim_restored is None:
+            return
+        self.retired.check(episode_id)
+        record = await self.claim_restored(episode_id.capture_key)
+        if record is not None:
+            self._restored[episode_id.capture_key] = EpisodeRecord.model_validate(record)
 
     def begin(
         self, episode_id: EpisodeId, task: Any, deadline: Optional[asyncio.Timeout], *, restart: bool = False

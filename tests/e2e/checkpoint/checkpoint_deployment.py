@@ -9,8 +9,10 @@ as a training framework's inference workers and token store would.
 """
 
 import contextlib
+import glob
 import os
 import random
+import re
 import signal
 import socket
 import subprocess
@@ -24,6 +26,7 @@ import yaml
 from omegaconf import OmegaConf
 
 from nemo_gym._checkpoint import coordination
+from nemo_gym.runtime_dir import RUNTIME_ROOT
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
 
 
@@ -102,6 +105,8 @@ class Deployment:
 
     With ``inference_url``,
     the policy model serves from that endpoint and the fake backend's control routes are unavailable.
+    ``policy_workers`` sets the policy model server's uvicorn workers,
+    and ``server_workers`` those of the environment, agent, and resources servers.
     """
 
     def __init__(
@@ -115,6 +120,8 @@ class Deployment:
         inference_url: Optional[str] = None,
         model_name: str = "fake-model",
         policy_workers: int = 1,
+        server_workers: int = 1,
+        resources_mcp: bool = False,
         extra_config: Optional[dict[str, Any]] = None,
     ) -> None:
         self.topology = topology
@@ -129,9 +136,14 @@ class Deployment:
         self.inference_url = inference_url or f"http://127.0.0.1:{self.backend_port}/v1"
         self.model_name = model_name
         self.policy_workers = policy_workers
+        self.server_workers = server_workers
+        # Expose the counter resources server's tools over MCP, as a CLI agent harness calls them.
+        self.resources_mcp = resources_mcp
         self.external_inference = inference_url is not None
         self.procs: dict[str, subprocess.Popen] = {}
         self.dirs: dict[str, Path] = {}
+        # Servers whose code lives in a test directory; they always run one worker.
+        self.single_worker: set[str] = set()
         # The slow server's verify mode is a class attribute on real servers;
         # this test server reads it from its environment so one scenario can run both modes.
         self.slow_verify_mode = checkpoint_verify or "wait"
@@ -165,6 +177,13 @@ class Deployment:
         def add(name: str, server_dir: str, entry: dict) -> None:
             inner = next(iter(next(iter(entry.values())).values()))
             inner["port"] = free_port()
+            # uvicorn's workers import a server's app by the path its config names,
+            # which is always the repository server a test server subclasses, never the test directory.
+            # With several workers a test server would serve its parent's code, so test servers run one worker.
+            if server_dir.startswith("/"):
+                self.single_worker.add(name)
+            elif name != "policy_model":
+                inner["num_workers"] = self.server_workers
             config[name] = entry
             self.dirs[name] = REPO / server_dir if not server_dir.startswith("/") else Path(server_dir)
 
@@ -192,6 +211,7 @@ class Deployment:
                 domain="agent",
                 verified=False,
                 description="counter",
+                expose_tools_over_mcp=self.resources_mcp,
             )
             add("resources", "resources_servers/example_session_state_mgmt", resources)
         elif self.topology == "slow":
@@ -262,6 +282,13 @@ class Deployment:
             add("environment", "environment_servers/legacy_agent", environment)
         return config
 
+    def set_server_workers(self, count: int) -> None:
+        """Change the worker count of the environment, agent, and resources servers for their next start."""
+        self.server_workers = count
+        for name in self.dirs:
+            if name != "policy_model" and name not in self.single_worker:
+                next(iter(next(iter(self.config[name].values())).values()))["num_workers"] = count
+
     # -- processes ------------------------------------------------------------------------------
 
     def start_backend(self) -> None:
@@ -281,6 +308,7 @@ class Deployment:
             self._start(name)
         for name in self.dirs:
             self._wait_healthy(name, f"{self.url(name)}/health")
+            self._wait_workers(name)
 
     def crash_gym(self) -> None:
         """Kill every Gym server process, including uvicorn workers, without a chance to clean up."""
@@ -333,6 +361,55 @@ class Deployment:
                 pass
             time.sleep(0.2)
         raise TimeoutError(f"{name} did not become healthy at {url}")
+
+    def _wait_workers(self, name: str, timeout: float = 120) -> None:
+        """Wait until every uvicorn worker of ``name`` has joined its checkpoint coordinator and serves.
+
+        ``/health`` answers as soon as one worker serves.
+        Until the others start, that worker accepts every connection,
+        so every session a test creates would be owned by it.
+        A worker joins its coordinator early in its startup,
+        so a worker of a server that routes sessions counts only once its private session socket accepts too.
+        """
+        inner = next(iter(next(iter(self.config[name].values())).values()))
+        workers = inner.get("num_workers") or 1
+        if workers == 1:
+            return
+        url = f"{self.url(name)}/ng-control/v1/checkpoint/status"
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            proc = self.procs[name]
+            if proc.poll() is not None:
+                raise RuntimeError(f"{name} exited with {proc.returncode}; see {self.log_dir / name}.log")
+            try:
+                reply = requests.get(url, headers={"authorization": f"Bearer {TOKEN}"}, timeout=1)
+                # A server that keeps no checkpoint state, such as the legacy relay, has no coordinator.
+                # It holds no sessions either, so no test depends on which of its workers serves.
+                if reply.status_code == 404:
+                    return
+                # Only agents and resources servers route sessions to their owner, through these sockets.
+                routed = name in ("agent", "resources")
+                if reply.json().get("workers") == workers and (not routed or self._sockets_accepting(name) >= workers):
+                    return
+            except requests.RequestException:
+                pass
+            time.sleep(0.2)
+        raise TimeoutError(f"{name} did not start all {workers} workers")
+
+    def _sockets_accepting(self, name: str) -> int:
+        """How many of ``name``'s workers accept on their private session socket, which is named by routing ID."""
+        accepting = 0
+        for path in glob.glob(os.path.join(RUNTIME_ROOT, f"ng-{self.procs[name].pid}-*", "*.sock")):
+            if not re.fullmatch(r"[0-9a-f]{32}\.sock", os.path.basename(path)):
+                continue
+            with socket.socket(socket.AF_UNIX) as probe:
+                probe.settimeout(1)
+                try:
+                    probe.connect(path)
+                except OSError:
+                    continue
+            accepting += 1
+        return accepting
 
     # -- access ---------------------------------------------------------------------------------
 

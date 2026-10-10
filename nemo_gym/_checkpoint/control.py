@@ -270,11 +270,15 @@ class CheckpointParticipant(ABC):
     def __init__(self) -> None:
         self.retired = RetiredAttempts()
         self._changed = asyncio.Condition()
+        # With several workers, each worker's participant also reports its changes to the coordinator.
+        self.on_change: Optional[Callable[[], Awaitable[None]]] = None
 
     async def notify(self) -> None:
         """Wake a prepare that waits for this participant to become ready."""
         async with self._changed:
             self._changed.notify_all()
+        if self.on_change is not None:
+            await self.on_change()
 
     async def wait_changed(self, timeout: float) -> None:
         async with self._changed:
@@ -372,8 +376,26 @@ class CheckpointParticipant(ABC):
         """Participant-specific fields the controller needs in the commit reply."""
         return {}
 
+    def manifest_extra(self) -> dict[str, Any]:
+        """Participant-specific fields to keep in the checkpoint's manifest, read back by ``restore_manifest``."""
+        return {}
+
+    def restore_manifest(self, manifest: dict[str, Any]) -> None:
+        """Read what ``manifest_extra`` kept, before a restore installs the records."""
+
     def status_extra(self) -> dict[str, Any]:
         return {}
+
+    @staticmethod
+    def claim_key(record: CheckpointRecord) -> Optional[str]:
+        """The key a replacement claims ``record`` by, for state that lives inside one request.
+
+        With several workers,
+        the coordinator holds such a record until the worker that receives the replacement claims it.
+        Records of state that spans requests return None:
+        they are installed on the worker their session's requests are routed to.
+        """
+        return None
 
 
 def next_attempt(episode_id: EpisodeId) -> EpisodeId:
@@ -732,6 +754,7 @@ class ParticipantControlPlane:
                     # Converted in the writer thread:
                     # exported state is not changed in place until resume, which stops the writer.
                     records=(record.to_json_record() for record in write.records),
+                    extra=self.participant.manifest_extra(),
                     stop=write.stop,
                 )
             )
@@ -774,6 +797,7 @@ class ParticipantControlPlane:
             await _within(request, self._installed())
             try:
                 await self.participant.close_admission(request)
+                self.participant.restore_manifest(manifest)
                 self._install = asyncio.ensure_future(self.participant.install(records, request.episode_ids))
                 # A restore that fails after this retires what the install brings: the retire waits for it.
                 self._install.add_done_callback(lambda done: done.cancelled() or done.exception())

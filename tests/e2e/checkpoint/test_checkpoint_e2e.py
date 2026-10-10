@@ -52,6 +52,8 @@ from nemo_gym.episode_types import EpisodeId
 
 # The policy model server runs in one process, or as a coordinator plus uvicorn workers.
 POLICY_WORKERS = pytest.mark.parametrize("policy_workers", [1, 2])
+# So do the environment, agent, and resources servers.
+SERVER_WORKERS = pytest.mark.parametrize("server_workers", [1, 2], ids=["servers1", "servers2"])
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("NEMO_GYM_CHECKPOINT_E2E") != "1",
@@ -133,8 +135,12 @@ async def crash_and_restore(
     skip_kinds: tuple[str, ...] = (),
     attempt: int = 0,
     restore_id: str = "r1",
+    server_workers: Optional[int] = None,
 ) -> None:
+    """Crash, restart, and restore; ``server_workers`` restarts the servers with a different worker count."""
     deployment.crash_gym()
+    if server_workers is not None:
+        deployment.set_server_workers(server_workers)
     if not deployment.external_inference:
         deployment.backend("/_ctl/release", {})
     deployment.slow_verify_flag.unlink(missing_ok=True)
@@ -157,16 +163,31 @@ def records_file(participant_dir: Path) -> Path:
     return path
 
 
+async def checkpoint_replies(deployment: Deployment, checkpoint_dir: Path, rollout_ids: list[str]) -> dict[str, Any]:
+    """Prepare and commit as ``checkpoint`` does, and return each participant's commit reply."""
+    participants = await deployment.participants()
+    prepared = await coordination.prepare(participants, "c1", deadline_ts=deadline())
+    assert prepared.prepared, prepared.blockers()
+    episode_ids = [EpisodeId(rollout_id=rollout_id) for rollout_id in rollout_ids]
+    return await coordination.commit(participants, "c1", str(checkpoint_dir), episode_ids, deadline_ts=deadline())
+
+
+def session_records(checkpoint_dir: Path, kind: str) -> list[str]:
+    [path] = (checkpoint_dir / "gym" / kind).rglob("records-*.jsonl")
+    return path.read_text().splitlines()
+
+
 def environment_record(checkpoint_dir: Path) -> dict:
     [line] = records_file(checkpoint_dir / "gym/environment/environment").read_text().splitlines()
     return json.loads(line)
 
 
 @POLICY_WORKERS
+@SERVER_WORKERS
 async def test_native_episode_continues_from_its_last_boundary_after_a_crash(
-    deploy, tmp_path: Path, policy_workers: int
+    deploy, tmp_path: Path, policy_workers: int, server_workers: int
 ) -> None:
-    deployment = deploy("native", policy_workers=policy_workers)
+    deployment = deploy("native", policy_workers=policy_workers, server_workers=server_workers)
     deployment.backend("/_ctl/hold", {"after_calls": 1})
     async with httpx.AsyncClient(base_url=deployment.url("environment"), timeout=120) as http:
         first = asyncio.create_task(http.post("/run", json=weather_episode("crash-1")))
@@ -185,10 +206,11 @@ async def test_native_episode_continues_from_its_last_boundary_after_a_crash(
 
 
 @POLICY_WORKERS
+@SERVER_WORKERS
 async def test_a_second_crash_before_the_replacement_starts_still_continues(
-    deploy, tmp_path: Path, policy_workers: int
+    deploy, tmp_path: Path, policy_workers: int, server_workers: int
 ) -> None:
-    deployment = deploy("native", policy_workers=policy_workers)
+    deployment = deploy("native", policy_workers=policy_workers, server_workers=server_workers)
     deployment.backend("/_ctl/hold", {"after_calls": 1})
     async with httpx.AsyncClient(base_url=deployment.url("environment"), timeout=120) as http:
         first = asyncio.create_task(http.post("/run", json=weather_episode("twice-1")))
@@ -244,8 +266,11 @@ async def test_a_checkpoint_restores_again_after_its_replacement_made_calls(
     assert not manifest.get("failures")
 
 
-async def test_legacy_run_continues_from_its_last_boundary_after_a_crash(deploy, tmp_path: Path) -> None:
-    deployment = deploy("legacy")
+@SERVER_WORKERS
+async def test_legacy_run_continues_from_its_last_boundary_after_a_crash(
+    deploy, tmp_path: Path, server_workers: int
+) -> None:
+    deployment = deploy("legacy", server_workers=server_workers)
     deployment.backend("/_ctl/hold", {"after_calls": 1})
     async with httpx.AsyncClient(base_url=deployment.url("environment"), timeout=120) as http:
         first = asyncio.create_task(http.post("/run", json=weather_row("legacy-1")))
@@ -261,8 +286,11 @@ async def test_legacy_run_continues_from_its_last_boundary_after_a_crash(deploy,
 
 
 @pytest.mark.parametrize("restore_resources", [True, False])
-async def test_resources_state_is_restored_with_the_episode(deploy, tmp_path: Path, restore_resources: bool) -> None:
-    deployment = deploy("counter")
+@SERVER_WORKERS
+async def test_resources_state_is_restored_with_the_episode(
+    deploy, tmp_path: Path, restore_resources: bool, server_workers: int
+) -> None:
+    deployment = deploy("counter", server_workers=server_workers)
     deployment.backend("/_ctl/script", COUNTER_SCRIPT)
     # The first increment runs before the checkpoint; the model call for the second is held.
     deployment.backend("/_ctl/hold", {"after_calls": 1})
@@ -337,10 +365,11 @@ async def test_an_in_flight_generation_is_cut_and_its_prefix_continued(
 
 
 @POLICY_WORKERS
+@SERVER_WORKERS
 async def test_a_checkpoint_without_a_crash_parks_and_then_resumes_the_episode(
-    deploy, tmp_path: Path, policy_workers: int
+    deploy, tmp_path: Path, policy_workers: int, server_workers: int
 ) -> None:
-    deployment = deploy("native", policy_workers=policy_workers)
+    deployment = deploy("native", policy_workers=policy_workers, server_workers=server_workers)
     deployment.backend("/_ctl/hold", {"after_calls": 0})
     async with httpx.AsyncClient(base_url=deployment.url("environment"), timeout=120) as http:
         run = asyncio.create_task(http.post("/run", json=weather_episode("park-1")))
@@ -360,6 +389,63 @@ async def test_a_checkpoint_without_a_crash_parks_and_then_resumes_the_episode(
     assert parked
     assert response.json()["result"]["reward"] == 1.0
     assert len(deployment.backend_calls()) == 2
+
+
+@pytest.mark.parametrize("topology", ["native", "counter"])
+@pytest.mark.parametrize(
+    ("workers_before", "workers_after"),
+    [(1, 1), (2, 2), (1, 2), (2, 1), (2, 4)],
+    ids=["servers1to1", "servers2to2", "servers1to2", "servers2to1", "servers2to4"],
+)
+async def test_concurrent_sessions_across_workers_all_continue_after_a_crash(
+    deploy, tmp_path: Path, topology: str, workers_before: int, workers_after: int
+) -> None:
+    """Many rollouts in flight at once, their sessions spread over every worker, all continue after a crash.
+
+    The servers may restart with a different worker count than they were checkpointed with.
+    """
+    count = 16
+    deployment = deploy(topology, server_workers=workers_before)
+    if topology == "counter":
+        deployment.backend("/_ctl/script", COUNTER_SCRIPT)
+        rows = {f"many-{index}": counter_row(f"many-{index}") for index in range(count)}
+        # Native sessions: the turn loop's agent sessions.
+        # Counter: the resources sessions holding each counter.
+        # The legacy relay keeps no episode state; the agent holds each /run episode.
+        session_kind, episode_owner, calls_per_rollout = "resources", "agent", 3
+    else:
+        rows = {f"many-{index}": weather_episode(f"many-{index}") for index in range(count)}
+        session_kind, episode_owner, calls_per_rollout = "agent", "environment", 2
+    # Every rollout's first model call returns; every later call is held.
+    # The first calls are released only once all of them have arrived.
+    # Otherwise a rollout answered early could send its second call before another rollout sent its first.
+    deployment.backend("/_ctl/gate", {})
+    async with httpx.AsyncClient(base_url=deployment.url("environment"), timeout=120) as http:
+        runs = [asyncio.create_task(http.post("/run", json=row)) for row in rows.values()]
+        await wait_until(lambda: len(deployment.backend_calls()) == count, timeout=60)
+        deployment.backend("/_ctl/step", {"calls": count})
+        await wait_until(lambda: len(deployment.backend_calls()) == 2 * count, timeout=60)
+        replies = await checkpoint_replies(deployment, tmp_path / "ckpt", list(rows))
+        owners = {json.loads(line)["owner"] for line in session_records(tmp_path / "ckpt", session_kind)}
+        await crash_and_restore(deployment, tmp_path / "ckpt", list(rows), server_workers=workers_after)
+        for run in runs:
+            run.cancel()
+        if topology == "counter":
+            replacements = [counter_row(rollout_id, attempt=1) for rollout_id in rows]
+        else:
+            replacements = [weather_episode(rollout_id, attempt=1) for rollout_id in rows]
+        results = await asyncio.gather(*(http.post("/run", json=row) for row in replacements))
+
+    rewards = [reward_of(result.json()) for result in results]
+    assert replies[episode_owner]["episode_ids"] == sorted(rows)
+    # With one worker, sessions carry no routing owner; with several, they come from every worker.
+    assert owners == ({None} if workers_before == 1 else set(owners) - {None})
+    assert len(owners) == workers_before
+    assert rewards == [1.0] * count
+    # Between them, the rollouts had one call delivered each before the crash.
+    # Every continued rollout makes only the calls it still needed,
+    # so none repeats a delivered call or restarts from its input.
+    assert len(deployment.backend_calls()) == 2 * count + (calls_per_rollout - 1) * count
 
 
 @pytest.mark.parametrize("mode", ["replay", "wait"])
@@ -434,11 +520,17 @@ async def test_an_episode_that_finishes_during_prepare_is_neither_lost_nor_redon
 @pytest.mark.skipif(
     not os.environ.get("NEMO_GYM_CHECKPOINT_VLLM_URL"), reason="set NEMO_GYM_CHECKPOINT_VLLM_URL to a vLLM server"
 )
-async def test_real_model_rollouts_are_either_finished_or_continued_after_a_crash(deploy, tmp_path: Path) -> None:
+@POLICY_WORKERS
+@SERVER_WORKERS
+async def test_real_model_rollouts_are_either_finished_or_continued_after_a_crash(
+    deploy, tmp_path: Path, policy_workers: int, server_workers: int
+) -> None:
     deployment = deploy(
         "native",
         inference_url=os.environ["NEMO_GYM_CHECKPOINT_VLLM_URL"],
         model_name=os.environ.get("NEMO_GYM_CHECKPOINT_VLLM_MODEL", "Qwen/Qwen3-0.6B"),
+        policy_workers=policy_workers,
+        server_workers=server_workers,
     )
     rollout_ids = [f"real-{index}" for index in range(64)]
     async with httpx.AsyncClient(base_url=deployment.url("environment"), timeout=300) as http:
@@ -497,13 +589,17 @@ async def test_real_model_rollouts_are_either_finished_or_continued_after_a_cras
 @pytest.mark.skipif(
     not os.environ.get("NEMO_GYM_CHECKPOINT_VLLM_URL"), reason="set NEMO_GYM_CHECKPOINT_VLLM_URL to a vLLM server"
 )
+@POLICY_WORKERS
+@SERVER_WORKERS
 async def test_real_model_restarts_keep_running_through_a_checkpoint_and_start_over_after_a_crash(
-    deploy, tmp_path: Path
+    deploy, tmp_path: Path, policy_workers: int, server_workers: int
 ) -> None:
     deployment = deploy(
         "mixed",
         inference_url=os.environ["NEMO_GYM_CHECKPOINT_VLLM_URL"],
         model_name=os.environ.get("NEMO_GYM_CHECKPOINT_VLLM_MODEL", "Qwen/Qwen3-0.6B"),
+        policy_workers=policy_workers,
+        server_workers=server_workers,
     )
     environment = httpx.AsyncClient(base_url=deployment.url("environment"), timeout=300)
     restarting = httpx.AsyncClient(base_url=deployment.url("restart_environment"), timeout=300)
@@ -562,13 +658,15 @@ async def test_real_model_restarts_keep_running_through_a_checkpoint_and_start_o
     not os.environ.get("NEMO_GYM_CHECKPOINT_SCALE"), reason="set NEMO_GYM_CHECKPOINT_SCALE to a rollout count"
 )
 @POLICY_WORKERS
-async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int) -> None:
+@SERVER_WORKERS
+async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int, server_workers: int) -> None:
     """Checkpoint thousands of in-flight rollouts, crash, restore, and finish every one of them."""
     count = int(os.environ["NEMO_GYM_CHECKPOINT_SCALE"])
     # The training framework raises Gym's per-host connection limit the same way.
     deployment = deploy(
         "native",
         policy_workers=policy_workers,
+        server_workers=server_workers,
         token_capture=True,
         generation_cuts=True,
         extra_config={"global_aiohttp_connector_limit_per_host": 16384},
@@ -651,7 +749,7 @@ async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int) 
         str(result.get("failure") or result)[:160] for result, reward in zip(results, rewards) if reward != 1.0
     )
     print(
-        f"\nscale={count} policy_workers={policy_workers} finished_before={len(finished)} exported={len(exported)}"
+        f"\nscale={count} policy_workers={policy_workers} server_workers={server_workers} finished_before={len(finished)} exported={len(exported)}"
         f"\ntimings_s={ {name: round(value, 2) for name, value in timings.items()} }"
         f"\nrecords_bytes={sizes} report={prepared.replies['policy_model']['report']['counts']}"
         f"\ncut_rounds={len(cuts)} prefixes_cut={sum(len(round_) for round_ in cuts)} calls_continued={continued}"
@@ -727,10 +825,11 @@ async def _mixed_checkpoint(deployment: Deployment, checkpoint_dir: Path) -> coo
     return prepared
 
 
+@SERVER_WORKERS
 async def test_a_restart_episode_never_holds_up_a_checkpoint_and_starts_over_after_a_crash(
-    deploy, tmp_path: Path
+    deploy, tmp_path: Path, server_workers: int
 ) -> None:
-    deployment = deploy("mixed")
+    deployment = deploy("mixed", server_workers=server_workers)
     # Every model call waits, so both episodes are in flight at the checkpoint.
     deployment.backend("/_ctl/hold", {"after_calls": 0})
     environment = httpx.AsyncClient(base_url=deployment.url("environment"), timeout=120)
@@ -759,8 +858,11 @@ async def test_a_restart_episode_never_holds_up_a_checkpoint_and_starts_over_aft
     assert restarted.json()["result"]["reward"] == 1.0
 
 
-async def test_a_restart_episode_keeps_running_through_a_checkpoint_without_a_crash(deploy, tmp_path: Path) -> None:
-    deployment = deploy("mixed")
+@SERVER_WORKERS
+async def test_a_restart_episode_keeps_running_through_a_checkpoint_without_a_crash(
+    deploy, tmp_path: Path, server_workers: int
+) -> None:
+    deployment = deploy("mixed", server_workers=server_workers)
     deployment.backend("/_ctl/hold", {"after_calls": 0})
     environment = httpx.AsyncClient(base_url=deployment.url("environment"), timeout=120)
     restarting = httpx.AsyncClient(base_url=deployment.url("restart_environment"), timeout=120)
@@ -936,3 +1038,52 @@ async def test_real_model_collection_finishes_every_row_once_after_its_collector
     # Every row finishes exactly once, and none fails.
     assert sorted(rollout_ids) == sorted(row["_ng_rollout_id"] for row in rows)
     assert all(row.get("failure_kind") is None and reward_of(row) is not None for row in results)
+
+
+MCP_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
+
+
+async def mcp_call(http: httpx.AsyncClient, token: str, name: str, arguments: dict) -> dict:
+    """Call a tool as a CLI agent harness does: the MCP session token only, never the session cookie."""
+    response = await http.post(
+        "/mcp",
+        headers={"accept": "application/json, text/event-stream", MCP_TOKEN_HEADER: token},
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result.get("isError") is not True, result
+    return json.loads(result["content"][0]["text"])
+
+
+async def test_mcp_tool_calls_wait_out_a_checkpoint_and_keep_their_sessions_across_a_restore(
+    deploy, tmp_path: Path
+) -> None:
+    deployment = deploy("counter", server_workers=2, resources_mcp=True)
+    rollout_ids = [f"mcp-{index}" for index in range(8)]
+    async with httpx.AsyncClient(base_url=deployment.url("resources"), timeout=60) as http:
+        tokens = []
+        for index, rollout_id in enumerate(rollout_ids):
+            seeded = await http.post(f"/ng-rollout/{rollout_id}/seed_session", json={"initial_count": index})
+            http.cookies.clear()
+            tokens.append(seeded.json()["mcp"]["headers"][MCP_TOKEN_HEADER])
+            await mcp_call(http, tokens[-1], "increment_counter", {"count": 10})
+
+        participants = await deployment.participants()
+        prepared = await coordination.prepare(participants, "c1", deadline_ts=deadline())
+        assert prepared.prepared, prepared.blockers()
+        # Calls made while the checkpoint is open wait on whichever worker owns the session, instead of failing.
+        waiting = [asyncio.create_task(mcp_call(http, token, "increment_counter", {"count": 100})) for token in tokens]
+        await asyncio.sleep(1)
+        assert not any(task.done() for task in waiting)
+        episode_ids = [EpisodeId(rollout_id=rollout_id) for rollout_id in rollout_ids]
+        await coordination.commit(participants, "c1", str(tmp_path / "ckpt"), episode_ids, deadline_ts=deadline())
+        await coordination.resume(participants, "c1", deadline_ts=deadline())
+        await asyncio.gather(*waiting)
+
+        # Gym restarts with three workers per server; each harness keeps its token.
+        await crash_and_restore(deployment, tmp_path / "ckpt", rollout_ids, server_workers=3)
+        restored = [(await mcp_call(http, token, "get_counter_value", {}))["count"] for token in tokens]
+
+    # The checkpoint holds the counts from before the waiting calls ran.
+    assert restored == [index + 10 for index in range(len(rollout_ids))]
