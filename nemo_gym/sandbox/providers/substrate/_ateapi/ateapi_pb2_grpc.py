@@ -5,7 +5,7 @@ import warnings
 
 from . import ateapi_pb2 as ateapi__pb2
 
-GRPC_GENERATED_VERSION = '1.74.0'
+GRPC_GENERATED_VERSION = '1.81.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,14 +18,14 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in ateapi_pb2_grpc.py depends on'
+        + ' but the generated code in ateapi_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
     )
 
 
-class ControlStub(object):
+class ControlStub:
     """Control is the primary RPC interface for Agentic Substrate.
     """
 
@@ -65,6 +65,11 @@ class ControlStub(object):
                 request_serializer=ateapi__pb2.ResumeActorRequest.SerializeToString,
                 response_deserializer=ateapi__pb2.ResumeActorResponse.FromString,
                 _registered_method=True)
+        self.RevertActor = channel.unary_unary(
+                '/ateapi.Control/RevertActor',
+                request_serializer=ateapi__pb2.RevertActorRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.RevertActorResponse.FromString,
+                _registered_method=True)
         self.DeleteActor = channel.unary_unary(
                 '/ateapi.Control/DeleteActor',
                 request_serializer=ateapi__pb2.DeleteActorRequest.SerializeToString,
@@ -89,6 +94,16 @@ class ControlStub(object):
                 '/ateapi.Control/DeleteActorEgressPolicy',
                 request_serializer=ateapi__pb2.DeleteActorEgressPolicyRequest.SerializeToString,
                 response_deserializer=ateapi__pb2.EgressPolicy.FromString,
+                _registered_method=True)
+        self.MintActorJWT = channel.unary_unary(
+                '/ateapi.Control/MintActorJWT',
+                request_serializer=ateapi__pb2.MintActorJWTRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.MintActorJWTResponse.FromString,
+                _registered_method=True)
+        self.MintActorCertificate = channel.unary_unary(
+                '/ateapi.Control/MintActorCertificate',
+                request_serializer=ateapi__pb2.MintActorCertificateRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.MintActorCertificateResponse.FromString,
                 _registered_method=True)
         self.CreateTag = channel.unary_unary(
                 '/ateapi.Control/CreateTag',
@@ -195,9 +210,44 @@ class ControlStub(object):
                 request_serializer=ateapi__pb2.DeleteActorTemplateRequest.SerializeToString,
                 response_deserializer=ateapi__pb2.ActorTemplate.FromString,
                 _registered_method=True)
+        self.GetGlobalAccessPolicy = channel.unary_unary(
+                '/ateapi.Control/GetGlobalAccessPolicy',
+                request_serializer=ateapi__pb2.GetGlobalAccessPolicyRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.AccessPolicy.FromString,
+                _registered_method=True)
+        self.CreateGlobalAccessPolicy = channel.unary_unary(
+                '/ateapi.Control/CreateGlobalAccessPolicy',
+                request_serializer=ateapi__pb2.CreateGlobalAccessPolicyRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.AccessPolicy.FromString,
+                _registered_method=True)
+        self.UpdateGlobalAccessPolicy = channel.unary_unary(
+                '/ateapi.Control/UpdateGlobalAccessPolicy',
+                request_serializer=ateapi__pb2.UpdateGlobalAccessPolicyRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.AccessPolicy.FromString,
+                _registered_method=True)
+        self.GetAtespaceAccessPolicy = channel.unary_unary(
+                '/ateapi.Control/GetAtespaceAccessPolicy',
+                request_serializer=ateapi__pb2.GetAtespaceAccessPolicyRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.AccessPolicy.FromString,
+                _registered_method=True)
+        self.CreateAtespaceAccessPolicy = channel.unary_unary(
+                '/ateapi.Control/CreateAtespaceAccessPolicy',
+                request_serializer=ateapi__pb2.CreateAtespaceAccessPolicyRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.AccessPolicy.FromString,
+                _registered_method=True)
+        self.UpdateAtespaceAccessPolicy = channel.unary_unary(
+                '/ateapi.Control/UpdateAtespaceAccessPolicy',
+                request_serializer=ateapi__pb2.UpdateAtespaceAccessPolicyRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.AccessPolicy.FromString,
+                _registered_method=True)
+        self.DeleteAtespaceAccessPolicy = channel.unary_unary(
+                '/ateapi.Control/DeleteAtespaceAccessPolicy',
+                request_serializer=ateapi__pb2.DeleteAtespaceAccessPolicyRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.AccessPolicy.FromString,
+                _registered_method=True)
 
 
-class ControlServicer(object):
+class ControlServicer:
     """Control is the primary RPC interface for Agentic Substrate.
     """
 
@@ -245,8 +295,17 @@ class ControlServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def RevertActor(self, request, context):
+        """Revert an actor to SUSPENDED state.
+        Only crashed, running or paused actors can be reverted.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def DeleteActor(self, request, context):
-        """Delete an actor. Only suspended actors can be deleted.
+        """Delete an actor. Only suspended or crashed actors can be deleted unless
+        any_state is set.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -275,6 +334,27 @@ class ControlServicer(object):
 
     def DeleteActorEgressPolicy(self, request, context):
         """Delete the egress policy resource nested under an Actor.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def MintActorJWT(self, request, context):
+        """Create a Substrate-issued JWT asserting the actor identity.
+
+        * Called by the egress gateway when actor JWT injection is configured for outbound requests.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def MintActorCertificate(self, request, context):
+        """Create a Substrate-issued SPIFFE certificate asserting the actor identity.
+
+        SPIFFE URI: spiffe://${trustdomain}/actor/${atespace}/${actor}
+
+        * Called by the egress gateway when actor client certificate injection is
+        configured for outbound requests.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -427,7 +507,61 @@ class ControlServicer(object):
 
     def DeleteActorTemplate(self, request, context):
         """Delete an ActorTemplate together with its golden actor and golden
-        snapshot in the ActorTemplate's namespace.
+        tag in the reserved ate-golden atespace.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetGlobalAccessPolicy(self, request, context):
+        """Get the deployment-wide global access policy singleton. Returns NotFound
+        until the policy has been created.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CreateGlobalAccessPolicy(self, request, context):
+        """Create the deployment-wide global access policy singleton. The server's
+        configured bootstrap owners are global owners whether or not this policy
+        exists, so they can create it.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UpdateGlobalAccessPolicy(self, request, context):
+        """Replace the deployment-wide global access policy singleton. Empty
+        bindings revoke every grant held through the policy; bootstrap owners
+        keep access.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetAtespaceAccessPolicy(self, request, context):
+        """Get the access policy resource nested under an Atespace.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CreateAtespaceAccessPolicy(self, request, context):
+        """Create the access policy resource nested under an Atespace.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UpdateAtespaceAccessPolicy(self, request, context):
+        """Replace the access policy resource nested under an Atespace.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteAtespaceAccessPolicy(self, request, context):
+        """Delete the access policy resource nested under an Atespace.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -466,6 +600,11 @@ def add_ControlServicer_to_server(servicer, server):
                     request_deserializer=ateapi__pb2.ResumeActorRequest.FromString,
                     response_serializer=ateapi__pb2.ResumeActorResponse.SerializeToString,
             ),
+            'RevertActor': grpc.unary_unary_rpc_method_handler(
+                    servicer.RevertActor,
+                    request_deserializer=ateapi__pb2.RevertActorRequest.FromString,
+                    response_serializer=ateapi__pb2.RevertActorResponse.SerializeToString,
+            ),
             'DeleteActor': grpc.unary_unary_rpc_method_handler(
                     servicer.DeleteActor,
                     request_deserializer=ateapi__pb2.DeleteActorRequest.FromString,
@@ -490,6 +629,16 @@ def add_ControlServicer_to_server(servicer, server):
                     servicer.DeleteActorEgressPolicy,
                     request_deserializer=ateapi__pb2.DeleteActorEgressPolicyRequest.FromString,
                     response_serializer=ateapi__pb2.EgressPolicy.SerializeToString,
+            ),
+            'MintActorJWT': grpc.unary_unary_rpc_method_handler(
+                    servicer.MintActorJWT,
+                    request_deserializer=ateapi__pb2.MintActorJWTRequest.FromString,
+                    response_serializer=ateapi__pb2.MintActorJWTResponse.SerializeToString,
+            ),
+            'MintActorCertificate': grpc.unary_unary_rpc_method_handler(
+                    servicer.MintActorCertificate,
+                    request_deserializer=ateapi__pb2.MintActorCertificateRequest.FromString,
+                    response_serializer=ateapi__pb2.MintActorCertificateResponse.SerializeToString,
             ),
             'CreateTag': grpc.unary_unary_rpc_method_handler(
                     servicer.CreateTag,
@@ -596,6 +745,41 @@ def add_ControlServicer_to_server(servicer, server):
                     request_deserializer=ateapi__pb2.DeleteActorTemplateRequest.FromString,
                     response_serializer=ateapi__pb2.ActorTemplate.SerializeToString,
             ),
+            'GetGlobalAccessPolicy': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetGlobalAccessPolicy,
+                    request_deserializer=ateapi__pb2.GetGlobalAccessPolicyRequest.FromString,
+                    response_serializer=ateapi__pb2.AccessPolicy.SerializeToString,
+            ),
+            'CreateGlobalAccessPolicy': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateGlobalAccessPolicy,
+                    request_deserializer=ateapi__pb2.CreateGlobalAccessPolicyRequest.FromString,
+                    response_serializer=ateapi__pb2.AccessPolicy.SerializeToString,
+            ),
+            'UpdateGlobalAccessPolicy': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdateGlobalAccessPolicy,
+                    request_deserializer=ateapi__pb2.UpdateGlobalAccessPolicyRequest.FromString,
+                    response_serializer=ateapi__pb2.AccessPolicy.SerializeToString,
+            ),
+            'GetAtespaceAccessPolicy': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetAtespaceAccessPolicy,
+                    request_deserializer=ateapi__pb2.GetAtespaceAccessPolicyRequest.FromString,
+                    response_serializer=ateapi__pb2.AccessPolicy.SerializeToString,
+            ),
+            'CreateAtespaceAccessPolicy': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateAtespaceAccessPolicy,
+                    request_deserializer=ateapi__pb2.CreateAtespaceAccessPolicyRequest.FromString,
+                    response_serializer=ateapi__pb2.AccessPolicy.SerializeToString,
+            ),
+            'UpdateAtespaceAccessPolicy': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdateAtespaceAccessPolicy,
+                    request_deserializer=ateapi__pb2.UpdateAtespaceAccessPolicyRequest.FromString,
+                    response_serializer=ateapi__pb2.AccessPolicy.SerializeToString,
+            ),
+            'DeleteAtespaceAccessPolicy': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteAtespaceAccessPolicy,
+                    request_deserializer=ateapi__pb2.DeleteAtespaceAccessPolicyRequest.FromString,
+                    response_serializer=ateapi__pb2.AccessPolicy.SerializeToString,
+            ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
             'ateapi.Control', rpc_method_handlers)
@@ -604,7 +788,7 @@ def add_ControlServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class Control(object):
+class Control:
     """Control is the primary RPC interface for Agentic Substrate.
     """
 
@@ -771,6 +955,33 @@ class Control(object):
             _registered_method=True)
 
     @staticmethod
+    def RevertActor(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ateapi.Control/RevertActor',
+            ateapi__pb2.RevertActorRequest.SerializeToString,
+            ateapi__pb2.RevertActorResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def DeleteActor(request,
             target,
             options=(),
@@ -895,6 +1106,60 @@ class Control(object):
             '/ateapi.Control/DeleteActorEgressPolicy',
             ateapi__pb2.DeleteActorEgressPolicyRequest.SerializeToString,
             ateapi__pb2.EgressPolicy.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def MintActorJWT(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ateapi.Control/MintActorJWT',
+            ateapi__pb2.MintActorJWTRequest.SerializeToString,
+            ateapi__pb2.MintActorJWTResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def MintActorCertificate(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ateapi.Control/MintActorCertificate',
+            ateapi__pb2.MintActorCertificateRequest.SerializeToString,
+            ateapi__pb2.MintActorCertificateResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -1472,102 +1737,8 @@ class Control(object):
             metadata,
             _registered_method=True)
 
-
-class ActorIdentityStub(object):
-    """ActorIdentity allows substrate workloads to exchange their
-    infrastructure-level credentials (k8s service account token, etc.) for a
-    substrate actor-level credential. A given substrate actor might migrate
-    between many different physical workers over the course of its lifecycle,
-    whereas the actor credential's identity will be stable for the life of the
-    actor.
-    """
-
-    def __init__(self, channel):
-        """Constructor.
-
-        Args:
-            channel: A grpc.Channel.
-        """
-        self.MintJWT = channel.unary_unary(
-                '/ateapi.ActorIdentity/MintJWT',
-                request_serializer=ateapi__pb2.MintJWTRequest.SerializeToString,
-                response_deserializer=ateapi__pb2.MintJWTResponse.FromString,
-                _registered_method=True)
-        self.MintCert = channel.unary_unary(
-                '/ateapi.ActorIdentity/MintCert',
-                request_serializer=ateapi__pb2.MintCertRequest.SerializeToString,
-                response_deserializer=ateapi__pb2.MintCertResponse.FromString,
-                _registered_method=True)
-
-
-class ActorIdentityServicer(object):
-    """ActorIdentity allows substrate workloads to exchange their
-    infrastructure-level credentials (k8s service account token, etc.) for a
-    substrate actor-level credential. A given substrate actor might migrate
-    between many different physical workers over the course of its lifecycle,
-    whereas the actor credential's identity will be stable for the life of the
-    actor.
-    """
-
-    def MintJWT(self, request, context):
-        """Request an Actor Identity JWT.
-
-        To call this RPC, you must be authenticated as the Kubernetes Pod that is
-        currently running the requested actor.
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def MintCert(self, request, context):
-        """Request an Actor Identity Certificate for an actor.
-
-        Actors do not call this RPC themselves. The atelet hosting the actor calls
-        it on the actor's behalf, authenticating with its own client certificate
-        rather than a bearer token.
-
-        Authorization is decided on that client certificate and the worker
-        identity attested by atelet. Ateapi verifies that the worker is assigned to
-        the actor and that the actor points back to that exact worker before signing.
-
-        The certificate in the response is the actor's identity, not the atelet's.
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-
-def add_ActorIdentityServicer_to_server(servicer, server):
-    rpc_method_handlers = {
-            'MintJWT': grpc.unary_unary_rpc_method_handler(
-                    servicer.MintJWT,
-                    request_deserializer=ateapi__pb2.MintJWTRequest.FromString,
-                    response_serializer=ateapi__pb2.MintJWTResponse.SerializeToString,
-            ),
-            'MintCert': grpc.unary_unary_rpc_method_handler(
-                    servicer.MintCert,
-                    request_deserializer=ateapi__pb2.MintCertRequest.FromString,
-                    response_serializer=ateapi__pb2.MintCertResponse.SerializeToString,
-            ),
-    }
-    generic_handler = grpc.method_handlers_generic_handler(
-            'ateapi.ActorIdentity', rpc_method_handlers)
-    server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('ateapi.ActorIdentity', rpc_method_handlers)
-
-
- # This class is part of an EXPERIMENTAL API.
-class ActorIdentity(object):
-    """ActorIdentity allows substrate workloads to exchange their
-    infrastructure-level credentials (k8s service account token, etc.) for a
-    substrate actor-level credential. A given substrate actor might migrate
-    between many different physical workers over the course of its lifecycle,
-    whereas the actor credential's identity will be stable for the life of the
-    actor.
-    """
-
     @staticmethod
-    def MintJWT(request,
+    def GetGlobalAccessPolicy(request,
             target,
             options=(),
             channel_credentials=None,
@@ -1580,9 +1751,9 @@ class ActorIdentity(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/ateapi.ActorIdentity/MintJWT',
-            ateapi__pb2.MintJWTRequest.SerializeToString,
-            ateapi__pb2.MintJWTResponse.FromString,
+            '/ateapi.Control/GetGlobalAccessPolicy',
+            ateapi__pb2.GetGlobalAccessPolicyRequest.SerializeToString,
+            ateapi__pb2.AccessPolicy.FromString,
             options,
             channel_credentials,
             insecure,
@@ -1594,7 +1765,7 @@ class ActorIdentity(object):
             _registered_method=True)
 
     @staticmethod
-    def MintCert(request,
+    def CreateGlobalAccessPolicy(request,
             target,
             options=(),
             channel_credentials=None,
@@ -1607,9 +1778,144 @@ class ActorIdentity(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/ateapi.ActorIdentity/MintCert',
-            ateapi__pb2.MintCertRequest.SerializeToString,
-            ateapi__pb2.MintCertResponse.FromString,
+            '/ateapi.Control/CreateGlobalAccessPolicy',
+            ateapi__pb2.CreateGlobalAccessPolicyRequest.SerializeToString,
+            ateapi__pb2.AccessPolicy.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpdateGlobalAccessPolicy(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ateapi.Control/UpdateGlobalAccessPolicy',
+            ateapi__pb2.UpdateGlobalAccessPolicyRequest.SerializeToString,
+            ateapi__pb2.AccessPolicy.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetAtespaceAccessPolicy(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ateapi.Control/GetAtespaceAccessPolicy',
+            ateapi__pb2.GetAtespaceAccessPolicyRequest.SerializeToString,
+            ateapi__pb2.AccessPolicy.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CreateAtespaceAccessPolicy(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ateapi.Control/CreateAtespaceAccessPolicy',
+            ateapi__pb2.CreateAtespaceAccessPolicyRequest.SerializeToString,
+            ateapi__pb2.AccessPolicy.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpdateAtespaceAccessPolicy(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ateapi.Control/UpdateAtespaceAccessPolicy',
+            ateapi__pb2.UpdateAtespaceAccessPolicyRequest.SerializeToString,
+            ateapi__pb2.AccessPolicy.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteAtespaceAccessPolicy(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ateapi.Control/DeleteAtespaceAccessPolicy',
+            ateapi__pb2.DeleteAtespaceAccessPolicyRequest.SerializeToString,
+            ateapi__pb2.AccessPolicy.FromString,
             options,
             channel_credentials,
             insecure,
@@ -1621,8 +1927,8 @@ class ActorIdentity(object):
             _registered_method=True)
 
 
-class WorkerServiceStub(object):
-    """WorkerService is how a Worker tells the control plane about itself. It is
+class WorkerServiceStub:
+    """WorkerService is how a Worker tells the control plane what it observes. It is
     separate from Control because the two have different callers and different
     authorization: Control is the client-facing API, while these RPCs are served
     only to an atelet, and only for the Workers on its own node.
@@ -1634,28 +1940,76 @@ class WorkerServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.SetWorkerCapacity = channel.unary_unary(
-                '/ateapi.WorkerService/SetWorkerCapacity',
-                request_serializer=ateapi__pb2.SetWorkerCapacityRequest.SerializeToString,
-                response_deserializer=ateapi__pb2.SetWorkerCapacityResponse.FromString,
+        self.RegisterWorker = channel.unary_unary(
+                '/ateapi.WorkerService/RegisterWorker',
+                request_serializer=ateapi__pb2.RegisterWorkerRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.RegisterWorkerResponse.FromString,
+                _registered_method=True)
+        self.MintAteomActorCertificate = channel.unary_unary(
+                '/ateapi.WorkerService/MintAteomActorCertificate',
+                request_serializer=ateapi__pb2.MintAteomActorCertificateRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.MintAteomActorCertificateResponse.FromString,
+                _registered_method=True)
+        self.RequestActorSuspend = channel.unary_unary(
+                '/ateapi.WorkerService/RequestActorSuspend',
+                request_serializer=ateapi__pb2.RequestActorSuspendRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.RequestActorSuspendResponse.FromString,
                 _registered_method=True)
 
 
-class WorkerServiceServicer(object):
-    """WorkerService is how a Worker tells the control plane about itself. It is
+class WorkerServiceServicer:
+    """WorkerService is how a Worker tells the control plane what it observes. It is
     separate from Control because the two have different callers and different
     authorization: Control is the client-facing API, while these RPCs are served
     only to an atelet, and only for the Workers on its own node.
     """
 
-    def SetWorkerCapacity(self, request, context):
-        """SetWorkerCapacity records what a Worker can hold. Capacity is the Worker's
-        to report rather than the control plane's to infer: it is what the ateom
-        can actually supply, only its node can observe it, and a fleet may run
-        mixed ateom versions.
+    def RegisterWorker(self, request, context):
+        """RegisterWorker records what a Worker can hold and its supported sandbox
+        runtimes in one write, so a Worker is never schedulable without runtime
+        compatibility information to match snapshots against. Capacity and
+        runtimes are the Worker's to report rather than the control plane's to
+        infer: they are what the worker can actually supply and expose, only its
+        node can observe them, and a fleet may run mixed versions.
 
         atelet calls this with its own client certificate, as it does for
-        MintCert. Idempotent: re-sending the same capacity is not a write.
+        MintCert. Idempotent: re-sending the same capacity and runtimes is not a
+        write.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def MintAteomActorCertificate(self, request, context):
+        """Create a Substrate-issued SPIFFE certificate that asserts an ateom acting
+        on behalf of a particular actor.
+
+        SPIFFE URI: spiffe://${trustdomain}/ateom-for-actor/${atespace}/${actor}
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RequestActorSuspend(self, request, context):
+        """RequestActorSuspend asks the control plane to suspend an Actor that the
+        calling Worker hosts. Only the Worker can observe what makes an Actor
+        worth reclaiming -- whether its workload still has anything to do -- and
+        only the control plane can decide whether to act on that.
+
+        This is a request, not a command. It runs the same suspend workflow
+        Control.SuspendActor runs, behind the same preconditions, so a proposal
+        that races a resume, pause, or delete loses to it.
+
+        atelet calls this with its own client certificate, as it does for
+        RegisterWorker, naming the Worker its caller proved itself to be. The
+        control plane serves it only for an Actor that is assigned to that Worker.
+
+        Not idempotent, unlike Control.SuspendActor, which reports an
+        already-suspended Actor as the success it is. A suspend releases the
+        Worker it ran on, so the second request names an Actor the caller no
+        longer hosts, and is refused as NotFound like any other. A Worker that
+        retries a suspend it had already been granted therefore sees a failure
+        rather than a repeat of its success.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -1664,10 +2018,20 @@ class WorkerServiceServicer(object):
 
 def add_WorkerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'SetWorkerCapacity': grpc.unary_unary_rpc_method_handler(
-                    servicer.SetWorkerCapacity,
-                    request_deserializer=ateapi__pb2.SetWorkerCapacityRequest.FromString,
-                    response_serializer=ateapi__pb2.SetWorkerCapacityResponse.SerializeToString,
+            'RegisterWorker': grpc.unary_unary_rpc_method_handler(
+                    servicer.RegisterWorker,
+                    request_deserializer=ateapi__pb2.RegisterWorkerRequest.FromString,
+                    response_serializer=ateapi__pb2.RegisterWorkerResponse.SerializeToString,
+            ),
+            'MintAteomActorCertificate': grpc.unary_unary_rpc_method_handler(
+                    servicer.MintAteomActorCertificate,
+                    request_deserializer=ateapi__pb2.MintAteomActorCertificateRequest.FromString,
+                    response_serializer=ateapi__pb2.MintAteomActorCertificateResponse.SerializeToString,
+            ),
+            'RequestActorSuspend': grpc.unary_unary_rpc_method_handler(
+                    servicer.RequestActorSuspend,
+                    request_deserializer=ateapi__pb2.RequestActorSuspendRequest.FromString,
+                    response_serializer=ateapi__pb2.RequestActorSuspendResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1677,15 +2041,15 @@ def add_WorkerServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class WorkerService(object):
-    """WorkerService is how a Worker tells the control plane about itself. It is
+class WorkerService:
+    """WorkerService is how a Worker tells the control plane what it observes. It is
     separate from Control because the two have different callers and different
     authorization: Control is the client-facing API, while these RPCs are served
     only to an atelet, and only for the Workers on its own node.
     """
 
     @staticmethod
-    def SetWorkerCapacity(request,
+    def RegisterWorker(request,
             target,
             options=(),
             channel_credentials=None,
@@ -1698,9 +2062,63 @@ class WorkerService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/ateapi.WorkerService/SetWorkerCapacity',
-            ateapi__pb2.SetWorkerCapacityRequest.SerializeToString,
-            ateapi__pb2.SetWorkerCapacityResponse.FromString,
+            '/ateapi.WorkerService/RegisterWorker',
+            ateapi__pb2.RegisterWorkerRequest.SerializeToString,
+            ateapi__pb2.RegisterWorkerResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def MintAteomActorCertificate(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ateapi.WorkerService/MintAteomActorCertificate',
+            ateapi__pb2.MintAteomActorCertificateRequest.SerializeToString,
+            ateapi__pb2.MintAteomActorCertificateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RequestActorSuspend(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ateapi.WorkerService/RequestActorSuspend',
+            ateapi__pb2.RequestActorSuspendRequest.SerializeToString,
+            ateapi__pb2.RequestActorSuspendResponse.FromString,
             options,
             channel_credentials,
             insecure,
