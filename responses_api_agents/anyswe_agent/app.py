@@ -374,6 +374,23 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         return json.loads(value) if isinstance(value, str) else dict(value)
 
     @staticmethod
+    def _r2e_test_setup_script(repo_path: str = "/testbed", tests_path: str = "/r2e_tests") -> str:
+        """Put R2E-Gym's hidden tests where the image's ``run_tests.sh`` looks for them.
+
+        R2E-Gym images ship the tests at ``/r2e_tests``, while ``/testbed/run_tests.sh`` runs
+        ``.venv/bin/python -m pytest -rA r2e_tests`` from the repository. R2E-Gym's own runtime links the
+        directory into the repository before it runs the tests (``DockerRuntime.setup_env``); without that
+        step pytest stops with "file or directory not found: r2e_tests" and no patch can resolve.
+        Images that already have the tests in the repository are left alone.
+        """
+        repo_tests = shlex.quote(f"{repo_path.rstrip('/')}/r2e_tests")
+        tests = shlex.quote(tests_path)
+        return (
+            f"if [ ! -e {repo_tests} ] && [ -d {tests} ]; then "
+            f"ln -s {tests} {repo_tests} && echo '>>>>> Linked {tests_path} into {repo_path}'; fi\n"
+        )
+
+    @staticmethod
     def _apply_patch_script() -> str:
         return (
             "cd /testbed && "
@@ -442,7 +459,12 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 "elif [ -f /root/run_tests.sh ]; then bash /root/run_tests.sh; "
                 "else echo 'R2E eval script not found'; exit 127; fi"
             )
-        script = 'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n' + self._apply_patch_script() + str(eval_script)
+        script = (
+            'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n'
+            + self._r2e_test_setup_script()
+            + self._apply_patch_script()
+            + str(eval_script)
+        )
         spec = self._sandbox_spec(
             params,
             files={
