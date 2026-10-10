@@ -1,0 +1,14 @@
+spatialclaw_resources_server:
+  resources_servers:
+    spatialclaw:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Score prepared rows with the pinned SpatialClaw benchmark evaluator.
+      value: Preserve SpatialClaw-native extraction and aggregate metrics in NeMo Gym.
+      spatialclaw_url: ssh://git@gitlab-master.nvidia.com:12051/ehosseiniasl/spatial_claw.git
+      spatialclaw_commit: 946ac114dfcabf9df997629bfa8b6f2f66da1425  # pragma: allowlist secret
+      spatialclaw_root: ${oc.env:SPATIALCLAW_ROOT,null}
+      source_cache_root: null
+      dataset_config: ???
+      data_root: ${oc.env:SPATIALCLAW_DATA_ROOT,null}
