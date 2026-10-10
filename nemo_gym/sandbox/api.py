@@ -41,6 +41,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxPauseResume,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
+    SupportsSandboxSidecars,
     create_provider,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
@@ -431,6 +432,9 @@ class AsyncSandbox:
         requested_spec = spec if spec is not None else self._spec
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
+        if requested_spec.sidecars and not isinstance(self._provider, SupportsSandboxSidecars):
+            provider_name = getattr(self._provider, "name", type(self._provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
 
         if is_span_group_enabled(GymSpanGroup.SANDBOX):
             provider_name = self._telemetry_provider_name()
@@ -576,6 +580,16 @@ class AsyncSandbox:
     async def download(self, remote_path: str, local_path: Path | str) -> None:
         await self._provider.download_file(self._require_handle(), remote_path, Path(local_path))
 
+    def sidecar(self, name: str) -> "AsyncSandboxSidecar":
+        """Return a sidecar container declared in ``SandboxSpec.sidecars``, to run commands in and read files from."""
+        if not isinstance(self._provider, SupportsSandboxSidecars):
+            provider_name = getattr(self._provider, "name", type(self._provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
+        declared = [sidecar.name for sidecar in self._spec.sidecars] if self._spec is not None else []
+        if name not in declared:
+            raise ValueError(f"Sidecar {name!r} was not declared in SandboxSpec.sidecars; declared: {declared!r}")
+        return AsyncSandboxSidecar(self._provider, self._require_handle(), name)
+
     async def status(self) -> SandboxStatus:
         if self._handle is None:
             return SandboxStatus.UNKNOWN
@@ -688,6 +702,11 @@ class AsyncSandbox:
             descriptor = {**descriptor, "workdir": self._spec.workdir}
         if isinstance(descriptor, dict) and self._spec is not None and self._spec.ports:
             descriptor = {**descriptor, "ports": list(self._spec.ports)}
+        # Carry the declared sidecars so a borrower that connects can use `sidecar(name)` without re-declaring them.
+        # Only name and image travel: a sidecar's environment may hold secrets, and a borrower never starts it.
+        if isinstance(descriptor, dict) and self._spec is not None and self._spec.sidecars:
+            sidecars = [{"name": sidecar.name, "image": sidecar.image} for sidecar in self._spec.sidecars]
+            descriptor = {**descriptor, "sidecars": sidecars}
         return descriptor
 
     @classmethod
@@ -704,7 +723,10 @@ class AsyncSandbox:
         handle = await provider.connect(descriptor)
         workdir = descriptor.get("workdir") if isinstance(descriptor, Mapping) else None
         ports = descriptor.get("ports", ()) if isinstance(descriptor, Mapping) else ()
-        sandbox = cls(provider, SandboxSpec(workdir=workdir, ports=ports), owns_provider=owns_provider)
+        sidecars = descriptor.get("sidecars", ()) if isinstance(descriptor, Mapping) else ()
+        sandbox = cls(
+            provider, SandboxSpec(workdir=workdir, ports=ports, sidecars=sidecars), owns_provider=owns_provider
+        )
         sandbox._handle = handle
         sandbox._stopped = False
         sandbox._connected = True
@@ -715,6 +737,30 @@ class AsyncSandbox:
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         await self.stop()
+
+
+class AsyncSandboxSidecar:
+    """A sidecar container of a started sandbox; get one with ``AsyncSandbox.sidecar(name)``."""
+
+    def __init__(self, provider: SupportsSandboxSidecars, handle: SandboxHandle, name: str) -> None:
+        self._provider = provider
+        self._handle = handle
+        self.name = name
+
+    async def exec(
+        self, *argv: str, timeout_s: int | float, on_stdout: Callable[[str], None] | None = None
+    ) -> SandboxExecResult:
+        """Run ``argv`` without a shell (sidecar images can be distroless) and wait for it to exit.
+
+        ``on_stdout`` receives stdout text as it arrives, so a caller can follow a long-running service.
+        """
+        return await self._provider.sidecar_exec(
+            self._handle, self.name, list(argv), timeout_s=timeout_s, on_stdout=on_stdout
+        )
+
+    async def download(self, remote_path: str, local_path: Path | str) -> None:
+        """Download one file from the sidecar's filesystem."""
+        await self._provider.download_sidecar_file(self._handle, self.name, remote_path, Path(local_path))
 
 
 class _AsyncLoopRunner:
