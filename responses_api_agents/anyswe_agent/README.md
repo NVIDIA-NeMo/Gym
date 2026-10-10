@@ -72,6 +72,12 @@ agent into each task image. `agent_runtime_source` controls other delivery modes
 
 Each archive must contain the runtime's `bin/python` at its root.
 
+The runner itself starts with `python -I`, so the task image's `PYTHONPATH` and
+user site cannot shadow the runtime's packages. For the CLI harnesses (Claude
+Code, Cline, OpenCode, OpenClaw and Pi), only the harness executable, plus `node`
+when the executable is a node script, is put on the agent's `PATH`. The agent's
+`python`, `pip` and `node` therefore resolve to the task image, not the runtime.
+
 Private task images can pass registry credentials through
 `sandbox_spec.provider_options.image_auth`.
 
