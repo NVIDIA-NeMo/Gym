@@ -68,6 +68,9 @@ class _Recorder:
         self._pause_delay_s = pause_delay_s
         # Interleaved control and HTTP activity, in completion order.
         self.events: list[tuple[str, str]] = []
+        # The fake control plane parks on PauseActor and the fake router
+        # resumes on the next request, like the real ones.
+        self._parked = False
 
     async def control(self, rpc: str, request: Any) -> Any:
         self.control_calls.append((rpc, request))
@@ -76,10 +79,16 @@ class _Recorder:
         self.events.append(("control", rpc))
         if rpc == "CreateActor" and self._create_error is not None:
             raise self._create_error
+        if rpc in ("PauseActor", "SuspendActor"):
+            self._parked = True
         if rpc == "GetActor":
             state = self._get_actor_state
             if state is None:
-                state = ateapi_pb2.ActorState.ACTOR_STATE_RUNNING
+                state = (
+                    ateapi_pb2.ActorState.ACTOR_STATE_PAUSED
+                    if self._parked
+                    else ateapi_pb2.ActorState.ACTOR_STATE_RUNNING
+                )
             return ateapi_pb2.Actor(status=ateapi_pb2.ActorStatus(state=state))
         return None
 
@@ -97,6 +106,7 @@ class _Recorder:
     ) -> httpx.Response:
         self.http_paths.append(path)
         self.events.append(("http", path))
+        self._parked = False
         if path == "/exec":
             if self._exec_delay_s:
                 await asyncio.sleep(self._exec_delay_s)
@@ -299,6 +309,102 @@ async def test_exec_retries_while_the_actor_is_mid_transition(monkeypatch: pytes
     result = await provider.exec(handle, "true", timeout_s=5)
 
     assert (result.return_code, result.error_type, execs) == (0, None, 2)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "actor nemo-gym/gym-x unavailable: AssignWorker prerequisite not met for Actor: nemo-gym/gym-x "
+        "(got: ACTOR_STATE_CRASHED, want ACTOR_STATE_SUSPENDED or ACTOR_STATE_PAUSED)",
+        "actor nemo-gym/gym-x unavailable: AssignWorker prerequisite not met for Actor: nemo-gym/gym-x "
+        "(got: ACTOR_STATE_DELETING, want ACTOR_STATE_SUSPENDED or ACTOR_STATE_PAUSED)",
+    ],
+)
+async def test_exec_fails_fast_when_the_actor_is_gone(body: str) -> None:
+    recorder = _Recorder()
+    provider = _make_provider(recorder)
+    execs = 0
+
+    def router(request: httpx.Request) -> httpx.Response:
+        nonlocal execs
+        if request.url.path != "/exec":
+            return httpx.Response(200)
+        execs += 1
+        return httpx.Response(503, text=body)
+
+    provider._http = substrate_provider.SubstrateProvider._http.__get__(provider)
+    provider._http_client = httpx.AsyncClient(transport=httpx.MockTransport(router), base_url="http://router")
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+
+    result = await provider.exec(handle, "true", timeout_s=30)
+
+    assert (result.error_type, result.return_code, execs) == (
+        "sandbox",
+        substrate_provider.SANDBOX_RUNTIME_RETURN_CODE,
+        1,
+    )
+
+
+async def test_exec_retries_an_aborted_conflict_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(substrate_provider, "_TRANSITION_RETRY_DELAY_S", 0.0)
+    recorder = _Recorder()
+    provider = _make_provider(recorder)
+    execs = 0
+
+    def router(request: httpx.Request) -> httpx.Response:
+        nonlocal execs
+        if request.url.path != "/exec":
+            return httpx.Response(200)
+        execs += 1
+        if execs == 1:
+            return httpx.Response(
+                503, text="actor nemo-gym/gym-x unavailable: concurrent update conflict, please retry"
+            )
+        return httpx.Response(200, json={"stdout": "ok", "stderr": "", "exit_code": 0})
+
+    provider._http = substrate_provider.SubstrateProvider._http.__get__(provider)
+    provider._http_client = httpx.AsyncClient(transport=httpx.MockTransport(router), base_url="http://router")
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+
+    result = await provider.exec(handle, "true", timeout_s=5)
+
+    assert (result.return_code, execs) == (0, 2)
+
+
+async def test_pause_waits_for_in_flight_requests() -> None:
+    recorder = _Recorder(exec_delay_s=0.05)
+    provider = _make_provider(recorder)
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+
+    exec_task = asyncio.create_task(provider.exec(handle, "sleep"))
+    await asyncio.sleep(0.01)
+    await provider.pause(handle)
+    await exec_task
+
+    execs = [i for i, event in enumerate(recorder.events) if event == ("http", "/exec")]
+    assert execs[0] < recorder.events.index(("control", "PauseActor"))
+
+
+async def test_close_waits_for_a_pause_in_flight() -> None:
+    recorder = _Recorder(pause_delay_s=0.05)
+    provider = _make_provider(recorder, suspend_policy="pause_after_exec", idle_before_suspend_s=0.01)
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+
+    await provider.exec(handle, "step")
+    await asyncio.sleep(0.02)  # PauseActor is now in flight
+    await provider.close(handle)
+
+    assert recorder.events.index(("control", "PauseActor")) < recorder.events.index(("control", "DeleteActor"))
+
+
+async def test_eviction_notice_turns_the_next_idle_park_into_a_suspend() -> None:
+    recorder = _Recorder(exec_body={"stdout": "", "stderr": "", "exit_code": 0, "evicting": True})
+    provider = _make_provider(recorder, suspend_policy="pause_after_exec")
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+
+    await provider.exec(handle, "true")
+
+    assert "SuspendActor" in recorder.rpcs() and "PauseActor" not in recorder.rpcs()
 
 
 async def test_exec_retries_a_capacity_503_until_the_router_has_room() -> None:

@@ -51,17 +51,20 @@ _RETRYABLE_CONTROL_CODES = (grpc.StatusCode.ABORTED, grpc.StatusCode.UNAVAILABLE
 _CONTROL_ATTEMPTS = 5
 _CONTROL_BACKOFF_S = 0.5
 
-# The router answers 503 with one of these when a request could not be placed:
-# no room within its parking budget, or the actor still mid-transition
-# (PAUSING, SUSPENDING) so it cannot be resumed yet. Such a request never
-# reached the actor, so sending it again is safe.
+# The router answers 503 "actor <id> unavailable[: <reason>]" when it could not
+# place a request: the pool had no room within the parking budget, the actor
+# was mid-transition, a concurrent update conflicted, or ateapi was away. None
+# of those requests reached the actor, so sending them again is safe. A reason
+# that names a terminal state is the one exception: nothing will make that
+# actor routable again.
 _CAPACITY_MARKERS = ("router at capacity", "no worker has room")
-_TRANSITION_MARKER = "prerequisite not met"
+_TERMINAL_STATE_MARKERS = ("got: ACTOR_STATE_CRASHED", "got: ACTOR_STATE_DELETING")
 _TRANSITION_RETRY_DELAY_S = 1.0
 
 _STATUS_MAP = {
     ateapi_pb2.ActorState.ACTOR_STATE_RUNNING: SandboxStatus.RUNNING,
     ateapi_pb2.ActorState.ACTOR_STATE_RESUMING: SandboxStatus.STARTING,
+    ateapi_pb2.ActorState.ACTOR_STATE_REVERTING: SandboxStatus.STARTING,
     # A paused or suspended actor is alive and one request away: the router
     # resumes it on the next exec. PAUSED says so without implying it is gone.
     ateapi_pb2.ActorState.ACTOR_STATE_SUSPENDED: SandboxStatus.PAUSED,
@@ -121,7 +124,14 @@ def normalize_image(image: str) -> str:
 def _is_transient_503(response: httpx.Response) -> bool:
     if response.status_code != 503:
         return False
-    return _TRANSITION_MARKER in response.text or any(marker in response.text for marker in _CAPACITY_MARKERS)
+    text = response.text
+    if any(marker in text for marker in _TERMINAL_STATE_MARKERS):
+        return False
+    return "unavailable" in text
+
+
+def _is_capacity_503(response: httpx.Response) -> bool:
+    return any(marker in response.text for marker in _CAPACITY_MARKERS)
 
 
 def _read_kube_config() -> dict[str, Any]:
@@ -232,7 +242,9 @@ class SubstrateProbeConfig:
     """Readiness probe run against the actor through the router."""
 
     path: str = "/readyz"
-    timeout_s: float = 30.0
+    # Longer than the router's parking budget, so a probe waiting for a worker
+    # slot is held by the router rather than cut by the client and re-parked.
+    timeout_s: float = 150.0
     stable_count: int = 1
     stable_delay_s: float = 1.0
 
@@ -255,6 +267,12 @@ class _SubstrateActor:
     # the router refuses to resume an actor that is still PAUSING.
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     parking: bool = False
+    # True once a park settled and no request has gone out since, so two idle
+    # parks that both found the actor idle do not both call the control plane.
+    parked: bool = False
+    # Set when the in-actor server reports that its worker is being evicted;
+    # the next idle park then suspends to storage, whatever the policy says.
+    evicting: bool = False
 
     @property
     def target(self) -> str:
@@ -289,6 +307,7 @@ class SubstrateProvider:
         self._probe = coerce_config(probe, SubstrateProbeConfig)
 
         self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
+        self._suspend_tasks: set[asyncio.Task] = set()
         self._channel: grpc.aio.Channel | None = None
         self._stub: Any = None
         self._http_client: httpx.AsyncClient | None = None
@@ -454,25 +473,25 @@ class SubstrateProvider:
             pass
 
         loop = asyncio.get_running_loop()
-        deadline = None if timeout_s is None else loop.time() + timeout_s
+        budget = timeout_s if timeout_s is not None else (self._exec_config.default_timeout_s or 1800.0)
+        deadline = loop.time() + budget
         while True:
+            remaining = max(deadline - loop.time(), 1.0)
             if limited:
                 async with self._semaphore:
                     response = await self._http_client.request(
-                        method, path, headers=headers, json=json, content=content, params=params, timeout=timeout_s
+                        method, path, headers=headers, json=json, content=content, params=params, timeout=remaining
                     )
             else:
                 response = await self._http_client.request(
-                    method, path, headers=headers, json=json, content=content, params=params, timeout=timeout_s
+                    method, path, headers=headers, json=json, content=content, params=params, timeout=remaining
                 )
             if not _is_transient_503(response):
                 return response
             delay = (
-                _TRANSITION_RETRY_DELAY_S
-                if _TRANSITION_MARKER in response.text
-                else self._exec_config.capacity_retry_delay_s
+                self._exec_config.capacity_retry_delay_s if _is_capacity_503(response) else _TRANSITION_RETRY_DELAY_S
             )
-            if deadline is not None and loop.time() + delay >= deadline:
+            if loop.time() + delay >= deadline:
                 return response
             LOGGER.info("substrate: %s not routable yet (%s); retrying in %.0fs", actor.name, path, delay)
             await asyncio.sleep(delay)
@@ -650,8 +669,14 @@ class SubstrateProvider:
                 return_code=body.get("exit_code", SANDBOX_RUNTIME_RETURN_CODE),
                 error_type=body.get("error_type") or None,
             )
+            if body.get("evicting") and not actor.evicting:
+                actor.evicting = True
+                LOGGER.warning("substrate: worker of %s is being evicted; it will be suspended when idle", actor.name)
 
-        await self._suspend_when_idle(actor)
+        try:
+            await self._suspend_when_idle(actor)
+        except Exception as e:  # noqa: BLE001 - the command ran; parking is best effort
+            LOGGER.warning("substrate: parking %s after exec failed: %s", actor.name, e)
         return result
 
     # ---- idle handling ---- #
@@ -667,6 +692,7 @@ class SubstrateProvider:
         self._cancel_pending_suspend(actor)
         async with actor.lock:
             actor.inflight += 1
+            actor.parked = False  # the router resumes it for this request
         try:
             yield
         finally:
@@ -691,19 +717,32 @@ class SubstrateProvider:
         here and a restore on the next call.
         """
         policy = self._create_config.suspend_policy
-        if policy == "never":
+        if actor.evicting:
+            # The node is going away: a node-local pause would go with it.
+            rpc = "SuspendActor"
+        elif policy == "never":
             return
-        rpc = "SuspendActor" if policy == "after_exec" else "PauseActor"
+        else:
+            rpc = "SuspendActor" if policy == "after_exec" else "PauseActor"
         delay = self._create_config.idle_before_suspend_s
-        if delay <= 0:
-            await self._suspend_if_idle(actor, rpc)
-            return
         self._cancel_pending_suspend(actor)
-        actor.suspend_task = asyncio.create_task(self._suspend_after(actor, rpc, delay))
+        # Always a task, shielded from the caller: a PauseActor RPC that is
+        # cancelled client-side leaves the actor stranded mid-transition on
+        # the server, with nothing to finish it.
+        task = asyncio.create_task(self._suspend_after(actor, rpc, delay))
+        actor.suspend_task = task
+        self._suspend_tasks.add(task)
+        task.add_done_callback(self._suspend_tasks.discard)
+        if delay <= 0:
+            # No idle phase to cancel: mark it parking now, before it runs, so
+            # a concurrent request waits on the lock instead of cancelling it.
+            actor.parking = True
+            await asyncio.shield(task)
 
     async def _suspend_after(self, actor: _SubstrateActor, rpc: str, delay: float) -> None:
         try:
-            await asyncio.sleep(delay)
+            if delay > 0:
+                await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
         actor.parking = True
@@ -716,14 +755,20 @@ class SubstrateProvider:
 
     async def _suspend_if_idle(self, actor: _SubstrateActor, rpc: str) -> None:
         async with actor.lock:
-            if actor.inflight:
+            if actor.inflight or actor.parked:
                 return
             try:
-                await self._park(actor, rpc)
+                state = await self._park(actor, rpc)
             except grpc.aio.AioRpcError as e:
                 # A failed suspend costs density, not correctness: the actor
                 # stays running and the next exec still works.
                 LOGGER.warning("substrate: %s on %s failed: %s", rpc, actor.name, e.details())
+                return
+            actor.parked = state in _PARKED_STATES
+        if state not in _PARKED_STATES:
+            LOGGER.warning(
+                "substrate: %s on %s did not park it: %s", rpc, actor.name, ateapi_pb2.ActorState.Name(state)
+            )
 
     async def _park(self, actor: _SubstrateActor, rpc: str) -> int:
         """Pause or suspend the actor and wait out the transition.
@@ -751,16 +796,30 @@ class SubstrateProvider:
             await asyncio.sleep(0.25)
 
     async def pause(self, handle: SandboxHandle) -> None:
-        """Pause the actor and return once the control plane reports it parked."""
+        """Pause the actor once it is idle and return when the control plane reports it parked.
+
+        A pause while a command runs would checkpoint the command mid-flight
+        and cut its response, so in-flight requests finish first.
+        """
         actor: _SubstrateActor = handle.raw
         self._cancel_pending_suspend(actor)
-        async with actor.lock:
-            state = await self._park(actor, "PauseActor")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._connection.grpc_timeout_s
+        while True:
+            async with actor.lock:
+                if not actor.inflight:
+                    state = await self._park(actor, "PauseActor")
+                    actor.parked = state in _PARKED_STATES
+                    break
+            if loop.time() >= deadline:
+                raise RuntimeError(f"actor {actor.name!r} still has requests in flight; not pausing")
+            await asyncio.sleep(0.1)
         if state not in _PARKED_STATES:
             raise RuntimeError(f"actor {actor.name!r} is {ateapi_pb2.ActorState.Name(state)} after pause")
 
     async def resume(self, handle: SandboxHandle) -> None:
         """Resume through the router, which parks the request until a worker has room."""
+        self._cancel_pending_suspend(handle.raw)
         await self._wait_until_ready(handle, self._create_config.ready_timeout_s)
 
     async def _write_file(self, handle: SandboxHandle, target_path: str, content: bytes) -> None:
@@ -807,25 +866,34 @@ class SubstrateProvider:
     async def close(self, handle: SandboxHandle) -> None:
         actor: _SubstrateActor = handle.raw
         self._cancel_pending_suspend(actor)
-        if not self._create_config.delete_on_close:
-            # Keep the sandbox for inspection, but not its worker.
-            try:
-                async with actor.lock:
+        # A pause that already reached the control plane holds the lock until
+        # the actor settles; deleting under it would only collide with it.
+        async with actor.lock:
+            if not self._create_config.delete_on_close:
+                # Keep the sandbox for inspection, but not its worker.
+                try:
                     await self._park(actor, "SuspendActor")
+                except grpc.aio.AioRpcError as e:
+                    if e.code() != grpc.StatusCode.NOT_FOUND:
+                        LOGGER.warning("substrate: suspending %s on close: %s", actor.name, e.details())
+                return
+
+            # any_state removes a running, paused or mid-transition actor
+            # outright; nothing about a finished sandbox is worth a final
+            # snapshot.
+            try:
+                await self._control(
+                    "DeleteActor", ateapi_pb2.DeleteActorRequest(actor=actor.object_ref, any_state=True)
+                )
             except grpc.aio.AioRpcError as e:
                 if e.code() != grpc.StatusCode.NOT_FOUND:
-                    LOGGER.warning("substrate: suspending %s on close: %s", actor.name, e.details())
-            return
-
-        # any_state removes a running, paused or mid-transition actor outright;
-        # nothing about a finished sandbox is worth a final snapshot.
-        try:
-            await self._control("DeleteActor", ateapi_pb2.DeleteActorRequest(actor=actor.object_ref, any_state=True))
-        except grpc.aio.AioRpcError as e:
-            if e.code() != grpc.StatusCode.NOT_FOUND:
-                raise RuntimeError(f"deleting actor {actor.name!r} failed: {e.details()}") from e
+                    raise RuntimeError(f"deleting actor {actor.name!r} failed: {e.details()}") from e
 
     async def aclose(self) -> None:
+        # A park still in flight must finish before its channel goes away, or
+        # the actor is left mid-transition.
+        if self._suspend_tasks:
+            await asyncio.gather(*self._suspend_tasks, return_exceptions=True)
         if self._http_client is not None:
             await self._http_client.aclose()
             self._http_client = None

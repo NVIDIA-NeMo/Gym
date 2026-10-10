@@ -117,6 +117,8 @@ sandbox:
       default_timeout_s: 1800
       concurrency: 32
       capacity_retry_delay_s: 5
+    probe:
+      timeout_s: 150              # above the router's --parked-request-budget
 ```
 
 ### `suspend_policy`
@@ -136,6 +138,10 @@ storage and any node can resume it. This pays a checkpoint upload per idle
 period and a restore download at the start of the next step.
 
 `never` leaves the actor running and is the control to measure against.
+
+Whatever the policy, an actor whose worker is being evicted (the in-actor
+server reports the worker's `SIGTERM` on its next reply) is suspended to
+storage once idle, since a node-local pause would go away with the node.
 
 ### Pause, resume and status
 

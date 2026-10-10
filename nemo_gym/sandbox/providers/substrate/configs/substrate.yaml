@@ -24,4 +24,7 @@ sandbox:
       concurrency: 32
       capacity_retry_delay_s: 5
     probe:
+      # Above the router's --parked-request-budget, so a probe waiting for a
+      # slot is held by the router rather than cut and re-parked.
+      timeout_s: 150
       stable_delay_s: 1.0
