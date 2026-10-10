@@ -1131,6 +1131,17 @@ def _telemetry_server_type(server_cls: Type) -> Optional[str]:
     return None
 
 
+# Routes whose cancellation discards a model generation (or a whole rollout). Every client disconnect on
+# these is logged; other paths keep the sampled 1-in-100 line.
+_ALWAYS_LOGGED_DISCONNECT_PATH_SUFFIXES = (
+    "/v1/messages",
+    "/v1/chat/completions",
+    "/v1/completions",
+    "/v1/responses",
+    "/run",
+)
+
+
 class ClientDisconnectCancellationMiddleware:
     """Cancel an in-flight HTTP request when its client disconnects."""
 
@@ -1146,17 +1157,25 @@ class ClientDisconnectCancellationMiddleware:
         received_messages: asyncio.Queue[Message] = asyncio.Queue()
         client_disconnected = asyncio.Event()
         response_complete = asyncio.Event()
+        # For the 499 line: how long the request ran, and whether any response body had been sent.
+        # "before first byte" points at the client giving up while waiting (queueing, prefill, a client
+        # timeout); "mid-stream" at a client abandoning a response that was already flowing.
+        started_at = time.monotonic()
+        body_bytes_sent = 0
 
         async def receive_message() -> Message:
             return await received_messages.get()
 
         async def send_message(message: Message) -> None:
+            nonlocal body_bytes_sent
             if client_disconnected.is_set():
                 return
 
             await send(message)
-            if message["type"] == "http.response.body" and not message.get("more_body", False):
-                response_complete.set()
+            if message["type"] == "http.response.body":
+                body_bytes_sent += len(message.get("body") or b"")
+                if not message.get("more_body", False):
+                    response_complete.set()
 
         # The listener is the sole reader of the original ASGI receive channel.
         # Forwarding request messages keeps the body available to the app while
@@ -1185,12 +1204,20 @@ class ClientDisconnectCancellationMiddleware:
                     await received_messages.put(message)
                     client_disconnected.set()
                     self.num_cancelled += 1
-                    if is_global_aiohttp_client_request_debug_enabled() or self.num_cancelled % 100 == 0:
+                    always_logged = scope["path"].endswith(_ALWAYS_LOGGED_DISCONNECT_PATH_SUFFIXES)
+                    if (
+                        always_logged
+                        or is_global_aiohttp_client_request_debug_enabled()
+                        or self.num_cancelled % 100 == 0
+                    ):
                         client = scope.get("client")
                         client_address = f"{client[0]}:{client[1]}" if client else "-:-"
+                        elapsed_s = time.monotonic() - started_at
+                        phase = "mid-stream" if body_bytes_sent else "before first byte"
                         print(
                             f'{client_address} - "{scope["method"]} {scope["path"]}" '
-                            f"499 CLIENT DISCONNECTED ({self.num_cancelled} total for this server worker)"
+                            f"499 CLIENT DISCONNECTED after {elapsed_s:.1f}s {phase} "
+                            f"({body_bytes_sent} body bytes sent; {self.num_cancelled} total for this server worker)"
                         )
                     task_group.cancel_scope.cancel()
                     return
