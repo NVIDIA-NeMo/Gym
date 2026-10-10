@@ -124,6 +124,10 @@ The rollout driver, which is `gym eval run`, reports how much work it holds and 
 | `gym.driver.output.write.duration` | Histogram | s | Time to write and flush one rollout's output row. |
 | `gym.driver.output.write.bytes` | Histogram | bytes | Size of one rollout's output row. |
 | `gym.driver.materialize.duration` | Histogram | s | Time to read, repeat, and write a run's input rows before dispatch. |
+| `gym.driver.rollout.input.items` | Histogram | count | Input items one completed rollout started with. |
+| `gym.driver.rollout.output.items` | Histogram | count | Output items in one completed rollout's final response. |
+| `gym.driver.rollout.turns` | Histogram | count | Agent turns in one completed rollout. Recorded only when rollout observability produced the rollout's `ng_perf`. |
+| `gym.driver.rollout.tool_calls` | Histogram | count | Tool calls in one completed rollout, from `ng_perf`, or counted from the final response's `function_call` items without it. |
 
 Resident minus active is the number of rollouts waiting for admission. A standalone `gym eval run --no-serve` driver sets up its own telemetry from the `telemetry:` block, so it reports these metrics and the `gym.job` span too.
 

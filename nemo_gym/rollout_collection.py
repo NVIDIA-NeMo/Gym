@@ -1315,6 +1315,34 @@ def _record_output_write(started: float, serialized: bytes) -> None:
         runtime_metrics.write_bytes.record(len(serialized) + 1)
 
 
+def _record_rollout_shape(row: Mapping[str, Any], result: Mapping[str, Any]) -> None:
+    """Record the size of one completed rollout, while runtime metrics run.
+
+    Turns and tool calls come from the rollout's ``ng_perf`` when rollout observability produced it.
+    Without it, tool calls are counted from the final response's ``function_call`` items, and turns are not recorded.
+    """
+    runtime_metrics = driver_metrics()
+    if runtime_metrics is None:
+        return
+    try:
+        input_items = (row.get("responses_create_params") or {}).get("input")
+        if isinstance(input_items, list):
+            runtime_metrics.input_items.record(len(input_items))
+        output_items = ((result.get("response") or {}).get("output")) or []
+        runtime_metrics.output_items.record(len(output_items))
+        ng_perf = result.get(NG_PERF_KEY) or {}
+        if "num_turns" in ng_perf:
+            runtime_metrics.turns.record(ng_perf["num_turns"])
+        tool_calls = ng_perf.get("num_tool_calls")
+        if tool_calls is None:
+            tool_calls = sum(
+                1 for item in output_items if isinstance(item, dict) and item.get("type") == "function_call"
+            )
+        runtime_metrics.tool_calls.record(tool_calls)
+    except Exception:
+        logger.debug("Could not record rollout shape metrics", exc_info=True)
+
+
 def _dispatch_drained_result(remaining_s: float, margin_s: Optional[float]) -> Dict[str, Any]:
     """The result Gym builds for a row the dispatch budget never started.
 
@@ -3016,6 +3044,7 @@ class RolloutCollectionHelper(BaseModel):
                     _record_rollout_outcome(result, "scored", dispatch_name)
                     health_outcome = "scored"
                     _record_output_write(write_started, serialized)
+                    _record_rollout_shape(row, result)
                     persisted_count += 1
                     persisted_success_keys.add((result[TASK_INDEX_KEY_NAME], result[ROLLOUT_INDEX_KEY_NAME]))
                     if config.retain_results_in_memory:

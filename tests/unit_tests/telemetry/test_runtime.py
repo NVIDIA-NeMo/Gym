@@ -399,3 +399,40 @@ class TestDriverMetrics:
 
         assert runtime.driver_metrics() is None
         _record_output_write(time.perf_counter(), b"row")
+
+
+class TestRolloutShape:
+    def _record(self, collected, row, result):
+        from nemo_gym.rollout_collection import _record_rollout_shape
+
+        async def run():
+            async with runtime.observe_event_loop("driver"):
+                _record_rollout_shape(row, result)
+                return collected()
+
+        return asyncio.run(run())
+
+    def test_turns_and_tool_calls_come_from_ng_perf(self, collected):
+        exported = self._record(
+            collected,
+            {"responses_create_params": {"input": [{"role": "user", "content": "hi"}] * 3}},
+            {"response": {"output": [{"type": "message"}] * 5}, "ng_perf": {"num_turns": 4, "num_tool_calls": 3}},
+        )
+        assert exported[runtime.ROLLOUT_INPUT_ITEMS_INSTRUMENT][0].sum == 3
+        assert exported[runtime.ROLLOUT_OUTPUT_ITEMS_INSTRUMENT][0].sum == 5
+        assert exported[runtime.ROLLOUT_TURNS_INSTRUMENT][0].sum == 4
+        assert exported[runtime.ROLLOUT_TOOL_CALLS_INSTRUMENT][0].sum == 3
+
+    def test_without_ng_perf_tool_calls_are_counted_from_the_output(self, collected):
+        exported = self._record(
+            collected,
+            {"responses_create_params": {"input": "a plain string prompt"}},
+            {
+                "response": {
+                    "output": [{"type": "function_call"}, {"type": "function_call_output"}, {"type": "message"}]
+                }
+            },
+        )
+        assert exported[runtime.ROLLOUT_TOOL_CALLS_INSTRUMENT][0].sum == 1
+        assert runtime.ROLLOUT_TURNS_INSTRUMENT not in exported
+        assert runtime.ROLLOUT_INPUT_ITEMS_INSTRUMENT not in exported  # a string prompt has no item list

@@ -30,6 +30,7 @@ These metrics make that pressure visible without inspecting private asyncio inte
   The outermost server middleware keeps them as plain integers, and the exporter thread reads them.
 * ``gym.http.client.requests.in_flight``: outbound calls through ``server_utils.request`` still waiting for their response headers.
 * ``gym.driver.rollouts.offered``, ``gym.driver.rollouts.resident``, and ``gym.driver.rollouts.active``, plus the ``gym.driver.admission.duration``, ``gym.driver.output.write.duration``, ``gym.driver.output.write.bytes``, and ``gym.driver.materialize.duration`` histograms, from the rollout driver.
+* ``gym.driver.rollout.input.items``, ``gym.driver.rollout.output.items``, ``gym.driver.rollout.turns``, and ``gym.driver.rollout.tool_calls``: the size of each completed rollout, recorded once per rollout by the driver.
 
 Each kind of work runs where it costs the least:
 
@@ -78,6 +79,10 @@ DRIVER_ADMISSION_INSTRUMENT = "gym.driver.admission.duration"
 DRIVER_WRITE_DURATION_INSTRUMENT = "gym.driver.output.write.duration"
 DRIVER_WRITE_BYTES_INSTRUMENT = "gym.driver.output.write.bytes"
 DRIVER_MATERIALIZE_INSTRUMENT = "gym.driver.materialize.duration"
+ROLLOUT_INPUT_ITEMS_INSTRUMENT = "gym.driver.rollout.input.items"
+ROLLOUT_OUTPUT_ITEMS_INSTRUMENT = "gym.driver.rollout.output.items"
+ROLLOUT_TURNS_INSTRUMENT = "gym.driver.rollout.turns"
+ROLLOUT_TOOL_CALLS_INSTRUMENT = "gym.driver.rollout.tool_calls"
 
 EVENT_LOOP_ATTRIBUTE = "nemo.gym.event_loop"
 GC_GENERATION_ATTRIBUTE = "generation"
@@ -300,6 +305,26 @@ class _Instruments:
             description="Time to read, repeat, and write a run's input rows before dispatch.",
             explicit_bucket_boundaries_advisory=list(DRIVER_DURATION_BOUNDARIES_S),
         )
+        for attribute, name, description in (
+            ("input_items", ROLLOUT_INPUT_ITEMS_INSTRUMENT, "Input items one completed rollout started with."),
+            (
+                "output_items",
+                ROLLOUT_OUTPUT_ITEMS_INSTRUMENT,
+                "Output items in one completed rollout's final response.",
+            ),
+            ("turns", ROLLOUT_TURNS_INSTRUMENT, "Agent turns in one completed rollout, from its ng_perf."),
+            ("tool_calls", ROLLOUT_TOOL_CALLS_INSTRUMENT, "Tool calls in one completed rollout."),
+        ):
+            setattr(
+                self,
+                attribute,
+                meter.create_histogram(
+                    name,
+                    unit="{item}",
+                    description=description,
+                    explicit_bucket_boundaries_advisory=list(ROLLOUT_COUNT_BOUNDARIES),
+                ),
+            )
         meter.create_observable_counter(
             GC_COLLECTIONS_INSTRUMENT,
             callbacks=[_by_generation(lambda runtime: runtime.gc.collections)],
@@ -381,6 +406,8 @@ DRIVER_DURATION_BOUNDARIES_S: tuple[float, ...] = (
     300,
     1800,
 )
+#: Counts of items, turns, or calls in one rollout, from a single message to a very long agent trajectory.
+ROLLOUT_COUNT_BOUNDARIES: tuple[float, ...] = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 4096)
 #: Bytes. A row ranges from a short answer to a long trajectory with token IDs.
 DRIVER_WRITE_BYTES_BOUNDARIES: tuple[float, ...] = (1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000)
 
@@ -402,6 +429,10 @@ class _ProcessRuntime:
         self.write_duration = instruments.write_duration
         self.write_bytes = instruments.write_bytes
         self.materialize = instruments.materialize
+        self.input_items = instruments.input_items
+        self.output_items = instruments.output_items
+        self.turns = instruments.turns
+        self.tool_calls = instruments.tool_calls
         self.lag = instruments.lag
         self.tasks = instruments.tasks
         self.gc_pause = instruments.gc_pause
