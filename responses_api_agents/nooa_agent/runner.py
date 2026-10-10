@@ -101,7 +101,7 @@ class EmbeddedNOOARunner:
         server_client: ServerClient,
         model_server_name: str,
         resources_server_name: str,
-        max_policy_calls: int,
+        max_policy_calls: int | None,
     ) -> None:
         if invocation.execution_mode == "sandboxed":
             raise NotImplementedError("NOOA sandboxed execution is not implemented")
@@ -165,6 +165,13 @@ class EmbeddedNOOARunner:
                     termination_error = str(cause)
                     break
                 cause = cause.__cause__ or cause.__context__
+
+        # An unrecovered model transport failure cannot become a graded fallback.
+        if state.fatal_error is not None:
+            termination_reason = None
+            termination_error = None
+            if failure is None:
+                failure = state.fatal_error
 
         episode, trajectory = trace.project(
             create_params=request.responses_create_params,

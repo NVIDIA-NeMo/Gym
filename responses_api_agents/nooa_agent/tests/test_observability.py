@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import BaseModel
@@ -30,14 +31,49 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
-from responses_api_agents.nooa_agent.gym_llm import GymModelCall, RolloutLLMState
+from responses_api_agents.nooa_agent.gym_llm import GymModelCall, GymResponsesLLM, RolloutLLMState
 from responses_api_agents.nooa_agent.observability import (
     GymTraceHooks,
     _json_output,
     ensure_verifier_final_message,
     finalize_observation_gaps,
 )
-from responses_api_agents.nooa_agent.tests.test_gym_llm import model_response
+from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
+
+
+@pytest.mark.asyncio
+async def test_model_transport_preserves_scoped_ownership_on_failed_and_successful_attempts() -> None:
+    trace = GymTraceHooks()
+    state = RolloutLLMState(max_policy_calls=None)
+    failure = ConnectionError("model disconnected")
+    client = MagicMock(post=AsyncMock(side_effect=[failure, FakeHTTPResponse(model_response())]))
+    llm = GymResponsesLLM(
+        server_client=client,
+        model_server_name="policy",
+        model_url_path="/v1/responses",
+        state=state,
+        cookies={},
+        on_call=trace.on_model_call,
+    )
+    root = trace.before_agent_call(call_id="parent", parent_call_id=None)
+    child = trace.before_agent_call(call_id="child", parent_call_id="parent")
+    try:
+        with pytest.raises(ConnectionError, match="disconnected"):
+            await llm.acall([{"role": "user", "content": "task"}])
+    finally:
+        trace.after_agent_call(context=child, exception=failure)
+    try:
+        await llm.acall([{"role": "user", "content": "task"}])
+    finally:
+        trace.after_agent_call(context=root, exception=None)
+    assert [call.kwargs["headers"] for call in client.post.await_args_list] == [
+        {"x-session-id": "child"},
+        {"x-session-id": "parent"},
+    ]
+    assert [call.invocation_id for call in state.calls] == ["child", "parent"]
+    assert state.calls[0].response is None
+    assert state.calls[1].response is not None
+    assert state.fatal_error is None
 
 
 def test_scoped_projection_preserves_model_ownership_and_collector_tool_output_join() -> None:
