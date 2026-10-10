@@ -13,7 +13,6 @@ Resources Server verifies and stops it afterwards.
 import asyncio
 import logging
 import re
-import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,11 +45,10 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox import AsyncSandbox, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.adapters.harbor import (
-    DEFAULT_EXEC_TIMEOUT_SECONDS,
+from nemo_gym.sandbox.adapters.harbor import DEFAULT_EXEC_TIMEOUT_SECONDS, HarborSandboxEnvironment
+from nemo_gym.sandbox.adapters.harbor_metadata import (
     HARBOR_AGENT_TIMEOUT_METADATA_KEY,
     HARBOR_AGENT_USER_METADATA_KEY,
-    HarborSandboxEnvironment,
 )
 from nemo_gym.sandbox.config import resolve_provider_config
 from responses_api_agents.harbor_harness_agent.atif import convert_atif_to_gym_responses
@@ -124,8 +122,8 @@ class HarborHarnessAgent(SimpleResponsesAPIAgent):
             raise
 
         capture_key = body.episode_id.capture_key
-        trial_dir = (self.config.logs_dir / _path_component(capture_key)).resolve()
-        shutil.rmtree(trial_dir, ignore_errors=True)
+        # Capture keys repeat across runs; the session id keeps each episode's logs apart.
+        trial_dir = (self.config.logs_dir / _path_component(f"{capture_key}__{body.agent_session_id}")).resolve()
         trial_paths = TrialPaths(trial_dir)
         trial_paths.mkdir()
         # The agent never sees the task definition: Resources has already staged the task into the sandbox.

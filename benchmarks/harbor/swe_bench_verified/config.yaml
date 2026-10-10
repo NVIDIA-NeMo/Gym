@@ -1,0 +1,52 @@
+# SWE-bench Verified from the Harbor hub, graded by its own Harbor verifier. Default agent: Harbor's Terminus-2; pick another
+# with --agent-type (for example harbor_harness_agent/opencode). Add a sandbox provider config and a model server.
+config_paths:
+  - responses_api_agents/harbor_harness_agent/configs/harbor_harness_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+harbor_swe_bench_verified_resources_server:
+  resources_servers:
+    harbor_tasks:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: SWE-bench Verified from the Harbor hub, graded by its Harbor verifier
+      allowed_agents: [harbor_harness_agent]
+      # Pinned to one published version, so rows and the server resolve the same tasks.
+      harbor_datasets:
+        swe_bench_verified:
+          name: swe-bench/swe-bench-verified
+          ref: "sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341"
+      # Tasks build from environment/Dockerfile; build these images with build_images.py before running.
+      image_template: nemo-gym-harbor-env:{environment_hash}
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 21600
+        ready_timeout_s: 900
+      artifacts_dir: results/harbor/swe_bench_verified/harbor_tasks
+      datasets:
+        - name: harbor_swe_bench_verified
+          type: benchmark
+          jsonl_fpath: benchmarks/harbor/swe_bench_verified/data/benchmark.jsonl
+          prepare_script: benchmarks/harbor/swe_bench_verified/prepare.py
+          num_repeats: 1
+
+harbor_swe_bench_verified_harbor_harness_agent:
+  _inherit_from: harbor_harness_agent
+  responses_api_agents:
+    harbor_harness_agent:
+      resources_server:
+        type: resources_servers
+        name: harbor_swe_bench_verified_resources_server
+      logs_dir: results/harbor/swe_bench_verified/harbor_harness_agent
+
+harbor_swe_bench_verified:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: harbor_swe_bench_verified_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: harbor_swe_bench_verified_harbor_harness_agent

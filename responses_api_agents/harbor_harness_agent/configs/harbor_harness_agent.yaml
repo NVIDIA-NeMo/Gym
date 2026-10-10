@@ -1,4 +1,5 @@
-# Runs a Harbor agent in the task sandbox a Resources Server hands it (for example resources_servers/harbor_tasks).
+# Runs Harbor's Terminus-2 in the task sandbox a Resources Server hands it (for example resources_servers/harbor_tasks).
+# The resources server is left unset so `--agent-type harbor_harness_agent` can run any compatible benchmark.
 harbor_harness_agent:
   responses_api_agents:
     harbor_harness_agent:
@@ -7,7 +8,7 @@ harbor_harness_agent:
       description: Any Harbor agent in a Resources-owned task sandbox
       resources_server:
         type: resources_servers
-        name: harbor_tasks
+        name: ???
       model_server:
         type: responses_api_models
         name: policy_model
@@ -29,8 +30,7 @@ harbor_harness_agent:
         # TIP: escape $ (\${MY_ENV}) so Harbor resolves secrets itself instead of Hydra writing them to the config.
         env: {}
 
-      # Terminus-2 calls the model from this process and takes the base URL as `api_base`. Installed agents run in
-      # the sandbox: set model_base_url_kwarg to null and list their base-URL variables, e.g. [OPENAI_BASE_URL].
+      # Terminus-2 calls the model from this process and takes the base URL as `api_base`.
       model_base_url_kwarg: api_base
       model_base_url_env: []
       agent_timeout_multiplier: 1.0

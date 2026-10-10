@@ -16,6 +16,24 @@ with `SandboxAccess`, activates it once, and closes it before verification.
 A timed-out agent, or one that exits non-zero, returns a response with `status: incomplete` and the reason in
 `metadata.harbor_agent_exit`, and the episode still verifies, as in a Harbor trial.
 
+## Choosing the Harbor agent
+
+The configs leave `resources_server` unset, so any benchmark that pairs a Resources Server with this agent can swap
+the Harbor agent at start-up with `--agent-type`:
+
+| `--agent-type` | Harbor agent | Where it runs |
+| --- | --- | --- |
+| `harbor_harness_agent` | Terminus-2 | this server process; commands run in the sandbox |
+| `harbor_harness_agent/opencode` | OpenCode | inside the sandbox, which must reach the model server |
+
+```bash
+gym env start --benchmark harbor/hello_world --agent-type harbor_harness_agent/opencode \
+    --config nemo_gym/sandbox/providers/docker/configs/docker.yaml --model-type vllm_model
+```
+
+Add a flavor for another Harbor agent as one more file in `configs/`. A swap keeps the benchmark's Resources Server,
+model server and datasets; everything else, `logs_dir` included, comes from the flavor.
+
 ## Configuration
 
 `harbor_agent` follows `harbor.models.trial.config:AgentConfig`: `name` (for example `terminus-2`, `opencode`,

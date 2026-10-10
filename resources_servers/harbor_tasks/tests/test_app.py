@@ -19,12 +19,8 @@ from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.harbor_tasks import app as harbor_app
-from resources_servers.harbor_tasks.app import (
-    HarborTasksResourcesServer,
-    HarborTasksResourcesServerConfig,
-    unsupported_features,
-)
-from resources_servers.harbor_tasks.prepare import task_row
+from resources_servers.harbor_tasks.app import HarborTasksResourcesServer, HarborTasksResourcesServerConfig
+from resources_servers.harbor_tasks.tasks import image_reference, unsupported_features
 
 
 EXAMPLE_TASKS = Path(__file__).parents[1] / "data" / "tasks"
@@ -62,14 +58,16 @@ def write_task(root: Path, name: str, *, environment: str = 'docker_image = "pyt
 
 def make_server(tmp_path: Path, **overrides) -> HarborTasksResourcesServer:
     config = HarborTasksResourcesServerConfig(
-        host="",
-        port=0,
-        entrypoint="",
-        name="harbor_tasks",
-        harbor_datasets={"example": {"path": str(EXAMPLE_TASKS)}},
-        sandbox_provider="sandbox",
-        artifacts_dir=tmp_path / "artifacts",
-        **overrides,
+        **{
+            "host": "",
+            "port": 0,
+            "entrypoint": "",
+            "name": "harbor_tasks",
+            "harbor_datasets": {"example": {"path": str(EXAMPLE_TASKS)}},
+            "sandbox_provider": "sandbox",
+            "artifacts_dir": tmp_path / "artifacts",
+        }
+        | overrides
     )
     return HarborTasksResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -142,7 +140,13 @@ def test_relative_config_paths_resolve_against_the_repository(tmp_path: Path) ->
         ({}, []),
         ({"environment": 'docker_image = "x"\nnetwork_mode = "no-network"'}, ["restricted network policies"]),
         ({"verifier_extra": 'environment_mode = "separate"'}, ["separate verifier environments"]),
-        ({"environment": "cpus = 1"}, ["tasks without a prebuilt [environment].docker_image"]),
+        ({"environment": "cpus = 1"}, ["Dockerfile environments without an image_template"]),
+        (
+            {
+                "environment": 'docker_image = "x"\n[[environment.mcp_servers]]\nname = "kb"\ntransport = "streamable-http"\nurl = "http://kb/mcp"'
+            },
+            ["task-declared MCP servers"],
+        ),
     ],
 )
 def test_unsupported_features_names_what_the_server_cannot_reproduce(
@@ -166,12 +170,31 @@ def test_compose_tasks_are_unsupported(tmp_path: Path) -> None:
     assert unsupported_features(Task(task_dir)) == ["docker-compose environments"]
 
 
-def test_task_row_materializes_the_instruction_and_agent_settings() -> None:
-    row = task_row("example", Task(EXAMPLE_TASKS / "hello-world"))
-    assert row["task_id"] == row["task_name"] == "hello-world"
-    assert row["harbor_dataset"] == "example"
-    assert row["responses_create_params"]["input"][0]["content"].startswith("Create a file named `hello.txt`")
-    assert row["responses_create_params"]["metadata"] == {"harbor_agent_timeout_sec": "600.0"}
+def test_task_without_image_or_dockerfile_is_unsupported(tmp_path: Path) -> None:
+    task_dir = write_task(tmp_path, "task", environment="cpus = 1")
+    (task_dir / "environment" / "Dockerfile").unlink()
+    (task_dir / "environment" / "data.txt").write_text("x")
+    assert unsupported_features(Task(task_dir), image_template="env:{environment_hash}") == [
+        "environments with neither a docker_image nor a Dockerfile"
+    ]
+
+
+def test_image_reference_prefers_the_prebuilt_image_then_tags_the_environment_by_content(tmp_path: Path) -> None:
+    prebuilt = Task(write_task(tmp_path, "prebuilt"))
+    assert image_reference(prebuilt, "env:{environment_hash}") == "python:3.12-slim"
+
+    first = Task(write_task(tmp_path, "first", environment="cpus = 1"))
+    same = Task(write_task(tmp_path, "same", environment="cpus = 2"))
+    other_dir = write_task(tmp_path, "other", environment="cpus = 1")
+    (other_dir / "environment" / "Dockerfile").write_text("FROM python:3.13-slim\n")
+    other = Task(other_dir)
+    assert image_reference(first, None) is None
+    tag = image_reference(first, "env:{environment_hash}")
+    assert tag.startswith("env:") and len(tag) == len("env:") + 32
+    # Identical environment/ directories share one image; any change to them is a different image.
+    assert image_reference(same, "env:{environment_hash}") == tag
+    assert image_reference(other, "env:{environment_hash}") != tag
+    assert unsupported_features(first, image_template="env:{environment_hash}") == []
 
 
 def test_reward_uses_the_configured_key_then_the_first_value(tmp_path: Path) -> None:
@@ -228,6 +251,26 @@ def test_failed_seed_stops_the_sandbox(tmp_path: Path, fake_sandbox: type[FakeSa
     assert client.post("/seed_session", json=seed_request().model_dump(mode="json")).status_code == 500
     assert fake_sandbox.instances[0].stopped
     assert server._sessions == {}
+
+
+def test_seed_of_an_unbuilt_environment_says_how_to_build_it(tmp_path: Path, fake_sandbox, monkeypatch) -> None:
+    write_task(tmp_path / "tasks", "built", environment="cpus = 1")
+
+    async def missing_image(self, spec):
+        raise RuntimeError(f"image {spec.image} not found")
+
+    monkeypatch.setattr(FakeSandbox, "start", missing_image)
+    server = make_server(
+        tmp_path,
+        harbor_datasets={"local": {"path": str(tmp_path / "tasks")}},
+        image_template="env:{environment_hash}",
+    )
+    seed = seed_request(task_name="built").model_copy(
+        update={"task_data": {"harbor_dataset": "local", "task_name": "built"}}
+    )
+    with pytest.raises(RuntimeError, match="build_images.py"):
+        TestClient(server.setup_webserver()).post("/seed_session", json=seed.model_dump(mode="json"))
+    assert fake_sandbox.instances[0].stopped
 
 
 def test_verify_requires_a_seeded_session(tmp_path: Path) -> None:

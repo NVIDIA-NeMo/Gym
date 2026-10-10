@@ -2,15 +2,21 @@
 # driven by the single-agent-turn Environment Server. Tasks come from prepare.py's default `sandbox` profile.
 # Add a sandbox provider config, e.g. nemo_gym/sandbox/providers/docker/configs/docker.yaml, and a model server.
 config_paths:
-  - resources_servers/harbor_tasks/configs/harbor_tasks.yaml
   - responses_api_agents/harbor_harness_agent/configs/harbor_harness_agent.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
 biomnibench_da_resources_server:
-  _inherit_from: harbor_tasks
   resources_servers:
     harbor_tasks:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      allowed_agents: [harbor_harness_agent]
       description: BiomniBench-DA data-analysis tasks graded by an LLM judge
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 21600
+        ready_timeout_s: 900
       harbor_datasets:
         biomnibench_da:
           path: environments/biomnibench_da/data/example

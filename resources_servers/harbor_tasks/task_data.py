@@ -9,6 +9,8 @@ agent. ``verify`` runs the task's Harbor verifier (``tests/test.sh``) in that sa
 task.
 """
 
+from typing import Optional
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -22,4 +24,9 @@ class TaskData(BaseModel):
     task_name: str = Field(
         description="Harbor task name within the dataset: the task.toml [task].name or the task directory name.",
         json_schema_extra={"consumed_by": ["seed_session", "verify"]},
+    )
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Stable task identity for rollout collection; the Harbor task name.",
+        json_schema_extra={"consumed_by": ["provenance"]},
     )

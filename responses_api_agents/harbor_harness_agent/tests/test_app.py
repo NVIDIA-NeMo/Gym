@@ -140,7 +140,8 @@ def test_session_runs_the_harbor_agent_in_the_borrowed_sandbox(tmp_path: Path) -
     assert closed.agent_observations.source == "harbor:fake-harbor-agent"
     # Resources owns the sandbox: the agent disconnects and never stops it.
     assert sandbox.disconnected and not sandbox.stopped
-    assert (tmp_path / "logs" / "3-1" / "agent" / "trajectory.json").is_file()
+    # Capture keys repeat across runs, so each session writes its own directory.
+    assert (tmp_path / "logs" / "3-1__agent-session-1" / "agent" / "trajectory.json").is_file()
 
 
 def test_timed_out_agent_returns_an_incomplete_response_so_verification_still_runs(tmp_path: Path) -> None:

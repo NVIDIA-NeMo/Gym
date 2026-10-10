@@ -20,12 +20,9 @@ from typing import Any, ClassVar
 
 from fastapi import FastAPI, Request
 from harbor.models.job.config import DatasetConfig
-from harbor.models.task.config import NetworkMode, TaskOS
 from harbor.models.task.task import Task
-from harbor.models.task.verifier_mode import VerifierEnvironmentMode, resolve_task_verifier_mode
 from harbor.models.trial.config import VerifierConfig
 from harbor.models.trial.paths import TrialPaths
-from harbor.tasks.client import TaskClient
 from harbor.utils.env import resolve_env_vars
 from harbor.verifier.factory import VerifierFactory
 from pydantic import Field, PositiveFloat, field_validator
@@ -51,6 +48,12 @@ from nemo_gym.sandbox.adapters.harbor import DEFAULT_EXEC_TIMEOUT_SECONDS, Harbo
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.harbor_tasks.task_data import TaskData
+from resources_servers.harbor_tasks.tasks import (
+    builds_image,
+    download_dataset_tasks,
+    image_reference,
+    unsupported_features,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -67,6 +70,14 @@ class HarborTasksResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_config: dict[str, Any] = Field(
         default_factory=dict,
         description="SandboxSpec overrides: ttl_s, ready_timeout_s, env, metadata, provider_options, resources.",
+    )
+    image_template: str | None = Field(
+        default=None,
+        description=(
+            "Image for tasks that build from environment/Dockerfile, formatted with `environment_hash`, e.g. "
+            "`registry.example/harbor-env:{environment_hash}`. benchmarks/harbor/prepare_utils/build_images.py "
+            "builds and tags these images; this server never builds."
+        ),
     )
     image_rewrites: list[dict[str, str]] = Field(
         default_factory=list, description="Ordered [{from, to}] prefix rewrites applied to each task's docker_image."
@@ -185,8 +196,8 @@ class HarborTasksResourcesServer(SimpleResourcesServer):
             task_data = TaskData.model_validate(body.task_data)
             task = await self.load_task(task_data)
             sandbox = AsyncSandbox(create_provider(self._provider_config()))
-            trial_dir = self.config.artifacts_dir / _path_component(body.episode_id.capture_key)
-            shutil.rmtree(trial_dir, ignore_errors=True)
+            # Capture keys repeat across runs; the session id keeps each episode's artifacts apart.
+            trial_dir = self.config.artifacts_dir / _path_component(f"{body.episode_id.capture_key}__{session_id}")
             trial_paths = TrialPaths(trial_dir.resolve())
             trial_paths.mkdir()
             session = HarborTaskSession(
@@ -200,7 +211,16 @@ class HarborTasksResourcesServer(SimpleResourcesServer):
             # Own the sandbox before it starts, so a failed start is still stopped.
             self._sessions[session_id] = session
             try:
-                await sandbox.start(self._sandbox_spec(task))
+                image = image_reference(task, self.config.image_template)
+                try:
+                    await sandbox.start(self._sandbox_spec(task, image))
+                except Exception as error:
+                    if not builds_image(task):
+                        raise
+                    raise RuntimeError(
+                        f"Cannot start {image!r} for Harbor task {task.name!r}. Its environment is built from "
+                        "environment/Dockerfile: build it with benchmarks/harbor/prepare_utils/build_images.py."
+                    ) from error
                 session.environment = HarborSandboxEnvironment(
                     sandbox,
                     environment_dir=task.paths.environment_dir,
@@ -341,7 +361,9 @@ class HarborTasksResourcesServer(SimpleResourcesServer):
 
     def _require_supported(self, task: Task) -> None:
         unsupported = unsupported_features(
-            task, allow_unenforced_network_policy=self.config.allow_unenforced_network_policy
+            task,
+            image_template=self.config.image_template,
+            allow_unenforced_network_policy=self.config.allow_unenforced_network_policy,
         )
         if unsupported:
             raise ValueError(f"Harbor task {task.name!r} uses unsupported features: {', '.join(unsupported)}")
@@ -349,7 +371,7 @@ class HarborTasksResourcesServer(SimpleResourcesServer):
     def _provider_config(self) -> dict[str, Any]:
         return resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
 
-    def _sandbox_spec(self, task: Task) -> SandboxSpec:
+    def _sandbox_spec(self, task: Task, image: str) -> SandboxSpec:
         environment = task.config.environment
         resources: dict[str, Any] = {}
         if environment.cpus:
@@ -364,7 +386,7 @@ class HarborTasksResourcesServer(SimpleResourcesServer):
         # Harbor applies the task env to every command; container env gives the agent and verifier the same view.
         env = resolve_env_vars(environment.env) if environment.env else {}
         return SandboxSpec(
-            image=rewrite_image(environment.docker_image, self.config.image_rewrites),
+            image=rewrite_image(image, self.config.image_rewrites),
             ttl_s=self.config.sandbox_config.get("ttl_s"),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             workdir=environment.workdir,
@@ -419,40 +441,6 @@ class HarborTasksResourcesServer(SimpleResourcesServer):
         async with asyncio.timeout(self.config.stop_timeout_seconds):
             await session.sandbox.stop()
         self._sessions.pop(session_id, None)
-
-
-async def download_dataset_tasks(dataset: DatasetConfig, *, disable_verification: bool = False) -> list[Path]:
-    """Resolve a Harbor dataset to local task directories, downloading registry tasks into Harbor's cache."""
-    task_configs = await dataset.get_task_configs(disable_verification=disable_verification)
-    downloaded = await TaskClient().download_tasks(
-        [config.get_task_id() for config in task_configs],
-        overwrite=dataset.overwrite,
-        output_dir=dataset.download_dir,
-    )
-    return downloaded.paths
-
-
-def unsupported_features(task: Task, *, allow_unenforced_network_policy: bool = False) -> list[str]:
-    """List the task features this server cannot reproduce faithfully; empty when the task is supported."""
-    unsupported = []
-    if task.has_steps:
-        unsupported.append("multi-step tasks ([[steps]])")
-    if resolve_task_verifier_mode(task.config) == VerifierEnvironmentMode.SEPARATE:
-        unsupported.append("separate verifier environments")
-    if task.config.environment.os != TaskOS.LINUX:
-        unsupported.append(f"{task.config.environment.os.value} tasks")
-    if not task.config.environment.docker_image:
-        unsupported.append("tasks without a prebuilt [environment].docker_image")
-    if any((task.paths.environment_dir / name).exists() for name in ("docker-compose.yaml", "docker-compose.yml")):
-        unsupported.append("docker-compose environments")
-    network_modes = {
-        task.config.environment.network_mode,
-        task.config.agent.network_mode,
-        task.config.verifier.network_mode,
-    }
-    if network_modes - {None, NetworkMode.PUBLIC} and not allow_unenforced_network_policy:
-        unsupported.append("restricted network policies (set allow_unenforced_network_policy to run unenforced)")
-    return unsupported
 
 
 def _repo_path(path: Path) -> Path:

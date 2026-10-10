@@ -1,0 +1,30 @@
+name: harbor/swe_bench_verified
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: SWE-bench Verified's 500 tasks as published on the Harbor hub, run in per-instance environments and graded by the Harbor verifier.
+modality: text
+licensing: MIT
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: config.yaml
+resources_server: harbor_tasks
+agent_server: harbor_harness_agent
+datasets:
+- name: harbor_swe_bench_verified
+  type: benchmark
+  jsonl_fpath: benchmarks/harbor/swe_bench_verified/data/benchmark.jsonl
+  prepare_script: benchmarks/harbor/swe_bench_verified/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

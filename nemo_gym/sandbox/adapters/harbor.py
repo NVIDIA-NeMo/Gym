@@ -27,10 +27,6 @@ from nemo_gym.sandbox import AsyncSandbox
 
 
 HARBOR_ENVIRONMENT_TYPE = "nemo_gym_sandbox"
-# Task-level agent settings from task.toml. The agent never reads the task, so prepared rows carry them in
-# responses_create_params.metadata, and the Harbor harness agent reads them at activation.
-HARBOR_AGENT_TIMEOUT_METADATA_KEY = "harbor_agent_timeout_sec"
-HARBOR_AGENT_USER_METADATA_KEY = "harbor_agent_user"
 # Harbor's agents and verifier bound their own phases with asyncio timeouts and often call exec without a timeout.
 # Providers substitute a short default for None, so pass a bound longer than any Harbor phase instead.
 DEFAULT_EXEC_TIMEOUT_SECONDS = 24 * 3600.0
