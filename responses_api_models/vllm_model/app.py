@@ -278,6 +278,21 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     preserve_reasoning_in_assistant_content: bool = False
     replace_developer_role_with_system: bool = False
 
+    drop_unrepresentable_request_fields: bool = Field(
+        default=False,
+        description=(
+            "How the Responses-to-Chat-Completions conversion treats a request field that has no "
+            "Chat Completions representation. Off, the conversion refuses the request, so the caller can "
+            "route it to a server that serves Responses natively. On, the reporting-only fields, a "
+            "non-empty `include` (every value), `reasoning.summary` and `reasoning.generate_summary`, and "
+            "a message `phase` are dropped and the request proceeds. An image part in a tool's output is "
+            "replaced with the text placeholder `[image omitted from tool output]`, so the model does not "
+            "see that image. Every other unrepresentable field, `reasoning.context` included, is still "
+            "refused. The setting has no effect when `is_responses_native` is on, because that path skips "
+            "the conversion."
+        ),
+    )
+
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
     sequential_reasoning_allowed: bool = True
 
@@ -551,7 +566,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             return await self._responses_native(request, body)
 
         # Response Create Params -> Chat Completion Create Params
-        chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
+        chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(
+            body, drop_unrepresentable_request_fields=self.config.drop_unrepresentable_request_fields
+        )
         body.model = self.config.model
 
         # Chat Completion Create Params -> Chat Completion

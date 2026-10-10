@@ -118,7 +118,9 @@ class VLLMModelWithCompaction(VLLMModel):
         standard_body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
             body.model_dump(exclude={"required_prefix_token_ids"})
         )
-        standard_chat_params = self._converter.responses_to_chat_completion_create_params(standard_body)
+        standard_chat_params = self._converter.responses_to_chat_completion_create_params(
+            standard_body, drop_unrepresentable_request_fields=self.config.drop_unrepresentable_request_fields
+        )
         chat_params = VLLMContextCompactionChatCompletionCreateParams.model_validate(
             standard_chat_params.model_dump(exclude_unset=True)
             | {"required_prefix_token_ids": required_prefix_token_ids}
