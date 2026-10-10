@@ -19,7 +19,8 @@ Each rollout uses one ``<rollout_id>.tokens.jsonl`` file.
 Evaluation records use a separate file.
 Every entry line is ``fsync``ed before ``put`` returns — that is the durability
 guarantee. The state index is written atomically but fsynced only on lifecycle
-transitions (freeze, mark, drop); it is reconstructible from the JSONL tail.
+transitions (freeze, mark, drop, refusal); it is reconstructible from the JSONL tail
+except for those transitions, which is why they are fsynced.
 A per-rollout file lock serializes writers to the same rollout.
 Different rollouts can write concurrently.
 """
@@ -32,6 +33,7 @@ import hashlib
 import logging
 import os
 import tempfile
+import time
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -46,7 +48,7 @@ from nemo_gym.token_id_capture.protocols import (
     TokenCaptureRetiredError,
     TokenCaptureSnapshot,
 )
-from nemo_gym.token_id_capture.records import TokenEntry
+from nemo_gym.token_id_capture.records import RefusalRecord, TokenEntry
 
 
 logger = logging.getLogger(__name__)
@@ -117,6 +119,7 @@ class TokenCaptureStore:
                 "version": 0,
                 "entry_digests": {},
                 "indexed_size": 0,
+                "refusals": [],
             }
         state = orjson.loads(path.read_bytes())
         if not isinstance(state, dict):
@@ -317,13 +320,48 @@ class TokenCaptureStore:
     async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
         await asyncio.to_thread(self._begin_call, rollout_id, model_call_id)
 
-    def _dangling_intents(self, rollout_id: str, entries: tuple[TokenEntry, ...]) -> list[str]:
+    def _refuse_call(self, rollout_id: str, model_call_id: str, code: str | None) -> None:
+        """Durably record that the engine refused a captured call before it generated anything.
+
+        The refusal resolves the call's pre-dispatch intent: no entry can ever arrive for the
+        call, so ``freeze_now`` stops reporting the intent as dangling. The record lives in the
+        state file and is fsynced here because it cannot be rebuilt from the JSONL tail.
+        Repeating a call id with the same code is a no-op; a different code is a conflict.
+        """
+        with self._locked(rollout_id):
+            state = self._read_state(rollout_id)
+            if state.get("retired", False):
+                raise TokenCaptureRetiredError(f"Token capture for rollout {rollout_id} is retired")
+            if state.get("frozen", False):
+                raise TokenCaptureFrozenError(f"Token capture for rollout {rollout_id} is already frozen")
+            refusals = [RefusalRecord.model_validate(record) for record in state.get("refusals") or []]
+            for existing in refusals:
+                if existing.model_call_id != model_call_id:
+                    continue
+                if existing.code == code:
+                    return
+                raise ValueError(
+                    f"Model call id {model_call_id!r} was refused with a different code for rollout {rollout_id!r}"
+                )
+            refusals.append(RefusalRecord(model_call_id=model_call_id, code=code, created_at=time.time()))
+            state["refusals"] = [record.model_dump(mode="json") for record in refusals]
+            state["version"] = int(state.get("version", 0)) + 1
+            self._write_state(rollout_id, state)
+
+    async def refuse_call(self, rollout_id: str, *, model_call_id: str, code: str | None) -> None:
+        """Record an engine refusal; see ``_refuse_call``."""
+        await asyncio.to_thread(self._refuse_call, rollout_id, model_call_id, code)
+
+    def _dangling_intents(self, rollout_id: str, entries: tuple[TokenEntry, ...], state: dict[str, Any]) -> list[str]:
         path = self.intents_path_for(rollout_id)
         if not path.exists():
             return []
-        recorded = {entry.model_call_id for entry in entries}
+        # An entry or a refusal resolves an intent; a refused call never generated, so it was
+        # not lost.
+        resolved = {entry.model_call_id for entry in entries}
+        resolved.update(str(record["model_call_id"]) for record in state.get("refusals") or [])
         intents = [line.strip().decode("utf-8") for line in path.read_bytes().splitlines() if line.strip()]
-        return [call_id for call_id in intents if call_id not in recorded]
+        return [call_id for call_id in intents if call_id not in resolved]
 
     async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot:
         return await asyncio.to_thread(self.freeze_now, rollout_id)
@@ -343,15 +381,18 @@ class TokenCaptureStore:
             elif index_changed:
                 self._write_state(rollout_id, state)
             entries = tuple(self._read_entries_unlocked(rollout_id))
-            # A dispatched call with no entry was lost.
+            # A dispatched call with neither an entry nor a refusal was lost.
             # The rollout must be masked.
-            incomplete = bool(state.get("incomplete", False)) or bool(self._dangling_intents(rollout_id, entries))
+            incomplete = bool(state.get("incomplete", False)) or bool(
+                self._dangling_intents(rollout_id, entries, state)
+            )
             return TokenCaptureSnapshot(
                 rollout_id=rollout_id,
                 entries=entries,
                 incomplete=incomplete,
                 snapshot_id=str(state["snapshot_id"]),
                 version=int(state["version"]),
+                refusals=tuple(RefusalRecord.model_validate(record) for record in state.get("refusals") or []),
             )
 
     async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:
@@ -380,6 +421,7 @@ class TokenCaptureStore:
         # without a fence, and a late writer never finds an index that points past missing records.
         state["indexed_size"] = 0
         state["entry_digests"] = {}
+        state["refusals"] = []
         state["retired"] = True
         self._write_state(rollout_id, state, sync_root=False)
 

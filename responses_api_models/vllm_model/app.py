@@ -25,13 +25,18 @@ from time import monotonic, time, time_ns
 from typing import Any, Awaitable, ClassVar, Dict, List, Literal, Optional, Union, get_args
 
 from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
-from fastapi import Request, Response
+from fastapi import Request
+from fastapi.responses import JSONResponse
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.base_responses_api_model import (
+    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+    CONTEXT_OVERFLOW_ERROR_ATTRIBUTE,
+    CONTEXT_OVERFLOW_ERROR_CODE_ATTRIBUTE,
     BaseResponsesAPIModelConfig,
     Body,
     SimpleResponsesAPIModel,
+    context_overflow_error_fields,
     start_model_execution,
 )
 from nemo_gym.openai_utils import (
@@ -55,6 +60,7 @@ from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY, _redacted_url, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
     current_capture_context,
+    record_refusal,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.external_capture import (
@@ -83,30 +89,63 @@ def _log_unhandled_engine_error(request: Request, status: int, body: str, route:
     )
 
 
-_PROPAGATE_CONTEXT_ERROR_ATTRIBUTE = "nemo_gym_vllm_propagate_context_error"
+# Phrases an engine's 400 body uses when the request does not fit the context window. vLLM:
+# "This model's maximum context length is ..." and "Input length (N) exceeds model's maximum
+# context length (M)." (both contain "context length"), and the engine's "decoder prompt ... is
+# longer than the maximum model length". llama.cpp: two phrases a proxy may forward without the
+# error type.
+_CONTEXT_WINDOW_MARKERS = (
+    "context length",
+    "maximum model length",
+    "exceeds the available context size",
+    "is larger than the max context size",
+)
+# Phrases vLLM uses when the request's own output-token parameter is invalid ("max_tokens must be
+# at least 1", "max_completion_tokens=N cannot be greater than max_model_len"). Lowering the
+# parameter fixes these; shortening the prompt does not.
+_MAX_TOKENS_PARAMETER_MARKERS = ("max_tokens", "max_completion_tokens")
 
 
-def _is_context_length_error(error: ClientResponseError) -> bool:
-    """Recognize request overflow without swallowing runtime KV-cache failures."""
-    if error.status != 400:
-        return False
-
-    message = error.response_content.decode(errors="replace")
-    if "context length" in message or "max_tokens" in message:
+def _names_context_window(message: str) -> bool:
+    """Whether an engine's error body says the request exceeds the context window."""
+    if any(marker in message for marker in _CONTEXT_WINDOW_MARKERS):
         return True
-
     # llama.cpp supplies a dedicated error type, unlike vLLM's BadRequestError.
     try:
         payload = json.loads(message)
     except json.JSONDecodeError:
-        payload = None
+        return False
     if isinstance(payload, dict):
         payload = payload.get("error", payload)
-    if isinstance(payload, dict) and payload.get("type") == "exceed_context_size_error":
-        return True
+    return isinstance(payload, dict) and payload.get("type") == "exceed_context_size_error"
 
-    # Retain compatibility when a proxy forwards only llama.cpp's message.
-    return "exceeds the available context size" in message or "is larger than the max context size" in message
+
+def _is_context_length_error(error: ClientResponseError) -> bool:
+    """Recognize request overflow without swallowing runtime KV-cache failures.
+
+    Both a full context window and an invalid output-token parameter count: either way the
+    engine refused to generate for a length reason, and the propagation setting decides whether
+    the refusal reaches the harness or becomes an empty completion.
+    """
+    if error.status != 400:
+        return False
+    message = error.response_content.decode(errors="replace")
+    return _names_context_window(message) or any(marker in message for marker in _MAX_TOKENS_PARAMETER_MARKERS)
+
+
+def _mark_propagated_overflow(error: ClientResponseError) -> str | None:
+    """Mark a length refusal the server propagates, and return the envelope code chosen for it.
+
+    A body that names the context window gets OpenAI's ``context_length_exceeded``, which tells
+    an OpenAI-compatible harness to compact its history and retry. A body that only names the
+    output-token parameter gets no code: compaction would not help, so the harness sees an
+    ordinary invalid request with the engine's own message.
+    """
+    message = error.response_content.decode(errors="replace")
+    code = CONTEXT_LENGTH_EXCEEDED_ERROR_CODE if _names_context_window(message) else None
+    setattr(error, CONTEXT_OVERFLOW_ERROR_ATTRIBUTE, True)
+    setattr(error, CONTEXT_OVERFLOW_ERROR_CODE_ATTRIBUTE, code)
+    return code
 
 
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
@@ -420,17 +459,33 @@ class VLLMModel(SimpleResponsesAPIModel):
     _external_capture_handler: ExternalCaptureHandler | None = PrivateAttr(default=None)
     _warned_request_chat_template_kwargs_dropped: bool = PrivateAttr(default=False)
 
+    def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:
+        # The shared handler answers every other engine error with the provider's raw body. A
+        # marked length refusal is let through to the middleware below, which answers with
+        # OpenAI's envelope instead: vLLM's body carries the integer code 400, which
+        # OpenAI-compatible harnesses cannot match against "context_length_exceeded".
+        return not getattr(error, CONTEXT_OVERFLOW_ERROR_ATTRIBUTE, False)
+
     def setup_exception_middleware(self, app) -> None:
         @app.middleware("http")
         async def context_error_middleware(request: Request, call_next):
             try:
                 return await call_next(request)
             except ClientResponseError as error:
-                if getattr(error, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, False):
-                    return Response(
-                        content=error.response_content,
+                if getattr(error, CONTEXT_OVERFLOW_ERROR_ATTRIBUTE, False):
+                    # The engine's message and param are preserved verbatim inside OpenAI's error
+                    # envelope; the code says whether compacting the prompt is the remedy.
+                    message, code, param = context_overflow_error_fields(error)
+                    return JSONResponse(
+                        content={
+                            "error": {
+                                "message": message,
+                                "type": "invalid_request_error",
+                                "param": param,
+                                "code": code,
+                            }
+                        },
                         status_code=error.status,
-                        media_type="application/json",
                     )
                 raise
 
@@ -1076,7 +1131,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             if _is_context_length_error(e):
                 execution["error_category"] = "context_length_exceeded"
                 if self.config.propagate_context_overflow_errors:
-                    setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
+                    # The refused call generated nothing and gets no token record; the refusal
+                    # record resolves the capture intent registered before dispatch.
+                    await record_refusal(_mark_propagated_overflow(e))
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
@@ -1410,7 +1467,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             if _is_context_length_error(e):
                 execution["error_category"] = "context_length_exceeded"
                 if self.config.propagate_context_overflow_errors:
-                    setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
+                    # The refused call generated nothing and gets no token record; the refusal
+                    # record resolves the capture intent registered before dispatch.
+                    await record_refusal(_mark_propagated_overflow(e))
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"

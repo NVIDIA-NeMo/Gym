@@ -38,6 +38,7 @@ import pytest
 from fastapi import Body, Request
 from fastapi.responses import RedirectResponse, Response
 from fastapi.testclient import TestClient
+from openai.types.responses.response import IncompleteDetails
 from pydantic import BaseModel, ValidationError
 
 from nemo_gym.base_responses_api_model import (
@@ -71,6 +72,7 @@ from nemo_gym.token_id_capture import (
     current_capture_context,
     extract_token_fields,
     install_token_sink,
+    record_refusal,
     register_call_intent,
     reset_token_sink,
     resolve_parent,
@@ -86,6 +88,7 @@ from nemo_gym.token_id_capture.lineage import (
     RolloutLineage,
 )
 from nemo_gym.token_id_capture.protocols import TokenCaptureFrozenError, TokenCaptureRetiredError, TokenSource
+from nemo_gym.token_id_capture.records import response_finish_reason
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -157,6 +160,40 @@ def test_extract_token_fields_rejects_multiple_carriers():
     }
     with pytest.raises(ValueError, match="multiple response items"):
         extract_token_fields({"output": [carrier, carrier]})
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        # A chat payload states the reason directly.
+        ({"choices": [{"finish_reason": "length", "message": {}}]}, "length"),
+        ({"choices": [{"finish_reason": "tool_calls", "message": {}}]}, "tool_calls"),
+        ({"choices": [{"message": {}}]}, None),
+        # A Responses payload states only ``incomplete_details``; map it back to the chat vocabulary.
+        (
+            {
+                "output": [{"type": "message"}],
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            },
+            "length",
+        ),
+        (
+            {
+                "output": [{"type": "message"}],
+                "status": "incomplete",
+                "incomplete_details": {"reason": "content_filter"},
+            },
+            "content_filter",
+        ),
+        ({"output": [{"type": "message"}, {"type": "function_call"}], "status": "completed"}, "tool_calls"),
+        ({"output": [{"type": "message"}]}, "stop"),
+        ({"output": [{"type": "message"}], "status": "incomplete"}, None),
+        ({}, None),
+    ],
+)
+def test_response_finish_reason_speaks_the_chat_vocabulary_for_both_payload_shapes(payload, expected):
+    assert response_finish_reason(payload) == expected
 
 
 def test_token_entry_rejects_mismatched_generation_arrays():
@@ -310,6 +347,131 @@ def test_register_call_intent_uses_optional_sink_extension():
         reset_token_sink(token)
 
     assert calls == [("r", "c")]
+
+
+def test_a_refused_call_resolves_its_intent_and_the_snapshot_reports_it(tmp_path):
+    """A call the engine refused never generated, so its intent is resolved rather than lost."""
+    store = TokenCaptureStore(tmp_path)
+    asyncio.run(store.begin_call("refused", "c1"))
+    entry = TokenEntry(
+        rollout_id="refused",
+        model_call_id="c1",
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    asyncio.run(store.put(entry))
+    asyncio.run(store.begin_call("refused", "c2"))
+    asyncio.run(store.refuse_call("refused", model_call_id="c2", code="context_length_exceeded"))
+
+    snapshot = store.freeze_now("refused")
+
+    assert [entry.model_call_id for entry in snapshot.entries] == ["c1"]
+    assert snapshot.incomplete is False
+    assert [(record.model_call_id, record.code) for record in snapshot.refusals] == [("c2", "context_length_exceeded")]
+    assert snapshot.refusals[0].created_at > 0
+    # The refusal is a lifecycle fact and lives in the fsynced state file; there is no payload file for it.
+    state = orjson.loads(store.state_path_for("refused").read_bytes())
+    assert [record["model_call_id"] for record in state["refusals"]] == ["c2"]
+    assert sorted(path.suffix for path in tmp_path.iterdir()) == [".intents", ".json", ".jsonl", ".lock"]
+
+
+def test_a_refusal_repeats_idempotently_and_conflicts_on_a_different_code(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    asyncio.run(store.refuse_call("r0", model_call_id="c2", code="context_length_exceeded"))
+    asyncio.run(store.refuse_call("r0", model_call_id="c2", code="context_length_exceeded"))
+
+    with pytest.raises(ValueError, match="different code"):
+        asyncio.run(store.refuse_call("r0", model_call_id="c2", code=None))
+
+    assert len(store.freeze_now("r0").refusals) == 1
+
+
+def test_a_refusal_after_freeze_is_rejected_and_the_snapshot_is_unchanged(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    before = store.freeze_now("r0")
+
+    with pytest.raises(TokenCaptureFrozenError):
+        asyncio.run(store.refuse_call("r0", model_call_id="c9", code="context_length_exceeded"))
+
+    after = store.freeze_now("r0")
+    assert after.refusals == ()
+    assert (after.snapshot_id, after.version) == (before.snapshot_id, before.version)
+
+
+def test_a_refusal_for_a_retired_rollout_is_rejected(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    snapshot = store.freeze_now("r0")
+    assert asyncio.run(store.drop("r0", snapshot_id=snapshot.snapshot_id, version=snapshot.version))
+
+    with pytest.raises(TokenCaptureRetiredError):
+        asyncio.run(store.refuse_call("r0", model_call_id="c9", code="context_length_exceeded"))
+
+
+def test_record_refusal_uses_the_optional_sink_extension():
+    calls: list[tuple[str, str, str | None]] = []
+
+    class Sink:
+        async def refuse_call(self, rollout_id: str, *, model_call_id: str, code: str | None) -> None:
+            calls.append((rollout_id, model_call_id, code))
+
+    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    token = set_token_sink(context)
+    try:
+        asyncio.run(record_refusal("context_length_exceeded"))
+    finally:
+        reset_token_sink(token)
+
+    assert calls == [("r", "c", "context_length_exceeded")]
+    assert context.refusal_recorded is True
+
+
+def test_record_refusal_without_the_extension_warns_once_and_leaves_the_intent_dangling(caplog):
+    class Sink:
+        async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+            pass
+
+    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    token = set_token_sink(context)
+    try:
+        with patch("nemo_gym.token_id_capture.sink._REFUSE_CALL_MISSING_NOTED", [False]):
+            with caplog.at_level(logging.WARNING, logger="nemo_gym.token_id_capture.sink"):
+                asyncio.run(register_call_intent())
+                asyncio.run(record_refusal("context_length_exceeded"))
+                asyncio.run(record_refusal("context_length_exceeded"))
+    finally:
+        reset_token_sink(token)
+
+    warnings = [r.getMessage() for r in caplog.records if "does not implement refuse_call" in r.getMessage()]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("Sink Sink does not implement refuse_call")
+    assert context.refusal_recorded is False
+
+
+def test_the_unserved_call_reasons_are_the_refusal_and_the_uncommitted_call():
+    """Pin the set a framework's receipt builder treats as off-chain rather than poisoning."""
+    from nemo_gym.token_id_capture import ENGINE_REFUSED_CALL_REASON, UNCOMMITTED_CALL_REASON
+    from nemo_gym.token_id_capture.staging.records import UNSERVED_CALL_FAILURE_REASONS
+
+    assert UNSERVED_CALL_FAILURE_REASONS == frozenset({UNCOMMITTED_CALL_REASON, ENGINE_REFUSED_CALL_REASON})
+
+
+def test_record_refusal_never_raises(caplog):
+    class Sink:
+        async def refuse_call(self, rollout_id: str, *, model_call_id: str, code: str | None) -> None:
+            raise RuntimeError("disk full")
+
+    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    token = set_token_sink(context)
+    try:
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.token_id_capture.sink"):
+            asyncio.run(record_refusal("context_length_exceeded"))
+    finally:
+        reset_token_sink(token)
+
+    assert context.refusal_recorded is False
+    assert any("Could not record the engine refusal" in r.getMessage() for r in caplog.records)
 
 
 def test_token_store_freeze_is_atomic_and_conditional_drop_is_race_safe(tmp_path):
@@ -993,8 +1155,29 @@ class _CapturingModel(SimpleResponsesAPIModel):
         return _training_chat_completion()
 
 
-def _server(global_config_dict, *, num_workers: int | None = None) -> SimpleResponsesAPIModel:
-    return _CapturingModel(
+class _TruncatedModel(_CapturingModel):
+    """Serve calls whose generation was cut at the output-token budget, on both dialects."""
+
+    async def responses(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
+        # The Responses converter reports a chat ``length`` stop this way.
+        return _training_response("cut off").model_copy(
+            update={"status": "incomplete", "incomplete_details": IncompleteDetails(reason="max_output_tokens")}
+        )
+
+    async def chat_completions(
+        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        completion = _training_chat_completion()
+        completion.choices[0].finish_reason = "length"
+        return completion
+
+
+def _server(
+    global_config_dict, *, num_workers: int | None = None, model_cls: type = _CapturingModel
+) -> SimpleResponsesAPIModel:
+    return model_cls(
         config=BaseResponsesAPIModelConfig(
             host="0.0.0.0",
             port=8099,
@@ -1039,6 +1222,8 @@ def test_responses_call_captures_tokens_joined_to_eval_record(tmp_path):
     tokens = TokenCaptureStore(tmp_path).read_entries("task0-roll0")
     assert len(tokens) == 1
     assert tokens[0].generation_token_ids == GTOKS and tokens[0].prompt_token_ids == PTOKS
+    # A completed Responses payload without tool calls records the chat reason ``stop``.
+    assert tokens[0].finish_reason == "stop"
 
     records = read_model_call_records(CaptureStore(tmp_path), "task0-roll0")
     assert len(records) == 1
@@ -1098,6 +1283,24 @@ def test_chat_completions_call_captures_tokens(tmp_path):
     assert resp.status_code == 200
     tokens = TokenCaptureStore(tmp_path).read_entries("task0-roll2")
     assert len(tokens) == 1 and tokens[0].generation_token_ids == GTOKS
+    assert tokens[0].finish_reason == "stop"
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/responses", {"input": "hi"}),
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}),
+    ],
+)
+def test_a_call_cut_at_the_output_budget_records_the_chat_finish_reason(tmp_path, path, body):
+    """Record ``length`` whether the served payload is a chat completion or its Responses conversion."""
+    client = TestClient(_server(_both_enabled(tmp_path), model_cls=_TruncatedModel).setup_webserver())
+    resp = client.post(f"/ng-rollout/task0-rollCut/training-token-capture{path}", json=body)
+    assert resp.status_code == 200
+    tokens = TokenCaptureStore(tmp_path).read_entries("task0-rollCut")
+    assert len(tokens) == 1
+    assert tokens[0].finish_reason == "length"
 
 
 def test_tokens_captured_even_when_eval_capture_disabled(tmp_path):
@@ -1487,10 +1690,14 @@ def test_delete_removes_records_and_marker(tmp_path):
         )
     )
     asyncio.run(store.mark_incomplete("gone-0", "c"))
+    asyncio.run(store.refuse_call("gone-0", model_call_id="c2", code="context_length_exceeded"))
     assert store.path_for("gone-0").exists() and store.is_incomplete("gone-0")
     store.delete_now(["gone-0"])
     assert not store.path_for("gone-0").exists()
     assert not store.is_incomplete("gone-0")
+    # The refusal went with the state file.
+    assert not store.state_path_for("gone-0").exists()
+    assert store.freeze_now("gone-0").refusals == ()
     # Idempotent: consuming a rollout twice must not raise.
     store.delete_now(["gone-0"])
 
@@ -2720,6 +2927,23 @@ def test_omitted_optional_schema_fields_use_safe_defaults():
     assert entry.prompt_is_delta is False
     assert entry.prefix_requested is False
     assert entry.prefix_supplied is False
+    assert entry.finish_reason is None
+
+
+def test_the_finish_reason_round_trips_through_the_store_when_stated(tmp_path):
+    """Read back a stated finish reason; a record written without the field reads as ``None``."""
+    store = TokenCaptureStore(tmp_path)
+    store.append(TokenEntry(**_entry_fields(finish_reason="length")))
+    # An older writer never wrote the field.
+    older = TokenEntry(**_entry_fields()).model_dump(mode="json")
+    older["model_call_id"] = "older"
+    del older["finish_reason"]
+    with store.path_for("r0").open("ab") as handle:
+        handle.write(orjson.dumps(older) + b"\n")
+
+    by_id = {entry.model_call_id: entry for entry in store.read_entries("r0")}
+    assert by_id["c1"].finish_reason == "length"
+    assert by_id["older"].finish_reason is None
 
 
 def test_a_record_newer_than_this_reader_is_refused():

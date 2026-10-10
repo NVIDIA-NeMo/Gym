@@ -28,6 +28,7 @@ import pytest
 
 from nemo_gym.token_id_capture import (
     ParentResolutionStatus,
+    RefusalRecord,
     TokenCaptureStore,
     TokenEntry,
     stamp_lineage,
@@ -642,6 +643,133 @@ def test_finalize_attributes_from_the_result_response(tmp_path):
     assert attribution["method"] == "response_id" and attribution["chain"] == "delivered"
     delivered = [i for i in result["response"]["output"] if i.get("generation_token_ids")]
     assert [i["generation_token_ids"] for i in delivered] == [[3, 4], [7, 8]]
+
+
+def _length_cut_chain_entries() -> list[TokenEntry]:
+    """Two chained calls whose terminal call stopped at the output-token budget."""
+    return [
+        _entry("call1", [1, 2], [3, 4], text="step one", response_id="resp_1", created_at=2.0),
+        _entry(
+            "call2",
+            [1, 2, 3, 4, 5, 6],
+            [7, 8],
+            text="final answer",
+            response_id="resp_2",
+            created_at=3.0,
+            parent_call_id="call1",
+            finish_reason="length",
+        ),
+    ]
+
+
+def _finalize_length_cut_rollout(tmp_path, harness_status: str | None) -> tuple[dict, dict]:
+    """Deliver a length-cut rollout whose harness response reports ``harness_status`` (or none)."""
+    store = TokenCaptureStore(tmp_path)
+    response = _response([_assistant_item("step one"), _assistant_item("final answer")], response_id="resp_2")
+    if harness_status is not None:
+        response["status"] = harness_status
+    result = {"_ng_rollout_id": "t0-r0", "response": response, "reward": 1.0}
+
+    async def go() -> dict:
+        for entry in _length_cut_chain_entries():
+            await store.put(entry.model_copy(update={"rollout_id": "t0-r0"}))
+        return await finalize_rollout_token_capture(result, store)
+
+    return asyncio.run(go()), result
+
+
+@pytest.mark.parametrize("harness_status", ["completed", None])
+def test_finalize_marks_the_delivered_response_incomplete_when_the_terminal_call_was_cut(tmp_path, harness_status):
+    # The agent server's response says "completed" (or says nothing) because the harness ended the
+    # rollout on its own terms, but the capture shows the terminal call stopped at the output
+    # budget. Delivery carries the builder's verdict onto the result's response, so a consumer
+    # reading ``incomplete_details`` sees the truncation that the rebuilt output reflects.
+    built, result = _finalize_length_cut_rollout(tmp_path, harness_status)
+    assert built[MASK_SAMPLE_KEY] is False
+    assert built["rebuilt_response"]["status"] == "incomplete"
+    assert result["response"]["status"] == "incomplete"
+    assert result["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
+    assert [i["generation_token_ids"] for i in result["response"]["output"] if i.get("generation_token_ids")] == [
+        [3, 4],
+        [7, 8],
+    ]
+
+
+def test_finalize_keeps_a_harness_verdict_that_is_already_a_failure(tmp_path):
+    # A harness that reported ``failed`` gave a more specific verdict than the capture's truncation;
+    # delivery replaces the output but leaves that status and its absent ``incomplete_details``.
+    built, result = _finalize_length_cut_rollout(tmp_path, "failed")
+    assert built["rebuilt_response"]["status"] == "incomplete"
+    assert result["response"]["status"] == "failed"
+    assert "incomplete_details" not in result["response"]
+    assert [i["generation_token_ids"] for i in result["response"]["output"] if i.get("generation_token_ids")] == [
+        [3, 4],
+        [7, 8],
+    ]
+
+
+def _completed_chain_entries() -> list[TokenEntry]:
+    """Two chained calls whose terminal call completed on its own."""
+    return [
+        _entry("call1", [1, 2], [3, 4], text="step one", response_id="resp_1", created_at=2.0),
+        _entry(
+            "call2",
+            [1, 2, 3, 4, 5, 6],
+            [7, 8],
+            text="final answer",
+            response_id="resp_2",
+            created_at=3.0,
+            parent_call_id="call1",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("refused_at", "expected_status"),
+    [(3.5, "incomplete"), (2.5, None)],
+    ids=["terminal-refusal", "recovered-refusal"],
+)
+def test_a_refusal_ends_the_rebuilt_response_only_when_it_came_after_the_terminal_call(refused_at, expected_status):
+    # A refusal after the last served call means the harness's next request no longer fit the
+    # context window: the rollout ended at the model's limit. A refusal the harness recovered
+    # from, by compacting and getting a later call served, ended nothing.
+    built = _assemble(
+        "r",
+        _completed_chain_entries(),
+        "prefix_merging",
+        "m",
+        explicit_terminal_call_id="call2",
+        refusals=(RefusalRecord(model_call_id="call3", code="context_length_exceeded", created_at=refused_at),),
+    )
+    assert built[MASK_SAMPLE_KEY] is False
+    assert built["rebuilt_response"].get("status") == expected_status
+    expected_details = {"reason": "max_output_tokens"} if expected_status else None
+    assert built["rebuilt_response"].get("incomplete_details") == expected_details
+
+
+def test_finalize_reports_a_terminal_refusal_on_the_result(tmp_path):
+    # The store records the refusal and resolves the refused call's intent, so the frozen
+    # snapshot is complete; the refusal reaches delivery as the builder's verdict and as a
+    # metrics entry that distinguishes it from a served ``length`` stop.
+    store = TokenCaptureStore(tmp_path)
+    response = _response([_assistant_item("step one"), _assistant_item("final answer")], response_id="resp_2")
+    result = {"_ng_rollout_id": "t0-r0", "response": response, "reward": 1.0}
+
+    async def go() -> dict:
+        for entry in _completed_chain_entries():
+            await store.put(entry.model_copy(update={"rollout_id": "t0-r0"}))
+        await store.begin_call("t0-r0", "call3")
+        await store.refuse_call("t0-r0", model_call_id="call3", code="context_length_exceeded")
+        return await finalize_rollout_token_capture(result, store)
+
+    built = asyncio.run(go())
+    assert built[MASK_SAMPLE_KEY] is False
+    assert result.get(MASK_SAMPLE_KEY) is not True
+    assert result["response"]["status"] == "incomplete"
+    assert result["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
+    (refusal,) = result[TOKEN_CAPTURE_KEY]["refusals"]
+    assert (refusal["model_call_id"], refusal["code"]) == ("call3", "context_length_exceeded")
+    assert refusal["created_at"] > 3.0
 
 
 def test_finalize_honors_an_explicit_terminal_key(tmp_path):

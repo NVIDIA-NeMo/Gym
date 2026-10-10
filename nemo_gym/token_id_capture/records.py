@@ -68,8 +68,19 @@ _EMPTY_DIGEST = hashlib.sha256(_DIGEST_DOMAIN).hexdigest()
 # Parent resolution could not admit the call. Written by ``resolve_parent``.
 UNRESOLVED_PARENT_REASON = "unresolved_parent"
 # The call was admitted but finished without worker commit coordinates.
-# Written by the capture middleware.
+# Written by the capture middleware. Custody is ambiguous: the worker may have staged tokens
+# whose acknowledgement was lost.
 UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
+# The engine answered the admitted call with a refusal (a prompt that does not fit the context
+# window), so generation never ran and nothing was staged. Unlike a lost response, this outcome
+# is definite. Written by the model server at the engine call site, under worker custody.
+ENGINE_REFUSED_CALL_REASON = "engine_refused_request"
+# Failure reasons of a call that served no completion to the client: the engine refused it, or
+# the request finished before the worker's commit was acknowledged (the ledger commit precedes
+# the response leaving the server). Such a call can never be a lineage parent, so a framework
+# assembling a receipt treats these rows as off-chain rather than as a hole in the chain; the
+# rollout is still masked when the refused or lost call is the one the harness kept.
+UNSERVED_CALL_FAILURE_REASONS = frozenset({UNCOMMITTED_CALL_REASON, ENGINE_REFUSED_CALL_REASON})
 # A committed ledger row lacks the served response id that terminal attribution joins on.
 LEDGER_ROW_MISSING_RESPONSE_ID_REASON = "ledger_row_missing_response_id"
 # A committed ledger row lacks the chain or cumulative digest that verification anchors on.
@@ -113,6 +124,26 @@ def compute_digest(token_ids: list[int]) -> str:
     return hashlib.sha256(_DIGEST_DOMAIN + encode_token_ids(token_ids)).hexdigest()
 
 
+class RefusalRecord(BaseModel):
+    """One model call the engine refused, so the rollout has no record for it.
+
+    A refusal is not a lost capture: the call never generated, and the client was told why.
+    On the local capture path the refusal resolves the call's pre-dispatch intent, so the
+    rollout is not incomplete; the record is what tells a consumer where the engine refused.
+    ``code`` is the error code the client received: ``context_length_exceeded`` for a prompt
+    that does not fit the context window, ``None`` when the envelope carried no code (an
+    output-token parameter the engine rejected).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    model_call_id: str
+    code: str | None = None
+    # Seconds since the epoch, stamped when the refusal is recorded. The builder orders it
+    # against the delivered terminal call to decide whether the refusal ended the rollout.
+    created_at: float = 0.0
+
+
 class TokenEntry(BaseModel):
     """Store one model call's content and token metadata.
 
@@ -143,6 +174,12 @@ class TokenEntry(BaseModel):
     # The response id returned to the client for this model call.
     # Terminal attribution uses it to match the agent's final response to these captured tokens.
     response_id: str | None = None
+    # Why generation stopped, usually in the Chat Completions vocabulary: ``stop``, ``length``,
+    # ``tool_calls``, or ``content_filter``. ``response_finish_reason`` derives it from either
+    # served payload shape, and other engine values pass through unchanged; only ``length`` and
+    # ``content_filter`` are consumed. ``None`` means the payload stated no reason or the record
+    # predates this field.
+    finish_reason: str | None = None
     # This non-semantic timestamp helps diagnose retries and sibling branches.
     created_at: float = 0.0
 
@@ -306,6 +343,42 @@ def response_to_output_items(payload: dict) -> list[dict]:
         item.setdefault("role", "assistant")
         items.append(item)
     return items
+
+
+# ``incomplete_details.reason`` values of a Responses payload, keyed to the chat finish
+# reasons that ``nemo_gym.responses_converter`` maps onto them.
+_INCOMPLETE_REASON_TO_FINISH_REASON = {"max_output_tokens": "length", "content_filter": "content_filter"}
+
+# Responses output items that the converter builds from a chat message's tool calls.
+_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call"})
+
+
+def response_finish_reason(payload: dict) -> str | None:
+    """Return why a served response stopped, in the Chat Completions vocabulary.
+
+    A chat payload states it directly as ``choices[0].finish_reason``.
+    A Responses payload carries no finish reason.
+    The converter maps ``length`` and ``content_filter`` to ``incomplete_details.reason``; reverse that map.
+    A completed Responses payload stopped at a tool call (``tool_calls``) or at the end of its text (``stop``).
+    Return ``None`` when the payload is neither shape or is incomplete without a stated reason.
+    """
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        reason = first.get("finish_reason")
+        return reason if isinstance(reason, str) else None
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return None
+    details = payload.get("incomplete_details")
+    reason = details.get("reason") if isinstance(details, dict) else None
+    if isinstance(reason, str):
+        return _INCOMPLETE_REASON_TO_FINISH_REASON.get(reason, reason)
+    if payload.get("status") not in (None, "completed"):
+        return None
+    if any(isinstance(item, dict) and item.get("type") in _TOOL_CALL_ITEM_TYPES for item in output):
+        return "tool_calls"
+    return "stop"
 
 
 def strip_token_fields(items: list[dict]) -> tuple[list[dict], int | None]:
