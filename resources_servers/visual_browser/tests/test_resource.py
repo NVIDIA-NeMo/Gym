@@ -32,7 +32,7 @@ from resources_servers.visual_browser.evaluators import WebVoyagerEvidenceEvalua
 from resources_servers.visual_browser.session_manager import VisualBrowserSessionManager
 
 
-COMPONENT_ROOT = Path(__file__).resolve().parents[2] / "resources_servers" / "visual_browser"
+COMPONENT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _config() -> VisualBrowserResourcesServerConfig:
