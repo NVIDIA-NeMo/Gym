@@ -228,6 +228,45 @@ def test_close_retains_failed_runtime_handles_for_retry(tmp_path: Path) -> None:
     assert context.close.call_count == browser.close.call_count == playwright.stop.call_count == 2
 
 
+def test_record_video_writes_into_the_session_recording_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    context = _Context()
+    browser = _Browser(context)
+    playwright = _Playwright(browser)
+    sync_api = types.ModuleType("playwright.sync_api")
+    sync_api.sync_playwright = lambda: types.SimpleNamespace(start=lambda: playwright)
+    package = types.ModuleType("playwright")
+    package.sync_api = sync_api
+    monkeypatch.setitem(sys.modules, "playwright", package)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr("nemo_gym.web.visual_browser.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("PIL.ImageGrab.grab", lambda **_kwargs: b"png-payload")
+    store = WebArtifactStore(tmp_path)
+    driver = VisualBrowserDriver(
+        _config(record_video=True),
+        "session-1",
+        store,
+        BrowserSessionHandle(session_id="session-1", provider_name="local_process", owner_pid=os.getpid()),
+    )
+    driver._configure_pyautogui = lambda: None  # type: ignore[method-assign]
+    driver._proxy_for_task = lambda _task: ""  # type: ignore[method-assign]
+
+    driver.reset(_task(start_urls=["https://one.example"]))
+    video_dir = Path(browser.context_kwargs["record_video_dir"])
+    assert browser.context_kwargs["record_video_size"] == browser.context_kwargs["viewport"]
+
+    # Stand in for the file Playwright finalizes on context close.
+    driver.close()
+    video_dir.mkdir(parents=True, exist_ok=True)
+    (video_dir / "page.webm").write_bytes(b"webm")
+
+    [recording] = store.recording_artifacts("session-1")
+    assert recording.uri == (video_dir / "page.webm").resolve().as_uri()
+    assert recording.mime_type == "video/webm"
+
+
 def test_reset_capture_evaluation_and_close(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     context = _Context()
     browser = _Browser(context)
@@ -258,6 +297,7 @@ def test_reset_capture_evaluation_and_close(monkeypatch: pytest.MonkeyPatch, tmp
         "password": "pass",
     }
     assert metadata_seen == [browser.context_kwargs["proxy"]]
+    assert "record_video_dir" not in browser.context_kwargs
     assert [page.url for page in context.pages] == ["https://one.example", "https://two.example"]
     assert observation.url == "https://two.example"
     assert metadata["proxy_enabled"] is True

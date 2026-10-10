@@ -278,6 +278,11 @@ class VisualBrowserDriver:
         }
         if proxy:
             context_kwargs["proxy"] = self._playwright_proxy(proxy)
+        if self.config.record_video:
+            # Playwright finishes the .webm when the context closes; /close then
+            # reports every non-empty file under this directory.
+            context_kwargs["record_video_dir"] = str(self.artifacts.session_dir(self.session_id) / "video")
+            context_kwargs["record_video_size"] = dict(context_kwargs["viewport"])
         self._context = self._browser.new_context(**context_kwargs)
         # One context-wide deadline, as the reference runner sets, instead of a
         # per-navigation override. Every Playwright operation is then bounded.
