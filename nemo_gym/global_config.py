@@ -116,6 +116,10 @@ JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
+# false keeps copies of captured requests and replies out of rollout records (``ng_model_call_capture.calls``,
+# ``ng_trajectory.model_calls`` and ``ng_trajectory.turns[].question``): every request repeats the whole conversation,
+# so for long agent rollouts the copies are tens of times the rollout. The capture files keep every request.
+MODEL_CALL_CAPTURE_PAYLOADS_IN_ROWS_KEY_NAME = "model_call_capture_payloads_in_rows"
 # Run-wide training-token capture settings.
 # See ``nemo_gym/token_id_capture/config.py``.
 TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
@@ -163,6 +167,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     QUERY_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
+    MODEL_CALL_CAPTURE_PAYLOADS_IN_ROWS_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
     COMPONENT_NAME_KEY_NAME,
     SKIP_VERIFICATION_KEY_NAME,

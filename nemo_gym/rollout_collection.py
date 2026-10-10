@@ -68,6 +68,7 @@ from nemo_gym.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+    MODEL_CALL_CAPTURE_PAYLOADS_IN_ROWS_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -739,9 +740,29 @@ def _rollout_for_export(result: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
-def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> None:
+def _omit_turn_requests(record: TrajectoryRecord) -> TrajectoryRecord:
+    """Drop each turn's copy of the request it answered. Every request repeats the conversation so far, so these
+    copies grow with the square of the conversation; the capture files keep every request."""
+    if all(turn.question is None for turn in record.turns):
+        return record
+    return record.model_copy(
+        update={
+            "turns": [turn.model_copy(update={"question": None}) for turn in record.turns],
+            "gaps": [
+                *record.gaps,
+                ObservationGap(
+                    code="turn_requests_omitted",
+                    detail="model_call_capture_payloads_in_rows is false; the capture files keep every request",
+                ),
+            ],
+        }
+    )
+
+
+def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any], *, turn_requests: bool = True) -> None:
     try:
-        result[NG_TRAJECTORY_KEY] = _build_trajectory_record(row, result).model_dump(mode="json")
+        record = _build_trajectory_record(row, result)
+        result[NG_TRAJECTORY_KEY] = (record if turn_requests else _omit_turn_requests(record)).model_dump(mode="json")
     except Exception as exc:
         result.pop(NG_TRAJECTORY_KEY, None)
         logger.warning("Could not project standardized trajectory evidence.", exc_info=True)
@@ -2629,6 +2650,8 @@ class RolloutCollectionHelper(BaseModel):
             else get_global_config_dict()
         )
         capture_dirs = model_call_capture_dirs_from_config(global_config)
+        # false keeps request and reply copies out of the rows; the capture files keep them.
+        payloads_in_rows = bool(global_config.get(MODEL_CALL_CAPTURE_PAYLOADS_IN_ROWS_KEY_NAME, True))
         observability_enabled = observability_enabled_from_config(global_config)
         # How a finalized rollout with an incomplete capture is treated
         # (token_id_capture.mask_incomplete_when_attributed): read once, applied to every rebuild below.
@@ -2804,7 +2827,8 @@ class RolloutCollectionHelper(BaseModel):
                     merge_model_call_capture_into_record(
                         result,
                         capture_dirs,
-                        include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
+                        include_payloads=payloads_in_rows
+                        and not _has_observation_gap(result, "multimodal_history_redacted"),
                     )
 
                 if (
@@ -2812,7 +2836,7 @@ class RolloutCollectionHelper(BaseModel):
                     or "ng_agent_observations" in result
                     or NG_TRAJECTORY_KEY in result
                 ):
-                    _attach_trajectory_record(row, result)
+                    _attach_trajectory_record(row, result, turn_requests=payloads_in_rows)
 
                 # Assembles ng_perf from ng_trajectory when observability is enabled.
                 _attach_ng_perf(
