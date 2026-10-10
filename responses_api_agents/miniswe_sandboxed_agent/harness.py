@@ -35,7 +35,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.sandbox import AsyncSandbox
-from responses_api_agents.miniswe_sandboxed_agent.bootstrap import bootstrap_assets
+from responses_api_agents.miniswe_sandboxed_agent.bootstrap import bootstrap_assets, offline_assets
 
 
 LOGGER = logging.getLogger(__name__)
@@ -150,8 +150,10 @@ class MiniSWEHarness:
         model_name: str,
         directory: Path,
         observability_enabled: bool = False,
+        bootstrap_dir: Path | None = None,
     ) -> None:
         self.sandbox = sandbox
+        self.bootstrap_dir = bootstrap_dir
         self.context = context
         self.config = config
         self.params = params
@@ -176,9 +178,10 @@ class MiniSWEHarness:
         if self.context.mcp_servers:
             (self.directory / "mcp.json").write_text(json.dumps(self.context.mcp_servers))
             remote = f"/tmp/{self.context.session_id}-mcp"
+            index = f"--no-index --find-links {self.remote_directory}/wheels " if self.bootstrap_dir else ""
             command = (
                 f"{self.remote_directory}/uv --no-config venv {remote} --python {self.remote_directory}/python/bin/python3 && "
-                f"{self.remote_directory}/uv --no-config pip install --python {remote}/bin/python mcp==1.29.0 httpx-aiohttp==0.2.0"
+                f"{self.remote_directory}/uv --no-config pip install {index}--python {remote}/bin/python mcp==1.29.0 httpx-aiohttp==0.2.0"
             )
             result = await self.sandbox.exec(
                 command, user=self.context.user, cwd=self.context.workdir, timeout_s=self.context.setup_timeout_sec
@@ -227,7 +230,16 @@ class MiniSWEHarness:
         if result.return_code:
             raise RuntimeError(f"mini-SWE bootstrap probe failed: {result.stdout}\n{result.stderr}")
         arch, libc = result.stdout.strip().splitlines()
-        uv, python = await bootstrap_assets(arch, libc)
+        if self.bootstrap_dir is None:
+            uv, python = await bootstrap_assets(arch, libc)
+            unpack_wheels, index = "", ""
+        else:
+            # Prepared offline: the same uv and Python, and every wheel mini-SWE needs, so the sandbox installs
+            # without network.
+            uv, python, wheels = offline_assets(self.bootstrap_dir, arch, libc)
+            await self.sandbox.upload(wheels, remote + "/wheels.tar.gz")
+            unpack_wheels = f"mkdir -p {remote}/wheels && tar -xzf {remote}/wheels.tar.gz -C {remote}/wheels && "
+            index = f"--no-index --find-links {remote}/wheels "
         await self.sandbox.upload(uv, remote + "/uv.tar.gz")
         await self.sandbox.upload(python, remote + "/python.tar.gz")
         # Extract as the task user: uploads may be root-owned and non-root task
@@ -236,8 +248,9 @@ class MiniSWEHarness:
             f"tar -xzf {remote}/uv.tar.gz -C {remote} --strip-components=1 "
             f"uv-{arch}-unknown-linux-musl/uv && "
             f"tar -xzf {remote}/python.tar.gz -C {remote} && "
+            f"{unpack_wheels}"
             f"UV_PYTHON_DOWNLOADS=never {remote}/uv --no-config venv {remote}/venv --python {remote}/python/bin/python3 && "
-            f"{remote}/uv --no-config pip install --python {remote}/venv/bin/python mini-swe-agent==2.4.6",
+            f"{remote}/uv --no-config pip install {index}--python {remote}/venv/bin/python mini-swe-agent==2.4.6",
             user=self.context.user,
             cwd=self.context.workdir,
             timeout_s=self.context.setup_timeout_sec,

@@ -493,3 +493,11 @@ async def test_cancellation_during_cleanup_delays_transport_release_and_verifica
     f.provider.aclose.assert_awaited_once()
     assert f.verification["termination"]["reason"] == "cancelled"
     assert not f.agent._sessions
+
+
+async def test_instruction_suffix_is_appended_to_the_seed_instruction(fixture):
+    f = fixture
+    f.agent.config.instruction_suffix = "\n\nTeacher note: explain each step."
+    await f.agent.run(f.request, f.body)
+    assert f.harnesses[0].context.instruction == f.seed["instruction"] + "\n\nTeacher note: explain each step."
+    assert f.harnesses[0].params.input[0].content == f.harnesses[0].context.instruction

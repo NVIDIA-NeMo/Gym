@@ -92,3 +92,14 @@ from remote sandboxes. Three-step smokes validate execution and verification,
 not task-solving accuracy. The TB4 profile retains one repeat; the three-repeat
 protocol requires `++num_repeats=3`. Selecting this profile does not establish
 benchmark coverage or exact methodology parity.
+
+## Offline setup and instruction suffix
+
+`bootstrap_dir` sets the sandbox up without network. Prepare the directory once on a host with network:
+`python -m responses_api_agents.miniswe_sandboxed_agent.bootstrap prepare --dest DIR` downloads uv, Python and a
+wheelhouse for mini-swe-agent 2.4.6 and the MCP client for each sandbox platform, and writes `manifest.json`. Every
+setup then uploads them and installs with `uv pip install --no-index`, so sandboxes under a deny-all network policy
+can run mini-SWE. Without `bootstrap_dir`, setup downloads the assets and installs from PyPI as before.
+
+`instruction_suffix` is appended to each task instruction before mini-SWE renders its prompts; empty leaves the
+instruction unchanged.

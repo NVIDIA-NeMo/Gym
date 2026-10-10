@@ -75,6 +75,14 @@ class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
     agent_max_timeout_sec: float | None = Field(default=None, gt=0)
     setup_timeout_sec: float = Field(default=360, gt=0)
     shutdown_timeout_sec: float = Field(default=30, ge=0)
+    # Host directory prepared once with `python -m responses_api_agents.miniswe_sandboxed_agent.bootstrap prepare`:
+    # uv, Python and a wheelhouse per sandbox platform. When set, setup uploads them and installs mini-SWE with
+    # `uv pip install --no-index`, so neither the Gym host nor the sandbox needs network at run time (deny-all
+    # sandbox policies); when unset, assets are downloaded and mini-SWE is installed from PyPI as upstream does.
+    bootstrap_dir: Path | None = None
+    # Appended to every task instruction before mini-SWE renders it (for example a teacher instruction); empty keeps
+    # the resources server's instruction as it is.
+    instruction_suffix: str = ""
 
     @field_validator("sandbox_model_base_url")
     @classmethod
@@ -202,7 +210,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                                 session_id=seed.session_id,
                                 task_id=seed.task_id,
                                 rollout_id=rollout_id,
-                                instruction=seed.instruction,
+                                instruction=seed.instruction + self.config.instruction_suffix,
                                 user=seed.user,
                                 workdir=cwd.stdout.strip(),
                                 setup_timeout_sec=self.config.setup_timeout_sec,
@@ -227,6 +235,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                                 + "/v1",
                                 model_name=self.config.model_server.name,
                                 directory=state.artifact_directory or self.config.artifacts_dir / seed.session_id,
+                                bootstrap_dir=self.config.bootstrap_dir,
                             )
                             await harness.setup()
                         timings["agent_setup"]["finished_at"] = now()
