@@ -465,9 +465,13 @@ def test_token_store_retire_syncs_fences_then_removals_once_per_batch(tmp_path):
         store.retire_now(["r1", "r2", "r3"])
         # One sync makes every fence durable, a second one the removed records.
         assert fsync_root.call_count == 2
-        # Nothing changed, so a repeat does not sync at all.
+        # A repeat writes nothing but still syncs once: an overlapping retire may have written a fence it found
+        # without syncing it yet.
         store.retire_now(["r1", "r2", "r3"])
-        assert fsync_root.call_count == 2
+        assert fsync_root.call_count == 3
+        # An empty batch has nothing to make durable.
+        store.retire_now([])
+        assert fsync_root.call_count == 3
 
     _store_entry(store, "r4")
     snapshot = store.freeze_now("r4")
@@ -658,6 +662,27 @@ def test_token_store_syncs_files_removed_before_a_later_removal_failed(tmp_path,
 
     # The failed call itself synced after the records file was already gone.
     assert False in syncs
+
+
+def test_token_store_retire_leaves_a_reused_rollout_alone_after_a_delete_between_its_phases(tmp_path):
+    """Between fencing and removing, a delete can clear the fence and a reused rollout ID can write again."""
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r1")
+    real_fsync = store._fsync_root
+    reused = []
+
+    def fsync_root():
+        real_fsync()
+        if not reused:
+            reused.append(True)
+            store.delete_now(["r1"])
+            _store_entry(store, "r1")
+
+    with patch.object(store, "_fsync_root", fsync_root):
+        store.retire_now(["r1"])
+
+    # The new attempt's records survive, and its state still matches them.
+    assert [entry.model_call_id for entry in store.freeze_now("r1").entries] == ["r1-c1"]
 
 
 def test_token_store_delete_removes_the_fence_so_the_rollout_id_can_be_reused(tmp_path):
