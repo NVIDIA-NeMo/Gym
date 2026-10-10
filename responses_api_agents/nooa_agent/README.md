@@ -41,3 +41,6 @@ Resources cookies before verification; Resources closes its sandbox afterward.
 a longer episode timeout does not extend the worker ceiling.
 `session_close_timeout_seconds` budgets each cleanup/capture phase and the remaining activation join
 (default: 30 seconds per phase). Both settings must be positive and finite.
+
+See [NOOA sessions and SWE-bench Pro](../../fern/versions/latest/pages/evaluation-tutorials/nooa-swe-bench-pro.mdx)
+for setup, recipes, service lifecycle and observation limits.
