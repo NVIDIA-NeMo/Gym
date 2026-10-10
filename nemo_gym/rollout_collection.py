@@ -362,6 +362,43 @@ def _is_collector_key(key: str) -> bool:
     return key.startswith("_ng_") or key in (NG_TRAJECTORY_KEY, "ng_model_call_capture", NG_PERF_KEY)
 
 
+# Legacy harnesses intentionally return these failure and observation fields.
+# Other collector keys (including identities and persisted records) may be stale
+# echoes of an input and must not control the current execution.
+_LEGACY_RESULT_FIELDS = frozenset(
+    {
+        NG_FAILURE_CLASS_KEY,
+        NG_NO_PERSIST_KEY,
+        NG_TERMINAL_KEY,
+        "_ng_failure_type",
+        "_ng_failure_message",
+        "_ng_failure_http_status",
+        "_ng_failure_response_body",
+        "_ng_failure_response",
+        "_ng_failure_partial_response",
+        "_ng_failure_stage",
+        "_ng_failure_judge_error",
+        "_ng_agent_observations",
+        "_ng_terminal_model_call_id",
+        "_ng_token_capture",
+        "_ng_timeout_inflight",
+        "_ng_timeout_concurrency_limit",
+        "_ng_group_id",
+        "_ng_group_attempt",
+        NG_TRAJECTORY_KEY,
+        NG_PERF_KEY,
+        "ng_model_call_capture",
+    }
+)
+
+
+def _sanitize_legacy_result(result: Dict) -> None:
+    """Discard collector bookkeeping while preserving declared legacy evidence."""
+    for key in list(result):
+        if _is_collector_key(key) and key not in _LEGACY_RESULT_FIELDS:
+            del result[key]
+
+
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     """Turn a ``BaseEpisodeResponse`` into the rollout record the collector stores.
 
@@ -1783,10 +1820,10 @@ def _failure_outcome(row: Dict, failure: Dict, stage: str) -> RolloutFailure:
 def _normalize_rollout_outcome(row: Dict, result: Any) -> Dict | RolloutFailure:
     if not isinstance(result, dict):
         raise InvalidRolloutResult("Agent /run must return a JSON object.")
-    # This marker belongs to the persistence layer, not legacy producer replies.
-    result.pop("_ng_omitted", None)
+    native = _materialized_taskset(row) is not None
+    if not native:
+        _sanitize_legacy_result(result)
     try:
-        native = _materialized_taskset(row) is not None
         if "failure" in result and "episode_id" in result and not native:
             raise InvalidRolloutResult(
                 "Agents cannot return collector-owned RolloutFailure records; use the shared failure markers."
@@ -1832,7 +1869,7 @@ def _failure_diagnostics(result: Any) -> Dict:
     # Legacy producers use different names for errors, trace paths, and other
     # evidence. Preserve their fields, but never turn placeholder scores or
     # generation into a completed result. Actual judge input is restored separately.
-    excluded = {"reward", "response", NG_NO_PERSIST_KEY, "_ng_omitted"}
+    excluded = {"reward", "response", NG_NO_PERSIST_KEY}
     if result.get("type") == "failure":
         # The envelope is a sidecar row; only _ng_failure_record is the typed model.
         excluded.add("type")
@@ -2962,8 +2999,8 @@ class RolloutCollectionHelper(BaseModel):
                         rows.append(row)
                         results.append(result)
                     continue
-                if isinstance(result, dict):
-                    result.pop("_ng_omitted", None)
+                if isinstance(result, dict) and _materialized_taskset(row) is None:
+                    _sanitize_legacy_result(result)
                 verification_response = completed.verification_response
                 diagnostics = completed.diagnostics or _failure_diagnostics(result)
                 metric_result = diagnostics
@@ -3956,18 +3993,21 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     if (typed_outcomes or validate_results) and _materialized_taskset(row) is not None:
                         stage = "result"
                         result = _native_episode_record(row, result)
-                    verification_response = _judge_failure_response(result)
-                    diagnostics = _failure_diagnostics(result)
+                    outcome = result
                     if typed_outcomes or validate_results:
                         stage = "result"
-                        result = _normalize_rollout_outcome(row, result)
+                        outcome = _normalize_rollout_outcome(row, result)
+                    # Normalization sanitizes legacy fields before diagnostics
+                    # can copy them back into the persisted failure envelope.
+                    verification_response = _judge_failure_response(result)
+                    diagnostics = _failure_diagnostics(result)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time.time() - started_at) * 1000
                     succeeded = True
                     return _CompletedRollout(
                         row=row,
-                        result=result,
+                        result=outcome,
                         rollout_latency_ms=rollout_latency_ms,
                         verification_response=verification_response,
                         diagnostics=diagnostics,

@@ -1503,3 +1503,66 @@ def test_legacy_alias_through_directory_alias_is_one_input(tmp_path):
     directory_alias = tmp_path / "shortcut"
     directory_alias.symlink_to(original_dir, target_is_directory=True)
     assert collection._expand_input_glob(f"{alias},{directory_alias / alias.name}") == [str(alias)]
+
+
+@pytest.mark.parametrize("routing", [False, True])
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("_ng_failure_record", {"stale": True}),
+        ("_ng_failure_record", {"schema_version": 999}),
+        ("_ng_omitted", True),
+        ("_ng_dispatch_drained", True),
+        ("_ng_unknown_collector_key", "stale bookkeeping"),
+        ("_ng_task_id", {"taskset": "foreign", "task_id": "42"}),
+        ("_ng_failure_kind", "stale_internal_kind"),
+    ],
+)
+async def test_legacy_reply_cannot_echo_collector_bookkeeping(runner_config, monkeypatch, routing, key, value):
+    runner_config.route_failures_to_sidecar = routing
+    payload = {"reward": 1.0, "response": {"answer": "saved", "echoed": {key: value}}, key: value}
+    install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, payload)))
+    await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    store = RolloutStore.read(Path(runner_config.output_jsonl_fpath))
+    assert store.coverage()["successful"] == 3
+    assert store.pending(3) == []
+    assert store.failures() == []
+    for saved in store.selected("success"):
+        assert key not in saved
+        # The model's actual answer is data, even when it mentions reserved keys.
+        assert saved["response"] == payload["response"]
+
+
+async def test_legacy_reply_cleanup_preserves_declared_failure_diagnostics(runner_config, monkeypatch):
+    response = {"answer": "real answer"}
+    evidence = {
+        "_ng_failure_class": "judge_failed",
+        "_ng_failure_message": "Judge unavailable",
+        "_ng_failure_judge_error": "Judge unavailable",
+        "_ng_failure_type": "TimeoutError",
+        "_ng_timeout_inflight": 64,
+        "_ng_timeout_concurrency_limit": 128,
+        "_ng_terminal_model_call_id": "kept-call",
+        "_ng_group_id": "cohort",
+        "_ng_group_attempt": 2,
+        "_ng_agent_observations": {"trace": "producer evidence"},
+    }
+
+    async def post(**kwargs):
+        if kwargs["json"]["_ng_task_index"] == 0:
+            return FakeResponse(
+                200,
+                evidence
+                | {"response": response, "_ng_failure_record": {"stale": True}, "_ng_unknown_collector_key": "drop"},
+            )
+        return FakeResponse(200, {"reward": 1.0, "response": {}})
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    [saved] = RolloutStore.read(Path(runner_config.output_jsonl_fpath)).failures()
+    assert saved["response"] == response
+    assert "reward" not in saved
+    assert "_ng_unknown_collector_key" not in saved
+    assert saved["_ng_failure_record"]["schema_version"] == 1
+    for key, value in evidence.items():
+        assert saved[key] == value
