@@ -14,18 +14,28 @@
 # limitations under the License.
 
 import json
+from copy import deepcopy
 from http.cookies import SimpleCookie
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from nooa.context_blocks.formatter import OpenAIProviderFormatter
+from nooa.context_blocks.models import RenderedMessage, Role, ToolCallInfo
+from nooa.llm_types import AssistantReasoning, AssistantText
+from nooa.storage.serialization import deserialize, serialize
+from nooa.storage.sqlite import SQLiteStorageManager
 from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall
 from pydantic import BaseModel
 
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCallForTraining,
+    NeMoGymResponseFunctionWebSearch,
+    NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
+    NeMoGymResponseReasoningItem,
+    NeMoGymResponseReasoningItemForTraining,
 )
 from responses_api_agents.nooa_agent.gym_llm import (
     GymResponsesLLM,
@@ -292,6 +302,299 @@ async def test_preserves_function_call_token_metadata() -> None:
     assert replayed[0]["generation_token_ids"] == [11, 12]
 
 
+def mixed_model_response() -> dict:
+    outputs = []
+    for index, city in enumerate(("Paris", "Oslo"), start=1):
+        metadata = {
+            "prompt_token_ids": [10 + index],
+            "generation_token_ids": [20 + index, 30 + index],
+            "generation_log_probs": [-0.1, -0.2],
+            "routed_experts": [[[0, 1]], [[1, 2]]],
+        }
+        outputs.extend(
+            [
+                NeMoGymResponseReasoningItemForTraining(
+                    id=f"reasoning-{index}",
+                    summary=[{"type": "summary_text", "text": f"Check {city}."}],
+                    content=[{"type": "reasoning_text", "text": f"Need the {city} forecast."}],
+                    encrypted_content=f"encrypted-{index}",
+                    **metadata,
+                ),
+                NeMoGymResponseOutputMessageForTraining(
+                    id=f"message-{index}",
+                    phase="commentary",
+                    content=[NeMoGymResponseOutputText(annotations=[], text=f"Checking {city}.")],
+                    **metadata,
+                ),
+                NeMoGymResponseFunctionToolCallForTraining(
+                    id=f"function-{index}",
+                    call_id=f"call-{index}",
+                    name="weather",
+                    arguments=json.dumps({"city": city}),
+                    **metadata,
+                ),
+            ]
+        )
+    return model_response(*outputs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("history", ["live", "snapshot", "sqlite"])
+async def test_mixed_assistant_history_replays_complete_ordered_outputs(history: str) -> None:
+    payload = mixed_model_response()
+    llm, client, state = make_llm(payload)
+    question = {"role": "user", "content": "Compare the weather in Paris and Oslo."}
+    result = await llm.acall([question])
+
+    if history == "snapshot":
+        blob, allowlist = serialize(result)
+        assert "raw_response" not in json.dumps(blob)
+        result = deserialize(json.loads(json.dumps(blob)), allowlist)
+    elif history == "sqlite":
+        with SQLiteStorageManager(":memory:") as storage:
+            storage.event_backend.store("assistant-turn", result)
+            result = storage.event_backend.get("assistant-turn")
+
+    assert isinstance(result, LLMResponse)
+    if history != "live":
+        assert result.raw_response is None
+        llm = GymResponsesLLM(
+            server_client=client,
+            model_server_name="policy_model",
+            model_url_path="/ng-rollout/restored/v1/responses",
+            state=state,
+            cookies={},
+        )
+    await llm.acall(
+        [
+            question,
+            result,
+            {"role": "tool", "tool_call_id": "call-1", "content": "Sunny"},
+            {"role": "tool", "tool_call_id": "call-2", "content": "Snowy"},
+        ]
+    )
+
+    request = client.post.await_args.kwargs["json"].model_dump(mode="json", exclude_none=True)
+    expected_output = NeMoGymResponse.model_validate(payload).model_dump(mode="json", exclude_none=True)["output"]
+    assert request["input"][1:-2] == expected_output
+    assert request["input"][-2:] == [
+        {"type": "function_call_output", "call_id": "call-1", "output": "Sunny"},
+        {"type": "function_call_output", "call_id": "call-2", "output": "Snowy"},
+    ]
+    assert result.content == "Checking Paris.Checking Oslo."
+    assert result.reasoning == "Need the Paris forecast.\nNeed the Oslo forecast."
+    assert [part.kind for part in result.parts] == ["reasoning", "text", "tool_call"] * 2
+    assert result.finish_reason == "tool_calls"
+    assert state.gaps == []
+
+
+@pytest.mark.asyncio
+async def test_editing_assistant_text_discards_stale_native_replay_metadata() -> None:
+    llm, client, _ = make_llm(mixed_model_response())
+    result = await llm.acall([{"role": "user", "content": "Weather?"}])
+    edited = result.replace_text("Updated weather request.")
+
+    await llm.acall([edited])
+
+    request = client.post.await_args.kwargs["json"].model_dump(mode="json", exclude_none=True)
+    replayed = request["input"]
+    text = [item["content"] for item in replayed if item["type"] == "message"]
+    assert text == ["Updated weather request.", "Need the Paris forecast.", "Need the Oslo forecast."]
+    assert [item["type"] for item in replayed] == ["message", "message", "function_call", "message", "function_call"]
+    assert [item["call_id"] for item in replayed if item["type"] == "function_call"] == ["call-1", "call-2"]
+    wire = json.dumps(replayed)
+    assert "encrypted" not in wire
+    assert "token_ids" not in wire
+    assert "generation_log_probs" not in wire
+    assert "routed_experts" not in wire
+    assert "Checking" not in wire
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_tools", [False, True])
+@pytest.mark.parametrize("content", ["Edited answer.", ""])
+async def test_formatter_history_edits_preserve_public_reasoning_without_native_metadata(
+    with_tools: bool, content: str
+) -> None:
+    llm, client, state = make_llm(mixed_model_response())
+    original = await llm.acall([{"role": "user", "content": "Weather?"}])
+    original_snapshot = original.model_dump(mode="json")
+    original_response = state.calls[0].response.model_dump(mode="json")
+    edited_call = ToolCallInfo(id="call-1", name="weather", arguments='{"city":"Berlin"}')
+    rendered = OpenAIProviderFormatter().format(
+        [
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                content=content,
+                reasoning="Edited visible reasoning.",
+                tool_calls=(edited_call,) if with_tools else (),
+                replay_message=original,
+            )
+        ]
+    )
+    assert isinstance(rendered[0], dict)
+    rendered_snapshot = deepcopy(rendered)
+
+    await llm.acall(rendered)
+
+    request = client.post.await_args.kwargs["json"]
+    expected = [{"type": "message", "role": "assistant", "content": "Edited visible reasoning."}]
+    if content:
+        expected.append({"type": "message", "role": "assistant", "content": content})
+    if with_tools:
+        expected.append(
+            {"type": "function_call", "call_id": "call-1", "name": "weather", "arguments": '{"city":"Berlin"}'}
+        )
+    assert request.model_dump(mode="json", exclude_none=True)["input"] == expected
+    assert state.calls[-1].request == request
+    assert original.model_dump(mode="json") == original_snapshot
+    assert state.calls[0].response.model_dump(mode="json") == original_response
+    assert rendered == rendered_snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_tools", [False, True])
+async def test_unscoped_history_replays_public_fields_instead_of_live_raw_response(with_tools: bool) -> None:
+    raw = NeMoGymResponse.model_validate(mixed_model_response())
+    raw_snapshot = raw.model_dump(mode="json")
+    replacement = LLMResponse(
+        raw_response=raw,
+        content="Replacement answer.",
+        reasoning="Replacement reasoning.",
+        tool_calls=[ToolCall(id="edited-call", name="weather", arguments='{"city":"Berlin"}')] if with_tools else [],
+    )
+    assert replacement.replay_scope is None
+    llm, client, state = make_llm(model_response())
+
+    await llm.acall([replacement])
+
+    expected = [
+        {"type": "message", "role": "assistant", "content": "Replacement reasoning."},
+        {"type": "message", "role": "assistant", "content": "Replacement answer."},
+    ]
+    if with_tools:
+        expected.append(
+            {"type": "function_call", "call_id": "edited-call", "name": "weather", "arguments": '{"city":"Berlin"}'}
+        )
+    request = client.post.await_args.kwargs["json"]
+    assert request.model_dump(mode="json", exclude_none=True)["input"] == expected
+    assert state.calls[-1].request == request
+    assert raw.model_dump(mode="json") == raw_snapshot
+    assert [gap.code for gap in state.gaps] == ["foreign_turn_projected_portable"]
+
+
+@pytest.mark.asyncio
+async def test_foreign_ordered_parts_replay_only_public_text_and_tool_calls() -> None:
+    foreign = LLMResponse(
+        parts=(
+            AssistantText(text="Checking.", native={"encrypted_content": "foreign-secret"}),
+            ToolCall(id="call-9", name="weather", arguments='{"city":"Oslo"}', native={"token_ids": [9]}),
+            AssistantReasoning(text="Need temperature too.", native={"encrypted_content": "foreign-secret"}),
+            AssistantText(text="One moment."),
+        ),
+        replay_scope="foreign-provider",
+        finish_reason="tool_calls",
+    )
+    llm, client, state = make_llm(model_response())
+
+    await llm.acall([foreign])
+
+    request = client.post.await_args.kwargs["json"].model_dump(mode="json", exclude_none=True)
+    assert request["input"] == [
+        {"type": "message", "role": "assistant", "content": "Checking."},
+        {"type": "function_call", "call_id": "call-9", "name": "weather", "arguments": '{"city":"Oslo"}'},
+        {"type": "message", "role": "assistant", "content": "Need temperature too."},
+        {"type": "message", "role": "assistant", "content": "One moment."},
+    ]
+    assert [gap.code for gap in state.gaps] == ["foreign_turn_projected_portable"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_server_name", "model"),
+    [("other_model_server", "gym-policy"), ("policy_model", "other-policy")],
+)
+async def test_different_model_replays_public_parts_without_native_metadata(
+    model_server_name: str, model: str
+) -> None:
+    llm, client, state = make_llm(mixed_model_response())
+    result = await llm.acall([{"role": "user", "content": "Weather?"}])
+    other_llm = GymResponsesLLM(
+        server_client=client,
+        model_server_name=model_server_name,
+        model_url_path="/ng-rollout/other/v1/responses",
+        model=model,
+        state=state,
+        cookies={},
+    )
+
+    await other_llm.acall([result])
+
+    replayed = client.post.await_args.kwargs["json"].model_dump(mode="json", exclude_none=True)["input"]
+    assert [item["type"] for item in replayed] == ["message", "message", "function_call"] * 2
+    assert [item["content"] for item in replayed if item["type"] == "message"] == [
+        "Need the Paris forecast.",
+        "Checking Paris.",
+        "Need the Oslo forecast.",
+        "Checking Oslo.",
+    ]
+    assert [item["call_id"] for item in replayed if item["type"] == "function_call"] == ["call-1", "call-2"]
+    wire = json.dumps(replayed)
+    assert "encrypted" not in wire
+    assert "token_ids" not in wire
+    assert "generation_log_probs" not in wire
+    assert "routed_experts" not in wire
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output", "reasoning"),
+    [
+        (
+            NeMoGymResponseReasoningItem(
+                id="summary-only",
+                summary=[{"type": "summary_text", "text": "Compare the forecasts."}],
+                encrypted_content="encrypted-summary",
+            ),
+            "Compare the forecasts.",
+        ),
+        (
+            NeMoGymResponseReasoningItem(id="encrypted-only", summary=[], encrypted_content="encrypted-reasoning"),
+            None,
+        ),
+        (
+            NeMoGymResponseOutputMessage(
+                id="refusal", content=[{"type": "refusal", "refusal": "Cannot provide that."}]
+            ),
+            None,
+        ),
+        (
+            NeMoGymResponseFunctionWebSearch(
+                id="web-search",
+                type="web_search_call",
+                status="completed",
+                action={"type": "search", "query": "Paris weather"},
+            ),
+            None,
+        ),
+    ],
+    ids=["reasoning-summary", "encrypted-reasoning", "refusal", "hosted-tool"],
+)
+async def test_nontext_outputs_survive_snapshot_replay(output: BaseModel, reasoning: str | None) -> None:
+    payload = model_response(output)
+    llm, client, state = make_llm(payload)
+    result = await llm.acall([{"role": "user", "content": "Continue."}])
+    blob, allowlist = serialize(result)
+    restored = deserialize(json.loads(json.dumps(blob)), allowlist)
+
+    await llm.acall([restored])
+
+    replayed = client.post.await_args.kwargs["json"].model_dump(mode="json", exclude_none=True)["input"]
+    assert replayed == [output.model_dump(mode="json", exclude_none=True)]
+    assert restored.reasoning == reasoning
+    assert state.gaps == []
+
+
 def test_cache_boundary_is_never_a_model_input() -> None:
     replayed, instructions = _responses_input([{"role": "user", "content": "Weather?"}, CacheBoundary()])
 
@@ -325,7 +628,7 @@ def test_foreign_llm_response_projects_portable_and_records_gap() -> None:
 async def test_structured_output_schema_and_parsing() -> None:
     output = NeMoGymResponseOutputMessageForTraining(
         id="msg-1",
-        content=[NeMoGymResponseOutputText(annotations=[], text='{"verdict":"positive"}')],
+        content=[NeMoGymResponseOutputText(annotations=[], text=' {\n  "verdict": "positive"\n}\n')],
         prompt_token_ids=[1],
         generation_token_ids=[2],
         generation_log_probs=[-0.1],
@@ -336,7 +639,18 @@ async def test_structured_output_schema_and_parsing() -> None:
 
     assert result.parsed == StructuredAnswer(verdict="positive")
     assert json.loads(result.content) == {"verdict": "positive"}
+    assert result.content == output.content[0].text
     assert client.post.await_args.kwargs["json"].text["format"]["name"] == "StructuredAnswer"
+
+    blob, allowlist = serialize(result)
+    restored = deserialize(json.loads(json.dumps(blob)), allowlist)
+    assert restored.parsed is None
+    assert restored.content == result.content
+
+    await llm.acall([restored])
+
+    replayed = client.post.await_args.kwargs["json"].model_dump(mode="json", exclude_none=True)["input"]
+    assert replayed == [output.model_dump(mode="json", exclude_none=True)]
 
 
 @pytest.mark.asyncio
