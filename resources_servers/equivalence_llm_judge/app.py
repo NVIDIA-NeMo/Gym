@@ -26,7 +26,7 @@ import re
 from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
@@ -35,6 +35,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -115,6 +116,8 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
         {question}, {expected_answer}, {generated_answer}
     - judge_equal_label / judge_not_equal_label: labels the judge must output.
     """
+
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     # Default logical name for this resources server
     name: str = "equivalence_llm_judge"
@@ -349,6 +352,8 @@ def _extract_question_text(
 
 class LLMJudgeResourcesServer(SimpleResourcesServer):
     """Judge-only verifier using an LLM to compare answers."""
+
+    ray_enabled = False
 
     config: LLMJudgeResourcesServerConfig
 

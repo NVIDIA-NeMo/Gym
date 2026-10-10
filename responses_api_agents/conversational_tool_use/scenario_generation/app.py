@@ -204,6 +204,7 @@ class _CallOutcome:
 
 
 class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: ScenarioGenerationAgentConfig
 
     async def responses(

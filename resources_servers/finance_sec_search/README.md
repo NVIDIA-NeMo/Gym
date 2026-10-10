@@ -35,7 +35,8 @@ search_judge_model_name: gpt-5-mini
 # Optional: set TAVILY_API_KEY to enable web_search.
 tavily_api_key: ${oc.env:TAVILY_API_KEY,null}
 
-# Required when the dataset exposes edgar_search.
+# Required when the dataset exposes edgar_search: local or live (needs sec_api_key).
+edgar_search_mode: local
 local_edgar_index_path: /path/to/sap500_sec_fts.sqlite
 
 # Optional per-process JSONL latency records.
@@ -66,11 +67,11 @@ its metadata sidecar once per index, which is what keeps common queries under a
 second instead of tens of seconds:
 
 ```bash
-python resources_servers/finance_sec_search/scripts/build_local_edgar_metadata.py \
+python resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py \
   --index /path/to/sap500_sec_fts.sqlite
 ```
 
-See [docs/local-edgar-index.md](docs/local-edgar-index.md) for the schema an
+See [local-edgar-index.md](../sec_local_index/docs/local-edgar-index.md) for the schema an
 index must have, the column formats that matter, and how to obtain one.
 
 ## Cache Management
@@ -126,6 +127,33 @@ so track how many rollouts never submit, not just mean reward.
 
 With a local corpus or index available, also set `sec_dump_path` and
 `local_edgar_index_path` (see [Local EDGAR index](#local-edgar-index)).
+
+### Where SEC data comes from
+
+`edgar_search_mode` selects the source for `edgar_search`.
+
+| `edgar_search_mode` | `edgar_search` | Needs |
+|---|---|---|
+| unset | Unavailable | Nothing |
+| `local` | Local SQLite index | `local_edgar_index_path` |
+| `live` | sec-api.io | `sec_api_key` |
+
+Only datasets that expose `edgar_search` need a mode; the benchmark exposes
+`sec_filing_search` and leaves it unset. A mode whose index or key is missing
+fails at startup. The mode in use, and in local mode the date range the index
+covers, is logged at startup; `NEMO_GYM_LOG_LEVEL=WARNING` silences that.
+
+`sec_filing_search` is unaffected by `edgar_search_mode`: it resolves tickers and filing
+metadata against SEC.gov in both, and `use_cache: true` with
+`scripts/prefetch_sec_metadata.py` keeps that off the critical path during
+training.
+
+In local mode `edgar_search` makes no network call, which is what training
+throughput needs, and filing text is read from `sec_dump_path`. It can only
+answer for dates the corpus holds — a search outside the indexed span returns
+an error naming that span rather than an empty result.
+
+Live mode is the one that matches the published benchmark.
 
 ### What is cached
 
@@ -268,8 +296,9 @@ python resources_servers/finance_sec_search/scripts/convert_questions.py \
 
 This keeps the same user prompt and companion tools while replacing
 `sec_filing_search` with the agent-facing `edgar_search` schema. The
-`/edgar_search` route reads `local_edgar_index_path` in read-only immutable mode
-and returns sec-api-compatible filing metadata. It does not call sec-api.io.
+`/edgar_search` route needs `edgar_search_mode` set. In local mode it reads
+`local_edgar_index_path` in read-only immutable mode and returns sec-api-compatible
+filing metadata without calling sec-api.io.
 `parse_html_page` remains separate and may read the filing cache, filing dump,
 or SEC.gov.
 

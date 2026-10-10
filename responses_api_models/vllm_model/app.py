@@ -19,11 +19,12 @@ import json
 import logging
 import os
 from copy import deepcopy
+from dataclasses import dataclass
 from threading import Lock
 from time import monotonic, time, time_ns
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from typing import Any, Awaitable, ClassVar, Dict, List, Literal, Optional, Union, get_args
 
-from aiohttp.client_exceptions import ClientResponseError
+from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
 from fastapi import Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
@@ -31,6 +32,7 @@ from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     Body,
     SimpleResponsesAPIModel,
+    start_model_execution,
 )
 from nemo_gym.openai_utils import (
     REQUIRED_TOKEN_METADATA_FIELDS,
@@ -43,14 +45,14 @@ from nemo_gym.openai_utils import (
     NeMoGymChoice,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    PermanentEndpointError,
 )
 from nemo_gym.responses_converter import (
     VLLMConverter,
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.rollout_correlation import current_rollout_id
+from nemo_gym.server_utils import SESSION_ID_KEY, _redacted_url, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
     current_capture_context,
 )
@@ -62,20 +64,53 @@ from nemo_gym.token_id_capture.external_capture import (
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
+
+
+def _log_unhandled_engine_error(request: Request, status: int, body: str, route: str) -> None:
+    """Log an engine answer the server does not handle, once, before it is re-raised.
+
+    The shared model error handler preserves the upstream status and body. The log
+    additionally ties that error to the request path and rollout id (set by the
+    capture route's prefix).
+    """
+    LOG.warning(
+        "engine answered %s to a %s for %s (rollout %s): %s",
+        status,
+        route,
+        request.url.path,
+        current_rollout_id() or "none",
+        body[:500],
+    )
+
+
 _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE = "nemo_gym_vllm_propagate_context_error"
 
 
 def _is_context_length_error(error: ClientResponseError) -> bool:
-    """Recognize vLLM's context-budget 400 across serving-version wordings."""
-
+    """Recognize request overflow without swallowing runtime KV-cache failures."""
     if error.status != 400:
         return False
-    message = error.response_content.decode(errors="replace").lower()
-    return (
-        "context length" in message
-        or "max_tokens" in message
-        or ("decoder prompt" in message and "longer than the maximum model length" in message)
-    )
+
+    message = error.response_content.decode(errors="replace")
+    if "context length" in message or "max_tokens" in message:
+        return True
+
+    # vLLM rejects an over-long multimodal prompt in its decoder-prompt length check.
+    if "decoder prompt" in message and "longer than the maximum model length" in message:
+        return True
+
+    # llama.cpp supplies a dedicated error type, unlike vLLM's BadRequestError.
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        payload = payload.get("error", payload)
+    if isinstance(payload, dict) and payload.get("type") == "exceed_context_size_error":
+        return True
+
+    # Retain compatibility when a proxy forwards only llama.cpp's message.
+    return "exceeds the available context size" in message or "is larger than the max context size" in message
 
 
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
@@ -172,6 +207,56 @@ def _append_transport_io(event: Dict[str, Any]) -> None:
         LOG.exception("Failed to append vLLM transport log to %s", path)
 
 
+@dataclass
+class _EndpointHealth:
+    """What the server has observed of one engine endpoint.
+
+    ``consecutive_failures`` counts 5xx and connection-error answers since the last good
+    answer. ``failed_at`` is the monotonic time the endpoint stopped receiving sessions, or
+    None while it serves; it is refreshed whenever a trial call is claimed or fails, so the
+    retry interval always runs from the latest attempt.
+    """
+
+    consecutive_failures: int = 0
+    failed_at: Optional[float] = None
+
+
+def _redacted_error_repr(error: ClientResponseError) -> str:
+    """Describe an upstream HTTP error for the transport log without headers or the URL query string.
+
+    `raise_for_status` keeps the request headers on the exception, and they carry
+    `Authorization: Bearer <api key>`, so `repr(error)` must not be written to the log.
+    """
+    request_info = error.request_info
+    url = getattr(request_info, "real_url", None) or getattr(request_info, "url", None)
+    if url is not None:
+        url = _redacted_url(str(url))
+    return (
+        f"{type(error).__name__}(status={error.status}, message={error.message!r}, "
+        f"method={getattr(request_info, 'method', None)!r}, url={url!r})"
+    )
+
+
+ReasoningFieldMode = Literal["both", "reasoning", "reasoning_content"]
+
+
+def _default_reasoning_field() -> str:
+    # Environment fallback for launchers that select the mode without a config
+    # override; an explicit ``reasoning_field`` in config takes precedence.
+    value = os.environ.get("NEMO_GYM_REASONING_FIELD", "").strip() or "both"
+    if value not in get_args(ReasoningFieldMode):
+        raise ValueError(f"NEMO_GYM_REASONING_FIELD must be one of {get_args(ReasoningFieldMode)}, got {value!r}")
+    return value
+
+
+def _set_reasoning(message_dict: dict[str, Any], reasoning: str, mode: ReasoningFieldMode) -> None:
+    """Attach reasoning under the key(s) selected by ``mode``."""
+    if mode in ("both", "reasoning_content"):
+        message_dict["reasoning_content"] = reasoning
+    if mode in ("both", "reasoning"):
+        message_dict["reasoning"] = reasoning
+
+
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
     api_key: str
@@ -183,6 +268,13 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
+    # Which key(s) carry reasoning on an outgoing assistant message. "both" keeps
+    # the historical behaviour: vLLM < 0.16.0 reads `reasoning_content`, >= 0.16.0
+    # reads `reasoning`, and most servers ignore the one they do not know. Some
+    # OpenAI-compatible frontends alias the two keys and reject the pair
+    # (`400 duplicate field 'reasoning'`).
+    # Unset falls back to the NEMO_GYM_REASONING_FIELD environment variable, then "both".
+    reasoning_field: ReasoningFieldMode = Field(default_factory=_default_reasoning_field, validate_default=True)
     # Keep reconstructed assistant history byte-for-byte in ``content`` for
     # models whose validated direct-vLLM contract includes <think> tags.
     # Response parsing remains controlled independently by
@@ -203,6 +295,14 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     is_responses_native: bool = False
 
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+    # Whether a request's own top-level ``chat_template_kwargs`` is merged over the
+    # configured baseline (below per-request metadata overrides). Off by default:
+    # agents such as Stirrup attach ``enable_thinking`` on every call, so
+    # forwarding it changes the policy's generation regime relative to results
+    # collected without it. When off, the request field is dropped and a warning is
+    # logged once. Chat path only: with ``use_completions_api`` the request field
+    # is always dropped. Opt in deliberately and re-baseline with a same-config run.
+    forward_request_chat_template_kwargs: bool = False
 
     # When True, if the last input message is an assistant message, forward it to vLLM as a
     # prefix to continue (continue_final_message=True, add_generation_prompt=False) instead of
@@ -242,8 +342,26 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Connection-error retry bound applied to clients when endpoint_file is set.
     endpoint_connection_retries: Optional[int] = 8
 
+    # Expose the Gym session (one per rollout) as the backend's conversation id.
+    # ``conversation_params`` is a TensorRT-LLM extension outside the OpenAI Chat Completions
+    # schema, and strict OpenAI-compatible backends reject it, so this is off by default and
+    # enabled only by deployments that route on conversation/rank affinity.
+    forward_session_id_as_conversation_id: bool = False
+
     # How often endpoint_file may be stat'd; otherwise the `os.stat` results is cached and reused.
     endpoint_check_interval_s: float = 10.0
+
+    # Move sessions off an engine endpoint that keeps failing. Off, a session stays on the
+    # endpoint its id hashes to for the whole run, so an endpoint whose engine has died
+    # answers every call of every session pinned to it with a 5xx until the run ends. On, an
+    # endpoint that has answered `endpoint_failure_threshold` consecutive calls with a 5xx or
+    # a connection error stops receiving sessions, and the sessions pinned to it move to a
+    # serving endpoint on their next call. Once per `endpoint_retry_after_s` one call is tried
+    # on the failed endpoint; when it succeeds the endpoint serves sessions again.
+    route_around_failing_endpoints: bool = False
+    endpoint_failure_threshold: int = Field(default=3, ge=1)
+    endpoint_retry_after_s: float = Field(default=60.0, gt=0)
+
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``) against. Absolute paths are used
     # as-is. When unset, relative paths raise. Audio is always inlined as a
@@ -292,6 +410,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
 
 class VLLMModel(SimpleResponsesAPIModel):
+    ray_enabled = False
     config: VLLMModelConfig
 
     _TOKENIZE_CHAT_FIELDS: ClassVar[tuple[str, ...]] = (
@@ -303,6 +422,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         "required_prefix_token_ids",
     )
     _external_capture_handler: ExternalCaptureHandler | None = PrivateAttr(default=None)
+    _warned_request_chat_template_kwargs_dropped: bool = PrivateAttr(default=False)
 
     def setup_exception_middleware(self, app) -> None:
         @app.middleware("http")
@@ -310,9 +430,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             try:
                 return await call_next(request)
             except ClientResponseError as error:
-                if isinstance(error, PermanentEndpointError) or getattr(
-                    error, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, False
-                ):
+                if getattr(error, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, False):
                     return Response(
                         content=error.response_content,
                         status_code=error.status,
@@ -357,6 +475,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+        # Keyed by base_url so the record outlives a client rebind to the same address.
+        self._endpoint_health: Dict[str, _EndpointHealth] = dict()
         self._endpoint_file_mtime: Optional[float] = None
         self._endpoint_missing_since: Optional[float] = None
         self._endpoint_last_check_at: Optional[float] = None
@@ -486,7 +606,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._apply_sampling_overrides(body_dict)
 
         client = self._resolve_client(request)
-        response_dict = await client.create_response(**body_dict)
+        execution = start_model_execution(request, upstream_attempted=True)
+        try:
+            response_dict = await self._call_endpoint(client, client.create_response(**body_dict))
+        except ClientResponseError as error:
+            execution.update(response_source="upstream", upstream_status_code=error.status)
+            raise
+        execution["response_source"] = "upstream"
 
         return NeMoGymResponse.model_validate(response_dict)
 
@@ -540,6 +666,18 @@ class VLLMModel(SimpleResponsesAPIModel):
             encoded = base64.b64encode(f.read()).decode("ascii")
         return f"data:audio/{mime};base64,{encoded}"
 
+    def _warn_request_chat_template_kwargs_dropped(self, reason: str) -> None:
+        """Log once per server that a request's top-level ``chat_template_kwargs`` was dropped."""
+        if self._warned_request_chat_template_kwargs_dropped:
+            return
+        self._warned_request_chat_template_kwargs_dropped = True
+        LOG.warning(
+            "NeMo Gym server `%s`: dropping the request's top-level chat_template_kwargs (%s). "
+            "Configured and metadata.chat_template_kwargs still apply. Logged once per server.",
+            self.config.name,
+            reason,
+        )
+
     @staticmethod
     def _strip_hosted_only_tool_fields(body_dict: Dict[str, Any]) -> None:
         """Remove OpenAI-hosted-only fields from function tool definitions.
@@ -583,6 +721,16 @@ class VLLMModel(SimpleResponsesAPIModel):
         chat_template_kwargs = {}
         if self.config.chat_template_kwargs:
             chat_template_kwargs = deepcopy(self.config.chat_template_kwargs)
+
+        # Precedence: config baseline -> direct request field -> metadata override.
+        # The request field is always popped so it never reaches the engine
+        # unmerged; it is applied only when forwarding is enabled.
+        request_chat_template_kwargs = body_dict.pop("chat_template_kwargs", None)
+        if request_chat_template_kwargs:
+            if self.config.forward_request_chat_template_kwargs:
+                chat_template_kwargs.update(request_chat_template_kwargs)
+            else:
+                self._warn_request_chat_template_kwargs_dropped("forward_request_chat_template_kwargs is false")
 
         metadata = body_dict.get("metadata") or {}
 
@@ -633,11 +781,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                     reasoning_matches, remaining_content = self._converter._extract_reasoning_from_content(content)
                     message_dict["content"] = remaining_content
                     if reasoning_matches and self.config.uses_interleaved_reasoning:
-                        message_dict["reasoning_content"] = reasoning_matches[0]
-
-                        # TODO when NeMo RL migrates to vLLM>=0.16.0, remove the reasoning_content support above.
-                        # Starting with vLLM 0.16.0, the `reasoning_content` field has been deprecated in favor of just `reasoning`
-                        message_dict["reasoning"] = reasoning_matches[0]
+                        # TODO when NeMo RL migrates to vLLM>=0.16.0, drop reasoning_content.
+                        # From vLLM 0.16.0 `reasoning_content` is deprecated in favor of `reasoning`.
+                        _set_reasoning(message_dict, reasoning_matches[0], self.config.reasoning_field)
                 elif isinstance(content, list):
                     reasoning_content = None
                     for content_item_dict in content:
@@ -651,9 +797,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                         # Even though we set the reasoning content already here, we still loop through all the content item dicts for the assert above.
                         content_item_dict["text"] = remaining_content
                         if reasoning_matches and self.config.uses_interleaved_reasoning:
-                            message_dict["reasoning_content"] = reasoning_matches[0]
                             # See the TODO wrt reasoning_content above
-                            message_dict["reasoning"] = reasoning_matches[0]
+                            _set_reasoning(message_dict, reasoning_matches[0], self.config.reasoning_field)
                 elif not content:
                     # No content or content None is a no-op
                     pass
@@ -858,11 +1003,20 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
         client = self._resolve_client(request)
+        # Rank-affine routing downstream: expose the Gym session (one per rollout)
+        # as the backend's canonical conversation id so a disaggregated server can
+        # pin every turn of a conversation to the ADP rank holding its prefix.
+        if self.config.forward_session_id_as_conversation_id:
+            _session_id = request.session.get(SESSION_ID_KEY)
+            if _session_id:
+                body_dict["conversation_params"] = {"conversation_id": str(_session_id)}
+        execution = start_model_execution(request, upstream_attempted=False)
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
             if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "content_filter"
+                execution.update(response_source="local", local_response_reason="empty_assistant")
                 return res
 
         transport_io_enabled = bool(os.environ.get("NEMO_GYM_VLLM_TRANSPORT_LOG", "").strip())
@@ -890,9 +1044,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                 }
             )
 
+        execution["upstream_attempted"] = True
         try:
-            chat_completion_dict = await client.create_chat_completion(**body_dict)
+            chat_completion_dict = await self._call_endpoint(client, client.create_chat_completion(**body_dict))
         except ClientResponseError as e:
+            execution.update(response_source="upstream", upstream_status_code=e.status)
             if transport_io_enabled:
                 finished_ns = time_ns()
                 _append_transport_io(
@@ -906,7 +1062,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                         "pid": os.getpid(),
                         "http_status": e.status,
                         "raw_response_body": e.response_content.decode(errors="replace"),
-                        "error": repr(e),
+                        "error": _redacted_error_repr(e),
                     }
                 )
             """
@@ -920,14 +1076,18 @@ class VLLMModel(SimpleResponsesAPIModel):
             3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
             4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
             """
+            result_content_str = e.response_content.decode(errors="replace")
             if _is_context_length_error(e):
+                execution["error_category"] = "context_length_exceeded"
                 if self.config.propagate_context_overflow_errors:
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
+                execution.update(response_source="local", local_response_reason="context_length_exceeded")
                 return res
             else:
+                _log_unhandled_engine_error(request, e.status, result_content_str, "chat completion")
                 raise e
         except Exception as e:
             if transport_io_enabled:
@@ -947,6 +1107,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 )
             raise
 
+        execution["response_source"] = "upstream"
         if transport_io_enabled:
             finished_ns = time_ns()
             _append_transport_io(
@@ -1214,6 +1375,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._strip_hosted_only_tool_fields(body_dict)
         messages = body_dict.get("messages", []) or []
         metadata = body_dict.get("metadata", {}) or {}
+        if body_dict.get("chat_template_kwargs"):
+            self._warn_request_chat_template_kwargs_dropped("use_completions_api is true")
 
         if not self.config.render_chat_template and body_dict.get("tools"):
             raise ValueError(
@@ -1242,18 +1405,25 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         client = self._resolve_client(request)
 
+        execution = start_model_execution(request, upstream_attempted=True)
         try:
-            completion_dict = await client.create_completion(**completion_body)
+            completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
         except ClientResponseError as e:
+            execution.update(response_source="upstream", upstream_status_code=e.status)
+            result_content_str = e.response_content.decode(errors="replace")
             if _is_context_length_error(e):
+                execution["error_category"] = "context_length_exceeded"
                 if self.config.propagate_context_overflow_errors:
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
+                execution.update(response_source="local", local_response_reason="context_length_exceeded")
                 return res
+            _log_unhandled_engine_error(request, e.status, result_content_str, "completion")
             raise
 
+        execution["response_source"] = "upstream"
         if self.config.return_token_id_information:
             choice_dict = completion_dict["choices"][0]
             if choice_dict.get("prompt_token_ids") is None:
@@ -1353,8 +1523,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         tools = body_dict.get("tools") or None
         self._validate_text_only_messages(messages)
 
-        # Mirror the precedence rules in _preprocess_chat_completion_create_params:
-        # global config baseline, per-request metadata overrides on top.
+        # Global config baseline, per-request metadata overrides on top. Unlike the
+        # chat path, a request's top-level chat_template_kwargs is never merged here.
         chat_template_kwargs: Dict[str, Any] = {}
         if self.config.chat_template_kwargs:
             chat_template_kwargs.update(deepcopy(self.config.chat_template_kwargs))
@@ -1603,16 +1773,114 @@ class VLLMModel(SimpleResponsesAPIModel):
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
         session_id = request.session[SESSION_ID_KEY]
-        if session_id not in self._session_id_to_client:
-            # Uvicorn workers do not share this cache. A stable assignment keeps
-            # every turn in a session on the same vLLM endpoint across workers.
-            digest = hashlib.sha256(session_id.encode("utf-8")).digest()
-            client_idx = int.from_bytes(digest[:8], byteorder="big") % len(self._clients)
-            client = self._clients[client_idx]
-            self._session_id_to_client[session_id] = client
-        client = self._session_id_to_client[session_id]
+        client = self._session_id_to_client.get(session_id)
+        if self.config.route_around_failing_endpoints:
+            hashed = self._hashed_client(session_id)
+            if client is not hashed and self._endpoint_serves(hashed):
+                # The session's own endpoint serves again, or is due for its trial
+                # call: this call goes back to it. Sessions moved off a failed
+                # endpoint are the only callers left once a wave has started, so
+                # they are what probes it, and a recovered endpoint gets its
+                # sessions back.
+                client = hashed
+            elif client is not None and not self._endpoint_serves(client):
+                client = None
+        if client is None:
+            client = self._assign_client(session_id)
+        self._session_id_to_client[session_id] = client
 
         return client
+
+    def _hashed_client(self, session_id: str) -> NeMoGymAsyncOpenAI:
+        # Uvicorn workers do not share the session cache. A stable assignment keeps
+        # every turn in a session on the same vLLM endpoint across workers.
+        return self._clients[self._hashed_index(session_id, len(self._clients))]
+
+    @staticmethod
+    def _hashed_index(session_id: str, n: int) -> int:
+        digest = hashlib.sha256(session_id.encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], byteorder="big") % n
+
+    def _assign_client(self, session_id: str) -> NeMoGymAsyncOpenAI:
+        client = self._hashed_client(session_id)
+        if not self.config.route_around_failing_endpoints or self._endpoint_serves(client):
+            return client
+        # The same digest picks among the serving endpoints, so the assignment stays a
+        # function of the session id and of which endpoints have failed.
+        serving = [candidate for candidate in self._clients if not self._endpoint_failed(candidate)]
+        if not serving:
+            return client
+        return serving[self._hashed_index(session_id, len(serving))]
+
+    def _endpoint_failed(self, client: NeMoGymAsyncOpenAI) -> bool:
+        health = self._endpoint_health.get(client.base_url)
+        return health is not None and health.failed_at is not None
+
+    def _endpoint_serves(self, client: NeMoGymAsyncOpenAI) -> bool:
+        """Whether a call may go to this endpoint now.
+
+        A failed endpoint takes one trial call per ``endpoint_retry_after_s``. Claiming the
+        trial restarts the interval, so concurrent callers do not all land on it at once.
+        """
+        health = self._endpoint_health.get(client.base_url)
+        if health is None or health.failed_at is None:
+            return True
+        now = monotonic()
+        if now - health.failed_at < self.config.endpoint_retry_after_s:
+            return False
+        health.failed_at = now
+        return True
+
+    async def _call_endpoint(self, client: NeMoGymAsyncOpenAI, call: Awaitable[Dict[str, Any]]) -> Dict[str, Any]:
+        """Await one engine call and record how the endpoint answered.
+
+        A 5xx or a connection error counts against the endpoint. Any other answer, a 4xx
+        included, shows the engine alive and resets its count.
+        """
+        try:
+            result = await call
+        except ClientResponseError as error:
+            if error.status >= 500:
+                self._note_endpoint_failure(client)
+            else:
+                self._note_endpoint_success(client)
+            raise
+        except ClientConnectionError:
+            self._note_endpoint_failure(client)
+            raise
+        self._note_endpoint_success(client)
+        return result
+
+    def _note_endpoint_failure(self, client: NeMoGymAsyncOpenAI) -> None:
+        if not self.config.route_around_failing_endpoints:
+            return
+        health = self._endpoint_health.setdefault(client.base_url, _EndpointHealth())
+        health.consecutive_failures += 1
+        if health.failed_at is not None:
+            # A trial call failed; the next trial waits a whole interval again.
+            health.failed_at = monotonic()
+            return
+        if health.consecutive_failures < self.config.endpoint_failure_threshold:
+            return
+        health.failed_at = monotonic()
+        LOG.warning(
+            "endpoint %s answered %d consecutive calls with a server or connection error; its sessions move "
+            "to the other endpoints and one call is tried here every %.0fs",
+            client.base_url,
+            health.consecutive_failures,
+            self.config.endpoint_retry_after_s,
+        )
+
+    def _note_endpoint_success(self, client: NeMoGymAsyncOpenAI) -> None:
+        if not self.config.route_around_failing_endpoints:
+            return
+        health = self._endpoint_health.get(client.base_url)
+        if health is None:
+            return
+        if health.failed_at is not None:
+            LOG.warning("endpoint %s answered a call; it serves sessions again", client.base_url)
+        health.consecutive_failures = 0
+        health.failed_at = None
 
 
 if __name__ == "__main__":

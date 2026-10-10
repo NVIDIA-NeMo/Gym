@@ -15,7 +15,6 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CICD_MAIN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "cicd-main.yml"
 CLASSIFY_CHANGES_ACTION = REPO_ROOT / ".github" / "actions" / "classify-changes" / "action.yml"
-IS_MAIN_OR_RELEASE_REF_ACTION = REPO_ROOT / ".github" / "actions" / "is-main-or-release-ref" / "action.yml"
 FULL_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "full-test-suite.yml"
 GPU_E2E_CONFIG = REPO_ROOT / "tests" / "e2e" / "gpu_e2e.yaml"
 GPU_E2E_DATASET = REPO_ROOT / "tests" / "e2e" / "gpu_smoke.jsonl"
@@ -248,7 +247,15 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "  pull-requests: read\n" in workflow
     assert "id-token:" not in workflow
     assert "uses: ./.github/workflows/unit-tests.yml" in workflow
-    assert workflow.count("base-ref: ${{ needs.pre-flight.outputs.base_ref }}") == 2
+    jobs = _cicd_main_jobs()
+    base_ref = "${{ needs.pre-flight.outputs.base_ref }}"
+    for job in ("unit_tests", "harness_conformance"):
+        assert jobs[job]["with"]["base-ref"] == base_ref
+    assert [
+        step["with"]["base-ref"]
+        for step in jobs["classify_changes"]["steps"]
+        if step.get("uses") == "./.github/actions/classify-changes"
+    ] == [base_ref]
     assert "uses: ./.github/actions/classify-changes" in workflow
     assert "uses: ./.github/actions/test-template" in workflow
     assert "base-ref: ${{ needs.pre-flight.outputs.base_ref }}" in workflow
@@ -435,8 +442,8 @@ def test_cicd_docs_only_nightly_jobs_override_skipped_unit_status() -> None:
 def test_notify_failure_ref_check_allows_only_main_and_release_branches(
     ref: str, allowed: str, tmp_path: Path
 ) -> None:
-    action = yaml.safe_load(IS_MAIN_OR_RELEASE_REF_ACTION.read_text())
-    (script,) = (step["run"] for step in action["runs"]["steps"] if step.get("name") == "Check ref")
+    jobs = yaml.safe_load(CICD_MAIN_WORKFLOW.read_text())["jobs"]
+    (script,) = (step["run"] for step in jobs["notify-failure"]["steps"] if step.get("id") == "ref_check")
 
     output_path = tmp_path / f"github_output_{ref}"
     output_path.write_text("")
@@ -450,37 +457,39 @@ def test_notify_failure_ref_check_allows_only_main_and_release_branches(
     assert f"allowed={allowed}" in output_path.read_text(), (result.stdout, result.stderr)
 
 
-def test_notify_failure_uses_shared_ref_check_action() -> None:
-    for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
-        jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
-        steps = jobs["notify-failure"]["steps"]
-        (ref_check_step,) = (step for step in steps if step.get("name") == "Check ref is main or a release branch")
-
-        assert ref_check_step["uses"] == "./.github/actions/is-main-or-release-ref", workflow_file
-        assert any(step.get("name") == "Checkout repository" for step in steps), workflow_file
-
-
-def test_notification_workflows_pin_slack_rejection_handling() -> None:
+def test_notification_workflows_use_pinned_shared_summary_without_checkout() -> None:
     expected_action = (
-        "NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@f07495d7a01aad5578a407db8e0c4f4e395375f6"
+        "NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@631c404d00a9e60afc591cd071d35d2e18f82fc6"
     )
+    ref_scripts = []
     for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
         jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
-        steps = jobs["notify-failure"]["steps"]
+        notify = jobs["notify-failure"]
+        steps = notify["steps"]
+        (ref_step,) = (step for step in steps if step.get("id") == "ref_check")
         (notify_step,) = (step for step in steps if step.get("name") == "Notify Gym alerts channel")
 
+        ref_scripts.append(ref_step["run"])
+        assert ref_step["env"] == {"REF": "${{ github.ref_name }}"}
+        assert notify_step["if"] == "steps.ref_check.outputs.allowed == 'true'"
         assert notify_step["uses"] == expected_action, workflow_file
-
-
-def test_notify_failure_message_reports_friendly_trigger_label() -> None:
-    # The Slack message renders a "• Trigger: <expr>" bullet; assert the full
-    # GitHub expression (encoding-independent of the bullet) is present.
-    expected_trigger_expr = (
-        "Trigger: ${{ github.event_name == 'schedule' && 'Nightly schedule' "
-        "|| github.event_name == 'workflow_dispatch' && 'Manual dispatch' || 'Push to main' }}"
-    )
-    for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
-        assert expected_trigger_expr in workflow_file.read_text(), workflow_file
+        assert notify_step["with"] == {
+            "needs-json": "${{ toJSON(needs) }}",
+            "webhook": "${{ secrets.SLACK_WEBHOOK }}",
+        }
+        assert notify["environment"] == "main"
+        assert notify["permissions"] == {}
+        assert all("checkout" not in step.get("uses", "") for step in steps)
+        excluded_jobs = {"notify-failure", "merge-queue-notification"}
+        if workflow_file == CICD_MAIN_WORKFLOW:
+            # Harness P0 is reported separately and is not part of Gym's nightly gate.
+            excluded_jobs.add("harness_conformance")
+        assert set(notify["needs"]) == set(jobs) - excluded_jobs
+        assert "failure()" in notify["if"]
+        assert "always() && !cancelled()" in notify["if"]
+        assert "needs." not in notify["if"]
+        assert "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'" in notify["if"]
+    assert ref_scripts[0] == ref_scripts[1]
 
 
 def test_full_test_suite_runs_on_schedule_and_dispatch_not_push() -> None:
@@ -522,7 +531,12 @@ def test_shared_change_classifier_matches_gym_docs_and_server_paths() -> None:
 
     for path in ("**.md", "fern/**", "LICENSE", "benchmarks/**"):
         assert path in action
-    for path in ("resources_servers/**", "responses_api_agents/**", "responses_api_models/**"):
+    for path in (
+        "resources_servers/**",
+        "responses_api_agents/**",
+        "responses_api_models/**",
+        "environment_servers/**",
+    ):
         assert path in action
 
     assert "uses: ./.github/actions/classify-changes" in unit_workflow
@@ -681,7 +695,7 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "--max-output-tokens 4096" in script
 
     env_config = (REPO_ROOT / "tests" / "e2e" / "inference_provider_env.yaml").read_text()
-    assert "max_steps: 2" in env_config
+    assert "max_policy_calls: 2" in env_config
 
 
 def _valid_inference_provider_rollout() -> dict:
@@ -834,7 +848,7 @@ case "${1:-}" in
         : > "${venv_dir}/bin/python"
         chmod +x "${venv_dir}/bin/python"
         ;;
-    sync) ;;
+    lock|sync) ;;
     *) printf 'unexpected fake uv command: %s\\n' "$*" >&2; exit 2 ;;
 esac
 """,
@@ -937,3 +951,53 @@ def test_dockerfile_seeds_pre_commit_hook_cache_for_offline_lint() -> None:
     assert seed_cache_start < install_hooks < remove_git_dir
     assert 'chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${PRE_COMMIT_HOME}"' in dockerfile
     assert 'test -w "${PRE_COMMIT_HOME}"' in dockerfile
+
+
+@pytest.mark.parametrize("container", [False, True])
+@pytest.mark.parametrize("lock_status", [0, 1])
+def test_setup_dev_checks_lock_before_sync(tmp_path: Path, container: bool, lock_status: int) -> None:
+    repo_root = tmp_path / "repo"
+    ci_dir = repo_root / "scripts" / "ci"
+    ci_dir.mkdir(parents=True)
+    shutil.copy2(SETUP_DEV, ci_dir / "setup_dev.sh")
+    shutil.copy2(REPO_ROOT / ".python-version", repo_root / ".python-version")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture = tmp_path / "uv.args"
+    _write_executable(
+        bin_dir / "uv",
+        """#!/usr/bin/env bash
+set -eu
+case "$1" in
+    --version) echo 'uv 0.11.29' ;;
+    cache) echo "${UV_CACHE_DIR}" ;;
+    lock) echo "$*" >> "${GYM_CI_CAPTURE}"; exit "${LOCK_STATUS}" ;;
+    sync) echo "$*" >> "${GYM_CI_CAPTURE}" ;;
+    *) echo "unexpected uv command: $*" >&2; exit 2 ;;
+esac
+""",
+    )
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    _write_executable(venv / "bin" / "python", "#!/usr/bin/env bash\nexit 0\n")
+    (venv / "bin" / "activate").write_text("")
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{bin_dir}:{env['PATH']}",
+            "GYM_CI_DEV_VENV_DIR": str(venv),
+            "UV_CACHE_DIR": str(tmp_path / "cache"),
+            "GYM_CI_CAPTURE": str(capture),
+            "LOCK_STATUS": str(lock_status),
+            "NEMO_GYM_CONTAINER": "1" if container else "0",
+        }
+    )
+
+    result = subprocess.run(["bash", str(ci_dir / "setup_dev.sh")], capture_output=True, text=True, env=env)
+
+    assert result.returncode == lock_status, result.stderr
+    offline = " --offline" if container else ""
+    expected = [f"lock --check{offline}"]
+    if lock_status == 0:
+        expected.append(f"sync --extra dev{offline}")
+    assert capture.read_text().splitlines() == expected

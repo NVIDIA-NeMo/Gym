@@ -16,8 +16,10 @@
 import json
 import shlex
 import shutil
+import socket
 from pathlib import Path
 from typing import Any, Callable
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -35,6 +37,49 @@ pytestmark = pytest.mark.sandbox
 
 
 FAKE_BINARY = "/usr/bin/apptainer"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_preserves_workdir_environment_and_transfers(fake_binary, tmp_path, monkeypatch):
+    import tempfile
+
+    from nemo_gym.sandbox import AsyncSandbox
+
+    staging = Path(tempfile.mkdtemp(prefix="nemo-gym-apptainer-", dir=tmp_path))
+    creator = apptainer_provider.ApptainerProvider()
+    original = AsyncSandbox(creator, SandboxSpec(workdir="/testbed"))
+    original._handle = _make_handle(staging, name="nemo-gym-" + "a" * 32, env={"OMP_NUM_THREADS": "2"})
+    original._stopped = False
+    descriptor = json.loads(json.dumps(await original.serialize()))
+    receiver = apptainer_provider.ApptainerProvider()
+    monkeypatch.setattr(receiver, "status", AsyncMock(return_value=SandboxStatus.RUNNING))
+    received = await AsyncSandbox.connect(descriptor, provider=receiver)
+    calls = []
+
+    async def run(argv, **kwargs):
+        calls.append(argv)
+        assert shlex.split(_env_file_path(argv).read_text()) == ["OMP_NUM_THREADS=2"]
+        return 0, "ok", ""
+
+    monkeypatch.setattr(receiver, "_run", run)
+    await received.exec("pwd")
+    assert _contains_seq(calls[0], ["--pwd", "/testbed"])
+    source = tmp_path / "source"
+    source.write_text("payload")
+    await received.upload(source, "/sandbox/transferred")
+    await original.download("/sandbox/transferred", tmp_path / "download")
+    assert (tmp_path / "download").read_text() == "payload"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_rejects_bare_id_or_other_host(fake_binary, tmp_path):
+    provider = apptainer_provider.ApptainerProvider()
+    with pytest.raises(ValueError, match="full serialized descriptor"):
+        await provider.connect({"sandbox_id": "name"})
+    descriptor = await provider.serialize_handle(_make_handle(tmp_path))
+    descriptor["hostname"] = socket.gethostname() + "-other"
+    with pytest.raises(ValueError, match="same host and UID"):
+        await provider.connect(descriptor)
 
 
 # --------------------------------------------------------------------------- #

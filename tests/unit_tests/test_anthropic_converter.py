@@ -257,11 +257,39 @@ class TestAnthropicRequestToResponses:
                 {"source": {"type": "base64", "media_type": "image/tiff", "data": "x"}}
             )
 
-    def test_unsupported_tool_result_block_raises(self) -> None:
-        import pytest
+    def test_tool_result_image_content_is_preserved(self) -> None:
+        params = _converter().anthropic_request_to_responses(
+            {
+                "max_tokens": 10,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_1",
+                                "content": [
+                                    {"type": "text", "text": "chart"},
+                                    {
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": "image/png",
+                                            "data": "aGVsbG8=",
+                                        },
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
 
-        with pytest.raises(NotImplementedError):
-            _converter()._anthropic_tool_result_content_to_text([{"type": "image", "source": {}}])
+        assert params.input[0].output == [
+            {"type": "input_text", "text": "chart"},
+            {"type": "input_image", "image_url": PNG_DATA_URL, "detail": "auto"},
+        ]
 
 
 class TestResponsesToAnthropicResponse:

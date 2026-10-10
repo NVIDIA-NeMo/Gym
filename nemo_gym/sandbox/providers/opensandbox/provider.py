@@ -43,6 +43,9 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled
+from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 LOGGER = logging.getLogger(__name__)
@@ -299,6 +302,8 @@ def _log_create_retry(retry_state: Any) -> None:
         sleep_s,
         exception,
     )
+    if is_span_group_enabled(GymSpanGroup.SANDBOX):
+        record_sandbox_create_retry(provider="opensandbox")
 
 
 def _log_operation_retry(retry_state: Any, *, operation: str = "?", sandbox_id: str = "?") -> None:
@@ -1818,11 +1823,10 @@ class OpenSandboxProvider:
         if status_timeout_s is None:
             status_timeout_s = poll_timeout_s
 
-        def _status_poll_is_retryable(exception: BaseException) -> bool:
-            # The short budget makes poll timeouts routine rather than fatal:
-            # re-polling a status is an idempotent GET, so unlike a submit
-            # (where a timeout stays terminal to avoid a double-run) a timed-out
-            # poll retries within the normal budget instead of killing the command.
+        def _command_read_is_retryable(exception: BaseException) -> bool:
+            # Status and log reads are idempotent GETs for the same execution.
+            # Retry timed-out reads within the normal budget; submit timeouts
+            # stay terminal because retrying could run the command twice.
             if isinstance(exception, TimeoutError):
                 return True
             return _is_retryable_sdk_operation_error(exception)
@@ -1837,7 +1841,7 @@ class OpenSandboxProvider:
                 sandbox_id=handle.sandbox_id,
                 timeout_s=status_timeout_s,
                 retries=self._operations.retries,
-                is_retryable=_status_poll_is_retryable,
+                is_retryable=_command_read_is_retryable,
             )
             # A renamed SDK field must not degrade silently: a missing `running`
             # would end the poll at once, a missing `exit_code` would score a
@@ -1864,6 +1868,7 @@ class OpenSandboxProvider:
             sandbox_id=handle.sandbox_id,
             timeout_s=poll_timeout_s,
             retries=self._operations.retries,
+            is_retryable=_command_read_is_retryable,
         )
         stdout = getattr(logs, "content", None) or None
         status_error = getattr(status, "error", None)
@@ -1900,6 +1905,79 @@ class OpenSandboxProvider:
             retries=self._command_retry_count(),
         )
 
+    async def exec_with_background_services(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        timeout_s: int | float | None = None,
+    ) -> SandboxExecResult:
+        """Preserve background services that redirect their stdout and stderr."""
+        if timeout_s is not None and timeout_s < 0:
+            raise ValueError("timeout_s must be nonnegative")
+        commands = handle.raw.commands
+        session_id = await self._await_sdk_call(
+            commands.create_session(working_directory=cwd),
+            operation="create bash session",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=self._connection.request_timeout_s,
+        )
+        # A nested shell keeps exit/exec in the command from replacing the SDK's
+        # session wrapper. The client owns the deadline: the native timeout can
+        # kill only the shell and then hang waiting for a child's output pipe.
+        task = asyncio.create_task(
+            commands.run_in_session(session_id, f"bash -c {shlex.quote(command)}", timeout=timedelta(0))
+        )
+
+        async def release_session() -> None:
+            try:
+                # Delete while the request is still active: execd then knows the
+                # process group to kill. After normal completion it only drops
+                # session state; background services live until sandbox teardown.
+                await self._await_sdk_call(
+                    commands.delete_session(session_id),
+                    operation="delete bash session",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=10,
+                )
+                if not task.done():
+                    await asyncio.wait({task}, timeout=10)
+            finally:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        try:
+            done, _ = await asyncio.wait({task}, timeout=timeout_s)
+            timed_out = not done
+        finally:
+            cleanup = asyncio.create_task(release_session())
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+                raise
+
+        if timed_out and (task.cancelled() or task.exception() is not None):
+            return SandboxExecResult(
+                None, f"Command timed out after {timeout_s:g}s; native session was deleted", 124, error_type="timeout"
+            )
+        execution = task.result()
+        stdout = "\n".join(msg.text for msg in execution.logs.stdout) or None
+        stderr_parts = [msg.text for msg in execution.logs.stderr]
+        if timed_out:
+            stderr_parts.append(f"Command timed out after {timeout_s:g}s; native session was deleted")
+            return SandboxExecResult(stdout, "\n".join(stderr_parts), 124, error_type="timeout")
+        if execution.error is not None:
+            stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
+        return_code = execution.exit_code
+        error_type = None
+        if return_code is None:
+            return_code = 125 if execution.error is not None else 0
+            error_type = "sandbox" if execution.error is not None else None
+        return SandboxExecResult(stdout, "\n".join(stderr_parts) or None, return_code, error_type)
+
     def _pty_http_client(self) -> Any:
         """Return the aiohttp client for one PTY session (same ``tls_verify`` as the SDK transport)."""
         import aiohttp
@@ -1907,6 +1985,27 @@ class OpenSandboxProvider:
         if not self._connection.tls_verify:
             return aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
         return aiohttp.ClientSession()
+
+    async def _pty_session_missing(
+        self, base_url: str, headers: dict[str, str], session_id: str, request_timeout_s: float | None
+    ) -> bool:
+        """True only when execd itself reports the PTY session does not exist.
+
+        A proxy 404 (route not registered yet) lacks execd's error code, and a
+        failed check is treated as unknown so the attach proceeds as before.
+        """
+        import aiohttp
+
+        try:
+            async with self._pty_http_client() as client:
+                async with client.get(
+                    f"{base_url}/pty/{session_id}",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=request_timeout_s),
+                ) as response:
+                    return response.status == 404 and "CONTEXT_NOT_FOUND" in await response.text()
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            return False  # unknown: keep the takeover retries
 
     async def _pty_target(self, handle: SandboxHandle) -> tuple[str, dict[str, str], float | None]:
         """Resolve the sandbox's execd base URL, headers and request timeout."""
@@ -1958,6 +2057,11 @@ class OpenSandboxProvider:
         from nemo_gym.sandbox.providers.opensandbox.pty import _PTY_TAKEOVER_RETRY_DELAYS, attach_pty_session
 
         base_url, headers, request_timeout_s = await self._pty_target(handle)
+        # execd refuses a missing session with the same close as a held one (for
+        # example after a pause replaced the runtime), which the takeover retries
+        # below would ride out for tens of seconds. Ask first.
+        if await self._pty_session_missing(base_url, headers, session_id, request_timeout_s):
+            raise SandboxPtyError(f"PTY session {session_id} not found")
         if takeover:
             # Release our own live attachment first, so the takeover below has
             # nothing to evict and cannot be refused as "already attached".
@@ -2050,16 +2154,13 @@ class OpenSandboxProvider:
                     raise
                 LOGGER.debug("OpenSandbox sandbox %r already gone; treating terminate as success", handle.sandbox_id)
 
-        stop_error: Exception | None = None
-        try:
-            await self._await_sdk_operation(
-                kill_ignore_missing,
-                operation="kill",
-                sandbox_id=handle.sandbox_id,
-                timeout_s=self._operations.close_timeout_s,
-            )
-        except Exception as e:
-            stop_error = e
+        # If termination fails, keep the SDK handle usable for the owner's retry.
+        await self._await_sdk_operation(
+            kill_ignore_missing,
+            operation="kill",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=self._operations.close_timeout_s,
+        )
 
         close_error: Exception | None = None
         try:
@@ -2077,14 +2178,6 @@ class OpenSandboxProvider:
                 e,
             )
 
-        if stop_error is not None:
-            if close_error is not None:
-                raise RuntimeError(
-                    "Failed to stop and close OpenSandbox sandbox "
-                    f"{handle.sandbox_id!r}: stop_error={stop_error!r}, "
-                    f"close_error={close_error!r}"
-                ) from stop_error
-            raise stop_error
         if renewal_error is not None:
             raise RuntimeError(
                 f"OpenSandbox lifetime renewal failed for sandbox {handle.sandbox_id!r}"

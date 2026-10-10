@@ -1,0 +1,9 @@
+# Standalone Hermes launch: agent and resources workers share a host, UID and mounts.
+sandbox:
+  apptainer:
+    create:
+      extra_start_args: [--fakeroot, --containall, --writable-tmpfs]
+    exec:
+      default_timeout_s: 1800
+      timeout_grace_s: 30
+      default_binds: []  # Set to ["/host/hermes-runtime:/opt/hermes:ro"].

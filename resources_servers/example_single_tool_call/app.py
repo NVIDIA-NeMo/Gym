@@ -15,14 +15,21 @@
 from pathlib import Path
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.verifier_fixture import VerifierFixture
 
 
@@ -48,7 +55,10 @@ class SimpleWeatherVerifier:
 
 
 class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer):
+    ray_enabled = False
     config: SimpleWeatherResourcesServerConfig
+    _session_episodes: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
+    _closed_session_ids: set[str] = PrivateAttr(default_factory=set)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -56,6 +66,33 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
         app.post("/get_weather")(self.get_weather)
 
         return app
+
+    async def seed_session(
+        self,
+        body: ResourcesSeedSessionRequest | BaseSeedSessionRequest,
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        if not isinstance(body, ResourcesSeedSessionRequest):
+            return BaseSeedSessionResponse()
+
+        resources_session_id = body.resources_session_id
+        # Nothing below awaits, so no other request can run between the checks and the update.
+        if resources_session_id in self._closed_session_ids:
+            raise ValueError(f"Resources session is already closed: {resources_session_id}")
+        identity = self._session_episodes.setdefault(resources_session_id, (body.episode_id, body.task_id))
+        if identity != (body.episode_id, body.task_id):
+            raise ValueError("resources_session_id is already bound to another episode or task")
+        return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        # Sessions are keyed by resources_session_id, not the cookie's session id, so the body names the session.
+        resources_session_id = body.resources_session_id
+        # Nothing below awaits, so no other request can run between the check and the update.
+        identity = self._session_episodes.get(resources_session_id)
+        if identity is not None and body.episode_id != identity[0]:
+            raise ValueError("episode_id does not match the seeded resources session")
+        self._session_episodes.pop(resources_session_id, None)
+        self._closed_session_ids.add(resources_session_id)
+        return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
 
     async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:
         return GetWeatherResponse(city=body.city, weather_description=f"The weather in {body.city} is cold.")

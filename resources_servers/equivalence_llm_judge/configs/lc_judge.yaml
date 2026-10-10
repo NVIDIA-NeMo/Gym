@@ -29,3 +29,11 @@ lc_judge_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+
+lc_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: lc_judge_simple_agent

@@ -18,7 +18,6 @@ from resources_servers.terminal_bench_4.verifier import restore, run_verifier
 
 
 NATIVE_VERSION = "1"
-SETUP_TIMEOUT_SEC = 360
 
 
 def now():
@@ -37,6 +36,8 @@ class Session:
     started: asyncio.Event = field(default_factory=asyncio.Event)
     execution: asyncio.Task | None = None
     finalization: asyncio.Task | None = None
+    expiry_task: asyncio.Task | None = None
+    agent_deadline: float | None = None
     task: Any = None
     environment: Any = None
     verifier_environment: Any = None
@@ -44,6 +45,7 @@ class Session:
     termination: AgentTermination | None = None
     verify_body: Any = None
     verified_response: Any = None
+    seed_response: Any = None
     result: dict = field(default_factory=dict)
     deadlines: dict = field(default_factory=dict)
     diagnostics: list = field(default_factory=list)
@@ -61,6 +63,8 @@ def exception(session, error, error_type=None):
 
 
 async def cleanup(session):
+    if session.expiry_task is not None:
+        session.expiry_task.cancel()
     session.subphase = "cleanup"
     session.persist()
     for env in (session.environment, session.verifier_environment):
@@ -225,18 +229,31 @@ async def finalize_session(session, *, grade):
         await cleanup(session)
 
 
-async def shutdown(sessions, timeout):
-    executions = []
+async def shutdown(sessions: list[Session], timeout: float) -> None:
+    preparations = []
+    finalizers = []
+    expiries = []
     for session in sessions:
+        if session.expiry_task is not None:
+            session.expiry_task.cancel()
+            expiries.append(session.expiry_task)
         if session.execution and not session.execution.done():
-            # Once grading starts, allow it the grace period before interrupting.
             await session.started.wait()
-            if session.finalization is None and not session.execution.cancelling():
-                session.execution.cancel()
-            executions.append(session.execution)
-    if executions:
-        _, pending = await asyncio.wait(executions, timeout=timeout)
+            session.execution.cancel()
+            preparations.append(session.execution)
+        if session.finalization and not session.finalization.done():
+            finalizers.append(session.finalization)
+    if expiries:
+        await asyncio.gather(*expiries, return_exceptions=True)
+    if preparations:
+        await asyncio.gather(*preparations, return_exceptions=True)
+    if finalizers:
+        _, pending = await asyncio.wait(finalizers, timeout=timeout)
         for session in sessions:
-            if session.execution in pending and session.finalization is not None and session.subphase != "cleanup":
+            if session.finalization in pending and session.subphase != "cleanup":
                 session.finalization.cancel()
-        await asyncio.gather(*executions, return_exceptions=True)
+        await asyncio.gather(*finalizers, return_exceptions=True)
+    # Includes provisioned sessions whose agent disconnected or died before verification.
+    for session in sessions:
+        if session.phase != "closed":
+            await cleanup(session)

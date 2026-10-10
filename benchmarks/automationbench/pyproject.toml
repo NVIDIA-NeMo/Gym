@@ -4,6 +4,11 @@ version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
     "automation-bench @ git+https://github.com/zapier/AutomationBench.git@4a8e106",
+    # verifiers requires openai unbounded. Left free it pulls openai 3.x and
+    # openai-agents 0.22, which imports PromptCacheOptions -- a name openai
+    # 2.44.0 does not have. Installing into a running Gym cannot replace the
+    # already-imported openai 2.44.0, so that import fails. Stay on Gym's line.
+    "openai<3",
 ]
 
 [tool.hatch.metadata]

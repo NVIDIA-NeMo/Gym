@@ -21,3 +21,11 @@ math_proof_judgement_simple_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/math_proof_judgement/data/example.jsonl
+
+math_proof_judgement_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: math_proof_judgement_simple_agent

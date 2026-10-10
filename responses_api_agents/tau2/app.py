@@ -47,7 +47,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import get_server_url, is_nemo_gym_fastapi_entrypoint
+from responses_api_agents.tau2.observability import build_tool_observations
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
@@ -198,6 +200,7 @@ class Tau2RunRequest(BaseRunRequest):
 
 
 class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
+    ng_agent_observations: AgentObservationBundle
     result: SimulationRun
     duration: float
     num_steps: int
@@ -217,6 +220,7 @@ class Tau2FailureResponse(BaseVerifyResponse):
 
 
 class Tau2Agent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: Tau2Config
 
     __key_metrics: Optional[List[str]] = None
@@ -347,6 +351,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
         return Tau2VerifyResponse(
             **body_dict,
+            ng_agent_observations=build_tool_observations(result),
             responses_create_params=dict(
                 input=body.responses_create_params.input + input_items_1 + input_items_2,
                 model=body.responses_create_params.model or "",

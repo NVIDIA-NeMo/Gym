@@ -1,0 +1,29 @@
+name: pinchbench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: agent
+description: PinchBench v2.0.0 tasks run through the native OpenClaw benchmark harness,
+  with continuous grading in [0, 1].
+modality: text
+licensing: MIT
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+agent_server: pinchbench
+datasets:
+- name: pinchbench
+  type: benchmark
+  jsonl_fpath: benchmarks/pinchbench/data/pinchbench_benchmark.jsonl
+  prepare_script: benchmarks/pinchbench/prepare.py
+  num_repeats: 10
+canonical_split: benchmark
+prompt_source: agent
+lifecycle: active
+resources_server: null

@@ -17,3 +17,6 @@ policy_model:
       endpoint_stale_grace_s: 300.0
       endpoint_connection_retries: 8
       endpoint_check_interval_s: 10.0
+      route_around_failing_endpoints: false
+      endpoint_failure_threshold: 3
+      endpoint_retry_after_s: 60.0

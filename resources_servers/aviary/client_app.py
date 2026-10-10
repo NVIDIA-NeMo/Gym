@@ -43,6 +43,7 @@ class AviaryClientResourcesServerConfig(AviaryResourcesServerConfig):
 
 
 class AviaryClientResourcesServer(AviaryResourcesServer[TaskEnvironmentClient, TaskDatasetClient]):
+    ray_enabled = False
     config: AviaryClientResourcesServerConfig
     dataset: TaskDatasetClient
 

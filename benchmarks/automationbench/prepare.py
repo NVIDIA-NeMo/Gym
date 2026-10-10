@@ -38,8 +38,12 @@ def prepare(
         import verifiers as vf  # noqa: F401
         from automationbench_env import load_environment
     except ImportError as exc:  # pragma: no cover
+        # Report what actually failed: this fires for any ImportError raised
+        # anywhere under automationbench_env, not only a missing package, and
+        # "not installed" sends people to reinstall something already present.
         raise SystemExit(
-            "automationbench_env is not installed. Install this environment first:\n"
+            f"Could not import automationbench_env ({type(exc).__name__}: {exc}).\n"
+            "If the package is missing, install it with:\n"
             "    uv pip install -e benchmarks/automationbench"
         ) from exc
 

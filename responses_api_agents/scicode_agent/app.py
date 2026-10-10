@@ -169,6 +169,8 @@ def _token_metrics(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
 class ScicodeAgent(SimpleResponsesAPIAgent):
     """Agent that drives the SciCode per-sub-step generation + code-accumulation loop."""
 
+    ray_enabled = False
+
     config: ScicodeAgentConfig
 
     def model_post_init(self, context):
@@ -187,7 +189,7 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
 
         model_response = await self.server_client.post(
             server_name=self.config.model_server.name,
-            url_path="/v1/responses",
+            url_path=self.url_path_for_request("/v1/responses", request),
             json=body.model_dump(exclude_unset=True, exclude_none=True),
             cookies=request.cookies,
         )
@@ -214,6 +216,8 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         step_usage = []
         response_create_params = body.responses_create_params.model_dump(exclude_unset=True, exclude_none=True)
         response_create_params.pop("input", None)
+        response_create_params["model"] = body.responses_create_params.model or self.config.model_server.name
+        response_create_params["tools"] = body.responses_create_params.tools
 
         for cur_step in range(total):
             step_record = {
@@ -243,7 +247,7 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             try:
                 gen_response = await self.server_client.post(
                     server_name=self.config.name,
-                    url_path="/v1/responses",
+                    url_path=self.url_path_for_run("/v1/responses", body),
                     json={
                         **response_create_params,
                         "input": [{"role": "user", "content": user_content}],
@@ -320,6 +324,9 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         metrics.update(_across_run_stats(tasks))
         metrics.update(_token_metrics(tasks))
         return metrics
+
+    def compute_repeat_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        return self.compute_metrics(tasks)
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         return {

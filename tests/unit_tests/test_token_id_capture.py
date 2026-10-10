@@ -22,12 +22,13 @@ Consumers read records through ``TokenSource.freeze``.
 """
 
 import asyncio
+import errno
 import json
 import logging
 import multiprocessing
-import os
 import subprocess
 import sys
+import threading
 from time import time
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -35,6 +36,7 @@ from uuid import uuid4
 import orjson
 import pytest
 from fastapi import Body, Request
+from fastapi.responses import RedirectResponse, Response
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ValidationError
 
@@ -83,7 +85,7 @@ from nemo_gym.token_id_capture.lineage import (
     LineageIndex,
     RolloutLineage,
 )
-from nemo_gym.token_id_capture.protocols import TokenSource
+from nemo_gym.token_id_capture.protocols import TokenCaptureFrozenError, TokenCaptureRetiredError, TokenSource
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -341,35 +343,370 @@ def test_token_store_freeze_is_atomic_and_conditional_drop_is_race_safe(tmp_path
     with pytest.raises(RuntimeError, match="retired"):
         asyncio.run(store.put(entry.model_copy(update={"model_call_id": "late-after-drop"})))
 
-    store.delete("r0")
+    store.delete_now(["r0"])
     replacement = entry.model_copy(update={"model_call_id": "replacement"})
     asyncio.run(store.put(replacement))
     assert store.read_entries("r0") == [replacement]
 
 
-def test_token_store_sweeps_only_old_retired_tombstones(tmp_path):
+def test_a_late_capture_after_freeze_is_dropped_without_marking_the_frozen_rollout(tmp_path, caplog):
+    """A commit that lost the freeze race must not disturb the sealed verdict.
+
+    The store rejects the late write with the typed frozen error.
+    The sink drops the record without a traceback.
+    It must not mark the rollout incomplete.
+    A post-freeze mark would change the snapshot version and break retirement.
+    """
     store = TokenCaptureStore(tmp_path)
-    for rollout_id in ("old", "recent", "live"):
-        entry = TokenEntry(
-            rollout_id=rollout_id,
-            model_call_id=f"{rollout_id}-c1",
-            prompt_token_ids=PTOKS,
-            generation_token_ids=GTOKS,
-            generation_log_probs=LPS,
-        )
-        stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
-        store.append(entry)
-    for rollout_id in ("old", "recent"):
-        snapshot = store.freeze_now(rollout_id)
-        assert asyncio.run(store.drop(rollout_id, snapshot_id=snapshot.snapshot_id, version=snapshot.version))
+    entry = TokenEntry(
+        rollout_id="late-r0",
+        model_call_id="c1",
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
+    )
+    asyncio.run(store.put(entry))
+    snapshot = asyncio.run(store.freeze("late-r0"))
+    assert snapshot.incomplete is False
 
-    old = time() - 3600
-    os.utime(store.state_path_for("old"), (old, old))
+    with pytest.raises(TokenCaptureFrozenError):
+        asyncio.run(store.put(entry.model_copy(update={"model_call_id": "c2"})))
 
-    assert store.sweep_retired(older_than_seconds=600) == 1
-    assert not store.state_path_for("old").exists()
-    assert store.state_path_for("recent").exists()
-    assert store.path_for("live").exists()
+    context = CaptureContext(rollout_id="late-r0", model_call_id="c2", token_sink=store)
+    token = set_token_sink(context)
+    try:
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(commit_entry(entry.model_copy(update={"model_call_id": "c2"})))
+    finally:
+        reset_token_sink(token)
+
+    assert context.committed is False
+    assert any("arrived after the capture was frozen" in record.message for record in caplog.records)
+    assert all(record.exc_info is None for record in caplog.records)
+    # The frozen snapshot identity and verdict are unchanged, so it still retires.
+    assert not store.is_incomplete("late-r0")
+    assert asyncio.run(store.freeze("late-r0")) == snapshot
+    assert asyncio.run(store.drop("late-r0", snapshot_id=snapshot.snapshot_id, version=snapshot.version))
+
+
+def test_a_late_capture_after_retire_is_dropped_like_one_after_freeze(tmp_path, caplog):
+    """An abandoned attempt that keeps running must not be reported as a capture failure."""
+    store = TokenCaptureStore(tmp_path)
+    entry = TokenEntry(
+        rollout_id="abandoned",
+        model_call_id="c1",
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
+    )
+    asyncio.run(store.put(entry))
+    store.retire_now(["abandoned"])
+
+    context = CaptureContext(rollout_id="abandoned", model_call_id="c2", token_sink=store)
+    token = set_token_sink(context)
+    try:
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(commit_entry(entry.model_copy(update={"model_call_id": "c2"})))
+    finally:
+        reset_token_sink(token)
+
+    assert context.committed is False
+    assert any("arrived after the capture was frozen or retired" in record.message for record in caplog.records)
+    assert all(record.exc_info is None for record in caplog.records)
+    assert not any("failed to" in record.message for record in caplog.records)
+    assert store.read_entries("abandoned") == []
+    assert not store.incomplete_path_for("abandoned").exists()
+
+
+def _store_entry(store: TokenCaptureStore, rollout_id: str) -> None:
+    entry = TokenEntry(
+        rollout_id=rollout_id,
+        model_call_id=f"{rollout_id}-c1",
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    store.append(entry)
+
+
+def test_token_store_retire_fences_a_rollout_whatever_its_state(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "live")
+    _store_entry(store, "frozen")
+    store.freeze_now("frozen")
+    asyncio.run(store.mark_incomplete("live", "lost-call"))
+
+    result = asyncio.run(store.retire(["live", "frozen", "never-captured"]))
+
+    assert result == {"removed": ["live", "frozen"], "absent": ["never-captured"]}
+    for rollout_id in ("live", "frozen", "never-captured"):
+        assert store.read_entries(rollout_id) == []
+        assert not store.incomplete_path_for(rollout_id).exists()
+        # The fence refuses later writes, as after ``drop``.
+        with pytest.raises(TokenCaptureRetiredError):
+            _store_entry(store, rollout_id)
+        with pytest.raises(TokenCaptureRetiredError):
+            asyncio.run(store.begin_call(rollout_id, "late"))
+        with pytest.raises(TokenCaptureRetiredError):
+            asyncio.run(store.mark_incomplete(rollout_id, "late"))
+        with pytest.raises(TokenCaptureRetiredError):
+            store.freeze_now(rollout_id)
+    # Retiring again is a no-op.
+    assert asyncio.run(store.retire(["live"])) == {"removed": [], "absent": ["live"]}
+
+
+def test_token_store_retire_syncs_fences_then_removals_once_per_batch(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    for rollout_id in ("r1", "r2", "r3"):
+        _store_entry(store, rollout_id)
+
+    with patch.object(store, "_fsync_root", wraps=store._fsync_root) as fsync_root:
+        store.retire_now(["r1", "r2", "r3"])
+        # One sync makes every fence durable, a second one the removed records.
+        assert fsync_root.call_count == 2
+        # A repeat writes nothing but still syncs once: an overlapping retire may have written a fence it found
+        # without syncing it yet.
+        store.retire_now(["r1", "r2", "r3"])
+        assert fsync_root.call_count == 3
+        # An empty batch has nothing to make durable.
+        store.retire_now([])
+        assert fsync_root.call_count == 3
+
+    _store_entry(store, "r4")
+    snapshot = store.freeze_now("r4")
+    with patch.object(store, "_fsync_root", wraps=store._fsync_root) as fsync_root:
+        assert asyncio.run(store.drop("r4", snapshot_id=snapshot.snapshot_id, version=snapshot.version))
+    assert fsync_root.call_count == 2
+
+
+def test_token_store_delete_syncs_every_non_empty_batch(tmp_path):
+    """An overlapping delete may have removed the files without syncing yet, so a delete that finds nothing still syncs."""
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r1")
+
+    with patch.object(store, "_fsync_root", wraps=store._fsync_root) as fsync_root:
+        assert store.delete_now(["r1"]) == {"removed": ["r1"], "absent": []}
+        assert store.delete_now(["r1", "never-captured"]) == {"removed": [], "absent": ["r1", "never-captured"]}
+        assert fsync_root.call_count == 2
+        # An empty batch has nothing to make durable.
+        store.delete_now([])
+        assert fsync_root.call_count == 2
+
+
+def _fail_unlinking_records_of(store: TokenCaptureStore, rollout_id: str):
+    """Make removing one rollout's token records fail, as an I/O error would."""
+    target = store.path_for(rollout_id)
+    real_unlink = type(target).unlink
+
+    def unlink(path, missing_ok=False):
+        if path == target:
+            raise OSError(errno.EIO, "injected I/O error", str(path))
+        return real_unlink(path, missing_ok=missing_ok)
+
+    return patch.object(type(target), "unlink", unlink)
+
+
+@pytest.mark.parametrize("method", ["retire_now", "delete_now"])
+def test_token_store_batch_that_fails_part_way_still_syncs_what_it_changed(tmp_path, method):
+    store = TokenCaptureStore(tmp_path)
+    for rollout_id in ("r1", "r2", "r3"):
+        _store_entry(store, rollout_id)
+
+    with patch.object(store, "_fsync_root", wraps=store._fsync_root) as fsync_root:
+        with _fail_unlinking_records_of(store, "r3"), pytest.raises(OSError):
+            getattr(store, method)(["r1", "r2", "r3"])
+        # r1 and r2 changed before r3 failed; a retry over them finds nothing left to do.
+        getattr(store, method)(["r1", "r2"])
+
+    assert fsync_root.call_count >= 1
+
+
+def test_token_store_retire_that_fails_part_way_leaves_the_rollout_usable(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r1")
+
+    with _fail_unlinking_records_of(store, "r1"), pytest.raises(OSError):
+        store.retire_now(["r1"])
+
+    # The fence is written first, so the rollout already refuses late writes cleanly.
+    with pytest.raises(TokenCaptureRetiredError):
+        _store_entry(store, "r1")
+    with pytest.raises(TokenCaptureRetiredError):
+        store.freeze_now("r1")
+    # A retry finishes removing the records.
+    assert store.retire_now(["r1"]) == {"removed": ["r1"], "absent": []}
+    assert not store.path_for("r1").exists()
+
+
+def test_token_store_retire_that_cannot_write_its_fence_changes_nothing(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r1")
+
+    def no_space(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    with patch.object(store, "_write_state", no_space), pytest.raises(OSError):
+        store.retire_now(["r1"])
+
+    assert len(store.freeze_now("r1").entries) == 1
+
+
+def test_a_late_call_without_token_ids_after_retire_is_not_reported_as_a_failure(tmp_path, caplog):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "abandoned")
+    store.retire_now(["abandoned"])
+
+    context = CaptureContext(rollout_id="abandoned", model_call_id="c2", token_sink=store)
+    token = set_token_sink(context)
+    try:
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(capture_tokens({"id": "resp-1", "output": []}))
+    finally:
+        reset_token_sink(token)
+
+    assert all(record.exc_info is None for record in caplog.records)
+    assert not any("Could not mark rollout" in record.getMessage() for record in caplog.records)
+
+
+def test_token_store_overlapping_retire_returns_only_once_the_fence_is_durable(tmp_path):
+    """A second retire of the same ID must not report success before the first one has synced the fence."""
+    store = TokenCaptureStore(tmp_path)
+    for rollout_id in ("r1", "r2"):
+        _store_entry(store, rollout_id)
+    events = []
+    real_fsync, real_write_state = store._fsync_root, store._write_state
+
+    def fsync_root():
+        events.append("fsync")
+        real_fsync()
+
+    def write_state(rollout_id, state, **kwargs):
+        real_write_state(rollout_id, state, **kwargs)
+        if rollout_id == "r2" and state.get("retired"):
+            # The first retire has handled r1 but not finished its batch: a second retire of r1 overlaps here.
+            second = threading.Thread(target=lambda: (store.retire_now(["r1"]), events.append("second returned")))
+            second.start()
+            second.join()
+
+    with patch.object(store, "_fsync_root", fsync_root), patch.object(store, "_write_state", write_state):
+        store.retire_now(["r1", "r2"])
+
+    assert "fsync" in events[: events.index("second returned")]
+
+
+def test_token_store_sync_failure_after_an_error_does_not_hide_the_error(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    for rollout_id in ("r1", "r2"):
+        _store_entry(store, rollout_id)
+
+    real_fsync = store._fsync_root
+    syncs = []
+
+    def sync_that_fails_after_the_first():
+        syncs.append(1)
+        if len(syncs) > 1:
+            raise OSError(errno.EIO, "sync failed")
+        real_fsync()
+
+    with patch.object(store, "_fsync_root", sync_that_fails_after_the_first), _fail_unlinking_records_of(store, "r2"):
+        with pytest.raises(OSError, match="injected I/O error"):
+            store.retire_now(["r1", "r2"])
+
+
+def test_a_late_build_failure_after_retire_is_not_counted_as_a_capture_failure(tmp_path, caplog):
+    from nemo_gym.token_id_capture import sink as sink_module
+
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "abandoned")
+    store.retire_now(["abandoned"])
+    context = CaptureContext(rollout_id="abandoned", model_call_id="c2", token_sink=store)
+    failures_before = sink_module._CAPTURE_FAILURES[0]
+
+    async def build_fails():
+        try:
+            raise ValueError("bad payload")
+        except ValueError:
+            await sink_module._capture_failed(context, "build")
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(build_fails())
+
+    assert sink_module._CAPTURE_FAILURES[0] == failures_before
+    assert not any("failed to build" in record.getMessage() for record in caplog.records)
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+@pytest.mark.parametrize("method", ["retire_now", "delete_now"])
+def test_token_store_syncs_files_removed_before_a_later_removal_failed(tmp_path, method):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r1")
+    asyncio.run(store.mark_incomplete("r1", "lost-call"))
+    target = store.incomplete_path_for("r1")
+    real_unlink = type(target).unlink
+
+    def unlink(path, missing_ok=False):
+        # The records file goes first; the incomplete marker after it fails.
+        if path == target:
+            raise OSError(errno.EIO, "injected I/O error", str(path))
+        return real_unlink(path, missing_ok=missing_ok)
+
+    syncs = []
+    real_fsync = store._fsync_root
+    with (
+        patch.object(type(target), "unlink", unlink),
+        patch.object(store, "_fsync_root", lambda: (syncs.append(store.path_for("r1").exists()), real_fsync())),
+    ):
+        with pytest.raises(OSError, match="injected I/O error"):
+            getattr(store, method)(["r1"])
+
+    # The failed call itself synced after the records file was already gone.
+    assert False in syncs
+
+
+def test_token_store_retire_leaves_a_reused_rollout_alone_after_a_delete_between_its_phases(tmp_path):
+    """Between fencing and removing, a delete can clear the fence and a reused rollout ID can write again."""
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r1")
+    real_fsync = store._fsync_root
+    reused = []
+
+    def fsync_root():
+        real_fsync()
+        if not reused:
+            reused.append(True)
+            store.delete_now(["r1"])
+            _store_entry(store, "r1")
+
+    with patch.object(store, "_fsync_root", fsync_root):
+        store.retire_now(["r1"])
+
+    # The new attempt's records survive, and its state still matches them.
+    assert [entry.model_call_id for entry in store.freeze_now("r1").entries] == ["r1-c1"]
+
+
+def test_token_store_delete_removes_the_fence_so_the_rollout_id_can_be_reused(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r0")
+    store.retire_now(["r0"])
+
+    assert asyncio.run(store.delete(["r0"])) == {"removed": [], "absent": ["r0"]}
+
+    assert not store.state_path_for("r0").exists()
+    _store_entry(store, "r0")
+    assert [entry.model_call_id for entry in store.read_entries("r0")] == ["r0-c1"]
+
+
+@pytest.mark.parametrize("method", ["retire_now", "delete_now"])
+def test_token_store_rejects_a_bare_rollout_id_and_invalid_batches(tmp_path, method):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r1")
+    # A string is a sequence of one-character IDs; treating it as a batch would remove the wrong rollouts.
+    with pytest.raises(TypeError, match="sequence of rollout ids"):
+        getattr(store, method)("r1")
+    with pytest.raises(ValueError, match="Invalid rollout id"):
+        getattr(store, method)(["r1", "../escape"])
+    assert [entry.model_call_id for entry in store.read_entries("r1")] == ["r1-c1"]
 
 
 def test_token_store_recovers_state_lag_from_the_durable_jsonl_tail(tmp_path):
@@ -438,6 +775,42 @@ def test_config_keeps_settings_when_capture_is_off(tmp_path):
     cfg = TokenIdCaptureConfig.model_validate({"token_id_capture": {"enabled": False, "dir": str(tmp_path)}})
     assert cfg.enabled is False
     assert cfg.build_sink() is None
+
+
+def test_model_config_accepts_exact_non_generating_requests():
+    cfg = BaseResponsesAPIModelConfig(
+        host="0.0.0.0",
+        port=8099,
+        entrypoint="app.py",
+        name="custom_model",
+        token_id_capture_non_generating_requests=[{"method": "get", "path": "/custom/metadata"}],
+    )
+
+    assert [(request.method, request.path) for request in cfg.token_id_capture_non_generating_requests] == [
+        ("GET", "/custom/metadata")
+    ]
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        {"method": "*", "path": "/v1/models"},
+        {"method": 123, "path": "/v1/models"},
+        {"method": True, "path": "/v1/models"},
+        {"method": "GET", "path": "v1/models"},
+        {"method": "GET", "path": "/v1/*"},
+        {"method": "GET", "path": "/v1/models?all=true"},
+    ],
+)
+def test_model_config_rejects_invalid_non_generating_requests(declaration):
+    with pytest.raises(ValidationError):
+        BaseResponsesAPIModelConfig(
+            host="0.0.0.0",
+            port=8099,
+            entrypoint="app.py",
+            name="custom_model",
+            token_id_capture_non_generating_requests=[declaration],
+        )
 
 
 def test_mask_fraction_limit_defaults_off_and_parses():
@@ -754,6 +1127,167 @@ def test_uncorrelated_call_captures_nothing(tmp_path):
     assert list(tmp_path.glob("*.tokens.jsonl")) == []
 
 
+def test_unimplemented_model_discovery_does_not_mark_capture_incomplete(tmp_path):
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    response = client.get("/ng-rollout/models-roll0/training-token-capture/v1/models")
+
+    assert response.status_code == 404
+    assert TokenCaptureStore(tmp_path).freeze_now("models-roll0").incomplete is False
+
+
+def test_unimplemented_method_does_not_mark_capture_incomplete(tmp_path):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    @app.get("/metadata")
+    async def metadata():
+        return {"kind": "metadata"}
+
+    client = TestClient(app)
+    response = client.post("/ng-rollout/probe-roll0/training-token-capture/metadata")
+
+    assert response.status_code == 405
+    assert TokenCaptureStore(tmp_path).freeze_now("probe-roll0").incomplete is False
+
+
+def test_successful_unknown_capture_path_fails_closed(tmp_path):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    @app.post("/v1/unsupported-generation")
+    async def unsupported_generation():
+        return {"output": "generated"}
+
+    client = TestClient(app)
+    response = client.post(
+        "/ng-rollout/unknown-roll0/training-token-capture/v1/unsupported-generation",
+        json={"input": "hi"},
+    )
+
+    assert response.status_code == 200
+    assert TokenCaptureStore(tmp_path).freeze_now("unknown-roll0").incomplete is True
+
+
+def test_unknown_head_request_fails_closed(tmp_path):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    @app.head("/metadata")
+    async def metadata():
+        return Response(status_code=200)
+
+    client = TestClient(app)
+    response = client.head("/ng-rollout/head-roll0/training-token-capture/metadata")
+
+    assert response.status_code == 200
+    assert TokenCaptureStore(tmp_path).freeze_now("head-roll0").incomplete is True
+
+
+def test_unknown_redirect_fails_closed(tmp_path):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    @app.get("/redirect")
+    async def redirect():
+        return RedirectResponse("/v1/responses", status_code=307)
+
+    client = TestClient(app, follow_redirects=False)
+    response = client.get("/ng-rollout/redirect-roll0/training-token-capture/redirect")
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/ng-rollout/redirect-roll0/training-token-capture/v1/responses"
+    assert TokenCaptureStore(tmp_path).freeze_now("redirect-roll0").incomplete is True
+
+
+def test_router_redirect_preserves_capture_prefix(tmp_path):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    @app.get("/metadata/")
+    async def metadata():
+        return {"kind": "metadata"}
+
+    client = TestClient(app, follow_redirects=False)
+    response = client.get("/ng-rollout/router-redirect-roll0/training-token-capture/metadata")
+
+    assert response.status_code == 307
+    assert (
+        response.headers["location"]
+        == "http://testserver/ng-rollout/router-redirect-roll0/training-token-capture/metadata/"
+    )
+    assert TokenCaptureStore(tmp_path).freeze_now("router-redirect-roll0").incomplete is True
+
+
+@pytest.mark.parametrize("status", [204, 400, 500])
+def test_unknown_status_other_than_not_found_or_method_not_allowed_fails_closed(tmp_path, status):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    @app.get("/status")
+    async def status_response():
+        return Response(status_code=status)
+
+    client = TestClient(app)
+    response = client.get("/ng-rollout/status-roll0/training-token-capture/status")
+
+    assert response.status_code == status
+    assert TokenCaptureStore(tmp_path).freeze_now("status-roll0").incomplete is True
+
+
+def test_unknown_exception_before_response_fails_closed(tmp_path):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    @app.get("/crash")
+    async def crash():
+        raise RuntimeError("boom")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.get("/ng-rollout/crash-roll0/training-token-capture/crash")
+
+    assert response.status_code == 500
+    assert TokenCaptureStore(tmp_path).freeze_now("crash-roll0").incomplete is True
+
+
+def test_unknown_request_without_response_start_fails_closed(tmp_path):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    async def silent_app(scope, receive, send):
+        return
+
+    app.mount("/silent", silent_app)
+    client = TestClient(app)
+
+    with pytest.raises(RuntimeError, match="No response returned"):
+        client.get("/ng-rollout/silent-roll0/training-token-capture/silent/")
+
+    assert TokenCaptureStore(tmp_path).freeze_now("silent-roll0").incomplete is True
+
+
+def test_model_server_can_declare_successful_non_generating_route(tmp_path):
+    config = _both_enabled(tmp_path)
+
+    server = _CapturingModel(
+        config=BaseResponsesAPIModelConfig(
+            host="0.0.0.0",
+            port=8099,
+            entrypoint="",
+            name="srv",
+            token_id_capture_non_generating_requests=[
+                {"method": "POST", "path": "/v1/custom-metadata"},
+            ],
+        ),
+        server_client=MagicMock(spec=ServerClient, global_config_dict=config),
+    )
+    app = server.setup_webserver()
+
+    @app.post("/v1/custom-metadata")
+    async def custom_metadata():
+        return {"capabilities": ["tools"]}
+
+    client = TestClient(app)
+    response = client.post(
+        "/ng-rollout/declared-roll0/training-token-capture/v1/custom-metadata",
+        json={},
+    )
+
+    assert response.status_code == 200
+    assert TokenCaptureStore(tmp_path).freeze_now("declared-roll0").incomplete is False
+
+
 def test_package_is_dependency_free_leaf():
     """Keep token capture independent of Gym's server stack.
 
@@ -954,11 +1488,11 @@ def test_delete_removes_records_and_marker(tmp_path):
     )
     asyncio.run(store.mark_incomplete("gone-0", "c"))
     assert store.path_for("gone-0").exists() and store.is_incomplete("gone-0")
-    store.delete("gone-0")
+    store.delete_now(["gone-0"])
     assert not store.path_for("gone-0").exists()
     assert not store.is_incomplete("gone-0")
     # Idempotent: consuming a rollout twice must not raise.
-    store.delete("gone-0")
+    store.delete_now(["gone-0"])
 
 
 def test_concurrent_appends_to_one_rollout_stay_intact(tmp_path):

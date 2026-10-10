@@ -20,3 +20,10 @@ arxivmath_0426_math_with_autograder_simple_agent:
         jsonl_fpath: benchmarks/arxivmath_0426/data/arxivmath_0426_benchmark.jsonl
         prompt_config: benchmarks/arxivmath_0426/prompts/default.yaml
         prepare_script: benchmarks/arxivmath_0426/prepare.py
+
+arxivmath_0426_math_with_autograder_environment_server:
+  _inherit_from: math_with_autograder_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: arxivmath_0426_math_with_autograder_simple_agent

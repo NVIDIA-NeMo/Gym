@@ -46,3 +46,11 @@ web_agent:
       close_request_timeout_secs: 30.0
       run_timeout_secs: 1800.0
       datasets: []
+
+web_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: web_agent

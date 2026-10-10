@@ -184,6 +184,7 @@ class FinanceAgentVerifyResponse(BaseVerifyResponse):
 
 
 class FinanceAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: FinanceAgentConfig
 
     @staticmethod

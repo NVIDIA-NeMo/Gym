@@ -10,6 +10,7 @@ from resources_servers.visual_browser.session_manager import VisualBrowserSessio
 
 
 class VisualBrowserResourcesServer(WebResourcesServer):
+    ray_enabled = False
     config: VisualBrowserResourcesServerConfig
 
     def make_session_manager(self) -> VisualBrowserSessionManager:

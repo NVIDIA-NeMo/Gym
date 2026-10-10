@@ -76,6 +76,7 @@ def parse_gemini_verdict(text: str) -> tuple[bool, dict[str, str]] | None:
 
 
 class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: WebVoyagerJudgeConfig
 
     async def _judge_evidence(self, body: WebVoyagerJudgeRequest) -> WebVoyagerJudgeResponse:
@@ -102,7 +103,7 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
             return WebVoyagerJudgeResponse(
                 result=WebVerifierResult(
                     valid_sample=True,
-                    failure_kind="missing_judge_evidence",
+                    failure_kind="web:missing_judge_evidence",
                     verifier_version=self.config.verifier_version,
                 )
             )

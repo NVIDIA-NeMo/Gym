@@ -15,6 +15,7 @@
 """Tests for GenRM Compare Resources Server."""
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -27,6 +28,7 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -44,6 +46,7 @@ from resources_servers.genrm_compare.app import (
     GenRMCompareResponse,
     GenRMCompareVerifyRequest,
     _input_to_conversation_history,
+    _output_budget_exhausted,
 )
 from resources_servers.genrm_compare.utils import get_prompt_key_from_input
 
@@ -70,7 +73,7 @@ class TestGenRMCompareConfig:
         # Check defaults
         assert config.comparison_strategy == "circular"
         assert config.num_judges_per_comparison == 1
-        assert config.cohort_collection_timeout_s is None
+        assert config.cohort_collection_timeout_s == 1800.0
         assert config.cohort_result_ttl_s == 3600.0
         assert config.max_terminal_cohorts == 4096
         assert config.use_principle is False
@@ -243,12 +246,13 @@ class TestGenRMCompareResourcesServer:
 
         assert request.group_attempt == 3
 
-    def test_verify_request_defaults_missing_group_attempt_to_zero_with_warning(self):
+    def test_verify_request_defaults_missing_group_attempt_to_zero_with_warning(self, caplog):
         payload = self._verify_request(0, task_index=None, group_id="legacy-group").model_dump(by_alias=True)
         payload.pop(GROUP_ATTEMPT_KEY_NAME)
 
-        with pytest.warns(UserWarning, match="treating this legacy request as group attempt zero"):
-            request = GenRMCompareVerifyRequest.model_validate(payload)
+        resources_servers.genrm_compare.app._warn_legacy_attempt.cache_clear()
+        request = GenRMCompareVerifyRequest.model_validate(payload)
+        assert "group attempt zero" in caplog.text
 
         assert request.group_attempt == 0
 
@@ -843,11 +847,14 @@ class TestGenRMCompareResourcesServer:
         )
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
 
+        waiter = asyncio.create_task(server.verify(self._verify_request(0, task_index=22)))
+        await asyncio.sleep(0)
+        cohort = next(iter(server._verify_cohorts.values()))
         with pytest.raises(HTTPException, match="did not collect 2 unique rollout indices") as error:
-            await asyncio.wait_for(server.verify(self._verify_request(0, task_index=22)), timeout=1.0)
+            await asyncio.wait_for(waiter, timeout=1.0)
 
         assert error.value.status_code == 503
-        cohort = next(iter(server._verify_cohorts.values()))
+        assert server._verify_cohorts[cohort.key] is cohort
         assert cohort.phase == "failed"
         assert cohort.collection_timeout_task is None
         assert all(member.body is None and not member.waiters for member in cohort.members.values())
@@ -856,7 +863,7 @@ class TestGenRMCompareResourcesServer:
         config = config.model_copy(
             update={
                 "num_rollouts_per_prompt": 2,
-                "cohort_collection_timeout_s": None,
+                "cohort_collection_timeout_s": 1.0,
             }
         )
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
@@ -864,7 +871,7 @@ class TestGenRMCompareResourcesServer:
         await asyncio.sleep(0)
         cohort = next(iter(server._verify_cohorts.values()))
 
-        assert cohort.collection_timeout_task is None
+        assert cohort.collection_timeout_task is not None
         waiter.cancel()
         await asyncio.gather(waiter, return_exceptions=True)
 
@@ -965,7 +972,7 @@ class TestGenRMCompareResourcesServer:
         await asyncio.gather(first_waiter, return_exceptions=True)
         cohort = next(iter(first._verify_cohorts.values()))
         assert cohort.phase == "collecting"
-        assert cohort.collection_timeout_task is None
+        assert cohort.collection_timeout_task is not None
 
     async def test_terminal_tombstones_are_bounded_and_expire(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(
@@ -1013,16 +1020,18 @@ class TestRunSingleComparison:
         )
         mock_server_client = MagicMock()
         # Return a well-formed GenRM score response
-        mock_http_response = AsyncMock()
-        mock_http_response.json = AsyncMock(
-            return_value={
-                "output": [
-                    {
-                        "type": "message",
-                        "content": [{"type": "output_text", "text": '{"score_1": 4, "score_2": 2, "ranking": 2}'}],
-                    }
-                ]
-            }
+        mock_http_response = AsyncMock(ok=True)
+        mock_http_response.read = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": '{"score_1": 4, "score_2": 2, "ranking": 2}'}],
+                        }
+                    ]
+                }
+            ).encode()
         )
         mock_server_client.post = AsyncMock(return_value=mock_http_response)
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=mock_server_client)
@@ -1089,3 +1098,91 @@ class TestRunSingleComparison:
 
         body = self._get_sent_body(mock_client)
         assert "principle" not in body.metadata
+
+    @staticmethod
+    def _http_response(body: dict):
+        response = AsyncMock(ok=True)
+        response.read = AsyncMock(return_value=json.dumps(body).encode())
+        return response
+
+    @staticmethod
+    def _incomplete_response():
+        """A Responses API object cut off by max_output_tokens: reasoning present, no verdict text."""
+        return {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{"type": "reasoning", "summary": [], "content": [{"type": "reasoning_text", "text": "..."}]}],
+        }
+
+    def test_output_budget_exhausted_detection(self):
+        assert _output_budget_exhausted(self._incomplete_response())
+        assert not _output_budget_exhausted({"status": "completed", "output": []})
+        assert not _output_budget_exhausted(
+            {"status": "incomplete", "incomplete_details": {"reason": "content_filter"}}
+        )
+        assert not _output_budget_exhausted({"status": "incomplete"})
+        assert not _output_budget_exhausted(None)
+
+    def test_budget_exhaustion_is_named_in_judge_error(self, caplog):
+        """Every attempt hits max_output_tokens -> JudgeError says so, with the budget, instead of a generic message."""
+        server, mock_client = self._make_server()
+        server.config.genrm_parse_retries = 1
+        server.config.genrm_parse_retry_sleep_s = 0.0
+        mock_client.post = AsyncMock(return_value=self._http_response(self._incomplete_response()))
+
+        with caplog.at_level("WARNING"), pytest.raises(JudgeError) as error:
+            asyncio.run(
+                server._run_single_comparison(
+                    [{"role": "user", "content": "q"}], self._make_response_obj("a"), self._make_response_obj("b")
+                )
+            )
+
+        assert mock_client.post.await_count == 2
+        assert "no completed answer after 2 attempts" in str(error.value)
+        assert "2 of them exhausted max_output_tokens=1024" in str(error.value)
+        assert sum("output budget exhausted" in r.getMessage() for r in caplog.records) == 2
+
+    def test_budget_exhaustion_then_verdict_recovers(self):
+        """One exhausted attempt followed by a completed verdict parses normally."""
+        server, mock_client = self._make_server()
+        server.config.genrm_parse_retries = 1
+        server.config.genrm_parse_retry_sleep_s = 0.0
+        completed = {
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": '{"score_1": 4, "score_2": 2, "ranking": 2}'}],
+                }
+            ],
+        }
+        mock_client.post = AsyncMock(
+            side_effect=[self._http_response(self._incomplete_response()), self._http_response(completed)]
+        )
+
+        result = asyncio.run(
+            server._run_single_comparison(
+                [{"role": "user", "content": "q"}], self._make_response_obj("a"), self._make_response_obj("b")
+            )
+        )
+
+        assert result == (4.0, 2.0, 2.0)
+
+    def test_empty_completed_answer_keeps_generic_judge_error(self):
+        """A completed but empty answer is not budget exhaustion; the message stays generic."""
+        server, mock_client = self._make_server()
+        server.config.genrm_parse_retries = 0
+        empty = {
+            "status": "completed",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": ""}]}],
+        }
+        mock_client.post = AsyncMock(return_value=self._http_response(empty))
+
+        with pytest.raises(JudgeError) as error:
+            asyncio.run(
+                server._run_single_comparison(
+                    [{"role": "user", "content": "q"}], self._make_response_obj("a"), self._make_response_obj("b")
+                )
+            )
+
+        assert str(error.value) == "Judge returned no completed answer after 1 attempts"

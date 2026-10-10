@@ -14,11 +14,11 @@
 # limitations under the License.
 import sys
 import types
+from http.cookiejar import CookieJar
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
-from httpx import Cookies
 
 from nemo_gym.server_utils import ServerClient
 from resources_servers.openenv.app import (
@@ -31,13 +31,13 @@ from resources_servers.openenv.app import (
 def _make_test_client(server):
     """Create a TestClient with stateless cookies for session testing."""
     app = server.setup_webserver()
-    client = TestClient(app)
 
-    class StatelessCookies(Cookies):
-        def extract_cookies(self, response):
+    class StatelessCookieJar(CookieJar):
+        def extract_cookies(self, response: object, request: object) -> None:
+            # Sessions must come from explicit request cookies, not earlier responses.
             pass
 
-    client._cookies = StatelessCookies(client._cookies)
+    client = TestClient(app, cookies=StatelessCookieJar())
     return client
 
 

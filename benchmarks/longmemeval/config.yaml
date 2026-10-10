@@ -12,3 +12,10 @@ longmemeval_benchmark_simple_agent:
         prepare_script: benchmarks/longmemeval/prepare.py
         prompt_config: null
         license: MIT
+
+longmemeval_benchmark_environment_server:
+  _inherit_from: longmemeval_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: longmemeval_benchmark_simple_agent

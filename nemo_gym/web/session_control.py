@@ -84,11 +84,12 @@ class WebSessionControl:
             raise SessionConflictError("the session identity was used with a different seed payload")
         record.fingerprint = fingerprint
         prior_seed = record.seed
+        # Replay only a successful seed. A failed one runs again once its
+        # cleanup has finished; until then, retries receive the same failure.
         if (
             prior_seed is not None
             and prior_seed.done()
-            and not prior_seed.cancelled()
-            and isinstance(prior_seed.exception(), CapacityUnavailableError)
+            and (prior_seed.cancelled() or prior_seed.exception() is not None)
             and await self._manager.can_retry_seed(session_id)
         ):
             if record.closing:

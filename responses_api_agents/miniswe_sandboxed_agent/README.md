@@ -1,78 +1,94 @@
 # Sandboxed mini-SWE
 
-Generic mini-SWE 2.4.6 `DefaultAgent` execution on a caller-owned `AsyncSandbox`.
-`harness.py` exposes `MiniSWEHarness`, `HarnessContext`, `MiniSWEConfig`, and
-`HarnessOutcome`. The caller supplies the sandbox, task instruction, execution
-user and working directory, setup budget, optional MCP/skills configuration,
-artifact directory, and an async model-query callback. The harness imports no
-benchmark code and has no dataset, provisioning, verification, or sandbox lifecycle logic.
+Run pinned mini-SWE 2.4.6 directly in a resource-owned Linux sandbox, using its
+native CLI, `DefaultAgent`, `LocalEnvironment`, and `litellm_response` model.
+Use [the TB4 profile](../../benchmarks/terminal_bench_4/miniswe.yaml) with
+[TB4 resources](../../resources_servers/terminal_bench_4/README.md).
 
-The synchronous mini-SWE loop uses a bridge to async model and sandbox operations.
-Cancellation closes pending I/O and joins the worker before returning its outcome,
-response, and trajectory metadata. The caller owns subsequent collection and
-cleanup. `app.py` is a thin Gym collector adapter: it forwards `/run` to the
-configured resources runner, preserving session identity and model-call capture
-routing, and returns its verification response.
+`harness.py` supplies execution and trajectory conversion; it imports no benchmark
+code. `/run` seeds the resources server, connects to its sandbox, stores session
+state, calls `responses()`, and sends the result to resources `/verify` after
+stopping agent processes. Resources owns provisioning, grading, and destruction.
+`/v1/responses` requires a connected session and owns working-directory discovery,
+config and model routing, harness setup, and execution. It neither provisions nor
+grades. Retried responses share setup and execution for the same message.
+Retried `/run` calls share one execution and forward the seeded resource cookies.
 
-The adapter loads system and instance prompts from the pinned package's `mini.yaml`
-and exposes mini-SWE's native `bash` tool through Gym's Responses API. The version
-and prompts follow [Artificial Analysis's TB4 methodology](https://artificialanalysis.ai/methodology/intelligence-benchmarking).
-The prompt defines completion as a successful command whose first output
-line is `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`, matching mini-SWE's convention.
-The Python defaults remain `step_limit=0`, `step_timeout_sec=600`, and `cost_limit=0`;
-the caller bounds total execution time. The TB4 benchmark sets a 500-step limit and
-30-second command timeout, overridable with `++tb4_max_steps=...` and
-`++tb4_step_timeout_sec=...`. Commands receive the environment defaults from `mini.yaml`;
-system information in the prompt comes from the task sandbox.
-Every step persists the native mini-SWE trajectory, including observations.
-The adapter preserves Responses output items (including reasoning and tool calls)
-when replaying history and returns observations with their matching call IDs.
+## Setup and model access
 
-Full command observations are deliberately retained: we do not use `mini.yaml`'s
-first/last 5,000-character truncation. AA's intent regarding that upstream default
-is unclear. There is no context compaction or summarization. Execution uses
-`DefaultAgent` without interactive confirmations and keeps cost limits disabled.
+Task images need `bash`, `uname`, `tar`, and `setsid`; preinstalled Python, pip,
+curl, and CA certificates are unnecessary. Setup detects the sandbox architecture
+and libc using shell commands, then installs Python 3.13.12 and uv 0.10.12 as the
+task user. Both archives are downloaded by Gym and cached under
+`$TMPDIR/nemo-gym-miniswe-assets` (or `/tmp`), shared across tasks. Concurrent
+initial setup requests share the downloads, and Python archives are checksum
+verified. Downloads are pinned separately for x86-64/ARM64 and glibc/musl.
+The sandbox never downloads these assets from GitHub; PyPI access is still needed
+for the isolated mini-SWE environment. LiteLLM uses its bundled model-cost map.
 
-Task skills are exposed by their supplied directory. For MCP tasks, setup installs
-`mcp==1.29.0` into a task-local virtual environment, discovers the declared tools,
-and adds their schemas and invocation command to the prompt. The CLI supports
-stdio, SSE, and streamable HTTP; calls execute inside the main sandbox so service
-names retain their task-network meaning. A persistent MCP session preserves state
-across calls. MCP tools are visible as schemas and CLI instructions in the task
-prompt and invoked through native `bash` calls, rather than registered as separate
-model tools. Image tool results become multimodal model inputs. This changes the evaluation profile
-relative to native mini-SWE and must be disclosed in score comparisons.
+The native agent calls Gym's rollout-prefixed `/v1/responses` endpoint directly.
+Gym's model wrapper retains model-call and training-token capture; every request
+includes the resource session's `x-session-id` header. Set
+`sandbox_model_base_url` when the configured model address is not reachable from
+the sandbox. The TB4 override is `++tb4_sandbox_model_base_url=...`; an optional
+`/v1` suffix is accepted and any reverse-proxy path is preserved.
 
-Use [the TB4 mini-SWE profile](../../benchmarks/terminal_bench_4/miniswe.yaml) with
-[TB4 resources](../../resources_servers/terminal_bench_4/README.md). Existing
-`mini_swe_agent_2` SWE-bench behavior remains unchanged. Coverage is a validation
-claim, not implied by selecting this configuration.
+The caller supplies the task instruction, task user and working directory,
+setup/execution budgets, optional skills/MCP configuration, and artifact path.
+Setup has a separate 360-second budget. Execution uses the smaller of the task's
+budget and `agent_max_timeout_sec`. Default artifacts are written to
+`results/miniswe_sandboxed_agent/<session_id>/`; TB4 uses its configured jobs'
+`agent/` directory. `artifact_directory` can override the location per run.
 
-The TB4 profile retains one repeat; clients seeking AA's three-repeat protocol
-must explicitly set `++num_repeats=3`. Verifier timeout handling is unchanged:
-timeouts remain infrastructure failures pending evidence of their frequency on
-real workloads. These decisions are detailed in the benchmark README and mean
-the profile is not an exact reproduction of AA's evaluation.
+## Native behavior and observability
 
-## Rollout observability
+The CLI loads `mini.yaml` from the pinned package and overlays the task/model
+configuration. Defaults remain unlimited steps, a 600-second command timeout,
+and disabled cost limits. TB4 selects 500 steps and a 30-second command timeout;
+`++tb4_max_steps`, `++tb4_step_timeout_sec`, and `++tb4_agent_max_timeout_sec`
+override those values. Completion follows mini-SWE's
+`COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` convention. Native observations use the
+package's first/last 5,000-character bounds and preserve raw output in trajectories.
+There is no context compaction. Native format-error recovery and exception names
+are retained, including `RepeatedFormatError` and `ContextWindowExceededError`.
+Gym disables extra SDK/model retries; the model server retains its retry policy.
 
-Enable `observability_enabled: true` in Gym's run configuration to collect
-`ng_agent_observations` and canonical `ng_trajectory` turns. Direct harness
-callers pass `observability_enabled=True`; collection is disabled by default.
-Responses without an ID retain their turn and record a
-`model_call_reference_unavailable` gap.
-TB4 sends the resources session ID as `x-session-id` on every Gym model request,
-so capture can assign failed attempts and retries to the same invocation even
-when there is no response ID. Successful responses retain exact response refs;
-decisions are recorded before mini-SWE parses them, including rejected output.
+`trajectory.json` is the unmodified native transcript; `agent.log` contains CLI
+stdout/stderr. With `observability_enabled: true`, Gym projects saved decisions,
+reasoning, tool results, return codes, completion timestamps, usage, and native
+model response references into `ng_agent_observations` and `ng_trajectory`.
+LiteLLM's response-ID envelope is decoded to join Gym's original capture IDs.
+Missing aggregate usage stays unknown. Submission is separate from verifier success.
 
-Tool observations measure each dispatched bash call independently with monotonic
-duration, wall-clock bounds, and outcome. Combined Responses output now includes
-tool results, including terminal submission. The native mini-SWE transcript and
-the model-visible prompts retain their existing behavior. Execution stays serial.
-Intermediate canonical turns remain unresolved; agent submission is not verifier
-success. Missing aggregate usage is preserved as unknown, never a partial or empty
-zero sum.
+Removing the custom wrapper has these limits:
 
-`benchmarks/terminal_bench_4/smoke.py` now retains `model_calls/`,
-`evaluator_rollouts.jsonl`, and Gym's `quality_summary.json` for offline inspection.
+- Native mini-SWE records tool completion timestamps, but no start times or
+  durations. Gym emits `tool_timing_unavailable` gaps rather than estimating them.
+- Submission exits before a final tool observation is saved. The decision and
+  native submission text remain available; that tool's execution observation is
+  incomplete, with no output or error evidence. This known mini-SWE gap fails
+  TE-5 (`tool.terminal` and `tool.outcome`) and the `gym-p0/v1` conformance gate,
+  even when the task succeeds. mini-SWE needs to persist a terminal tool result
+  correlated with the submit call before exiting; Gym's projection must then
+  retain that evidence. The observability test asserts this gap until it is fixed.
+- Native trajectories are saved after each step. A forced kill during a model
+  request or command can lose the active step, or leave a partially written
+  trajectory. Gym model-server capture remains independent of that file.
+- Wrapper-specific runtime metadata and `OutputTokenLimitExceeded` normalization
+  are removed. Native termination names and CLI logs are retained.
+- MCP tools remain available through a persistent task-local CLI session, but
+  native Responses observations do not promote MCP image blobs to multimodal
+  inputs. Such results remain command text subject to native output bounds.
+
+Cancellation stops processes carrying the run's inherited environment marker,
+including native shell commands in separate process groups, and registered MCP
+process groups before verification. Resources must quiesce the sandbox if cleanup
+fails. Shutdown uses one `shutdown_timeout_sec` budget for seed completion,
+execution cleanup, and verification; resources expires abandoned seed sessions.
+
+`benchmarks/terminal_bench_4/smoke.py` retains model captures, rollout JSONL,
+health summaries, and source hashes. `--host` selects a service address reachable
+from remote sandboxes. Three-step smokes validate execution and verification,
+not task-solving accuracy. The TB4 profile retains one repeat; the three-repeat
+protocol requires `++num_repeats=3`. Selecting this profile does not establish
+benchmark coverage or exact methodology parity.

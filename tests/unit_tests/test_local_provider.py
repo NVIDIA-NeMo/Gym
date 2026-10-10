@@ -14,16 +14,75 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
 import logging
+import os
+import signal
+import sys
+from json import loads
 from pathlib import Path
+from shlex import join
 
 import pytest
 
+from nemo_gym.agent_utils import process_supervisor
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, SandboxStatus, create_provider
 from nemo_gym.sandbox.providers.local import LocalProvider
 
 
 pytestmark = pytest.mark.sandbox
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper and /proc are required")
+async def test_supervisor_deadline_finishes_before_provider_hard_timeout(tmp_path: Path) -> None:
+    provider = LocalProvider()
+    handle = await provider.create(SandboxSpec(workdir=str(tmp_path)))
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "import pathlib, signal, subprocess, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+        "pathlib.Path('child.pid').write_text(str(child.pid))\n"
+        "time.sleep(60)\n"
+    )
+    receipt_path = tmp_path / "cleanup.json"
+    command = join(
+        [
+            sys.executable,
+            "-I",
+            process_supervisor.__file__,
+            "--timeout",
+            "1",
+            "--cleanup-timeout",
+            "0.5",
+            "--receipt",
+            str(receipt_path),
+            "--",
+            sys.executable,
+            "-I",
+            str(worker),
+        ]
+    )
+    try:
+        result = await provider.exec(
+            handle, command, timeout_s=process_supervisor.exec_timeout(timeout=1, cleanup_timeout=0.5)
+        )
+        assert result.error_type is None, result.stderr
+        assert result.return_code == 0
+        receipt = loads(receipt_path.read_text())
+        assert receipt["cleanup_confirmed"] is True
+        assert receipt["timed_out"] is True
+        assert receipt["return_code"] == -signal.SIGKILL
+        assert receipt["error"] is None
+        with pytest.raises(ProcessLookupError):
+            os.kill(int((tmp_path / "child.pid").read_text()), 0)
+    finally:
+        if (tmp_path / "child.pid").exists():
+            try:
+                os.kill(int((tmp_path / "child.pid").read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        await provider.close(handle)
 
 
 async def test_exec_runs_in_the_workspace_with_layered_env(tmp_path: Path) -> None:
@@ -66,6 +125,56 @@ async def test_timeout_kills_the_whole_process_tree(tmp_path: Path) -> None:
     assert result.return_code == 125 and result.error_type == "timeout"
     await asyncio.sleep(2)
     assert not marker.exists(), "backgrounded child outlived the timed-out command"
+
+
+@pytest.mark.parametrize("shell_waits", [True, False])
+@pytest.mark.parametrize("interruption", ["cancellation", "timeout"])
+async def test_interrupted_command_kills_the_whole_process_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell_waits: bool, interruption: str
+) -> None:
+    started = asyncio.Event()
+    create_subprocess_exec = asyncio.create_subprocess_exec
+
+    async def record_process(*args, **kwargs) -> asyncio.subprocess.Process:
+        process = await create_subprocess_exec(*args, **kwargs)
+        # Start the provider's timeout only after the child is ready and, when
+        # requested, the shell has exited while the child still holds its pipes.
+        while not (tmp_path / "ready").exists() or (not shell_waits and process.returncode is None):
+            await asyncio.sleep(0.01)
+        started.set()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", record_process)
+    sandbox = AsyncSandbox(create_provider({"local": {}}))
+    await sandbox.start(SandboxSpec(workdir=str(tmp_path)))
+    async with sandbox:
+        command = "(touch ready && while [ ! -e release ]; do sleep 0.01; done; touch survived) &"
+        task = asyncio.create_task(
+            sandbox.exec(
+                command + (" wait" if shell_waits else ""), timeout_s=0.2 if interruption == "timeout" else None
+            )
+        )
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+
+            assert not task.done(), "The child must still hold the command's output pipes open."
+            if interruption == "cancellation":
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=10)
+            else:
+                result = await asyncio.wait_for(task, timeout=10)
+                assert result.return_code == 125 and result.error_type == "timeout"
+                assert result.stdout is None and result.stderr == "local command timed out after 0.2s"
+
+            (tmp_path / "release").touch()
+            await asyncio.sleep(2)
+            assert not (tmp_path / "survived").exists(), f"backgrounded child outlived {interruption}"
+        finally:
+            (tmp_path / "release").touch()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 async def test_timeout_returns_even_when_a_child_escapes_the_process_group(tmp_path: Path) -> None:

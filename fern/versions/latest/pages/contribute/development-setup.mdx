@@ -90,6 +90,31 @@ Optional local preview follows the Fern README. Full `make docs` / library autod
 
 **NVIDIA employees:** if you already have NVIDIA Slack, you can also ask in `#fern` for org access or docs help. Slack `#fern` is not required for external contributors.
 
+### Public repository content
+
+NeMo Gym's repository and documentation site are public. Do not include NVIDIA
+internal or confidential information. Before merging, authors and reviewers must
+check documentation, code comments, scripts, configs, example data, logs, and
+screenshots for information that is not approved for public release:
+
+- Keep internal hostnames and URLs, private repository and issue links, employee
+  filesystem paths, deployment identifiers, and non-public dataset or checkpoint
+  details in approved private systems. Use portable paths, placeholders, or
+  documented public resources in repository examples.
+- Do not name individuals or publish personal handles or email addresses as
+  contacts for credentials, access approvals, restricted artifacts, or internal
+  support. Use a team-owned support route approved for public use.
+- Give readers a public entry point, such as
+  [maintainer issues](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose), for
+  general setup questions. Keep internal access instructions in private systems;
+  exchange credentials and restricted policy contents through approved private
+  channels.
+- Use placeholders or environment-variable references for credentials, and
+  review copied output and screenshots for secrets or internal details.
+
+Preserve public contributor attribution and required license notices. Document
+access restrictions accurately without exposing the restricted material.
+
 ### Copyright Header Errors
 
 **Error**: "Found files with missing copyright"

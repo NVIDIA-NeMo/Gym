@@ -88,6 +88,7 @@ class AALCRVerifyResponse(AALCRVerifyRequest, BaseVerifyResponse):
 
 
 class AalcrResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: AalcrResourcesServerConfig
 
     async def verify(self, body: AALCRVerifyRequest) -> AALCRVerifyResponse:

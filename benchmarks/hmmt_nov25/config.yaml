@@ -20,3 +20,10 @@ hmmt_nov25_math_with_judge_simple_agent:
         jsonl_fpath: benchmarks/hmmt_nov25/data/hmmt_nov25_benchmark.jsonl
         prompt_config: benchmarks/prompts/generic/math.yaml
         prepare_script: benchmarks/hmmt_nov25/prepare.py
+
+hmmt_nov25_math_with_judge_environment_server:
+  _inherit_from: math_with_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: hmmt_nov25_math_with_judge_simple_agent

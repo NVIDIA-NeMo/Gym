@@ -63,6 +63,7 @@ from nemo_gym.rollout_observability import (
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
+from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION, apply_observability_patch
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 
 
@@ -87,7 +88,11 @@ def _milliseconds(value: Any) -> Optional[float]:
 
 
 def _parse_opencode_session(
-    db_path: Path, fallback_invocation_id: str, trajectory: Optional[TrajectoryRecord] = None
+    db_path: Path,
+    fallback_invocation_id: str,
+    trajectory: Optional[TrajectoryRecord] = None,
+    *,
+    model_ref: ModelServerRef | None = None,
 ) -> AgentObservationBundle:
     """Read OpenCode's persisted session tree before its workspace is removed."""
     if not db_path.is_file():
@@ -126,7 +131,7 @@ def _parse_opencode_session(
     compaction_parts: list[tuple[str, str, float | None, dict[str, Any]]] = []
     gaps: list[ObservationGap] = []
     summary_text: dict[str, list[str]] = {}
-    summaries_by_parent: dict[str, list[str]] = {}
+    summaries_by_parent: dict[tuple[str, str], list[str]] = {}
     first_item_id_by_message: dict[tuple[str, str], str] = {}
 
     for row in message_rows:
@@ -140,11 +145,11 @@ def _parse_opencode_session(
             message_time = message.get("time") if isinstance(message.get("time"), dict) else {}
             if invocation_status[session_id] != "failed" and _milliseconds(message_time.get("completed")) is not None:
                 invocation_status[session_id] = "completed"
-        if message.get("summary") is True:
+        if message.get("role") == "assistant" and message.get("summary") is True:
             summary_text[row["id"]] = []
             parent_id = message.get("parentID")
             if isinstance(parent_id, str):
-                summaries_by_parent.setdefault(parent_id, []).append(row["id"])
+                summaries_by_parent.setdefault((session_id, parent_id), []).append(row["id"])
 
     for row in part_rows:
         part = _load_json(row["data"])
@@ -288,13 +293,14 @@ def _parse_opencode_session(
 
     compactions: list[ContextCompactionObservation] = []
     for session_id, message_id, observed_at, part in compaction_parts:
-        summary_ids = summaries_by_parent.get(message_id, [])
+        summary_ids = summaries_by_parent.get((session_id, message_id), [])
         summary = "\n".join(summary_text.get(summary_ids[0], [])) if len(summary_ids) == 1 else None
         if len(summary_ids) > 1:
             gaps.append(
                 ObservationGap(
                     code="compaction_summary_ambiguous",
                     invocation_id=session_id,
+                    detail=",".join(summary_ids),
                 )
             )
         trigger = "overflow" if part.get("overflow") is True else "automatic" if part.get("auto") is True else "manual"
@@ -305,6 +311,8 @@ def _parse_opencode_session(
         compactions.append(
             ContextCompactionObservation(
                 invocation_id=session_id,
+                source_message_ids=summary_ids,
+                source_model_ref=model_ref,
                 observed_at=observed_at,
                 trigger=trigger,
                 outcome="completed" if summary else "unknown",
@@ -376,7 +384,7 @@ def _parse_opencode_session(
         gaps.append(ObservationGap(code="agent_transcript_unavailable"))
 
     if trajectory is not None:
-        append_opencode_turns(trajectory, session_ids, message_rows, part_rows)
+        append_opencode_turns(trajectory, session_ids, message_rows, part_rows, model_ref=model_ref)
 
     return AgentObservationBundle(
         source="opencode",
@@ -385,19 +393,32 @@ def _parse_opencode_session(
     )
 
 
-def parse_opencode_session(db_path: Path) -> tuple[list[Any], dict[str, int]]:
-    """Convert an OpenCode session database into the existing Gym response shape."""
+def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) -> tuple[list[Any], dict[str, int]]:
+    """Convert an OpenCode session database into the existing Gym response shape.
+
+    ``root_session_only`` restricts the transcript to sessions without a
+    parent: a sub-agent spawned by the ``task`` tool runs in its own session
+    (stored with ``parent_id``), and its parts would otherwise interleave with
+    the root conversation. Parts are ordered by creation time and then id,
+    OpenCode's own order, because parallel tool parts can share a creation
+    millisecond.
+    """
     output_items: list[Any] = []
     input_tokens = 0
     output_tokens = 0
+    reasoning_tokens = 0
     if not db_path.is_file():
         return output_items, {"input_tokens": 0, "output_tokens": 0}
 
+    scope = " where session_id in (select id from session where parent_id is null)" if root_session_only else ""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
-        roles = {row["id"]: _load_json(row["data"]).get("role") for row in con.execute("select id, data from message")}
-        rows = con.execute("select message_id, data from part order by time_created").fetchall()
+        roles = {
+            row["id"]: _load_json(row["data"]).get("role")
+            for row in con.execute(f"select id, data from message{scope}")
+        }
+        rows = con.execute(f"select message_id, data from part{scope} order by time_created, id").fetchall()
     finally:
         con.close()
 
@@ -407,8 +428,10 @@ def parse_opencode_session(db_path: Path) -> tuple[list[Any], dict[str, int]]:
         if ptype == "step-finish":
             tokens = part.get("tokens") or {}
             cache = tokens.get("cache") or {}
-            input_tokens += int(tokens.get("input") or 0) + int(cache.get("read") or 0)
-            output_tokens += int(tokens.get("output") or 0)
+            # OpenCode separates cache reads and writes from uncached input; Responses includes all three.
+            input_tokens += int(tokens.get("input") or 0) + int(cache.get("read") or 0) + int(cache.get("write") or 0)
+            output_tokens += int(tokens.get("output") or 0) + int(tokens.get("reasoning") or 0)
+            reasoning_tokens += int(tokens.get("reasoning") or 0)
         elif roles.get(row["message_id"]) == "assistant" and ptype == "text" and (part.get("text") or "").strip():
             output_items.append(
                 NeMoGymResponseOutputMessage(
@@ -424,6 +447,10 @@ def parse_opencode_session(db_path: Path) -> tuple[list[Any], dict[str, int]]:
             call_id = part.get("callID") or f"call-{uuid4().hex[:8]}"
             tool_input = state.get("input") or {}
             arguments = json.dumps(tool_input) if isinstance(tool_input, (dict, list)) else str(tool_input)
+            # A call OpenCode recorded as errored or aborted carries its error
+            # text in place of an output; the transcript keeps that outcome.
+            status = "completed" if state.get("status") in (None, "completed") else "incomplete"
+            result = state.get("output") if state.get("output") is not None else state.get("error")
             output_items.append(
                 NeMoGymResponseFunctionToolCall(
                     arguments=arguments,
@@ -431,20 +458,24 @@ def parse_opencode_session(db_path: Path) -> tuple[list[Any], dict[str, int]]:
                     name=part.get("tool", ""),
                     type="function_call",
                     id=call_id,
-                    status="completed",
+                    status=status,
                 )
             )
-            if state.get("output") is not None:
+            if result is not None:
                 output_items.append(
                     NeMoGymFunctionCallOutput(
                         type="function_call_output",
                         call_id=call_id,
-                        output=str(state["output"]),
-                        status="completed",
+                        output=str(result),
+                        status=status,
                     )
                 )
 
-    return output_items, {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    return output_items, {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": reasoning_tokens,
+    }
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -499,7 +530,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     opencode_config: dict[str, Any] = Field(default_factory=dict)
     context_window: int = 262144
     max_output_tokens: int = 131072
-    opencode_version: Optional[str] = None
+    opencode_version: str = OPENCODE_VERSION
 
     @property
     def command_parts(self) -> list[str]:
@@ -522,6 +553,8 @@ class OpenCodeAgentVerifyResponse(BaseVerifyResponse):
 class OpenCodeAgent(SimpleResponsesAPIAgent):
     """Runs the CLI (opencode run --format=json)"""
 
+    ray_enabled = False
+
     config: OpenCodeAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -543,10 +576,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         return base
 
     def _workspace_root(self) -> Path:
-        root = Path(self.config.workspace_root).expanduser() / f"opencode_{uuid4().hex[:8]}"
+        """Create a fresh per-rollout workspace directory and return it.
+
+        The full uuid plus exist_ok=False: a name collision must fail this
+        rollout loudly rather than silently merge two live rollouts' trees.
+        """
+        root = Path(self.config.workspace_root).expanduser() / f"opencode_{uuid4().hex}"
         if not root.is_absolute():
             root = Path.cwd() / root
-        root.mkdir(parents=True, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=False)
         return root
 
     def _repo_dir(self, fallback: Path) -> Path:
@@ -580,11 +618,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 model,
                 {
                     "name": self.config.model,
-                    "interleaved": {"field": "reasoning"},
+                    # Gym model servers emit and accept `reasoning_content`; OpenCode replays assistant
+                    # history under this field, and Gym rejects an unknown `reasoning` key with a 422.
+                    "interleaved": {"field": "reasoning_content"},
                     "limit": {"context": self.config.context_window, "output": self.config.max_output_tokens},
                 },
             )
             nemo["models"] = {self.config.model: model}
+        if self._model_call_capture_enabled():
+            apply_observability_patch(config)
         return config
 
     def _write_opencode_config(self, work_dir: Path, rollout_id: Optional[str] = None) -> None:
@@ -661,7 +703,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             observations = AgentObservationBundle(source="opencode")
             if collect_observations:
                 try:
-                    observations = _parse_opencode_session(db_path, invocation_id, trajectory)
+                    observations = _parse_opencode_session(
+                        db_path, invocation_id, trajectory, model_ref=self.config.model_server
+                    )
                 except Exception:
                     LOG.exception("failed to read OpenCode session artifact")
                     if trajectory is not None:
@@ -761,7 +805,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 input_tokens=input_tokens,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
                 output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(
+                    reasoning_tokens=usage.get("reasoning_tokens", 0)
+                ),
                 total_tokens=input_tokens + output_tokens,
             ),
         )

@@ -98,6 +98,7 @@ def _extract_text(outputs):
 
 # TODO: Use LangGraph's Send() API for the parallel worker dispatch, see langgraphs workflows.md Orchestrator-Worker pattern.
 class OrchestratorAgent(LangGraphAgentAdapter):
+    ray_enabled = False
     config: OrchestratorAgentConfig
 
     async def _call_model(self, state, prompt):

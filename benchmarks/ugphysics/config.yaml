@@ -13,3 +13,10 @@ ugphysics_ugphysics_judge_simple_agent:
           prompt_config: benchmarks/ugphysics/prompts/default.yaml
           prepare_script: benchmarks/ugphysics/prepare.py
           license: Apache 2.0
+
+ugphysics_ugphysics_judge_environment_server:
+  _inherit_from: ugphysics_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: ugphysics_ugphysics_judge_simple_agent
