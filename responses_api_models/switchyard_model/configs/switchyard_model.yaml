@@ -58,6 +58,19 @@ policy_model:
       # deployment's hash). Ignored when hosting.
       proxy_provenance: {}
 
+      # Set when the upstream runs a reasoning parser (vLLM --reasoning-parser):
+      # folds the separate reasoning field into the assistant content as
+      # <think> tags, so an agent can replay the turn. See app.py.
+      uses_reasoning_parser: false
+      # With the above: move replayed <think> blocks back into reasoning_content
+      # before forwarding, as vllm_model does. See app.py.
+      uses_interleaved_reasoning: true
+
+      # Pin sampling on every outbound request, as vllm_model does. Needed for
+      # a proxied arm to state the same sampling as a direct one; a null value
+      # clears a field the caller set (e.g. an agent's blanket max_tokens).
+      sampling_overrides: null
+
       extra_body: {}
       default_headers: {}
       max_concurrent_requests: null
