@@ -108,6 +108,8 @@ _VALIDATION_ERROR_LOG_BODY_CHARS = 4096
 _VALIDATION_ERROR_LOG_MAX_ERRORS = 20
 _VALIDATION_ERROR_LOG_FIELD_CHARS = 256
 _VALIDATION_ERROR_LOG_LOC_ITEMS = 8
+# Bound the rendered error summaries in the log message to 4 KiB.
+_VALIDATION_ERROR_LOG_ERRORS_CHARS = 4096
 
 
 def _escaped_log_text(value: str, max_chars: int) -> tuple[str, bool]:
@@ -170,9 +172,22 @@ def _validation_error_summaries(errors: list[dict[str, Any]]) -> tuple[list[dict
     return summaries, truncated
 
 
+def _validation_errors_log_text(error_summaries: list[dict[str, Any]]) -> tuple[str, bool]:
+    """Render the error summaries for the log message, bounded by ``_VALIDATION_ERROR_LOG_ERRORS_CHARS``."""
+    rendered = json.dumps(error_summaries, ensure_ascii=True, separators=(",", ":"))
+    if len(rendered) <= _VALIDATION_ERROR_LOG_ERRORS_CHARS:
+        return rendered, False
+    suffix = "...[truncated]"
+    return rendered[: _VALIDATION_ERROR_LOG_ERRORS_CHARS - len(suffix)] + suffix, True
+
+
 async def _log_validation_exception(request: Request, exc: RequestValidationError) -> None:
     errors = exc.errors()
     error_summaries, errors_truncated = _validation_error_summaries(errors)
+    # The summaries are also attached as ``extra``, but the default formatter drops extras,
+    # so render them into the message too: a 422 log line should say which field failed.
+    errors_text, errors_text_truncated = _validation_errors_log_text(error_summaries)
+    errors_truncated = errors_truncated or errors_text_truncated
     errors_suffix = " ...[truncated]" if errors_truncated else ""
     extra = {
         "validation_error_count": len(errors),
@@ -185,8 +200,10 @@ async def _log_validation_exception(request: Request, exc: RequestValidationErro
     )
     if not has_body_error:
         logger.warning(
-            "Request validation failed; validation_error_count=%d validation_errors_truncated=%s%s",
+            "Request validation failed; validation_error_count=%d validation_errors=%s "
+            "validation_errors_truncated=%s%s",
             len(errors),
+            errors_text,
             errors_truncated,
             errors_suffix,
             extra=extra,
@@ -198,8 +215,9 @@ async def _log_validation_exception(request: Request, exc: RequestValidationErro
     except Exception:
         logger.warning(
             "Request validation failed; request body unavailable; "
-            "validation_error_count=%d validation_errors_truncated=%s%s",
+            "validation_error_count=%d validation_errors=%s validation_errors_truncated=%s%s",
             len(errors),
+            errors_text,
             errors_truncated,
             errors_suffix,
             extra=extra,
@@ -220,11 +238,12 @@ async def _log_validation_exception(request: Request, exc: RequestValidationErro
     )
     logger.warning(
         "Request validation failed; request_body_size_bytes=%d request_body_truncated=%s request_body_prefix=%s "
-        "validation_error_count=%d validation_errors_truncated=%s%s",
+        "validation_error_count=%d validation_errors=%s validation_errors_truncated=%s%s",
         len(body),
         body_truncated,
         escaped_prefix,
         len(errors),
+        errors_text,
         errors_truncated,
         errors_suffix,
         extra=extra,

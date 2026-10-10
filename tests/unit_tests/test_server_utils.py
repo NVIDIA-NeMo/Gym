@@ -1531,6 +1531,54 @@ class TestServerUtils:
         assert record.getMessage().endswith("...[truncated]")
         assert len(record.getMessage()) < 5000
 
+    @mark.parametrize(("location", "body_unavailable"), [("body", False), ("query", False), ("body", True)])
+    async def test_validation_exception_message_names_failed_fields(
+        self, location: str, body_unavailable: bool, caplog: LogCaptureFixture
+    ) -> None:
+        # The summaries are also attached as ``extra``, which the default formatter drops,
+        # so the rendered message itself must say which field failed.
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        if body_unavailable:
+            request.body.side_effect = RuntimeError("body unavailable")
+        errors = [
+            {
+                "type": "extra_forbidden",
+                "loc": (location, "aws_region_name"),
+                "msg": "Extra inputs are not permitted",
+                "input": "must-not-be-logged",
+            }
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        message = caplog.records[-1].getMessage()
+        expected = '[{"type":"extra_forbidden","loc":["%s","aws_region_name"],"msg":"Extra inputs are not permitted"}]'
+        assert f"validation_errors={expected % location} " in message
+        assert "must-not-be-logged" not in message
+        assert message.endswith("validation_errors_truncated=False")
+
+    async def test_validation_exception_message_bounds_rendered_errors(self, caplog: LogCaptureFixture) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        long_msg = "m" * nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
+        errors = [
+            {"type": "value_error", "loc": ("body", f"field_{index}"), "msg": long_msg, "input": None}
+            for index in range(nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS)
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        record = caplog.records[-1]
+        rendered = record.getMessage().split("validation_errors=", 1)[1].split(" validation_errors_truncated=", 1)[0]
+        assert len(rendered) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_ERRORS_CHARS
+        assert rendered.endswith("...[truncated]")
+        assert record.validation_errors_truncated is True
+        assert len(record.validation_errors) == len(errors)  # the structured extra is not cut
+        assert record.getMessage().endswith("...[truncated]")
+
     async def test_validation_exception_does_not_log_body_for_query_error(self, caplog: LogCaptureFixture) -> None:
         request = MagicMock(spec=Request)
         request.body = AsyncMock(return_value=b"password=must-not-be-logged")
