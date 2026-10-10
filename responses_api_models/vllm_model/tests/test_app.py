@@ -847,12 +847,67 @@ class TestApp:
     @mark.parametrize("responses_api", [False, True])
     @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
     @mark.parametrize(
-        "error_content",
+        "error_content, expected_code, expected_param",
         [
-            b'{"error":{"message":"maximum context length","code":400}}',
-            b'{"error":{"type":"exceed_context_size_error","message":"request too long","code":400}}',
+            # The two refusals vLLM 0.29.0 issues when the window is full: the renderer's prompt-plus-
+            # output check (vllm/renderers/params.py) and the max-tokens resolution's prompt-only check
+            # (vllm/entrypoints/serve/utils/api_utils.py). Both bodies nest the message under "error"
+            # with the integer code 400 (vLLM 0.10.1 and later).
+            (
+                json.dumps(
+                    {
+                        "error": {
+                            "message": (
+                                "This model's maximum context length is 32768 tokens. However, you requested 256 "
+                                "output tokens and your prompt contains 32818 input tokens, for a total of 33074 "
+                                "tokens. Please reduce the length of the input prompt or the number of requested "
+                                "output tokens."
+                            ),
+                            "type": "BadRequestError",
+                            "param": "input_tokens",
+                            "code": 400,
+                        }
+                    }
+                ).encode(),
+                "context_length_exceeded",
+                "input_tokens",
+            ),
+            (
+                b'{"error":{"message":"Input length (32818) exceeds model\'s maximum context length (32768).",'
+                b'"type":"BadRequestError","param":null,"code":400}}',
+                "context_length_exceeded",
+                None,
+            ),
+            # The engine's own check, which names the model length rather than the context length.
+            (
+                b'{"error":{"message":"The decoder prompt (length 32818) is longer than the maximum model length '
+                b'of 32768. Make sure that max_model_len is no smaller than the number of text tokens.",'
+                b'"type":"BadRequestError","param":null,"code":400}}',
+                "context_length_exceeded",
+                None,
+            ),
+            # llama.cpp names the refusal by type, not by phrase.
+            (
+                b'{"error":{"type":"exceed_context_size_error","message":"request too long","code":400}}',
+                "context_length_exceeded",
+                None,
+            ),
+            # An invalid output-token parameter is a length refusal too, but compaction would not fix
+            # it, so the envelope carries no overflow code.
+            (
+                b'{"error":{"message":"max_tokens must be at least 1, got 0.","type":"BadRequestError",'
+                b'"param":null,"code":400}}',
+                None,
+                None,
+            ),
+            (
+                b'{"error":{"message":"max_completion_tokens=40000 cannot be greater than max_model_len (32768).",'
+                b'"type":"BadRequestError","param":null,"code":400}}',
+                None,
+                None,
+            ),
         ],
-        ids=["vllm", "llamacpp"],
+        ids=["prompt-plus-output", "prompt-only", "decoder-prompt", "llamacpp", "max-tokens", "max-completion-tokens"],
     )
     def test_context_overflow_propagation_flag(
         self,
@@ -861,6 +916,8 @@ class TestApp:
         responses_api: bool,
         use_completions_api: bool,
         error_content: bytes,
+        expected_code: str | None,
+        expected_param: str | None,
     ) -> None:
         server = self._setup_server(monkeypatch, propagate_context_overflow_errors=propagate)
         server.config.use_completions_api = use_completions_api
@@ -882,8 +939,18 @@ class TestApp:
         )
 
         if propagate:
+            # The engine's message and param are preserved verbatim inside OpenAI's error envelope.
+            # vLLM's raw body carries the integer 400 as its code, which OpenAI-compatible harnesses
+            # cannot match; the string code tells them whether compacting the prompt is the remedy.
             assert response.status_code == 400
-            assert response.json() == json.loads(error_content)
+            assert response.json() == {
+                "error": {
+                    "message": json.loads(error_content)["error"]["message"],
+                    "type": "invalid_request_error",
+                    "param": expected_param,
+                    "code": expected_code,
+                }
+            }
         else:
             assert response.status_code == 200
             if responses_api:
@@ -895,6 +962,74 @@ class TestApp:
         unused_method = mock_client.create_chat_completion if use_completions_api else mock_client.create_completion
         used_method.assert_awaited_once()
         unused_method.assert_not_awaited()
+
+    def test_streaming_responses_context_overflow_is_an_http_400_before_the_stream(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # Generation is buffered, so nothing has been sent when the engine refuses: the streaming
+        # request gets the same HTTP 400 envelope as a plain one, which is how OpenAI answers an
+        # overflow on a streaming request and what the harnesses handle.
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/responses",
+            json={"model": "dummy_model", "stream": True, "input": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "context_length_exceeded"
+        assert response.json()["error"]["message"] == "maximum context length"
+
+    def test_streaming_chat_completions_context_overflow_after_the_keepalive_carries_the_envelope(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # Once the keepalive has committed the SSE headers, the refusal can only be an error event;
+        # it carries the same envelope as the HTTP path, so a chat-SSE harness can classify it too.
+        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = (
+            b'{"error":{"message":"Input length (32818) exceeds model\'s maximum context length (32768).",'
+            b'"type":"BadRequestError","param":null,"code":400}}'
+        )
+
+        async def slow_refusal(**_kwargs):
+            await asyncio.sleep(0.05)
+            raise error
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=slow_refusal)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert response.text.startswith(": keep-alive")
+        error_lines = [line for line in response.text.splitlines() if line.startswith("data: ")]
+        payload = json.loads(error_lines[-1][len("data: ") :])
+        assert payload == {
+            "error": {
+                "message": "Input length (32818) exceeds model's maximum context length (32768).",
+                "type": "invalid_request_error",
+                "param": None,
+                "code": "context_length_exceeded",
+            }
+        }
 
     @mark.parametrize("use_completions_api", [False, True])
     def test_an_engine_error_the_server_does_not_handle_is_logged_with_its_body(

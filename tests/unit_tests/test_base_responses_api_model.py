@@ -865,6 +865,55 @@ def test_exception_http_details_tolerates_lazy_response_failure():
     assert _exception_http_details(error) == (503, b"")
 
 
+def test_context_overflow_error_fields_reads_the_engine_body_and_the_marked_code():
+    from nemo_gym.base_responses_api_model import (
+        CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+        CONTEXT_OVERFLOW_ERROR_CODE_ATTRIBUTE,
+        context_overflow_error_fields,
+    )
+
+    overflow = (
+        "This model's maximum context length is 4096 tokens. However, you requested 256 output tokens and "
+        "your prompt contains 4000 input tokens, for a total of 4256 tokens. Please reduce the length of the "
+        "input prompt or the number of requested output tokens."
+    )
+
+    # vLLM 0.10.1 and later nest the message, param and integer code inside an "error" object: the
+    # message and param come back verbatim, and the code defaults to OpenAI's overflow code.
+    error = RuntimeError("400, message='Bad Request'")
+    error.response_content = json.dumps(
+        {"error": {"message": overflow, "type": "BadRequestError", "param": "input_tokens", "code": 400}}
+    ).encode()
+    assert context_overflow_error_fields(error) == (overflow, CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, "input_tokens")
+
+    # The code is whatever the server stored when it marked the error; a refusal of the request's own
+    # max_tokens carries none.
+    setattr(error, CONTEXT_OVERFLOW_ERROR_CODE_ATTRIBUTE, None)
+    error.response_content = json.dumps(
+        {"error": {"message": "max_tokens must be at least 1, got 0.", "param": None, "code": 400}}
+    ).encode()
+    assert context_overflow_error_fields(error) == ("max_tokens must be at least 1, got 0.", None, None)
+
+    # Older engines put the message at the top level; that shape is still read.
+    flat = RuntimeError("400, message='Bad Request'")
+    flat.response_content = json.dumps(
+        {"object": "error", "message": "maximum context length is 4096 tokens", "code": 400}
+    ).encode()
+    assert context_overflow_error_fields(flat) == (
+        "maximum context length is 4096 tokens",
+        CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+        None,
+    )
+
+    # A non-JSON body, or JSON without a message string in either shape, falls back to the raw text
+    # so no information is lost; a missing body yields an empty message rather than an exception.
+    flat.response_content = b"upstream exploded in a non-JSON way"
+    assert context_overflow_error_fields(flat)[0] == "upstream exploded in a non-JSON way"
+    flat.response_content = b'{"error": "nested string"}'
+    assert context_overflow_error_fields(flat)[0] == '{"error": "nested string"}'
+    assert context_overflow_error_fields(RuntimeError("bare")) == ("", CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, None)
+
+
 # --- capture-store config + init failure ---
 def test_model_call_capture_keys_are_reserved_global_config():
     assert {"observability_enabled", "model_call_capture_dir", "token_id_capture"} <= set(
