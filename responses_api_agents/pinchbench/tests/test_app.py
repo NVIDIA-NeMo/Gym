@@ -125,11 +125,12 @@ def test_build_spec_from_config(tmp_path):
     assert spec.env["OPENCLAW_GATEWAY_TOKEN"]
 
 
-def _write_result(out_dir, task_id, mean, gtype, breakdown, notes):
+def _write_result(out_dir, task_id, mean, gtype, breakdown, notes, **task_fields):
     payload = {
         "tasks": [
             {
                 "task_id": task_id,
+                **task_fields,
                 "grading": {
                     "runs": [
                         {
@@ -157,6 +158,17 @@ def test_parse_result_hybrid(tmp_path):
     assert r["breakdown"]["llm_judge.quality"] == 0.9
     assert r["notes"] == "looks good"
     assert r["status"] == "success"
+
+
+def test_parse_result_propagates_skill_timeout(tmp_path):
+    # benchmark.py records the agent run's own outcome next to the grading; a timed-out
+    # run is still graded, so the reward must come through unchanged
+    _write_result(tmp_path, "task_x", 0.4, "automated", {}, "", status="timeout", timed_out=True, execution_time=900.5)
+    r = make_agent()._parse_result("task_x", tmp_path)
+    assert r["reward"] == pytest.approx(0.4)
+    assert r["status"] == "timeout"
+    assert r["timed_out"] is True
+    assert r["execution_time"] == pytest.approx(900.5)
 
 
 def test_parse_result_missing_task(tmp_path):
@@ -555,6 +567,24 @@ async def test_non_clean_exit_rc_present_in_raw_rollout(tmp_path, monkeypatch):
     monkeypatch.setattr(agent, "_collect_transcript", lambda *_: ([], ""))
     resp = await agent.run(body=_run_body())
     assert resp.raw_rollout["non_clean_exit_rc"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_surfaces_skill_timeout(tmp_path, monkeypatch):
+    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
+
+    async def timed_out_run(task_id, out_dir, rollout_id=None):
+        _write_result(
+            out_dir, task_id, 0.25, "automated", {}, "", status="timeout", timed_out=True, execution_time=721.0
+        )
+
+    monkeypatch.setattr(agent, "_run_in_sandbox", timed_out_run)
+    monkeypatch.setattr(agent, "_collect_transcript", lambda *_: ([], ""))
+    resp = await agent.run(body=_run_body())
+    assert resp.reward == pytest.approx(0.25)
+    assert resp.status == "timeout"
+    assert resp.raw_rollout["timed_out"] is True
+    assert resp.raw_rollout["execution_time"] == pytest.approx(721.0)
 
 
 # --- signal-kill detection in _run_in_apptainer_direct ---
