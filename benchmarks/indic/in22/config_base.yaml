@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/wmt_translation/configs/wmt_translation.yaml
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+num_repeats: 1
+responses_create_params:
+  max_output_tokens: 4096
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      uses_reasoning_parser: false
+      uses_interleaved_reasoning: false
+      chat_template_kwargs:
+        enable_thinking: false
+      sampling_overrides:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: -1
+        seed: 42
+
+in22_wmt_translation_resources_server:
+  _inherit_from: wmt_translation
+  resources_servers:
+    wmt_translation:
+      compute_comet: false
+      language_consistency_backend: null
+      strip_reasoning: true
+      metric_profile: in22
