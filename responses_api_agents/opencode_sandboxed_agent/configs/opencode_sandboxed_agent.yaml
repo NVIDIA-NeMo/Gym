@@ -21,6 +21,11 @@ opencode_sandboxed_agent:
       remote_opencode_install_script_path: null
       remote_opencode_binary_path: null
       remote_opencode_musl_binary_path: null
+
+      # Identity for the in-sandbox OpenCode process and every tool call the model makes (account
+      # name for `su`, or a uid). null = image default. A row-level `agent_user` echoed by
+      # /seed_session wins. A non-root value requires a root-default image with that account.
+      agent_user: null
       # Optional host-local rg executable to upload for network-restricted sandboxes.
       local_ripgrep_binary_path: null
 

@@ -47,6 +47,20 @@ checksum before use. Gym uploads it through the sandbox file API and installs it
 alongside OpenCode before execution; no sandbox internet access or root package
 installation is needed. The default is `null`, preserving existing behavior.
 
+## Task text and agent identity
+
+The task reaches `opencode run` on standard input (`printf '%s' <task> | opencode run ...`). Passed as a
+command-line argument, OpenCode wraps it in double quotes and escapes the quotes inside it before the model
+sees it, so the model would read a different task text than the dataset row holds.
+
+`agent_user` (agent config, or a row field that the resources server echoes from `/seed_session`; the row wins)
+is the account OpenCode, and so every tool call the model makes, runs as: an account name for `su`, or a uid.
+`null`, `root` and `0` keep the image default. A non-root identity needs a root-default image on which the
+account exists; the agent checks this before the install (`agent_user.py`, `check_agent_user`) and fails the
+rollout otherwise. The install, the run, `session list`, the export and the database snapshot all run as that
+account, with `$HOME` reset to its home, and the verify request carries the identity the agent ran as. The
+TB2.1 resources server applies the same rules (`resources_servers/terminal_bench_2_1/agent_user.py`).
+
 ## Offline scientific evaluation with OpenCode or Pi
 
 The dedicated `opencode_sandboxed_agent` and `pi_sandboxed_agent` run their native

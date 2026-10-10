@@ -30,7 +30,7 @@ from uuid import uuid4
 from anyio import CancelScope
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
-from pydantic import ConfigDict, Field, FilePath
+from pydantic import ConfigDict, Field, FilePath, field_validator
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -88,6 +88,13 @@ from responses_api_agents.opencode_agent.runtime import (
     OBSERVABILITY_PATCH,
     OPENCODE_VERSION,
     apply_observability_patch,
+)
+from responses_api_agents.opencode_sandboxed_agent.agent_user import (
+    AgentUser,
+    agent_home_prefix,
+    check_agent_user,
+    is_root_agent_user,
+    normalize_agent_user,
 )
 
 
@@ -434,6 +441,15 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
     artifacts_dir: Optional[str] = None
     opencode_model_call_timeout: Optional[int] = None
+    # Identity for the in-sandbox OpenCode process, and so for every tool call the model makes: an account name for
+    # `su`, or a uid. None = image default. A row-level `agent_user` echoed by the resources server's /seed_session
+    # wins; a non-root value needs a root-default image with that account (checked before the install).
+    agent_user: AgentUser = None
+
+    @field_validator("agent_user", mode="before")
+    @classmethod
+    def _validate_agent_user(cls, value: Any) -> Any:
+        return normalize_agent_user(value)
 
     # Sandbox config
     sandbox_provider: str
@@ -528,6 +544,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         self._sem = Semaphore(self.config.concurrency) if self.config.concurrency else nullcontext()
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
+        # Effective identity per session (row echo, else the lane config), keyed like `_sandbox_id_to_sandbox`.
+        self._sandbox_id_to_agent_user: Dict[str, AgentUser] = dict()
 
     async def _start_sandbox(self, sandbox_id: Optional[str] = None, workdir: Optional[str] = None) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
@@ -777,6 +795,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if self.config.tool_servers and not isinstance(getattr(request.state, "_ng_opencode_mcp", None), dict):
             raise ValueError("Configured tool servers require a seeded /run request")
         sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
+        # `_run()` records the effective identity per session; a direct call gets the lane default.
+        agent_user = self._sandbox_id_to_agent_user.get(request.cookies["sandbox_id"], self.config.agent_user)
+        if not is_root_agent_user(agent_user):
+            # Fail closed before anything model-controlled runs: a wrong image or a missing account stops here.
+            await check_agent_user(sandbox, agent_user)
+        home_prefix = agent_home_prefix(agent_user)
 
         query = None
         # This can be modified to handle system/developer prompts too.
@@ -860,7 +884,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # and there is no way to set it to null.
         # Here, we set an exorbitantly high number that cannot ever be reached.
         # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
-        command = f"""
+        # Every exec that touches the install or the session store runs as `agent_user` (None keeps the image default)
+        # and, under a non-root identity, first resets $HOME to that account's home (`agent_home_prefix`).
+        # The task reaches `opencode run` on standard input: as a command-line argument OpenCode wraps it in double
+        # quotes and escapes the quotes inside it (cli/cmd/run.ts), so the model would read a different task text.
+        command = f"""{home_prefix}
         echo "Shell: $SHELL" \
         && {install_str} \
         {ripgrep_install_str} \
@@ -868,8 +896,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
-        && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
-            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
+        && printf '%s' {quote(query)} | NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
+            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} \
         && echo "OpenCode run finished"
         """
 
@@ -884,6 +912,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             result = await sandbox.exec(
                 command=command,
                 timeout_s=self.config.sandbox_timeout,
+                user=agent_user,
             )
         except Exception as exc:
             result = None
@@ -908,20 +937,22 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
         try:
             session_list_result = await sandbox.exec(
-                command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
+                command=f"{home_prefix}export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
                 env=session_env,
                 timeout_s=self.config.sandbox_timeout,
+                user=agent_user,
             )
             if session_list_result.return_code != 0:
                 raise RuntimeError(f"Failed to list OpenCode sessions: {session_list_result}")
             session_id = _extract_opencode_session_id(session_list_result.stdout or "")
             export_result = await sandbox.exec(
                 command=(
-                    "export PATH=$HOME/.opencode/bin:$PATH "
+                    f"{home_prefix}export PATH=$HOME/.opencode/bin:$PATH "
                     f"&& opencode export {quote(session_id)} > {quote(export_remote_fpath)}"
                 ),
                 env=session_env,
                 timeout_s=self.config.sandbox_timeout,
+                user=agent_user,
             )
         except Exception:
             export_result = None
@@ -967,9 +998,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 # VACUUM INTO includes committed WAL data in one consistent, standalone snapshot.
                 snapshot_sql = "VACUUM INTO '" + snapshot_remote_fpath.replace("'", "''") + "'"
                 snapshot_result = await sandbox.exec(
-                    command=f"export PATH=$HOME/.opencode/bin:$PATH && opencode db {quote(snapshot_sql)}",
+                    command=f"{home_prefix}export PATH=$HOME/.opencode/bin:$PATH && opencode db {quote(snapshot_sql)}",
                     env=session_env,
                     timeout_s=self.config.sandbox_timeout,
+                    user=agent_user,
                 )
                 if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:
                     raise RuntimeError(f"OpenCode database snapshot failed: {snapshot_result.stderr}")
@@ -1137,6 +1169,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request.state._ng_observation_invocation_id = rollout_id
         observations = None
         try:
+            # The resources server is the authority for the per-row identity: a row value (including the explicit
+            # "root" / 0 image default) wins over the lane config. Inside the try, so a malformed echo stops the sandbox.
+            row_agent_user = normalize_agent_user(seed_session_result.get("agent_user"))
+            agent_user = row_agent_user if row_agent_user is not None else self.config.agent_user
+            self._sandbox_id_to_agent_user[session_key] = agent_user
+            # The verifier learns the identity the agent actually ran as.
+            verify_body = (
+                body
+                if agent_user is None
+                else OpenCodeSandboxedAgentRunRequest.model_validate(body.model_dump() | {"agent_user": agent_user})
+            )
             response = await self.responses(request, body.responses_create_params)
             run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
             observations = run_result.pop("_ng_agent_observations", None)
@@ -1144,7 +1187,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             response_dict = await verify_agent_response(
                 self.server_client,
                 self.config.resources_server,
-                body,
+                verify_body,
                 response,
                 cookies,
                 force_zero_reward=self.config.execution_failure_reward_zero
@@ -1165,6 +1208,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 finally:
                     self._sandbox_id_to_sandbox.pop(session_key, None)
                     self._sandbox_id_to_run_result.pop(session_key, None)
+                    self._sandbox_id_to_agent_user.pop(session_key, None)
 
         response_dict |= run_result
         if trajectory is not None:
