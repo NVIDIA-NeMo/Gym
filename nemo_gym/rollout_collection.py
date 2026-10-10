@@ -19,6 +19,7 @@ import glob as glob_module
 import json
 import logging
 import os
+import signal
 import tempfile
 import time
 import warnings
@@ -1186,6 +1187,143 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
 NG_ELAPSED_KEY = "elapsed_seconds"
 
 
+class RunTimingReport:
+    """Start coverage, wall-clock-limit hits and long rollouts of one collection, as a two-row
+    table (this run | healthy). Diagnostic only: it never stops the run."""
+
+    def __init__(
+        self,
+        *,
+        total: int,
+        start_within_s: float,
+        start_min_fraction: float,
+        all_started_within_s: Optional[float],
+        long_rollout_s: Optional[float],
+        long_rollout_max_fraction: float,
+        timed_out_max_fraction: float,
+    ) -> None:
+        self._total = total
+        self._start_within_s = start_within_s
+        self._start_min_fraction = start_min_fraction
+        self._all_started_within_s = all_started_within_s if all_started_within_s is not None else start_within_s
+        self._long_rollout_s = long_rollout_s
+        self._long_rollout_max_fraction = long_rollout_max_fraction
+        self._timed_out_max_fraction = timed_out_max_fraction
+        self._t0 = time.monotonic()
+        self._start_offsets: List[float] = []
+        self._durations: List[float] = []
+        self._timed_out = 0
+
+    def record_start(self, now: float) -> None:
+        self._start_offsets.append(now - self._t0)
+
+    def record_result(self, result: Mapping[str, Any], seconds: float) -> None:
+        self._durations.append(seconds)
+        if result.get("timed_out") or result.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded":
+            self._timed_out += 1
+
+    def table(self) -> str:
+        elapsed = time.monotonic() - self._t0
+        started = len(self._start_offsets)
+        all_started = started >= self._total
+        window_min, all_by_min = self._start_within_s / 60, self._all_started_within_s / 60
+        rows: List[Tuple[str, str, str, bool]] = []
+        if all_started:
+            started_by = max(self._start_offsets) / 60
+            rows.append(
+                (
+                    "all rollouts started by",
+                    f"{started_by:.1f} min",
+                    f"<= {all_by_min:.0f} min",
+                    started_by <= all_by_min,
+                )
+            )
+        else:
+            # Judged only once the deadline has passed; until then the count is progress, not a failure.
+            rows.append(
+                (
+                    "rollouts started so far",
+                    f"{started}/{self._total}",
+                    f"all by {all_by_min:.0f} min",
+                    elapsed <= self._all_started_within_s,
+                )
+            )
+        within = sum(1 for o in self._start_offsets if o <= self._start_within_s) / self._total if self._total else 0.0
+        window_open = not all_started and elapsed <= self._start_within_s
+        rows.append(
+            (
+                f"started within {window_min:.0f} min" + (" (window open)" if window_open else ""),
+                f"{within:.1%}",
+                f">= {self._start_min_fraction:.0%}",
+                window_open or within >= self._start_min_fraction,
+            )
+        )
+        n = len(self._durations)
+        if n:
+            timed_out = self._timed_out / n
+            rows.append(
+                (
+                    "ended by wall-clock limit",
+                    f"{timed_out:.1%} ({self._timed_out})",
+                    f"<= {self._timed_out_max_fraction:.0%}",
+                    timed_out <= self._timed_out_max_fraction,
+                )
+            )
+            if self._long_rollout_s is not None:
+                long = sum(1 for d in self._durations if d > self._long_rollout_s) / n
+                rows.append(
+                    (
+                        f"longer than {self._long_rollout_s / 60:.0f} min",
+                        f"{long:.1%}",
+                        f"<= {self._long_rollout_max_fraction:.0%}",
+                        long <= self._long_rollout_max_fraction,
+                    )
+                )
+        width = max(len(r[0]) for r in rows)
+        lines = ["Run timing summary (this run | healthy):"]
+        for label, value, healthy, ok in rows:
+            lines.append(f"  {label:<{width}} : {value:>12} | {healthy}" + ("" if ok else "   <-- WARNING"))
+        return "\n".join(lines)
+
+
+_NO_SIGTERM_HOOK = object()
+
+
+def _print_on_sigterm(render: Callable[[], str]) -> Any:
+    """Print render() when Slurm's time limit sends SIGTERM, then terminate as before.
+
+    Python's default SIGTERM action exits without unwinding, so nothing printed in a ``finally``
+    survives a time-limit kill. Returns the previous handler for ``_restore_sigterm``, or
+    ``_NO_SIGTERM_HOOK`` when no hook could be installed.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def _on_sigterm() -> None:
+            try:
+                print(render(), flush=True)
+            finally:
+                loop.remove_signal_handler(signal.SIGTERM)
+                signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
+                os.kill(os.getpid(), signal.SIGTERM)
+
+        loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+        return previous
+    except (NotImplementedError, RuntimeError, ValueError):
+        return _NO_SIGTERM_HOOK
+
+
+def _restore_sigterm(previous: Any) -> None:
+    if previous is _NO_SIGTERM_HOOK:
+        return
+    try:
+        asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
+    except (NotImplementedError, RuntimeError, ValueError):
+        pass
+
+
 class DispatchLatencyTracker:
     """Per-task latency observed by the dispatcher, and the drain margin from it.
 
@@ -1643,6 +1781,58 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         ),
     )
 
+    dispatch_start_report_within_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Enable the run timing summary: the share of rollouts started within this many seconds of "
+            "collection start, the last start, the share stopped by a per-rollout wall-clock limit and "
+            "the share of long rollouts, printed every timing_summary_interval_s, at the end and on "
+            "SIGTERM. Diagnostic only, nothing is aborted."
+        ),
+    )
+    dispatch_start_report_min_fraction: float = Field(
+        default=0.99,
+        ge=0,
+        le=1,
+        description="Share of rollouts expected to have started within dispatch_start_report_within_s; below it the report is a WARNING.",
+    )
+    dispatch_all_started_within_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Seconds into collection by which every rollout is expected to have started; the timing "
+            "summary warns when the last start is later. Defaults to dispatch_start_report_within_s."
+        ),
+    )
+    long_rollout_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="Rollouts running longer than this many seconds are counted in the end-of-run timing summary.",
+    )
+    long_rollout_max_fraction: float = Field(
+        default=0.05,
+        ge=0,
+        le=1,
+        description="Share of rollouts longer than long_rollout_s above which the timing summary warns.",
+    )
+    timing_summary_interval_s: Optional[float] = Field(
+        default=600,
+        ge=0,
+        description=(
+            "Print the run timing summary every this many seconds while rollouts are collected. "
+            "Requires dispatch_start_report_within_s; 0 or null disables the periodic print."
+        ),
+    )
+    timed_out_max_fraction: float = Field(
+        default=0.01,
+        ge=0,
+        le=1,
+        description=(
+            "Share of rollouts ended by a per-rollout wall-clock limit (result field `timed_out`, or "
+            "failure class `timeout_exceeded`) above which the timing summary warns."
+        ),
+    )
     retry_terminal_timeouts: bool = Field(
         default=False,
         description=(
@@ -2753,6 +2943,19 @@ class RolloutCollectionHelper(BaseModel):
         persisted_count = len(persisted_success_keys)
         collection_succeeded = False
         latency_tracker = DispatchLatencyTracker()
+        run_timing: Optional[RunTimingReport] = None
+        if config.dispatch_start_report_within_s is not None:
+            run_timing = RunTimingReport(
+                total=len(input_rows),
+                start_within_s=config.dispatch_start_report_within_s,
+                start_min_fraction=config.dispatch_start_report_min_fraction,
+                all_started_within_s=config.dispatch_all_started_within_s,
+                long_rollout_s=config.long_rollout_s,
+                long_rollout_max_fraction=config.long_rollout_max_fraction,
+                timed_out_max_fraction=config.timed_out_max_fraction,
+            )
+        timing_heartbeat: Optional[asyncio.Task] = None
+        sigterm_previous: Any = _NO_SIGTERM_HOOK
         if config.dispatch_budget_s is not None:
             print(
                 f"Dispatch budget: {config.dispatch_budget_s / 60:.0f} min. New rollouts stop being "
@@ -2783,6 +2986,17 @@ class RolloutCollectionHelper(BaseModel):
                             if line.strip():
                                 upload_spool.write(orjson.dumps(_rollout_for_export(orjson.loads(line))) + b"\n")
 
+            if run_timing is not None:
+
+                async def _timing_heartbeat() -> None:
+                    while True:
+                        await asyncio.sleep(config.timing_summary_interval_s)
+                        tqdm.write(run_timing.table())
+
+                if config.timing_summary_interval_s:
+                    timing_heartbeat = asyncio.create_task(_timing_heartbeat())
+                sigterm_previous = _print_on_sigterm(run_timing.table)
+
             completion_iterator = self._run_examples_with_metadata(
                 input_rows,
                 semaphore=semaphore,
@@ -2792,6 +3006,7 @@ class RolloutCollectionHelper(BaseModel):
                 dispatch_budget_s=config.dispatch_budget_s,
                 drain_margin_s=config.drain_margin_s,
                 latency_tracker=latency_tracker,
+                **({"run_timing": run_timing} if run_timing is not None else {}),
             )
             for future in completion_iterator:
                 completed = await future
@@ -3061,6 +3276,11 @@ class RolloutCollectionHelper(BaseModel):
             collection_succeeded = True
         finally:
             try:
+                if timing_heartbeat is not None:
+                    timing_heartbeat.cancel()
+                _restore_sigterm(sigterm_previous)
+                if run_timing is not None:
+                    print(run_timing.table())
                 if isinstance(completion_iterator, _BoundedCompletionIterator):
                     await completion_iterator.aclose()
             finally:
@@ -3620,6 +3840,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
+        run_timing: Optional[RunTimingReport] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -3695,6 +3916,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
                 started = time.monotonic()
                 started_at = time.time()
+                if run_timing is not None:
+                    run_timing.record_start(started)
                 res = None
                 succeeded = False
                 try:
@@ -3702,6 +3925,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     await raise_for_status(res)
                     result = await get_response_json(res)
+                    if run_timing is not None and isinstance(result, Mapping):
+                        run_timing.record_result(result, time.monotonic() - started)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time.time() - started_at) * 1000
