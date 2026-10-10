@@ -47,6 +47,14 @@ gym eval run --no-serve \
 `prepare.py` writes `data/swebench_verified.jsonl`. Each row must resolve to a
 task image through its `image` field or `container_formatter`.
 
+With the Apptainer sandbox provider, `container_formatter` may instead be one or
+more local `.sif` path templates, for example `/images/r2e_gym/{instance_id}.sif`.
+A `.sif` template takes precedence over the row's `image` / `docker_image`, so
+rollouts never pull from a registry. Like `swe_agents`, the resolver tries the raw
+`instance_id`, R2E-Gym's `<repo>_final_<hash>` name, and the `__` to `_1776_` /
+`_s_` rewrites, and accepts exact file names only. A row can also pin an image
+with `sif_path` in its metadata.
+
 ## Agents
 
 The included configurations run Hermes Agent, Claude Code, Cline, Pi, OpenClaw, or OpenCode

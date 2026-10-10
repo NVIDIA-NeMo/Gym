@@ -15,6 +15,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import re
 import shlex
 import shutil
 import tarfile
@@ -151,7 +152,13 @@ class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     agent_config_class: str = Field(description="Agent config class name, e.g. HermesAgentConfig")
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
 
-    container_formatter: str = Field(description="Baked task image containing the AnySWE agent runtime")
+    container_formatter: str | list[str] = Field(
+        description=(
+            "Task image template, formatted with the row's instance_id. Either an OCI image "
+            "(e.g. swebench/sweb.eval.x86_64.{instance_id}) or one or more local Apptainer .sif path templates "
+            "(e.g. /images/r2e_gym/{instance_id}.sif). A .sif template takes precedence over the row's image."
+        )
+    )
     sandbox_provider: str | Dict[str, Any] = "sandbox"
     sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
     sandbox_model_base_url: Optional[str] = None
@@ -307,16 +314,53 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
 
     @staticmethod
-    def _sandbox_image(problem_info: Dict[str, Any]) -> str:
+    def _sif_candidates(instance_id: str, dataset_name: str) -> list[str]:
+        """Image names to try for one instance, following swe_agents' naming conventions.
+
+        The raw id first, then R2E-Gym's ``<repo>_final_<hash>``, then the ``__`` to ``_1776_`` / ``_s_``
+        rewrites (original case, then lowercase).
+        """
+        candidates = [instance_id]
+        if "R2E-Gym" in dataset_name:
+            candidates.append(re.sub(r"[^_]+__([^-]+)-", lambda m: m.group(1).lower() + "_final_", instance_id))
+        for replacement in ("_1776_", "_s_"):
+            replaced = instance_id.replace("__", replacement)
+            candidates.extend([replaced, replaced.lower()])
+        return list(dict.fromkeys(candidates))
+
+    @classmethod
+    def _sandbox_sif(cls, problem_info: Dict[str, Any], formatters: list[str]) -> str:
+        # Exact names only: a glob such as "{instance_id}*.sif" would resolve psf__requests-1142 to
+        # psf__requests-11420.sif. Put any fixed prefix or suffix in the template instead.
+        instance_id = problem_info["instance_id"]
+        candidates = cls._sif_candidates(instance_id, str(problem_info.get("dataset_name", "")))
+        tried = [formatter.format(instance_id=candidate) for formatter in formatters for candidate in candidates]
+        for path in tried:
+            if Path(path).exists():
+                return path
+        raise FileNotFoundError(f"no .sif image found for instance {instance_id!r}; tried {tried}")
+
+    @classmethod
+    def _sandbox_image(cls, problem_info: Dict[str, Any]) -> str:
         instance = problem_info.get("instance_dict", {})
         instance = json.loads(instance) if isinstance(instance, str) else instance
+        formatters = problem_info.get("container_formatter") or []
+        formatters = [formatters] if isinstance(formatters, str) else list(formatters)
+        explicit_sif = problem_info.get("sif_path") or instance.get("sif_path")
+        if explicit_sif:
+            if not Path(str(explicit_sif)).exists():
+                raise FileNotFoundError(f"sif_path does not exist: {explicit_sif}")
+            return str(explicit_sif)
+        # Local .sif images win over the row's image, so rollouts never pull it from a registry.
+        sif_formatters = [formatter for formatter in formatters if formatter.endswith(".sif")]
+        if sif_formatters:
+            return cls._sandbox_sif(problem_info, sif_formatters)
         explicit_image = problem_info.get("image") or instance.get("image") or instance.get("docker_image")
         if explicit_image:
             return str(explicit_image).removeprefix("docker://")
-        formatter = problem_info["container_formatter"]
-        if formatter.endswith(".sif"):
-            raise ValueError("sandbox_provider requires a container image, not a .sif file")
-        formatter = formatter.removeprefix("docker://")
+        if not formatters:
+            raise ValueError("container_formatter is required when the row carries no image")
+        formatter = formatters[0].removeprefix("docker://")
         instance_id = problem_info["instance_id"].replace("__", "_1776_").lower()
         image = formatter.format(instance_id=instance_id)
         if ":" not in image.rsplit("/", 1)[-1]:
