@@ -533,21 +533,27 @@ def _bare_terminus(llm):
 async def test_decision_results_and_subagent_purposes_land_on_the_calls(monkeypatch):
     from harbor.agents.terminus_2 import Terminus2
 
-    llm, observations, _ = _observed_llm(["ok", "ok", "ok"])
+    llm, observations, _ = _observed_llm(["ok", "ok", "ok", "ok"])
     terminus = _bare_terminus(llm)
+    parses = iter([([object(), object()], False, "parsed"), ([], False, "ERROR: Could not parse JSON")])
 
     async def fake_interaction(self, *_args, **_kwargs):
         response = await llm.call("decide", message_history=[])
         observations.decision_response = response
-        return ([object(), object()], False, "parsed")
+        return next(parses)
 
     monkeypatch.setattr(Terminus2, "_handle_llm_interaction", fake_interaction)
     result = await terminus._handle_llm_interaction()
     assert result[1] is False
-    [decision] = observations.trajectory.model_calls
-    assert decision.parsed_tool_calls == 2 and decision.task_complete is False
+    await terminus._handle_llm_interaction()  # Harbor's parser rejected this one: no command batch will run
+    decision, unparsable = observations.trajectory.model_calls
+    assert (decision.parsed_tool_calls, decision.task_complete, decision.parse_error) == (2, False, False)
+    assert (unparsable.parsed_tool_calls, unparsable.parse_error) == (0, True)
     assert decision.processed_at is not None and decision.processed_at >= decision.completed_at
-    assert [t.model_calls[0].model_call_id for t in observations.trajectory.turns] == [decision.model_call_id]
+    assert [t.model_calls[0].model_call_id for t in observations.trajectory.turns] == [
+        decision.model_call_id,
+        unparsable.model_call_id,
+    ]
 
     # Harbor's compaction sub-agents are told apart by the filename suffix it passes to _run_subagent.
     async def fake_subagent(self, *_args, **_kwargs):
@@ -557,7 +563,7 @@ async def test_decision_results_and_subagent_purposes_land_on_the_calls(monkeypa
     await terminus._run_subagent(filename_suffix="questions")
     await llm.call("short summary")  # no message_history: Harbor's short-summary fallback
     purposes = [c.model_call_purpose for c in observations.trajectory.model_calls]
-    assert purposes == ["agent_step", "compaction_questions", "compaction_fallback"]
+    assert purposes == ["agent_step", "agent_step", "compaction_questions", "compaction_fallback"]
 
 
 @pytest.mark.asyncio

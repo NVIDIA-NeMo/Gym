@@ -4,14 +4,18 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
 import orjson
+import pytest
 from ng_latency.build import build_run_timeline
 from ng_latency.check import run_checks
+from ng_latency.derive import derive_trial
+from ng_latency.project import project_rollout
 
-from tests.unit_tests.latency.conftest import opencode_row, terminus_row
+from tests.unit_tests.latency.conftest import T0, opencode_row, terminus_row
 
 
 def _run(tmp_path: Path, rows: list[dict]) -> Path:
@@ -66,6 +70,63 @@ def test_a_call_without_a_server_record_is_a_coverage_warning_not_a_failure(tmp_
     assert report["passed"] and set(report["warnings"]) == {"server_coverage", "unverified_joins"}
     coverage = [c for c in report["checks"] if c["name"] == "server_coverage"][0]
     assert coverage["details"] == ["coverage=0.67 threshold=0.99"]
+
+
+def test_a_decision_without_commands_has_harbors_screen_read_but_no_batch(tmp_path: Path) -> None:
+    """Harbor runs its command batch for every decision it could parse, with or without commands: the completion
+    claim has an exec time (the screen read alone) and no batch span, a response its parser rejected has neither.
+    The check walks the lists in decision order; the derivation counts the claim as an empty batch and the time
+    Terminus spends after either decision as known harness time."""
+    row = terminus_row()
+    t = T0
+
+    def decision(call_id: str, start: float, end: float, **fields) -> dict:
+        call = copy.deepcopy(row["ng_trajectory"]["model_calls"][0])
+        call.update(
+            model_call_id=call_id,
+            client_call_id=f"t2-{call_id}",
+            started_at=t + start,
+            completed_at=t + end,
+            duration_ms=(end - start) * 1000,
+            processed_at=t + end + 0.01,
+            server_started_at=t + start + 0.01,
+            server_completed_at=t + end - 0.01,
+            server_duration_ms=(end - start) * 1000 - 20,
+            parsed_tool_calls=0,
+            **fields,
+        )
+        call["response_metadata"] = {**call["response_metadata"], "response_id": f"resp_{call_id}", "engine": None}
+        call["attempts"] = [
+            {
+                **call["attempts"][0],
+                "started_at": t + start,
+                "completed_at": t + end,
+                "duration_ms": (end - start) * 1000,
+            }
+        ]
+        return call
+
+    unparsable = decision("cap-5", 71.4, 71.5, task_complete=False, parse_error=True)
+    claim = decision("cap-4", 71.6, 71.8, task_complete=True, parse_error=False)
+    row["ng_trajectory"]["model_calls"] += [unparsable, claim]
+    row["model_call_times"] += [0.1, 0.2]
+    row["command_exec_times"].append(0.2)  # the claim's screen read; nothing for the unparsable response
+    usage = {"input_tokens": 1000, "output_tokens": 60, "output_tokens_details": {"reasoning_tokens": 20}}
+    row["usages"] += [usage, usage]
+    run_dir = _run(tmp_path, [row])
+    report = run_checks(run_dir)
+    assert report["passed"], report["failed_checks"]
+    batches = [c for c in report["checks"] if c["name"] == "terminus_command_exec_times"][0]
+    assert batches["samples"] == 5 and batches["details"] == []
+    trial = derive_trial(project_rollout(row), row, replica="replica_0")
+    m = trial["metrics"]
+    assert m["agent_steps"] == 4 and m["tool_batches"] == 2
+    assert m["tool_time_by_operation"]["empty_batches"] == 1
+    assert m["no_action_turn"] == {"total": 1, "by_reason": {"parse_failure": 1}}
+    # the two batches' reads (0.1 s each), the prompt after the unparsable response (0.1 s) and the claim's read
+    # until the agent's end (0.2 s)
+    assert m["known_no_model_tool_time_by_event"]["terminus_observation_assembly"] == pytest.approx(0.5)
+    assert m["unexplained_no_model_tool_time"] == pytest.approx(9.2 - 0.3 - 0.3)
 
 
 def test_engine_time_longer_than_the_server_span_is_reported(tmp_path: Path) -> None:

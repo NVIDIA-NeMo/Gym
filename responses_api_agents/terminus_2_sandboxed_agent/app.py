@@ -458,8 +458,9 @@ class NeMoGymTerminus2(Terminus2):
         finally:
             # Record before terminal commands execute, including when parsing raises.
             observations.finish_decision(self._completed_command_batches)
-        # Harbor returns (commands, is_task_complete, ...): the parse result of the decision just recorded.
-        observations.note_decision_result(len(result[0]), bool(result[1]))
+        # Harbor returns (commands, is_task_complete, feedback, ...): the parse result of the decision just
+        # recorded. A feedback with "ERROR:" is a parse error, after which Harbor skips the command batch.
+        observations.note_decision_result(len(result[0]), bool(result[1]), "ERROR:" in (result[2] or ""))
         return result
 
     async def _run_subagent(self, *args, **kwargs):

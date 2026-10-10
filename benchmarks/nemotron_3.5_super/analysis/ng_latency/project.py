@@ -341,6 +341,7 @@ class _Projection:
                             "purpose": purpose,
                             "parsed_commands": _i(call.get("parsed_tool_calls")),
                             "task_complete": call.get("task_complete"),
+                            "parse_error": call.get("parse_error"),
                             "context_overflow": call.get("context_overflow"),
                             "processed_wall_s": processed,
                             "response_id": metadata.get("response_id"),

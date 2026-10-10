@@ -86,7 +86,8 @@ def test_per_step_tax_and_engine_vs_agent_views(summary):
     assert tax["model_per_step"]["mean"] == pytest.approx((39.0 / 2 + 18.0 / 2) / 2)
     eva = where["engine_vs_agent"]
     assert eva["calls"] == 6  # every server record of both rollouts carries vLLM's engine durations
-    assert eva["buckets"] and sum(b["calls"] for b in eva["buckets"]) == 6
+    # generated tokens come from the server record (completion = output + reasoning): 60, 400, 80 / 60, 30, 40
+    assert {b["bucket"]: b["calls"] for b in eva["buckets"]} == {"<100": 5, "100-1k": 1}
     assert all(b["agent_s"]["median"] >= b["engine_e2e_s"]["median"] for b in eva["buckets"])
     dist = summary["distributions"]
     assert set(dist["e2e_agent_time"]) == {"success", "failure"} and dist["e2e_agent_time"]["success"]["values"] == [

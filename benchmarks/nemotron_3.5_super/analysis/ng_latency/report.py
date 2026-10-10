@@ -245,11 +245,8 @@ def scan_timeline(path: Path, replica: str) -> list[RolloutTrace]:
                 trace.error_type = attrs.get("error_type") or outcome
             elif name == "model_call" and _timed(start, end):
                 trace.model.append((float(start), float(end)))
-                attrs = span.get("attrs") or {}
-                tokens = attrs.get("tokens") or {}
-                generated = sum(int(tokens.get(k) or 0) for k in ("output", "reasoning"))
                 trace.calls.append(
-                    {"span_id": span.get("span_id"), "agent_s": float(end) - float(start), "generated": generated}
+                    {"span_id": span.get("span_id"), "agent_s": float(end) - float(start), "generated": 0}
                 )
             elif name in ("tool_call", "tool_batch") and _timed(start, end):
                 trace.tool.append((float(start), float(end)))
@@ -261,6 +258,12 @@ def scan_timeline(path: Path, replica: str) -> list[RolloutTrace]:
                 call = next((c for c in trace.calls if c["span_id"] == parent), None)
                 if call is not None:
                     vllm = (span.get("attrs") or {}).get("vllm") or {}
+                    # tokens live on the server record; generated = completion (output + reasoning)
+                    tokens = (span.get("attrs") or {}).get("tokens") or {}
+                    generated = tokens.get("completion_total")
+                    if not isinstance(generated, (int, float)):
+                        generated = sum(int(tokens.get(k) or 0) for k in ("output", "reasoning"))
+                    call["generated"] = int(generated or 0)
                     call["server_s"] = float(end) - float(start)
                     call["engine_e2e_s"] = vllm.get("e2e_s") if _is_number(vllm.get("e2e_s")) else None
                     call["ttft_s"] = vllm.get("ttft_s") if _is_number(vllm.get("ttft_s")) else None

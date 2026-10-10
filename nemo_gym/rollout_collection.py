@@ -528,14 +528,17 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                         )
                     )
             merged.update(update)
-            # A harness record without its own bounds (it only named the call) takes the server's bounds.
-            for key, server_key in (
-                ("started_at", "server_started_at"),
-                ("completed_at", "server_completed_at"),
-                ("duration_ms", "server_duration_ms"),
-            ):
-                if merged.get(key) is None and merged.get(server_key) is not None:
-                    merged[key] = merged[server_key]
+            # A harness record without any bounds of its own (it only named the call) takes the server's bounds.
+            # One with wall bounds but no monotonic duration (an OpenCode step: two sandbox-clock timestamps)
+            # keeps duration_ms empty; the server's duration stays beside it in server_duration_ms.
+            if merged.get("started_at") is None and merged.get("completed_at") is None:
+                for key, server_key in (
+                    ("started_at", "server_started_at"),
+                    ("completed_at", "server_completed_at"),
+                    ("duration_ms", "server_duration_ms"),
+                ):
+                    if merged.get(server_key) is not None:
+                        merged[key] = merged[server_key]
             projected = TrajectoryModelCall.model_validate(merged)
             model_calls[position] = projected
 

@@ -4425,6 +4425,9 @@ class TestLatencyMerge:
         assert len(record.model_calls) == 2
         first, second = record.model_calls
         assert (first.started_at, first.completed_at, first.server_started_at) == (100.0, 105.0, 100.2)
+        # the step has wall bounds on the sandbox clock but no monotonic duration: the server's duration stays
+        # beside it, never in its place (D14: it ended every OpenCode call at start + server duration)
+        assert first.duration_ms is None and first.server_duration_ms == 4000.0
         assert first.model_call_id == "c1" and first.token_stats.prompt_tokens == 800
         assert second.started_at == 120.0 and second.model_call_id == "c2"
         codes = {gap.code for gap in record.gaps}

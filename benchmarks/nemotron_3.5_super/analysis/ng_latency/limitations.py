@@ -53,11 +53,14 @@ LIMITATIONS: list[tuple[str, str, str]] = [
     (
         "Terminus commands",
         "Terminus sends a command's keystrokes and waits the duration the model asked for (at most 60 s), then "
-        "reads the screen once for the whole batch. Each command is timed on its own; the screen read after the "
-        "last command belongs to the batch.",
+        "reads the screen once for the whole batch, a sandbox round trip of about a second, and builds the next "
+        "prompt. Each command is timed on its own; the screen read and the prompt are the observation delay. A "
+        "decision without commands (the completion claim and its confirmation) still costs the screen read.",
         "tool_execution_time measures Terminus's wait, not the command's own runtime: a command that outlives the "
         "wait is charged to later spans. The k-th command's dispatch delay includes the commands before it; the "
-        "first command's value is the true dispatch delay. Observation volume and observation delay are per batch.",
+        "first command's value is the true dispatch delay. Observation volume and observation delay are per batch; "
+        "the screen read and prompt time after every decision is known harness time (terminus_observation_assembly), "
+        "about 2 to 3 s per step on the smokes.",
     ),
     (
         "OpenCode tools",

@@ -204,11 +204,13 @@ class TerminusObservations:
             call.context_overflow = True
         self.last_rejected_call_id = model_call_id
 
-    def note_decision_result(self, parsed_tool_calls: int, task_complete: bool) -> None:
+    def note_decision_result(self, parsed_tool_calls: int, task_complete: bool, parse_error: bool = False) -> None:
+        """What Harbor's parser made of the decision; after a parse error Harbor runs no command batch."""
         call = self._call(self.last_decision_call_id)
         if call is not None:
             call.parsed_tool_calls = parsed_tool_calls
             call.task_complete = task_complete
+            call.parse_error = parse_error
 
     def command_record(
         self,

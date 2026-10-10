@@ -328,6 +328,20 @@ def _lifecycle_parts(ctx: _Context, metrics: dict[str, Any]) -> None:
         metrics["post_agent_time"] = r_end - ctx.window[1]
 
 
+def _empty_decisions(ctx: _Context, *, ran_batch: bool) -> list[dict[str, Any]]:
+    """Terminus agent steps that parsed no command. Harbor still runs its (empty) command batch for them, except
+    after a parse error, when it goes straight to the next prompt; ``ran_batch`` keeps only the former."""
+    return [
+        c
+        for c in ctx.harness("model_call")
+        if c.get("end_wall_s") is not None
+        and c["attrs"].get("purpose") == "agent_step"
+        and c.get("status") == "ok"
+        and not c["attrs"].get("parsed_commands")
+        and not (ran_batch and c["attrs"].get("parse_error") is True)
+    ]
+
+
 def _coverage(ctx: _Context) -> dict[str, Any]:
     """Intervals on the harness clock: window, model, tool, known events (by name) and unexplained time."""
     if ctx.window is None:
@@ -357,6 +371,16 @@ def _coverage(ctx: _Context) -> dict[str, Any]:
             received = batch["attrs"].get("response_received_wall_s")
             if received is not None and batch.get("end_wall_s") is not None and received > batch["end_wall_s"]:
                 assembly.append((float(batch["end_wall_s"]), float(received)))
+        # A decision without commands (the completion claim, its confirmation, a malformed response) still
+        # costs Terminus the screen read and the next prompt: the time to the next call, or to the agent's
+        # end, is the same harness work as the assembly after a batch.
+        starts = [float(c["start_wall_s"]) for c in ctx.harness("model_call")]
+        for call in _empty_decisions(ctx, ran_batch=False):
+            end = float(call["end_wall_s"])
+            following = [s for s in starts if s > end]
+            until = min(following) if following else float(window[1])
+            if until > end:
+                assembly.append((end, until))
         events["terminus_observation_assembly"] = assembly
     known_by_event: dict[str, list[Interval]] = {}
     known_total: list[Interval] = []
@@ -719,9 +743,8 @@ def _model_section(
         if is_tool or is_final:
             produced += 1
             continue
-        reason = (
-            "empty" if chars == 0 else ("parse_failure" if ctx.kind == "terminus2" and kind == "text" else "other")
-        )
+        parse_error = call["attrs"].get("parse_error") is True or (ctx.kind == "terminus2" and kind == "text")
+        reason = "empty" if chars == 0 else ("parse_failure" if parse_error else "other")
         if kind != "other":
             no_action[reason] = no_action.get(reason, 0) + 1
         unusable[reason] = unusable.get(reason, 0) + 1
@@ -871,7 +894,7 @@ def _tool_section(
                 observation.append(float(received) - float(batch["end_wall_s"]))
         timed_out = sum(1 for b in batches if b["attrs"].get("timeout") is True)
         errors = sum(1 for b in batches if b.get("status") == "error")
-        empty = sum(1 for b in batches if not b["attrs"].get("num_commands"))
+        empty = len(_empty_decisions(ctx, ran_batch=True))  # a screen read without commands, no batch span
         metrics["tool_time_by_operation"] = {
             "timed_out_batches": timed_out,
             "error_batches": errors,

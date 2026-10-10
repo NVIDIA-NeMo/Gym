@@ -105,25 +105,43 @@ def _check_terminus(
         results.append(check.result())
 
     # Harbor's batch timer runs from the first command to the screen read after the last; the batch span spans
-    # the commands and the next-iteration mark bounds the read, so Harbor's value lies between the two.
+    # the commands and the next-iteration mark bounds the read, so Harbor's value lies between the two. Harbor
+    # runs _execute_commands for every decision, with or without commands: a decision without commands has an
+    # exec time (the screen read alone) and no batch span, so the two lists are walked in decision order.
     if isinstance(record.get("command_exec_times"), list):
         check = _Check("terminus_command_exec_times")
         batches = [b for b in by_name.get("tool_batch", []) if b.get("status") != "cancelled"]
         exec_times = record["command_exec_times"]
+        decisions = [
+            c
+            for c in calls
+            if (c.get("attrs") or {}).get("purpose") == "agent_step"
+            and c.get("status") == "ok"
+            and (c.get("attrs") or {}).get("parse_error") is not True  # after a parse error Harbor runs no batch
+        ]
+        empty = sum(1 for c in decisions if not (c.get("attrs") or {}).get("parsed_commands"))
         check.require(
-            len(exec_times) == len(batches), f"count: command_exec_times={len(exec_times)} batches={len(batches)}"
+            len(exec_times) == len(batches) + empty,
+            f"count: command_exec_times={len(exec_times)} batches={len(batches)} empty decisions={empty}",
         )
-        for i, (expected, batch) in enumerate(zip(exec_times, batches)):
+        next_batch = 0
+        for i, (expected, decision) in enumerate(zip(exec_times, decisions)):
+            if not (decision.get("attrs") or {}).get("parsed_commands"):
+                continue  # the screen read alone: nothing of ours to compare it with
+            if next_batch >= len(batches):
+                break
+            batch = batches[next_batch]
+            next_batch += 1
             span_s = _duration_s(batch)
             received = (batch.get("attrs") or {}).get("response_received_wall_s")
             upper = float(received) - batch["start_wall_s"] if received is not None else None
             if span_s is None:
-                check.require(False, f"batch[{i}]: open span")
+                check.require(False, f"decision[{i}]: open batch span")
                 continue
-            check.require(expected >= span_s - TOLERANCE_S, f"batch[{i}]: harbor {expected} < commands {span_s}")
+            check.require(expected >= span_s - TOLERANCE_S, f"decision[{i}]: harbor {expected} < commands {span_s}")
             if upper is not None:
                 check.require(
-                    expected <= upper + TOLERANCE_S, f"batch[{i}]: harbor {expected} > until next mark {upper}"
+                    expected <= upper + TOLERANCE_S, f"decision[{i}]: harbor {expected} > until next mark {upper}"
                 )
         results.append(check.result())
 

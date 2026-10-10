@@ -176,6 +176,11 @@ class TrajectoryModelCall(ObservationModel):
         default=None, ge=0, description="Tool actions the harness parsed out of a text response (Terminus commands)."
     )
     task_complete: Optional[bool] = Field(default=None, description="The response declared the task complete.")
+    parse_error: Optional[bool] = Field(
+        default=None,
+        description="The harness could not parse the response into actions (Terminus: Harbor's parser reported an "
+        "error, so no command batch ran for this decision).",
+    )
     context_overflow: Optional[bool] = Field(
         default=None, description="The request was rejected for exceeding the context window."
     )
