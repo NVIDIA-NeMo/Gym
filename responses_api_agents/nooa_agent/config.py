@@ -24,7 +24,7 @@ from nooa import Agent
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
 
@@ -81,13 +81,18 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
 
     model_config = ConfigDict(extra="forbid")
 
-    resources_server: ResourcesServerRef
     model_server: ModelServerRef
     nooa: NOOAInvocationConfig
     max_policy_calls: int | None = Field(
         default=None, gt=0, description="Optional shared model-call limit per rollout; null disables the limit."
     )
-    run_timeout_secs: float = Field(default=2100, gt=0)
+
+    @field_validator("num_workers")
+    @classmethod
+    def require_single_worker(cls, value: int | None) -> int | None:
+        if value not in (None, 1):
+            raise ValueError("NOOA sessions require num_workers=1")
+        return value
 
 
 def load_agent_class(path: str) -> type[Agent]:

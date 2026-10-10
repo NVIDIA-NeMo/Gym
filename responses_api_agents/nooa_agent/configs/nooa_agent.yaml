@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+nooa_agent:
+  responses_api_agents:
+    nooa_agent:
+      entrypoint: app.py
+      num_workers: 1
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      nooa:
+        agent_class: responses_api_agents.nooa_agent.task_agent:TaskAgent
+        invocation_adapter: responses_api_agents.nooa_agent.task_agent:invoke_solve_task
+        init_kwargs: {}
+        execution_mode: embedded
+      max_policy_calls: null

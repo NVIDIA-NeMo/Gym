@@ -22,13 +22,15 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import uuid4
 
+from nooa.errors import GenerationError
 from nooa.runtime.hooks import hooks_scope
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, TrajectoryRecord
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.tool_access import DirectHTTPToolAccess
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.gym_llm import (
+    GymModelClient,
     GymResponsesLLM,
     InvalidPolicyOutputError,
     PolicyCallBudgetExceeded,
@@ -46,6 +48,7 @@ from responses_api_agents.nooa_agent.resource_tools import (
 class NOOARunRequest:
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     model_url_path: str
+    tool_access: DirectHTTPToolAccess | None = None
     model_cookies: dict[str, str] = field(default_factory=dict)
     resource_cookies: dict[str, str] = field(default_factory=dict)
     task_id: str = "unknown"
@@ -91,24 +94,20 @@ def _validate_agent_llm_bindings(agent_class: type) -> None:
         )
 
 
-class EmbeddedNOOARunner:
+class InProcessNOOARunner:
     """Construct and invoke one isolated NOOA agent instance per Gym rollout."""
 
     def __init__(
         self,
         *,
         invocation: NOOAInvocationConfig,
-        server_client: ServerClient,
+        server_client: GymModelClient,
         model_server_name: str,
-        resources_server_name: str,
         max_policy_calls: int | None,
     ) -> None:
-        if invocation.execution_mode == "sandboxed":
-            raise NotImplementedError("NOOA sandboxed execution is not implemented")
         self._invocation = invocation
         self._server_client = server_client
         self._model_server_name = model_server_name
-        self._resources_server_name = resources_server_name
         self._max_policy_calls = max_policy_calls
         self._agent_class, self._invocation_adapter = validate_invocation(invocation)
         _validate_agent_llm_bindings(self._agent_class)
@@ -129,8 +128,7 @@ class EmbeddedNOOARunner:
             sampling_overrides=sampling_overrides,
         )
         dispatcher = ResourceToolDispatcher(
-            server_client=self._server_client,
-            resources_server_name=self._resources_server_name,
+            tool_access=request.tool_access,
             cookies=request.resource_cookies,
             trace_hooks=trace,
         )
@@ -164,14 +162,29 @@ class EmbeddedNOOARunner:
                     )
                     termination_error = str(cause)
                     break
+                if isinstance(cause, GenerationError) and state.calls:
+                    response = state.calls[-1].response
+                    if response is not None and response.incomplete_details is not None:
+                        if response.incomplete_details.reason == "max_output_tokens":
+                            # NOOA raises GenerationError for output truncation as well as
+                            # infrastructure failures. Require explicit provider evidence.
+                            termination_reason = "invalid_policy_output"
+                            termination_error = str(cause)
+                            break
                 cause = cause.__cause__ or cause.__context__
 
-        # An unrecovered model transport failure cannot become a graded fallback.
+        fatal_error = dispatcher.fatal_error
         if state.fatal_error is not None:
+            # A budget or output error after an unrecovered transport failure
+            # still lacks a valid rollout to grade. Keep the terminal cause.
             termination_reason = None
             termination_error = None
-            if failure is None:
-                failure = state.fatal_error
+        if fatal_error is None and failure is None:
+            fatal_error = state.fatal_error
+        if fatal_error is not None and not isinstance(failure, asyncio.CancelledError):
+            failure = fatal_error
+            termination_reason = None
+            termination_error = None
 
         episode, trajectory = trace.project(
             create_params=request.responses_create_params,

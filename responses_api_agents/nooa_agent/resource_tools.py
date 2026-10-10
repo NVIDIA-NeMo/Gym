@@ -24,7 +24,8 @@ from typing import TYPE_CHECKING, Any
 from jsonschema import Draft202012Validator, ValidationError
 from pydantic import BaseModel
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import raise_for_status, request
+from nemo_gym.tool_access import DirectHTTPToolAccess
 
 
 if TYPE_CHECKING:
@@ -59,13 +60,12 @@ class ResourceToolDispatcher:
     def __init__(
         self,
         *,
-        server_client: ServerClient,
-        resources_server_name: str,
+        tool_access: DirectHTTPToolAccess | None,
         cookies: dict[str, str],
         trace_hooks: GymTraceHooks | None = None,
     ) -> None:
-        self._server_client = server_client
-        self._resources_server_name = resources_server_name
+        self._tool_access = tool_access
+        self.fatal_error: Exception | None = None
         self._cookies = cookies
         self._lock = asyncio.Lock()
         self._trace_hooks = trace_hooks
@@ -106,21 +106,31 @@ class ResourceToolDispatcher:
                 observation.status = "failed"
                 observation.error_type = "invalid_arguments"
         else:
+            # Serialization errors are model-authored argument errors, not transport failures.
             try:
-                response = await self._server_client.post(
-                    server_name=self._resources_server_name,
-                    url_path=f"/{name}",
+                json.dumps(arguments)
+            except (TypeError, ValueError) as error:
+                return {"error": f"Could not serialize arguments for {name}: {error}"}
+            try:
+                if self._tool_access is None:
+                    raise ValueError("Resource tools require a direct HTTP tool grant")
+                response = await request(
+                    "POST",
+                    f"{str(self._tool_access.base_url).rstrip('/')}/{name}",
                     json=arguments,
-                    cookies=self._cookies,
+                    headers=dict(self._tool_access.headers),
+                    cookies=dict(self._cookies),
                 )
-            except TypeError as error:
-                output = {"error": f"Could not serialize arguments for {name}: {error}"}
-                return output
-            self._cookies.update({key: morsel.value for key, morsel in response.cookies.items()})
-            if observation is not None and response.status >= 400:
-                observation.status = "failed"
-                observation.error_type = f"http_{response.status}"
-            body = (await response.content.read()).decode(errors="replace")
+                self._cookies.update({key: morsel.value for key, morsel in response.cookies.items()})
+                await raise_for_status(response)
+            except Exception as error:
+                self.fatal_error = error
+                raise
+            try:
+                body = (await response.content.read()).decode(errors="replace")
+            except Exception as error:
+                self.fatal_error = error
+                raise
             try:
                 output = json.loads(body)
             except json.JSONDecodeError:
@@ -201,6 +211,8 @@ def create_agent_class_with_resource_methods(
         name = tool.get("name")
         if not isinstance(name, str) or not name.isidentifier() or name.startswith("_"):
             raise ValueError(f"resource tool name must be a public Python identifier, received {name!r}")
+        if name in {"seed", "verify", "close", "seed_session", "close_session"}:
+            raise ValueError(f"resource lifecycle route {name!r} cannot be an agent tool")
         if name in seen or hasattr(agent_class, name):
             raise ValueError(f"duplicate or conflicting agent method name {name!r}")
         seen.add(name)
