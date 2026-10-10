@@ -1119,10 +1119,15 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         results: List[Dict[str, Any]],
         completed: int | None = None,
         intentionally_omitted: int = 0,
-        retryable: bool = True,
-        made_progress: bool = True,
+        retryable: bool,
+        made_progress: bool,
     ) -> None:
-        """Reject unfinished work; accept explicit omissions with a count warning."""
+        """Reject unfinished work; allow omissions alongside completed tasks.
+
+        Drivers must supply whether any tasks can still be retried and whether
+        this invocation saved outcomes. Assuming either can cause endless
+        automatic restarts when a driver has no work left or makes no progress.
+        """
         if not self.require_complete and not intentionally_omitted:
             return
         if completed is None:
@@ -3181,11 +3186,7 @@ class RolloutCollectionHelper(BaseModel):
             if config.count_missing_rollouts_as_zero and not config.disable_aggregation
             else []
         )
-        only_omissions = (
-            completion["intentionally_omitted"] > 0
-            and completion["successful"] + completion["intentionally_omitted"] == completion["expected"]
-        )
-        if input_rows and not selected_attempts and not counted and not missing and not only_omissions:
+        if input_rows and not selected_attempts and not counted and not missing:
             if batch_tracker is not None:
                 batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
             if upload_spool is not None:

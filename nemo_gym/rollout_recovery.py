@@ -513,8 +513,8 @@ def run_lock(output: Path, *, checkpoint_dir: Path | None = None) -> Iterator[No
 
 
 def warn_if_only_omissions(*, expected: int, completed: int, intentionally_omitted: int) -> bool:
-    """Accept policy omissions without describing them as completed or scored tasks."""
-    if intentionally_omitted > 0 and completed + intentionally_omitted == expected:
+    """Accept omissions only alongside completed tasks, without inventing scores."""
+    if completed > 0 and intentionally_omitted > 0 and completed + intentionally_omitted == expected:
         logger.warning(
             "Evaluation finished with intentional omissions: %s/%s samples completed, %s intentionally omitted. "
             "Exiting successfully; omitted tasks have no measured score.",

@@ -1731,9 +1731,13 @@ async def test_batch_status_uses_current_journal_attempts(tmp_path, monkeypatch,
     if latest_outcome == "suppressed_retry":
         monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "4")
         post.return_value = FakeResponse(200, {"_ng_no_persist": True})
-        # A producer-suppressed result is an intentional omission. Collection
-        # exits successfully, but status still must not revive the older score.
-        await RolloutCollectionHelper().run_from_config(resumed)
+        # The only selected outcome is now an omission. The run has no
+        # completed tasks, and status must not revive the older score.
+        from nemo_gym.rollout_recovery import IncompleteEvaluationError
+
+        with pytest.raises(IncompleteEvaluationError) as error:
+            await RolloutCollectionHelper().run_from_config(resumed)
+        assert error.value.exit_code == 76
         post.assert_awaited_once()
         post.reset_mock()
     else:

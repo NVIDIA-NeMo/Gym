@@ -1308,7 +1308,7 @@ async def test_reverify_failure_source_protects_entire_parent_run(
     assert RolloutStore.read(output).coverage()["failed"] == 1
 
 
-@pytest.mark.parametrize("num_omitted", [1, 3])
+@pytest.mark.parametrize("num_omitted", [1, 2])
 @pytest.mark.parametrize("require_complete", [False, True])
 async def test_collector_accepts_only_intentional_gaps_without_scoring_them(
     runner_config, monkeypatch, caplog, num_omitted, require_complete
@@ -1360,8 +1360,57 @@ def test_omissions_do_not_hide_other_unfinished_work(prepared_run, remaining):
         with pytest.raises(IncompleteEvaluationError) as error:
             collection.SharedRolloutCollectionConfig(
                 output_jsonl_fpath=str(output), require_complete=True
-            ).check_completion(expected=2, results=[], intentionally_omitted=1, retryable=bool(store.pending(3)))
+            ).check_completion(
+                expected=2,
+                results=[],
+                intentionally_omitted=1,
+                retryable=bool(store.pending(3)),
+                made_progress=store.outcomes_recorded > 0,
+            )
         assert error.value.exit_code == (75 if remaining in {"retryable", "unknown"} else 76)
     with pytest.raises(IncompleteEvaluationError) as error:
         _check_saved_completion(output)
     assert error.value.exit_code == (75 if remaining in {"retryable", "unknown"} else 76)
+
+
+@pytest.mark.parametrize("require_complete", [False, True])
+async def test_all_omitted_run_and_resume_have_no_score_and_exit_76(
+    runner_config, monkeypatch, caplog, require_complete
+):
+    from nemo_gym.cli.eval import _check_saved_completion
+    from nemo_gym.path_utils import aggregate_metrics_path_for
+
+    runner_config.require_complete = require_complete
+    runner_config.route_failures_to_sidecar = True
+    runner_config.disable_aggregation = False
+    client = install_fake_server_client(
+        monkeypatch,
+        AsyncMock(return_value=FakeResponse(200, {"_ng_failure_class": "skipped", "_ng_failure_terminal": True})),
+    )
+    output = Path(runner_config.output_jsonl_fpath)
+    for resume in (False, True):
+        runner_config.resume_from_cache = resume
+        # The library permits a partial cached return when require_complete is
+        # false; the CLI must still reject a run with no completed tasks.
+        with pytest.raises(IncompleteEvaluationError) as error:
+            await collection.RolloutCollectionHelper().run_from_config(runner_config)
+            _check_saved_completion(output)
+        assert error.value.exit_code == 76
+        with pytest.raises(IncompleteEvaluationError) as saved_error:
+            _check_saved_completion(output)
+        assert saved_error.value.exit_code == 76
+        report = RolloutStore.read(output).coverage()
+        assert (report["successful"], report["intentionally_omitted"], report["retryable"]) == (0, 3, 0)
+        assert report["complete"] is False
+        assert list(read_records(output)) == []
+        assert not aggregate_metrics_path_for(output).exists()
+        assert all("reward" not in row for row in RolloutStore.read(output).selected("omitted"))
+    assert client.post.await_count == 3
+    assert "Exiting successfully" not in caplog.text
+
+
+@pytest.mark.parametrize("signals", [{}, {"retryable": False}, {"made_progress": False}])
+def test_completion_requires_explicit_retry_and_progress_signals(runner_config, signals):
+    runner_config.require_complete = True
+    with pytest.raises(TypeError, match="required keyword-only argument"):
+        runner_config.check_completion(expected=3, results=[], **signals)

@@ -330,14 +330,19 @@ The CLI exits with **76** if unfinished work includes terminal failures or exhau
 eligible for retry. This is a compatibility change from older collection commands that could return 0 for these partial
 results: Slurm marks these evaluations FAILED. Intentional omissions do not hide other failed or unfinished tasks.
 
-If the only gaps are intentional omissions, the CLI exits with **0** and warns with the completed, expected and omitted
-counts. This also applies when every task is intentionally omitted. Omissions keep their separate coverage disposition:
-they are not completed answers and receive no measured score. GDPVal's explicitly accepted partial-stage omissions
-follow the same exit policy. None of the nonzero statuses reports a complete evaluation.
+If at least one task completed and the only gaps are intentional omissions, the CLI exits with **0** and warns with the
+completed, expected and omitted counts. If every task is omitted, it exits with **76**: there are no completed tasks to
+report, and retrying cannot help. For example, check whether the deliverables folder is mounted if a judge-only run
+skips every task. After fixing the cause, use a new output path; resume preserves intentional omissions.
+Omissions keep their separate coverage disposition: they are not completed answers and receive no measured score. GDPVal's explicitly accepted partial-stage omissions follow the same exit policy.
+None of the nonzero statuses reports a complete evaluation.
 
 The Slurm auto-resume chain continues after 75 without spending an infrastructure retry and stops after 76.
 Its accumulated walltime cap applies only when `max_walltime` is configured. Collection coverage exposes eligible
 tasks as `retryable` and new outcomes as `outcomes_recorded`; aggregate coverage includes `retryable` within each shard.
+Custom collection drivers calling `check_completion` must explicitly pass `retryable` (whether another attempt can
+help) and `made_progress` (whether this invocation saved new outcomes). Both are required; cached outcomes alone do
+not establish progress.
 
 Code 0 means collection finished, possibly with the intentional omissions described above. Inspect coverage to learn
 how many tasks actually completed. An explicit Ctrl-C in `gym eval run` retains the existing cancellation behavior: it can return 0 with partial artifacts when `require_complete=false`. Inspect coverage to determine

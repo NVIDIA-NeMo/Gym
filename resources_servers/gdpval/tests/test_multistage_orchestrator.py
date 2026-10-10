@@ -925,9 +925,16 @@ class TestResumeSeam:
             assert summaries[1]["reference_ids"] == base_summaries[1]["reference_ids"]
         assert summaries[0]["num_rollouts"] == 6
         config = SharedRolloutCollectionConfig(output_jsonl_fpath="rollouts.jsonl", require_complete=True)
-        config.check_completion(expected=sum(s["num_rollouts"] for s in summaries), results=results)
+        config.check_completion(
+            expected=sum(s["num_rollouts"] for s in summaries), results=results, retryable=False, made_progress=True
+        )
         with pytest.raises(RuntimeError, match="15/16 samples completed"):
-            config.check_completion(expected=sum(s["num_rollouts"] for s in summaries), results=results[:-1])
+            config.check_completion(
+                expected=sum(s["num_rollouts"] for s in summaries),
+                results=results[:-1],
+                retryable=True,
+                made_progress=True,
+            )
 
     async def test_interrupted_stage_redispatches_only_missing(self) -> None:
         task_ids = [f"t{i}" for i in range(10)]
