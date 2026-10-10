@@ -76,6 +76,7 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.orchestration.jobs import installed_gym_commit
 from nemo_gym.package_info import __version__
+from nemo_gym.task_selection import select_tasks
 
 
 logger = logging.getLogger(__name__)
@@ -597,6 +598,10 @@ def e2e_rollout_collection():  # pragma: no cover
     rollout_collection_config = RolloutCollectionConfig.model_validate(
         OmegaConf.to_container(rollout_collection_config_dict)
     )
+    if rollout_collection_config.task_ids is not None:
+        # Refuse unknown or missing ids before any server starts; collection selects the same rows again.
+        rows = [json.loads(line) for line in input_jsonl_fpath.read_text().splitlines() if line.strip()]
+        select_tasks(rows, rollout_collection_config.task_ids)
 
     rh = RunHelper()
     rh.start(None)

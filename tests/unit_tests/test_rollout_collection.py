@@ -3179,6 +3179,28 @@ class TestRolloutCollection:
         assert result[0]["expected_answer"] == "4"
         assert result[1]["responses_create_params"]["input"][1]["content"] == "Solve: What is 3*5?"
 
+    def test_preprocess_rows_selects_task_ids_once_each_then_repeats(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "input.jsonl"
+        rows = [{"task_id": task_id, "responses_create_params": {"input": []}} for task_id in ("a", "a", "b", "c")]
+        fpath.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            task_ids=["c", "a"],
+            num_repeats=2,
+        )
+
+        result = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        assert [row["task_id"] for row in result] == ["a", "a", "c", "c"]
+
+    def test_task_ids_cannot_be_combined_with_limit(self) -> None:
+        with pytest.raises(ValidationError, match="limit cannot be combined"):
+            RolloutCollectionConfig(
+                input_jsonl_fpath="in.jsonl", output_jsonl_fpath="out.jsonl", task_ids=["a"], limit=1
+            )
+
     def test_preprocess_rows_prompt_config_rejects_prebaked(self, tmp_path: Path) -> None:
         """prompt_config raises when rows already have responses_create_params.input."""
         prompt_path = tmp_path / "prompt.yaml"
