@@ -255,6 +255,41 @@ def _set_reasoning(message_dict: dict[str, Any], reasoning: str, mode: Reasoning
         message_dict["reasoning"] = reasoning
 
 
+class _ContextErrorMiddleware:
+    """Return a context-length error from the model endpoint to the client unchanged.
+
+    A request that exceeds the model's context length is marked with ``_PROPAGATE_CONTEXT_ERROR_ATTRIBUTE``.
+    This middleware answers with the endpoint's own status and body, so the client sees the real error instead of Gym's generic 500.
+    Other errors, and errors raised after the response has started, propagate unchanged.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        response_started = False
+
+        async def send_wrapper(message: Dict[str, Any]) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        except ClientResponseError as error:
+            if response_started or not getattr(error, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, False):
+                raise
+            response = Response(
+                content=error.response_content, status_code=error.status, media_type="application/json"
+            )
+            await response(scope, receive, send)
+
+
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
     # Where each backend takes generation cuts, aligned with `base_url`,
@@ -460,19 +495,8 @@ class VLLMModel(SimpleResponsesAPIModel):
     _generation_cut_control_urls: Dict[str, str] = PrivateAttr(default_factory=dict)
 
     def setup_exception_middleware(self, app) -> None:
-        @app.middleware("http")
-        async def context_error_middleware(request: Request, call_next):
-            try:
-                return await call_next(request)
-            except ClientResponseError as error:
-                if getattr(error, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, False):
-                    return Response(
-                        content=error.response_content,
-                        status_code=error.status,
-                        media_type="application/json",
-                    )
-                raise
-
+        # Registered before Gym's exception middleware, so it runs inside it and sees the error first.
+        app.add_middleware(_ContextErrorMiddleware)
         super().setup_exception_middleware(app)
 
     def get_converter(self) -> "VLLMConverter":
