@@ -209,6 +209,7 @@ class StagedCallBaseSnapshot(_DigestWireModel):
             cumulative_hash=self.cumulative_hash,
         )
         if info.context is _BUILD_STAGING_DIGEST:
+            # Construction-time assignment requires a mutable model without validate_assignment.
             self.digest = actual_digest
         elif self.digest != actual_digest:
             raise ValueError("digest does not match staged call contents")
@@ -244,6 +245,10 @@ class StagedCallRecord(StagedCallBaseSnapshot):
 
         Runs normal field, integrity, and extras validators. Wire constructors
         still require a supplied digest and verify it against the contents.
+
+        Raises:
+            ValueError: A mask or log probability is not an exact Python float.
+            ValidationError: Other components fail field or integrity validation.
         """
         # Pydantic StrictFloat accepts integers. Local builders historically
         # hashed before model construction and required exact Python floats.
