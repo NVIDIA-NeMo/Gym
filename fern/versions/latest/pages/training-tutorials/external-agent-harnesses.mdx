@@ -79,6 +79,8 @@ token_id_capture:
 
 `mask_incomplete_when_attributed` (default `true`) decides what happens when a model call registered its capture intent but never committed a record, which is what a harness killed at its timeout leaves behind. By default such an incomplete capture always sets `mask_sample: true`. Set it to `false` to keep the rollout when terminal attribution delivered the verifier-scored chain whole: a call with no record cannot sit inside a delivered chain, so the uncaptured call lies outside the scored trajectory. Without a delivered attribution the rollout is still masked.
 
+A call the engine refuses because the prompt does not fit the context window is not a lost call. When the vLLM model server propagates the refusal (`propagate_context_overflow_errors: true`), it records the refusal in place of a token record, so the rollout is not incomplete and the harness can compact its history and continue. A refusal recorded after the delivered terminal call marks the rebuilt response `incomplete` with reason `max_output_tokens`, and `_ng_token_capture.refusals` lists every refused call.
+
 ### 3. Opt in the external agent
 
 Enable capture on each external harness that returns no token ids:
@@ -250,6 +252,7 @@ Gym adds capture metrics under `_ng_token_capture` on each rebuilt rollout.
 | `quarantined_calls` | `0` | Gym found conflicting candidates and refused to choose between them. |
 | `empty_generation_calls` | `0` | A model call produced no trainable generated tokens. |
 | `unresolved_parent_calls` | `0` | A continuation could not be linked to exactly one verified earlier call. |
+| `refusals` | Absent | The engine refused the listed calls (`model_call_id`, `code`, `created_at`); the prompt no longer fit the context window. A refusal after the delivered terminal call also marks the rebuilt response `incomplete` with reason `max_output_tokens`, which a served `length` stop reports without this field. |
 | `mask_sample` | Absent or `false` | The rollout is incomplete or ambiguous and must not contribute to the loss. |
 
 Terminal attribution is how Gym finds the captured call that produced the response the verifier scored. When attribution succeeds, `terminal_attribution.chain` is `delivered`, and Gym trains on that call's chain even if the harness also made side calls. When Gym cannot identify the final call, `terminal_attribution.chain` is empty and `terminal_attribution.method` is `none`. This is not an error by itself. Gym then keeps the rollout only if the capture contains exactly one chain with no unresolved calls, so `chains` greater than 1 masks an unattributed rollout.

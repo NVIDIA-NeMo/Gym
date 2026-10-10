@@ -68,8 +68,13 @@ _EMPTY_DIGEST = hashlib.sha256(_DIGEST_DOMAIN).hexdigest()
 # Parent resolution could not admit the call. Written by ``resolve_parent``.
 UNRESOLVED_PARENT_REASON = "unresolved_parent"
 # The call was admitted but finished without worker commit coordinates.
-# Written by the capture middleware.
+# Written by the capture middleware. Custody is ambiguous: the worker may have staged tokens
+# whose acknowledgement was lost.
 UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
+# The engine answered the admitted call with a refusal (a prompt that does not fit the context
+# window), so generation never ran and nothing was staged. Unlike a lost response, this outcome
+# is definite. Written by the model server at the engine call site, under worker custody.
+ENGINE_REFUSED_CALL_REASON = "engine_refused_request"
 # A committed ledger row lacks the served response id that terminal attribution joins on.
 LEDGER_ROW_MISSING_RESPONSE_ID_REASON = "ledger_row_missing_response_id"
 # A committed ledger row lacks the chain or cumulative digest that verification anchors on.
@@ -111,6 +116,26 @@ def compute_digest(token_ids: list[int]) -> str:
     if not token_ids:
         return _EMPTY_DIGEST
     return hashlib.sha256(_DIGEST_DOMAIN + encode_token_ids(token_ids)).hexdigest()
+
+
+class RefusalRecord(BaseModel):
+    """One model call the engine refused, so the rollout has no record for it.
+
+    A refusal is not a lost capture: the call never generated, and the client was told why.
+    On the local capture path the refusal resolves the call's pre-dispatch intent, so the
+    rollout is not incomplete; the record is what tells a consumer where the engine refused.
+    ``code`` is the error code the client received: ``context_length_exceeded`` for a prompt
+    that does not fit the context window, ``None`` when the envelope carried no code (an
+    output-token parameter the engine rejected).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    model_call_id: str
+    code: str | None = None
+    # Seconds since the epoch, stamped when the refusal is recorded. The builder orders it
+    # against the delivered terminal call to decide whether the refusal ended the rollout.
+    created_at: float = 0.0
 
 
 class TokenEntry(BaseModel):

@@ -33,9 +33,10 @@ def test_file_store_passes_all_checks(tmp_path):
         )
     )
     assert "begin_call_custody" in passed
+    assert "refuse_call_resolution" in passed
     assert "lineage_visibility" in passed
     assert {"unconditional_retirement", "delete_clears_retirement"} <= set(passed)
-    assert len(passed) >= 10
+    assert len(passed) >= 11
 
 
 class _MemoryBackend:
@@ -154,8 +155,9 @@ def test_memory_backend_passes_applicable_checks():
             lambda: _MemoryLineage(backend),
         )
     )
-    # No begin_call on this sink: the custody check is skipped, everything else passes.
+    # No begin_call or refuse_call on this sink: those checks are skipped, everything else passes.
     assert "begin_call_custody" not in passed
+    assert "refuse_call_resolution" not in passed
     assert "lineage_visibility" in passed
     assert len(passed) >= 9
 
@@ -278,3 +280,23 @@ def test_conformance_does_not_treat_a_broken_freeze_as_an_empty_rollout():
     backend = _MemoryBackend()
     with pytest.raises(ConformanceError, match="unconditional_retirement"):
         asyncio.run(run_conformance(lambda: _MemorySink(backend), lambda: _BrokenFreezeAfterRetireSource(backend)))
+
+
+def test_kit_rejects_a_sink_whose_refusal_leaves_the_intent_dangling(tmp_path):
+    from nemo_gym.token_id_capture import TokenCaptureRetiredError
+    from nemo_gym.token_id_capture.conformance import ConformanceError
+
+    class _Forgetful(TokenCaptureStore):
+        async def refuse_call(self, rollout_id, *, model_call_id, code):
+            # Fences a retired rollout like the real store, but acknowledges without recording anything.
+            if self._read_state(rollout_id).get("retired", False):
+                raise TokenCaptureRetiredError(f"Token capture for rollout {rollout_id} is retired")
+
+    with pytest.raises(ConformanceError) as info:
+        asyncio.run(
+            run_conformance(
+                lambda: _Forgetful(tmp_path),
+                lambda: TokenCaptureStore(tmp_path),
+            )
+        )
+    assert info.value.check_name == "refuse_call_resolution"

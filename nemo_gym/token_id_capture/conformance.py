@@ -102,7 +102,7 @@ async def run_conformance(
 
     Raise ``ConformanceError`` on the first failure.
     Lineage checks are skipped without a ``lineage_factory``.
-    The ``begin_call`` check is skipped when the sink lacks the extension.
+    The ``begin_call`` and ``refuse_call`` checks are skipped when the sink lacks the extension.
     """
     passed: list[str] = []
     closables: list = []
@@ -147,6 +147,8 @@ async def run_conformance(
     probe_sink = sink()
     if getattr(probe_sink, "begin_call", None) is not None:
         checks.append(("begin_call_custody", lambda r: _check_begin_call_custody(sink(), source(), r)))
+    if getattr(probe_sink, "refuse_call", None) is not None:
+        checks.append(("refuse_call_resolution", lambda r: _check_refuse_call_resolution(sink(), source(), r)))
 
     try:
         for name, check in checks:
@@ -309,6 +311,11 @@ async def _check_unconditional_retirement(sink: TokenSink, src: TokenSource, rol
     begin = getattr(sink, "begin_call", None)
     if begin is not None:
         await _require_fenced(name, begin(rollout_id, "call-4"), "a late begin_call")
+    refuse = getattr(sink, "refuse_call", None)
+    if refuse is not None:
+        await _require_fenced(
+            name, refuse(rollout_id, model_call_id="call-5", code="context_length_exceeded"), "a late refuse_call"
+        )
     _require(await _visible_entries(src, rollout_id) == 0, name, "a write after retirement became visible")
     again = await src.retire([rollout_id])
     _require(again.get("absent") == [rollout_id], name, f"retiring again was not a no-op: {again}")
@@ -381,3 +388,29 @@ async def _check_begin_call_custody(sink: TokenSink, src: TokenSource, rollout_i
     await sink.begin_call(rollout_id, "call-lost")  # type: ignore[attr-defined]
     snapshot = await src.freeze(rollout_id)
     _require(snapshot.incomplete, name, "a dangling pre-dispatch intent did not mask the rollout")
+
+
+async def _check_refuse_call_resolution(sink: TokenSink, src: TokenSource, rollout_id: str) -> None:
+    name = "refuse_call_resolution"
+    entry = _make_entry(rollout_id, "call-1", prompt=[11, 12], generation=[13, 14], request_items=_REQUEST, text="a")
+    await sink.put(entry)
+    begin = getattr(sink, "begin_call", None)
+    if begin is not None:
+        await begin(rollout_id, "call-2")
+    await sink.refuse_call(rollout_id, model_call_id="call-2", code="context_length_exceeded")  # type: ignore[attr-defined]
+    snapshot = await src.freeze(rollout_id)
+    _require(not snapshot.incomplete, name, "a refused call's intent still masked the rollout")
+    _require(
+        [(record.model_call_id, record.code) for record in snapshot.refusals]
+        == [("call-2", "context_length_exceeded")],
+        name,
+        f"the frozen snapshot does not report the refusal: {snapshot.refusals!r}",
+    )
+    try:
+        await sink.refuse_call(rollout_id, model_call_id="call-3", code="context_length_exceeded")  # type: ignore[attr-defined]
+    except Exception:
+        return  # A hard fence is acceptable.
+    # A sink that accepts the late refusal must not stale the consumed snapshot's retirement:
+    # the refusal cannot change the sample that was already delivered.
+    retired = await src.drop(rollout_id, snapshot_id=snapshot.snapshot_id, version=snapshot.version)
+    _require(retired, name, "a refusal after freeze changed the version and staled the consumed snapshot")
