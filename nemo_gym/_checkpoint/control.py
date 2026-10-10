@@ -324,6 +324,12 @@ class CheckpointParticipant(ABC):
         """Refuse these attempts from now on, before a retire stops them. Override to tell other processes as well."""
         self.retired.mark(episode_ids)
 
+    def check_forget(self, rollout_ids: list[str]) -> None:
+        """Raise if forgetting ``rollout_ids`` now would make retired state live again; ``forget`` checks first.
+
+        A server with several workers asks every worker before any of them forgets.
+        """
+
     async def forget(self, rollout_ids: list[str]) -> None:
         """Stop refusing these rollouts' retired attempts. Override to tell other processes as well."""
         self.retired.forget(rollout_ids)
