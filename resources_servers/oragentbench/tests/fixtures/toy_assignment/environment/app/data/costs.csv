@@ -1,0 +1,10 @@
+worker,job,cost
+w1,j1,4
+w1,j2,2
+w1,j3,8
+w2,j1,4
+w2,j2,3
+w2,j3,7
+w3,j1,3
+w3,j2,1
+w3,j3,6
