@@ -1,19 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+import os
+import tarfile
+import tomllib
 from contextlib import contextmanager
 from copy import deepcopy
-from glob import glob
-from pathlib import Path
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
 from shlex import join
+from shlex import quote as shlex_quote
 from sys import stderr
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from time import time
 from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
-from fastapi import Request
-from pydantic import BaseModel
+from fastapi import HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
@@ -25,10 +30,12 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.terminal_bench_2_1.agent_user import AgentUser, is_root_agent_user, normalize_agent_user
 
 
 # Bullseye security packages were removed from the live mirror after LTS ended.
@@ -49,30 +56,118 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
 
     is_verifying_golden_patch: bool = False
     evaluation_timeout: Optional[int] = None
+    # Wall budget for `bash /tests/test.sh`: max(this floor, the task's own limit), where the task's limit is the
+    # row's `verifier_timeout_sec` or else `[verifier] timeout_sec` in its task.toml.
+    verifier_timeout_floor_sec: int = 1800
+    # Run `bash /tests/test.sh` as the row's non-root `agent_user` instead of the image default (root on the
+    # `-userroot` derivatives). Off by default: many vendor verifiers require root (they drop candidate code to an
+    # unprivileged user themselves), and running them as the agent user fails tasks that pass as root.
+    verifier_runs_as_agent_user: bool = False
 
     # Sandbox config
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
 
+    # Run the Debian/apt source preparation after the sandbox starts. Images whose tests are self-contained
+    # (or sandboxes with a deny-all network policy) skip it: with no egress `apt-get update` only burns time.
+    prepare_apt_sources: bool = True
+    # One small JSON per session (`<session_id>.json`: phase open/closed, request, termination, verdict) so a
+    # campaign driver can tell which rollouts are still in flight server-side after it restarts. None disables.
+    session_records_dir: Optional[Path] = None
+
     debug: bool = False
+
+
+def task_verifier_timeout_sec(task_folder: Path) -> Optional[float]:
+    """The task's own ``[verifier] timeout_sec`` from ``task.toml``, or None when missing, unreadable or invalid."""
+    try:
+        with open(task_folder / "task.toml", "rb") as stream:
+            value = tomllib.load(stream).get("verifier", {}).get("timeout_sec")
+    except (OSError, tomllib.TOMLDecodeError, AttributeError):
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return float(value)
+
+
+def uploaded_subdirectories(target_dirpath: str, remote_paths: List[str]) -> List[str]:
+    """Directories strictly below ``target_dirpath`` that hold ``remote_paths`` (deduplicated, parents first).
+
+    ``remote_paths`` must come from ``_upload_folder(..., target_dirpath)``, i.e. each is ``f"{target_dirpath}/<rel>"``;
+    the directories are the ones the unpacked archive created or used for nested files, never the upload root itself.
+    """
+    prefix = f"{target_dirpath}/"
+    root = target_dirpath.rstrip("/")
+    directories: Dict[str, None] = {}
+    for remote_path in remote_paths:
+        assert remote_path.startswith(prefix), (remote_path, target_dirpath)
+        relative_dir = PurePosixPath(remote_path[len(prefix) :]).parent
+        for depth in range(1, len(relative_dir.parts) + 1):
+            directories.setdefault(f"{root}/{'/'.join(relative_dir.parts[:depth])}", None)
+    return list(directories)
 
 
 class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
+    session_id: str
+    sandbox_descriptor: Dict[str, Any]
+    sandbox_provider: Dict[str, Any]
+    instruction: str
+    task_id: str
+    agent_timeout_sec: float
+    # Identity the agent harness runs as (row `agent_user`); None = the image default, as for OpenCode/Terminus.
+    user: AgentUser = None
+    # Echo of the row's agent_user for the OpenCode and Terminus 2 agents, which read it under this name.
+    agent_user: AgentUser = None
 
 
 class TerminalBench21SeedSessionRequest(BaseModel):
     task_name: str
     docker_image: str
     task_folder: str
+    # Identity the agent harness runs as inside the task sandbox (mirrors Harbor `task.toml` `[agent] user`).
+    # `None` keeps the image default. A non-root `agent_user` requires a root-default image on which that account
+    # exists. The verifier runs as the same account when `verifier_runs_as_agent_user` is on (default off), else as
+    # the image default. A row value of "root" (or 0) is the explicit per-row image default and beats any lane-level
+    # setting.
+    agent_user: AgentUser = None
+
+    @field_validator("agent_user", mode="before")
+    @classmethod
+    def _normalize_agent_user(cls, value: Any) -> Any:
+        return normalize_agent_user(value)
+
+
+class TerminalBench21RunRequest(TerminalBench21SeedSessionRequest):
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming | None = None
+    agent_timeout_sec: float = Field(default=28800, gt=0)
+    # Wall budget for `bash /tests/test.sh` (defaults to the server's evaluation_timeout) and extra environment
+    # for it (e.g. a task's own VERIFIER_WALL_SEC), both taken from the task's metadata by the row builder.
+    verifier_timeout_sec: Optional[float] = Field(default=None, gt=0)
+    verifier_env: Dict[str, str] = Field(default_factory=dict)
+    # Campaign bookkeeping only (recorded in the session record, never interpreted here).
+    rollout_id: Optional[str] = None
 
 
 class TerminalBench21VerifyRequest(TerminalBench21SeedSessionRequest, BaseVerifyRequest):
     pass
 
 
+class TerminalBench21SessionVerifyRequest(BaseVerifyRequest):
+    session_id: str
+    termination: Dict[str, Any]
+    agent_started: bool = False
+    agent_timings: Dict[str, Dict[str, str]] = Field(default_factory=dict)
+    harness_metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class TerminalBench21VerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+
     evaluation_completed: bool
+    # Set (to the agent's termination detail) when the tests were NOT run because the agent harness itself
+    # failed; mirrors the TB4 resources server so campaign drivers can treat both the same way.
+    infrastructure_error: Optional[str] = None
 
     # Misc metrics
     verification_time_taken: float
@@ -80,6 +175,12 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
     task_name: str
     test_output: str
     golden_patch_output: Optional[str]
+    # Identity the agent ran as (the base response chain drops undeclared request fields, so declare it here
+    # to record it in rollouts).
+    agent_user: AgentUser = None
+    # Identity and wall budget `bash /tests/test.sh` actually ran with (None = the image default).
+    verifier_user: AgentUser = None
+    verifier_timeout_sec: Optional[float] = None
 
 
 GOLDEN_PATCH_SOLVE_SH_PATCHES = {
@@ -142,6 +243,27 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
 
         self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
+        self._session_id_to_task: Dict[str, TerminalBench21RunRequest] = dict()
+        if self.config.session_records_dir is not None:
+            self.config.session_records_dir.mkdir(parents=True, exist_ok=True)
+
+    def _record_session(self, session_id: str, **fields: Any) -> None:
+        """Merge `fields` into the session's JSON record (atomic replace; best effort, never fails a request)."""
+        directory = self.config.session_records_dir
+        if directory is None:
+            return
+        path = directory / f"{session_id}.json"
+        try:
+            record = json.loads(path.read_text()) if path.exists() else {}
+        except (OSError, ValueError):
+            record = {}
+        record.update(fields, session_id=session_id, updated_at=datetime.now(timezone.utc).isoformat())
+        try:
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(record, default=str))
+            os.replace(temporary, path)
+        except OSError:
+            print(f"Could not write the session record {path}: {format_exc()}", file=stderr)
 
     def _patch_sandbox_provider_options_for_instances(
         self, task_name: str, resources: SandboxResources, provider_options: Dict[str, Any]
@@ -215,17 +337,48 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         # start_with_setup stops the container if _run_setup raises, instead of
         # leaving it running until its TTL.
-        await eval_sandbox.start_with_setup(eval_sandbox_spec, _run_setup)
+        if self.config.prepare_apt_sources:
+            await eval_sandbox.start_with_setup(eval_sandbox_spec, _run_setup)
+        else:
+            await eval_sandbox.start(eval_sandbox_spec)
 
         return eval_sandbox
 
     async def seed_session(
-        self, request: Request, body: TerminalBench21SeedSessionRequest
+        self, request: Request, body: TerminalBench21RunRequest
     ) -> TerminalBench21SeedSessionResponse:
+        instruction = []
+        for item in body.responses_create_params.input if body.responses_create_params else []:
+            if getattr(item, "role", None) == "user":
+                content = item.model_dump()["content"]
+                instruction.append(
+                    content if isinstance(content, str) else "\n".join(part["text"] for part in content)
+                )
+        provider = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
         eval_sandbox = await self._create_sandbox(body)
-        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
+        session_id = request.session[SESSION_ID_KEY]
+        self._session_id_to_sandbox[session_id] = eval_sandbox
+        self._session_id_to_task[session_id] = body
+        self._record_session(
+            session_id,
+            phase="open",
+            request=body.model_dump(exclude={"responses_create_params"}),
+            sandbox_id=eval_sandbox._handle.sandbox_id,
+            seeded_at=datetime.now(timezone.utc).isoformat(),
+        )
 
-        return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
+        # Keep the handle for OpenCode/Terminus; mini-SWE consumes the structured fields.
+        return TerminalBench21SeedSessionResponse(
+            sandbox_handle=eval_sandbox._handle.sandbox_id,
+            session_id=session_id,
+            sandbox_descriptor=await eval_sandbox.serialize(),
+            sandbox_provider=provider,
+            instruction="\n".join(instruction),
+            task_id=body.task_name,
+            agent_timeout_sec=body.agent_timeout_sec,
+            user=body.agent_user,
+            agent_user=body.agent_user,
+        )
 
     @contextmanager
     def _patch_golden_patch_solve_sh(
@@ -252,67 +405,155 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         target_dirpath: str,
         patches: Dict[str, List[Tuple[str, str]]],
         task_name: Optional[str] = None,
-    ) -> None:
+    ) -> List[str]:
+        """Upload every file under ``local_dirpath`` (hidden ones included, e.g. tests/.truth/) to ``target_dirpath``
+        as one archive; returns the remote paths written."""
         if not local_dirpath.is_absolute():
             local_dirpath = PARENT_DIR / local_dirpath
+        remote_paths: List[str] = []
 
-        for file in glob("**", root_dir=str(local_dirpath), recursive=True):
-            local_fpath = local_dirpath / file
-            if not local_fpath.is_file():
-                continue
-
-            target_fpath = f"{target_dirpath}/{file}"
-            mkdir_result = await sandbox.exec(f"mkdir -p {Path(target_fpath).parent}")
+        # One archive, one upload, one exec: a tests/ folder of hundreds of fixture files used to cost two
+        # control-plane calls per file, which is what bounds a resources server at high concurrency.
+        with TemporaryDirectory(prefix="tb21-upload-") as scratch:
+            archive = Path(scratch) / "folder.tar.gz"
+            with tarfile.open(archive, "w:gz") as tar:
+                for local_fpath in sorted(local_dirpath.rglob("*")):
+                    if not local_fpath.is_file():
+                        continue
+                    relative = local_fpath.relative_to(local_dirpath).as_posix()
+                    remote_paths.append(f"{target_dirpath}/{relative}")
+                    with self._patch_golden_patch_solve_sh(task_name, local_fpath, patches) as new_local_fpath:
+                        info = tar.gettarinfo(str(new_local_fpath), arcname=relative)
+                        info.mode = local_fpath.stat().st_mode & 0o7777
+                        with open(new_local_fpath, "rb") as stream:
+                            tar.addfile(info, stream)
+            remote_archive = f"{target_dirpath.rstrip('/')}.upload.tar.gz"
+            mkdir_result = await sandbox.exec(f"mkdir -p {json.dumps(target_dirpath)}")
             assert mkdir_result.return_code == 0, mkdir_result
+            await sandbox.upload(local_path=archive, remote_path=remote_archive)
+            unpack = await sandbox.exec(
+                f"tar -xzf {json.dumps(remote_archive)} -C {json.dumps(target_dirpath)} && rm -f {json.dumps(remote_archive)}",
+                timeout_s=600,
+            )
+            assert unpack.return_code == 0, unpack
+        return remote_paths
 
-            with self._patch_golden_patch_solve_sh(task_name, local_fpath, patches) as new_local_fpath:
-                await sandbox.upload(local_path=new_local_fpath, remote_path=target_fpath)
-
-    async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
+    async def verify(
+        self, request: Request, body: TerminalBench21VerifyRequest | TerminalBench21SessionVerifyRequest
+    ) -> TerminalBench21VerifyResponse:
+        metadata: Dict[str, Any] = {}
+        session_id = request.session[SESSION_ID_KEY]
+        run_request: Optional[TerminalBench21RunRequest] = None
+        agent_failure: Optional[str] = None
+        termination_reason: Optional[str] = None
+        if isinstance(body, TerminalBench21SessionVerifyRequest):
+            if body.session_id != session_id:
+                raise HTTPException(409, "Verification session does not match the seeded session cookie")
+            run_request = self._session_id_to_task.get(body.session_id)
+            if run_request is None:
+                raise HTTPException(404, "No seeded TB2 task for this session")
+            metadata = body.harness_metadata | {
+                "termination": body.termination,
+                "agent_started": body.agent_started,
+                "agent_timings": body.agent_timings,
+            }
+            # The agent harness failing (or never starting) is not the model's doing: release the sandbox
+            # without grading, as the TB4 resources server does, and mark the sample unusable.
+            termination_reason = body.termination.get("reason") if isinstance(body.termination, dict) else None
+            if termination_reason in ("infrastructure_error", "cancelled") or not body.agent_started:
+                agent_failure = str(
+                    (body.termination.get("detail") if isinstance(body.termination, dict) else None)
+                    or termination_reason
+                    or "Agent did not start"
+                )
+            body = TerminalBench21VerifyRequest.model_validate(run_request.model_dump() | body.model_dump())
         task_folder = Path(body.task_folder)
+        local_task_folder = task_folder if task_folder.is_absolute() else PARENT_DIR / task_folder
+        task_limit = run_request.verifier_timeout_sec if run_request is not None else None
+        verifier_timeout = float(
+            max(
+                self.config.verifier_timeout_floor_sec, task_limit or task_verifier_timeout_sec(local_task_folder) or 0
+            )
+        )
+        verifier_env: Dict[str, str] = dict(run_request.verifier_env) if run_request is not None else {}
+        agent_user = body.agent_user
+        verifier_user = (
+            agent_user if self.config.verifier_runs_as_agent_user and not is_root_agent_user(agent_user) else None
+        )
 
         if self.config.is_verifying_golden_patch:
             if self.config.debug:
                 print(f"Creating eval sandbox for {body.task_name}", file=stderr)
             eval_sandbox = await self._create_sandbox(body)
             cwd = (await eval_sandbox.exec("pwd")).stdout.strip()
-            await self._upload_folder(
+            solution_paths = await self._upload_folder(
                 eval_sandbox, task_folder / "solution", cwd, GOLDEN_PATCH_SOLVE_SH_PATCHES, task_name=body.task_name
             )
+            # The reference solution stands in for the agent, so it runs under the agent identity. Uploads (and the
+            # directories the archive created for nested files) land owned by the image default; hand them to a
+            # non-root agent_user first (mirrors Harbor's agents/installed/base.py chown after upload) so solve.sh
+            # can read and modify its own files. One non-recursive chown, parents first, never the upload root.
+            if not is_root_agent_user(agent_user) and solution_paths:
+                chown_targets = uploaded_subdirectories(cwd, solution_paths) + solution_paths
+                quoted_paths = " ".join(shlex_quote(path) for path in chown_targets)
+                chown_result = await eval_sandbox.exec(f"chown {shlex_quote(str(agent_user))} {quoted_paths}")
+                if chown_result.return_code != 0:
+                    print(f"Failed to chown solution files to {agent_user!r}: {chown_result}", file=stderr)
 
             if self.config.debug:
                 print(f"Running golden patch for {body.task_name}", file=stderr)
             golden_patch_result = await eval_sandbox.exec(
                 f"bash {cwd}/solve.sh",
                 timeout_s=self.config.evaluation_timeout,
-                preserve_background_services=True,
+                # Keeping the solution's background services needs the provider's service-preserving exec, which
+                # takes no per-command user; a non-root agent identity runs solve.sh as that account instead.
+                **({"preserve_background_services": True} if is_root_agent_user(agent_user) else {"user": agent_user}),
             )
             golden_patch_output = (golden_patch_result.stderr or "") + (golden_patch_result.stdout or "")
             if self.config.debug:
                 print(f"Golden patch output for {body.task_name}: {golden_patch_output}", file=stderr)
         else:
             # Re-use the original sandbox
-            eval_sandbox = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
+            eval_sandbox = self._session_id_to_sandbox.pop(session_id)
+            self._session_id_to_task.pop(session_id, None)
             golden_patch_output = None
 
-        if self.config.debug:
-            print(f"Running tests for {body.task_name}", file=stderr)
         start_time = time()
-        try:
-            await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
-            # Test scripts write rewards here even if their test runner fails to start.
-            setup_result = await eval_sandbox.exec("mkdir -p /logs/verifier", timeout_s=self.config.evaluation_timeout)
-            if setup_result.return_code != 0:
-                raise RuntimeError(f"Failed to prepare TerminalBench verifier output directory: {setup_result}")
-            eval_result = await eval_sandbox.exec(
-                "bash /tests/test.sh",
-                timeout_s=self.config.evaluation_timeout,
-            )
-            test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
-        except:
-            print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
-            eval_result = None
-            test_output = ""
+        eval_result = None
+        test_output = ""
+        if agent_failure is not None:
+            print(f"Skipping tests for {body.task_name}: agent harness failure: {agent_failure[:300]}", file=stderr)
+        else:
+            if self.config.debug:
+                print(f"Running tests for {body.task_name}", file=stderr)
+            try:
+                # /tests is uploaded as the image default (root), so the verifier account can read but not change
+                # it. `bash /tests/test.sh` then runs as `verifier_user`: the agent's account (as the vendor images
+                # declare it), or the image default when the agent ran as root or the switch is off.
+                await self._upload_folder(
+                    eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name
+                )
+                # Test scripts write rewards here even if their test runner fails to start.
+                setup_result = await eval_sandbox.exec(
+                    "mkdir -p /logs/verifier", timeout_s=self.config.evaluation_timeout
+                )
+                if setup_result.return_code != 0:
+                    raise RuntimeError(f"Failed to prepare TerminalBench verifier output directory: {setup_result}")
+                if verifier_user is not None:
+                    prepare = await eval_sandbox.exec(f"chown -R {shlex_quote(str(verifier_user))} /logs/verifier")
+                    if prepare.return_code != 0:
+                        print(f"Failed to hand /logs/verifier to {verifier_user!r}: {prepare}", file=stderr)
+                eval_result = await eval_sandbox.exec(
+                    "bash /tests/test.sh",
+                    timeout_s=verifier_timeout,
+                    env=verifier_env or None,
+                    user=verifier_user,
+                )
+                test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
+            except:
+                print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
+                eval_result = None
+                test_output = ""
         verification_time_taken = time() - start_time
 
         if self.config.debug:
@@ -337,14 +578,56 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         except:
             print(f"Hit an exception stopping sandbox: {format_exc()}", file=stderr)
 
-        return TerminalBench21VerifyResponse(
+        # A missing reward is the verifier's doing, never a model failure: keep the reward at 0 for
+        # compatibility but flag the sample so downstream scores exclude it.
+        mask_sample = False
+        failure_kind = None
+        failure_reason = None
+        if agent_failure is not None:
+            mask_sample = True
+            failure_kind = "cancelled" if termination_reason == "cancelled" else "agent_run_error"
+            failure_reason = agent_failure
+        elif not evaluation_completed:
+            mask_sample = True
+            failure_kind = "verifier_error"
+            failure_reason = (
+                "MissingOfficialReward: the verifier left no /logs/verifier/reward.txt"
+                if eval_result is not None
+                else "VerifierExecutionError: the tests could not be uploaded or run"
+            )
+
+        result = TerminalBench21VerifyResponse(
             **body.model_dump(),
             evaluation_completed=evaluation_completed,
             reward=reward,
+            mask_sample=mask_sample,
+            failure_kind=failure_kind,
+            failure_reason=failure_reason,
+            infrastructure_error=agent_failure,
             verification_time_taken=verification_time_taken,
             test_output=test_output,
             golden_patch_output=golden_patch_output,
+            verifier_user=verifier_user,
+            verifier_timeout_sec=verifier_timeout,
         )
+        self._record_session(
+            session_id,
+            phase="closed",
+            termination=metadata.get("termination"),
+            agent_started=metadata.get("agent_started"),
+            verified_response={
+                "reward": reward,
+                "evaluation_completed": evaluation_completed,
+                "mask_sample": mask_sample,
+                "failure_kind": failure_kind,
+                "failure_reason": failure_reason,
+                "infrastructure_error": agent_failure,
+                "verification_time_taken": verification_time_taken,
+                "test_output_tail": test_output[-4000:],
+            },
+            verified_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return TerminalBench21VerifyResponse.model_validate(metadata | result.model_dump()) if metadata else result
 
 
 if __name__ == "__main__":
