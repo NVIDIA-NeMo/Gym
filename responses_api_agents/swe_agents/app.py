@@ -183,6 +183,18 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         ),
     )
 
+    sanitize_git_history: bool = Field(
+        default=False,
+        description=(
+            "Before the agent starts, remove the task repository's git history that is not reachable from HEAD (or "
+            "from the instance's base_commit): delete every other ref, all remotes and reflogs, and prune the "
+            "unreachable objects. Some task images ship the upstream clone with the fix commit still reachable "
+            "through other branches, tags, remote-tracking refs or reflogs (`git log --all`). Ancestor tags and "
+            "branches are kept, as are HEAD and the working tree, so patch capture and grading are unaffected. "
+            "Output goes to git_sanitize.log in the rollout's trajectory directory."
+        ),
+    )
+
     agent_prompt_overrides: Optional[list[AgentPromptOverride]] = Field(
         default=None,
         description="List of (user_prompt_template, system_prompt_template, agent_cls) overrides. "
@@ -1894,8 +1906,17 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
         baseline_fix = _extract_instance_dict(data_point).get("baseline_fix", "")
         baseline_fix_cmd = f"{{ {baseline_fix} >/tmp/baseline_fix.log 2>&1 || true; }} && " if baseline_fix else ""
 
+        git_sanitize_cmd = ""
+        if self.config.sanitize_git_history:
+            git_sanitize_cmd = _git_history_sanitize_cmd(
+                _resolve_opencode_workspace_path(data_point),
+                str(data_point.get("base_commit") or ""),
+                f"{self.config.base_mounted_dir}/git_sanitize.log",
+            )
+
         agent_main_cmd = (
             f"{workspace_check_cmd}"
+            f"{git_sanitize_cmd}"
             # Add miniforge bin to PATH (for tmux, node, poetry, etc.)
             "mkdir -p /tmp/ && "
             "export PATH=/openhands_setup/miniforge3/bin:$PATH && "
@@ -2031,6 +2052,36 @@ def _resolve_opencode_workspace_path(problem_info: Dict[str, Any]) -> str:
         repo_name = repo.split("/", 1)[1] if "/" in repo else repo
         return f"/{repo_name}"
     return "/testbed"
+
+
+def _git_history_sanitize_cmd(repo_path: str, base_commit: str, log_path: str) -> str:
+    """Shell prefix that leaves ``repo_path`` with only the git history reachable from HEAD or ``base_commit``.
+
+    Removes every remote, deletes every ref whose tip is not an ancestor of HEAD (or of ``base_commit`` when it
+    resolves, so harnesses that reset to it keep working) and every ref to a non-commit object, expires all
+    reflogs and runs ``git gc --prune=now`` so the dropped commits are gone from the object store, not just
+    unreferenced. Ancestor tags/branches, HEAD and the working tree are untouched. Best effort: a missing
+    repository or a git failure is written to ``log_path`` and never blocks the rollout.
+    """
+    script = f"""set -u
+g() {{ git -c safe.directory='*' "$@"; }}
+cd {shlex.quote(repo_path)} 2>/dev/null && [ -e .git ] || {{ echo "no git repository at {shlex.quote(repo_path)}"; exit 0; }}
+before=$(g rev-list --all --count)
+base={shlex.quote(base_commit)}
+g rev-parse -q --verify "$base^{{commit}}" >/dev/null 2>&1 || base=
+for remote in $(g remote); do g remote remove "$remote"; done
+{{
+  g for-each-ref --no-merged=HEAD --format='%(refname)' |
+    while read -r ref; do [ -n "$base" ] && g merge-base --is-ancestor "$ref" "$base" || echo "$ref"; done
+  g for-each-ref --format='%(objecttype) %(*objecttype) %(refname)' | awk '$1 != "commit" && $2 != "commit" {{print $NF}}'
+}} | while read -r ref; do echo "delete $ref"; g update-ref --no-deref -d "$ref"; done
+git_dir=$(g rev-parse --git-dir)
+for f in FETCH_HEAD ORIG_HEAD MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_HEAD AUTO_MERGE; do rm -f "$git_dir/$f"; done
+g reflog expire --expire=now --expire-unreachable=now --all
+g gc --prune=now --quiet
+echo "git history sanitized in {shlex.quote(repo_path)}: $before -> $(g rev-list --all --count) commits reachable"
+"""
+    return f"{{ bash -c {shlex.quote(script)} >{shlex.quote(log_path)} 2>&1 || true; }} && "
 
 
 def _extract_instance_dict(problem_info: Dict[str, Any]) -> Dict[str, Any]:
@@ -2303,6 +2354,14 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
                 "} && "
             )
 
+        git_sanitize_cmd = ""
+        if self.config.sanitize_git_history:
+            git_sanitize_cmd = _git_history_sanitize_cmd(
+                workspace_path,
+                str(data_point.get("base_commit") or ""),
+                f"{self.config.base_mounted_dir}/git_sanitize.log",
+            )
+
         agent_main_cmd = (
             "mkdir -p /tmp/ && "
             "export PATH=/opencode_setup/bun/bin:$PATH && "
@@ -2323,6 +2382,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f"echo {shlex.quote(config_str)} >{config_file_path} && "
             f"{conda_activate_cmd}"
             f"{denovoswe_clean_cmd}"
+            f"{git_sanitize_cmd}"
             f"{baseline_fix_cmd}"
             "./evaluation/benchmarks/swe_bench/scripts/run_infer.sh "
             f"    {self.config.agent_framework_commit} "  # $1: opencode commit
