@@ -449,6 +449,14 @@ def test_record_refusal_without_the_extension_warns_once_and_leaves_the_intent_d
     assert context.refusal_recorded is False
 
 
+def test_the_unserved_call_reasons_are_the_refusal_and_the_uncommitted_call():
+    """Pin the set a framework's receipt builder treats as off-chain rather than poisoning."""
+    from nemo_gym.token_id_capture import ENGINE_REFUSED_CALL_REASON, UNCOMMITTED_CALL_REASON
+    from nemo_gym.token_id_capture.staging.records import UNSERVED_CALL_FAILURE_REASONS
+
+    assert UNSERVED_CALL_FAILURE_REASONS == frozenset({UNCOMMITTED_CALL_REASON, ENGINE_REFUSED_CALL_REASON})
+
+
 def test_record_refusal_never_raises(caplog):
     class Sink:
         async def refuse_call(self, rollout_id: str, *, model_call_id: str, code: str | None) -> None:

@@ -75,6 +75,12 @@ UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
 # window), so generation never ran and nothing was staged. Unlike a lost response, this outcome
 # is definite. Written by the model server at the engine call site, under worker custody.
 ENGINE_REFUSED_CALL_REASON = "engine_refused_request"
+# Failure reasons of a call that served no completion to the client: the engine refused it, or
+# the request finished before the worker's commit was acknowledged (the ledger commit precedes
+# the response leaving the server). Such a call can never be a lineage parent, so a framework
+# assembling a receipt treats these rows as off-chain rather than as a hole in the chain; the
+# rollout is still masked when the refused or lost call is the one the harness kept.
+UNSERVED_CALL_FAILURE_REASONS = frozenset({UNCOMMITTED_CALL_REASON, ENGINE_REFUSED_CALL_REASON})
 # A committed ledger row lacks the served response id that terminal attribution joins on.
 LEDGER_ROW_MISSING_RESPONSE_ID_REASON = "ledger_row_missing_response_id"
 # A committed ledger row lacks the chain or cumulative digest that verification anchors on.
