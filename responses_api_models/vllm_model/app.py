@@ -60,6 +60,7 @@ from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY, _redacted_url, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
     current_capture_context,
+    record_refusal,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.external_capture import (
@@ -132,8 +133,8 @@ def _is_context_length_error(error: ClientResponseError) -> bool:
     return _names_context_window(message) or any(marker in message for marker in _MAX_TOKENS_PARAMETER_MARKERS)
 
 
-def _mark_propagated_overflow(error: ClientResponseError) -> None:
-    """Mark a length refusal the server propagates, and choose the envelope code for it.
+def _mark_propagated_overflow(error: ClientResponseError) -> str | None:
+    """Mark a length refusal the server propagates, and return the envelope code chosen for it.
 
     A body that names the context window gets OpenAI's ``context_length_exceeded``, which tells
     an OpenAI-compatible harness to compact its history and retry. A body that only names the
@@ -141,12 +142,10 @@ def _mark_propagated_overflow(error: ClientResponseError) -> None:
     ordinary invalid request with the engine's own message.
     """
     message = error.response_content.decode(errors="replace")
+    code = CONTEXT_LENGTH_EXCEEDED_ERROR_CODE if _names_context_window(message) else None
     setattr(error, CONTEXT_OVERFLOW_ERROR_ATTRIBUTE, True)
-    setattr(
-        error,
-        CONTEXT_OVERFLOW_ERROR_CODE_ATTRIBUTE,
-        CONTEXT_LENGTH_EXCEEDED_ERROR_CODE if _names_context_window(message) else None,
-    )
+    setattr(error, CONTEXT_OVERFLOW_ERROR_CODE_ATTRIBUTE, code)
+    return code
 
 
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
@@ -1132,7 +1131,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             if _is_context_length_error(e):
                 execution["error_category"] = "context_length_exceeded"
                 if self.config.propagate_context_overflow_errors:
-                    _mark_propagated_overflow(e)
+                    # The refused call generated nothing and gets no token record; the refusal
+                    # record resolves the capture intent registered before dispatch.
+                    await record_refusal(_mark_propagated_overflow(e))
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
@@ -1466,7 +1467,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             if _is_context_length_error(e):
                 execution["error_category"] = "context_length_exceeded"
                 if self.config.propagate_context_overflow_errors:
-                    _mark_propagated_overflow(e)
+                    # The refused call generated nothing and gets no token record; the refusal
+                    # record resolves the capture intent registered before dispatch.
+                    await record_refusal(_mark_propagated_overflow(e))
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"

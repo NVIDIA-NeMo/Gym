@@ -22,6 +22,7 @@ from typing import Annotated, Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, model_validator
 
 from nemo_gym.token_id_capture.records import (  # noqa: F401  (re-exported for staging consumers)
+    ENGINE_REFUSED_CALL_REASON,
     LEDGER_ROW_MISSING_CHAIN_HASH_REASON,
     LEDGER_ROW_MISSING_RESPONSE_ID_REASON,
     UNCOMMITTED_CALL_REASON,
@@ -59,7 +60,7 @@ def staging_key(rollout_id: str, model_call_id: str) -> str:
 # wire contract: the framework switches on them, so never repurpose one.
 
 # Reasons specific to worker commit coordinates. The shared reasons
-# (``UNRESOLVED_PARENT_REASON``, ``UNCOMMITTED_CALL_REASON``,
+# (``UNRESOLVED_PARENT_REASON``, ``UNCOMMITTED_CALL_REASON``, ``ENGINE_REFUSED_CALL_REASON``,
 # ``LEDGER_ROW_MISSING_RESPONSE_ID_REASON``, ``LEDGER_ROW_MISSING_CHAIN_HASH_REASON``)
 # live in the core records module
 # and are re-exported here.

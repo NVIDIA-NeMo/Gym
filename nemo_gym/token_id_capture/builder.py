@@ -40,7 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, compute_digest
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, RefusalRecord, TokenEntry, compute_digest
 
 
 @dataclass
@@ -614,7 +614,9 @@ def project_chain_to_output_items(chain: Chain) -> list[dict]:
 _INCOMPLETE_REASON_BY_FINISH_REASON = {"length": "max_output_tokens", "content_filter": "content_filter"}
 
 
-def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = "") -> dict:
+def project_main_chain_response(
+    rollout_id: str, out: BuildOutput, model: str = "", refusals: tuple[RefusalRecord, ...] = ()
+) -> dict:
     """Rebuild the main chain as a Responses object whose output items are contiguous.
 
     The result is a Gym-native Responses payload.
@@ -628,6 +630,14 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
     chat completion that ended the same way. The finish reason is recorded by the local capture
     path (``capture_tokens``); a call staged under worker custody carries none, so a chain built
     from externally staged records reports no verdict.
+
+    ``refusals`` are the frozen snapshot's engine refusals. A refusal recorded after the
+    delivered terminal call also makes the payload ``incomplete`` with reason
+    ``max_output_tokens``: the harness's next request did not fit the context window, so the
+    rollout ended at the model's limit although its last served call completed. A refusal the
+    harness recovered from, with a call served after it, does not: that call ended the chain.
+    A refusal and a served ``length`` stop give the same status; the consumer's
+    ``metrics["refusals"]`` tells them apart.
     """
     if not out.chains:
         raise ValueError("capture produced no safe trainable chain")
@@ -651,8 +661,11 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
     }
     # Only the terminal call decides: an earlier ``length`` stop did not end the delivered
     # chain, because a later call extended it. A complete ending, or an unrecorded finish
-    # reason, leaves ``status`` unset.
-    incomplete_reason = _INCOMPLETE_REASON_BY_FINISH_REASON.get(mains[0].links[-1].entry.finish_reason)
+    # reason, leaves ``status`` unset unless a refusal came after the terminal call.
+    terminal = mains[0].links[-1].entry
+    incomplete_reason = _INCOMPLETE_REASON_BY_FINISH_REASON.get(terminal.finish_reason)
+    if incomplete_reason is None and any(refusal.created_at > terminal.created_at for refusal in refusals):
+        incomplete_reason = "max_output_tokens"
     if incomplete_reason is not None:
         response["status"] = "incomplete"
         response["incomplete_details"] = {"reason": incomplete_reason}

@@ -1486,12 +1486,16 @@ def _record(
 
 
 async def _fail_uncommitted_external_call(context: CaptureContext | None) -> None:
-    """Record a failure when an admitted worker call returns without commit coordinates."""
+    """Record a failure when an admitted worker call returns without commit coordinates.
+
+    A call the engine refused is skipped: ``record_refusal`` already wrote its definite reason.
+    """
     if (
         context is None
         or not context.external_staging
         or context.capture_admission is None
         or context.committed
+        or context.refusal_recorded
         or context.lineage_store is None
     ):
         return
