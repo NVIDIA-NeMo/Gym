@@ -1,0 +1,31 @@
+kernel_gym:
+  responses_api_agents:
+    kernel_gym:
+      entrypoint: app.py
+      domain: coding
+      description: KernelBench one shot or coding agent
+      value: Evaluate and improve agent kernel optimization
+
+      agent_server_module: responses_api_agents.claude_code_agent.app
+      agent_server_class: ClaudeCodeAgent
+      agent_config_class: ClaudeCodeAgentConfig
+      agent_kwargs:
+        model: ${policy_model_name}
+        anthropic_api_key: ${policy_api_key}
+        anthropic_base_url: ${policy_base_url}
+        max_turns: 100
+        timeout: 1200
+
+      container_formatter: "{docker_image}"
+      sandbox_provider: ${sandbox}
+      sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,https://inference-api.nvidia.com/v1}
+      concurrency: 48
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: kernelbench
+          type: example
+          jsonl_fpath: responses_api_agents/kernel_gym/data/kernelbench.jsonl
