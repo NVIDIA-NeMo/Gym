@@ -715,6 +715,12 @@ class IncrementalLineageStore:
             self._materialized_tokens = 0
 
 
+# Budget for one worker's cached ledger rows, counted as rows plus staging-chain keys. Each row repeats its
+# call's whole chain, so a rollout's rows grow with the square of its call count; at roughly 120 bytes per
+# entry, this keeps the cache to a few hundred megabytes.
+MAX_CACHED_LEDGER_ENTRIES = 2_000_000
+
+
 class FileLineageStore(IncrementalLineageStore):
     """Resolve lineage from the token JSONL committed by ``TokenCaptureStore``.
 
@@ -736,10 +742,14 @@ class FileLineageStore(IncrementalLineageStore):
         self._store = TokenCaptureStore(root)
         # The capture-ledger rows live beside the token JSONL. Each worker
         # caches parsed rows through its last byte offset; locked appends
-        # provide read-after-write visibility across workers.
+        # provide read-after-write visibility across workers. The cache holds
+        # at most ``max_cached_rollouts`` rollouts and ``MAX_CACHED_LEDGER_ENTRIES``
+        # rows plus chain keys, evicting the rollout used longest ago.
         self._ledger_root = Path(root)
         self._ledger_root.mkdir(parents=True, exist_ok=True)
         self._ledger_cache: dict[str, tuple[int, int, list[dict]]] = {}
+        self._ledger_cache_weights: dict[str, int] = {}
+        self._ledger_cache_weight = 0
 
     def _read_locked(self, rollout_id: str):
         return self._store._locked(rollout_id, shared=True)
@@ -799,16 +809,50 @@ class FileLineageStore(IncrementalLineageStore):
         # discipline covers both and no second lock file is minted.
         return self._store._locked(rollout_id)
 
+    def _ledger_cache_put(self, rollout_id: str, value: tuple[int, int, list[dict]]) -> None:
+        # Evicting a rollout only costs a re-read of its ledger, so bound the cache like the entry cache: by
+        # rollouts, and by rows plus staging-chain keys, since every row repeats its call's whole chain and one
+        # long rollout can outweigh thousands of short ones. The rollout just stored is never evicted.
+        # Different rollouts write concurrently from worker threads, so the dictionary needs the guard.
+        weight = sum(1 + len(row.get("staging_chain") or ()) for row in value[2])
+        with self._cache_guard:
+            self._ledger_cache_pop_unlocked(rollout_id)
+            self._ledger_cache[rollout_id] = value
+            self._ledger_cache_weights[rollout_id] = weight
+            self._ledger_cache_weight += weight
+            while len(self._ledger_cache) > 1 and (
+                len(self._ledger_cache) > self._max_cached_rollouts
+                or self._ledger_cache_weight > MAX_CACHED_LEDGER_ENTRIES
+            ):
+                self._ledger_cache_pop_unlocked(next(iter(self._ledger_cache)))
+
+    def _ledger_cache_touch(self, rollout_id: str) -> None:
+        # A read is a use too: move the rollout to the newest end so it is evicted last.
+        with self._cache_guard:
+            value = self._ledger_cache.pop(rollout_id, None)
+            if value is not None:
+                self._ledger_cache[rollout_id] = value
+
+    def _ledger_cache_pop(self, rollout_id: str) -> None:
+        with self._cache_guard:
+            self._ledger_cache_pop_unlocked(rollout_id)
+
+    def _ledger_cache_pop_unlocked(self, rollout_id: str) -> None:
+        if self._ledger_cache.pop(rollout_id, None) is not None:
+            self._ledger_cache_weight -= self._ledger_cache_weights.pop(rollout_id)
+
     def _read(self, rollout_id: str) -> list[dict]:
         path = self._ledger_path(rollout_id)
         if not path.exists():
-            self._ledger_cache.pop(rollout_id, None)
+            self._ledger_cache_pop(rollout_id)
             return []
         file_stat = path.stat()
         inode, offset, cached = self._ledger_cache.get(rollout_id, (file_stat.st_ino, 0, []))
         if inode != file_stat.st_ino or offset < 0 or offset > file_stat.st_size:
             inode, offset, cached = file_stat.st_ino, 0, []
         if offset == file_stat.st_size:
+            if cached:
+                self._ledger_cache_touch(rollout_id)
             return cached
 
         records = list(cached)
@@ -823,7 +867,7 @@ class FileLineageStore(IncrementalLineageStore):
                     raise ValueError(f"lineage record for {rollout_id} is not an object")
                 records.append(record)
             offset = handle.tell()
-        self._ledger_cache[rollout_id] = (inode, offset, records)
+        self._ledger_cache_put(rollout_id, (inode, offset, records))
         return records
 
     def _append(self, rollout_id: str, record: dict, records: list[dict]) -> None:
@@ -843,7 +887,7 @@ class FileLineageStore(IncrementalLineageStore):
             finally:
                 os.close(directory_fd)
         records.append(record)
-        self._ledger_cache[rollout_id] = (inode, offset, records)
+        self._ledger_cache_put(rollout_id, (inode, offset, records))
 
     def _resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
         resolution = super()._resolve(rollout_id, request_items)
