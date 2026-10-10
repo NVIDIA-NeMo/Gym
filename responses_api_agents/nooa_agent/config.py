@@ -81,13 +81,22 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
 
     model_config = ConfigDict(extra="forbid")
 
-    resources_server: ResourcesServerRef
+    resources_server: ResourcesServerRef | None = Field(
+        default=None,
+        description="Dataset/schema discovery metadata; runtime access comes from environment session grants.",
+    )
     model_server: ModelServerRef
     nooa: NOOAInvocationConfig
     max_policy_calls: int | None = Field(
         default=None, gt=0, description="Optional shared model-call limit per rollout; null disables the limit."
     )
-    run_timeout_secs: float = Field(default=2100, gt=0)
+
+    @field_validator("num_workers")
+    @classmethod
+    def require_single_worker(cls, value: int | None) -> int | None:
+        if value not in (None, 1):
+            raise ValueError("NOOA sessions require num_workers=1")
+        return value
 
 
 def load_agent_class(path: str) -> type[Agent]:

@@ -17,19 +17,30 @@ import asyncio
 import inspect
 import json
 from http.cookies import SimpleCookie
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
 from jsonschema import Draft202012Validator
 from nooa import Agent
 
+from nemo_gym.tool_access import DirectHTTPToolAccess
+from responses_api_agents.nooa_agent import resource_tools
 from responses_api_agents.nooa_agent.observability import GymTraceHooks
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
     create_agent_class_with_resource_methods,
     validate_agent_resource_method_bindings,
 )
+
+
+@pytest.fixture(autouse=True)
+def outbound(monkeypatch):
+    mock = AsyncMock()
+    monkeypatch.setattr(resource_tools, "request", mock)
+    return mock
 
 
 class FakeContent:
@@ -47,6 +58,25 @@ class FakeResponse:
         self.cookies = SimpleCookie()
         if cookie:
             self.cookies[cookie[0]] = cookie[1]
+
+    @property
+    def ok(self) -> bool:
+        return self.status < 400
+
+    def raise_for_status(self) -> None:
+        if not self.ok:
+            raise aiohttp.ClientResponseError(
+                SimpleNamespace(url="http://resources", real_url="http://resources", method="POST", headers={}),
+                (),
+                status=self.status,
+                message="unavailable",
+            )
+
+
+def grant() -> DirectHTTPToolAccess:
+    return DirectHTTPToolAccess(
+        name="resources", required=True, base_url="http://resources/", headers={"X-Grant": "yes"}
+    )
 
 
 class FakeAgent:
@@ -94,8 +124,9 @@ def weather_tool() -> dict[str, Any]:
 @pytest.mark.asyncio
 async def test_resource_signature_and_dispatch_for_json_types(schema_type: str, annotation: Any, value: Any) -> None:
     client = MagicMock()
-    client.post = AsyncMock(return_value=FakeResponse({"ok": True}))
-    dispatcher = ResourceToolDispatcher(server_client=client, resources_server_name="resources", cookies={})
+    client.post = resource_tools.request
+    client.post.return_value = FakeResponse({"ok": True})
+    dispatcher = ResourceToolDispatcher(tool_access=grant(), cookies={})
     tool = weather_tool()
     tool["name"] = "typed"
     tool["parameters"]["properties"] = {"value": {"type": schema_type} if schema_type else {}}
@@ -109,11 +140,10 @@ async def test_resource_signature_and_dispatch_for_json_types(schema_type: str, 
 @pytest.mark.asyncio
 async def test_invalid_resource_arguments_are_observed_without_http() -> None:
     client = MagicMock()
-    client.post = AsyncMock()
+    client.post = resource_tools.request
     trace = GymTraceHooks()
     dispatcher = ResourceToolDispatcher(
-        server_client=client,
-        resources_server_name="resources",
+        tool_access=grant(),
         cookies={},
         trace_hooks=trace,
     )
@@ -129,8 +159,7 @@ async def test_invalid_resource_arguments_are_observed_without_http() -> None:
 
 def test_invalid_tool_json_schema_rejected_before_execution() -> None:
     dispatcher = ResourceToolDispatcher(
-        server_client=MagicMock(),
-        resources_server_name="resources",
+        tool_access=grant(),
         cookies={},
     )
     tool = weather_tool()
@@ -143,11 +172,11 @@ def make_agent(
     response: FakeResponse,
 ) -> tuple[FakeAgent, MagicMock, dict[str, str]]:
     client = MagicMock()
-    client.post = AsyncMock(return_value=response)
+    client.post = resource_tools.request
+    client.post.return_value = response
     cookies = {"session": "old"}
     dispatcher = ResourceToolDispatcher(
-        server_client=client,
-        resources_server_name="weather_resources",
+        tool_access=grant(),
         cookies=cookies,
     )
     agent_class = create_agent_class_with_resource_methods(
@@ -173,11 +202,11 @@ async def test_method_is_attached_directly_with_typed_signature_defaults_and_coo
     assert agent.get_weather.__doc__ == "Return the weather for a city."  # type: ignore[attr-defined]
     assert output == {"city": "Paris", "weather": "cold"}
     assert client.post.await_args.kwargs == {
-        "server_name": "weather_resources",
-        "url_path": "/get_weather",
+        "headers": {"X-Grant": "yes"},
         "json": {"city": "Paris", "units": "celsius"},
-        "cookies": {"session": "new"},
+        "cookies": {"session": "old"},
     }
+    assert client.post.await_args.args == ("POST", "http://resources/get_weather")
     assert cookies == {"session": "new"}
 
 
@@ -202,12 +231,11 @@ async def test_invalid_python_call_raises_type_error_without_http_call() -> None
 
 
 @pytest.mark.asyncio
-async def test_resource_http_error_is_returned() -> None:
+async def test_resource_http_error_is_raised() -> None:
     agent, _, _ = make_agent(FakeResponse({"detail": "unavailable"}, status=503))
 
-    output = await agent.get_weather(city="Paris")  # type: ignore[attr-defined]
-
-    assert output == {"detail": "unavailable"}
+    with pytest.raises(aiohttp.ClientResponseError):
+        await agent.get_weather(city="Paris")
 
 
 @pytest.mark.asyncio
@@ -216,20 +244,20 @@ async def test_resource_calls_are_serialized_per_rollout() -> None:
     max_active_calls = 0
     call_order: list[str] = []
 
-    async def post(*, url_path: str, **_: Any) -> FakeResponse:
+    async def post(method: str, url: str, **_: Any) -> FakeResponse:
         nonlocal active_calls, max_active_calls
         active_calls += 1
         max_active_calls = max(max_active_calls, active_calls)
-        call_order.append(url_path)
+        call_order.append(url)
         await asyncio.sleep(0.01)
         active_calls -= 1
         return FakeResponse({"ok": True})
 
     client = MagicMock()
-    client.post = AsyncMock(side_effect=post)
+    client.post = resource_tools.request
+    client.post.side_effect = post
     dispatcher = ResourceToolDispatcher(
-        server_client=client,
-        resources_server_name="resources",
+        tool_access=grant(),
         cookies={},
     )
     validator = Draft202012Validator({"type": "object"})
@@ -240,13 +268,12 @@ async def test_resource_calls_are_serialized_per_rollout() -> None:
     )
 
     assert max_active_calls == 1
-    assert call_order == ["/first", "/second"]
+    assert call_order == ["http://resources/first", "http://resources/second"]
 
 
 def test_rejects_method_name_that_collides_with_agent() -> None:
     dispatcher = ResourceToolDispatcher(
-        server_client=MagicMock(),
-        resources_server_name="resources",
+        tool_access=grant(),
         cookies={},
     )
 
@@ -260,8 +287,7 @@ def test_rejects_method_name_that_collides_with_agent() -> None:
 
 def test_rejects_instance_field_that_hides_resource_method() -> None:
     dispatcher = ResourceToolDispatcher(
-        server_client=MagicMock(),
-        resources_server_name="resources",
+        tool_access=grant(),
         cookies={},
     )
     agent_class = create_agent_class_with_resource_methods(
@@ -277,8 +303,7 @@ def test_rejects_instance_field_that_hides_resource_method() -> None:
 
 def test_method_can_be_attached_to_real_nooa_agent_instance() -> None:
     dispatcher = ResourceToolDispatcher(
-        server_client=MagicMock(),
-        resources_server_name="resources",
+        tool_access=grant(),
         cookies={},
     )
     agent_class = create_agent_class_with_resource_methods(
@@ -304,10 +329,30 @@ def test_method_can_be_attached_to_real_nooa_agent_instance() -> None:
 )
 def test_rejects_unsupported_or_colliding_tool_definitions(tools: list[dict], message: str) -> None:
     dispatcher = ResourceToolDispatcher(
-        server_client=MagicMock(),
-        resources_server_name="resources",
+        tool_access=grant(),
         cookies={},
     )
 
     with pytest.raises(ValueError, match=message):
         create_agent_class_with_resource_methods(FakeAgent, dispatcher=dispatcher, tools=tools)
+
+
+@pytest.mark.parametrize("name", ["seed", "verify", "close", "seed_session", "close_session"])
+def test_lifecycle_routes_cannot_be_exposed(name: str) -> None:
+    dispatcher = ResourceToolDispatcher(tool_access=grant(), cookies={})
+    with pytest.raises(ValueError, match="lifecycle route"):
+        create_agent_class_with_resource_methods(
+            FakeAgent, dispatcher=dispatcher, tools=[weather_tool() | {"name": name}]
+        )
+
+
+@pytest.mark.asyncio
+async def test_transport_failure_remains_sticky_after_a_later_success(outbound) -> None:
+    failure = ConnectionError("resources unavailable")
+    outbound.side_effect = [failure, FakeResponse({"ok": True})]
+    dispatcher = ResourceToolDispatcher(tool_access=grant(), cookies={})
+    validator = Draft202012Validator({"type": "object"})
+    with pytest.raises(ConnectionError):
+        await dispatcher.call(name="tool", arguments={}, validator=validator)
+    assert await dispatcher.call(name="tool", arguments={}, validator=validator) == {"ok": True}
+    assert dispatcher.fatal_error is failure
