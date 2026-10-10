@@ -371,6 +371,7 @@ _LEGACY_RESULT_FIELDS = frozenset(
         NG_NO_PERSIST_KEY,
         NG_TERMINAL_KEY,
         "_ng_failure_type",
+        "_ng_failure_kind",  # The legacy Environment Server adapter preserves an explicitly absent kind.
         "_ng_failure_message",
         "_ng_failure_http_status",
         "_ng_failure_response_body",

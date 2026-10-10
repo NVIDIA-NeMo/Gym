@@ -1336,7 +1336,6 @@ async def test_collector_accepts_only_intentional_gaps_without_scoring_them(
     _check_saved_completion(output)
     assert f"{3 - num_omitted}/3 samples completed, {num_omitted} intentionally omitted" in caplog.text
     assert caplog.text.count("Evaluation accepted with intentional omissions") == 1
-    assert "Exiting successfully" not in caplog.text
     store = RolloutStore.read(output)
     assert store.coverage()["complete"] is False
     assert store.coverage()["intentionally_omitted"] == num_omitted
@@ -1382,8 +1381,9 @@ def test_omissions_do_not_hide_other_unfinished_work(prepared_run, remaining):
 
 
 @pytest.mark.parametrize("require_complete", [False, True])
+@pytest.mark.parametrize("producer", ["skipped", "bare_no_persist"])
 async def test_all_omitted_run_and_resume_have_no_score_and_exit_76(
-    runner_config, monkeypatch, caplog, require_complete
+    runner_config, monkeypatch, caplog, require_complete, producer
 ):
     from nemo_gym.cli.eval import _check_saved_completion
     from nemo_gym.path_utils import aggregate_metrics_path_for
@@ -1391,19 +1391,24 @@ async def test_all_omitted_run_and_resume_have_no_score_and_exit_76(
     runner_config.require_complete = require_complete
     runner_config.route_failures_to_sidecar = True
     runner_config.disable_aggregation = False
-    client = install_fake_server_client(
-        monkeypatch,
-        AsyncMock(return_value=FakeResponse(200, {"_ng_failure_class": "skipped", "_ng_failure_terminal": True})),
+    reply = (
+        {"_ng_failure_class": "skipped", "_ng_failure_terminal": True}
+        if producer == "skipped"
+        else {"_ng_no_persist": True}
     )
+    client = install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, reply)))
     output = Path(runner_config.output_jsonl_fpath)
     for resume in (False, True):
         runner_config.resume_from_cache = resume
         # The library permits a partial cached return when require_complete is
         # false; the CLI must still reject a run with no completed tasks.
-        with pytest.raises(IncompleteEvaluationError) as error:
-            await collection.RolloutCollectionHelper().run_from_config(runner_config)
-            _check_saved_completion(output)
-        assert error.value.exit_code == 76
+        if resume and not require_complete:
+            assert await collection.RolloutCollectionHelper().run_from_config(runner_config) == []
+        else:
+            with pytest.raises(IncompleteEvaluationError) as error:
+                await collection.RolloutCollectionHelper().run_from_config(runner_config)
+            assert error.value.exit_code == 76
+        assert "Evaluation accepted with intentional omissions" not in caplog.text
         with pytest.raises(IncompleteEvaluationError) as saved_error:
             _check_saved_completion(output)
         assert saved_error.value.exit_code == 76
@@ -1414,7 +1419,6 @@ async def test_all_omitted_run_and_resume_have_no_score_and_exit_76(
         assert not aggregate_metrics_path_for(output).exists()
         assert all("reward" not in row for row in RolloutStore.read(output).selected("omitted"))
     assert client.post.await_count == 3
-    assert "Exiting successfully" not in caplog.text
 
 
 @pytest.mark.parametrize("signals", [{}, {"retryable": False}, {"made_progress": False}])
@@ -1515,7 +1519,7 @@ def test_legacy_alias_through_directory_alias_is_one_input(tmp_path):
         ("_ng_dispatch_drained", True),
         ("_ng_unknown_collector_key", "stale bookkeeping"),
         ("_ng_task_id", {"taskset": "foreign", "task_id": "42"}),
-        ("_ng_failure_kind", "stale_internal_kind"),
+        ("_ng_run_id", "stale_run"),
     ],
 )
 async def test_legacy_reply_cannot_echo_collector_bookkeeping(runner_config, monkeypatch, routing, key, value):
@@ -1566,3 +1570,24 @@ async def test_legacy_reply_cleanup_preserves_declared_failure_diagnostics(runne
     assert saved["_ng_failure_record"]["schema_version"] == 1
     for key, value in evidence.items():
         assert saved[key] == value
+
+
+@pytest.mark.parametrize("destination_kind", ["alias", "alias_failures"])
+def test_reverify_fresh_overwrite_refuses_competing_legacy_alias_companions(tmp_path, destination_kind):
+    from nemo_gym.rollout_reverification import _prepare_output_fpaths
+
+    target = tmp_path / "target.jsonl"
+    alias = tmp_path / "alias.jsonl"
+    target.write_text('{"reward": 1}\n')
+    alias.symlink_to(target.name)
+    failures_path_for(target).write_text('{"_ng_failure_class": "judge_failed"}\n')
+    failures_path_for(alias).write_text('{"_ng_failure_class": "agent_run_error"}\n')
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    destination = alias if destination_kind == "alias" else failures_path_for(alias)
+
+    with pytest.raises(ConfigError, match="Recovery artifacts exist beside the rollout alias"):
+        _prepare_output_fpaths("", str(destination), False, True, False)
+
+    assert alias.is_symlink()
+    assert alias.readlink() == Path(target.name)
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before

@@ -404,7 +404,7 @@ async def test_aggregation_can_replace_a_plain_projection_without_recovery_histo
         assert list(read_records(target)) == [result]
         assert target.stat().st_mode & 0o777 == 0o640
         assert destination.is_symlink() == alias
-        assert coverage_path_for(destination).exists()  # A reporting snapshot alone is not recovery history.
+        assert coverage_path_for(destination.resolve()).exists()  # A reporting snapshot is not recovery history.
 
 
 @pytest.mark.parametrize("failure", ["serialization", "publication"])
