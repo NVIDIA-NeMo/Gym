@@ -364,3 +364,13 @@ def test_model_server_exposes_current_rollout_id_to_its_own_handler() -> None:
     uncorrelated = client.get("/observed-rollout-id")
     assert uncorrelated.status_code == 200
     assert uncorrelated.json() == {"rollout_id": None}
+
+
+def test_an_explicit_rollout_id_with_an_attempt_suffix_cannot_also_take_an_attempt_index() -> None:
+    # A controller may name a replacement attempt itself, as "<rollout>-a<N>".
+    assert maybe_rollout_id_from_run_body({"_ng_rollout_id": "job-a2"}) == "job-a2"
+    assert maybe_rollout_id_from_run_body({"_ng_rollout_id": "job", "_ng_attempt_index": 2}) == "job-a2"
+
+    # Both at once would build "job-a2-a1", which decodes to no rollout and attempt.
+    with pytest.raises(ValueError, match="already ends with the attempt suffix"):
+        maybe_rollout_id_from_run_body({"_ng_rollout_id": "job-a2", "_ng_attempt_index": 1})
