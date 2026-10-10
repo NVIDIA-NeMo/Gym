@@ -1,0 +1,30 @@
+name: facts_parametric
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: FACTS Parametric public-set closed-book factuality evaluation with the official three-sample Gemini grader
+modality: text
+licensing: Apache-2.0
+authors:
+- reinainblood
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: facts_parametric
+agent_server: simple_agent
+datasets:
+- name: facts_parametric
+  type: benchmark
+  jsonl_fpath: benchmarks/facts_parametric/data/facts_parametric_public.jsonl
+  prepare_script: benchmarks/facts_parametric/prepare.py
+  prompt_config: benchmarks/prompts/generic/default.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/generic/default.yaml
+lifecycle: active
