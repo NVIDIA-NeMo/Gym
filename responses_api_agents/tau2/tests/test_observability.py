@@ -105,3 +105,67 @@ def test_conflicting_requestor_does_not_attribute_execution_to_policy() -> None:
     record = trajectory([message, output("user")])
     assert not record.tool_calls
     assert any(gap.code == "tau_tool_requestor_mismatch" for gap in record.gaps)
+
+
+@pytest.mark.parametrize("missing_capture", [False, True])
+def test_native_model_turns_supply_perf_and_keep_tool_observations(missing_capture):
+    from nemo_gym.config_types import ModelServerRef
+    from nemo_gym.rollout_collection import _attach_ng_perf, _attach_trajectory_record
+    from responses_api_agents.tau2.observability import build_trajectory
+
+    policy = ModelServerRef(type="responses_api_models", name="policy")
+    user = ModelServerRef(type="responses_api_models", name="user")
+    tool_request = request()
+    tool_request.raw_data = {"id": "policy-1"}
+    result = SimulationRun(
+        id="simulation",
+        task_id="task",
+        start_time="2026-10-08T10:00:00",
+        end_time="2026-10-08T10:00:01",
+        duration=1,
+        num_steps=5,
+        termination_reason=TerminationReason.USER_STOP,
+        messages=[
+            AssistantMessage(role="assistant", content="Scripted greeting"),
+            UserMessage(role="user", content="Please look it up", raw_data={"id": "user-1"}),
+            tool_request,
+            output(),
+            AssistantMessage(role="assistant", content="Done", raw_data={"id": "policy-2"}),
+        ],
+    )
+    observations = build_tool_observations(result)
+    trajectory = build_trajectory(
+        result, observations=observations, task_id="task", rollout_id="0-0", policy_model=policy, user_model=user
+    )
+    # Model-only participants must also reach the observation join, not just the trajectory.
+    simulator = next(
+        r for r in observations.records if getattr(r, "invocation_id", None) == "simulation:user_simulator"
+    )
+    assert simulator.model_calls[0].response_id == "user-1"
+    calls = [
+        {"model_call_id": "c0", "response_id": "user-1", "model_ref": user.model_dump(), "tokens_out": 10},
+        {"model_call_id": "c1", "response_id": "policy-1", "model_ref": policy.model_dump(), "tokens_out": 20},
+        {"model_call_id": "c2", "response_id": "policy-2", "model_ref": policy.model_dump(), "tokens_out": 30},
+    ]
+    record = {
+        "ng_trajectory": trajectory.model_dump(mode="json"),
+        "ng_agent_observations": observations.model_dump(mode="json"),
+        "ng_model_call_capture": {"calls": calls[:-1] if missing_capture else calls},
+    }
+    _attach_trajectory_record({"task_id": "task", "_ng_task_index": 0, "_ng_rollout_index": 0}, record)
+    _attach_ng_perf(record, observability_enabled=True, rollout_latency_ms=1000)
+    assert record["ng_perf"] == {
+        "num_turns": 3,
+        "num_tool_calls": 1,
+        "completion_tokens": 30 if missing_capture else 60,
+        "token_observability_coverage": 2 / 3 if missing_capture else 1.0,
+        "total_latency_ms": 1000,
+    }
+    turns = record["ng_trajectory"]["turns"]
+    assert [(t["invocation_id"], t["turn_no"]) for t in turns] == [
+        ("simulation:agent", 1),
+        ("simulation:user_simulator", 1),
+        ("simulation:agent", 2),
+    ]  # Sorted by native timestamps: tool_request was constructed first.
+    assert record["ng_trajectory"]["tool_calls"][0]["output"] == "result"
+    assert turns[0]["answer"]["tool_calls"][0]["id"] == "call-1"

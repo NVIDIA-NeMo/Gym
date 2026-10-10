@@ -47,9 +47,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.server_utils import get_server_url, is_nemo_gym_fastapi_entrypoint
-from responses_api_agents.tau2.observability import build_tool_observations
+from responses_api_agents.tau2.observability import build_tool_observations, build_trajectory
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
@@ -201,6 +201,7 @@ class Tau2RunRequest(BaseRunRequest):
 
 class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
     ng_agent_observations: AgentObservationBundle
+    ng_trajectory: Optional[TrajectoryRecord] = None
     result: SimulationRun
     duration: float
     num_steps: int
@@ -349,9 +350,33 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             max_prompt_tokens = max(prompt_usages)
             max_completion_tokens = max(completion_usages)
 
+        observations = build_tool_observations(result)
+        rollout_id = self.rollout_id_from_run(body)
+        extra = body.model_extra or {}
+        task_id = next(
+            (
+                str(extra[key])
+                for key in ("task_id", "problem_id", "instance_id", "_ng_task_index")
+                if extra.get(key) is not None
+            ),
+            result.task_id,
+        )
+        trajectory = (
+            build_trajectory(
+                result,
+                observations=observations,
+                task_id=task_id,
+                rollout_id=rollout_id,
+                policy_model=self.config.model_server,
+                user_model=self.config.user_model_server,
+            )
+            if self._model_call_capture_enabled() and rollout_id is not None
+            else None
+        )
         return Tau2VerifyResponse(
             **body_dict,
-            ng_agent_observations=build_tool_observations(result),
+            ng_agent_observations=observations,
+            ng_trajectory=trajectory,
             responses_create_params=dict(
                 input=body.responses_create_params.input + input_items_1 + input_items_2,
                 model=body.responses_create_params.model or "",
