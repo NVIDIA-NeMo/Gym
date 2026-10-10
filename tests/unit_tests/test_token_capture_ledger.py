@@ -610,7 +610,7 @@ async def test_file_store_rejects_the_whole_batch_on_an_invalid_rollout_id(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_retiring_again_does_not_touch_fences_or_sync_the_directory(tmp_path):
+async def test_retiring_again_writes_nothing_but_syncs_once(tmp_path):
     store = FileLineageStore(tmp_path)
     await _record_call_1(store)
     await store.retire(["r1"])
@@ -620,10 +620,11 @@ async def test_retiring_again_does_not_touch_fences_or_sync_the_directory(tmp_pa
     with patch.object(store, "_fsync_ledger_root", wraps=store._fsync_ledger_root) as fsync_root:
         result = await store.retire(["r1"])
 
-    # A retried retire changes nothing on disk, so it writes no metadata and syncs nothing.
+    # A retried retire writes no metadata. It still syncs once: an overlapping retire may have written the
+    # fence without syncing it yet, and this call must not report success before the fence is durable.
     assert result == {"removed": [], "absent": ["r1"]}
     assert fence.stat().st_mtime_ns == fence_mtime
-    assert fsync_root.call_count == 0
+    assert fsync_root.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -724,3 +725,27 @@ async def test_file_store_delete_syncs_every_non_empty_batch(tmp_path):
         await store.delete(["r1", "never-recorded"])
 
     assert fsync_root.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_retire_does_not_remove_a_ledger_recreated_after_a_delete_between_its_phases(tmp_path):
+    """Between fencing and removing, a delete can clear the fence and a reused rollout ID can record again."""
+    store = FileLineageStore(tmp_path)
+    await _record_call_1(store)
+    real_fsync = store._fsync_ledger_root
+    reused = []
+
+    def fsync_root():
+        real_fsync()
+        if not reused:
+            reused.append(True)
+            store._delete(["r1"])
+            store._record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1]))
+
+    with patch.object(store, "_fsync_ledger_root", fsync_root):
+        await store.retire(["r1"])
+
+    # The new attempt's ledger survives, unfenced.
+    assert not (tmp_path / "r1.lineage.retired").exists()
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert [record.model_call_id for record in manifest.records] == ["c1"]

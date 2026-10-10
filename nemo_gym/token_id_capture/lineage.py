@@ -1040,18 +1040,15 @@ class FileLineageStore(IncrementalLineageStore):
         from nemo_gym.token_id_capture.store import validate_rollout_ids
 
         rollout_ids = validate_rollout_ids(rollout_ids)
-        created_fence = has_ledger = False
         for rollout_id in rollout_ids:
             with self._locked(rollout_id):
                 fence = self._retired_path(rollout_id)
                 if not fence.exists():
                     fence.touch()
-                    created_fence = True
-                has_ledger = has_ledger or self._ledger_path(rollout_id).exists()
-        # Make every fence durable before deleting any ledger, so a crash in between leaves a fence. That
-        # includes fences that already existed: a retire that crashed earlier may have created them without
-        # syncing. A retried batch with nothing left to delete changes nothing, so it syncs nothing.
-        if created_fence or has_ledger:
+        # Make every fence durable before deleting any ledger, and before returning, so a crash leaves a fence.
+        # That includes fences that already existed: an overlapping or crashed retire may have created them
+        # without syncing. A retried batch writes nothing, but still syncs once.
+        if rollout_ids:
             self._fsync_ledger_root()
         return self._remove(rollout_ids)
 
@@ -1068,6 +1065,11 @@ class FileLineageStore(IncrementalLineageStore):
         changed = False
         for rollout_id in rollout_ids:
             with self._locked(rollout_id):
+                if not unretire and not self._retired_path(rollout_id).exists():
+                    # A delete cleared the fence after this retire wrote it, and the rollout ID may already be
+                    # in use again: its ledger now belongs to the new attempt, so leave it.
+                    absent.append(rollout_id)
+                    continue
                 try:
                     self._ledger_path(rollout_id).unlink()
                     removed.append(rollout_id)
@@ -1081,9 +1083,9 @@ class FileLineageStore(IncrementalLineageStore):
                     except FileNotFoundError:
                         pass
                 self._ledger_cache_pop(rollout_id)
-        # A retire with nothing left to remove syncs nothing, since its fences are already durable. A delete
-        # always syncs a non-empty batch: an overlapping delete may have removed the files without syncing yet,
-        # and a caller that reuses the rollout ID must not see the old fence or ledger come back after a crash.
+        # A retire with nothing left to remove has already synced its fences. A delete always syncs a non-empty
+        # batch: an overlapping delete may have removed the files without syncing yet, and a caller that reuses
+        # the rollout ID must not see the old fence or ledger come back after a crash.
         if changed or (unretire and rollout_ids):
             self._fsync_ledger_root()
         return {"removed": removed, "absent": absent}
