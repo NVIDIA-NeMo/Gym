@@ -285,3 +285,28 @@ def _update_field(hasher: Any, tag: bytes, value: str) -> None:
     hasher.update(tag)
     hasher.update(len(encoded).to_bytes(8, "big"))
     hasher.update(encoded)
+
+
+def tool_call_ids(items: list[dict]) -> list[str]:
+    """Return the tool-call ids carried by model-authored items, in order, across dialects."""
+    ids: list[str] = []
+    for item in items or []:
+        if not isinstance(item, dict) or not _is_assistant_authored(item):
+            continue
+        for call_id, _name, _arguments in _tools_of(item):
+            if call_id:
+                ids.append(call_id)
+    return ids
+
+
+def trailing_assistant_turn(messages: list[dict]) -> list[dict]:
+    """Return the last model-authored turn of a request: the final run of consecutive assistant-authored items,
+    skipping any trailing user/tool items (tool results) that follow it."""
+    items = [m for m in messages or [] if isinstance(m, dict)]
+    end = len(items)
+    while end > 0 and not _is_assistant_authored(items[end - 1]):
+        end -= 1
+    start = end
+    while start > 0 and _is_assistant_authored(items[start - 1]):
+        start -= 1
+    return items[start:end]

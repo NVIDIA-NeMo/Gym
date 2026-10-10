@@ -2940,3 +2940,69 @@ def test_the_fingerprint_still_ignores_tool_results():
     assert assistant_fingerprint(turn) == assistant_fingerprint(
         turn + [{"type": "function_call_output", "output": "42 files"}]
     )
+
+
+def _chat_tool_turn(call_id: str, arguments: str) -> dict:
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": call_id, "type": "function", "function": {"name": "Bash", "arguments": arguments}}],
+    }
+
+
+def test_lineage_falls_back_to_tool_call_ids_when_the_harness_rewrites_arguments():
+    """Claude Code echoes tool-call ids verbatim but rewrites arguments (drops `cd /testbed && `, adds defaults)."""
+    lineage = RolloutLineage()
+    ctx = [{"role": "user", "content": "fix it"}]
+    lineage.record("call-1", ctx + [_chat_tool_turn("t1", '{"command": "cd /testbed && pytest"}')], [1, 2, 3], "d1")
+    rewritten = ctx + [
+        _chat_tool_turn("t1", '{"command": "pytest", "description": "run tests"}'),
+        {"role": "tool", "tool_call_id": "t1", "content": "1 passed"},
+    ]
+    assert not lineage.by_fingerprint.get(assistant_fingerprint(rewritten))
+    resolved = lineage.resolve(rewritten)
+    assert resolved.status == ParentResolutionStatus.RESOLVED
+    assert resolved.match is not None and resolved.match.model_call_id == "call-1"
+
+
+def test_lineage_tool_call_id_fallback_still_requires_the_recorded_context():
+    lineage = RolloutLineage()
+    lineage.record(
+        "call-1", [{"role": "user", "content": "fix it"}, _chat_tool_turn("t1", '{"a": 1}')], [1, 2, 3], "d1"
+    )
+    compacted = [{"role": "user", "content": "summary"}, _chat_tool_turn("t1", '{"a": 2}')]
+    assert lineage.resolve(compacted).status == ParentResolutionStatus.UNRESOLVED
+
+
+def test_lineage_tool_call_id_fallback_refuses_ambiguous_ids():
+    lineage = RolloutLineage()
+    ctx = [{"role": "user", "content": "q"}]
+    lineage.record("call-a", ctx + [_chat_tool_turn("dup", "{}")], [1], "da")
+    lineage.record("call-b", ctx + [_chat_tool_turn("dup", "{}")], [2], "db")
+    assert lineage.resolve(ctx + [_chat_tool_turn("dup", '{"x": 1}')]).status == ParentResolutionStatus.UNRESOLVED
+
+
+def test_lineage_add_entry_indexes_responses_function_call_ids():
+    lineage = RolloutLineage()
+    ctx = [{"role": "user", "content": "q"}]
+    entry = TokenEntry(
+        rollout_id="r0",
+        model_call_id="c-fc",
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.1],
+        output_items=[{"type": "function_call", "call_id": "fc1", "name": "Edit", "arguments": '{"path": "a"}'}],
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    lineage.add_entry(stamp_continuation(entry, ctx))
+    echoed = ctx + [
+        {
+            "type": "function_call",
+            "call_id": "fc1",
+            "name": "Edit",
+            "arguments": '{"path": "a", "replace_all": false}',
+        },
+        {"type": "function_call_output", "call_id": "fc1", "output": "ok"},
+    ]
+    resolved = lineage.resolve(echoed)
+    assert resolved.status == ParentResolutionStatus.RESOLVED and resolved.match.model_call_id == "c-fc"
