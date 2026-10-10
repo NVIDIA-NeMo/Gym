@@ -143,6 +143,12 @@ class TokenEntry(BaseModel):
     # The response id returned to the client for this model call.
     # Terminal attribution uses it to match the agent's final response to these captured tokens.
     response_id: str | None = None
+    # Why generation stopped, usually in the Chat Completions vocabulary: ``stop``, ``length``,
+    # ``tool_calls``, or ``content_filter``. ``response_finish_reason`` derives it from either
+    # served payload shape, and other engine values pass through unchanged; only ``length`` and
+    # ``content_filter`` are consumed. ``None`` means the payload stated no reason or the record
+    # predates this field.
+    finish_reason: str | None = None
     # This non-semantic timestamp helps diagnose retries and sibling branches.
     created_at: float = 0.0
 
@@ -306,6 +312,71 @@ def response_to_output_items(payload: dict) -> list[dict]:
         item.setdefault("role", "assistant")
         items.append(item)
     return items
+
+
+# ``incomplete_details.reason`` values of a Responses payload, keyed to the chat finish
+# reasons that ``nemo_gym.responses_converter`` maps onto them.
+_INCOMPLETE_REASON_TO_FINISH_REASON = {"max_output_tokens": "length", "content_filter": "content_filter"}
+# The reverse direction: the Responses ``incomplete_details.reason`` a rebuilt response reports for
+# its terminal call's finish reason. ``stop`` and ``tool_calls`` are complete endings and map to nothing.
+_FINISH_REASON_TO_INCOMPLETE_REASON = {"length": "max_output_tokens", "content_filter": "content_filter"}
+
+# The Chat Completions finish reason behind each Anthropic Messages ``stop_reason``: the inverse of
+# the table ``nemo_gym.anthropic_converter`` applies when it serves a Responses payload as a
+# Messages response.
+_STOP_REASON_TO_FINISH_REASON = {
+    "end_turn": "stop",
+    "stop_sequence": "stop",
+    "tool_use": "tool_calls",
+    "max_tokens": "length",
+    "model_context_window_exceeded": "length",
+    "refusal": "content_filter",
+}
+
+# Responses output items that the converter builds from a chat message's tool calls.
+_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call"})
+
+
+def incomplete_reason_for_finish_reason(finish_reason: str | None) -> str | None:
+    """Return the ``incomplete_details.reason`` a response that stopped for ``finish_reason`` reports.
+
+    ``length`` becomes ``max_output_tokens`` and ``content_filter`` stays ``content_filter``, the
+    verdict the Responses converter gives a chat completion that ended the same way. A complete
+    ending (``stop``, ``tool_calls``), an unknown reason, and ``None`` return ``None``.
+    """
+    return _FINISH_REASON_TO_INCOMPLETE_REASON.get(finish_reason)
+
+
+def response_finish_reason(payload: dict) -> str | None:
+    """Return why a served response stopped, in the Chat Completions vocabulary.
+
+    A chat payload states it directly as ``choices[0].finish_reason``.
+    An Anthropic Messages payload states ``stop_reason``; map it back through the converter's table.
+    A Responses payload carries no finish reason.
+    The converter maps ``length`` and ``content_filter`` to ``incomplete_details.reason``; reverse that map.
+    A completed Responses payload stopped at a tool call (``tool_calls``) or at the end of its text (``stop``).
+    Return ``None`` when the payload is none of these shapes or is incomplete without a stated reason.
+    """
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        reason = first.get("finish_reason")
+        return reason if isinstance(reason, str) else None
+    if payload.get("type") == "message" and "stop_reason" in payload:
+        stop_reason = payload.get("stop_reason")
+        return _STOP_REASON_TO_FINISH_REASON.get(stop_reason) if isinstance(stop_reason, str) else None
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return None
+    details = payload.get("incomplete_details")
+    reason = details.get("reason") if isinstance(details, dict) else None
+    if isinstance(reason, str):
+        return _INCOMPLETE_REASON_TO_FINISH_REASON.get(reason, reason)
+    if payload.get("status") not in (None, "completed"):
+        return None
+    if any(isinstance(item, dict) and item.get("type") in _TOOL_CALL_ITEM_TYPES for item in output):
+        return "tool_calls"
+    return "stop"
 
 
 def strip_token_fields(items: list[dict]) -> tuple[list[dict], int | None]:

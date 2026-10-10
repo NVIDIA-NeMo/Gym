@@ -14,6 +14,7 @@ from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant
 from nemo_gym.token_id_capture.protocols import CaptureLedger
 from nemo_gym.token_id_capture.records import (
     TOKEN_FIELDS,
+    response_finish_reason,
     response_to_output_items,
     strip_token_fields,
 )
@@ -274,6 +275,10 @@ class _BaseExternalCaptureHandler(ABC):
             output_fingerprint=output_fingerprint,
             continuation_fingerprint=continuation_fingerprint,
             fingerprint_version=FINGERPRINT_VERSION,
+            # The served representation states why the call stopped (a chat finish reason, a
+            # Responses ``incomplete_details``, or an Anthropic ``stop_reason``); the row keeps the
+            # chat-vocabulary reason so the rebuild can report a terminal ``length`` stop.
+            finish_reason=response_finish_reason(served_payload),
         )
         commit = CaptureLedgerCommit(
             rollout_id=context.rollout_id,

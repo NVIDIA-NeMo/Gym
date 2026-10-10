@@ -178,6 +178,31 @@ def test_verification_is_retry_safe_and_deterministic() -> None:
     assert verify_and_linearize(receipt, snapshots) == verify_and_linearize(receipt, snapshots)
 
 
+def test_the_linearized_row_reports_the_terminal_finish_reason() -> None:
+    # Only the terminal row decides the rebuilt response's verdict: the root's ``length`` stop did
+    # not end the chain, because the terminal call extended it. A manifest written before the
+    # column existed reports no reason.
+    receipt, snapshots = _branched()
+    rows = {row.model_call_id: row for row in receipt.manifest}
+
+    def with_reasons(root: str | None, main: str | None) -> RolloutReceipt:
+        manifest = [
+            rows["root"].model_copy(update={"finish_reason": root}),
+            rows["sibling"],
+            rows["main"].model_copy(update={"finish_reason": main}),
+        ]
+        return receipt.model_copy(update={"manifest": manifest})
+
+    complete = verify_and_linearize(with_reasons("length", "stop"), snapshots)
+    assert (complete.terminal_finish_reason, complete.incomplete_reason) == ("stop", None)
+    cut = verify_and_linearize(with_reasons("stop", "length"), snapshots)
+    assert (cut.terminal_finish_reason, cut.incomplete_reason) == ("length", "max_output_tokens")
+    filtered = verify_and_linearize(with_reasons("stop", "content_filter"), snapshots)
+    assert (filtered.terminal_finish_reason, filtered.incomplete_reason) == ("content_filter", "content_filter")
+    unstated = verify_and_linearize(receipt, snapshots)
+    assert (unstated.terminal_finish_reason, unstated.incomplete_reason) == (None, None)
+
+
 def test_extras_commitments_cover_the_selected_chain_in_order() -> None:
     receipt, snapshots = _branched()
     row = verify_and_linearize(receipt, snapshots)
