@@ -186,7 +186,7 @@ class WebSessionManager:
         await self._call_optional_provider_lifecycle("close")
 
     async def can_retry_seed(self, session_id: str) -> bool:
-        """A transient admission failure can retry only after prior cleanup."""
+        """A failed seed can run again only after its cleanup has finished."""
 
         async with self._lock:
             return not (
