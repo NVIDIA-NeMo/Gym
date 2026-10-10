@@ -1999,6 +1999,91 @@ def _coverage_report(
     return report
 
 
+class _EagerCompletionIterator:
+    """Completion-order iterator that starts every rollout task on first use.
+
+    The unbounded counterpart of ``_BoundedCompletionIterator``: all tasks are created, in
+    input order, when the first awaitable is requested, and completions come back as with
+    ``asyncio.as_completed``. ``aclose()`` cancels whatever is still running.
+    """
+
+    def __init__(self, awaitables: Iterator, *, total: int):
+        self._awaitables = awaitables
+        self._total = total
+        self._tasks: list[asyncio.Task] = []
+        self._completions: Optional[Iterator[Future]] = None
+        self._closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._closed:
+            raise StopIteration
+        if self._completions is None:
+            # asyncio.as_completed creates its tasks from a set, so create them here to start rollouts in input order.
+            self._tasks = [asyncio.ensure_future(awaitable) for awaitable in self._awaitables]
+            self._completions = iter(
+                tqdm.as_completed(
+                    self._tasks,
+                    desc="Collecting rollouts",
+                    miniters=10,
+                    total=self._total,
+                    maxinterval=60,
+                )
+            )
+        return next(self._completions)
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._completions is not None:
+            # Close tqdm's as_completed generator so its progress bar is released.
+            self._completions.close()
+        tasks = [task for task in self._tasks if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+class _RowResultIterator:
+    """What ``run_examples`` returns: ``(row, result)`` awaitables in completion order.
+
+    A thin map over the internal completion iterator that keeps its ``aclose()`` reachable, so a
+    direct caller can stop collecting and cancel the rollouts still in flight.
+    """
+
+    def __init__(self, completions: Iterator[Future]):
+        self._completions = completions
+        self._closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._closed:
+            raise StopIteration
+        return self._without_metadata(next(self._completions))
+
+    @staticmethod
+    async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
+        completed = await future
+        return completed.row, completed.result
+
+    async def aclose(self) -> None:
+        """Cancel every rollout task still running and wait for the cancellations to land.
+
+        Cancelling a task closes its `/run` request; the server side's
+        ``ClientDisconnectCancellationMiddleware`` then cancels the handler. Awaitables already
+        handed out but not yet awaited raise ``CancelledError``. Iteration stops afterwards. Safe
+        to call more than once.
+        """
+        self._closed = True
+        await self._completions.aclose()
+
+
 class _BoundedCompletionIterator:
     """Completion-order iterator with a bounded set of resident asyncio tasks."""
 
@@ -3751,18 +3836,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 total=len(examples),
             )
 
-        def _start_in_input_order() -> Iterator[Future]:
-            # asyncio.as_completed creates its tasks from a set, so create them here to start rollouts in input order.
-            tasks = [asyncio.ensure_future(awaitable) for awaitable in awaitables]
-            yield from tqdm.as_completed(
-                tasks,
-                desc="Collecting rollouts",
-                miniters=10,
-                total=len(examples),
-                maxinterval=60,
-            )
-
-        return _start_in_input_order()
+        return _EagerCompletionIterator(awaitables, total=len(examples))
 
     def run_examples(
         self,
@@ -3776,7 +3850,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
-    ) -> Iterator[Future]:  # pragma: no cover
+    ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
 
@@ -3791,8 +3865,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``max_resident_tasks`` limits admitted tasks and therefore concurrent requests,
         even when ``semaphore`` allows more. Admission starts when the first returned
         awaitable is awaited. None schedules all examples up front, as with
-        ``asyncio.as_completed``. Stopping iteration early leaves up to
-        ``max_resident_tasks`` tasks running because this mapped iterator has no ``aclose()``.
+        ``asyncio.as_completed``.
+
+        To stop early, ``await`` the returned iterator's ``aclose()``: it cancels every rollout
+        still running (closing its `/run` request) and waits for the cancellations to land.
+        Without it, abandoned rollouts keep running to completion in the background.
 
         ``dispatch_budget_s`` stops starting rows that many seconds after this call, and
         ``drain_margin_s`` stops sooner for rows that would not have time to finish.
@@ -3807,12 +3884,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         failure row with ``_ng_failure_*`` fields.
         """
 
-        async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
-            completed = await future
-            return completed.row, completed.result
-
-        return map(
-            _without_metadata,
+        return _RowResultIterator(
             self._run_examples_with_metadata(
                 examples,
                 head_server_config=head_server_config,
@@ -3823,7 +3895,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 dispatch_budget_s=dispatch_budget_s,
                 drain_margin_s=drain_margin_s,
                 latency_tracker=latency_tracker,
-            ),
+            )
         )
 
     def setup_server_client(

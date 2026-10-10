@@ -5864,6 +5864,105 @@ class TestRolloutCollection:
         assert result is None
 
 
+class TestRunExamplesAclose:
+    """``run_examples``' iterator can be closed, cancelling the rollouts still in flight."""
+
+    @staticmethod
+    def _row(task_index: int) -> dict:
+        return {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: task_index,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+        }
+
+    @staticmethod
+    def _helper(slow_task_indices: set, started: list, cancelled: list) -> RolloutCollectionHelper:
+        async def post(server_name, url_path, json):  # noqa: A002
+            task_index = json[TASK_INDEX_KEY_NAME]
+            started.append(task_index)
+            if task_index in slow_task_indices:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.append(task_index)
+                    raise
+            return MagicMock(status=200)
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(side_effect=post)
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                "my_agent": {"responses_api_agents": {"impl": {}}},
+                "my_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}
+                },
+            }
+        )
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, *args, **kwargs):
+                return mock_server_client
+
+        return MockHelper()
+
+    @pytest.mark.parametrize("max_resident_tasks", [None, 4])
+    async def test_aclose_cancels_rollouts_still_running(
+        self, monkeypatch: pytest.MonkeyPatch, max_resident_tasks: int | None
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        started: list = []
+        cancelled: list = []
+        rows = [self._row(i) for i in range(4)]
+        completions = self._helper({2, 3}, started, cancelled).run_examples(
+            rows, max_resident_tasks=max_resident_tasks
+        )
+
+        finished = [await asyncio.wait_for(next(completions), timeout=1) for _ in range(2)]
+        assert sorted(row[TASK_INDEX_KEY_NAME] for row, _result in finished) == [0, 1]
+
+        straggler = asyncio.ensure_future(next(completions))
+        await asyncio.sleep(0)
+        assert not straggler.done()
+
+        await asyncio.wait_for(completions.aclose(), timeout=1)
+
+        assert sorted(cancelled) == [2, 3]
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(straggler, timeout=1)
+        with pytest.raises(StopIteration):
+            next(completions)
+        # Idempotent.
+        await asyncio.wait_for(completions.aclose(), timeout=1)
+
+    async def test_aclose_before_first_use_starts_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        started: list = []
+        cancelled: list = []
+        completions = self._helper(set(), started, cancelled).run_examples([self._row(0), self._row(1)])
+
+        await asyncio.wait_for(completions.aclose(), timeout=1)
+
+        assert started == []
+        with pytest.raises(StopIteration):
+            next(completions)
+
+    async def test_full_iteration_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        started: list = []
+        cancelled: list = []
+        rows = [self._row(i) for i in range(3)]
+        completions = self._helper(set(), started, cancelled).run_examples(rows)
+
+        results = [await future for future in completions]
+
+        assert started == [0, 1, 2], "rows still start in input order"
+        assert sorted(row[TASK_INDEX_KEY_NAME] for row, _result in results) == [0, 1, 2]
+        assert all(result == {"reward": 1.0} for _row, result in results)
+        await completions.aclose()
+        assert cancelled == []
+
+
 class TestDispatchBudget:
     """A task that cannot finish before the deadline must not be started."""
 
