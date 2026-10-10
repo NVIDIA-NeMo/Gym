@@ -91,16 +91,6 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         default=None, gt=0, description="Optional shared model-call limit per rollout; null disables the limit."
     )
 
-    @field_validator("nooa")
-    @classmethod
-    def require_embedded_execution(cls, value: NOOAInvocationConfig) -> NOOAInvocationConfig:
-        if value.execution_mode != "embedded":
-            raise ValueError(
-                "nooa.execution_mode='sandboxed' is unavailable in this agent server; "
-                "use 'embedded' until sandbox sessions are supported"
-            )
-        return value
-
     @field_validator("num_workers")
     @classmethod
     def require_single_worker(cls, value: int | None) -> int | None:
