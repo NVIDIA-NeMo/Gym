@@ -308,6 +308,22 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(monkeypatc
     assert str(client_async_module.get_transport(types.SimpleNamespace(proxy="http://proxy.example")).proxy.url) == (
         "http://proxy.example"
     )
+
+    from unittest.mock import AsyncMock
+
+    request = httpx.Request("DELETE", "https://gateway.invalid/sandboxes/missing")
+    for status, content in [(404, b""), (404, b'{"message":"gone"}'), (200, b"ok")]:
+        monkeypatch.setattr(
+            GymAiohttpTransport,
+            "handle_async_request",
+            AsyncMock(return_value=httpx.Response(status, content=content, request=request)),
+        )
+        response = await control_transport.handle_async_request(request)
+        assert response.status_code == status
+        if status == 404 and not content:
+            assert response.json() == {"message": "Not found"}
+        else:
+            assert response.content == content
     with pytest.raises(ValueError, match="HTTP or HTTPS proxy"):
         client_async_module.get_transport(types.SimpleNamespace(proxy="socks5h://proxy.example:1080"))
 
@@ -336,10 +352,16 @@ async def test_real_sdk_user_agent_and_call_shapes() -> None:
     connection = e2b.ConnectionConfig()
     products = connection.headers["User-Agent"].split()
     assert f"nemo-gym/{nemo_gym_version}" in products
-    envd_client = sandbox_async.get_envd_api(connection, "https://sandbox.example")
-    for transport in (client_async.get_transport(connection), envd_client._transport):
+    envd_client = (
+        sandbox_async.get_envd_api(connection, "https://sandbox.example")
+        if hasattr(sandbox_async, "get_envd_api")
+        else None
+    )
+    envd_transport = envd_client._transport if envd_client else sandbox_async.get_transport(connection)
+    for transport in (client_async.get_transport(connection), envd_transport):
         assert isinstance(transport, GymAiohttpTransport)
-    await envd_client.aclose()
+    if envd_client:
+        await envd_client.aclose()
 
     inspect.signature(e2b.AsyncSandbox.create).bind(
         template="base",
@@ -717,11 +739,31 @@ class TestCreateAndLifecycle:
             await provider.create(_spec(ttl_s=ttl_s))
         assert FakeSandbox.instances == []
 
-    async def test_entrypoint_is_rejected_before_create(self) -> None:
+    async def test_entrypoint_starts_as_detached_command(self) -> None:
         provider = E2BProvider(create={"template": "base"})
-        with pytest.raises(E2BCreateError, match="entrypoint"):
-            await provider.create(_spec(entrypoint=["python", "app.py"]))
-        assert FakeSandbox.instances == []
+        handle = await provider.create(_spec(entrypoint=["python", "app with spaces.py"]))
+        command = handle.raw.exec_calls[0]
+        assert command["cmd"] == "python 'app with spaces.py'"
+        assert command["background"] is True
+        assert command["timeout"] == 0
+        await provider.close(handle)
+
+    async def test_shell_setup_failure_cleans_up_allocated_sandbox(self, monkeypatch) -> None:
+        provider = E2BProvider(create={"template": "base"})
+
+        def fail(sandbox):
+            raise RuntimeError("shell setup failed")
+
+        monkeypatch.setattr(provider, "_configure_shell", fail)
+        with pytest.raises(RuntimeError, match="shell setup failed"):
+            await provider.create(_spec())
+        assert FakeSandbox.instances[0].killed
+
+    async def test_reserved_relay_port_is_rejected_before_allocation(self) -> None:
+        provider = E2BProvider(create={"template": "base"}, networking={"enabled": True})
+        with pytest.raises(E2BCreateError, match="tunnel port"):
+            await provider.create(_spec(ports=(49152,)))
+        assert not FakeSandbox.instances
 
     async def test_unknown_provider_options_are_rejected_before_create(self) -> None:
         provider = E2BProvider(create={"template": "base"})
