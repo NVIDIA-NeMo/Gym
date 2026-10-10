@@ -32,6 +32,7 @@ from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR
+from nemo_gym._checkpoint.collection import CollectionStopped
 from nemo_gym.benchmarks import (
     BenchmarkConfig,
     discover_benchmarks,
@@ -634,6 +635,8 @@ def e2e_rollout_collection():  # pragma: no cover
         else:
             asyncio.run(rch.run_from_config(rollout_collection_config))
         collection_completed = True
+    except CollectionStopped as stopped:
+        print(f"{stopped}", flush=True)
     except KeyboardInterrupt:
         if rollout_collection_config.require_complete:
             raise RuntimeError("EVAL FAILED: rollout collection interrupted; partial artifacts retained.") from None
@@ -663,7 +666,10 @@ def collect_rollouts():  # pragma: no cover
     config = RolloutCollectionConfig.model_validate(get_global_config_dict())
     rch = RolloutCollectionHelper()
 
-    asyncio.run(rch.run_from_config(config))
+    try:
+        asyncio.run(rch.run_from_config(config))
+    except CollectionStopped as stopped:
+        print(f"{stopped}", flush=True)
 
 
 @exit_cleanly_on_config_error
