@@ -23,7 +23,6 @@ from uuid import uuid4
 
 import aiohttp
 from fastapi import Body, Request, Response
-from openai.types.responses.response_error import ResponseError
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -39,7 +38,8 @@ from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
-from responses_api_agents.nooa_agent.observability import ensure_verifier_final_message, finalize_observation_gaps
+from responses_api_agents.nooa_agent.observability import finalize_observation_gaps
+from responses_api_agents.nooa_agent.result import finalize_run_result, set_response_lifecycle
 from responses_api_agents.nooa_agent.runner import (
     EmbeddedNOOARunner,
     NOOARunFailure,
@@ -172,38 +172,10 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         )
         super().model_post_init(context)
 
-    @staticmethod
-    def _set_response_lifecycle(response: NeMoGymResponse, reason: str | None, error: str | None) -> NeMoGymResponse:
-        if reason is None:
-            return response.model_copy(update={"status": "completed", "error": None})
-        status = (
-            "incomplete" if reason in {"timeout", "cancelled", "agent_run_timeout", "timeout_exceeded"} else "failed"
-        )
-        return response.model_copy(
-            update={
-                "status": status,
-                "error": ResponseError(
-                    # Responses error codes are a closed OpenAI enum. Keep the
-                    # NOOA-specific reason in the message and rollout metadata.
-                    code="server_error",
-                    message=error or f"NOOA execution terminated with {reason}.",
-                ),
-            }
-        )
+    _set_response_lifecycle = staticmethod(set_response_lifecycle)
 
     def _finalize_run_result(self, run_result: NOOARunResult) -> tuple[NeMoGymResponse, AgentObservationBundle]:
-        verify_response, verify_gaps = ensure_verifier_final_message(
-            run_result.episode.response, run_result.return_value
-        )
-        observations = finalize_observation_gaps(
-            run_result.episode.observations,
-            extra_gaps=verify_gaps,
-            termination_reason=run_result.termination_reason,
-            termination_error=run_result.termination_error,
-        )
-        return self._set_response_lifecycle(
-            verify_response, run_result.termination_reason, run_result.termination_error
-        ), observations
+        return finalize_run_result(run_result)
 
     async def responses(
         self,
