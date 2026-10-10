@@ -104,6 +104,10 @@ _ENV_FIELD_MAP = {
     "instrument_aiohttp": f"{_OTEL_PREFIX}_INSTRUMENT_AIOHTTP",
 }
 
+#: The ``_ENV_FIELD_MAP`` fields that nemo-lens itself reads, each with a ``NEMO_LENS_<KEY>`` fallback.
+#: Exporting one of them as ``NEMO_GYM_OTEL_<KEY>`` would shadow that fallback.
+_LENS_FIELDS = frozenset({"span_groups", "traces_enabled", "metrics_enabled", "logs_enabled", "exporter", "run_id"})
+
 _MEMORY_PROFILING_ENV_FIELD_MAP = {
     "enabled": f"{_OTEL_PREFIX}_MEMORY_PROFILING_ENABLED",
     "interval_seconds": f"{_OTEL_PREFIX}_MEMORY_PROFILING_INTERVAL_SECONDS",
@@ -119,6 +123,18 @@ _OTLP_ENV_FIELD_MAP = {
 }
 
 _TRUTHY = ("1", "true", "yes", "on")
+
+
+def _lens_fallback_name(env_name: str) -> str:
+    """The ``NEMO_LENS_*`` fallback for Gym's ``NEMO_GYM_OTEL_*`` *env_name*."""
+    return _OTEL_FALLBACK_PREFIX + env_name.removeprefix(_OTEL_PREFIX)
+
+
+def _same_setting(config_value: Any, env_value: str) -> bool:
+    """Whether *env_value* asks for the same setting as *config_value*."""
+    if isinstance(config_value, bool):
+        return (env_value.lower() in _TRUTHY) == config_value
+    return env_value == str(config_value)
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -220,6 +236,18 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
         value = getattr(telemetry_config, field, None)
         if value is None:
             continue
+        fallback = _lens_fallback_name(env_name)
+        fallback_value = os.environ.get(fallback, "").strip()
+        if field in _LENS_FIELDS and fallback_value:
+            if field in telemetry_config.model_fields_set and not _same_setting(value, fallback_value):
+                logger.warning(
+                    "telemetry.%s=%r from the config is ignored because %s=%r is set",
+                    field,
+                    value,
+                    fallback,
+                    fallback_value,
+                )
+            continue
         os.environ.setdefault(env_name, "1" if value is True else "0" if value is False else str(value))
 
     for field, env_name in _MEMORY_PROFILING_ENV_FIELD_MAP.items():
@@ -241,10 +269,11 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
     # nemo.run.id resource attribute and a backend can group them. Generated here because
     # the orchestrator is the only process that sees the whole run; each server would
     # otherwise mint its own.
-    run_id = os.environ.get(f"{_OTEL_PREFIX}_RUN_ID", "").strip()
+    run_id_env = f"{_OTEL_PREFIX}_RUN_ID"
+    run_id = os.environ.get(run_id_env, "").strip() or os.environ.get(f"{_OTEL_FALLBACK_PREFIX}_RUN_ID", "").strip()
     if not run_id:
         run_id = os.environ.get("SLURM_JOB_ID", "").strip() or uuid4().hex[:12]
-        os.environ[f"{_OTEL_PREFIX}_RUN_ID"] = run_id
+        os.environ[run_id_env] = run_id
     return run_id
 
 

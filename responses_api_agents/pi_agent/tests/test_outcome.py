@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 import shutil
 import subprocess
@@ -61,7 +62,10 @@ assert.equal(records.length, count);
     "status,message,context_overflow",
     [(400, "This model's maximum context length is 262144 tokens.", True), (503, "Service unavailable", False)],
 )
-def test_pinned_pi_classifies_model_server_http_error(status, message, context_overflow):
+@pytest.mark.parametrize("delayed", [False, True])
+def test_pinned_pi_classifies_model_server_http_error(
+    monkeypatch: pytest.MonkeyPatch, status: int, message: str, context_overflow: bool, delayed: bool
+) -> None:
     node, pi = shutil.which("node"), shutil.which("pi")
     if not node or not pi:
         pytest.skip("Installed Pi and Node are required for the real SDK contract")
@@ -79,22 +83,36 @@ def test_pinned_pi_classifies_model_server_http_error(status, message, context_o
             openai_base_url="http://upstream.invalid/v1",
             openai_api_key="test",
             openai_model="test",
+            propagate_upstream_http_status_codes=frozenset({status}),
         ),
         server_client=MagicMock(spec=ServerClient, global_config_dict={}),
     )
     error = ClientResponseError(MagicMock(), (), status=status, message=message)
     error.response_content = json.dumps({"error": {"message": message, "type": "upstream_error"}}).encode()
-    server._client = MagicMock(create_chat_completion=AsyncMock(side_effect=error))
+
+    async def reject(**kwargs):
+        if delayed:
+            await asyncio.sleep(0.05)
+        raise error
+
+    if delayed:
+        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.001)
+    server._client = MagicMock(create_chat_completion=AsyncMock(side_effect=reject))
     with TestClient(server.setup_webserver()) as client:
         response = client.post(
             "/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}], "stream": True}
         )
+    if delayed:
+        assert response.status_code == 200
+        assert response.text.startswith(": keep-alive\n\n")
+    else:
+        assert response.status_code == status
     script = """
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 const wire = JSON.parse(fs.readFileSync(0, 'utf8'));
 globalThis.fetch = async () => new Response(wire.body, {
-  status: wire.status, headers: {'content-type': 'application/json'},
+  status: wire.status, headers: {'content-type': wire.content_type},
 });
 const {streamSimple} = await import(process.argv[1]);
 const {isContextOverflow} = await import(process.argv[2]);
@@ -119,6 +137,7 @@ assert.equal(isContextOverflow(result, model.contextWindow), wire.context_overfl
         input=json.dumps(
             {
                 "status": response.status_code,
+                "content_type": response.headers["content-type"],
                 "body": response.text,
                 "message": message,
                 "context_overflow": context_overflow,

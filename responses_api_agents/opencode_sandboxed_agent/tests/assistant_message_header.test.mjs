@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-const source = readFileSync(new URL('../assistant_message_header.js', import.meta.url));
+const source = readFileSync(new URL('../../opencode_agent/assistant_message_header.js', import.meta.url));
 const { AssistantMessageHeader } = await import(`data:text/javascript;base64,${source.toString('base64')}`);
 const header = 'X-OpenCode-Assistant-Message-Id';
 const message = (id = 'a') => ({ id, sessionID: 's', parentID: 'u', role: 'assistant', agent: 'build', modelID: 'm', providerID: 'p', time: { created: 1 } });
