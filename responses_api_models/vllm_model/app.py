@@ -597,8 +597,15 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict["model"] = self.config.model
         if self.config.chat_template_kwargs:
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
-        if self.config.extra_body:
-            body_dict = self.config.extra_body | body_dict
+        # Per-request extensions follow the same precedence as the chat path.
+        extra_body = deepcopy(self.config.extra_body or {})
+        metadata = body_dict.get("metadata") or {}
+        request_extra_body = json.loads(metadata.get("extra_body") or "{}")
+        if not isinstance(request_extra_body, dict):
+            raise ValueError("metadata.extra_body must encode a JSON object")
+        extra_body.update(request_extra_body)
+        if extra_body:
+            body_dict = extra_body | body_dict
         self._apply_sampling_overrides(body_dict)
 
         client = self._resolve_client(request)
