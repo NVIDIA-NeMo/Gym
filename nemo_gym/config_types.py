@@ -786,7 +786,7 @@ def maybe_get_server_instance_config(
     maybe_server_instance_config_dict = {
         "name": name,
         "server_type_config_dict": server_type_config_dict,
-        **OmegaConf.to_container(server_type_config_dict),
+        **OmegaConf.to_container(server_type_config_dict, resolve=True),
     }
     try:
         config = ServerInstanceConfigTypeAdapter.validate_python(maybe_server_instance_config_dict)
