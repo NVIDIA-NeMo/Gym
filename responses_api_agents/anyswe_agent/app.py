@@ -64,8 +64,20 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
     metrics_fpath.write_text(json.dumps(existing | update))
 
 
-def _model_url_for_rollout(model_url: str, rollout_id: Optional[str]) -> str:
-    return apply_rollout_prefix(model_url, rollout_id) if model_url and rollout_id else model_url
+def _model_url_for_rollout(model_url: str, rollout_id: Optional[str], *, token_capture: bool = False) -> str:
+    # ``token_capture`` selects the ``/ng-rollout/<id>/training-token-capture`` prefix that the model
+    # server's capture middleware keys on. With the plain eval prefix nothing is captured for the rollout.
+    if not (model_url and rollout_id):
+        return model_url
+    return apply_rollout_prefix(model_url, rollout_id, token_capture=token_capture)
+
+
+def _outer_response_id(instance_id: str, inner: Optional[NeMoGymResponse], *, token_capture: bool) -> str:
+    # Under training-token capture the inner agent names its response with the last served model-call id
+    # (claude_code_agent does). Terminal attribution joins the transcript to a captured call by that id.
+    if token_capture and inner is not None and inner.id:
+        return str(inner.id)
+    return f"anyswe-{instance_id}"
 
 
 def _safe_config_json(params: "AnySweInstanceConfig", indent: Optional[int] = None) -> str:
@@ -626,7 +638,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         )
 
         return NeMoGymResponse(
-            id=f"anyswe-{params.instance_id}",
+            id=_outer_response_id(params.instance_id, saved, token_capture=self._token_id_capture_enabled()),
             created_at=int(time.time()),
             model=params.body.model,
             object="response",
@@ -653,7 +665,9 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         persistent_dir.mkdir(parents=True, exist_ok=True)
         server_config = self._server.model_dump()
         if not self.config.sandbox_model_base_url:
-            server_config["model_server_url"] = _model_url_for_rollout(server_config["model_server_url"], rollout_id)
+            server_config["model_server_url"] = _model_url_for_rollout(
+                server_config["model_server_url"], rollout_id, token_capture=self._token_id_capture_enabled()
+            )
         params = AnySweInstanceConfig(
             **self.config.model_dump(),
             **server_config,
