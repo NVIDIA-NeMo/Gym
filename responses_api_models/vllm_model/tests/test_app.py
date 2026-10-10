@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections import Counter
 from copy import deepcopy
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
@@ -28,6 +29,7 @@ from yarl import URL
 
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
+from nemo_gym.base_responses_api_model import ROLLOUT_ID_SCOPE_KEY
 from nemo_gym.openai_utils import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     NeMoGymAsyncOpenAI,
@@ -1160,6 +1162,45 @@ class TestApp:
         request.session = {SESSION_ID_KEY: session_id}
         request.url.path = "/v1/chat/completions"
         return request
+
+    @staticmethod
+    def _request_for_rollout(rollout_id: str, session_id: str) -> MagicMock:
+        request = TestApp._request_for_session(session_id)
+        request.scope = {ROLLOUT_ID_SCOPE_KEY: rollout_id}
+        return request
+
+    def test_calls_of_one_rollout_share_an_endpoint_without_a_session_cookie(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(48)]
+        clients = {server._resolve_client(self._request_for_rollout("rollout-7", f"fresh-{i}")) for i in range(50)}
+        assert len(clients) == 1
+        assert len(server._session_id_to_client) == 1
+
+    def test_rollouts_spread_over_endpoints(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(48)]
+        counts = Counter(
+            server._clients.index(server._resolve_client(self._request_for_rollout(f"r-{i}", f"s-{i}")))
+            for i in range(1536)
+        )
+        assert len(counts) == 48
+        assert min(counts.values()) >= 12 and max(counts.values()) <= 56
+
+    def test_without_a_rollout_id_routing_uses_the_session(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(4)]
+        request = self._request_for_session("session-x")
+        request.scope = {"path": "/v1/chat/completions"}
+        expected = server._clients[self._hashed_client_idx("session-x", 4)]
+        assert server._resolve_client(request) is expected
+
+    def test_a_rollout_leaves_a_failing_endpoint(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_routing_server(monkeypatch, route_around=True, endpoint_failure_threshold=1)
+        pinned = server._resolve_client(self._request_for_rollout("rollout-a", "s-0"))
+        server._note_endpoint_failure(pinned)
+        moved = server._resolve_client(self._request_for_rollout("rollout-a", "s-1"))
+        assert moved is not pinned
+        assert server._resolve_client(self._request_for_rollout("rollout-a", "s-2")) is moved
 
     @staticmethod
     def _hashed_client_idx(session_id: str, n_clients: int) -> int:
