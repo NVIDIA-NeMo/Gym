@@ -380,6 +380,10 @@ class MathFormalLeanVerifyResponse(BaseVerifyResponse):
 
 
 class MathFormalLeanResourcesServer(SimpleResourcesServer):
+    # Each proof compiles on its own in the sandbox: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = False
     config: MathFormalLeanResourcesServerConfig
 
