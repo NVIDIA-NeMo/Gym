@@ -284,12 +284,30 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     _mcp_token_serializer: Any = PrivateAttr(default=None)
 
     def setup_webserver(self) -> FastAPI:
+        app = self.create_resources_app()
+        self.register_protocol_routes(app)
+        return app
+
+    def create_resources_app(self) -> FastAPI:
+        """Build the app with what every resources server shares, whatever its episode protocol.
+
+        That is the session and rollout middleware, the checkpoint participant,
+        ``/aggregate_metrics`` and ``/reverify_mode``.
+        A server with another protocol, such as Gymnasium's ``/reset`` and ``/step``,
+        overrides ``register_protocol_routes`` instead of building its own app.
+        """
         app = FastAPI()
 
         self.setup_session_middleware(app)
         app.add_middleware(RolloutContextMiddleware)
         self.setup_resources_checkpoint(app)
 
+        app.post("/aggregate_metrics")(self.aggregate_metrics)
+        app.get("/reverify_mode")(self.get_reverify_mode)
+        return app
+
+    def register_protocol_routes(self, app: FastAPI) -> None:
+        """Register the episode routes ``/seed_session``, ``/close_session`` and ``/verify``."""
         app.post("/seed_session")(self.seed_session)
         app.post("/close_session")(self.close_resources_session)
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
@@ -299,10 +317,84 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 static_attributes={"nemo.gym.server.name": self.config.name},
             )
         )
-        app.post("/aggregate_metrics")(self.aggregate_metrics)
-        app.get("/reverify_mode")(self.get_reverify_mode)
 
-        return app
+    def setup_resources_checkpoint(self, app: FastAPI) -> None:
+        settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
+        if settings is None:
+            return
+        if (self.config.num_workers or 1) != 1:
+            raise ValueError("resources checkpointing requires num_workers=1: sessions live in one process")
+        if self.checkpoint_mode == "exported":
+            # Hooks from an intermediate base class or a mixin count; only the stubs here do not.
+            missing = [
+                name for name in _SESSION_HOOKS if getattr(type(self), name) is getattr(SimpleResourcesServer, name)
+            ]
+            if missing:
+                raise ValueError(
+                    f"{type(self).__name__} declares checkpoint_mode='exported' but does not implement {missing}"
+                )
+        participant = ResourcesParticipant(self, self.checkpoint_mode, verify_mode=self.checkpoint_verify)
+        self._checkpoint = participant
+        install_participant(
+            app,
+            participant,
+            auth_token=settings.control_auth_token,
+            lease_grace_seconds=settings.lease_grace_seconds,
+            instance_name=self.config.name,
+        )
+        # Innermost, so the session middleware has already resolved the cookie session ID.
+        mcp_session_id = self._mcp_session_id if self.config.expose_tools_over_mcp else None
+        app.user_middleware.append(
+            Middleware(ResourcesCheckpointMiddleware, participant=participant, mcp_session_id=mcp_session_id)
+        )
+
+    def _mcp_session_id(self, scope: dict[str, Any]) -> Optional[str]:
+        """The session an MCP request's signed token names, or ``None``; the MCP endpoint rejects a bad token."""
+        header = NEMO_GYM_MCP_SESSION_TOKEN_HEADER.lower().encode()
+        token = next((value for key, value in scope.get("headers", ()) if key.lower() == header), None)
+        if token is None:
+            return None
+        try:
+            text = token.decode()
+        except UnicodeDecodeError:
+            return None
+        if self._mcp_token_serializer is None:
+            self._mcp_token_serializer = mcp_session_token_serializer(self.get_session_middleware_key())
+        payload = mcp_session_token_payload(self._mcp_token_serializer, text)
+        return payload.get("sid") if isinstance(payload, dict) else None
+
+    def checkpoint_session_started(self, request: Request) -> None:
+        """Report that the request's session began an episode; standard ``/seed_session`` does this itself.
+
+        Call it from a protocol route that starts a session under another name, such as ``/reset``.
+        """
+        if self._checkpoint is None:
+            return
+        episode_id = current_episode_id()
+        session_id = request.session.get(SESSION_ID_KEY)
+        if episode_id is not None and session_id is not None:
+            self._checkpoint.seeded(session_id, episode_id)
+
+    def checkpoint_session_ended(self, request: Request) -> None:
+        """Report that the request's session ended; standard ``/close_session`` and ``/verify`` do this.
+
+        Call it from a protocol route that ends a session under another name, such as a terminal step.
+        """
+        session_id = request.session.get(SESSION_ID_KEY)
+        if self._checkpoint is not None and session_id is not None:
+            self._checkpoint.ended(session_id)
+
+    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+        """Return each session's state for a checkpoint, leaving out sessions this server no longer holds."""
+        raise NotImplementedError
+
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+        """Validate every state, then install all of them; never install a partial set."""
+        raise NotImplementedError
+
+    async def retire_session_state(self, session_id: str) -> None:
+        """Discard a session whose attempt was retired."""
+        raise NotImplementedError
 
     def setup_resources_checkpoint(self, app: FastAPI) -> None:
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))

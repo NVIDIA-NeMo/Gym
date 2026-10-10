@@ -580,7 +580,9 @@ class OpenAirCongestionEnv(GymnasiumServer):
     async def _close_endpoint(self, request: Request) -> dict[str, Any]:
         """Release the cookie-scoped OpenAir episode without resetting it."""
 
-        return await self.explicit_close(request.session.get(SESSION_ID_KEY))
+        result = await self.explicit_close(request.session.get(SESSION_ID_KEY))
+        self.checkpoint_session_ended(request)
+        return result
 
     def setup_webserver(self):
         """Add the OpenAir-only cleanup route to the shared Gymnasium API."""
