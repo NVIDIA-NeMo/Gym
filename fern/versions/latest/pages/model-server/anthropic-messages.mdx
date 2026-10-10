@@ -113,6 +113,19 @@ gym eval run --no-serve \
     --limit 1
 ```
 
+## Truncated responses (`max_tokens`)
+
+When the backend stops because it hit an output-token cap, `/v1/messages` reports `stop_reason: "max_tokens"`. Claude Code treats that as fatal and ends the whole session, even when the cap was imposed on the server side (for example by `vllm_model`'s `sampling_overrides.max_tokens`) and is far below the `max_tokens` the client requested. To keep such sessions going, set `anthropic_max_tokens_as_end_turn: true` on the model server:
+
+```yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      anthropic_max_tokens_as_end_turn: true
+```
+
+A truncated response is then reported as `tool_use` when it contains tool calls, otherwise as `end_turn`, so the client keeps the truncated turn and continues. The flag is off by default and only affects `/v1/messages`.
+
 ## Smoke-test `/v1/messages`
 
 Launch a model server, take its URL from the `gym env start` log (`'url': 'http://127.0.0.1:<port>'`), then:

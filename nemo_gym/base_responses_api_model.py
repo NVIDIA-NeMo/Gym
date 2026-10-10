@@ -230,6 +230,20 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "so a backend with free-form tool support keeps them."
         ),
     )
+    # Anthropic Messages clients such as the Claude Code CLI abort the whole session when a response's
+    # stop_reason is ``max_tokens``. When a server-side cap (e.g. ``sampling_overrides.max_tokens``)
+    # truncates a response below what the client asked for, that discards an otherwise usable rollout.
+    # With this flag ``/v1/messages`` reports a truncated response as ``tool_use`` when it carries tool
+    # calls, else ``end_turn``, so the client keeps the truncated turn and continues.
+    anthropic_max_tokens_as_end_turn: bool = False
+
+
+def _soften_max_tokens_stop_reason(anthropic_response: dict) -> None:
+    """Rewrite a ``max_tokens`` stop reason so an Anthropic client treats the truncated turn as complete."""
+    if anthropic_response.get("stop_reason") != "max_tokens":
+        return
+    has_tool_use = any(block.get("type") == "tool_use" for block in anthropic_response.get("content") or [])
+    anthropic_response["stop_reason"] = "tool_use" if has_tool_use else "end_turn"
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -512,6 +526,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         response = await self._invoke_responses(request, params)
         model_name = body.get("model") or response.model
         anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)
+        if self.config.anthropic_max_tokens_as_end_turn:
+            _soften_max_tokens_stop_reason(anthropic_response)
         if body.get("stream"):
             return await self._stream_served_response(
                 anthropic_response,
