@@ -28,6 +28,7 @@ These metrics make that pressure visible without inspecting private asyncio inte
 * ``process.cpu.time`` (counter, seconds, by ``cpu.mode``), ``process.memory.usage``, ``process.thread.count``, and ``process.open_file_descriptor.count``.
 * ``gym.server.requests.in_flight``, ``gym.server.requests.cancelled``, and ``gym.server.requests.failed``.
   The outermost server middleware keeps them as plain integers, and the exporter thread reads them.
+* ``gym.http.client.requests.in_flight``: outbound calls through ``server_utils.request`` still waiting for their response headers.
 
 Each kind of work runs where it costs the least:
 
@@ -68,6 +69,7 @@ PROCESS_OPEN_FDS_INSTRUMENT = "process.open_file_descriptor.count"
 REQUESTS_IN_FLIGHT_INSTRUMENT = "gym.server.requests.in_flight"
 REQUESTS_CANCELLED_INSTRUMENT = "gym.server.requests.cancelled"
 REQUESTS_FAILED_INSTRUMENT = "gym.server.requests.failed"
+OUTBOUND_IN_FLIGHT_INSTRUMENT = "gym.http.client.requests.in_flight"
 
 EVENT_LOOP_ATTRIBUTE = "nemo.gym.event_loop"
 GC_GENERATION_ATTRIBUTE = "generation"
@@ -158,6 +160,7 @@ class RequestCounts:
         self.in_flight = 0
         self.cancelled = 0
         self.failed = 0
+        self.outbound_in_flight = 0
 
 
 def _observation(value: float, attributes: Optional[dict[str, Any]] = None) -> Any:
@@ -240,6 +243,12 @@ class _Instruments:
             callbacks=[_observe(lambda runtime: [_observation(runtime.requests.failed)])],
             unit="{request}",
             description="HTTP requests whose handler raised past every middleware.",
+        )
+        meter.create_observable_up_down_counter(
+            OUTBOUND_IN_FLIGHT_INSTRUMENT,
+            callbacks=[_observe(lambda runtime: [_observation(runtime.requests.outbound_in_flight)])],
+            unit="{request}",
+            description="Outbound calls through server_utils.request that are still waiting for their response headers.",
         )
         meter.create_observable_counter(
             GC_COLLECTIONS_INSTRUMENT,

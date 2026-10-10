@@ -528,8 +528,10 @@ async def request(
 
     # Gate first: a disabled site costs one frozenset lookup and nothing else. Gym runs at
     # 16k+ concurrency, so this is a hot path (kb/knowledge/conventions/hot-path-overhead.md).
-    if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
-        return await _traced_request(
+    send = _traced_request if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT) else _request_with_retries
+    counts = request_counts()
+    if counts is None:
+        return await send(
             method,
             url,
             _internal=_internal,
@@ -540,17 +542,22 @@ async def request(
             _resend_after_disconnect=_resend_after_disconnect,
             **kwargs,
         )
-    return await _request_with_retries(
-        method,
-        url,
-        _internal=_internal,
-        _max_num_tries=_max_num_tries,
-        _max_connection_retries=_max_connection_retries,
-        _server_name=_server_name,
-        _control=_control,
-        _resend_after_disconnect=_resend_after_disconnect,
-        **kwargs,
-    )
+    # While runtime metrics run, count calls still waiting for their response, which ends when the headers arrive.
+    counts.outbound_in_flight += 1
+    try:
+        return await send(
+            method,
+            url,
+            _internal=_internal,
+            _max_num_tries=_max_num_tries,
+            _max_connection_retries=_max_connection_retries,
+            _server_name=_server_name,
+            _control=_control,
+            _resend_after_disconnect=_resend_after_disconnect,
+            **kwargs,
+        )
+    finally:
+        counts.outbound_in_flight -= 1
 
 
 async def _traced_request(

@@ -32,6 +32,8 @@ would disagree the first time one dropped a sample.
 | `gym.http.connection_pool.queue_duration_ms` | Histogram | ms | Time one queued connection acquisition waited for an aiohttp pool slot. |
 | `gym.http.connection_pool.connect_total` | Observable counter | count | All outbound aiohttp connection attempts (`connect()` calls), including attempts that later fail or are abandoned. |
 | `gym.rollout.completed_total` | Counter | count | Rollout attempts the collection driver finished handling, by outcome. See below. |
+
+| `gym.http.connection_pool.connect_duration_ms` | Histogram | ms | Time to open one new pooled connection, including DNS, TCP, and TLS setup. Reused connections record nothing. |
 | `gym.server.memory.usage` | Gauge | bytes | Current RSS or PSS for one managed server and its descendants. |
 | `gym.server.memory.sampled_peak` | Gauge | bytes | Largest value observed by the sampler for one managed server and its descendants. |
 | `gym.server.processes` | Gauge | count | Processes currently attributed to one managed server. |
@@ -109,6 +111,7 @@ A Gym server answers every request on one asyncio event loop. When synchronous w
 | `gym.server.requests.in_flight` | Up/down counter | count | HTTP requests the server is handling. |
 | `gym.server.requests.cancelled` | Counter | count | Requests cancelled because the client disconnected before the response finished. |
 | `gym.server.requests.failed` | Counter | count | Requests whose handler raised past every middleware. |
+| `gym.http.client.requests.in_flight` | Up/down counter | count | Outbound calls through `server_utils.request` still waiting for their response headers. |
 
 `gym.runtime.event_loop.lag` and `gym.runtime.event_loop.tasks` carry `nemo.gym.event_loop`, which is `server` for a server's own loop and `head_server` for the head server's loop inside the supervisor.
 

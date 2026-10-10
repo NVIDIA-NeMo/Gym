@@ -310,3 +310,24 @@ def test_the_supervisor_hands_runtime_settings_to_every_server(monkeypatch):
 
 def test_every_process_reports_its_pid_as_a_resource_attribute():
     assert telemetry_setup._build_resource_attributes("srv", "resources_servers")["process.pid"] == os.getpid()
+
+
+def test_outbound_calls_are_counted_while_they_wait_for_a_response(collected, monkeypatch):
+    from nemo_gym import server_utils
+
+    seen = []
+
+    async def fake_send(*_args, **_kwargs):
+        seen.append(runtime.request_counts().outbound_in_flight)
+        return "response"
+
+    monkeypatch.setattr(server_utils, "_request_with_retries", fake_send)
+    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _group: False)
+
+    async def call():
+        async with runtime.observe_event_loop("server"):
+            assert await server_utils.request("GET", "http://example.invalid/x") == "response"
+            return runtime.request_counts().outbound_in_flight
+
+    assert asyncio.run(call()) == 0
+    assert seen == [1]
