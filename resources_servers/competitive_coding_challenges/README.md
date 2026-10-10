@@ -23,21 +23,23 @@ competitive_coding_challenges
     test_batch_size: 32
     num_parallel_requests: 16
     time_scale: 2.0
-    shared_dir: ${oc.env:SHARED_TEMP_DIR,/tmp}
-    local_compile_dir: ${oc.env:LOCAL_COMPILE_DIR,/tmp/nemo-gym-compile}
+    shared_dir: ${oc.env:CCC_SHARED_TEMP_DIR,${oc.env:SHARED_TEMP_DIR,/tmp}}
+    local_compile_dir: ${oc.env:CCC_LOCAL_COMPILE_DIR,${oc.env:LOCAL_COMPILE_DIR,/tmp/nemo-gym-compile}}
 ```
 
 You must set the following at runtime:
-- `export SHARED_TEMP_DIR=` shared directory for code-execution artifacts that must be visible to all Ray nodes
+- `export CCC_SHARED_TEMP_DIR=` shared directory for code-execution artifacts that must be visible to all Ray nodes
 - `export CCC_TEST_FILE=` path to metadata.jsonl file which contains data test cases and necessary execution artifacts
 
 and optionally can set to following:
 - `export CCC_LOG_JSONL_PATH=` set path to view generations and runtime/compilation information (ex: stderr, stdout)
-- `export LOCAL_COMPILE_DIR=` override the default `/tmp/nemo-gym-compile` staging directory before completed artifacts are published to `SHARED_TEMP_DIR`
-- `local_compile_dir: null` disable local compilation staging and compile directly in `SHARED_TEMP_DIR`
+- `export CCC_LOCAL_COMPILE_DIR=` override the default `/tmp/nemo-gym-compile` staging directory before completed artifacts are published to `shared_dir`
+- `local_compile_dir: null` disable local compilation staging and compile directly in `shared_dir`
 - `test_batch_size` per problem test case parallelism
 - `num_parallel_requests` number of problems to evaluate in parallel
 - `time_scale` timeout limit factor, multiply's each problem's inherent time limit
+
+The unprefixed `SHARED_TEMP_DIR` and `LOCAL_COMPILE_DIR` are still read as fallbacks when the `CCC_`-prefixed variables are unset; prefer the prefixed names.
 
 One can also override via the config, ex: `++env.nemo_gym.competitive_coding_challenges_resources_server.resources_servers.competitive_coding_challenges.test_file=`.
 
