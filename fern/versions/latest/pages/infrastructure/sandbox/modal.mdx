@@ -1,0 +1,184 @@
+---
+title: "Modal Provider"
+description: "Configure NeMo Gym sandboxes backed by Modal."
+position: 2
+---
+
+# Modal Provider
+
+The `modal` provider creates isolated sandboxes from OCI images through the Modal Python SDK.
+It supports command execution, streaming file copies, lifecycle status, HTTPS tunnels, and
+cross-process reconnection through NeMo Gym's provider-neutral sandbox API.
+
+## Setup
+
+Install the sandbox extra and authenticate the Modal SDK:
+
+```bash
+uv sync --extra sandbox
+modal token new
+```
+
+For a package install, use:
+
+```bash
+pip install "nemo-gym[sandbox]"
+```
+
+The provider requires `modal>=1.5.5,<2.0.0`. Existing `MODAL_TOKEN_ID` and
+`MODAL_TOKEN_SECRET` environment variables also work. Credentials are read by Modal's SDK and
+do not belong in `SandboxSpec.env` or the provider YAML.
+
+## Provider Config
+
+NeMo Gym ships `nemo_gym/sandbox/providers/modal/configs/modal.yaml`. It defines the normal
+top-level `sandbox` block used by sandbox-backed agents:
+
+```yaml
+sandbox:
+  default_metadata:
+    sandbox-api: modal
+  modal:
+    connection:
+      app_name: ${oc.env:NEMO_GYM_MODAL_APP,nemo-gym-sandboxes}
+      environment_name: ${oc.env:MODAL_ENVIRONMENT,null}
+      create_app_if_missing: true
+    create:
+      timeout_s: 3600.0
+      idle_timeout_s: null
+      block_network: false
+      port_mode: encrypted
+      strict_resources: false
+    probe:
+      command: "printf ok"
+      expected_stdout: "ok"
+      timeout_s: 30.0
+      deadline_s: 180.0
+    exec:
+      default_timeout_s: 180.0
+      allow_user_rewrite: false
+    files:
+      transfer_timeout_s: 600.0
+```
+
+Pass it beside the agent and model configs:
+
+```bash
+gym env start \
+  --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+  --config nemo_gym/sandbox/providers/modal/configs/modal.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml
+```
+
+Set `MODAL_ENVIRONMENT` when the environment must be explicit. Otherwise Modal uses the active
+profile or workspace default. `NEMO_GYM_MODAL_APP` selects the App that owns the sandboxes.
+
+## Relevant `SandboxSpec` Fields
+
+| Field | Modal behavior |
+| --- | --- |
+| `image` | Required OCI image reference. Pin a digest for reproducible runs. |
+| `entrypoint` | Overrides the image command; omitted values use a POSIX keepalive. |
+| `ttl_s` | Hard lifetime, positive and no more than 24 hours. |
+| `ready_timeout_s` | Budget for App lookup, allocation, and readiness; cleanup has its own bound. |
+| `workdir` / `env` | Passed to Modal at creation and used by NeMo Gym commands. |
+| `files` | Uploaded after readiness and before `start()` returns. |
+| `metadata` | Modal tags; at most ten tags after all defaults and overrides are merged. |
+| `resources.cpu` / `memory_mib` | Modal resource requests. |
+| `resources.gpu` / `gpu_type` | Converted to a Modal GPU string. |
+| `resources.disk_gib` | Unsupported by this API; warns or raises in strict mode. |
+| `ports` | TLS-terminated HTTPS tunnels by default. |
+
+CPU and memory are scalar resource requests, not hard usage caps. Modal request/limit pairs are
+not yet exposed by this provider. Workloads needing enforced per-sandbox resource limits need
+that capability added first.
+
+When `SandboxSpec.entrypoint` is omitted, the provider clears the registry image's ENTRYPOINT
+before supplying its POSIX keepalive command. An explicit `SandboxSpec.entrypoint` retains the
+image ENTRYPOINT and replaces its CMD, following Modal's command semantics.
+
+Per-sandbox `provider_options` support `gpu`, `cloud`, `region`, `secrets`, `volumes`,
+`block_network`, `idle_timeout_s`, `image_secret`, `name`, and `tags`. Unknown values and
+`block_network` combined with exposed ports are rejected before allocation.
+
+## Reliability
+
+The provider does not add retries to create or exec requests: a new request could allocate a
+second sandbox or repeat a side effect. The Modal SDK may retry transient create failures
+internally using the same request idempotency key. Provider retries are limited to recognized
+transient failures on idempotent control-plane operations such as reconnecting, resolving
+tunnels, and cleanup. `status()` polls once and returns unknown on transient failures.
+
+`ready_timeout_s` covers App lookup, image preparation/pull, scheduling, and the readiness probe.
+It overrides `probe.deadline_s` (180 seconds by default). `probe.command: null` disables only
+the exec probe. A failed probe reports the last completed attempt's stdout, stderr, and return
+code. Invalid exec configuration and sandbox errors confirmed stopped by a status poll fail
+immediately. Running or unknown sandboxes may retry transient probe failures. With
+`probe.deadline_s: null`, the first failed probe raises rather than polling indefinitely.
+
+Failed or cancelled creation attempts cleanup before returning. Cleanup can extend the readiness
+deadline: each close attempt is bounded by `operations.close_timeout_s` (60 seconds by default).
+When allocation is still in flight, the provider allows that same cleanup budget to obtain its
+id and terminate it. If no id arrives in time, it cancels the local request and logs the App name;
+a remote allocation may still exist and its TTL is the final cleanup backstop. The TTL also
+protects against the client process being killed; it does not replace normal `stop()` calls.
+
+SDK timeout exceptions and the SDK's `-1` exit sentinel return
+`SandboxExecResult(error_type="timeout", return_code=125)`. Worker-side deadlines can instead
+surface as signal exits (for example, 137). The provider classifies signal-range exit codes
+129–192 as timeouts when dispatch-to-wait-completion time meets the timeout passed to Modal
+(rounded up to whole seconds). This is a heuristic: a coincident explicit exit, OOM, unrelated
+signal, or delayed dispatch can be indistinguishable from a deadline. Live validation of this
+worker-timeout path is still pending. Early signals, signals without a deadline, and ordinary
+nonzero exits retain their process result. Slow output draining does not affect classification.
+
+A sandbox that disappears, rejects exec, or loses its client/transport returns
+`error_type="sandbox"` with code 125, without replaying the command. Both error types retain
+captured stdout and stderr, decoded with UTF-8 replacement. Exec sends EOF and drains stdin
+concurrently with output and process waiting, so stdin readers can finish. Expected stdin-close
+errors after confirmed process exit do not replace the exit result.
+
+Modal limits the combined exec argv to 65,536 characters, including the shell wrapper and any
+user rewrite. An oversized command returns a sandbox error before dispatch; upload a script
+and execute its path for large heredocs or generated programs.
+
+<Warning>
+Modal has no public per-exec kill API. Client cancellation (including `asyncio.timeout`) and
+interrupted file transfers attempt termination only for handles created by this provider.
+Handles obtained with `connect()` are borrowed: interruption logs a warning and preserves the
+sandbox so its owner can collect diagnostics and run verification before stopping it. A command
+on a borrowed handle may continue until its exec timeout; file writes may also remain in flight.
+Use an explicit exec timeout and let the owner coordinate cleanup before reusing the sandbox.
+On an owned handle, cancellation can remove logs; use exec's `timeout_s` to retain the sandbox
+and its files after a command deadline. Cleanup failures preserve the original interruption.
+
+</Warning>
+
+File operations use Modal's streaming filesystem API. Reads have the SDK's 5 GB limit. Missing
+remote files become `FileNotFoundError`; other SDK filesystem errors are preserved.
+
+`close()` waits for remote termination and detaches the SDK connection within its cleanup
+budget. The handle is retained if cleanup fails so it can be retried. Serialized handles
+reconnect through `modal.Sandbox.from_id`.
+
+## Security and Networking
+
+Modal supplies the isolation boundary. Outbound network access is enabled by default for tasks
+that install dependencies. Use `create.block_network: true` for offline workloads that do not
+expose ports. Keep provider credentials on the host and inject only the Secrets and Volumes the
+evaluated workload actually needs.
+
+`create.port_mode: encrypted` terminates TLS at Modal and returns an HTTPS endpoint. `h2`
+selects Modal's HTTP/2 tunnel. `unencrypted` exposes a public raw TCP socket represented as an
+`http://` endpoint.
+
+Commands with `user=None`, `user="root"`, or `user=0` use the container's default root user and
+need no `su` binary. Non-root users require `exec.allow_user_rewrite: true`, a named account, and
+`su` plus `/bin/sh` in the image; non-root numeric UIDs are unsupported. The full configured
+`exec.shell` argv is preserved, including login-shell flags such as `["/bin/bash", "-lc"]`.
+
+Registry images must target `linux/amd64`. `image_secret` supports static
+`REGISTRY_USERNAME` / `REGISTRY_PASSWORD` credentials. Private Amazon ECR and Google Artifact
+Registry authentication require Modal's dedicated image constructors, which this provider's
+`Image.from_registry` path does not expose; mirror those images to a registry with supported
+static credentials before using them here.
