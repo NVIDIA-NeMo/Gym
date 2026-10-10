@@ -4,49 +4,239 @@
 """File and directory transfer through Gym sandbox operations."""
 
 import hashlib
+import json
 import shlex
 import tarfile
 import tempfile
+from collections.abc import Awaitable, Callable
+from functools import partial
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
+from resources_servers.terminal_bench_4.archive_workers import ArchiveWorkers, run_local
 
-async def upload_file(sandbox, source, target):
+
+def _pack_trusted_directory(source: Path, target: str, archive: Path) -> None:
+    source = source.resolve()
+    if target != "/tests" or not source.is_dir():
+        raise ValueError("Trusted staging requires a tests directory and the fixed destination /tests")
+    for path in source.rglob("*"):
+        if path.is_symlink() and not path.resolve().is_relative_to(source):
+            raise ValueError(f"Staged link escapes its directory: {path.relative_to(source)}")
+
+    def metadata(member: tarfile.TarInfo) -> tarfile.TarInfo:
+        member.uid = member.gid = 0
+        member.uname = member.gname = "root"
+        return member
+
+    with tarfile.open(archive, "w:gz", compresslevel=1) as tar:
+        tar.add(source, arcname=".", filter=metadata)
+
+
+async def stage_trusted_directory(
+    sandbox: AsyncSandbox,
+    source: Path,
+    target: str,
+    *,
+    archive_workers: ArchiveWorkers | None = None,
+) -> None:
+    """Stage host-owned tests as root, without changing task workspace permissions."""
+    remote = f"/tmp/.nemo-gym-trusted-{uuid4().hex}.tar.gz"
+    with tempfile.TemporaryDirectory() as tmp:
+        archive = Path(tmp) / "trusted.tar.gz"
+        await run_local(partial(_pack_trusted_directory, source, target, archive), archive_workers)
+        await sandbox.upload(archive, remote)
+    try:
+        result = await _exec_as_root_or_default(
+            sandbox,
+            f"test ! -L {target} && mkdir -p {target} && "
+            f"find {target} -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} + && "
+            f"tar --no-same-owner --same-permissions -xzf {remote} -C {target}",
+            timeout_s=600,
+        )
+        if result.return_code:
+            raise RuntimeError(f"Trusted staging into {target} failed: {result.stderr}")
+    finally:
+        await _exec_as_root_or_default(sandbox, f"rm -f {remote}", timeout_s=60)
+
+
+def _identity_switch_refused(result: SandboxExecResult) -> bool:
+    text = (getattr(result, "stderr", None) or "") + (getattr(result, "stdout", None) or "")
+    return bool(getattr(result, "return_code", 0)) and (
+        "CAP_SETUID" in text or "operation not permitted" in text.lower()
+    )
+
+
+async def _exec_as_root_or_default(sandbox: AsyncSandbox, command: str, *, timeout_s: int) -> SandboxExecResult:
+    """Run as root where the sandbox allows it; a sandbox started as the image's own user cannot switch identity
+    (OpenSandbox drops CAP_SETUID/CAP_SETGID), so the command then runs as that default identity."""
+    result = await sandbox.exec(command, user="root", timeout_s=timeout_s)
+    if _identity_switch_refused(result):
+        result = await sandbox.exec(command, timeout_s=timeout_s)
+    return result
+
+
+def artifact_metadata_path(directory: Path, host_path: Path) -> Path:
+    """Keep trusted transfer metadata outside the agent-controlled artifact tree."""
+    key = hashlib.sha256(host_path.as_posix().encode()).hexdigest()
+    return directory.parent / "artifact-metadata" / f"{key}.json"
+
+
+def _write_metadata(path: Path, metadata: dict[str, list[int]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(metadata, sort_keys=True))
+
+
+def _read_metadata(path: Path) -> dict[str, list[int]]:
+    if not path.is_file():
+        raise RuntimeError(f"Artifact ownership/permissions metadata is missing: {path}")
+    return json.loads(path.read_text())
+
+
+async def upload_file(
+    sandbox: AsyncSandbox,
+    source: Path,
+    target: str,
+    *,
+    metadata_path: Path | None = None,
+    archive_workers: ArchiveWorkers | None = None,
+) -> None:
+    metadata = (
+        (await run_local(partial(_read_metadata, metadata_path), archive_workers))["."] if metadata_path else None
+    )
     await sandbox.exec(f"mkdir -p {shlex.quote(str(PurePosixPath(target).parent))}", timeout_s=60)
     await sandbox.upload(Path(source), target)
+    if metadata:
+        uid, gid, mode = metadata
+        quoted = shlex.quote(target)
+        result = await sandbox.exec(
+            f"test ! -L {quoted} && chown {uid}:{gid} -- {quoted} && chmod {mode:o} -- {quoted}",
+            user="root",
+            timeout_s=60,
+        )
+        if result.return_code:
+            raise RuntimeError(f"Failed to restore artifact metadata for {target}: {result.stderr}")
 
 
-async def upload_dir(sandbox, source, target):
+def _pack_directory(source: Path, archive: Path, metadata_path: Path | None) -> None:
+    metadata = _read_metadata(metadata_path) if metadata_path else None
+
+    def headers(member: tarfile.TarInfo) -> tarfile.TarInfo:
+        if metadata is not None:
+            key = PurePosixPath(member.name).as_posix()
+            if key not in metadata:
+                raise RuntimeError(f"Artifact metadata is missing for {key}")
+            member.uid, member.gid, member.mode = metadata[key]
+            # Names in two images may resolve to different numeric identities.
+            member.uname = member.gname = ""
+        return member
+
+    with tarfile.open(archive, "w:gz", compresslevel=1) as tar:
+        tar.add(source, arcname=".", filter=headers)
+
+
+def _directory_entries(source: Path) -> list[tuple[Path, bool, bool]]:
+    return [(path, path.is_dir(), path.is_file()) for path in sorted(source.rglob("*"))]
+
+
+async def upload_dir(
+    sandbox: AsyncSandbox,
+    source: Path,
+    target: str,
+    *,
+    metadata_path: Path | None = None,
+    archive_workers: ArchiveWorkers | None = None,
+) -> None:
     source = Path(source)
     remote = f"/tmp/.nemo-gym-upload-{uuid4().hex}.tar.gz"
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "upload.tar.gz"
-        with tarfile.open(archive, "w:gz") as tar:
-            tar.add(source, arcname=".")
+        await run_local(partial(_pack_directory, source, archive, metadata_path), archive_workers)
         await sandbox.upload(archive, remote)
+    flags = "--numeric-owner --same-owner --same-permissions " if metadata_path is not None else ""
     result = await sandbox.exec(
-        f"mkdir -p {shlex.quote(target)} && tar -xzf {remote} -C {shlex.quote(target)}; "
+        f"mkdir -p {shlex.quote(target)} && tar {flags}-xzf {remote} -C {shlex.quote(target)}; "
         f"status=$?; rm -f {remote}; exit $status",
         timeout_s=600,
+        **({"user": "root"} if metadata_path is not None else {}),
     )
     if result.return_code:
-        for path in sorted(source.rglob("*")):
+        if metadata_path is not None:
+            raise RuntimeError(f"Failed to restore artifact {target} with its metadata: {result.stderr}")
+        for path, is_dir, is_file in await run_local(partial(_directory_entries, source), archive_workers):
             destination = str(PurePosixPath(target) / path.relative_to(source).as_posix())
-            if path.is_dir():
+            if is_dir:
                 await sandbox.exec(f"mkdir -p {shlex.quote(destination)}", timeout_s=60)
-            elif path.is_file():
-                await upload_file(sandbox, path, destination)
+            elif is_file:
+                await upload_file(sandbox, path, destination, archive_workers=archive_workers)
 
 
-async def download_file(sandbox, source, target):
+async def download_file(
+    sandbox: AsyncSandbox,
+    source: str,
+    target: Path,
+    *,
+    metadata_path: Path | None = None,
+    archive_workers: ArchiveWorkers | None = None,
+) -> None:
     target = Path(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    await run_local(partial(target.parent.mkdir, parents=True, exist_ok=True), archive_workers)
+    if metadata_path:
+        result = await sandbox.exec(f"stat -Lc '%u %g %a' -- {shlex.quote(source)}", timeout_s=60)
+        if result.return_code:
+            raise RuntimeError(f"Failed to read artifact metadata for {source}: {result.stderr}")
+        uid, gid, mode = result.stdout.split()
+        metadata = {".": [int(uid), int(gid), int(mode, 8) & 0o777]}
     await sandbox.download(source, target)
+    if metadata_path:
+        await run_local(partial(_write_metadata, metadata_path, metadata), archive_workers)
 
 
-async def download_dir(sandbox, source, target, *, exclude=None, exec_command=None, shared_archive=None):
+def _extract_directory(
+    archive: Path, target: Path, metadata_path: Path | None, *, digest: bool, skipped: list[str] | None = None
+) -> str | None:
+    metadata = {}
+
+    def data_filter(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo | None:
+        try:
+            filtered = tarfile.data_filter(member, destination)
+        except (tarfile.AbsoluteLinkError, tarfile.LinkOutsideDestinationError):
+            # Task workdirs routinely hold links to absolute paths (venv interpreters, node_modules). They cannot be
+            # restored safely, but the rest of the artifact can: drop the link, keep collecting, report it.
+            if skipped is not None:
+                skipped.append(member.name)
+            return None
+        # Keep the safe host extraction, but never mistake host ownership
+        # or umask-derived directory modes for the sandbox's metadata.
+        # Set-ID/sticky bits are not propagated from untrusted artifacts.
+        metadata[PurePosixPath(filtered.name).as_posix()] = [member.uid, member.gid, member.mode & 0o777]
+        return filtered
+
+    with tarfile.open(archive, "r:gz") as tar:
+        tar.extractall(target, filter=data_filter)
+    if metadata_path:
+        _write_metadata(metadata_path, metadata)
+    if digest:
+        with archive.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+    return None
+
+
+async def download_dir(
+    sandbox: AsyncSandbox,
+    source: str,
+    target: Path,
+    *,
+    exclude: list[str] | None = None,
+    exec_command: Callable[..., Awaitable[SandboxExecResult]] | None = None,
+    shared_archive: str | None = None,
+    metadata_path: Path | None = None,
+    archive_workers: ArchiveWorkers | None = None,
+    skipped: list[str] | None = None,
+) -> str | None:
     target = Path(target)
-    target.mkdir(parents=True, exist_ok=True)
+    await run_local(partial(target.mkdir, parents=True, exist_ok=True), archive_workers)
     remote = shared_archive or f"/tmp/.nemo-gym-download-{uuid4().hex}.tar.gz"
     retained = False
     flags = " ".join(f"--exclude={shlex.quote(pattern)}" for pattern in (exclude or []))
@@ -59,7 +249,7 @@ async def download_dir(sandbox, source, target, *, exclude=None, exec_command=No
         result = await sandbox.exec(command, timeout_s=600)
     try:
         if result.return_code:
-            if exclude:
+            if exclude or metadata_path:
                 raise RuntimeError(f"Failed to archive {source}: {result.stderr}")
             listing = await sandbox.exec(f"find {shlex.quote(source)} -type f", timeout_s=120)
             if listing.return_code:
@@ -67,16 +257,18 @@ async def download_dir(sandbox, source, target, *, exclude=None, exec_command=No
             for line in (listing.stdout or "").splitlines():
                 if line.strip():
                     relative = PurePosixPath(line.strip()).relative_to(PurePosixPath(source))
-                    await download_file(sandbox, line.strip(), target / relative)
+                    await download_file(sandbox, line.strip(), target / relative, archive_workers=archive_workers)
             return
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "download.tar.gz"
             await sandbox.download(remote, archive)
-            with tarfile.open(archive, "r:gz") as tar:
-                tar.extractall(target, filter="data")
+            digest = await run_local(
+                partial(
+                    _extract_directory, archive, target, metadata_path, digest=bool(shared_archive), skipped=skipped
+                ),
+                archive_workers,
+            )
             if shared_archive:
-                with archive.open("rb") as stream:
-                    digest = hashlib.file_digest(stream, "sha256").hexdigest()
                 retained = True
                 return digest
     finally:

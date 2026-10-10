@@ -8,6 +8,18 @@ from copy import deepcopy
 from typing import Any
 
 
+MAIN_COMMAND = ("sh", "-c", "sleep infinity")
+
+
+def resolve_image_startup(service: dict, config: dict) -> None:
+    """Resolve image defaults without replacing explicit service startup overrides."""
+    explicit_entrypoint = service.get("entrypoint") is not None
+    if not explicit_entrypoint:
+        service["entrypoint"] = config.get("Entrypoint") or []
+    if service.get("command") is None:
+        service["command"] = [] if explicit_entrypoint else config.get("Cmd") or []
+
+
 def _compose_literals(value: Any) -> Any:
     if isinstance(value, str):
         escaped = value.replace("$$", "\x00")
@@ -44,7 +56,7 @@ def resolve_compose(document: dict, main_image: str, image_configs: dict) -> dic
     # images with a service-starting ENTRYPOINT that subsequently execs it.
     services["main"] = {
         "image": main_image,
-        "command": ["sh", "-c", "sleep infinity"],
+        "command": list(MAIN_COMMAND),
         **services.get("main", {}),
     }
     for name, service in services.items():
@@ -56,11 +68,7 @@ def resolve_compose(document: dict, main_image: str, image_configs: dict) -> dic
             raise ValueError(f"Service {name!r} requires a supported Linux/amd64 image")
         config = record["config"]
         service["image"] = record["image"]
-        explicit_entrypoint = service.get("entrypoint") is not None
-        if not explicit_entrypoint:
-            service["entrypoint"] = config.get("Entrypoint") or []
-        if service.get("command") is None:
-            service["command"] = [] if explicit_entrypoint else config.get("Cmd") or []
+        resolve_image_startup(service, config)
         if config.get("WorkingDir"):
             service.setdefault("working_dir", config["WorkingDir"])
         if config.get("User"):

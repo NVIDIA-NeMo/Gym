@@ -44,8 +44,242 @@ death stops renewal; provider TTL is the sandbox cleanup fallback.
 
 Model-call capture and harness trajectories belong to the agent server. Resource
 artifacts, including collected remote `/logs/agent` files, remain under the trial
-directory. The seed's connection configuration is used only for the internal
-agent/resource exchange and is not persisted in session records.
+directory, except the collected task workspace (next paragraph). The seed's
+connection configuration is used only for the internal agent/resource exchange and
+is not persisted in session records.
+
+Workspace artifacts are discarded after grading. The task's declared `artifacts`
+exist on the host only to move from the agent sandbox to the separate verifier
+sandbox: `/verify` collects them into `<trial>/artifacts/` and restores them into
+the verifier container. Task authors commonly declare their whole working directory,
+hundreds of MB and thousands of files per attempt, and nothing needs the host copy
+once the verifier has it. Cleanup therefore removes `<trial>/artifacts` after both
+sandboxes are stopped, unconditionally (there is no retention option), and appends
+`{"operation": "artifacts_discarded", "files": n, "bytes": m}` to the session
+diagnostics (`"error": ...` instead when the removal failed; the session still
+closes). `agent/`, `verifier/`, the reward files, `result.json`, `gym-agent.json`
+and `artifact-metadata/` stay; the per-artifact collection statuses that lived in
+`artifacts/manifest.json` go with the tree, while collection failures remain in the
+diagnostics.
+
+Links to absolute paths inside a declared artifact (venv interpreters, `node_modules` links)
+cannot be restored safely; the collector drops them, keeps the rest of the artifact, and
+records `skipped_links` on that artifact's collect diagnostic. Path traversal in member names
+still fails the collection. The EFS restore applies the same rule.
+
+Artifact transfer retains source numeric UID/GID and `0777` permission bits for
+files and directories, independently of the host's user and umask. Host-side
+metadata lives in the trial's `artifact-metadata/`, outside the collected tree.
+Restore uses root only to reapply this metadata; verifier execution still uses
+the configured verifier identity. Archive path/link checks remain enabled and
+set-ID/sticky bits are stripped. ACLs and extended attributes are not transferred.
+The EFS snapshot path follows the same rules. Missing metadata or failed archive
+restore is an infrastructure error, not a metadata-losing file-copy fallback.
+
+Local transfer packing, extraction, hashing and metadata I/O run in a bounded
+thread pool shared by all sessions of this resources process. Configure
+`max_concurrent_archive_operations` (positive integer, default **2**), or the
+benchmark override `tb4_archive_concurrency`, independently of
+`max_concurrent_sessions` / `tb4_concurrency`. Additional archive jobs wait
+asynchronously, leaving sandbox requests and status checks responsive. This is
+a per-process limit on local transfer I/O, not a limit on remote sandboxes or
+their archive commands; multiple resources processes have separate pools.
+
+Cancellation stops queued work, but Python cannot interrupt a running worker
+thread. An in-flight operation is joined before its slot or temporary files are
+released; shutdown joins the pool after session cleanup. Consequently, cleanup
+can exceed the normal grace period while slow filesystem work finishes. Archive
+filters, metadata, task identities and grading semantics remain unchanged. This
+does not accelerate a slow filesystem or qualify higher sandbox concurrency.
+
+## Optional local training packages
+
+The official public-package path remains the default. Set `local_task_packages:
+true` and `manifest_path` to a trusted host manifest to use prebuilt training
+images. The manifest has `format: "gym-tb4-local-v1"`, a dataset `ref`, and
+`tasks` entries containing `name`, content-pinned `ref` (`sha256:...`), and
+absolute host `path`. Names are used verbatim in this mode. Each package uses
+the same strict task schema and content-hash check as public packages; rows
+cannot supply arbitrary package paths. Shared-verifier tasks remain unsupported.
+The manifest may grow while the server runs: a seed naming a task absent from the
+loaded table re-reads it and adds the new entries (same `ref` and `format` only;
+entries are never removed or replaced), so tasks can be appended to a campaign
+without a restart.
+
+Local packages follow the verifier build-layout convention: `tests/Dockerfile`
+or `tests/docker-compose.yaml` means the verifier image already contains its
+tests, so the runner does not replace them with the host's build context. With
+neither file, it stages the host-owned `tests/` tree into `/tests` in the fresh
+verifier, as root, after restoring the declared artifacts. The agent's
+`environment/Dockerfile` does not control this decision. No additional dataset
+field or configuration flag is required. Tests are never injected into the
+agent's working directory. The test command still runs as `verifier.user`; when
+absent, the current image default is preserved. Images must support the requested
+identities and root setup operations.
+
+### Task identities and root-default images
+
+Execution identities come from `agent.user` and `verifier.user`. An omitted
+field uses that environment's **current** image default; the runner does not
+retain or look up the image's former User. If preprocessing republishes an
+image with `USER root`, it must fill any missing task identity with the original
+default for the corresponding role. Preserve explicit task users; do not replace
+an explicit root verifier with the original agent-image user. OCI's empty User
+means root. Regenerate content-pinned packages and manifest/row hashes after
+changing task settings.
+
+The old `environment.root_bootstrap_image_users` option is removed and rejected
+as an unknown setting. Remove it (and the corresponding launcher option) from
+new runs after preprocessing the task identities. Historical runs remain tied
+to their original code/config pins. Startup OCI metadata is independent and
+remains supported; its User field is not an execution-identity fallback.
+
+Account names and numeric UIDs are supported. Group-qualified `user:group`
+execution settings are rejected rather than silently losing the group override.
+Unavailable users or failed switches are errors, never root fallbacks. This
+does not rebuild an image or make a non-root sandbox capable of root execution.
+
+| Operation | Execution identity |
+| --- | --- |
+| Stage trusted tests | Root |
+| Live Mini-SWE commands | `agent.user`, otherwise current agent-image default |
+| Run verifier tests | `verifier.user`, otherwise current verifier-image default |
+| Healthcheck / collection hook without its own user | Current image default for that environment |
+
+The resolved agent identity is passed to both harnesses, not just resource-owned
+commands. Existing named-user switching remains. For a root-started main sandbox,
+log setup probes the role's UID/GID and prepares only
+`/logs`, `/logs/agent`, `/logs/verifier`, and `/logs/artifacts` for that role,
+including EFS mounts. No workspace ownership or permissions are repaired.
+For root-started sandboxes, `sandbox/<session-id>.identity.json` records the
+observed bootstrap UID, configured/execution user and execution UID/GID; it
+contains no historical image-user mapping. Non-root sandboxes retain their
+existing log-directory creation path, without a forced root switch. EFS log
+roots use the role's UID/GID in either case. Perform a live model smoke
+before qualifying preprocessed task packages and images.
+
+### Reference solution image key
+
+Some task packages name an image for running their reference solution, in a
+top-level `oracle_docker_image` in `task.toml`. This server runs no reference
+solutions: it accepts the key so those packages load under the strict task
+schema, and never uses it. Live rollouts use `environment.docker_image`, and
+grading starts a fresh verifier from `verifier.environment.docker_image` (or its
+agent-image fallback).
+
+## OpenCode agent (sandbox-handle contract)
+
+`harness: opencode` makes this server drive the **unmodified** `opencode_sandboxed_agent`,
+which speaks the TB2.1-style contract rather than the split contract above: it reads
+`sandbox_handle` from `/seed_session`, reconnects with its own provider configuration,
+runs OpenCode through one `exec` as the sandbox's default identity (no `user`, `cwd`
+or `env`), and posts `/verify` with the dataset row plus its `response` — no
+`session_id`, no termination. The adaptation lives in `opencode.py`; the agent code is
+not touched. Profile: `configs/terminal_bench_4_opencode.yaml`.
+
+Seed. Rows must carry one distinct `rollout_id` per attempt (e.g. `<task>/attempt-<n>`):
+the agent sends no `client_session_id` and its first request carries no resources cookie,
+so the episode owner derives from `dataset_ref:task_ref:rollout_id` — a transport-level
+retry joins the in-flight provisioning instead of allocating a second sandbox, and an
+identical row cannot run twice against one artifacts directory (409; `num_repeats` must
+be expressed as distinct rows). Before provisioning, the pinned package is loaded and the row must carry exactly one user
+message containing the canary-stripped instruction verbatim
+(`opencode.require_instruction_in_prompt`); tasks declaring MCP servers are rejected
+(422). A provisioning failure or an already-verified episode is an HTTP error, never a
+seed without a handle (the agent would otherwise create an unrelated sandbox).
+
+Identity. The agent never passes a user, so the server stages a **launcher** in the
+sandbox (`opencode.stage_dir`, default `/tmp/tb4-opencode`, root-owned 0755 in
+root-started sandboxes): `install.sh` honours the agent's cached-installer CLI
+(`--glibc-binary`/`--musl-binary`/`--binary`), copies the libc-matching binary to
+`<stage_dir>/bin/opencode.real` and installs the launcher at `$HOME/.opencode/bin/opencode`,
+the path the agent puts on `PATH`. Point the agent's
+`remote_opencode_install_script_path` at `<stage_dir>/install.sh`. Every `opencode`
+invocation (`run`, `session list`, `export`) then switches to `agent.user`
+(`setpriv --reuid --regid --init-groups`), pins `HOME`/`USER`/`LOGNAME` to that account
+(falling back to a private `/tmp` home when the account's home is missing or read-only),
+starts `run` in its own session and registers the process group in
+`/tmp/<session>.pids` for `quiesce_agent`, and writes a launch record plus the observed
+uid to `/logs/agent/tb4-opencode/` (collected with the agent logs). A non-root task user
+in a non-root-started sandbox is an infrastructure error, never a silent root run; an
+omitted `agent.user` keeps the image default, as TB2.1 did.
+
+Model access. OpenCode calls the model from inside the sandbox, so the agent's
+`baseURL` (the Gym host's model server) is unreachable from a Cell-style deployment.
+Set `opencode.model_gateway` to a sandbox-reachable origin that forwards to the Gym
+model server; the launcher rewrites only the scheme/host/port of `OPENCODE_CONFIG_CONTENT`'s
+`provider.nemo_gym.options.baseURL`, keeping Gym's rollout-capture path. Allow that host
+for the agent role of `no-network` tasks with `environment.agent_egress_allow`; the
+verifier remains deny-all and public tasks keep the provider default.
+
+Verify. A body without `session_id` is bound from the cookie owner and `rollout_id`
+(row or cookie). The server synthesizes `termination: completed` (the agent reports no
+exit status), `agent_started: true` (a started agent is graded unconditionally, as
+above), `agent_timings.agent_execution` from seed-ready to verify, and
+`harness_metadata` with the response item count and usage; an identical retry reuses
+the first binding. Grading, collection, cleanup and the response model are unchanged;
+the row's extra fields (`task_name`, `task_ref`, …) ride along in the response.
+
+Per-task agent budget. The agent's `sandbox_timeout` is one global exec budget, so
+`opencode.agent_timeout_floor_sec` (benchmark override
+`tb4_opencode_agent_timeout_floor_sec`, default null) lets the resources server
+enforce a per-task budget of `max(floor, task agent.timeout_sec)` seconds instead. A
+run row may only lower it (`agent_timeout_sec` in the run body, floor 600 s) — for a
+scheduler whose model server retires before the full budget; it can never raise it.
+`launcher.env` carries it as `TB4_AGENT_TIMEOUT_S`, and the launcher's `run` branch
+wraps the real binary inside the `setsid` session: coreutils `timeout -k 60 <budget>`
+when the image's `timeout` accepts `-k` (probed with `timeout -k 1 1 true`; busybox's
+does not), otherwise a launcher-owned watchdog that TERMs the session's process group
+at the budget and KILLs it 60 s later. Only the session is signalled, so the launcher
+survives to write its exit record, which gains `timed_out: 1` (exit status 124 from
+`timeout`, or the watchdog fired); the run record gains `budget_s`. `/verify` maps a
+`timed_out` exit to `termination.reason: timeout` with the exit status kept — graded
+like any TB4 agent timeout — and both fields ride in
+`harness_metadata.launch_records`. The seed's `agent_timeout_sec` reports the same
+budget so the agent side and a controller agree on it; `seeded_session_timeout_sec`
+is unchanged and, like the agent's `sandbox_timeout`, must stay above the largest
+budget or its kill lands first (no exit record, still a graded timeout). With the
+floor unset nothing changes: no in-sandbox budget, and the seed reports the task's own
+timeout.
+
+Gateway rollout prefix. The unmodified agent adds Gym's `/ng-rollout/<rollout_id>` path
+prefix to its model baseURL only when model-call or token capture is enabled. With
+`opencode.gateway_rollout_prefix: true` the launcher inserts that prefix itself (from the run's
+`rollout_id`, which must be a path-safe id: letters, digits, `.`, `_`, `-`) when the baseURL lacks
+one, so a gateway can route each attempt's model calls by id without capture overhead; the
+launch record carries `gateway_prefix`.
+
+## Image startup: Compose and standalone
+
+`environment.compose_image_configs` is the shared OCI metadata catalog for both
+Compose and standalone images. Despite its historical name, no Compose file or
+conversion is needed for a standalone image. The runner automatically uses its
+recorded `Entrypoint` followed by `sh -c "sleep infinity"`, matching Compose's
+default `main` service. It does **not** run the image's raw `Cmd`: an inherited
+`python3` or `bash` command can exit immediately. With no entrypoint, the startup
+is just the keepalive. Compose's explicit overrides and sidecar commands retain
+their existing behavior. Standalone agent and verifier roles each remain one
+ordinary sandbox, with unchanged users, workdirs, health checks and networking.
+
+The catalog maps image references to records with `image`, `os`, `architecture`,
+and the OCI `config`. Paths are absolute or relative to the Gym root. Acquire
+and digest-check the metadata upstream; the runner does not query a registry.
+Standalone records must match the effective image after `image_rewrites` (or
+pin the same SHA-256 image digest), describe Linux/amd64, and have string-list
+or null `Entrypoint`/`Cmd` fields. Shell-form entrypoints must already contain
+their image-recorded shell argv; they are not parsed again.
+
+The original official catalog contains only Compose images. A standalone image
+absent from that shared catalog retains the provider's old keepalive behavior,
+with a warning; the runner cannot infer an unrecorded entrypoint. No catalog
+also retains the old behavior. To preserve startup for new datasets, include
+**both** their agent and verifier images in the catalog.
+
+The previous `environment.single_container_image_configs` path remains accepted
+as a standalone-only compatibility override; when provided, it still requires
+every effective standalone image to be present and fails on missing records.
+Its startup semantics now also match Compose `main` (ENTRYPOINT + keepalive,
+not ENTRYPOINT + raw CMD). Neither metadata path is a boolean startup toggle.
 
 ## Non-root Compose services
 
@@ -70,9 +304,11 @@ other services, and verifier environments retain their original configuration.
 
 The benchmark profile sets `environment.efs_logs_host_path` to
 `/mnt/efs/data/shared`. Each episode creates a unique EFS directory with separate
-agent and verifier subdirectories mounted read-write at `/logs`. The image's
-default UID/GID owns its log root with mode `755`; workloads keep their original
-execution user. This allows non-root images to initialize their log directories
+agent and verifier subdirectories mounted read-write at `/logs`. The task role's
+UID/GID owns its log root with mode `755`; when its user is omitted, the current
+image default owns it. Root-started main containers also prepare the fixed log
+subdirectories for that role, independently of any image-history metadata.
+This allows non-root images to initialize their log directories
 and keeps root verifier reward-directory protections effective. Compose mounts
 these logs in `main`; sidecar mounts and collection order remain unchanged.
 

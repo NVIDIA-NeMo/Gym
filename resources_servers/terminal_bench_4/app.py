@@ -6,6 +6,7 @@
 import asyncio
 import hashlib
 import json
+import math
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,8 @@ from nemo_gym.server_utils import (
     is_nemo_gym_fastapi_entrypoint,
 )
 from resources_servers.terminal_bench_4 import lifecycle
+from resources_servers.terminal_bench_4 import opencode as opencode_harness
+from resources_servers.terminal_bench_4.archive_workers import ArchiveWorkers
 from resources_servers.terminal_bench_4.environment import EnvironmentConfig
 from resources_servers.terminal_bench_4.lifecycle import NATIVE_VERSION, Session
 from resources_servers.terminal_bench_4.models import (
@@ -36,6 +39,7 @@ from resources_servers.terminal_bench_4.models import (
     SeedSessionResponse,
     TerminalBench4RunRequest,
 )
+from resources_servers.terminal_bench_4.opencode import OpenCodeHarnessConfig
 from resources_servers.terminal_bench_4.task import PackageLoader
 
 
@@ -49,9 +53,16 @@ class TerminalBench4Config(BaseResourcesServerConfig):
     artifacts_dir: Path = Path("results/terminal_bench_4/resources")
     environment: EnvironmentConfig
     max_concurrent_sessions: int = Field(default=8, gt=0)
+    max_concurrent_archive_operations: int = Field(default=2, gt=0)
     shutdown_timeout_sec: float = Field(default=30, ge=0)
     seeded_session_timeout_sec: float = Field(default=10 * 60 * 60, gt=0)
     task_download_dir: Path | None = None
+    local_task_packages: bool = False
+    # Which agent contract this server speaks. ``miniswe``: the split contract (agent reconnects from the seed's
+    # descriptor and reports termination). ``opencode``: the unmodified OpenCode sandboxed agent's TB2.1-style
+    # contract (``sandbox_handle`` in the seed, row fields + ``response`` at ``/verify``); see opencode.py.
+    harness: Literal["miniswe", "opencode"] = "miniswe"
+    opencode: OpenCodeHarnessConfig = Field(default_factory=OpenCodeHarnessConfig)
 
 
 def atomic_json(path, value):
@@ -67,11 +78,20 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context):
         super().model_post_init(context)
         self._manifest = json.loads(self.config.manifest_path.read_text())
-        self._tasks = {"terminal-bench/" + task["name"]: task for task in self._manifest["tasks"]}
+        prefix = "" if self.config.local_task_packages else "terminal-bench/"
+        self._tasks = {prefix + task["name"]: task for task in self._manifest["tasks"]}
+        if len(self._tasks) != len(self._manifest["tasks"]):
+            raise ValueError("Task manifest contains duplicate names")
         self._sessions: dict[str, Session] = {}
         self._by_identity: dict[str, str] = {}
         self._slots = asyncio.Semaphore(self.config.max_concurrent_sessions)
-        self._loader = PackageLoader(self.config.task_download_dir)
+        local_paths = None
+        if self.config.local_task_packages:
+            if self._manifest.get("format") != "gym-tb4-local-v1":
+                raise ValueError("Local tasks require a gym-tb4-local-v1 manifest")
+            local_paths = {name: Path(task["path"]) for name, task in self._tasks.items()}
+        self._loader = PackageLoader(self.config.task_download_dir, local_paths=local_paths)
+        self._archive_workers = ArchiveWorkers(self.config.max_concurrent_archive_operations)
         self._closing = False
         self.config.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -87,7 +107,10 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     yield state
             finally:
                 self._closing = True
-                await lifecycle.shutdown(list(self._sessions.values()), self.config.shutdown_timeout_sec)
+                try:
+                    await lifecycle.shutdown(list(self._sessions.values()), self.config.shutdown_timeout_sec)
+                finally:
+                    await self._archive_workers.aclose()
 
         app.router.lifespan_context = lifespan
         return app
@@ -146,16 +169,53 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         kwargs.setdefault("result", {"runtime": "gym-tb4-native", "runtime_version": NATIVE_VERSION})
         session = Session(identity, owner, body, session_id, self.config.artifacts_dir / session_id, **kwargs)
         session.slots = self._slots
+        session.archive_workers = self._archive_workers
         session.config = self.config
         session.persist = lambda: self._persist(session)
         return session
+
+    def _refresh_tasks(self) -> None:
+        """Add-only re-read of the manifest so tasks appended during a campaign are seedable without a restart.
+
+        Only the same dataset pin and format extend the loaded table; nothing is ever removed or replaced, and an
+        unreadable or half-written manifest leaves the table as it was.
+        """
+        try:
+            manifest = json.loads(self.config.manifest_path.read_text())
+        except (OSError, ValueError):
+            return
+        if manifest.get("ref") != self._manifest["ref"] or manifest.get("format") != self._manifest.get("format"):
+            return
+        prefix = "" if self.config.local_task_packages else "terminal-bench/"
+        for task in manifest.get("tasks") or []:
+            name = prefix + task["name"]
+            if name in self._tasks:
+                continue
+            if self._loader.local_paths is not None:
+                self._loader.local_paths[name] = Path(task["path"])
+            self._tasks[name] = task
+        self._manifest["tasks"] = list(self._tasks.values())
 
     async def seed_session(self, request: Request, body: TerminalBench4RunRequest) -> SeedSessionResponse:
         if self._closing:
             raise HTTPException(503, "Resources server is shutting down")
         task = self._tasks.get(body.task_name)
+        if task is None:
+            self._refresh_tasks()
+            task = self._tasks.get(body.task_name)
         if task is None or body.task_ref != task["ref"] or body.dataset_ref != self._manifest["ref"]:
             raise HTTPException(422, "Task identity does not match the configured dataset pin")
+        opencode = self.config.harness == "opencode"
+        if body.rollout_id is None:
+            raise HTTPException(422, "rollout_id is required (OpenCode rows: one distinct value per attempt)")
+        if opencode and not body.client_session_id:
+            # The OpenCode agent sends no client_session_id and its first request carries no resources cookie, so a
+            # transport-level retry must still find the in-flight episode: the owner derives from the row identity.
+            # Consequently an identical row cannot run twice against one artifacts directory (409), by design.
+            body.client_session_id = hashlib.sha256(
+                f"{body.dataset_ref}:{body.task_ref}:{body.rollout_id}".encode()
+            ).hexdigest()
+        preloaded = await self._check_opencode_seed(body) if opencode else None
         if body.client_session_id:
             request.session["tb4_client_session_id"] = body.client_session_id
         owner = self._owner(request)
@@ -168,6 +228,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             else:
                 session_id = "tb4-" + uuid4().hex
                 session = self._new_session(identity, owner, body.model_copy(deep=True), session_id)
+                session.task = preloaded
                 self._sessions[session_id] = session
                 self._by_identity[identity] = session_id
                 session.persist()
@@ -181,28 +242,93 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             await asyncio.shield(session.execution)
         self._check_expiry(session)
         if session.verified_response is not None:
+            if opencode:
+                # The OpenCode agent would otherwise read a missing sandbox_handle and create an unrelated sandbox.
+                raise HTTPException(409, "Episode is already verified; the OpenCode contract cannot replay it")
             return SeedSessionResponse(session_id=session.session_id, verified_response=session.verified_response)
         if session.seed_response is None:
             raise HTTPException(409, "Episode has no recorded seed response")
+        if opencode and session.seed_response.termination is not None:
+            # Same reason: a provisioning failure must fail the agent's request, not hand it an empty seed.
+            detail = session.seed_response.termination.detail or session.seed_response.termination.reason
+            raise HTTPException(500, f"TB4 session {session.session_id} failed to provision: {detail}")
         return session.seed_response
+
+    async def _check_opencode_seed(self, body: TerminalBench4RunRequest):
+        """Fail closed before provisioning: what the unmodified OpenCode agent would only trip over afterwards."""
+        try:
+            task = await self._loader.load(body.task_name, body.task_ref)
+        except Exception as exc:
+            raise HTTPException(422, f"Task package is unavailable: {exc}") from exc
+        if task.config.environment.mcp_servers:
+            raise HTTPException(422, "The OpenCode contract cannot mount task MCP servers")
+        try:
+            opencode_harness.check_prompt(
+                body.responses_create_params,
+                task.instruction,
+                require_instruction=self.config.opencode.require_instruction_in_prompt,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return task
+
+    def _opencode_budget(self, task, request: TerminalBench4RunRequest | None = None) -> int | None:
+        """Per-task agent budget: the configured floor or the task's own agent timeout, whichever is larger.
+
+        A row may ask for LESS (``agent_timeout_sec`` in the run body, at least 600 s): a scheduler that knows its
+        model server retires before the full budget cuts the attempt short cleanly instead of letting the server die
+        under it. A request can never raise the budget above the policy value.
+        """
+        floor = self.config.opencode.agent_timeout_floor_sec
+        if floor is None:
+            return None
+        budget = max(floor, math.ceil(task.config.agent.timeout_sec))
+        requested = getattr(request, "agent_timeout_sec", None) if request is not None else None
+        if isinstance(requested, (int, float)) and not isinstance(requested, bool) and 0 < requested < budget:
+            budget = max(600, math.ceil(requested))
+        return budget
 
     async def _prepare_session(self, session: Session) -> None:
         session.started.set()
         with rollout_context(session.request.capture_rollout_id):
             try:
                 await lifecycle.prepare_session(session, self._loader)
+                session.result["harness"] = self.config.harness
+                budget = None
+                if self.config.harness == "opencode":
+                    # The launcher enforces the budget inside the sandbox; the seed reports the same number so the
+                    # agent side and the controller agree on it.
+                    budget = self._opencode_budget(session.task, session.request)
+                    session.result["opencode_launcher"] = await opencode_harness.stage_launcher(
+                        session.environment.main,
+                        self.config.opencode,
+                        session_id=session.session_id,
+                        agent_user=session.environment.role_user,
+                        bootstrap_uid=session.environment.bootstrap_uid,
+                        scratch=session.directory / "sandbox" / "opencode",
+                        workdir=session.task.config.environment.workdir,
+                        agent_timeout_s=budget,
+                        rollout_id=session.request.rollout_id,
+                    )
+                    if session.task.config.environment.skills_dir:
+                        session.diagnostics.append(
+                            {"operation": "opencode_skills_dir", "note": "not mounted by the OpenCode contract"}
+                        )
+                handle = getattr(getattr(session.environment.main, "_handle", None), "sandbox_id", None)
                 session.seed_response = SeedSessionResponse(
                     session_id=session.session_id,
                     task_id=session.request.task_name,
+                    sandbox_handle=handle,
                     sandbox_descriptor=await session.environment.main.serialize(),
                     sandbox_provider=session.environment.provider_config,
                     instruction=session.task.instruction,
-                    user=session.task.config.agent.user,
-                    agent_timeout_sec=session.task.config.agent.timeout_sec,
+                    user=session.environment.role_user,
+                    agent_timeout_sec=session.task.config.agent.timeout_sec if budget is None else budget,
                     mcp_servers=[s.model_dump() for s in session.task.config.environment.mcp_servers],
                     skills_dir=session.task.config.environment.skills_dir,
                 )
                 session.phase = "ready"
+                session.deadlines["agent_ready_at"] = lifecycle.now()
                 session.agent_deadline = asyncio.get_running_loop().time() + self.config.seeded_session_timeout_sec
                 session.deadlines["agent_expires_at"] = (
                     datetime.now(timezone.utc) + timedelta(seconds=self.config.seeded_session_timeout_sec)
@@ -257,6 +383,13 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             except OSError as exc:
                 lifecycle.exception(session, exc, "AgentRecordError")
             session.phase = "verifying" if body.agent_started else "cleaning"
+            if self.config.harness == "opencode" and body.agent_started and not session.environment.closed:
+                try:
+                    await opencode_harness.quiesce_agent_user(
+                        session.environment.main, session.environment.role_user, session.environment.bootstrap_uid
+                    )
+                except Exception as exc:
+                    session.diagnostics.append({"operation": "opencode_quiesce_user", "error": str(exc)})
             await lifecycle.finalize_session(
                 session, grade=body.agent_started and session.seed_response.termination is None
             )
@@ -272,14 +405,16 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             failure = (result.get("exception_info") or {}).get("exception_type", "MissingOfficialReward")
         elif session.termination.reason == "infrastructure_error":
             failure = session.termination.detail or "Agent infrastructure failure"
-        return SandboxedVerifyResponse(
-            **(
-                session.verify_body.model_dump(
-                    exclude={"termination", "agent_started", "agent_timings", "harness_metadata"}
-                )
-                | extra
-                | {"task_id": session.request.task_name}
-            ),
+        # Row extras ride along (extra="allow"); resources-owned fields always win over a same-named extra.
+        data = (
+            session.verify_body.model_dump(
+                exclude={"termination", "agent_started", "agent_timings", "harness_metadata"}
+            )
+            | extra
+            | {"task_id": session.request.task_name}
+        )
+        data.update(
+            session_id=session.session_id,
             reward=float(rewards.get("reward", 0)),
             evaluation_completed=completed,
             termination=session.termination,
@@ -289,8 +424,10 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             timings={
                 key: result.get(key) for key in ("environment_setup", "agent_setup", "agent_execution", "verifier")
             },
-            **({"_ng_failure_class": "infrastructure_error"} if failure else {}),
         )
+        if failure:
+            data["_ng_failure_class"] = "infrastructure_error"
+        return SandboxedVerifyResponse(**data)
 
     def _session(self, request, session_id):
         session = self._sessions.get(session_id)
@@ -333,7 +470,69 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             raise HTTPException(404, "Unknown session")
         return session
 
+    async def _bind_opencode_verify(self, request: Request, body: SandboxedVerifyRequest) -> SandboxedVerifyRequest:
+        """Bind the OpenCode agent's row+response payload to its TB4 session and supply what it cannot report.
+
+        The termination comes from the launcher's run/exit records inside the sandbox (see opencode.py), so an
+        install failure is an unmarked infrastructure error, a killed run is a timeout and a finished run carries
+        OpenCode's exit status — none of which the agent's payload contains.
+        """
+        extras = body.model_extra or {}
+        rollout_id = extras.get("rollout_id")
+        if not rollout_id:
+            raise HTTPException(422, "rollout_id is required to bind an OpenCode verification to its session")
+        identity = hashlib.sha256(f"{self._owner(request)}:{rollout_id}".encode()).hexdigest()
+        session_id = body.session_id or self._by_identity.get(identity)
+        if session_id is None and self._state_path(identity).exists():
+            session_id = json.loads(self._state_path(identity).read_text())["session_id"]
+        if session_id is None:
+            raise HTTPException(404, "No TB4 session is bound to this resources session and rollout")
+        session = self._sessions.get(session_id)
+        agent_fields = {"session_id", "termination", "agent_started", "agent_timings", "harness_metadata"}
+        if session is not None and session.verify_body is not None:
+            # A retried identical request reuses the first binding (its timings would otherwise differ).
+            if session.verify_body.model_dump(mode="json", exclude=agent_fields) == body.model_dump(
+                mode="json", exclude=agent_fields
+            ):
+                return session.verify_body
+        records: dict = {}
+        termination, agent_started = body.termination, True
+        if termination is None:
+            environment = session.environment if session is not None else None
+            try:
+                if environment is None or environment.main is None or environment.closed:
+                    raise RuntimeError("the agent sandbox is no longer available")
+                records = await opencode_harness.observe_launch(environment.main, self.config.opencode)
+                termination, agent_started = opencode_harness.derive_termination(records)
+            except Exception as exc:
+                termination = AgentTermination(
+                    reason="infrastructure_error", detail=f"OpenCode launch records unavailable: {exc}"
+                )
+        usage = body.response.usage.model_dump(mode="json") if body.response.usage is not None else None
+        started = session.deadlines.get("agent_ready_at") if session is not None else None
+        return body.model_copy(
+            update={
+                "session_id": session_id,
+                "termination": termination,
+                "agent_started": agent_started,
+                "agent_timings": {
+                    "agent_execution": {"started_at": started or lifecycle.now(), "finished_at": lifecycle.now()}
+                },
+                "harness_metadata": {
+                    "harness": "opencode",
+                    "contract": "sandbox_handle",
+                    "output_items": len(body.response.output),
+                    "usage": usage,
+                    "launch_records": records,
+                },
+            }
+        )
+
     async def verify(self, request: Request, body: SandboxedVerifyRequest) -> SandboxedVerifyResponse:
+        if body.session_id is None or body.termination is None:
+            if self.config.harness != "opencode":
+                raise HTTPException(422, "session_id and termination are required")
+            body = await self._bind_opencode_verify(request, body)
         session = self._session(request, body.session_id)
         if session.execution is not None:
             await asyncio.shield(session.execution)
