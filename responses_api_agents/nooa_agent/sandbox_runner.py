@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Borrow a task sandbox and supervise one whole NOOA activation."""
 
+import asyncio
 import json
+import logging
 import tempfile
 from pathlib import Path
 from shlex import quote
@@ -13,6 +15,9 @@ from nemo_gym.sandbox import AsyncSandbox
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunRequest, NOOARunResult
 from responses_api_agents.nooa_agent.sandbox_entrypoint import SandboxInput, SandboxResult
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SandboxNOOARunner:
@@ -73,26 +78,58 @@ class SandboxNOOARunner:
         d, python = quote(self.directory), quote(self.python)
         # The atomic claim also fences an exec whose response is lost or delayed until after close.
         command = (
-            f"trap '' TERM; ln -s launch {d}/launch.claim 2>/dev/null || exit 0; "
-            f"exec {python} -I -m responses_api_agents.nooa_agent.sandbox_supervisor "
-            f"{d} >{d}/stdout.log 2>{d}/stderr.log"
+            f"(trap '' TERM; ln -s launch {d}/launch.claim 2>/dev/null || exit 0; "
+            f"{python} -I -m responses_api_agents.nooa_agent.sandbox_supervisor "
+            f"{d}; echo $? > {d}/runner.exit) "
+            f">{d}/stdout.log 2>{d}/stderr.log </dev/null &"
         )
         self.launched = True
-        # Episode cancellation comes from nooa_single_agent_turn; no second episode clock.
-        await self.sandbox.exec(command, cwd=self.workdir, timeout_s=None)
-        await self.stop()
-        await self.collect()
-        if self.artifact is None:
-            raise RuntimeError(f"NOOA sandbox result is missing or malformed: {self.diagnostics}")
-        request.model_cookies.update(self.artifact.model_cookies)
-        request.resource_cookies.update(self.artifact.resource_cookies)
-        if self.artifact.error is not None:
-            detail = self.artifact.error.message
-            error = ConnectionError(detail) if self.artifact.error.kind == "transient" else RuntimeError(detail)
-            if self.artifact.response is not None:
-                raise NOOARunFailure(error, self.artifact.run_result()) from error
-            raise error
-        return self.artifact.run_result()
+        # Episode cancellation comes from the NOOA environment; no second episode clock.
+        try:
+            launch = await self.sandbox.exec(
+                command, cwd=self.workdir, timeout_s=30, preserve_background_services=True
+            )
+            if launch.return_code != 0:
+                raise RuntimeError("Could not launch NOOA supervisor")
+            while True:
+                # One small exec avoids repeated failed provider downloads while the
+                # worker runs. A cleanup receipt also covers launch/setup failures.
+                status = await self.sandbox.exec(
+                    f"test -f {d}/completion.json || test -f {d}/cleanup.json || test -f {d}/runner.exit",
+                    cwd="/",
+                    timeout_s=30,
+                )
+                if status.return_code == 0:
+                    break
+                await asyncio.sleep(2)
+            await self.collect()
+            if self.artifact is None:
+                raise RuntimeError(f"NOOA sandbox result is missing or malformed: {self.diagnostics}")
+            try:
+                completion = json.loads(await self._read("completion.json"))
+            except Exception:
+                raise RuntimeError("NOOA task completion is unconfirmed") from None
+            # Task completion precedes worker exit: the worker holds services
+            # for verification until close asks the shared supervisor to reap.
+            if not isinstance(completion, dict) or completion.get("task_completed") is not True:
+                raise RuntimeError(f"NOOA task did not complete: {completion}")
+            request.model_cookies.update(self.artifact.model_cookies)
+            request.resource_cookies.update(self.artifact.resource_cookies)
+            if self.artifact.error is not None:
+                detail = self.artifact.error.message
+                error = ConnectionError(detail) if self.artifact.error.kind == "transient" else RuntimeError(detail)
+                if self.artifact.response is not None:
+                    raise NOOARunFailure(error, self.artifact.run_result()) from error
+                raise error
+            return self.artifact.run_result()
+        except BaseException:
+            # Failures and cancellation never retain task services. Keep the
+            # original terminal error if cleanup fails; close can retry the handle.
+            try:
+                await self.stop()
+            except Exception:
+                LOGGER.exception("NOOA cleanup failed after interrupted execution")
+            raise
 
     async def stop(self) -> None:
         """Fence a pending launch or wait for the shared supervisor to reap descendants."""
@@ -113,10 +150,10 @@ class SandboxNOOARunner:
             receipt = json.loads(await self._read("cleanup.json"))
         except Exception:
             receipt = {}
-        if receipt.get("cleanup_confirmed") is not True:
+        if not isinstance(receipt, dict) or receipt.get("cleanup_confirmed") is not True:
             await self.sandbox.exec(script, cwd="/", timeout_s=25)
             receipt = json.loads(await self._read("cleanup.json"))
-        if receipt.get("cleanup_confirmed") is not True:
+        if not isinstance(receipt, dict) or receipt.get("cleanup_confirmed") is not True:
             raise RuntimeError("NOOA descendant cleanup is unconfirmed; close must retry")
         self.stopped = True
 

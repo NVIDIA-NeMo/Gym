@@ -17,6 +17,7 @@ def supervise(directory: Path) -> int:
     This is the sole dependency on Gym's private ``_supervise`` helper. Its CLI
     requires a finite deadline; infinity here leaves cancellation to the NOOA
     environment without changing the shared supervisor or copying its reaper.
+    The worker remains alive while successful task services await verification.
     """
     (directory / "runner.pid").write_text(str(os.getpid()))
     receipt = process_supervisor._supervise(
@@ -27,6 +28,8 @@ def supervise(directory: Path) -> int:
             "responses_api_agents.nooa_agent.sandbox_entrypoint",
             str(directory / "input.json"),
             str(directory / "result.json"),
+            str(directory / "runner.stop"),
+            str(directory / "completion.json"),
         ],
         timeout=math.inf,
         cleanup_timeout=5,

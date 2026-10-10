@@ -3,6 +3,7 @@
 """JSON boundary for running the existing NOOA harness in a task sandbox."""
 
 import asyncio
+import json
 import signal
 import sys
 from pathlib import Path
@@ -131,19 +132,57 @@ async def execute(payload: SandboxInput) -> SandboxResult:
     )
 
 
-async def _main(input_path: Path, output_path: Path) -> None:
+async def _main(input_path: Path, output_path: Path, *, stop_path: Path, completion_path: Path) -> None:
+    # The shared supervisor checks this fence before spawning. Check again after
+    # interpreter startup, then keep watching it so a lost TERM cannot lose stop.
+    if stop_path.exists():
+        return
     payload = SandboxInput.model_validate_json(input_path.read_text())
-    task = asyncio.create_task(execute(payload))
-    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
     client = set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+    task = asyncio.create_task(execute(payload))
+    stopping = asyncio.Event()
+
+    def stop() -> None:
+        if not stopping.is_set():
+            stopping.set()
+            if not task.done():
+                task.cancel()
+
+    async def watch_stop() -> None:
+        while not stop_path.exists():
+            await asyncio.sleep(0.05)
+        stop()
+
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, stop)
+    watcher = asyncio.create_task(watch_stop())
     try:
-        result = await task
+        try:
+            result = await task
+        finally:
+            await client.close()
+        temporary = output_path.with_suffix(".tmp")
+        temporary.write_text(result.model_dump_json())
+        temporary.replace(output_path)
+        temporary = completion_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"task_completed": True}))
+        temporary.replace(completion_path)
+        # Keep the unchanged supervisor's child alive until verification ends.
+        # Failure/cancellation exits immediately so its descendants are drained.
+        if result.error is None and result.response is not None:
+            await stopping.wait()
     finally:
-        await client.close()
-    temporary = output_path.with_suffix(".tmp")
-    temporary.write_text(result.model_dump_json())
-    temporary.replace(output_path)
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+        loop.remove_signal_handler(signal.SIGTERM)
 
 
 if __name__ == "__main__":
-    asyncio.run(_main(Path(sys.argv[1]), Path(sys.argv[2])))
+    asyncio.run(
+        _main(
+            Path(sys.argv[1]),
+            Path(sys.argv[2]),
+            stop_path=Path(sys.argv[3]),
+            completion_path=Path(sys.argv[4]),
+        )
+    )

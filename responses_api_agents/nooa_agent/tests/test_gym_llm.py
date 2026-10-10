@@ -692,11 +692,59 @@ def test_rejects_synchronous_policy_calls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_transport_error_clears_after_a_later_success() -> None:
+async def test_transport_error_clears_after_a_later_main_success() -> None:
     llm, client, state = make_llm(model_response())
     failure = ConnectionError("model disconnected")
     client.post.side_effect = [failure, FakeHTTPResponse(model_response())]
     with pytest.raises(ConnectionError, match="disconnected"):
         await llm.acall([{"role": "user", "content": "task"}])
+    assert state.fatal_error is failure
     await llm.acall([{"role": "user", "content": "retry"}])
     assert state.fatal_error is None
+    assert len(state.calls) == 2
+    assert state.calls[0].response is None
+    assert state.calls[1].response.id == "resp-1"
+
+
+@pytest.mark.asyncio
+async def test_recovered_call_and_failed_summary_preserve_durable_ordered_history() -> None:
+    from nooa.agents.summarization import _in_summary_fork
+
+    payload = mixed_model_response()
+    llm, client, state = make_llm(payload, max_policy_calls=4)
+    client.post.side_effect = [
+        ConnectionError("temporary model failure"),
+        FakeHTTPResponse(payload),
+        ConnectionError("optional summary failure"),
+        FakeHTTPResponse(model_response(response_id="continued")),
+    ]
+    question = {"role": "user", "content": "Compare Paris and Oslo."}
+    with pytest.raises(ConnectionError, match="temporary model failure"):
+        await llm.acall([question])
+    result = await llm.acall([question])
+    assert state.fatal_error is None
+
+    blob, allowlist = serialize(result)
+    restored = deserialize(json.loads(json.dumps(blob)), allowlist)
+    assert restored.raw_response is None
+    token = _in_summary_fork.set(True)
+    try:
+        with pytest.raises(ConnectionError, match="optional summary failure"):
+            await llm.acall([question, restored])
+    finally:
+        _in_summary_fork.reset(token)
+
+    assert state.fatal_error is None
+    await llm.acall([question, restored])
+    request = client.post.await_args.kwargs["json"].model_dump(mode="json", exclude_none=True)
+    expected = NeMoGymResponse.model_validate(payload).model_dump(mode="json", exclude_none=True)["output"]
+    assert request["input"][1:] == expected
+    assert [part.kind for part in restored.parts] == ["reasoning", "text", "tool_call"] * 2
+    assert [call.response.id if call.response is not None else None for call in state.calls] == [
+        None,
+        "resp-1",
+        None,
+        "continued",
+    ]
+    assert state.used == 4
+    assert state.gaps == []
