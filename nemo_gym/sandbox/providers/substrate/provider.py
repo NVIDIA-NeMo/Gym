@@ -2,15 +2,6 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """Sandbox provider backed by Substrate actors."""
 
@@ -19,6 +10,7 @@ import copy
 import hashlib
 import logging
 import os
+import random
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -44,33 +36,41 @@ LOGGER = logging.getLogger(__name__)
 
 _TOKEN_TTL_S = 3600
 
-# Actors are reachable through the atenet router by a name derived from the
-# actor and its atespace. The router resolves it, resuming the actor first if
-# it is suspended.
 TARGET_ACTOR_HEADER = "ate-target-actor"
 
-# Reported when no process exit code exists, because the command never ran or
-# the sandbox itself failed.
 SANDBOX_RUNTIME_RETURN_CODE = 125
 
-# Template names are DNS labels, so the digest is truncated rather than used
-# whole. Substrate's template generator derives names the same way; the two must
-# stay in step.
 TEMPLATE_NAME_PREFIX = "swb-"
 TEMPLATE_DIGEST_LENGTH = 16
+
+# ateapi answers ABORTED on an optimistic-concurrency conflict ("please retry")
+# and UNAVAILABLE while it restarts; both are safe to retry for every RPC the
+# provider sends.
+_RETRYABLE_CONTROL_CODES = (grpc.StatusCode.ABORTED, grpc.StatusCode.UNAVAILABLE)
+_CONTROL_ATTEMPTS = 5
+_CONTROL_BACKOFF_S = 0.5
+
+# The router answers 503 with one of these when a request could not be placed
+# within its parking budget. Such a request never reached the actor, so
+# sending it again is safe.
+_CAPACITY_MARKERS = ("router at capacity", "no worker has room")
 
 _STATUS_MAP = {
     ateapi_pb2.ActorState.ACTOR_STATE_RUNNING: SandboxStatus.RUNNING,
     ateapi_pb2.ActorState.ACTOR_STATE_RESUMING: SandboxStatus.STARTING,
-    # A suspended or paused actor is alive and one request away: the router
-    # resumes it on the next exec. Reporting it as STOPPED would make callers
-    # discard a perfectly good sandbox.
-    ateapi_pb2.ActorState.ACTOR_STATE_SUSPENDED: SandboxStatus.RUNNING,
-    ateapi_pb2.ActorState.ACTOR_STATE_SUSPENDING: SandboxStatus.RUNNING,
-    ateapi_pb2.ActorState.ACTOR_STATE_PAUSED: SandboxStatus.RUNNING,
-    ateapi_pb2.ActorState.ACTOR_STATE_PAUSING: SandboxStatus.RUNNING,
+    # A paused or suspended actor is alive and one request away: the router
+    # resumes it on the next exec. PAUSED says so without implying it is gone.
+    ateapi_pb2.ActorState.ACTOR_STATE_SUSPENDED: SandboxStatus.PAUSED,
+    ateapi_pb2.ActorState.ACTOR_STATE_SUSPENDING: SandboxStatus.PAUSED,
+    ateapi_pb2.ActorState.ACTOR_STATE_PAUSED: SandboxStatus.PAUSED,
+    ateapi_pb2.ActorState.ACTOR_STATE_PAUSING: SandboxStatus.PAUSED,
     ateapi_pb2.ActorState.ACTOR_STATE_CRASHED: SandboxStatus.ERROR,
     ateapi_pb2.ActorState.ACTOR_STATE_DELETING: SandboxStatus.STOPPED,
+}
+
+_PARKED_STATES = {
+    ateapi_pb2.ActorState.ACTOR_STATE_PAUSED,
+    ateapi_pb2.ActorState.ACTOR_STATE_SUSPENDED,
 }
 
 
@@ -87,18 +87,30 @@ def template_name_for_image(image: str) -> str:
 
     An ActorTemplate spec is immutable and an actor names a template rather than
     an image, so templates are built ahead of a run. Deriving the name from the
-    image lets both sides agree without a shared lookup table.
+    image lets both sides agree without a shared lookup table. Substrate's
+    demos/sandbox/gym-templates.sh computes the same name; a unit test pins it.
     """
     digest = hashlib.sha256(image.encode()).hexdigest()
     return TEMPLATE_NAME_PREFIX + digest[:TEMPLATE_DIGEST_LENGTH]
 
 
 def normalize_image(image: str) -> str:
-    """Strip a runtime scheme prefix, matching what the other providers accept."""
+    """Strip a runtime scheme and the default registry.
+
+    `docker.io/foo:tag` and `foo:tag` name the same image; the SWE-bench
+    environment spells it the first way and operators the second.
+    """
     for prefix in ("docker://", "oci://"):
         if image.startswith(prefix):
-            return image[len(prefix) :]
+            image = image[len(prefix) :]
+            break
+    if image.startswith("docker.io/"):
+        image = image[len("docker.io/") :]
     return image
+
+
+def _is_capacity_503(response: httpx.Response) -> bool:
+    return response.status_code == 503 and any(marker in response.text for marker in _CAPACITY_MARKERS)
 
 
 def _read_kube_config() -> dict[str, Any]:
@@ -127,7 +139,7 @@ class SubstrateConnectionConfig:
     ateapi_addr: str = "localhost:8080"
     atenet_addr: str = "localhost:8000"
     atespace: str = "nemo-gym"
-    template_namespace: str = "ate-swebench"
+    template_namespace: str = "nemo-gym"
 
     # ateapi always serves TLS. Against a port-forward the certificate names the
     # in-cluster service, so the expected name is overridden rather than
@@ -158,10 +170,13 @@ class SubstrateConnectionConfig:
 
 @dataclass(frozen=True)
 class SubstrateCreateConfig:
+    # How long create() and resume() wait for the actor to answer its readiness
+    # probe through the router. Under load this is mostly waiting for a worker
+    # slot. SandboxSpec.ready_timeout_s overrides it per sandbox.
     ready_timeout_s: float = 1200.0
 
     # never: leave the actor running between calls.
-    # after_exec: SuspendActor once each exec returns. The snapshot goes to
+    # after_exec: SuspendActor once the actor goes idle. The snapshot goes to
     #   object storage and the worker is freed.
     # pause_after_exec: PauseActor instead. The snapshot stays on the node, so
     #   the next resume skips the download but has to land on the same node.
@@ -169,21 +184,32 @@ class SubstrateCreateConfig:
     # actor before routing, so nothing has to resume it explicitly.
     suspend_policy: str = "never"
 
+    # An exec must be followed by this much idle time before the actor is
+    # suspended or paused, so back-to-back steps (an eval's test runs, say) do
+    # not each pay a checkpoint and a restore. 0 suspends inline as the exec
+    # returns.
+    idle_before_suspend_s: float = 1.0
+
     delete_on_close: bool = True
 
     def __post_init__(self) -> None:
         allowed = {"never", "after_exec", "pause_after_exec"}
         if self.suspend_policy not in allowed:
             raise ValueError(f"create.suspend_policy must be one of {sorted(allowed)}, got {self.suspend_policy!r}")
+        if self.idle_before_suspend_s < 0:
+            raise ValueError("create.idle_before_suspend_s must be >= 0")
 
 
 @dataclass(frozen=True)
 class SubstrateExecConfig:
     default_timeout_s: float | None = 1800.0
     concurrency: int = 32
-    # The workload image supplies the interpreter; SWE-bench harnesses need bash
-    # because conda activation is not portable to dash.
-    shell: str = "bash"
+
+    # Wait this long before resending a request the router could not place
+    # within its parking budget (a 503 that never reached the actor). The
+    # router has already held the request for its whole budget, so an
+    # immediate retry would only park again.
+    capacity_retry_delay_s: float = 5.0
 
     def __post_init__(self) -> None:
         if self.concurrency < 1:
@@ -196,7 +222,6 @@ class SubstrateProbeConfig:
 
     path: str = "/readyz"
     timeout_s: float = 30.0
-    deadline_s: float | None = 300.0
     stable_count: int = 1
     stable_delay_s: float = 1.0
 
@@ -211,7 +236,10 @@ class _SubstrateActor:
     image: str
     env: dict[str, str] = field(default_factory=dict)
     workdir: str | None = None
-    suspended: bool = False
+    # Requests to the in-actor server currently in flight; the actor is never
+    # suspended while this is nonzero.
+    inflight: int = 0
+    suspend_task: asyncio.Task | None = None
 
     @property
     def target(self) -> str:
@@ -227,7 +255,7 @@ class SubstrateProvider:
     """Runs sandboxes as Substrate actors.
 
     Control operations go to ateapi over gRPC; commands and file transfers go
-    to an agent inside the actor, reached through the atenet router.
+    to a small HTTP server inside the actor, reached through the atenet router.
     """
 
     name = "substrate"
@@ -357,7 +385,7 @@ class SubstrateProvider:
         return grpc.ssl_channel_credentials(root_certificates=self._ca_bundle())
 
     async def _control(self, rpc: str, request: Any) -> Any:
-        """Call one ateapi Control RPC."""
+        """Call one ateapi Control RPC, retrying transient failures."""
         if self._stub is None:
             options = [("grpc.ssl_target_name_override", self._connection.tls_server_name)]
             self._channel = grpc.aio.secure_channel(
@@ -365,9 +393,18 @@ class SubstrateProvider:
             )
             self._stub = ateapi_pb2_grpc.ControlStub(self._channel)
 
-        metadata = (("authorization", f"Bearer {self._bearer_token()}"),)
         method = getattr(self._stub, rpc)
-        return await method(request, metadata=metadata, timeout=self._connection.grpc_timeout_s)
+        for attempt in range(_CONTROL_ATTEMPTS):
+            metadata = (("authorization", f"Bearer {self._bearer_token()}"),)
+            try:
+                return await method(request, metadata=metadata, timeout=self._connection.grpc_timeout_s)
+            except grpc.aio.AioRpcError as e:
+                if e.code() not in _RETRYABLE_CONTROL_CODES or attempt == _CONTROL_ATTEMPTS - 1:
+                    raise
+                delay = _CONTROL_BACKOFF_S * 2**attempt + random.uniform(0, _CONTROL_BACKOFF_S)
+                LOGGER.warning("substrate: %s failed with %s; retrying in %.1fs", rpc, e.code().name, delay)
+                await asyncio.sleep(delay)
+        raise AssertionError("unreachable")
 
     async def _http(
         self,
@@ -379,11 +416,14 @@ class SubstrateProvider:
         json: Any = None,
         content: bytes | None = None,
         params: dict[str, str] | None = None,
+        limited: bool = True,
     ) -> httpx.Response:
-        """Call the in-actor agent through the router.
+        """Call the in-actor server through the router.
 
         The ate-target-actor header names the actor, and is also what makes
-        the router resume a suspended or paused actor before forwarding.
+        the router resume a suspended or paused actor before forwarding. A 503
+        saying the router had no room is retried until the request budget is
+        spent; the request never reached the actor, so that is safe.
         """
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(base_url=f"http://{self._connection.atenet_addr}")
@@ -398,16 +438,23 @@ class SubstrateProvider:
         except ImportError:
             pass
 
-        async with self._semaphore:
-            return await self._http_client.request(
-                method,
-                path,
-                headers=headers,
-                json=json,
-                content=content,
-                params=params,
-                timeout=timeout_s,
-            )
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout_s is None else loop.time() + timeout_s
+        while True:
+            if limited:
+                async with self._semaphore:
+                    response = await self._http_client.request(
+                        method, path, headers=headers, json=json, content=content, params=params, timeout=timeout_s
+                    )
+            else:
+                response = await self._http_client.request(
+                    method, path, headers=headers, json=json, content=content, params=params, timeout=timeout_s
+                )
+            delay = self._exec_config.capacity_retry_delay_s
+            if not _is_capacity_503(response) or (deadline is not None and loop.time() + delay >= deadline):
+                return response
+            LOGGER.info("substrate: no room for %s yet (%s); retrying in %.0fs", actor.name, path, delay)
+            await asyncio.sleep(delay)
 
     # ---- lifecycle ---- #
 
@@ -458,7 +505,7 @@ class SubstrateProvider:
             # here instead would make new actors race parked resumes for freed
             # slots at a hopeless cadence, capping the live-actor population at
             # the worker count under load.
-            await self._verify_created_handle(handle)
+            await self._wait_until_ready(handle, spec.ready_timeout_s or self._create_config.ready_timeout_s)
             await self._upload_spec_files(handle, spec)
         except Exception:
             await self._cleanup_failed_create(handle)
@@ -471,22 +518,27 @@ class SubstrateProvider:
         if spec.ttl_s is not None:
             LOGGER.debug("substrate: ttl_s is ignored; a suspended actor costs almost nothing")
         if spec.entrypoint:
-            LOGGER.warning("substrate: spec.entrypoint is ignored; the container command runs the sandbox agent")
+            LOGGER.warning("substrate: spec.entrypoint is ignored; the container command runs the sandbox server")
         resources = spec.resources
         if any(getattr(resources, f, None) is not None for f in ("cpu", "memory_mib", "disk_gib", "gpu")):
-            LOGGER.debug("substrate: spec.resources is ignored; actors are sized by their WorkerPool")
+            LOGGER.debug("substrate: spec.resources is ignored; actors are sized by their ActorTemplate")
 
-    async def _verify_created_handle(self, handle: SandboxHandle) -> None:
-        """Poll the readiness probe until it passes or the deadline elapses."""
+    async def _wait_until_ready(self, handle: SandboxHandle, deadline_s: float) -> None:
+        """Poll the readiness probe through the router until it passes.
+
+        Probes bypass the exec concurrency limit: they are what triggers the
+        resume, and a probe parked at the router must not hold a slot that a
+        running sandbox's exec needs.
+        """
         probe = self._probe
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + probe.deadline_s if probe.deadline_s is not None else None
+        deadline = loop.time() + deadline_s
         consecutive = 0
         last_detail = "no probe attempt completed"
 
         while True:
             try:
-                response = await self._http("GET", handle.raw, probe.path, timeout_s=probe.timeout_s)
+                response = await self._http("GET", handle.raw, probe.path, timeout_s=probe.timeout_s, limited=False)
                 if response.status_code == 200:
                     consecutive += 1
                     if consecutive >= probe.stable_count:
@@ -498,9 +550,9 @@ class SubstrateProvider:
                 consecutive = 0
                 last_detail = repr(e)
 
-            if deadline is not None and loop.time() >= deadline:
+            if loop.time() >= deadline:
                 raise SubstrateCreateVerificationError(
-                    f"actor {handle.sandbox_id!r} did not become ready within {probe.deadline_s:g}s: {last_detail}"
+                    f"actor {handle.sandbox_id!r} did not become ready within {deadline_s:g}s: {last_detail}"
                 )
             if probe.stable_delay_s > 0:
                 await asyncio.sleep(probe.stable_delay_s)
@@ -548,59 +600,119 @@ class SubstrateProvider:
         # losing the output.
         request_timeout = None if effective_timeout is None else float(effective_timeout) + 30.0
 
+        actor.inflight += 1
+        self._cancel_pending_suspend(actor)
         try:
-            response = await self._http("POST", actor, "/exec", timeout_s=request_timeout, json=payload)
-        except httpx.TimeoutException as e:
-            return SandboxExecResult(
-                stdout=None, stderr=str(e), return_code=SANDBOX_RUNTIME_RETURN_CODE, error_type="timeout"
-            )
-        except httpx.HTTPError as e:
-            return SandboxExecResult(
-                stdout=None, stderr=str(e), return_code=SANDBOX_RUNTIME_RETURN_CODE, error_type="sandbox"
-            )
+            try:
+                response = await self._http("POST", actor, "/exec", timeout_s=request_timeout, json=payload)
+            except httpx.TimeoutException as e:
+                return SandboxExecResult(
+                    stdout=None, stderr=str(e), return_code=SANDBOX_RUNTIME_RETURN_CODE, error_type="timeout"
+                )
+            except httpx.HTTPError as e:
+                return SandboxExecResult(
+                    stdout=None, stderr=str(e), return_code=SANDBOX_RUNTIME_RETURN_CODE, error_type="sandbox"
+                )
 
-        if response.status_code != 200:
-            # A router 5xx means the actor could not be reached or resumed; that
-            # is a sandbox failure, not the command's exit status.
-            return SandboxExecResult(
-                stdout=None,
-                stderr=f"router returned {response.status_code}: {response.text.strip()}",
-                return_code=SANDBOX_RUNTIME_RETURN_CODE,
-                error_type="sandbox",
+            if response.status_code != 200:
+                # A router 5xx means the actor could not be reached or resumed;
+                # that is a sandbox failure, not the command's exit status.
+                return SandboxExecResult(
+                    stdout=None,
+                    stderr=f"router returned {response.status_code}: {response.text.strip()}",
+                    return_code=SANDBOX_RUNTIME_RETURN_CODE,
+                    error_type="sandbox",
+                )
+
+            body = response.json()
+            result = SandboxExecResult(
+                stdout=body.get("stdout"),
+                stderr=body.get("stderr"),
+                return_code=body.get("exit_code", SANDBOX_RUNTIME_RETURN_CODE),
+                error_type=body.get("error_type") or None,
             )
+        finally:
+            actor.inflight -= 1
 
-        body = response.json()
-        result = SandboxExecResult(
-            stdout=body.get("stdout"),
-            stderr=body.get("stderr"),
-            return_code=body.get("exit_code", SANDBOX_RUNTIME_RETURN_CODE),
-            error_type=body.get("error_type") or None,
-        )
-
-        await self._maybe_suspend(actor)
+        await self._suspend_when_idle(actor)
         return result
 
-    async def _maybe_suspend(self, actor: _SubstrateActor) -> None:
-        """Free the actor's worker between steps when asked to.
+    # ---- idle handling ---- #
+
+    def _cancel_pending_suspend(self, actor: _SubstrateActor) -> None:
+        if actor.suspend_task is not None and not actor.suspend_task.done():
+            actor.suspend_task.cancel()
+        actor.suspend_task = None
+
+    async def _suspend_when_idle(self, actor: _SubstrateActor) -> None:
+        """Free the actor's worker once it has been idle long enough.
 
         Nothing resumes it explicitly: the next exec routes through the router,
-        which resumes the actor before forwarding. The cost is a checkpoint here
-        and a restore on the next call, both on the critical path.
+        which resumes the actor before forwarding. The cost is a checkpoint
+        here and a restore on the next call.
         """
         policy = self._create_config.suspend_policy
-        if policy == "after_exec":
-            rpc, request = "SuspendActor", ateapi_pb2.SuspendActorRequest(actor=actor.object_ref)
-        elif policy == "pause_after_exec":
-            rpc, request = "PauseActor", ateapi_pb2.PauseActorRequest(actor=actor.object_ref)
-        else:
+        if policy == "never":
+            return
+        rpc = "SuspendActor" if policy == "after_exec" else "PauseActor"
+        delay = self._create_config.idle_before_suspend_s
+        if delay <= 0:
+            await self._suspend_if_idle(actor, rpc)
+            return
+        self._cancel_pending_suspend(actor)
+        actor.suspend_task = asyncio.create_task(self._suspend_after(actor, rpc, delay))
+
+    async def _suspend_after(self, actor: _SubstrateActor, rpc: str, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+            await self._suspend_if_idle(actor, rpc)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:  # noqa: BLE001 - a background task must not die silently
+            LOGGER.warning("substrate: idle %s of %s failed: %s", rpc, actor.name, e)
+
+    async def _suspend_if_idle(self, actor: _SubstrateActor, rpc: str) -> None:
+        if actor.inflight:
             return
         try:
-            await self._control(rpc, request)
-            actor.suspended = True
+            await self._park(actor, rpc)
         except grpc.aio.AioRpcError as e:
             # A failed suspend costs density, not correctness: the actor stays
             # running and the next exec still works.
             LOGGER.warning("substrate: %s on %s failed: %s", rpc, actor.name, e.details())
+
+    async def _park(self, actor: _SubstrateActor, rpc: str) -> None:
+        if rpc == "PauseActor":
+            request: Any = ateapi_pb2.PauseActorRequest(actor=actor.object_ref)
+        else:
+            request = ateapi_pb2.SuspendActorRequest(actor=actor.object_ref)
+        try:
+            await self._control(rpc, request)
+        except grpc.aio.AioRpcError as e:
+            # Already parked, by a previous call or by the platform.
+            if e.code() != grpc.StatusCode.FAILED_PRECONDITION:
+                raise
+
+    async def pause(self, handle: SandboxHandle) -> None:
+        """Pause the actor and wait until the control plane reports it parked."""
+        actor: _SubstrateActor = handle.raw
+        self._cancel_pending_suspend(actor)
+        await self._park(actor, "PauseActor")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._connection.grpc_timeout_s
+        while True:
+            reply = await self._control("GetActor", ateapi_pb2.GetActorRequest(actor=actor.object_ref))
+            if reply.status.state in _PARKED_STATES:
+                return
+            if loop.time() >= deadline:
+                raise RuntimeError(
+                    f"actor {actor.name!r} still {ateapi_pb2.ActorState.Name(reply.status.state)} after pause"
+                )
+            await asyncio.sleep(0.5)
+
+    async def resume(self, handle: SandboxHandle) -> None:
+        """Resume through the router, which parks the request until a worker has room."""
+        await self._wait_until_ready(handle, self._create_config.ready_timeout_s)
 
     async def _write_file(self, handle: SandboxHandle, target_path: str, content: bytes) -> None:
         response = await self._http(
@@ -643,12 +755,13 @@ class SubstrateProvider:
 
     async def close(self, handle: SandboxHandle) -> None:
         actor: _SubstrateActor = handle.raw
+        self._cancel_pending_suspend(actor)
         if not self._create_config.delete_on_close:
             # Keep the sandbox for inspection, but not its worker.
             try:
-                await self._control("SuspendActor", ateapi_pb2.SuspendActorRequest(actor=actor.object_ref))
+                await self._park(actor, "SuspendActor")
             except grpc.aio.AioRpcError as e:
-                if e.code() not in (grpc.StatusCode.NOT_FOUND, grpc.StatusCode.FAILED_PRECONDITION):
+                if e.code() != grpc.StatusCode.NOT_FOUND:
                     LOGGER.warning("substrate: suspending %s on close: %s", actor.name, e.details())
             return
 

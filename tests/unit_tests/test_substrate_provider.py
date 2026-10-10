@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 from typing import Any
 
 import pytest
 
 from nemo_gym.sandbox.providers.base import SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.registry import get_provider_class
 
 
 pytestmark = pytest.mark.sandbox
@@ -28,6 +30,7 @@ pytest.importorskip("httpx", reason="httpx optional sandbox dependency is not in
 import grpc  # noqa: E402
 import httpx  # noqa: E402
 
+from nemo_gym.sandbox.providers.substrate import SubstrateProvider  # noqa: E402
 from nemo_gym.sandbox.providers.substrate import provider as substrate_provider  # noqa: E402
 from nemo_gym.sandbox.providers.substrate._ateapi import ateapi_pb2  # noqa: E402
 
@@ -51,6 +54,7 @@ class _Recorder:
         exec_status: int = 200,
         probe_status: int = 200,
         create_error: Exception | None = None,
+        exec_delay_s: float = 0.0,
     ) -> None:
         self.control_calls: list[tuple[str, Any]] = []
         self.http_paths: list[str] = []
@@ -59,6 +63,7 @@ class _Recorder:
         self._exec_status = exec_status
         self._probe_status = probe_status
         self._create_error = create_error
+        self._exec_delay_s = exec_delay_s
 
     async def control(self, rpc: str, request: Any) -> Any:
         self.control_calls.append((rpc, request))
@@ -81,9 +86,12 @@ class _Recorder:
         json: Any = None,
         content: Any = None,
         params: Any = None,
+        limited: bool = True,
     ) -> httpx.Response:
         self.http_paths.append(path)
         if path == "/exec":
+            if self._exec_delay_s:
+                await asyncio.sleep(self._exec_delay_s)
             return httpx.Response(self._exec_status, json=self._exec_body)
         if path == "/upload":
             return httpx.Response(204)
@@ -94,12 +102,17 @@ class _Recorder:
         return [rpc for rpc, _ in self.control_calls]
 
 
-def _make_provider(recorder: _Recorder, *, suspend_policy: str = "never") -> Any:
+def _make_provider(recorder: _Recorder, *, suspend_policy: str = "never", idle_before_suspend_s: float = 0.0) -> Any:
     provider = substrate_provider.SubstrateProvider(
         connection={"atespace": "swebench", "template_namespace": TEMPLATE_NAMESPACE},
-        create={"suspend_policy": suspend_policy},
-        # A short, delay-free probe keeps the test fast.
-        probe={"deadline_s": 5.0, "stable_delay_s": 0.0},
+        create={
+            "suspend_policy": suspend_policy,
+            "idle_before_suspend_s": idle_before_suspend_s,
+            # A short, delay-free probe keeps the test fast.
+            "ready_timeout_s": 5.0,
+        },
+        exec={"capacity_retry_delay_s": 0.0},
+        probe={"stable_delay_s": 0.0},
     )
     provider._control = recorder.control  # type: ignore[method-assign]
     provider._http = recorder.http  # type: ignore[method-assign]
@@ -115,6 +128,25 @@ def test_template_name_is_deterministic_and_scheme_stripped() -> None:
     assert name.startswith(substrate_provider.TEMPLATE_NAME_PREFIX)
     assert name == substrate_provider.template_name_for_image(substrate_provider.normalize_image(IMAGE))
     assert substrate_provider.normalize_image(IMAGE) == "registry.example/swebench:latest"
+    assert (
+        substrate_provider.normalize_image("docker://docker.io/library/python:3.12-slim") == "library/python:3.12-slim"
+    )
+
+
+def test_template_name_pins_the_swebench_derivation() -> None:
+    # The string mini_swe_agent_2 asks for (docker.io/, lowercased) and the one
+    # an operator passes to Substrate's demos/sandbox/gym-templates.sh must map
+    # to the same template. The generator strips docker.io/ the same way; if
+    # either derivation changes, this constant changes with it.
+    gym_image = "docker.io/swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-14141:latest"
+    operator_image = "swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-14141:latest"
+    expected = "swb-2616df737f5e10cb"
+    assert substrate_provider.template_name_for_image(substrate_provider.normalize_image(gym_image)) == expected
+    assert substrate_provider.template_name_for_image(substrate_provider.normalize_image(operator_image)) == expected
+
+
+def test_registry_resolves_substrate() -> None:
+    assert get_provider_class("substrate") is SubstrateProvider
 
 
 async def test_create_references_template_by_objectref_then_probes_and_uploads() -> None:
@@ -192,6 +224,87 @@ async def test_exec_pause_policy_pauses_after_exec() -> None:
     assert "SuspendActor" not in recorder.rpcs()
 
 
+async def test_exec_never_pauses_while_another_exec_is_in_flight() -> None:
+    recorder = _Recorder(exec_delay_s=0.01)
+    provider = _make_provider(recorder, suspend_policy="pause_after_exec")
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+
+    await asyncio.gather(provider.exec(handle, "sleep 1"), provider.exec(handle, "sleep 1"))
+
+    # Only the exec that found the actor idle pauses it.
+    assert recorder.rpcs().count("PauseActor") == 1
+
+
+async def test_idle_delay_defers_the_pause_and_a_new_exec_cancels_it() -> None:
+    recorder = _Recorder()
+    provider = _make_provider(recorder, suspend_policy="pause_after_exec", idle_before_suspend_s=0.05)
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+
+    await provider.exec(handle, "step 1")
+    assert "PauseActor" not in recorder.rpcs()
+    await provider.exec(handle, "step 2")
+    await asyncio.sleep(0.1)
+
+    # Two back-to-back steps, one pause, after the idle delay.
+    assert recorder.rpcs().count("PauseActor") == 1
+
+
+async def test_exec_retries_a_capacity_503_until_the_router_has_room() -> None:
+    recorder = _Recorder()
+    provider = _make_provider(recorder)
+    seen: list[httpx.Request] = []
+
+    def router(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/exec" and sum(r.url.path == "/exec" for r in seen) <= 2:
+            return httpx.Response(503, text='actor "swebench/gym-x" unavailable: no worker has room for the actor')
+        if request.url.path == "/exec":
+            return httpx.Response(200, json={"stdout": "ok", "stderr": "", "exit_code": 0})
+        return httpx.Response(200)
+
+    provider._http = substrate_provider.SubstrateProvider._http.__get__(provider)  # real path, fake transport
+    provider._http_client = httpx.AsyncClient(transport=httpx.MockTransport(router), base_url="http://router")
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+
+    result = await provider.exec(handle, "true", timeout_s=5)
+
+    assert result.return_code == 0 and result.error_type is None
+    assert sum(r.url.path == "/exec" for r in seen) == 3
+    assert seen[0].headers[substrate_provider.TARGET_ACTOR_HEADER] == f"swebench/{handle.sandbox_id}"
+
+
+async def test_pause_waits_for_parked_state_and_resume_probes_through_the_router() -> None:
+    recorder = _Recorder(get_actor_state=ateapi_pb2.ActorState.ACTOR_STATE_PAUSED)
+    provider = _make_provider(recorder)
+    handle = await provider.create(SandboxSpec(image=IMAGE))
+    probes_before = recorder.http_paths.count("/readyz")
+
+    await provider.pause(handle)
+    await provider.resume(handle)
+
+    assert recorder.rpcs().count("PauseActor") == 1
+    assert recorder.http_paths.count("/readyz") == probes_before + 1
+
+
+async def test_control_retries_aborted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(substrate_provider, "_CONTROL_BACKOFF_S", 0.0)
+    provider = substrate_provider.SubstrateProvider(connection={"atespace": "swebench", "token": "t"})
+    attempts = 0
+
+    class _Stub:
+        async def PauseActor(self, request: Any, *, metadata: Any, timeout: Any) -> Any:  # noqa: N802
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise _grpc_error(grpc.StatusCode.ABORTED, "concurrent update conflict, please retry")
+            return ateapi_pb2.PauseActorResponse()
+
+    provider._stub = _Stub()
+    await provider._control("PauseActor", ateapi_pb2.PauseActorRequest())
+
+    assert attempts == 3
+
+
 async def test_close_deletes_in_any_state() -> None:
     recorder = _Recorder()
     provider = _make_provider(recorder)
@@ -215,7 +328,8 @@ def test_router_target_is_atespace_slash_actor() -> None:
     [
         (ateapi_pb2.ActorState.ACTOR_STATE_RUNNING, SandboxStatus.RUNNING),
         (ateapi_pb2.ActorState.ACTOR_STATE_RESUMING, SandboxStatus.STARTING),
-        (ateapi_pb2.ActorState.ACTOR_STATE_SUSPENDED, SandboxStatus.RUNNING),
+        (ateapi_pb2.ActorState.ACTOR_STATE_SUSPENDED, SandboxStatus.PAUSED),
+        (ateapi_pb2.ActorState.ACTOR_STATE_PAUSED, SandboxStatus.PAUSED),
         (ateapi_pb2.ActorState.ACTOR_STATE_CRASHED, SandboxStatus.ERROR),
         (ateapi_pb2.ActorState.ACTOR_STATE_DELETING, SandboxStatus.STOPPED),
         (ateapi_pb2.ActorState.ACTOR_STATE_UNSPECIFIED, SandboxStatus.UNKNOWN),
