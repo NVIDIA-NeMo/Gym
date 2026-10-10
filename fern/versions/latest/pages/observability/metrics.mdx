@@ -135,6 +135,26 @@ Resident minus active is the number of rollouts waiting for admission. A standal
 
 The work stays off the request path. The event loop runs one sampling coroutine per interval. Process, garbage-collection, and request totals are plain counters that the exporter's background thread reads when it exports, so a request costs a few integer updates and no OpenTelemetry call.
 
+### Resources Operation Metrics
+
+Many resources servers limit expensive work, such as a verifier subprocess or a judge call, with a semaphore. When the limit is too small, verification waits in a queue that no request metric shows. A resources server reports that queue by wrapping its limited work in `nemo_gym.telemetry.resources_operations.resources_operation`:
+
+```python
+async with resources_operation(self._semaphore, operation="verify", executor="subprocess") as op:
+    result = await run_the_verifier()
+    if it_timed_out:
+        op.outcome = "timeout"
+```
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.resources.operation.queue.duration` | Histogram | s | Time one operation waited for its limit. |
+| `gym.resources.operation.duration` | Histogram | s | Time one operation ran inside its limit, by `outcome`: `ok`, `error`, `timeout`, `cancelled`, or `crashed`. |
+| `gym.resources.operation.queued` | Up/down counter | count | Operations waiting for their limit. |
+| `gym.resources.operation.active` | Up/down counter | count | Operations running inside their limit. |
+
+Every metric carries `operation` (`verify`, `tool`, `judge`, or `other`) and `executor` (`inline`, `thread`, `process`, `subprocess`, or `other`). They are recorded only while runtime metrics run. `math_with_judge` uses this contract for its SymPy verifier subprocesses.
+
 ### Memory Metrics
 
 Memory metrics are emitted only when `telemetry.memory_profiling.enabled` is true. Server points carry `nemo.gym.server.name`, `nemo.gym.server.type`, and the root `process.pid`; server memory gauges also carry `memory.type`, which is `rss` or `pss`. Host points rely on the existing `host.name` resource attribute and carry no per-sample attributes.
