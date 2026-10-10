@@ -17,6 +17,7 @@ from resources_servers.terminal_bench_4.app import (
     TerminalBench4ResourcesServer,
     TerminalBench4RunRequest,
 )
+from resources_servers.terminal_bench_4.environment import execution_user
 from resources_servers.terminal_bench_4.models import SandboxedVerifyRequest
 from resources_servers.terminal_bench_4.task import TaskSettings
 from resources_servers.terminal_bench_4.tests.test_environment import environment_config
@@ -71,14 +72,17 @@ async def fixture(tmp_path, monkeypatch):
             }
         ),
         instruction="Solve task",
+        path=tmp_path / "trusted-task",
     )
     server._loader.load = AsyncMock(return_value=task)
     envs, events, harnesses = [], [], []
 
-    def create(task, config, session_id, directory, verifier=False):
+    def create(task, config, session_id, directory, verifier=False, archive_workers=None):
+        assert archive_workers is server._archive_workers
         name = "verifier" if verifier else "agent"
         env = SimpleNamespace(
             task=task,
+            role_user=execution_user(task.config.verifier.user if verifier else task.config.agent.user),
             session_id=session_id,
             closed=False,
             resources=[],
@@ -90,7 +94,7 @@ async def fixture(tmp_path, monkeypatch):
             provider_config={"local": {}},
             main=SimpleNamespace(
                 serialize=AsyncMock(return_value={"sandbox_id": session_id}),
-                exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="/task\n")),
+                exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="/task\n", stderr="")),
             ),
             healthcheck=AsyncMock(),
             quiesce_agent=AsyncMock(side_effect=lambda _: events.append("quiesce")),
@@ -154,10 +158,11 @@ async def fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(lifecycle, "Environment", create)
     monkeypatch.setattr(module, "MiniSWEHarness", harness)
     monkeypatch.setattr(lifecycle, "download_dir", AsyncMock())
-    monkeypatch.setattr(lifecycle, "collect", AsyncMock(side_effect=lambda *a: events.append("collect")))
-    monkeypatch.setattr(lifecycle, "restore", AsyncMock(side_effect=lambda *a: events.append("restore")))
+    monkeypatch.setattr(lifecycle, "collect", AsyncMock(side_effect=lambda *a, **kw: events.append("collect")))
+    monkeypatch.setattr(lifecycle, "restore", AsyncMock(side_effect=lambda *a, **kw: events.append("restore")))
 
-    async def grade(*args):
+    async def grade(*args, **kwargs):
+        assert kwargs["archive_workers"] is server._archive_workers
         events.append("grade")
         return {"rewards": {"reward": 0.75}}
 
@@ -175,6 +180,23 @@ async def fixture(tmp_path, monkeypatch):
     )
     await agent.shutdown()
     await lifecycle.shutdown(list(server._sessions.values()), 0.01)
+    await server._archive_workers.aclose()
+
+
+@pytest.mark.parametrize("user", [None, "worker", "root", 1000, "1000"])
+async def test_seed_passes_the_task_identity_to_mini_swe(fixture, user):
+    f = fixture
+    task = f.server._loader.load.return_value
+    task.config.agent.user = user
+    result, retry = await asyncio.gather(f.agent.run(f.request, f.body), f.agent.run(f.request, f.body))
+    assert result == retry and result.evaluation_completed
+    assert f.envs[0].role_user == execution_user(user)
+    assert f.harnesses[0].context.user == execution_user(user)
+    assert all(env.closed for env in f.envs)
+    assert [call.kwargs["url_path"] for call in f.agent.server_client.post.await_args_list] == [
+        "/seed_session",
+        "/verify",
+    ]
 
 
 async def test_agent_owns_loop_and_replays_exact_result(fixture):
@@ -273,7 +295,7 @@ async def test_disconnected_http_caller_does_not_interrupt_episode(fixture, monk
     monkeypatch.setattr(module, "MiniSWEHarness", harness)
     if stage == "grade":
 
-        async def grade(*args):
+        async def grade(*args, **kwargs):
             await block()
             return {"rewards": {"reward": 0}}
 
@@ -347,7 +369,7 @@ async def test_shutdown_cancels_worker_before_collection_and_cleans_up(fixture, 
     f = fixture
     entered = asyncio.Event()
 
-    async def block(*args):
+    async def block(*args, **kwargs):
         entered.set()
         try:
             await asyncio.Event().wait()
@@ -708,7 +730,7 @@ async def test_verify_takes_over_before_seed_deadline(fixture):
     deadline = session.agent_deadline
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def grade(*args):
+    async def grade(*args, **kwargs):
         entered.set()
         await release.wait()
         return {"rewards": {"reward": 0.75}}
