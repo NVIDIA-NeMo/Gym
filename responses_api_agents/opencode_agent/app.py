@@ -70,6 +70,7 @@ from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+_INTERNAL_TIMED_OUT_KEY = "_ng_agent_timed_out"
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -545,6 +546,7 @@ class OpenCodeAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     finished_naturally: bool = False
+    agent_timed_out: bool = False
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -659,7 +661,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         collect_observations: bool = True,
         trajectory: Optional[TrajectoryRecord] = None,
-    ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle]:
+    ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle, bool]:
         """Run one headless OpenCode session and read its persisted artifact."""
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
@@ -727,7 +729,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     invocation.status = run_status
             if timed_out:
                 observations.gaps.append(ObservationGap(code="agent_run_timeout"))
-            return output_items, usage, self.config.model, observations
+            return output_items, usage, self.config.model, observations, timed_out
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -750,7 +752,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             TrajectoryRecord(task_id="unscoped", rollout_id=rollout_id or "unscoped") if collect_observations else None
         )
 
-        output_items, usage, model_name, observations = await self._run_opencode(
+        output_items, usage, model_name, observations, timed_out = await self._run_opencode(
             user_message,
             system_prompt,
             rollout_id=rollout_id,
@@ -813,6 +815,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
         if trajectory is not None:
             response = response.model_copy(update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")})
+        if timed_out:
+            response = response.model_copy(update={_INTERNAL_TIMED_OUT_KEY: True})
         return AgentEpisode(response=response, observations=observations)
 
     async def responses(
@@ -857,6 +861,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             cookies = agent_resp.cookies
             agent_resp_json = await get_response_json(agent_resp)
             raw_trajectory = agent_resp_json.pop(_INTERNAL_TRAJECTORY_KEY, None)
+            timed_out = bool(agent_resp_json.pop(_INTERNAL_TIMED_OUT_KEY, False))
             trajectory = (
                 scope_opencode_trajectory(TrajectoryRecord.model_validate(raw_trajectory), body, rollout_id)
                 if isinstance(raw_trajectory, dict) and rollout_id is not None
@@ -885,11 +890,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
             )
             last = gym_resp.output[-1] if gym_resp.output else None
-            naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
+            # A timed-out run is padded with an empty assistant message, which is not a natural finish.
+            naturally = (
+                not timed_out
+                and getattr(last, "type", None) == "message"
+                and getattr(last, "role", None) == "assistant"
+            )
 
             return OpenCodeAgentVerifyResponse.model_validate(
                 verify_json
-                | {"turns_used": turns, "finished_naturally": naturally}
+                | {"turns_used": turns, "finished_naturally": naturally, "agent_timed_out": timed_out}
                 | ({"ng_agent_observations": observations} if observations is not None else {})
                 | ({"ng_trajectory": trajectory.model_dump(mode="json")} if trajectory is not None else {})
             )

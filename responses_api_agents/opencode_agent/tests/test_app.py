@@ -280,7 +280,7 @@ class TestParseOpencodeSession:
         )
         items, usage = parse_opencode_session(db)
         agent = _make_agent()
-        agent._run_opencode = AsyncMock(return_value=(items, usage, "model", None))
+        agent._run_opencode = AsyncMock(return_value=(items, usage, "model", None, False))
         episode = asyncio.run(
             agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="solve"), collect_observations=False)
         )
@@ -590,7 +590,7 @@ class TestRolloutObservability:
         _, usage = parse_opencode_session(tmp_path / "missing.db")
         observations = _parse_opencode_session(tmp_path / "missing.db", "1-2")
         agent = _make_agent(system_prompt="configured system")
-        agent._run_opencode = AsyncMock(return_value=([], usage, "model", observations))
+        agent._run_opencode = AsyncMock(return_value=([], usage, "model", observations, False))
         body = NeMoGymResponseCreateParamsNonStreaming(
             input=[
                 NeMoGymEasyInputMessage(role="system", content="request system"),
@@ -621,7 +621,7 @@ class TestRolloutObservability:
 
         async def run_opencode(*args, trajectory, **kwargs):
             observations = _parse_opencode_session(db, "1-2", trajectory)
-            return items, usage, "model", observations
+            return items, usage, "model", observations, False
 
         agent._run_opencode = AsyncMock(side_effect=run_opencode)
 
@@ -654,6 +654,7 @@ class TestRolloutObservability:
         result = asyncio.run(agent.run(request, body))
 
         assert result.ng_agent_observations is not None
+        assert result.finished_naturally is True and result.agent_timed_out is False
         assert _invocations(result.ng_agent_observations)[0].conversation
         assert agent._run_opencode.await_args.kwargs["rollout_id"] == "1-2"
         assert agent.server_client.post.await_args_list[1].kwargs["url_path"] == "/ng-rollout/1-2/v1/responses"
@@ -663,6 +664,47 @@ class TestRolloutObservability:
         [turn] = TrajectoryRecord.model_validate(result.ng_trajectory).turns
         assert (turn.task_id, turn.rollout_id, turn.answer[0]["content"][0]["text"]) == ("1", "1-2", "done")
         assert not turn.model_calls
+
+    def test_timed_out_run_is_not_reported_as_finished_naturally(self) -> None:
+        agent = _make_agent()
+        agent.server_client.global_config_dict = {}
+        agent._run_opencode = AsyncMock(
+            return_value=(
+                [],
+                {"input_tokens": 0, "output_tokens": 0},
+                "model",
+                AgentObservationBundle(source="opencode"),
+                True,
+            )
+        )
+
+        class Response:
+            ok = True
+            cookies = {}
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            async def read(self):
+                return json.dumps(self.payload).encode()
+
+        async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+            if url_path == "/v1/responses":
+                response = await agent.responses(MagicMock(path_params={}), json)
+                return Response(response.model_dump(mode="json"))
+            return Response(json | {"reward": 0.0}) if url_path == "/verify" else Response({})
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        body = OpenCodeAgentRunRequest.model_validate({"responses_create_params": {"input": "solve"}})
+
+        result = asyncio.run(agent.run(MagicMock(cookies={}), body))
+
+        verify_json = agent.server_client.post.await_args_list[2].kwargs["json"]
+        assert "_ng_agent_timed_out" not in verify_json["response"]
+        assert verify_json["response"]["output"][0]["content"][0]["text"] == ""
+        assert (result.reward, result.turns_used) == (0.0, 1)
+        assert result.finished_naturally is False
+        assert result.agent_timed_out is True
 
 
 class TestRepoDir:
@@ -697,7 +739,7 @@ class TestRepoDir:
                 side_effect=ValueError("invalid observation artifact"),
             ),
         ):
-            output, usage, _, observations = await agent._run_opencode(
+            output, usage, _, observations, timed_out = await agent._run_opencode(
                 "fix the issue",
                 None,
                 collect_observations=True,
@@ -706,12 +748,40 @@ class TestRepoDir:
 
         assert output == scored
         assert usage == {"input_tokens": 1, "output_tokens": 2}
+        assert timed_out is False
         command = create_process.await_args.args
         assert "--title" not in command
         assert "agent_artifact_unavailable" in {gap.code for gap in observations.gaps}
         assert "turns_unavailable" in {gap.code for gap in trajectory.gaps}
         assert repo_dir.is_dir()
         assert not workspace.exists()
+
+    async def test_timeout_kills_process_and_reports_timed_out(self, tmp_path: Path) -> None:
+        process = MagicMock(returncode=-9)
+        process.communicate = AsyncMock(return_value=(b"", b""))
+        agent = _make_agent(timeout=1)
+
+        async def wait_for(awaitable, timeout):
+            awaitable.close()
+            raise asyncio.TimeoutError
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=tmp_path / "workspace"),
+            patch(
+                "responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec",
+                AsyncMock(return_value=process),
+            ),
+            patch("responses_api_agents.opencode_agent.app.asyncio.wait_for", side_effect=wait_for),
+            patch("responses_api_agents.opencode_agent.app.parse_opencode_session") as parse,
+        ):
+            output, usage, _, observations, timed_out = await agent._run_opencode(
+                "fix the issue", None, collect_observations=False
+            )
+
+        process.kill.assert_called_once()
+        parse.assert_not_called()
+        assert (output, usage, timed_out) == ([], {"input_tokens": 0, "output_tokens": 0}, True)
+        assert "agent_run_timeout" in {gap.code for gap in observations.gaps}
 
 
 class TestConfigYaml:
