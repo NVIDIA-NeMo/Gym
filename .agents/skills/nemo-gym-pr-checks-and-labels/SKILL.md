@@ -26,8 +26,8 @@ gh pr diff <PR> --repo NVIDIA-NeMo/Gym --name-only
 gh pr checks <PR> --repo NVIDIA-NeMo/Gym
 ```
 
-For local validation and CI routing, treat these repository files as
-authoritative:
+For local validation and CI routing, inspect the PR head and its actual target
+branch. Treat these repository files as authoritative:
 
 - `AGENTS.md` for the quality bar and required rollout evidence.
 - `CONTRIBUTING.md` for contributor and environment requirements.
@@ -103,9 +103,10 @@ changes, and rerun until clean. For read-only readiness assessments, inspect
 recorded validation and CI instead. If fresh execution is necessary, use an
 isolated temporary worktree or ask before running hooks in the user's worktree.
 
-Then classify the complete PR diff using the same precedence as CI:
+Then classify the complete PR diff using the same precedence as the unit-test
+workflow:
 
-| Diff classification | Paths | CI test scope | Local evidence |
+| Diff classification | Paths | Unit-test scope | Local evidence |
 |---|---|---|---|
 | CI docs-classified | Only `**.md`, `fern/**`, `LICENSE`, or `benchmarks/**`, with no server-path matches | Unit tests are skipped | For Fern changes, follow `fern/README.md`; for non-doc files under `benchmarks/**`, run targeted preparation/tests; otherwise run relevant docs/link checks |
 | Server-only | One or more files in `resources_servers/**`, `responses_api_agents/**`, `responses_api_models/**`, or `environment_servers/**`, with no uncategorized files | Core and sandbox coverage tests plus tests for changed servers | Run `gym env test +entrypoint=<component>/<name> +should_validate_data=true` for each changed component and targeted core tests when shared behavior is exercised |
@@ -123,6 +124,16 @@ For server-only changes, replace `<component>` with `resources_servers`,
 additional data validation only for resources servers. The
 `gym env test --resources-server <name>` form is shorthand for resources
 servers only and should use the same flag.
+
+Check separately for harness conformance on the actual target branch. Where
+`cicd-main.yml` calls `.github/workflows/harness-conformance.yml`, that workflow
+runs independently of the unit-test classification above. Read
+`scripts/harness_conformance/ci.py` for its selection of harnesses from the full
+PR diff; a Markdown-only unit-test classification does not imply no harness
+probes. Report the resulting `Harness conformance P0` check separately:
+`Nemo_CICD_Test` does not aggregate it. Whether P0 is a required check is a
+repository-rules decision, not something to infer from a green umbrella check.
+Conformance evidence does not replace representative model/verifier smoke.
 
 Additional evidence is required by behavior, not just path:
 
