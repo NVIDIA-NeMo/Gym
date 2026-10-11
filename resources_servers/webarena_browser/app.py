@@ -10,6 +10,7 @@ from resources_servers.webarena_browser.session_manager import WebArenaBrowserSe
 
 
 class WebArenaBrowserResourcesServer(WebResourcesServer):
+    ray_enabled = False
     config: WebArenaBrowserResourcesServerConfig
 
     def make_session_manager(self) -> WebArenaBrowserSessionManager:
