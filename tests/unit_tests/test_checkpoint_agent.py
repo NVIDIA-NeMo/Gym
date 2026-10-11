@@ -20,6 +20,7 @@ from nemo_gym._checkpoint.control import (
     RetireRequest,
 )
 from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
+from nemo_gym._checkpoint.model import PolicyModelParticipant
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.episode_types import EpisodeId
@@ -260,6 +261,132 @@ async def test_refused_model_call_parks_and_retries_after_resume() -> None:
 
     assert parked == 1
     assert attempts == ["refused", "served"]
+
+
+@pytest.mark.parametrize("reclose_before_delivery", [False, True])
+async def test_late_model_response_stays_parked_through_commit_and_restore(
+    tmp_path: Path, reclose_before_delivery: bool
+) -> None:
+    participant = AgentSessionParticipant(Hooks())
+    controller = ParticipantControlPlane(participant, instance_name="agent", lease_grace_seconds=60)
+    model = PolicyModelParticipant()
+    model_controller = ParticipantControlPlane(model, instance_name="model", lease_grace_seconds=60)
+    episode_id = EpisodeId(rollout_id="r")
+    participant.open_session("s", episode_id)
+    waiting = asyncio.Event()
+    response = asyncio.Event()
+    received = asyncio.Event()
+    reading_body = asyncio.Event()
+    body = asyncio.Event()
+
+    async def loop() -> None:
+        async with participant.activation("s", episode_id) as activation:
+            await activation.boundary(lambda: {"step": 1})
+            async with activation.awaiting_model():
+                waiting.set()
+                await response.wait()
+                received.set()
+            # Simple Agent reads the response body after leaving awaiting_model.
+            reading_body.set()
+            await body.wait()
+            await activation.boundary(lambda: {"step": 2})
+
+    task = asyncio.create_task(loop())
+    try:
+        await asyncio.wait_for(waiting.wait(), 1)
+        ticket = model.gate.enter(episode_id.capture_key)
+        await model.gate.release_response(ticket)
+        await model.gate.exit(ticket)
+        # Correct preparation order does not acknowledge client-side consumption.
+        await model_controller.prepare(CheckpointRequest(**control()))
+        await controller.prepare(CheckpointRequest(**control()))
+        response.set()
+        await asyncio.wait_for(received.wait(), 1)
+        assert participant.readiness().ready
+        assert not reading_body.is_set()
+        committed = await controller.commit(CommitRequest(**control(checkpoint_dir=str(tmp_path))))
+        assert committed["phase"] == "committed"
+        [record] = await participant.export(None)
+        assert record.boundary == {"step": 1}
+
+        restored = AgentSessionParticipant(Hooks())
+        restored_controller = ParticipantControlPlane(restored, instance_name="agent", lease_grace_seconds=60)
+        await restored_controller.restore(
+            RestoreRequest(**control("restore", checkpoint_dir=str(tmp_path), episode_ids=[episode_id]))
+        )
+        await restored_controller.resume(CheckpointRequest(**control("restore")))
+        async with restored.activation("s", EpisodeId(rollout_id="r", attempt=1)) as activation:
+            assert activation.continuation == {"step": 1}
+
+        await controller.resume(CheckpointRequest(**control()))
+        if reclose_before_delivery:
+            await participant.close_admission(CLOSE)
+            await asyncio.sleep(0)
+            assert not reading_body.is_set()
+            assert participant.readiness().ready
+            await participant.open_admission()
+        await model_controller.resume(CheckpointRequest(**control()))
+        await asyncio.wait_for(reading_body.wait(), 1)
+        body.set()
+        await asyncio.wait_for(task, 1)
+    finally:
+        await controller.resume(CheckpointRequest(**control()))
+        await model_controller.resume(CheckpointRequest(**control()))
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("response_arrived", [False, True])
+async def test_cancel_model_wait_during_checkpoint_does_not_wait_for_resume(response_arrived: bool) -> None:
+    participant = AgentSessionParticipant(Hooks())
+    episode_id = EpisodeId(rollout_id="r")
+    participant.open_session("s", episode_id)
+    waiting = asyncio.Event()
+    response = asyncio.Event()
+    received = asyncio.Event()
+
+    async def loop() -> None:
+        async with participant.activation("s", episode_id) as activation:
+            await activation.boundary(lambda: {"step": 1})
+            async with activation.awaiting_model():
+                waiting.set()
+                await response.wait()
+                received.set()
+            await activation.boundary(lambda: {"step": 2})
+
+    task = asyncio.create_task(loop())
+    try:
+        await asyncio.wait_for(waiting.wait(), 1)
+        await participant.close_admission(CLOSE)
+        if response_arrived:
+            response.set()
+            await asyncio.wait_for(received.wait(), 1)
+        task.cancel()
+        done, _ = await asyncio.wait([task], timeout=1)
+        assert task in done and task.cancelled()
+        assert not participant.accepting
+        assert participant.readiness().ready
+    finally:
+        await participant.open_admission()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_model_error_during_checkpoint_propagates_without_waiting_for_resume() -> None:
+    participant = AgentSessionParticipant(Hooks())
+    episode_id = EpisodeId(rollout_id="r")
+    participant.open_session("s", episode_id)
+    async with participant.activation("s", episode_id) as activation:
+        await activation.boundary(lambda: {"step": 1})
+        await participant.close_admission(CLOSE)
+        try:
+            async with asyncio.timeout(1):
+                with pytest.raises(RuntimeError, match="model failed"):
+                    async with activation.awaiting_model():
+                        raise RuntimeError("model failed")
+            assert not participant.readiness().ready
+        finally:
+            await participant.open_admission()
 
 
 class _UnsupportedAgent(SimpleResponsesAPIAgent):

@@ -15,7 +15,8 @@ Either way the agent keeps its own session state and exposes it through ``AgentS
 participant tracks which session is inside an activation and the activation's latest boundary. An
 activation reports a boundary before each model call and after each tool round. A session is
 ``at_boundary`` while parked there or while waiting on a policy call made right after it: the policy
-model server holds that call's response during a checkpoint, so the loop cannot move past the boundary.
+model server holds that call's response during a checkpoint. A response already sent before prepare can
+still reach the agent afterwards; the agent parks before processing it until admission reopens.
 Prepare is ready once no activation is between boundaries.
 
 A boundary is a snapshot function, not a snapshot. It runs only when a checkpoint exports the session,
@@ -246,11 +247,18 @@ class AgentSessionParticipant(CheckpointParticipant):
     async def awaiting_model(self, session: _Session) -> AsyncIterator[None]:
         session.state = "at_boundary"
         await self.notify()
+        completed = False
         try:
             yield
+            completed = True
         finally:
             if self._live(session):
-                session.state = "running"
+                # Server-side send completion does not acknowledge client-side consumption.
+                # Park late successful replies; errors and cancellation must still unwind.
+                if completed and session.park_requested:
+                    await self.park(session)
+                else:
+                    session.state = "running"
 
     def _live(self, session: _Session) -> bool:
         return self._sessions.get(session.key) is session
