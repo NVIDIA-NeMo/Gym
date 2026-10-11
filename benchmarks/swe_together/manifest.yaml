@@ -1,0 +1,30 @@
+name: swe_together
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: coding
+description: Interactive repository tasks with a simulated user and a frozen-goal agentic judge.
+modality: text
+licensing: Apache-2.0
+authors:
+  - Frederic Lafrance
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: stochastic
+resources_server: swe_together
+agent_server: opencode_agent
+dataset_owner: swe_together_resources
+model_server: policy_model
+session_model: episode
+state: per_session
+sandbox: sandbox
+canonical_split: full109
+prompt_source: agent
+datasets:
+  - name: swe_together
+    type: benchmark
+    jsonl_fpath: benchmarks/swe_together/data/full109.jsonl
+    prepare_script: benchmarks/swe_together/prepare.py
+    num_repeats: 2
