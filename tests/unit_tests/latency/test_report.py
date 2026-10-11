@@ -113,3 +113,24 @@ def test_write_report_puts_limitations_first(job_dir):
     assert page.index('id="limitations"') < page.index('id="run"')
     assert "Two clocks" in page and "rollouts_failures.jsonl" in page and "caveat" not in page.lower()
     assert "timelines.html#replica_0/4-1" in page
+
+
+def test_failed_vs_successful_reads_the_summary_split(summary):
+    """One successful (terminus) and one failed (opencode) row: both columns exist and ratios are per metric."""
+    side = summary["failed_vs_successful"]
+    rows = {r["metric"]: r for r in side["rows"]}
+    assert "e2e_agent_time" in rows and "model_calls" in rows
+    agent = rows["e2e_agent_time"]
+    assert agent["n_success"] == 1 and agent["n_failure"] == 1
+    assert agent["success"] is not None and agent["failure"] is not None
+    if agent["success"] and agent["success"] > 0:
+        assert agent["ratio"] == round(agent["failure"] / agent["success"], 3)
+    # a metric present for neither group is omitted rather than shown as a row of dashes
+    assert all(r["success"] is not None or r["failure"] is not None for r in side["rows"])
+
+
+def test_write_report_shows_failed_vs_successful_under_outcomes(job_dir):
+    write_report(job_dir)
+    page = (job_dir / "metrics" / "report.html").read_text(encoding="utf-8")
+    assert page.index('id="outcome-at-a-glance"') < page.index('id="failed-vs-successful"')
+    assert "Failed vs successful rollouts" in page

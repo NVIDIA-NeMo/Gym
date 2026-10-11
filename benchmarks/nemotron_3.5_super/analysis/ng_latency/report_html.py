@@ -1210,6 +1210,39 @@ def _distributions_section(summary: dict[str, Any]) -> str:
     return body
 
 
+def _failed_vs_successful_section(summary: dict[str, Any]) -> str:
+    """Side by side: per-rollout medians over successful and non-successful rollouts, and the ratio."""
+    side = summary.get("failed_vs_successful") or {}
+    rows = side.get("rows") or []
+    if not rows:
+        return ""
+    n_s = next((r["n_success"] for r in rows if _is_number(r.get("n_success"))), None)
+    n_f = next((r["n_failure"] for r in rows if _is_number(r.get("n_failure"))), None)
+
+    def cell(row: dict[str, Any], key: str) -> str:
+        v = row.get(key)
+        if not _is_number(v):
+            return "–"
+        if row["metric"] in ("unexplained_fraction", "repeated_actions"):
+            return pct(v)
+        return num(v, 0) if abs(v) >= 100 else num(v, 1)
+
+    body = f"<h3>Failed vs successful rollouts (median per rollout; {num(n_s)} successful, {num(n_f)} non-successful)</h3>"
+    body += table(
+        ("metric", "successful", "failed / timed out", "ratio"),
+        [[esc(r["label"]), cell(r, "success"), cell(r, "failure"), (f"{num(r['ratio'], 1)}×" if _is_number(r.get("ratio")) else "–")] for r in rows],
+        table_id="failed-vs-successful",
+        sortable=False,
+    )
+    body += (
+        '<p class="note">Read the ratios together: if steps and tool calls grow about as much as time, a failing '
+        "rollout took a longer route; if reasoning tokens grow more than steps, the model thought longer per step; "
+        "if only tool time grows, it ran longer commands. Groups are the summary's own success / failure split, so "
+        "the columns cover the same rollouts as every other table.</p>"
+    )
+    return body
+
+
 def _limitations_section(summary: dict[str, Any]) -> str:
     items = "".join(
         f"<li><b>{esc(item['title'])}.</b> {esc(item['what'])} <i>{esc(item['implication'])}</i></li>"
@@ -1798,7 +1831,7 @@ def render_report_html(summary: dict[str, Any]) -> str:
     bodies = (
         _limitations_section(summary),
         _run_section(summary),
-        _outcome_section(summary),
+        _outcome_section(summary) + _failed_vs_successful_section(summary),
         _native_section(summary),
         _timeline_section(summary),
         _where_section(summary),

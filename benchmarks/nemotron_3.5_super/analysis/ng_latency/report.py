@@ -1312,6 +1312,46 @@ def _where_time_goes_section(
     }
 
 
+
+# Per-rollout metrics compared between successful and non-successful rollouts: what a failure costs, and whether
+# the extra is route length (steps, tools) or thinking per step (reasoning). Each is the median over its group.
+SIDE_BY_SIDE_KEYS = (
+    ("e2e_agent_time", "agent time (s)"),
+    ("agent_steps", "agent steps"),
+    ("model_calls", "model calls"),
+    ("tool_calls", "tool calls"),
+    ("cumulative_input_tokens", "input tokens, cumulative"),
+    ("reasoning_tokens_total", "reasoning tokens"),
+    ("output_tokens_total", "output tokens"),
+    ("max_context", "peak context (tokens)"),
+    ("compactions", "compactions"),
+    ("repeated_actions", "repeated identical tool calls"),
+    ("unexplained_fraction", "unexplained share of agent time"),
+)
+
+
+def failed_vs_successful(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Median of each SIDE_BY_SIDE metric over successful and over non-successful rollouts, with the ratio.
+
+    Reads the summary's per-outcome split, so both columns are over the same rollouts as every other table.
+    A ratio is given only when both medians exist and the success median is positive.
+    """
+    rows = []
+    for key, label in SIDE_BY_SIDE_KEYS:
+        st = metrics.get(key)
+        if not isinstance(st, dict):
+            continue
+        success = (st.get("success") or {}).get("median")
+        failure = (st.get("failure") or {}).get("median")
+        n_s, n_f = (st.get("success") or {}).get("count"), (st.get("failure") or {}).get("count")
+        if not (_is_number(success) or _is_number(failure)):
+            continue
+        ratio = round(failure / success, 3) if _is_number(success) and _is_number(failure) and success > 0 else None
+        rows.append({"metric": key, "label": label, "success": success, "failure": failure, "ratio": ratio,
+                     "n_success": n_s, "n_failure": n_f})
+    return {"rows": rows}
+
+
 def _page_links(
     replicas: list[ReplicaInputs], trials: list[dict[str, Any]], report_dir: Path
 ) -> dict[tuple[str, str], str]:
@@ -1456,7 +1496,7 @@ def build_summary(
     per_task = _per_task_rows(rows_by_replica, trials, links)
     validation = _validation_section(replicas, trials, rows_by_replica)
     without_timeline = validation["excluded_trials"].get("no_timeline", 0)
-    return {
+    summary = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "definitions": definitions,
@@ -1477,6 +1517,8 @@ def build_summary(
         "state_bands": state_bands(traces) if with_occupancy else None,
         "data_quality": _data_quality_section(summary_all, notes, without_timeline),
     }
+    summary["failed_vs_successful"] = failed_vs_successful(summary_all["metrics"])
+    return summary
 
 
 def write_report(
