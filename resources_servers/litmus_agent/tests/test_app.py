@@ -907,7 +907,8 @@ class TestCodeExecTool:
             _FakeRequest(session_id="s1"),
             _make_verify_request("((3))", expected_answer="3", answer_type=FLOAT),
         )
-        assert provider.closed == 1 and provider.aclosed == 1
+        # The sandbox is closed; its provider is the checkpointer's, shared by every session, and lives on.
+        assert provider.closed == 1 and provider.aclosed == 0
         assert "s1" not in server._sessions
 
     async def test_verify_failure_still_cleans_up_session_sandbox(self):
@@ -921,7 +922,8 @@ class TestCodeExecTool:
                 _make_verify_request("((3))", expected_answer="3"),
             )
 
-        assert provider.closed == 1 and provider.aclosed == 1
+        # The sandbox is closed; its provider is the checkpointer's, shared by every session, and lives on.
+        assert provider.closed == 1 and provider.aclosed == 0
         assert "s1" not in server._sessions
 
     async def test_shutdown_closes_open_sessions(self):
