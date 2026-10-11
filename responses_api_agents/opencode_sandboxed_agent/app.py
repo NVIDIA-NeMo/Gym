@@ -864,7 +864,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         echo "Shell: $SHELL" \
         && {install_str} \
         {ripgrep_install_str} \
-        && export PATH=$HOME/.opencode/bin:$PATH \
+        && export PATH="$HOME/.opencode/bin:$PATH" \
         && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
@@ -908,7 +908,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
         try:
             session_list_result = await sandbox.exec(
-                command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
+                command='export PATH="$HOME/.opencode/bin:$PATH" && opencode session list --format json',
                 env=session_env,
                 timeout_s=self.config.sandbox_timeout,
             )
@@ -917,7 +917,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             session_id = _extract_opencode_session_id(session_list_result.stdout or "")
             export_result = await sandbox.exec(
                 command=(
-                    "export PATH=$HOME/.opencode/bin:$PATH "
+                    'export PATH="$HOME/.opencode/bin:$PATH" '
                     f"&& opencode export {quote(session_id)} > {quote(export_remote_fpath)}"
                 ),
                 env=session_env,
@@ -963,29 +963,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             observations_local_fpath = results_dir / "opencode.db"
             observations_local_fpath.unlink(missing_ok=True)
             try:
-                # Release channels and OPENCODE_DB can change the database filename.
-                database_path_result = await sandbox.exec(
-                    command="export PATH=$HOME/.opencode/bin:$PATH && opencode db path",
-                    env=session_env,
-                )
-                observations_remote_fpath = (database_path_result.stdout or "").strip()
-                if (
-                    database_path_result.return_code != 0
-                    or database_path_result.error_type is not None
-                    or not observations_remote_fpath
-                ):
-                    raise RuntimeError(f"OpenCode database path lookup failed: {database_path_result.stderr}")
-                snapshot_script = (
-                    "import sqlite3,sys;"
-                    "source=sqlite3.connect(f'file:{sys.argv[1]}?mode=ro',uri=True);"
-                    "destination=sqlite3.connect(sys.argv[2]);"
-                    "source.backup(destination);destination.close();source.close()"
-                )
+                # OpenCode selects its own database and supplies SQLite even in images without Python.
+                # VACUUM INTO includes committed WAL data in one consistent, standalone snapshot.
+                snapshot_sql = "VACUUM INTO '" + snapshot_remote_fpath.replace("'", "''") + "'"
                 snapshot_result = await sandbox.exec(
-                    command=(
-                        f"python3 -c {quote(snapshot_script)} "
-                        f"{quote(observations_remote_fpath)} {quote(snapshot_remote_fpath)}"
-                    ),
+                    command=f'export PATH="$HOME/.opencode/bin:$PATH" && opencode db {quote(snapshot_sql)}',
+                    env=session_env,
                     timeout_s=self.config.sandbox_timeout,
                 )
                 if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:

@@ -624,7 +624,7 @@ class TestRunHelperRayStartup:
         [
             (False, True, False),
             (True, True, True),
-            (None, True, True),
+            (None, True, False),
             (False, False, False),
             (None, False, False),
         ],
@@ -643,6 +643,9 @@ class TestRunHelperRayStartup:
 
         assert initialize_ray.called is expect_ray
         run_command.assert_called_once()
+        # Servers that don't declare Ray can't quietly start a private cluster on their first Ray call.
+        auto_connect = run_command.call_args.kwargs["extra_env"].get("RAY_ENABLE_AUTO_CONNECT")
+        assert auto_connect == (None if expect_ray else "0")
 
     def test_ray_server_without_ray_installed_fails_before_launching_anything(
         self, monkeypatch: MonkeyPatch, tmp_path: Path

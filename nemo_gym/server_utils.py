@@ -1199,36 +1199,9 @@ class ClientDisconnectCancellationMiddleware:
             task_group.start_soon(listen_for_disconnect)
 
 
-_WARNED_IMPLICIT_RAY_SERVERS: set[type] = set()
-
-
-def _server_uses_ray(server_class: type, global_config_dict: DictConfig) -> bool:
-    ray_enabled = server_class.ray_enabled
-    if ray_enabled is not None:
-        return ray_enabled
-
-    # An undeclared server joins Ray only when it can import Ray and a cluster is configured to join. Starting
-    # a cluster here would give every server process and worker its own private cluster.
-    uses_ray = ray_is_installed() and bool(global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME))
-    if server_class not in _WARNED_IMPLICIT_RAY_SERVERS:
-        name = f"{server_class.__module__}.{server_class.__name__}"
-        if uses_ray:
-            logger.warning(
-                f"{name} does not declare ray_enabled; Ray remains enabled for backward compatibility. "
-                "Set ray_enabled explicitly because a future release will default it to false."
-            )
-        else:
-            logger.warning(
-                f"{name} does not declare ray_enabled and this run has no Ray cluster to join, so it runs "
-                "without Ray. Set ray_enabled = True if it uses Ray, or ray_enabled = False if it doesn't."
-            )
-        _WARNED_IMPLICIT_RAY_SERVERS.add(server_class)
-    return uses_ray
-
-
 def _connect_server_to_ray(server_class: type, global_config_dict: DictConfig) -> None:
-    """Join the run's Ray cluster if this server uses Ray."""
-    if not _server_uses_ray(server_class, global_config_dict):
+    """Join the run's Ray cluster if this server declares that it uses Ray."""
+    if not server_class.ray_enabled:
         return
     if _has_injected_global_config_env() and not global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME):
         # Gym only launches servers without a cluster address when it decided no server needs Ray. Fail instead
@@ -1293,7 +1266,9 @@ def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
 
 class SimpleServer(BaseServer):
     server_client: ServerClient
-    ray_enabled: ClassVar[bool | None] = None
+    # Servers that use Ray must declare `ray_enabled = True` on the class their entrypoint runs. Gym reads it
+    # before launch to decide whether to start Ray, and connects only those servers to it.
+    ray_enabled: ClassVar[bool] = False
 
     @abstractmethod
     def setup_webserver(self) -> FastAPI:

@@ -191,7 +191,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             if agent_close_response.agent_session_id != agent_session_id:
                 raise ValueError("Agent close returned a different agent_session_id")
-            if agent_close_response.resources_cookies is not None:
+            # Verify identifies the episode by the Resources session cookie.
+            # An agent that held no Resources cookie jar returns None or an empty jar.
+            # Neither may replace the cookie from the Resources seed.
+            if agent_close_response.resources_cookies:
                 resources_cookies = agent_close_response.resources_cookies
 
         # Register cleanup before seed so cancellation can close a remotely created session even if its response is lost.

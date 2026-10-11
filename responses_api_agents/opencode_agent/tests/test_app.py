@@ -20,9 +20,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-import yaml
+from omegaconf import OmegaConf
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import GlobalConfigDictParser
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
@@ -74,9 +75,8 @@ def _compactions(bundle: AgentObservationBundle) -> list[ContextCompactionObserv
 
 
 def _make_agent(**kwargs) -> OpenCodeAgent:
-    with patch("responses_api_agents.opencode_agent.app.OpenCodeAgent.model_post_init"):
-        agent = OpenCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
+    agent = OpenCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+    agent._ensure_local_runtime = AsyncMock()
     return agent
 
 
@@ -719,11 +719,37 @@ class TestConfigYaml:
         app_path = Path(__file__).resolve().parent.parent / "app.py"
         compile(app_path.read_text(), str(app_path), "exec")
 
-    def test_config_yaml_parses(self) -> None:
+    @pytest.mark.parametrize("training_capture", [None, False, True])
+    def test_config_yaml_parses(self, monkeypatch: pytest.MonkeyPatch, training_capture: bool | None) -> None:
+        monkeypatch.chdir(Path(__file__).resolve().parents[3])
         cfg_path = Path(__file__).resolve().parent.parent / "configs" / "opencode_agent.yaml"
-        data = yaml.safe_load(cfg_path.read_text())
+        _, configs = GlobalConfigDictParser().load_extra_config_paths([str(cfg_path)])
+        data = OmegaConf.to_container(OmegaConf.merge(*configs, {"policy_model_name": "test-model"}), resolve=True)
         assert "opencode_agent" in data
         inner = data["opencode_agent"]["responses_api_agents"]["opencode_agent"]
-        assert inner["entrypoint"] == "app.py"
-        assert inner["concurrency"] == 8
-        assert inner["command"] == "opencode"
+        if training_capture is not None:
+            inner["token_id_capture"] = training_capture
+        config = OpenCodeAgentConfig.model_validate(inner | {"host": "localhost", "port": 8000, "name": "opencode"})
+        assert config.entrypoint == "app.py"
+        assert "execution_mode" not in type(config).model_fields
+        assert config.thinking is True
+        assert config.timeout == 10800
+        assert config.model == "test-model"
+        assert config.sandbox_provider is None
+        assert config.sandbox_install_timeout_seconds == 600
+        assert config.session_close_timeout_seconds == 60
+        assert config.resources_server is None
+        assert config.model_server.name == "policy_model"
+        assert config.opencode_config["permission"]["bash"]["*"] == "allow"
+        assert config.opencode_config["permission"]["bash"]["*git submodule update*"] == "deny"
+        assert config.opencode_config["tools"]["webfetch"] is False
+
+        assert config.token_id_capture is (training_capture is True)
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": True, "token_id_capture": {"enabled": True}}
+        agent = OpenCodeAgent(config=config, server_client=client)
+        capture_path = "/training-token-capture" if training_capture else ""
+        assert (
+            agent.base_url_for_run("http://model", {"_ng_task_index": 0, "_ng_rollout_index": 0})
+            == f"http://model/ng-rollout/0-0{capture_path}"
+        )
