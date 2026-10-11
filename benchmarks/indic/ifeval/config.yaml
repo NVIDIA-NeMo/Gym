@@ -4,7 +4,8 @@ config_paths:
   - resources_servers/instruction_following/configs/instruction_following.yaml
 
 indic_ifeval_instruction_following:
-  _inherit_from: instruction_following
+  # Keep the English verifier available when both benchmarks are selected.
+  _copy: instruction_following
   resources_servers:
     instruction_following:
       description: IndicIFEval-Trans using the upstream language-specific checkers.
@@ -28,3 +29,10 @@ indic_ifeval_instruction_following_simple_agent:
           jsonl_fpath: benchmarks/indic/ifeval/data/example.jsonl
           num_repeats: 1
           license: Creative Commons Attribution 4.0 International
+
+indic_ifeval_instruction_following_environment_server:
+  _inherit_from: instruction_following_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: indic_ifeval_instruction_following_simple_agent

@@ -15,16 +15,14 @@ import zipfile
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
-from typing import Literal, get_args
 
 from filelock import FileLock
 
+from resources_servers.instruction_following.indicifeval_schema import HARNESS_REVISION, LANGUAGES
 
-HARNESS_REVISION = "1bb5f1bc4936cb20b8544e185bfd7cbed8f31464"
+
 ARCHIVE_SHA256 = "01692685e707e039a48b60680ea1436811325a1907f79c69ffb5ce2fd000ba9e"
 ARCHIVE_URL = f"https://codeload.github.com/AI4Bharat/IndicIFEval/zip/{HARNESS_REVISION}"
-IndicLanguage = Literal["bn", "gu", "hi", "kn", "mr", "ml", "ne", "or", "pa", "ta", "te", "ur"]
-LANGUAGES: tuple[IndicLanguage, ...] = get_args(IndicLanguage)
 CACHE_DIR = Path(__file__).parent / ".indicifeval_trans" / HARNESS_REVISION
 PACKAGE_NAME = f"_gym_indicifeval_trans_{HARNESS_REVISION}"
 

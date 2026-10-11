@@ -12,6 +12,8 @@ The config inherits their shared settings. The `indicifeval_trans` backend selec
 checkers and strict/loose scoring functions from the
 [official harness](https://github.com/AI4Bharat/IndicIFEval/tree/1bb5f1bc4936cb20b8544e185bfd7cbed8f31464/lm-evaluation-harness/custom_configs/indicifeval-trans).
 The existing English backend remains the default for other configurations.
+The Indic config copies the shared verifier settings, keeping the English
+verifier available when `--benchmark ifeval --benchmark indic/ifeval` are combined.
 
 ## Dataset and protocol
 
@@ -33,6 +35,11 @@ the original kwargs still govern any requested response language.
 Prompts are zero-shot user messages without an added system instruction.
 Generation defaults match the upstream task YAML: temperature 0 and a
 1,280-token output limit. The model server controls chat-template handling.
+These defaults are stored on each Indic row, so selecting `--model-type` keeps
+them and combining benchmarks does not change another benchmark's requests.
+Explicit `--temperature`, `--top-p`, and `--max-output-tokens` flags override
+the corresponding fields for the whole run. There is one attempt per prompt
+in both the config and manifest; the canonical split is `benchmark`.
 Dataset `uuid` combines track, language, and source key; numeric `id`
 retains the original key. `subset_for_metrics` identifies the language.
 
@@ -55,7 +62,23 @@ gym eval run --benchmark indic/ifeval --model-type vllm_model \
 ```
 
 The checked-in `data/example.jsonl` contains one real `correct` Trans prompt
-per supported language. Use `--split example` for a 12-prompt smoke run.
+per supported language. To run these 12 samples, start the configured servers,
+then collect against the example file in a second terminal:
+
+```bash
+gym env start --config benchmarks/indic/ifeval/config.yaml --model-type vllm_model \
+  --model YOUR_MODEL --model-url http://HOST:PORT/v1 --model-api-key dummy
+
+gym eval run --no-serve --agent indic_ifeval_instruction_following_simple_agent \
+  --input benchmarks/indic/ifeval/data/example.jsonl \
+  --output results/indic_ifeval/smoke.jsonl --concurrency 2
+```
+
+For thinking models, explicitly choose a sufficient output budget, for example
+`--max-output-tokens 50000`, and configure the model's reasoning parser at the
+inference endpoint. Record that override and the endpoint's sampling settings
+with the results: a 1,280-token default run is not comparable to a 50k-token run.
+
 Bulk prepared JSONL is ignored by git. Use
 `+use_cached_prepared_benchmarks=false` to refresh the dataset or change
 preparation options. Upstream updates can change the prompts and row counts;
@@ -88,9 +111,16 @@ the upstream harness, including its eight loose-scoring response variants.
 ## Checks
 
 ```bash
-gym env test --resources-server instruction_following
-pytest benchmarks/indic/ifeval/tests resources_servers/instruction_following/tests
+pytest tests/unit_tests/test_indic_ifeval.py tests/unit_tests/test_rollout_seed_metadata.py
+gym env test --resources-server instruction_following +should_validate_data=true
+gym env test +entrypoint=responses_api_models/vllm_model
+pre-commit run --all-files
 ```
+
+Preparation, config composition, CLI overrides, and metadata isolation are
+tested in the core CI suite. Checker tests run in the instruction-following
+server suite; request conversion tests run in the vLLM server suite. See
+[validation evidence](validation.md) for preparation and real-model smoke results.
 
 ## Attribution
 

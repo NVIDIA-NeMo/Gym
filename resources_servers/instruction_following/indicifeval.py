@@ -6,31 +6,14 @@ import logging
 import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, Field, JsonValue
 
-from resources_servers.instruction_following.setup_indicifeval import LANGUAGES, IndicLanguage, load_harness
+from resources_servers.instruction_following.indicifeval_schema import LANGUAGES, IndicIFEvalMetadata
+from resources_servers.instruction_following.setup_indicifeval import load_harness
 
 
 logger = logging.getLogger(__name__)
-
-
-class IndicIFEvalMetadata(BaseModel):
-    """The aligned instruction lists and language required by the Trans harness."""
-
-    model_config = ConfigDict(extra="allow")
-    language: IndicLanguage
-    prompt: str = Field(min_length=1)
-    instruction_id_list: list[str] = Field(min_length=1)
-    kwargs: list[dict[str, JsonValue]]
-    grading_mode: Literal["binary", "fraction"] = "binary"
-
-    @model_validator(mode="after")
-    def aligned_instructions(self) -> "IndicIFEvalMetadata":
-        if len(self.instruction_id_list) != len(self.kwargs):
-            raise ValueError("instruction_id_list and kwargs must have the same length")
-        return self
 
 
 class IndicIFEvalScores(BaseModel):

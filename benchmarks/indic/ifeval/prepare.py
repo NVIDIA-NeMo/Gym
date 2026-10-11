@@ -11,8 +11,7 @@ from typing import Literal
 from huggingface_hub import hf_hub_download
 from pydantic import JsonValue
 
-from resources_servers.instruction_following.indicifeval import IndicIFEvalMetadata
-from resources_servers.instruction_following.setup_indicifeval import HARNESS_REVISION, LANGUAGES
+from resources_servers.instruction_following.indicifeval_schema import HARNESS_REVISION, LANGUAGES, IndicIFEvalMetadata
 
 
 DIRECTORY = Path(__file__).resolve().parent

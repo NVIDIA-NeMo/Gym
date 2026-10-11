@@ -49,5 +49,9 @@ Source comparison confirmed identical non-import logic in all 24 selected
 checker/utility files and all 21 evaluation functions (excluding the removed
 debug print). A stratified comparison covered all 288 language/instruction
 pairs present in the default dataset: 690 response evaluations and 2,760
-metric comparisons, with no mismatches. These checks use fixed sample
-responses; a live-model smoke evaluation is still pending.
+metric comparisons, with no mismatches. Those source-comparison checks used
+fixed sample responses. The current verifier also reproduces all four metrics
+for 24 saved real-model responses across the 12 languages (96 comparisons,
+zero mismatches or checker errors). See the benchmark
+[validation record](../../benchmarks/indic/ifeval/validation.md) for current
+preparation, test, and rollout evidence.
