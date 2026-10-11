@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Dependency-light task schema for the visual-browser resource server."""
+"""Dependency-light task schema owned by the visual-browser resource server."""
 
 from typing import Any, Dict, List, Literal, Optional, Union
 
@@ -29,7 +29,7 @@ class WebTaskData(BaseModel):
 
 
 class TaskData(BaseModel):
-    """Task-owned fields consumed by the visual browser or judge."""
+    """Task-owned fields consumed by a visual browser or colocated evaluator."""
 
     model_config = ConfigDict(extra="allow")
 

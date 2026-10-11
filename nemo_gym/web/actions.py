@@ -73,6 +73,7 @@ def _native_coordinate(value: Any, *, field: str) -> None:
 def _validate_native_computer_action(
     action: Any,
     index: int,
+    max_scroll_amount: int | None = MAX_SCROLL_AMOUNT,
 ) -> dict[str, Any]:
     if not isinstance(action, dict):
         raise ActionParseError(f"native computer action[{index}] must be an object")
@@ -111,8 +112,14 @@ def _validate_native_computer_action(
         if direction not in {"up", "down", "left", "right"}:
             raise ActionParseError(f"{prefix}.scroll_direction is unsupported")
         amount = parameters.get("scroll_amount")
-        if isinstance(amount, bool) or not isinstance(amount, int) or not 0 <= amount <= MAX_SCROLL_AMOUNT:
-            raise ActionParseError(f"{prefix}.scroll_amount must be an integer in [0, {MAX_SCROLL_AMOUNT}]")
+        if (
+            isinstance(amount, bool)
+            or not isinstance(amount, int)
+            or amount < 0
+            or (max_scroll_amount is not None and amount > max_scroll_amount)
+        ):
+            bound = f"in [0, {max_scroll_amount}]" if max_scroll_amount is not None else ">= 0"
+            raise ActionParseError(f"{prefix}.scroll_amount must be an integer {bound}")
     return normalized
 
 
@@ -121,6 +128,7 @@ def _validate_native_tool_arguments(
     arguments: dict[str, Any],
     *,
     max_computer_actions: int,
+    max_scroll_amount: int | None = MAX_SCROLL_AMOUNT,
 ) -> tuple[dict[str, Any], int]:
     normalized = dict(arguments)
     if name == "computer":
@@ -131,7 +139,7 @@ def _validate_native_tool_arguments(
             raise ActionParseError(f"native computer tool exceeded the {max_computer_actions}-action batch limit")
         validated_actions: list[dict[str, Any]] = []
         for index, action in enumerate(actions):
-            validated_actions.append(_validate_native_computer_action(action, index))
+            validated_actions.append(_validate_native_computer_action(action, index, max_scroll_amount))
         normalized["actions"] = validated_actions
         return normalized, len(actions)
     if name == "navigate":
@@ -179,6 +187,7 @@ def parse_nano_omni_tool_calls(
     *,
     max_calls: int | None = 8,
     max_computer_actions: int = 20,
+    max_scroll_amount: int | None = MAX_SCROLL_AMOUNT,
 ) -> WebAction:
     """Validate parser-produced Nano Omni calls without repairing their contents."""
 
@@ -210,6 +219,7 @@ def parse_nano_omni_tool_calls(
                 name,
                 arguments,
                 max_computer_actions=max_computer_actions,
+                max_scroll_amount=max_scroll_amount,
             )
         except ActionParseError as exc:
             if (

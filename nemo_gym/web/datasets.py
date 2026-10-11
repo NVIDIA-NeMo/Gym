@@ -9,6 +9,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from nemo_gym.web.evaluation_collision import build_collision_plans
 from nemo_gym.web.models import (
     WebBenchmark,
     WebObservationProfile,
@@ -44,6 +45,60 @@ def gym_row(task: WebTask) -> dict[str, Any]:
         },
         "web_task": task.model_dump(mode="json"),
     }
+
+
+def _string_list(value: Any) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return [str(item) for item in value if item]
+
+
+def _webarena_task_id(record: Mapping[str, Any]) -> Any:
+    source_id = record.get("id", record.get("task_id"))
+    if source_id is None:
+        raise ValueError("WebArena record requires id or task_id")
+    if isinstance(source_id, str) and source_id.startswith("webarena-"):
+        suffix = source_id.removeprefix("webarena-")
+        if suffix.isdigit():
+            return int(suffix)
+    return source_id
+
+
+def adapt_webarena_record(
+    record: Mapping[str, Any],
+    *,
+    collision_plan: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Adapt one maintained WebArena row to the shared visual-browser contract."""
+
+    task = WebTask(
+        benchmark=WebBenchmark.WEBARENA,
+        task_id=_webarena_task_id(record),
+        intent=str(record.get("ques") or record.get("intent") or ""),
+        start_urls=_start_urls(record.get("web") or record.get("start_url")),
+        sites=_string_list(record.get("web_name") or record.get("sites")),
+        input_images=_string_list(record.get("image") or record.get("images")),
+        observation_profile=WebObservationProfile.SCREENSHOT,
+        verifier_profile="webarena_classic",
+        task_kwargs={
+            "collision_plan": dict(collision_plan) if collision_plan is not None else {},
+        },
+        original_metadata=dict(record),
+    )
+    return gym_row(task)
+
+
+def adapt_webarena_records(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Adapt a selection while planning protection for shared mutable targets."""
+
+    source_records = [dict(record) for record in records]
+    collision_plans = build_collision_plans(source_records)
+    return [
+        adapt_webarena_record(record, collision_plan=plan)
+        for record, plan in zip(source_records, collision_plans, strict=True)
+    ]
 
 
 def adapt_webvoyager_record(record: Mapping[str, Any]) -> dict[str, Any]:
