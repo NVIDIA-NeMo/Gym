@@ -20,6 +20,7 @@ import pytest
 
 import resources_servers.scicode.app as app
 from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.rollout_observability import AgentInvocation, TrajectoryRecord, TrajectoryTurn
 from nemo_gym.server_utils import ServerClient
 from resources_servers.scicode.app import (
     ScicodeResourcesServer,
@@ -121,6 +122,33 @@ def test_run_substep_program_larger_than_arg_max():
 # server
 # ----------------------------
 class TestApp:
+    @pytest.mark.asyncio
+    async def test_verify_preserves_agent_trajectory_without_changing_score(self):
+        trajectory = TrajectoryRecord(
+            task_id="4",
+            rollout_id="4-2",
+            invocations=[AgentInvocation(invocation_id="substep-1", status="completed")],
+            turns=[
+                TrajectoryTurn(
+                    invocation_id="substep-1",
+                    task_id="4",
+                    rollout_id="4-2",
+                    turn_no=1,
+                    timestamp=1.0,
+                    answer=[{"role": "assistant", "content": "solution"}],
+                    step_count=1,
+                )
+            ],
+        )
+        request_json = _request(solutions={"1.1": "def f(): return 1"}, n_steps=1).model_dump()
+        request_json["ng_trajectory"] = trajectory.model_dump(mode="json")
+        request = ScicodeVerifyRequest.model_validate(request_json)
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep(passed=True):
+            result = (await _server(h5.name).verify(request)).model_dump()
+        assert result["ng_trajectory"] == request_json["ng_trajectory"]
+        assert result["reward"] == 1.0
+        assert result["problem_accuracy"] is True
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("has_solution", [False, True])
     async def test_verify_preserves_step_usage(self, has_solution):

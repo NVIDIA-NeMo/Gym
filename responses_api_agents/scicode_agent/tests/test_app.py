@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import statistics
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -22,6 +23,8 @@ import responses_api_agents.scicode_agent.app as app
 from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.rollout_collection import _attach_trajectory_record
+from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.scicode_agent.app import (
     TOKEN_USAGE_VERSION,
@@ -219,6 +222,82 @@ class TestApp:
             assert request_json["model"] == "policy_model"
 
     @pytest.mark.asyncio
+    async def test_run_preserves_substep_model_calls_in_trajectory(self, tmp_path):
+        agent = _agent(observability_enabled=True)
+        model_requests = []
+
+        def _post(server_name, url_path, json, cookies):
+            if url_path.endswith("/v1/responses"):
+                model_requests.append(json)
+                step = len(model_requests)
+                return _Resp({**_model_json(f"x = {step}"), "id": f"response-{step}", "usage": _usage(step)})
+            return _Resp({**json, "reward": 1.0})
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        body = _run_request(problem_id="1", n_steps=2, _ng_task_index=4, _ng_rollout_index=2)
+        with patch.object(app, "raise_for_status", AsyncMock()):
+            result = await agent.run(_FakeRequest(), body)
+
+        trajectory = result["ng_trajectory"]
+        assert (trajectory["task_id"], trajectory["rollout_id"]) == ("1", "4-2")
+        assert all(turn["task_id"] == "1" for turn in trajectory["turns"])
+        assert [invocation["invocation_id"] for invocation in trajectory["invocations"]] == [
+            "substep-1",
+            "substep-2",
+        ]
+        assert [turn["model_calls"][0]["response_id"] for turn in trajectory["turns"]] == [
+            "response-1",
+            "response-2",
+        ]
+        assert [invocation["model_calls"] for invocation in trajectory["invocations"]] == [
+            turn["model_calls"] for turn in trajectory["turns"]
+        ]
+        assert [turn["question"] for turn in trajectory["turns"]] == [request["input"] for request in model_requests]
+        assert [turn["answer"][0]["content"][0]["text"] for turn in trajectory["turns"]] == [
+            "```python\nx = 1\n```",
+            "```python\nx = 2\n```",
+        ]
+        assert result["response"]["usage"]["output_tokens"] == 3
+        assert result["reward"] == 1.0
+        assert set(result["solutions"]) == {"1.1", "1.2"}
+
+        # Use Gym's rollout finalizer and health checker with the model calls the mocked
+        # endpoint returned. This checks that the producer's references resolve at both
+        # turn and invocation scope, not merely that a trajectory field exists.
+        record = {
+            **result,
+            "_ng_task_index": 4,
+            "_ng_rollout_index": 2,
+            "ng_model_call_capture": {
+                "rollout_id": "4-2",
+                "calls": [
+                    {
+                        "model_call_id": f"call-{step}",
+                        "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                        "response_id": f"response-{step}",
+                        "status_code": 200,
+                        "response_status": "completed",
+                        "finish_reason": "stop",
+                        "tokens_in": 10,
+                        "tokens_out": step,
+                        "response": {**_model_json(f"x = {step}"), "id": f"response-{step}"},
+                    }
+                    for step in (1, 2)
+                ],
+            },
+        }
+        _attach_trajectory_record(record, record)
+        assert record["ng_trajectory"]["task_id"] == "1"
+        assert not any(
+            gap["code"] == "producer_trajectory_identity_mismatch" for gap in record["ng_trajectory"]["gaps"]
+        )
+        path = tmp_path / "rollouts.jsonl"
+        path.write_text(json.dumps(record) + "\n")
+        checked = run_health_checks(path, output_dir=tmp_path, workers=1)
+        assert checked.rollouts[0].verdict == "healthy"
+        assert checked.rollouts[0].unobserved == []
+
+    @pytest.mark.asyncio
     async def test_run_builds_solutions_and_calls_verify(self):
         agent = _agent()
         captured = {"model": []}
@@ -251,6 +330,7 @@ class TestApp:
             assert request_json["input"][0]["content"]
         verify = captured["verify"]
         assert "response" in verify  # /verify requires a response field
+        assert "ng_trajectory" not in verify  # No capture identity was supplied for this run.
         solutions = verify["solutions"]
         assert set(solutions.keys()) == {"1.1", "1.2"}
         assert "x = 1" in solutions["1.1"]
