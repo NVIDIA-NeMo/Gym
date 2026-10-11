@@ -97,6 +97,8 @@ class ProofRefinementVerifyResponse(BaseVerifyResponse):
 class ProofRefinementAgent(SimpleResponsesAPIAgent):
     """Agent that implements multi-turn proof refinement with error feedback."""
 
+    ray_enabled = False
+
     config: ProofRefinementAgentConfig
 
     async def responses(

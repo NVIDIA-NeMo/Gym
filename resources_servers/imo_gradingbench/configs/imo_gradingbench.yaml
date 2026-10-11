@@ -21,3 +21,11 @@ imo_gradingbench_simple_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/imo_gradingbench/data/example.jsonl
+
+imo_gradingbench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: imo_gradingbench_simple_agent

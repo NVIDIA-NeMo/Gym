@@ -26,6 +26,7 @@ from pydantic import (
     Field,
     TypeAdapter,
     ValidationError,
+    model_serializer,
     model_validator,
 )
 from pydantic_core import PydanticUndefined
@@ -185,6 +186,18 @@ class AlmostServerError(ConfigError, ValueError):
     `error_on_almost_servers` is set, so the run is aborted."""
 
 
+class AgentWithoutEnvironmentServerError(ConfigError, ValueError):
+    """An agent instance has no environment server."""
+
+
+class AmbiguousEnvironmentServerError(ConfigError, ValueError):
+    """Rows route by an agent that more than one environment server fronts."""
+
+
+class AmbiguousAgentRenameError(ConfigError, ValueError):
+    """An environment server references an agent inherited by several new instances."""
+
+
 class AgentCompositionError(ConfigError, ValueError):
     """A standalone agent config could not be composed onto the merged config's agent instances."""
 
@@ -199,6 +212,11 @@ class UnsupportedModelPairingError(ConfigError, ValueError):
 
 class UnsupportedAgentOverrideError(ConfigError, ValueError):
     """A command line override configures an agent that no instance ends up running."""
+
+
+class HeadServerUnreachableError(ConfigError, ValueError):
+    """Nothing answered at the configured head server address, so the merged config could not be fetched
+    from it (the head server is not running, or `head_server.host` / `head_server.port` point elsewhere)."""
 
 
 ########################################
@@ -449,6 +467,13 @@ class DatasetConfig(BaseModel):
     name: str
     type: DatasetType
     jsonl_fpath: str
+    prepare_script: Optional[Path] = None
+    prepare_dependencies: List[str] = Field(default_factory=list)
+    taskset: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="Taskset identifier used to materialize and route this dataset's tasks to an Environment Server.",
+    )
 
     num_repeats: int = Field(default=1, ge=1)
     # Unified, self-describing dataset source. Prefer this over the legacy *_identifier fields below.
@@ -470,6 +495,15 @@ class DatasetConfig(BaseModel):
             Literal["GNU General Public License v3.0"],
         ]
     ] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_preparation_fields(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if self.prepare_script is None:
+            data.pop("prepare_script", None)
+        if not self.prepare_dependencies:
+            data.pop("prepare_dependencies", None)
+        return data
 
     @model_validator(mode="after")
     def check_train_validation_sets(self) -> "DatasetConfig":
@@ -540,8 +574,17 @@ class BenchmarkDatasetConfig(BaseModel):
     type: Literal["benchmark"]
     jsonl_fpath: Path
     prepare_script: Path
+    taskset: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="Taskset identifier used to materialize and route this dataset's tasks to an Environment Server.",
+    )
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
+    # `uv pip install` arguments the prepare script needs, installed before it is
+    # imported. Without this a benchmark whose prepare pulls something Gym does
+    # not otherwise depend on has to shell out to pip mid-prepare to get it.
+    prepare_dependencies: List[str] = Field(default_factory=list)
     agent: Optional[str] = Field(
         default=None,
         description=(
@@ -549,7 +592,8 @@ class BenchmarkDatasetConfig(BaseModel):
             "Only needed when the config is ambiguous: the dataset is declared on a resources "
             "server that several agents reference. The pin must name one of those agents — rows "
             "are dispatched along the agent -> resources server edge, so any other value is a "
-            "config error. Unambiguous configs resolve without it."
+            "config error. Unambiguous configs resolve without it. A dataset that declares `taskset` "
+            "routes to an Environment Server, not an agent, and cannot set it."
         ),
     )
 

@@ -160,7 +160,7 @@ At startup (`run_webserver`), Gym:
 
 - turns each plain `POST` route into an MCP tool **named after its path** (`POST /get_weather` → tool `get_weather`), with the input schema derived from the route's Pydantic body model and the description from the handler's docstring. `/seed_session`, `/verify`, `/aggregate_metrics`, and `/mcp` are never tools.
 - mounts a Streamable-HTTP `/mcp` endpoint on the same app.
-- wraps `/seed_session` so its response also carries the `mcp` metadata (server name, `/mcp` URL path, and a signed per-rollout `X-NeMo-Gym-Session-Token`) — which is how an MCP-native agent discovers the endpoint and its rollout-scoped credentials.
+- wraps `/seed_session` so its response also carries the `mcp` metadata (server name, `/mcp` URL path, and a signed per-rollout `X-NeMo-Gym-Session-Token`) — which is how an MCP-native agent discovers the endpoint and its rollout-scoped credentials. When an Environment Server seeds the session, the same metadata is returned in the typed `resources_tools` field instead, and the Environment Server grants it to the agent.
 
 An MCP `tools/call` invokes the route's own handler directly, with the rollout's session materialized on the `Request` — handlers keep their `request.session` reads exactly as written. The route stays callable over plain HTTP too: the same tool serves both transports, and `/verify` scores both identically. Tool errors (`HTTPException`, validation failures, crashes) surface to the MCP client as tool errors with the same status and text the plain HTTP route would have returned.
 
@@ -245,7 +245,7 @@ The same override handles the other tailoring cases: **exclude a route** by filt
 
 ### Per-rollout tool restriction
 
-To narrow one rollout's token to the tools its task actually allows, override `mcp_allowed_tools_for_session(self, seed_body)` — `seed_body` is the JSON body POSTed to `/seed_session`. Return the allowed tool names, or `None` (the default) for unrestricted:
+To narrow one rollout's token to the tools its task actually allows, override `mcp_allowed_tools_for_session(self, seed_body)` — `seed_body` is the JSON body POSTed to `/seed_session`, or its `task_data` when an Environment Server seeds the session. Return the allowed tool names, or `None` (the default) for unrestricted:
 
 ```python
 def mcp_allowed_tools_for_session(self, seed_body: dict) -> list[str] | None:

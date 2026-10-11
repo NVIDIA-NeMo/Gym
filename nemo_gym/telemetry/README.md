@@ -22,7 +22,7 @@ Everything else here is supporting work for that.
 | --- | --- | --- | --- |
 | Process model | one process tree | Ray driver + actors | **N independent FastAPI processes** |
 | How settings reach a worker | in-process | Ray `runtime_env` | **`os.environ` snapshotted by `Popen`** |
-| Default `export_strategy` | `single_rank` | `single_rank` | **`all_ranks`** |
+| Which processes export | rank filter | rank filter | **every server process** |
 | The hard part | where to put a span | driver/worker split | **cross-process context propagation** |
 
 Gym's servers share no memory and inherit no handle. The orchestrator
@@ -30,9 +30,13 @@ Gym's servers share no memory and inherit no handle. The orchestrator
 `NEMO_GYM_OTEL_*` environment variables *before* spawning anything, and each server
 process reads that environment back. That is the whole of the coordination.
 
-`all_ranks` is the default because each Gym server is rank 0 of its own world of 1. A
-rank-based filter would either silence all of them or none, and any silenced process is a
-hole in the middle of a distributed trace.
+Every Gym server exports and reports itself as rank 0 of a world of 1. A rank-based
+filter would either silence all of them or none, and any silenced process is a hole in the
+middle of a distributed trace.
+
+nemo-lens allows one `setup_telemetry` per process. When Gym runs inside a NeMo-RL process
+that already called it, `init_telemetry` reuses those providers and leaves their shutdown
+to NeMo-RL.
 
 ## Files
 
@@ -40,8 +44,9 @@ hole in the middle of a distributed trace.
 | --- | --- |
 | `config.py` | `TelemetryConfig` — the `telemetry:` block. Imports pydantic only. |
 | `setup.py` | Lifecycle: `configure_telemetry_env` (orchestrator), `init_telemetry` (per server process), `get_telemetry`, `shutdown_telemetry`. |
-| `span_groups.py` | `GymSpanGroup` — Gym's groups and the `default` / `per_rollout` / `all` presets. |
+| `span_groups.py` | `GymSpanGroup` — Gym's groups and the `default` / `per_rollout` presets, registered with nemo-lens's `SpanRegistry` at import. |
 | `metrics.py` | Wrapper over nemo-lens's `gym.*` instruments, with a stated position on each. |
+| `memory.py` | Centralized host and logical-server process-tree memory sampling. |
 | `_fallbacks.py` | The single import point for instrumentation primitives. |
 
 ## Two rules worth knowing before you edit
@@ -83,6 +88,8 @@ nemo-lens's `record_gym_metrics` records **without attributes** at the pinned co
 would merge every endpoint of every server type into one histogram. The FastAPI
 instrumentor's `http.server.request.duration`, dimensioned by route/method/status, is used
 instead. `gym.servers.active` is a gauge and is written by the orchestrator only.
+
+Memory metrics are Gym-owned because nemo-lens has no instrument for a logical server and all of its descendants. The orchestrator owns the server root PIDs, so one sampler can report stable per-server RSS/PSS alongside host-wide capacity and pressure.
 
 Reward and accuracy numbers do **not** belong here. They are experiment telemetry (W&B's
 job), not application telemetry — see

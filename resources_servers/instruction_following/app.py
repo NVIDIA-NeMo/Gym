@@ -91,6 +91,7 @@ class IndicIFEvalVerifyResponse(InstructionFollowingVerifyResponse, IndicIFEvalS
 
 
 class InstructionFollowingResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: InstructionFollowingResourcesServerConfig
 
     def __init__(self, **kwargs):

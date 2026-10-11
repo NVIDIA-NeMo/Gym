@@ -125,7 +125,7 @@ service endpoints, status, and cleanup.
 
 This agent intentionally installs the immutable
 [`JeffPengCoder/OSWorld`](https://github.com/JeffPengCoder/OSWorld) fork at
-commit `0a65076f6f686588697343da59295cefc6bb7e56`, as declared in
+commit `f32ab2b74e3ea66e6a8eb0d87876a12ce93904d5`, as declared in
 [`requirements.txt`](requirements.txt). That revision starts from upstream
 OSWorld `83e85344` and includes the `nv-gym` provider overlay, proxy-runtime
 repair, logging hardening, VLC gateway-auth fallback, the per-environment
@@ -133,6 +133,12 @@ provider contract, opt-in setup/evaluator return-code semantics, and the
 restricted-guest Chrome ownership fix without rewriting canonical OSWorld task
 configs. Gym supplies orchestration and the
 worker control plane; OSWorld remains independent of Gym.
+
+The fork declares NumPy/OpenCV requirements by Python version: Python 3.12
+retains NumPy 1.26/OpenCV 4.8, while Python 3.13 uses NumPy 2.1+ and
+NumPy-2-compatible OpenCV 4.10.0.84+. Gym's role-local ranges further select
+the supported runtime. No NumPy override is needed to bypass OSWorld metadata;
+both this agent and the resources server consume the same source revision.
 
 The dependency is consumed as a commit-addressed source archive so uv does not
 initialize optional OSWorld submodules. Gym does not mutate the installed
@@ -206,6 +212,38 @@ history_policy:
   name: hysteresis
   params: {low_water: 3, high_water: 10}
 ```
+
+An opt-in sink window keeps the earliest screenshots alongside the recent
+window; intervening turns remain text in chronological order:
+
+```yaml
+history_policy:
+  name: sink_window
+  params: {sink: 1, low_water: 4, high_water: 4}
+```
+
+Here the four live images include one sink image and three recent images.
+Equal watermarks produce a sliding window. Setting `low_water: 3` and
+`high_water: 10` instead accumulates up to ten images and compacts back to
+three, including the sink. The low watermark must exceed `sink` to leave
+room for the current observation. Existing fixed/hysteresis policy identities
+and normal-path prompt rendering remain unchanged; selecting a sink is an
+intentional recipe change, not a default or a guaranteed score improvement.
+
+`snapshot_image_intervals` records the selected half-open turn intervals.
+For non-contiguous plans, consumers must use these intervals or per-turn
+decisions, not the legacy scalar `image_window_start` accessor. The telemetry
+field `snapshot_window_start` describes the trailing interval.
+
+On a context-length rejection, the adapter can shrink the recent-image window
+within its existing retry budget, preserving the sink and current observation.
+It stops when no smaller valid image set exists. Each actual shrink is recorded
+in `prompt_shrink_events`, including on recovered steps; this recovery can
+change outcomes relative to the previous unchanged-request retries. Normal
+parse failures do not trigger shrinking, and model deadlines propagate to the
+runner without parser retries. The adapter reports specific failure kinds and
+the terminal attempt's completion fact; runner/runtime admission still owns
+masking, and the evaluator still owns reward.
 
 `agent_contract_parity_mode: strict` is the default. It resolves the training
 and evaluation profiles at startup and refuses to start if their model

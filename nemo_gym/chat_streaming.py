@@ -28,9 +28,9 @@ its existing non-streaming backend call and re-emitting it as an SSE stream. Thi
 - the response-side synthesizer that re-emits a complete ``NeMoGymChatCompletion`` as the
   ``chat.completion.chunk`` SSE sequence a streaming client expects, terminated by ``data: [DONE]``.
 
-Only the SSE envelope is synthesized -- there is no true token-by-token streaming. The backend
-call completes before the first byte is emitted, so the model server's retry and
-error-normalization behavior is fully preserved on this path. External staging stores training
+Only the SSE envelope is synthesized -- there is no true token-by-token streaming. The dispatch
+sends keepalive comments while the backend computes, then emits the complete answer. Backend
+failures after the stream starts become terminal SSE errors. External staging stores training
 tokens separately; token ids and training logprobs are not carried in the ``chat.completion.chunk``
 schema. A client that does not set ``stream_options.include_usage``
 gets no usage chunk, so a model-call record reconstructed from this stream will lack token counts.
@@ -41,12 +41,20 @@ import logging
 from copy import deepcopy
 from typing import Any, Iterator
 
-from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.openai_utils import (
+    CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+)
 
 
 LOG = logging.getLogger(__name__)
 
-_PARAM_FIELDS = frozenset(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields)
+# Provider extension fields are accepted on the non-streaming path only. Streaming harnesses
+# (e.g. OpenClaw's ``chat_template_kwargs``) have always had them dropped here, so they stay
+# dropped rather than reaching the backend.
+_PARAM_FIELDS = (
+    frozenset(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields) - CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+)
 
 
 def _wants_usage(stream_options: Any) -> bool:

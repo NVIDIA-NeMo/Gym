@@ -641,7 +641,7 @@ overlay.
 | --- | --- |
 | Gym OSWorld benchmark | No manual checkout. The agent package installs the exact SHA from `responses_api_agents/osworld_agent/requirements.txt`. |
 | Direct OSWorld, plain Docker/VMware, no proxy-required tasks | Upstream xlang OSWorld main is sufficient; this adapter's pre-fix baseline was `83e8534451ba8b3ab6477448ef3f0a8e563f05be`. |
-| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `0a65076f6f686588697343da59295cefc6bb7e56` or a reviewed successor that preserves the selected task corpus. |
+| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `f32ab2b74e3ea66e6a8eb0d87876a12ce93904d5` or a reviewed successor that preserves the selected task corpus. |
 | Direct OSWorld with proxy-required tasks | The same `nv-gym` pinned SHA; set `PROXY_CONFIG_FILE` and construct `DesktopEnv(enable_proxy=True)`. |
 | Direct OSWorld with both features | The same `nv-gym` pinned SHA provides both independent capabilities. |
 
@@ -650,7 +650,7 @@ For a direct integration of the tested version:
 ```bash
 git clone https://github.com/JeffPengCoder/OSWorld.git
 cd OSWorld
-git checkout 0a65076f6f686588697343da59295cefc6bb7e56
+git checkout f32ab2b74e3ea66e6a8eb0d87876a12ce93904d5
 ```
 
 Use an immutable SHA in a lockfile or deployment manifest. The integration

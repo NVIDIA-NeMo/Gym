@@ -25,6 +25,16 @@ _EXECUTORS = {
 
 
 @experimental
-def submit(config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:  # pragma: no cover
+def submit(config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
     compute = next(iter(config.compute.values()))
-    return _EXECUTORS[type(compute)]().run(config, dry_run=dry_run)
+    executor_cls = _EXECUTORS[type(compute)]
+
+    if not executor_cls.supports_resumable:
+        unsupported = [name for name, b in config.driver.benchmarks.items() if b.resume_config is not None]
+        if unsupported:
+            raise ValueError(
+                f"Benchmark(s) {', '.join(unsupported)} set `resumable`, but {executor_cls.__name__} "
+                "does not support resumable runs."
+            )
+
+    return executor_cls().run(config, dry_run=dry_run)

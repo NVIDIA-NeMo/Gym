@@ -45,7 +45,7 @@ from nemo_gym.atif_v1_7 import (
     AtifTrajectoryV1_7,
 )
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, rollout_agent_label
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -896,13 +896,14 @@ def gym_rollout_to_atif(rollout: dict[str, Any], *, session_id: str, agent_versi
         raise _path_error("ng_trajectory.invocations[0].error_type", "completed invocation contains an error")
 
     agent_ref = rollout.get(AGENT_REF_KEY_NAME)
-    _preflight_model_ref(agent_ref, path=AGENT_REF_KEY_NAME)
-    agent_name = agent_ref.get("name") if isinstance(agent_ref, dict) else None
+    if agent_ref is not None:
+        _preflight_model_ref(agent_ref, path=AGENT_REF_KEY_NAME)
+        agent_type = agent_ref.get("type") if isinstance(agent_ref, dict) else None
+        if agent_type not in (None, "responses_api_agents"):
+            raise _path_error(f"{AGENT_REF_KEY_NAME}.type", "expected responses_api_agents when present")
+    agent_name = rollout_agent_label(rollout)
     if not isinstance(agent_name, str) or not agent_name.strip():
-        raise _path_error(AGENT_REF_KEY_NAME, "expected a non-empty agent_ref.name")
-    agent_type = agent_ref.get("type")
-    if agent_type not in (None, "responses_api_agents"):
-        raise _path_error(f"{AGENT_REF_KEY_NAME}.type", "expected responses_api_agents when present")
+        raise _path_error(AGENT_REF_KEY_NAME, "expected a non-empty agent_ref.name or environment server stamp")
 
     task_index = _index(rollout, TASK_INDEX_KEY_NAME, path=TASK_INDEX_KEY_NAME)
     rollout_index = _index(rollout, ROLLOUT_INDEX_KEY_NAME, path=ROLLOUT_INDEX_KEY_NAME)
@@ -1003,9 +1004,9 @@ def export_rollouts_to_atif(config: ExportAtifConfig) -> AtifExportResult:
                     if key in keys:
                         raise _path_error(f"line {line_no}", f"duplicate Gym rollout key {key}")
                     keys.add(key)
-                    agent_ref = row.get(AGENT_REF_KEY_NAME)
-                    if isinstance(agent_ref, dict) and isinstance(agent_ref.get("name"), str):
-                        agent_names.add(agent_ref["name"])
+                    label = rollout_agent_label(row)
+                    if isinstance(label, str):
+                        agent_names.add(label)
                     trajectory = gym_rollout_to_atif(
                         row,
                         session_id=config.session_id,

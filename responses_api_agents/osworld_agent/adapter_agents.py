@@ -143,6 +143,71 @@ def _encode_image(image_content: bytes) -> str:
     return base64.b64encode(image_content).decode("utf-8")
 
 
+# A rejected request and a malformed sample are different defects with
+# different remedies, and the old code funnelled both into one bucket named
+# after only one of them.  Classify explicitly so telemetry can tell a server
+# 4xx apart from the model emitting a stop token mid-string.
+_CONTEXT_OVERFLOW_MARKERS = (
+    "maximum context length",
+    "context_length_exceeded",
+    "exceeds model",
+    "reduce the length",
+    "input length",
+    "prompt is too long",
+    "please reduce",
+)
+
+# One bucket named "model_response_invalid" made a server 4xx and a
+# malformed sample indistinguishable in telemetry. Keep the family name for
+# consumers that aggregate, but report the specific defect.
+MODEL_FAILURE_OUTCOMES = {
+    "context_overflow": "model_context_overflow",
+    "transport_error": "model_call_failed",
+    "output_truncated": "model_output_truncated",
+    "empty_response": "model_response_empty",
+    "unparseable": "model_response_unparseable",
+}
+
+MODEL_FAILURE_KINDS = (
+    "context_overflow",
+    "transport_error",
+    "output_truncated",
+    "empty_response",
+    "unparseable",
+)
+
+
+def _failure_status_code(exc: BaseException) -> int | None:
+    for holder in (exc, getattr(exc, "response", None)):
+        code = getattr(holder, "status_code", None)
+        if isinstance(code, int):
+            return code
+    code = getattr(exc, "code", None)
+    return code if isinstance(code, int) else None
+
+
+def classify_model_failure(exc: BaseException, *, model_call_completed: bool) -> str:
+    """Name the defect behind one failed sampling attempt.
+
+    ``context_overflow`` is the only kind a retry cannot fix on its own: the
+    request is deterministically rejected, so resending it unchanged burns the
+    whole retry budget. Callers are expected to shrink the prompt instead.
+    """
+
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if any(marker in text for marker in _CONTEXT_OVERFLOW_MARKERS):
+        return "context_overflow"
+    if not model_call_completed:
+        return "transport_error"
+    if "finish_reason=" in text and "length" in text:
+        # The finish-reason guard runs before the parser, so this is the only
+        # kind that really means "the sampler hit its token budget".
+        return "output_truncated"
+    if "has no content" in text:
+        return "empty_response"
+    return "unparseable"
+
+
 def _response_parts(response: Any) -> tuple[str, str]:
     """Return ``(content, reasoning)`` for OpenAI-style strings or messages."""
 
@@ -660,10 +725,16 @@ class NemotronV3NanoOmniAgent:
         self.actions: List[str] = []
         self.cots: List[Dict[str, Any]] = []
         self.history_policy_state = HistoryPolicyState()
-        self.compacted_before = 0
+        # Turns folded into the text summary. Replaces the former
+        # ``compacted_before`` scalar, which assumed the live images were one
+        # contiguous suffix and is meaningless once a policy keeps a sink.
+        self.compacted_turns: tuple[int, ...] = ()
         self.snapshot_window: Dict[str, Any] = {
             "prompt_snapshot_count": 0,
             "snapshot_window_start": 0,
+            "snapshot_image_intervals": [],
+            "snapshot_sink_size": self.history_policy.sink,
+            "snapshot_image_budget_clamped": False,
             "snapshot_compaction_triggered": False,
             "snapshot_window_min": self.max_image_history_length,
             "snapshot_window_max": self.max_live_images,
@@ -756,7 +827,13 @@ class NemotronV3NanoOmniAgent:
             guidance.append(PRE_DONE_CHECKLIST)
         return "\n\n".join(guidance)
 
-    def _messages(self, instruction: str, obs: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _messages(
+        self,
+        instruction: str,
+        obs: Dict[str, Any],
+        *,
+        max_images: int | None = None,
+    ) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
         instruction_prompt = self.model_protocol.instruction_template.format(instruction=instruction)
         action_count = len(self.actions)
@@ -764,30 +841,45 @@ class NemotronV3NanoOmniAgent:
             self.history_policy,
             self.history_policy_state,
             completed_turns=action_count,
+            max_images=max_images,
         )
         self.history_policy_state = plan.next_state
-        self.compacted_before = plan.image_window_start
-        historical_image_turns = tuple(index for index in plan.image_turns if index < action_count)
-        image_history = len(historical_image_turns)
+        self.compacted_turns = plan.text_turns
         self.snapshot_window = plan.telemetry()
 
-        text_history = ""
-        if plan.text_turns:
-            history_parts = []
-            for index in plan.text_turns:
-                history_parts.append(
-                    self.model_protocol.step_template.format(step_num=index + 1)
-                    + self.model_protocol.text_history_template.format(
-                        thought=self.cots[index].get("thought", ""),
-                        action=self.cots[index].get("action", ""),
-                    )
-                )
-            text_history = "# Previous History Actions:\n" + "\n".join(history_parts)
+        # Walk the plan in turn order and flush a text block whenever a run of
+        # folded turns ends.  For a single leading text run -- every policy
+        # shipped before sink_window -- this reproduces the previous rendering
+        # byte for byte.  It is also the only ordering that stays correct once
+        # a policy keeps a sink, because there the summary of the folded middle
+        # must land *after* the sink images and *before* the recent window,
+        # not attached to whichever image happens to come first.
+        pending_text: List[int] = []
 
-        for index in historical_image_turns:
-            user_text = instruction_prompt
-            if index == historical_image_turns[0] and text_history:
-                user_text += text_history + "\n"
+        def _flush_text() -> str:
+            if not pending_text:
+                return ""
+            history_parts = [
+                self.model_protocol.step_template.format(step_num=index + 1)
+                + self.model_protocol.text_history_template.format(
+                    thought=self.cots[index].get("thought", ""),
+                    action=self.cots[index].get("action", ""),
+                )
+                for index in pending_text
+            ]
+            pending_text.clear()
+            return "# Previous History Actions:\n" + "\n".join(history_parts) + "\n"
+
+        image_history = 0
+        for decision in plan.decisions:
+            index = decision.turn_index
+            if index >= action_count:
+                break
+            if decision.disposition != "live_image":
+                pending_text.append(index)
+                continue
+            image_history += 1
+            user_text = instruction_prompt + _flush_text()
             user_text += f"You are currently on Step {index + 1}.\n"
             messages.append(
                 {
@@ -805,9 +897,7 @@ class NemotronV3NanoOmniAgent:
             )
             messages.append({"role": "assistant", "content": self._assistant_history(self.cots[index])})
 
-        current_text = instruction_prompt
-        if image_history == 0 and text_history:
-            current_text += text_history + "\n"
+        current_text = instruction_prompt + _flush_text()
         current_text += f"You are currently on Step {len(self.actions) + 1}.\n"
         guidance = self._step_guidance()
         if guidance:
@@ -833,12 +923,20 @@ class NemotronV3NanoOmniAgent:
         return pattern.sub(lambda match: f"{match.group(1)}{int(match.group(2)) * factor})", code)
 
     def predict(self, instruction: str, obs: Dict[str, Any], **_kwargs: Any) -> tuple[str, List[str], Dict[str, Any]]:
+        # Re-planning after a context overflow must start from the same policy
+        # state as the first attempt, otherwise the window would advance once
+        # per retry and the trajectory would stop being replayable.
+        entry_policy_state = self.history_policy_state
+        image_budget: int | None = None
         messages = self._messages(instruction, obs)
         request_messages = messages
         repeated_action_warning = bool(self._repeated_action_guidance())
         last_error = "No response"
         last_error_type = "RuntimeError"
         last_failure_stage = "model_call"
+        last_failure_kind = "transport_error"
+        failure_kind_counts: Dict[str, int] = {}
+        prompt_shrink_events: List[Dict[str, Any]] = []
         completed_model_calls = 0
         model_calls: List[Dict[str, Any]] = []
         parsed_info: Dict[str, Any] = {"model_calls": model_calls}
@@ -933,12 +1031,48 @@ class NemotronV3NanoOmniAgent:
                 last_error = str(exc)
                 last_error_type = type(exc).__name__
                 last_failure_stage = "response_parse" if model_call_completed else "model_call"
+                last_failure_kind = classify_model_failure(exc, model_call_completed=model_call_completed)
+                failure_kind_counts[last_failure_kind] = failure_kind_counts.get(last_failure_kind, 0) + 1
                 model_call_record["failure_stage"] = last_failure_stage
+                model_call_record["failure_kind"] = last_failure_kind
                 model_call_record["parse_error"] = last_error
                 model_call_record["parsed_actions"] = attempt_actions
                 model_calls.append(model_call_record)
                 will_retry = attempt + 1 < self.parse_retries
-                feedback_next = self.parse_error_feedback and will_retry
+                if last_failure_kind == "context_overflow" and will_retry:
+                    # Resending an over-long prompt cannot succeed; parse
+                    # feedback would only make it longer. Shrink the live-image
+                    # set and rebuild instead, replanning from the entry state.
+                    previous_images = int(self.snapshot_window.get("prompt_snapshot_count") or 1)
+                    minimum_images = self.history_policy.sink + 1
+                    next_budget = max(minimum_images, previous_images - 1)
+                    if next_budget < previous_images:
+                        image_budget = next_budget
+                        self.history_policy_state = entry_policy_state
+                        messages = self._messages(instruction, obs, max_images=image_budget)
+                        request_messages = messages
+                        prompt_shrink_events.append(
+                            {
+                                "parse_attempt": parse_attempt,
+                                "from_images": previous_images,
+                                "to_images": int(self.snapshot_window.get("prompt_snapshot_count") or 0),
+                                "reason": "context_overflow",
+                            }
+                        )
+                        self.logger.warning(
+                            "Context overflow at step %d attempt %d: shrinking live images %d -> %d",
+                            step_number,
+                            parse_attempt,
+                            previous_images,
+                            self.snapshot_window.get("prompt_snapshot_count"),
+                        )
+                    else:
+                        # The sink and current observation cannot be removed.
+                        # An unchanged rejected request cannot recover by retrying.
+                        will_retry = False
+                    feedback_next = False
+                else:
+                    feedback_next = self.parse_error_feedback and will_retry
                 if os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip():
                     _append_agent_io(
                         {
@@ -966,26 +1100,46 @@ class NemotronV3NanoOmniAgent:
                 )
                 if feedback_next:
                     request_messages = self._parse_retry_messages(messages, response, last_error)
-        else:
+                if not will_retry:
+                    break
+
+        if not model_calls[-1].get("accepted"):
             # Report facts only.  The runner owns rollout termination and the
             # runtime-admission policy decides whether the result is masked.
             # In particular, do not turn malformed sampled output into a
             # synthetic model-authored FAIL action.
             parsed_info.update(
                 {
-                    "agent_outcome": "model_response_invalid",
+                    "agent_outcome": MODEL_FAILURE_OUTCOMES[last_failure_kind],
+                    "agent_outcome_family": "model_response_invalid",
                     "stop_rollout": True,
-                    "model_call_completed": completed_model_calls > 0,
+                    # Admission needs the terminal attempt's fact. An earlier
+                    # malformed sample must not hide a later transport failure.
+                    "model_call_completed": model_call_completed,
                     "parse_failure": {
                         "attempt_count": len(model_calls),
                         "completed_model_call_count": completed_model_calls,
                         "last_failure_stage": last_failure_stage,
+                        "last_failure_kind": last_failure_kind,
+                        "failure_kind_counts": dict(failure_kind_counts),
+                        "prompt_shrink_events": list(prompt_shrink_events),
                         "last_error_type": last_error_type,
                         "last_error": last_error,
                     },
                 }
             )
             return last_error, [], parsed_info
+
+        # A step that recovered after shrinking its prompt still consumed extra
+        # sampling and rendered a smaller history than the policy asked for.
+        # Record that on the successful step too, otherwise the only trace of a
+        # server rejection would be on rollouts that died -- which is exactly
+        # how twenty HTTP 400s went missing from a whole benchmark release.
+        # Emitted only when non-empty, so the clean path keeps its byte shape.
+        if prompt_shrink_events:
+            parsed_info["prompt_shrink_events"] = list(prompt_shrink_events)
+        if failure_kind_counts:
+            parsed_info["failure_kind_counts"] = dict(failure_kind_counts)
 
         actions = [self._scale_windows_scroll(action) for action in actions]
         self.observations.append(obs)

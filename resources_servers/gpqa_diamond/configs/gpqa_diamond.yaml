@@ -29,3 +29,11 @@ gpqa_diamond_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/gpqa_diamond/data/example.jsonl
+
+gpqa_diamond_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: gpqa_diamond_simple_agent

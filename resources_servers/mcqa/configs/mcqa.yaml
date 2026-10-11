@@ -43,3 +43,11 @@ mcqa_simple_agent:
       - name: example_with_template_metadata
         type: example
         jsonl_fpath: resources_servers/mcqa/data/example_with_template_metadata.jsonl
+
+mcqa_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: mcqa_simple_agent

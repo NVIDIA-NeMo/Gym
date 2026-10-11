@@ -50,8 +50,9 @@ jobs:
 
   pre-flight:
     needs: [ephemeral-runner-routing]
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@d0878a142525ff79366ca96fbc0b306cd8d64670 # v1.9.0
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@037094bcc9138c72bc125418e6e3653f9e1c4160 # v1.11.0
     with:
+      workflow_ref: 037094bcc9138c72bc125418e6e3653f9e1c4160 # pragma: allowlist secret
       default_runner_prefix: ${{ vars.DEFAULT_RUNNER_PREFIX }}
       non_nvidia_runner_prefix: ${{ needs.ephemeral-runner-routing.outputs.runner_label_base }}
       default_test_data_path: ${{ vars.DEFAULT_TEST_DATA_PATH }}
@@ -92,6 +93,18 @@ jobs:
     needs: [pre-flight, classify_changes]
     if: needs.classify_changes.outputs.docs_only != 'true'
     uses: ./.github/workflows/unit-tests.yml
+    with:
+      base-ref: ${{ needs.pre-flight.outputs.base_ref }}
+
+  # P0 is published separately; requiring that check is a repository rules decision.
+  harness_conformance:
+    name: Harness conformance
+    needs: [pre-flight]
+    uses: ./.github/workflows/harness-conformance.yml
+    permissions:
+      contents: read
+      actions: read
+      checks: write
     with:
       base-ref: ${{ needs.pre-flight.outputs.base_ref }}
 
@@ -362,49 +375,35 @@ jobs:
   notify-failure:
     name: Notify test failure
     runs-on: ubuntu-latest
-    needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests, Nemo_CICD_Test]
+    needs: [ephemeral-runner-routing, pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests, Nemo_CICD_Test]
     environment: main
-    # Deliberately checks github.event_name directly rather than
-    # needs.classify_changes.outputs.is_nightly: classify_changes is skipped
-    # (and all its outputs, including literal ones, become empty) if
-    # pre-flight fails, which would otherwise silently suppress the alert
-    # for exactly the failure class this notifier exists to catch.
+    permissions: {}
+    # Use the event directly: setup outputs are empty when setup fails.
     if: >-
       ${{
-        always() && !cancelled() &&
+        always() && !cancelled() && failure() &&
         (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
-        needs.Nemo_CICD_Test.result == 'failure' &&
         (github.event_name != 'workflow_dispatch' || inputs.send_notification)
       }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
-      # workflow_dispatch can be run against any ref via the Actions UI, so
-      # only alert the shared Gym channel for runs against main or a release
-      # branch (rMAJOR.MINOR.PATCH) - not ad-hoc feature-branch dispatches.
+      # Dispatches on feature branches must not alert the shared channel.
       - name: Check ref is main or a release branch
         id: ref_check
-        uses: ./.github/actions/is-main-or-release-ref
-
+        shell: bash
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          if [[ "$REF" == "main" || "$REF" =~ ^r[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "allowed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "allowed=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Notify Gym alerts channel
         if: steps.ref_check.outputs.allowed == 'true'
-        uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@f07495d7a01aad5578a407db8e0c4f4e395375f6 # v1.9.1
+        uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@631c404d00a9e60afc591cd071d35d2e18f82fc6
         with:
-          webhook: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
-          message: |
-            :rotating_light: Nightly Gym CI failed on ${{ github.ref_name }}
-
-            • Repository: ${{ github.repository }}
-            • Commit: `${{ github.sha }}`
-            • Trigger: ${{ github.event_name == 'schedule' && 'Nightly schedule' || github.event_name == 'workflow_dispatch' && 'Manual dispatch' || 'Push to main' }}
-            • Pre-flight: ${{ needs.pre-flight.result }}
-            • Classify changes: ${{ needs.classify_changes.result }}
-            • Unit tests: ${{ needs.unit_tests.result }}
-            • Container build: ${{ needs.container_build.result }}
-            • GPU E2E tests: ${{ needs.gpu_e2e_tests.result }}
-            • Provider E2E tests: ${{ needs.provider_e2e_tests.result }}
-            • Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>
+          needs-json: ${{ toJSON(needs) }}
+          webhook: ${{ secrets.SLACK_WEBHOOK }}
 
   merge-queue-notification:
     name: Merge queue notification

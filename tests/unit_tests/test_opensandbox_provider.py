@@ -15,6 +15,7 @@
 
 import asyncio
 import builtins
+import gc
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
@@ -38,6 +39,71 @@ from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provi
 
 
 TEST_REGISTRY_PASSWORD = "secret"  # pragma: allowlist secret
+
+
+@pytest.mark.parametrize(
+    "outcome", ["success", "exit-124", "timeout", "cancel", "timeout-stream-error", "cancel-stream-error"]
+)
+async def test_session_execution_releases_session_before_cancelling(outcome: str, monkeypatch) -> None:
+    unhandled_errors = []
+    monkeypatch.setattr(asyncio.get_running_loop(), "call_exception_handler", unhandled_errors.append)
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+    calls = []
+
+    class Commands:
+        async def create_session(self, **kwargs):
+            calls.append("create")
+            assert kwargs == {"working_directory": "/work"}
+            return "session-1"
+
+        async def run_in_session(self, session_id, command, **kwargs):
+            assert session_id == "session-1"
+            assert "solve.sh" in command
+            started.set()
+            if outcome.startswith(("timeout", "cancel")):
+                try:
+                    await stopped.wait()
+                except asyncio.CancelledError:
+                    assert stopped.is_set(), "cancelled the client before stopping the remote process group"
+                    raise
+                if outcome.endswith("stream-error"):
+                    raise RuntimeError("output stream closed")
+            calls.append("finished")
+            return SimpleNamespace(
+                logs=SimpleNamespace(stdout=[SimpleNamespace(text="solution output")], stderr=[]),
+                exit_code=124 if outcome == "exit-124" else 0,
+                error=None,
+            )
+
+        async def delete_session(self, session_id):
+            assert session_id == "session-1"
+            calls.append("delete")
+            stopped.set()
+
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 1})
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", SimpleNamespace(commands=Commands()))
+    task = asyncio.create_task(
+        provider.exec_with_background_services(handle, "bash solve.sh", cwd="/work", timeout_s=0.05)
+    )
+    if outcome.startswith("cancel"):
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        result = await task
+        assert result.stdout == (None if outcome.endswith("stream-error") else "solution output")
+        assert result.return_code == (124 if outcome.startswith("timeout") or outcome == "exit-124" else 0)
+        assert result.error_type == ("timeout" if outcome.startswith("timeout") else None)
+    assert calls.count("delete") == 1
+    if outcome in ("timeout", "cancel"):
+        assert calls.index("delete") < calls.index("finished")
+    del task
+    # Let completed-task callbacks release their references before checking unhandled errors.
+    await asyncio.sleep(0)
+    gc.collect()
+    assert unhandled_errors == []
 
 
 @pytest.mark.parametrize("recovers", [True, False])
@@ -1398,7 +1464,7 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
         async def close(self) -> None:
             raise RuntimeError("close failed")
 
-    with pytest.raises(RuntimeError, match="Failed to stop and close"):
+    with pytest.raises(RuntimeError, match="stop failed"):
         await provider.close(
             opensandbox_provider.SandboxHandle(
                 sandbox_id="sandbox-2",
@@ -2259,14 +2325,12 @@ async def test_exec_background_status_polls_use_dedicated_timeout(
 
 
 @pytest.mark.asyncio
-async def test_exec_background_retries_timed_out_status_poll(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A timed-out status poll retries instead of killing the running command.
-
-    Per-call timeouts are deliberately terminal for submits (a retry could
-    double-run the command), so with the short poll budget a single slow poll
-    would otherwise fail the whole command; re-polling a status is an
-    idempotent GET and must retry within the normal budget.
-    """
+@pytest.mark.parametrize("read_operation", ["status", "logs"])
+@pytest.mark.parametrize("failures", [1, 3])
+async def test_exec_background_retries_timed_out_reads(
+    monkeypatch: pytest.MonkeyPatch, read_operation: str, failures: int
+) -> None:
+    """Read retries are bounded and never resubmit an already-running command."""
 
     class FakeRunCommandOpts:
         def __init__(self, **kwargs: Any) -> None:
@@ -2274,20 +2338,26 @@ async def test_exec_background_retries_timed_out_status_poll(monkeypatch: pytest
 
     class FakeCommands:
         def __init__(self) -> None:
+            self.submissions = 0
             self.status_calls: list[str] = []
+            self.log_calls: list[str] = []
 
         async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            self.submissions += 1
             return SimpleNamespace(id="exec-slowpoll")
 
         async def get_command_status(self, execution_id: str) -> Any:
             self.status_calls.append(execution_id)
-            if len(self.status_calls) == 1:
+            if read_operation == "status" and len(self.status_calls) <= failures:
                 # Surfaces through _await_sdk_call the same way an expired
                 # per-call budget does (asyncio.TimeoutError is TimeoutError).
                 raise TimeoutError("simulated status poll budget expiry")
             return SimpleNamespace(running=False, exit_code=0, error=None)
 
         async def get_background_command_logs(self, execution_id: str) -> Any:
+            self.log_calls.append(execution_id)
+            if read_operation == "logs" and len(self.log_calls) <= failures:
+                raise TimeoutError("simulated log fetch budget expiry")
             return SimpleNamespace(content="ok", cursor=None)
 
     monkeypatch.setattr(
@@ -2312,10 +2382,22 @@ async def test_exec_background_retries_timed_out_status_poll(monkeypatch: pytest
         sandbox_id="sandbox-slowpoll", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
     )
 
-    result = await provider.exec(handle, "echo ok", timeout_s=30)
+    if failures == 3:
+        with pytest.raises(TimeoutError, match=f"command {read_operation}"):
+            await provider.exec(handle, "echo ok", timeout_s=30)
+    else:
+        result = await provider.exec(handle, "echo ok", timeout_s=30)
+        assert result.return_code == 0
+        assert result.stdout == "ok"
 
-    assert commands.status_calls == ["exec-slowpoll", "exec-slowpoll"]
-    assert result.return_code == 0
+    assert commands.submissions == 1
+    expected_attempts = min(failures + 1, 3)
+    if read_operation == "status":
+        assert commands.status_calls == ["exec-slowpoll"] * expected_attempts
+        assert commands.log_calls == (["exec-slowpoll"] if failures == 1 else [])
+    else:
+        assert commands.status_calls == ["exec-slowpoll"]
+        assert commands.log_calls == ["exec-slowpoll"] * expected_attempts
 
 
 def test_tls_verify_reaches_transports(fake_opensandbox_sdk: None) -> None:

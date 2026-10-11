@@ -32,3 +32,11 @@ iheval_simple_agent:
         type: validation
         jsonl_fpath: resources_servers/iheval/data/test.jsonl
         license: Apache 2.0
+
+iheval_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: iheval_simple_agent

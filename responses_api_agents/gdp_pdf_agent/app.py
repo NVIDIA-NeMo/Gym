@@ -453,6 +453,7 @@ def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyR
 
 
 class GdpPdfAgent(SimpleAgent):
+    ray_enabled = False
     config: GdpPdfAgentConfig
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:

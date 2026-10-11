@@ -382,7 +382,7 @@ class AnthropicConverter:
                 items.append(
                     NeMoGymFunctionCallOutput(
                         call_id=block["tool_use_id"],
-                        output=self._anthropic_tool_result_content_to_text(block.get("content", "")),
+                        output=self._anthropic_tool_result_content(block.get("content", "")),
                         type="function_call_output",
                     )
                 )
@@ -416,18 +416,23 @@ class AnthropicConverter:
             "detail": "auto",
         }
 
-    def _anthropic_tool_result_content_to_text(self, content: Any) -> str:
+    def _anthropic_tool_result_content(self, content: Any) -> Any:
         if isinstance(content, str):
             return content
-        texts = []
+        if all(block.get("type") == "text" for block in content):
+            return "\n".join(block.get("text", "") for block in content)
+
+        parts = []
         for block in content:
             if block.get("type") == "text":
-                texts.append(block.get("text", ""))
+                parts.append({"type": "input_text", "text": block.get("text", "")})
+            elif block.get("type") == "image":
+                parts.append(self._anthropic_image_to_input_part(block))
             else:
                 raise NotImplementedError(
                     f"Unsupported Anthropic tool_result content block for ingress: {block.get('type')}"
                 )
-        return "\n".join(texts)
+        return parts
 
     def _anthropic_tools_to_responses(self, tools: Any) -> List[Dict[str, Any]]:
         if not tools:

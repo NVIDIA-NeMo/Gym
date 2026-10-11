@@ -1,0 +1,5 @@
+# Training data is fetched/built locally and never committed; the two example
+# fixtures the repo's data validation requires are the exceptions.
+*.jsonl
+!example.jsonl
+!example_rollouts.jsonl

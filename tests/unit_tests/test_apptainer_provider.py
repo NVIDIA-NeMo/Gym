@@ -16,8 +16,10 @@
 import json
 import shlex
 import shutil
+import socket
 from pathlib import Path
 from typing import Any, Callable
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -35,6 +37,49 @@ pytestmark = pytest.mark.sandbox
 
 
 FAKE_BINARY = "/usr/bin/apptainer"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_preserves_workdir_environment_and_transfers(fake_binary, tmp_path, monkeypatch):
+    import tempfile
+
+    from nemo_gym.sandbox import AsyncSandbox
+
+    staging = Path(tempfile.mkdtemp(prefix="nemo-gym-apptainer-", dir=tmp_path))
+    creator = apptainer_provider.ApptainerProvider()
+    original = AsyncSandbox(creator, SandboxSpec(workdir="/testbed"))
+    original._handle = _make_handle(staging, name="nemo-gym-" + "a" * 32, env={"OMP_NUM_THREADS": "2"})
+    original._stopped = False
+    descriptor = json.loads(json.dumps(await original.serialize()))
+    receiver = apptainer_provider.ApptainerProvider()
+    monkeypatch.setattr(receiver, "status", AsyncMock(return_value=SandboxStatus.RUNNING))
+    received = await AsyncSandbox.connect(descriptor, provider=receiver)
+    calls = []
+
+    async def run(argv, **kwargs):
+        calls.append(argv)
+        assert shlex.split(_env_file_path(argv).read_text()) == ["OMP_NUM_THREADS=2"]
+        return 0, "ok", ""
+
+    monkeypatch.setattr(receiver, "_run", run)
+    await received.exec("pwd")
+    assert _contains_seq(calls[0], ["--pwd", "/testbed"])
+    source = tmp_path / "source"
+    source.write_text("payload")
+    await received.upload(source, "/sandbox/transferred")
+    await original.download("/sandbox/transferred", tmp_path / "download")
+    assert (tmp_path / "download").read_text() == "payload"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_rejects_bare_id_or_other_host(fake_binary, tmp_path):
+    provider = apptainer_provider.ApptainerProvider()
+    with pytest.raises(ValueError, match="full serialized descriptor"):
+        await provider.connect({"sandbox_id": "name"})
+    descriptor = await provider.serialize_handle(_make_handle(tmp_path))
+    descriptor["hostname"] = socket.gethostname() + "-other"
+    with pytest.raises(ValueError, match="same host and UID"):
+        await provider.connect(descriptor)
 
 
 # --------------------------------------------------------------------------- #
@@ -916,7 +961,7 @@ async def test_run_real_timeout(fake_binary: str) -> None:
 
 
 @pytest.mark.skipif(shutil.which("sh") is None, reason="sh not available")
-async def test_run_daemonizing_returns_despite_lingering_child(fake_binary: str) -> None:
+async def test_run_daemonizing_returns_despite_lingering_child(fake_binary: str, tmp_path: Path) -> None:
     """Regression: a backgrounded child inheriting stdout must not wedge the read.
 
     Mirrors ``apptainer instance start``, which forks a long-lived instance that
@@ -924,10 +969,15 @@ async def test_run_daemonizing_returns_despite_lingering_child(fake_binary: str)
     until timeout; the daemonizing path waits only for the foreground process.
     """
     provider = apptainer_provider.ApptainerProvider()
-    # Foreground prints and exits immediately; the backgrounded `sleep` holds the
-    # inherited stdout fd open well past the (generous) timeout.
-    argv = [shutil.which("sh"), "-c", "sleep 30 & printf started"]
-    code, out, _err = await provider._run(argv, timeout_s=10, daemonize=True)
+    # Foreground prints and exits immediately.
+    # The backgrounded loop holds the inherited stdout fd open until the test releases it, well past the timeout.
+    release = tmp_path / "release"
+    lingering = f"while [ ! -e {shlex.quote(str(release))} ]; do sleep 0.05; done"
+    argv = [shutil.which("sh"), "-c", f"{lingering} & printf started"]
+    try:
+        code, out, _err = await provider._run(argv, timeout_s=10, daemonize=True)
+    finally:
+        release.touch()
     assert code == 0
     assert out == "started"
 

@@ -30,7 +30,7 @@ while lens is present.
 
 The no-op branch below is one of the four places named in
 ``kb/knowledge/conventions/fallback-sync.md``. It mirrors ``nemo/lens/fallbacks.py`` at
-commit ``b85578fc``; when a signature changes there, change it here in the same PR.
+commit ``b0f977d4``; when a signature changes there, change it here in the same PR.
 ``tests/unit_tests/telemetry/test_fallbacks.py`` asserts the two agree parameter-for-
 parameter whenever lens is importable.
 """

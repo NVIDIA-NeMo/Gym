@@ -28,7 +28,8 @@ def _require_gprof2dot() -> Callable[..., None]:
         from gprof2dot import main as gprof2dot_main
     except ModuleNotFoundError as e:
         raise ModuleNotFoundError(
-            "gprof2dot is required for CPU profiling. Install nemo-gym[dev] before enabling profiling."
+            "gprof2dot is required for CPU profiling and is not installed by default. "
+            "Run `uv pip install --no-config gprof2dot` before enabling profiling."
         ) from e
 
     return gprof2dot_main

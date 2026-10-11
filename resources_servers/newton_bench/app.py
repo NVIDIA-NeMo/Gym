@@ -142,6 +142,7 @@ class NewtonBenchEndSessionResponse(BaseModel):
 
 
 class NewtonBenchResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: NewtonBenchResourcesServerConfig
     session_metadata: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     _sessions: Dict[str, SessionHandle] = PrivateAttr(default_factory=dict)

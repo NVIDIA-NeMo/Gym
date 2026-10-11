@@ -56,6 +56,7 @@ class SokobanSessionState:
 
 
 class GrlSokobanResourcesServer(GymnasiumServer):
+    ray_enabled = False
     config: GrlSokobanResourcesServerConfig
     session_id_to_state: Dict[str, SokobanSessionState] = Field(default_factory=dict)
 

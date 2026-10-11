@@ -21,3 +21,11 @@ tau2_agent:
       - name: example
         type: example
         jsonl_fpath: responses_api_agents/tau2/data/example.jsonl
+
+tau2_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: tau2_agent

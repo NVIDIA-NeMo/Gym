@@ -36,10 +36,24 @@ telemetry:
 | `exporter` | `otlp` | `otlp` or `console`. |
 | `traces_enabled` | `true` | Emit spans. |
 | `metrics_enabled` | `true` | Emit metrics. |
+| `memory_profiling` | disabled | Sample host capacity and each managed server process tree. See below. |
 | `logs_enabled` | `false` | Bridge Python logging to OpenTelemetry logs. |
-| `export_strategy` | `all_ranks` | Which processes export. See below. |
-| `export_rank` | `-1` | For `single_rank`: which rank exports. `-1` means the last rank. |
 | `run_id` | generated | Correlates every process of one run. |
+
+### Memory Profiling
+
+Enable memory profiling inside the telemetry block:
+
+```yaml
+telemetry:
+  enabled: true
+  metrics_enabled: true
+  memory_profiling:
+    enabled: true
+    interval_seconds: 1
+```
+
+The orchestrator samples host used, available, and total memory plus every server process and its descendants, including Uvicorn workers and ordinary subprocesses. Collection starts after the servers become ready and stops before they are terminated. Server accounting reads Linux `/proc`; PSS is omitted when `smaps_rollup` is unavailable, while RSS falls back to `statm`.
 
 ### Why `service_name_per_server` Defaults to True
 
@@ -49,15 +63,13 @@ slow is the model server." With the default, each process reports
 `nemo-gym/<server name>`, and the unsuffixed name remains available as the
 `nemo.gym.service_group` resource attribute so you can still group the fleet.
 
-### Why `export_strategy` Defaults to `all_ranks`
+### Every Server Process Exports
 
-NeMo-RL and Megatron-LM default to `single_rank`, because they run one process tree where
-rank 0 sees a representative slice of the work. NeMo Gym is different: each server is an
-independent process and is rank 0 of its own world of one. Silencing any of them puts a
-hole in the middle of every distributed trace, so all of them export.
-
-Set `single_rank` only if you are running NeMo Gym inside a larger ranked job and know
-what you are filtering.
+Each server is an independent process that reports itself as rank 0 of a world of one, so
+every server exports. Silencing any of them would leave a gap in every trace that crosses
+it. The `export_strategy` and `export_rank` fields were removed when `nemo-lens` dropped
+rank-based export filtering. Older configs that still set them keep loading, and the
+fields have no effect.
 
 ## Environment Variables
 
@@ -72,14 +84,25 @@ config file.
 | `NEMO_GYM_OTEL_EXPORTER` | `exporter` |
 | `NEMO_GYM_OTEL_TRACES_ENABLED` | `traces_enabled` |
 | `NEMO_GYM_OTEL_METRICS_ENABLED` | `metrics_enabled` |
+| `NEMO_GYM_OTEL_MEMORY_PROFILING_ENABLED` | `memory_profiling.enabled` |
+| `NEMO_GYM_OTEL_MEMORY_PROFILING_INTERVAL_SECONDS` | `memory_profiling.interval_seconds` |
 | `NEMO_GYM_OTEL_LOGS_ENABLED` | `logs_enabled` |
-| `NEMO_GYM_OTEL_EXPORT_STRATEGY` | `export_strategy` |
 | `NEMO_GYM_OTEL_RUN_ID` | `run_id` |
 | `OTEL_SERVICE_NAME` | `service_name` |
 
-`NEMO_LENS_*` works as a fallback for any of the `NEMO_GYM_OTEL_*` names, so
-`NEMO_LENS_ENABLED=1` turns telemetry on. A `NEMO_GYM_OTEL_*` variable beats its
+For the settings `nemo-lens` itself reads (`enabled`, `span_groups`, `exporter`,
+`traces_enabled`, `metrics_enabled`, `logs_enabled`, and `run_id`), `NEMO_LENS_*` works as a
+fallback, so `NEMO_LENS_ENABLED=1` turns telemetry on. The memory profiling settings have no
 `NEMO_LENS_*` equivalent.
+
+The order of precedence is:
+
+1. `NEMO_GYM_OTEL_*`
+2. `NEMO_LENS_*`
+3. The `telemetry:` config block
+
+A `NEMO_LENS_*` variable set by a job that runs NeMo Gym alongside other NeMo libraries, such
+as NeMo RL, therefore applies to NeMo Gym's servers as well.
 
 Boolean variables accept `1`, `true`, `yes`, `on` and their negations.
 
@@ -117,6 +140,10 @@ Two consequences are worth knowing:
 
 - A variable you export in your shell reaches every server, because the orchestrator
   copies its own environment into each child.
+- A job submitted with `gym eval submit` needs none of this by hand: the submit sets
+  `NEMO_GYM_OTEL_ENABLED`, the run id, the span groups, the logs switch and the exporter endpoint
+  for the driver from its `observability:` block, pointing at the collector that runs beside the
+  job. See [Collector for Submitted Jobs](/main/observability/eval-submit-collector).
 - The orchestrator generates one `run_id` and shares it with the fleet, so every process
   in a run reports the same `nemo.run.id` resource attribute.
 

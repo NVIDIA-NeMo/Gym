@@ -98,6 +98,7 @@ class AviaryAgentRunRequest(BaseRunRequest):
 
 
 class AviaryAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: AviaryAgentConfig
 
     def update_agent_state(

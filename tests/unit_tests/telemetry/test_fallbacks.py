@@ -33,6 +33,10 @@ EXPECTED_NAMES = frozenset(
     {"trace_fn", "managed_span", "span_cm", "is_span_group_enabled", "safe_set_span_attributes"}
 )
 
+#: Lens fallbacks Gym deliberately does not mirror. ``SpanRegistry`` is only touched by
+#: ``nemo_gym.telemetry.span_groups``, which skips registration when lens is absent.
+NOT_MIRRORED = frozenset({"SpanRegistry"})
+
 
 def signature_map(module, names):
     """Map name -> parameter list for *names* on *module*."""
@@ -89,6 +93,7 @@ def test_shim_covers_every_lens_fallback(gym_shim_without_lens):
     lens_names |= {
         name for name in vars(lens_fallbacks) if not name.startswith("_") and callable(getattr(lens_fallbacks, name))
     } - {"contextmanager"}
+    lens_names -= NOT_MIRRORED
 
     assert lens_names == EXPECTED_NAMES, (
         "nemo.lens.fallbacks changed its public surface. Update nemo_gym/telemetry/_fallbacks.py "

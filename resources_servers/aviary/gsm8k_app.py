@@ -18,6 +18,7 @@ from resources_servers.aviary.app import AviaryResourcesServer
 
 
 class GSM8kResourcesServer(AviaryResourcesServer[CalculatorEnv, GSM8kDataset]):
+    ray_enabled = False
     dataset: GSM8kDataset = Field(default_factory=lambda: GSM8kDataset(GSM8kDatasetSplit.train))
 
 

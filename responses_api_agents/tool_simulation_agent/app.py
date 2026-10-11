@@ -42,6 +42,7 @@ class ToolSimulationAgentVerifyResponse(BaseVerifyResponse):
 
 
 class ToolSimulationAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: ToolSimulationAgentConfig
 
     async def responses(

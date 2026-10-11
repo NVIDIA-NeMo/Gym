@@ -28,3 +28,11 @@ math_formal_lean_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/math_formal_lean/data/minif2f_test.jsonl
+
+math_formal_lean_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: math_formal_lean_simple_agent

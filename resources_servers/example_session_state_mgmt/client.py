@@ -60,6 +60,7 @@ task = server_client.post(
                 },
             ],
         ).model_dump(exclude_unset=True),
+        "initial_count": 0,
         "expected_count": 7,
     },
 )

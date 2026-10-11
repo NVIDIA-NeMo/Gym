@@ -1,2 +1,2 @@
--e nemo-gym[dev] @ ../../
+-e nemo-gym[dev,sandbox] @ ../../
 hermes-agent @ git+https://github.com/cmunley1/hermes-agent@26bb847a

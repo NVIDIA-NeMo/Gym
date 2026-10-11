@@ -101,6 +101,13 @@ class RemoteCDPBackend(PlaywrightConnectedBackend):
             provider_options=dict(self._provider_options),
         )
         handle = await self._provider.acquire(spec)
+        # The one line that joins a provider's session to the rollout that held it.
+        LOGGER.info(
+            "Provider %r session %s acquired for %s",
+            getattr(self._provider, "name", type(self._provider).__name__),
+            handle.session_id or "?",
+            spec.metadata,
+        )
         if not handle.cdp_url:
             # Release before raising: the provider may already hold a session
             # even though it failed to give us a usable endpoint.
@@ -130,8 +137,9 @@ class RemoteCDPBackend(PlaywrightConnectedBackend):
             # Loud, not fatal: a session the provider still holds is a leaked
             # resource, and silence here is how a run walks into its quota.
             LOGGER.warning(
-                "Provider %r failed to release session %s: %r",
+                "Provider %r failed to release session %s for %s: %r",
                 getattr(self._provider, "name", type(self._provider).__name__),
                 handle.session_id or "?",
+                self.session_metadata,
                 exc,
             )

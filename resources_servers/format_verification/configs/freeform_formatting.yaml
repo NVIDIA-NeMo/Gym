@@ -28,3 +28,11 @@ freeform_formatting_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/format_verification/data/ds2_freeform_formatting_example.jsonl
+
+freeform_formatting_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: freeform_formatting_simple_agent

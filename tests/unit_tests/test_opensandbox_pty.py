@@ -108,14 +108,30 @@ class FakeHttpClient:
         ws: "FakeWs | list[FakeWs] | None" = None,
         post_status: "int | list[int]" = 201,
         ws_error: "Exception | list[Exception] | None" = None,
+        get_response: "FakeResponse | Exception | None" = None,
     ) -> None:
         self._ws = ws
         self._post_status = post_status
         self._ws_error = ws_error
+        # GET /pty/{id}: the session exists unless a test says otherwise.
+        self._get_response = get_response or FakeResponse(200, {"running": True})
         self.post_calls: list[tuple[str, dict[str, Any], dict[str, str]]] = []
         self.delete_calls: list[tuple[str, dict[str, str]]] = []
+        self.get_calls: list[str] = []
         self.ws_calls: list[tuple[str, dict[str, str]]] = []
         self.closed = False
+
+    async def __aenter__(self) -> "FakeHttpClient":
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        await self.close()
+
+    def get(self, url: str, *, headers: dict[str, str], timeout: Any = None) -> FakeResponse:
+        self.get_calls.append(url)
+        if isinstance(self._get_response, Exception):
+            raise self._get_response
+        return self._get_response
 
     def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str], timeout: Any = None) -> FakeResponse:
         self.post_calls.append((url, json, headers))
@@ -703,7 +719,8 @@ async def test_provider_attach_pty_retries_timed_out_takeover(monkeypatch: pytes
     provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "https"})
     rejected = FakeWs([], close_code=1008)
     rejected.closed = True
-    clients = [FakeHttpClient(ws=rejected), FakeHttpClient(ws=FakeWs([CONNECTED]))]
+    existence_check = FakeHttpClient()  # GET /pty/{id} runs before the first dial
+    clients = [existence_check, FakeHttpClient(ws=rejected), FakeHttpClient(ws=FakeWs([CONNECTED]))]
     handed_out: list[FakeHttpClient] = []
     monkeypatch.setattr(
         provider, "_pty_http_client", lambda: handed_out.append(clients[len(handed_out)]) or handed_out[-1]
@@ -711,8 +728,9 @@ async def test_provider_attach_pty_retries_timed_out_takeover(monkeypatch: pytes
     monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0.0,))
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
     session = await provider.attach_pty(handle, "s-7", takeover=True)
-    assert len(handed_out) == 2, "the timed-out takeover must be re-dialed once"
-    assert handed_out[0].closed, "the failed attempt's client must be released"
+    assert len(handed_out) == 3, "the timed-out takeover must be re-dialed once"
+    assert handed_out[1].closed, "the failed attempt's client must be released"
+    assert existence_check.closed, "the existence check's client must be released"
     await session.close()
 
 
@@ -739,7 +757,7 @@ async def test_provider_attach_pty_does_not_retry_without_takeover(monkeypatch: 
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
     with pytest.raises(SandboxPtyError, match="already has an attached client"):
         await provider.attach_pty(handle, "s-7", takeover=False)
-    assert clients_handed == 1, "without takeover the rejection is definitive"
+    assert clients_handed == 2, "without takeover the rejection is definitive (existence check + one dial)"
 
 
 async def test_provider_attach_pty_detaches_own_stale_attachment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -835,6 +853,86 @@ async def test_provider_attach_pty_keeps_refusal_when_status_unavailable(
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=OpaqueRaw())
     with pytest.raises(SandboxPtyError, match="already has an attached client"):
         await provider.attach_pty(handle, "s-7", takeover=True)
+
+
+class _RefusingRaw:
+    """Sandbox whose status must never be consulted: the existence check decides first."""
+
+    async def get_endpoint(self, port: int) -> SimpleNamespace:
+        return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
+
+    async def get_info(self) -> SimpleNamespace:
+        raise AssertionError("a missing session must not wait on the sandbox-death check")
+
+
+def _refused_with_existence(monkeypatch: pytest.MonkeyPatch, get_response: Any) -> tuple[Any, list[FakeHttpClient]]:
+    """Provider whose takeover attaches are refused and whose GET /pty/{id} answers ``get_response``."""
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "https"})
+    handed_out: list[FakeHttpClient] = []
+
+    def _client() -> FakeHttpClient:
+        rejected = FakeWs([], close_code=1008)
+        rejected.closed = True
+        handed_out.append(FakeHttpClient(ws=rejected, get_response=get_response))
+        return handed_out[-1]
+
+    monkeypatch.setattr(provider, "_pty_http_client", _client)
+    monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0.0,))
+    return provider, handed_out
+
+
+@pytest.mark.parametrize("takeover", [True, False])
+async def test_provider_attach_pty_fails_fast_on_a_missing_session(
+    monkeypatch: pytest.MonkeyPatch, takeover: bool
+) -> None:
+    """execd closes 1008 for a missing session exactly as for a held one (seen live after a
+    pause replaced the runtime); the attach must say "not found" at once, without dialing."""
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    missing = FakeResponse(404, {"code": "CONTEXT_NOT_FOUND", "message": "pty session s-7 not found"})
+    provider, handed_out = _refused_with_existence(monkeypatch, missing)
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=_RefusingRaw())
+
+    with pytest.raises(SandboxPtyError, match="PTY session s-7 not found"):
+        await provider.attach_pty(handle, "s-7", takeover=takeover)
+
+    assert len(handed_out) == 1, "only the existence check; no WebSocket dial"
+    assert handed_out[0].get_calls == ["https://server/v1/sandboxes/sb-1/proxy/44772/pty/s-7"]
+    assert handed_out[0].ws_calls == []
+    assert handed_out[0].closed
+
+
+@pytest.mark.parametrize(
+    "get_response",
+    [
+        FakeResponse(404, {"message": "pod IP not yet available"}),  # proxy 404, not execd's
+        aiohttp.ClientConnectionError("check failed"),
+    ],
+    ids=["proxy-404", "check-error"],
+)
+async def test_provider_attach_pty_keeps_retrying_when_absence_is_unproven(
+    monkeypatch: pytest.MonkeyPatch, get_response: Any
+) -> None:
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    provider, handed_out = _refused_with_existence(monkeypatch, get_response)
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=OpaqueStatusRaw())
+
+    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+        await provider.attach_pty(handle, "s-7", takeover=True)
+
+    attaches = [client for client in handed_out if client.ws_calls]
+    assert len(attaches) == 2, "the takeover must still be re-dialed"
+
+
+class OpaqueStatusRaw:
+    async def get_endpoint(self, port: int) -> SimpleNamespace:
+        return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
+
+    async def get_info(self) -> SimpleNamespace:
+        raise RuntimeError("control plane unavailable")
 
 
 async def test_provider_session_reports_non_oom_death_on_server_error_close(monkeypatch: pytest.MonkeyPatch) -> None:

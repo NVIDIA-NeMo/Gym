@@ -206,6 +206,8 @@ class TextToSqlVerifyResponse(BaseVerifyResponse):
 class TextToSqlResourcesServer(SimpleResourcesServer):
     """Text-to-SQL judge verifier using an LLM to compare SQL queries."""
 
+    ray_enabled = False
+
     config: TextToSqlResourcesServerConfig
 
     def __init__(self, *args, **kwargs):

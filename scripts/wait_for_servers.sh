@@ -7,6 +7,9 @@
 #   gym_env_start_pid   PID of the background gym env start process
 #   head_server_port    Port of the head server (default: 11000)
 #   max_wait_seconds    Max seconds to wait for child servers (default: 180)
+#
+# Environment:
+#   HEAD_MAX_WAIT       Max seconds to wait for the head server (default: 180)
 
 set -euo pipefail
 
@@ -24,11 +27,14 @@ check_pid() {
   fi
 }
 
-# Phase 1: Wait for head server to respond on /server_instances (max 60s)
+# Phase 1: Wait for head server to respond on /server_instances.
+# The head server starts Ray first, which can take close to a minute on a
+# shared network filesystem, so the old fixed 60s was too tight.
+HEAD_MAX_WAIT="${HEAD_MAX_WAIT:-180}"
 # The head server has no root route, but /server_instances returns 200.
 echo "Waiting for head server on port ${HEAD_PORT}..."
 HEAD_READY="false"
-for i in $(seq 1 $((60 / POLL_INTERVAL))); do
+for i in $(seq 1 $((HEAD_MAX_WAIT / POLL_INTERVAL))); do
   if curl -sf "${HEAD_URL}/server_instances" > /dev/null 2>&1; then
     echo "Head server up after $((i * POLL_INTERVAL))s"
     HEAD_READY="true"
@@ -38,7 +44,7 @@ for i in $(seq 1 $((60 / POLL_INTERVAL))); do
   sleep "$POLL_INTERVAL"
 done
 if [ "$HEAD_READY" != "true" ]; then
-  echo "Head server did not respond within 60s"
+  echo "Head server did not respond within ${HEAD_MAX_WAIT}s"
   exit 1
 fi
 

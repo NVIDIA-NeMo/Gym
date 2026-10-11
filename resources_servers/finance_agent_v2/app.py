@@ -27,7 +27,7 @@ Upstream tool surface (``finance_agent.tools``):
   - parse_html_page (ParseHtmlPage)           — writes to per-session storage
   - retrieve_information (RetrieveInformation) — LLM over stored docs
   - calculator (Calculator)                   — no key (simpleeval)
-  - price_history (PriceHistory)              — needs Tiingo key
+  - price_history (PriceHistory)              — needs Tiingo key, or local pricing data
   - submit_final_result (SubmitFinalResult)
 
 Tools implement ``async execute(args, state, logger)`` and share a per-session
@@ -37,15 +37,17 @@ Tools implement ``async execute(args, state, logger)`` and share a per-session
 import asyncio
 import json
 import logging
+import os
 import time
 from types import SimpleNamespace
-from typing import Any, ClassVar, Dict, List, NamedTuple, Optional, Sequence
+from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional, Sequence
 
 import yaml
 from fastapi import Body, FastAPI
 
 # Upstream Vals finance-agent-v2 tool classes (installed via requirements.txt).
 from finance_agent.tools import (
+    MAX_END_DATE,
     Calculator,
     EDGARSearch,
     ParseHtmlPage,
@@ -74,13 +76,15 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
+from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage, LocalPriceHistory
+from resources_servers.sec_local_index.cache import ToolCache
+from resources_servers.sec_local_index.local_edgar_search import LocalEdgarSearch
 
 
-# Local cache layer. Support both package import (tests:
-# resources_servers.finance_agent_v2.app) and flat script execution (the nemo-gym
-# entrypoint runs app.py directly, so relative imports would fail).
+# Support both package import (tests: resources_servers.finance_agent_v2.app) and flat
+# script execution (the nemo-gym entrypoint runs app.py directly, so relative imports
+# would fail).
 try:
-    from .cache import ToolCache
     from .cached_tools import (
         CachedEDGARSearch,
         CachedParseHtmlPage,
@@ -92,8 +96,6 @@ except ImportError:  # pragma: no cover - exercised only under flat entrypoint e
         CachedParseHtmlPage,
         CachedPriceHistory,
     )
-
-    from cache import ToolCache
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +118,38 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
     # --- Tool API keys (external services the upstream tools call) -----------
     tavily_api_key: Optional[str] = Field(default=None, description="Tavily API key for the web_search tool.")
     sec_api_key: Optional[str] = Field(default=None, description="sec-api.io API key for the edgar_search tool.")
+
+    # --- SEC data source -----------------------------------------------------
+    edgar_search_mode: Literal["live", "local"] = Field(
+        description="Where edgar_search reads filings from. 'live' queries sec-api.io and needs sec_api_key. "
+        "'local' reads local_edgar_index_path. Other tools are unaffected.",
+    )
+    local_edgar_index_path: Optional[str] = Field(
+        default=None,
+        description="Read-only SQLite FTS5 index backing edgar_search in local mode.",
+    )
+    local_edgar_metadata_path: Optional[str] = Field(
+        default=None,
+        description="Metadata sidecar for the local index, built by "
+        "resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py. Defaults to the index path "
+        "plus '.metadata' when that file exists. Searches are far slower without it.",
+    )
+    sec_dump_path: Optional[str] = Field(
+        default=None,
+        description="Root of the downloaded filing corpus. parse_html_page reads SEC filings from it after the "
+        "cache and before the network. Only used in local mode, since the index is what maps a URL to its file.",
+    )
     pricing_data_api_key: Optional[str] = Field(default=None, description="Tiingo API key for the price_history tool.")
+    price_history_mode: Literal["live", "local"] = Field(
+        default="live",
+        description="Where price_history reads prices from. 'live' queries Tiingo and needs pricing_data_api_key. "
+        "'local' reads local_pricing_dir and never uses the network.",
+    )
+    local_pricing_dir: Optional[str] = Field(
+        default=None,
+        description="Directory containing equity/<TICKER>.jsonl daily records, one JSON object per line with "
+        "date, open, high, low and close. Used by price_history in local mode.",
+    )
 
     # --- Retrieval model (powers retrieve_information) -----------------------
     retrieval_model_server: Optional[ModelServerRef] = Field(
@@ -382,6 +415,8 @@ class _NemoGymRetrievalLLM:
 class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
     """Exposes the upstream Vals finance-agent-v2 tools as HTTP endpoints."""
 
+    ray_enabled = False
+
     config: FinanceAgentV2ResourcesServerConfig
 
     # Tool name -> upstream Tool instance (None when the tool is unavailable,
@@ -395,7 +430,7 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         self._session_start_times: Dict[str, float] = {}
 
         # Shared disk cache for pricing / edgar / SEC docs (disabled when use_cache is False).
-        self._cache = ToolCache(self.config.cache_dir, use_cache=self.config.use_cache)
+        self._cache = ToolCache(self.config.cache_dir, use_cache=self.config.use_cache, app_name="finance_agent_v2")
         if self._cache.enabled:
             logger.info("Tool response cache enabled at %s", self._cache.root)
 
@@ -412,6 +447,40 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         else:
             with open(self.config.rubric_judge_prompt_template_fpath, "r") as f:
                 self._rubric_judge_prompt_template = yaml.safe_load(f)["rubric_judge_prompt_template"].strip()
+
+        self._local_edgar: Optional[LocalEdgarSearch] = None
+        if self.config.edgar_search_mode == "local":
+            if not self.config.local_edgar_index_path:
+                raise ValueError(
+                    "edgar_search_mode is 'local' but local_edgar_index_path is not set. Local mode serves "
+                    "edgar_search entirely from that index; without it every search would fail mid-rollout."
+                )
+            self._local_edgar = LocalEdgarSearch(
+                self.config.local_edgar_index_path,
+                max_end_date=MAX_END_DATE,
+                metadata_path=self.config.local_edgar_metadata_path,
+            )
+            logger.info(
+                "edgar_search: local mode, index %s (coverage %s)",
+                self.config.local_edgar_index_path,
+                self._local_edgar.coverage,
+            )
+        elif not self.config.sec_api_key:
+            raise ValueError("edgar_search_mode is 'live' but sec_api_key is not set.")
+
+        self._local_prices: Optional[LocalPriceHistory] = None
+        if self.config.price_history_mode == "local":
+            if not self.config.local_pricing_dir:
+                raise ValueError(
+                    "price_history_mode is 'local' but local_pricing_dir is not set. Local mode never calls "
+                    "Tiingo; without it every price_history call would fail mid-rollout."
+                )
+            self._local_prices = LocalPriceHistory(self.config.local_pricing_dir)
+            logger.info(
+                "price_history: local mode, %s (%d tickers)",
+                self.config.local_pricing_dir,
+                self._local_prices.ticker_count,
+            )
 
         self._tools = self._build_tools()
 
@@ -431,8 +500,12 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         # No-key tools: always available. parse_html_page is cached (sec.gov docs
         # only) when the cache is on; behavior/output is otherwise identical.
         tools["calculator"] = Calculator()
-        tools["parse_html_page"] = CachedParseHtmlPage(cache) if cache.enabled else ParseHtmlPage()
         tools["submit_final_result"] = SubmitFinalResult()
+
+        if self._local_edgar is not None and self.config.sec_dump_path:
+            tools["parse_html_page"] = LocalParseHtmlPage(self._local_edgar, self.config.sec_dump_path, cache=cache)
+        else:
+            tools["parse_html_page"] = CachedParseHtmlPage(cache) if cache.enabled else ParseHtmlPage()
 
         # Gated on the configured key so availability is deterministic: upstream
         # TavilyWebSearch otherwise falls back to os.getenv and becomes env-dependent.
@@ -443,8 +516,13 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             logger.info("No tavily_api_key configured — web_search will be unavailable")
             tools["web_search"] = None
 
-        # edgar_search (sec-api.io).
-        if self.config.sec_api_key:
+        # edgar_search: local index, or sec-api.io.
+        if self._local_edgar is not None:
+            tools["edgar_search"] = self._try_build(
+                "edgar_search",
+                lambda: LocalEDGARSearch(self._local_edgar, max_end_date=MAX_END_DATE),
+            )
+        else:
             tools["edgar_search"] = self._try_build(
                 "edgar_search",
                 lambda: (
@@ -453,12 +531,11 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                     else EDGARSearch(sec_api_key=self.config.sec_api_key)
                 ),
             )
-        else:
-            logger.info("No sec_api_key configured — edgar_search will be unavailable")
-            tools["edgar_search"] = None
 
-        # price_history (Tiingo).
-        if self.config.pricing_data_api_key:
+        # price_history: local records, or Tiingo.
+        if self._local_prices is not None:
+            tools["price_history"] = self._local_prices
+        elif self.config.pricing_data_api_key:
             tools["price_history"] = self._try_build(
                 "price_history",
                 lambda: (
@@ -1127,6 +1204,10 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             ) / len(criteria)
         return metrics
 
+    def compute_repeat_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Apply the full-run rubric scoring rules to each repeat's means."""
+        return {name: value for name, value in self.compute_metrics(tasks).items() if name.startswith("mean/")}
+
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         """Headline metrics: the usual mean/* plus judge-health counters.
 
@@ -1147,4 +1228,8 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
+    # Root stays at WARNING: at INFO the HTTP client logs a line per model call.
+    logging.basicConfig(level=logging.WARNING)
+    for _logger_name in (__name__, "resources_servers"):
+        logging.getLogger(_logger_name).setLevel(os.environ.get("NEMO_GYM_LOG_LEVEL", "INFO").upper())
     FinanceAgentV2ResourcesServer.run_webserver()

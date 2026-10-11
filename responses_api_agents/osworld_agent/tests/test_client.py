@@ -1270,7 +1270,11 @@ def test_nemotron_v3_nano_omni_runner_uses_gym_messages_transport(monkeypatch) -
     assert FakeNemotronAgent.instances[0].kwargs["max_steps"] == 100
 
 
-def test_nemotron_invalid_sample_stops_without_synthetic_fail(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "agent_outcome",
+    ["model_response_invalid", "model_response_unparseable", "model_output_truncated", "model_response_empty"],
+)
+def test_nemotron_invalid_sample_stops_without_synthetic_fail(monkeypatch, agent_outcome) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
 
     def invalid_sample(_self, _instruction, _obs):
@@ -1278,7 +1282,7 @@ def test_nemotron_invalid_sample_stops_without_synthetic_fail(monkeypatch) -> No
             "Model response did not finish cleanly: finish_reason='length'",
             [],
             {
-                "agent_outcome": "model_response_invalid",
+                "agent_outcome": agent_outcome,
                 "stop_rollout": True,
                 "model_call_completed": True,
                 "parse_failure": {"last_error": "finish_reason='length'"},
@@ -1309,12 +1313,13 @@ def test_nemotron_invalid_sample_stops_without_synthetic_fail(monkeypatch) -> No
     assert result.evaluation_completed is True
     assert result.runtime_eligible is True
     assert result.mask_sample is False
-    assert result.termination_reason == "model_response_invalid"
+    assert result.termination_reason == agent_outcome
     assert result.steps[0].actions == []
     assert FakeEnv.instances[0].actions == []
 
 
-def test_nemotron_model_transport_failure_stops_and_masks(monkeypatch) -> None:
+@pytest.mark.parametrize("agent_outcome", ["model_response_invalid", "model_call_failed", "model_context_overflow"])
+def test_nemotron_model_transport_failure_stops_and_masks(monkeypatch, agent_outcome) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
 
     def unavailable(_self, _instruction, _obs):
@@ -1322,7 +1327,7 @@ def test_nemotron_model_transport_failure_stops_and_masks(monkeypatch) -> None:
             "policy endpoint unreachable",
             [],
             {
-                "agent_outcome": "model_response_invalid",
+                "agent_outcome": agent_outcome,
                 "stop_rollout": True,
                 "model_call_completed": False,
                 "parse_failure": {"last_error": "policy endpoint unreachable"},

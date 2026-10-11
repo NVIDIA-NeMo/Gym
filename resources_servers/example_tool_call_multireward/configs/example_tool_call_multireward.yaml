@@ -20,3 +20,11 @@ example_tool_call_multireward_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/example_tool_call_multireward/data/example.jsonl
+
+example_tool_call_multireward_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: example_tool_call_multireward_simple_agent

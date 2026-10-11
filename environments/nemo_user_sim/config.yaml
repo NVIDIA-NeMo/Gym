@@ -1,0 +1,21 @@
+# NeMo UserSim environment composition. Preparation materializes canonical resolved episode rows.
+config_paths:
+  - resources_servers/nemo_user_sim/configs/nemo_user_sim.yaml
+
+nemo_user_sim_resources:
+  resources_servers:
+    nemo_user_sim:
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/nemo_user_sim/data/example.jsonl
+          taskset: nemo_user_sim:example
+          num_repeats: 1
+          license: Apache 2.0
+        - name: nemo_user_sim
+          type: validation
+          jsonl_fpath: environments/nemo_user_sim/data/nemo_user_sim.jsonl
+          prepare_script: environments/nemo_user_sim/prepare.py
+          taskset: nemo_user_sim:validation
+          num_repeats: 1
+          license: NVIDIA Evaluation Dataset License Agreement

@@ -187,6 +187,7 @@ class OmniscienceVerifyResponse(BaseVerifyResponse):
 
 
 class OmniscienceServer(SimpleResourcesServer):
+    ray_enabled = False
     config: OmniscienceConfig
 
     def model_post_init(self, context):

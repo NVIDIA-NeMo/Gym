@@ -38,6 +38,7 @@ class LocalVLLMModelProxyServerConfig(VLLMModelConfig):
 
 
 class LocalVLLMModelProxyServer(VLLMModel):
+    ray_enabled = False
     config: LocalVLLMModelProxyServerConfig
 
     def setup_webserver(self):

@@ -9,7 +9,7 @@ dependencies = [
     "nemo-gym[dev]",
     # This immutable revision supplies the generic per-instance
     # remote_docker and setup/evaluator contracts used by this server.
-    "osworld @ https://github.com/JeffPengCoder/OSWorld/archive/0a65076f6f686588697343da59295cefc6bb7e56.tar.gz",
+    "osworld @ https://github.com/JeffPengCoder/OSWorld/archive/f32ab2b74e3ea66e6a8eb0d87876a12ce93904d5.tar.gz",
     "requests-toolbelt~=1.0.0",
     # Support deployment-scoped SOCKS routing to remote Docker-published
     # OSWorld service endpoints without proxying Ray or model traffic.
@@ -48,7 +48,6 @@ nemo-gym = { path = "../..", editable = true }
 # model, or trainer environments. The experiment record captures the exact
 # versions selected by uv for a particular platform.
 override-dependencies = [
-    "numpy>=2.1,<2.5",
     "opencv-python-headless~=4.10.0.84",
     "Pillow>=12,<13",
     "matplotlib>=3.10,<3.11",

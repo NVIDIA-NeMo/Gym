@@ -12,12 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""GymSpanGroup preset resolution and membership."""
+"""GymSpanGroup registration, preset resolution, and membership."""
 
 import pytest
 
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from tests.unit_tests.telemetry.conftest import import_without_lens, requires_lens
+from tests.unit_tests.telemetry.conftest import import_without_lens, no_lens, requires_lens
 
 
 #: These exercise the telemetry-enabled path, which needs nemo-lens. The absent-lens path
@@ -25,7 +25,8 @@ from tests.unit_tests.telemetry.conftest import import_without_lens, requires_le
 pytestmark = requires_lens
 
 
-GYM_SPECIFIC = {
+GYM_GROUPS = {
+    "job",
     "server",
     "http_client",
     "rollout",
@@ -36,13 +37,23 @@ GYM_SPECIFIC = {
 }
 
 
-def test_gym_groups_extend_the_shared_base():
-    """Gym adds its own groups without dropping the shared ones."""
-    from nemo.lens.groups import SpanGroup
+def test_importing_span_groups_registers_them_with_lens():
+    """nemo-lens ships no group names, so an unregistered Gym group can never be enabled."""
+    from nemo.lens.groups import SpanRegistry
 
-    assert GYM_SPECIFIC <= GymSpanGroup.ALL_GROUPS
-    assert SpanGroup.ALL_GROUPS <= GymSpanGroup.ALL_GROUPS
-    assert GymSpanGroup.ALL_GROUPS == SpanGroup.ALL_GROUPS | GYM_SPECIFIC
+    from nemo_gym.telemetry.span_groups import NAMESPACE
+
+    assert GymSpanGroup.ALL_GROUPS == GYM_GROUPS
+    assert NAMESPACE in SpanRegistry.namespaces()
+    assert GYM_GROUPS <= SpanRegistry.groups()
+
+
+def test_registration_is_idempotent():
+    """A re-import, or a test that re-registers, must not raise on the existing namespace."""
+    from nemo_gym.telemetry.span_groups import register_span_groups
+
+    register_span_groups()
+    assert GymSpanGroup.resolve("default") == {"job", "server", "http_client", "rollout"}
 
 
 @pytest.mark.parametrize("preset", ["default", "per_rollout", "all"])
@@ -61,7 +72,7 @@ def test_every_preset_carries_the_cross_process_spine(preset):
 
 
 def test_default_preset_is_coarse():
-    """`default` is the run-level view: the spine plus job/evaluate, and nothing per-request."""
+    """`default` is the run-level view: the spine plus job, and nothing per-request."""
     resolved = GymSpanGroup.resolve("default")
     assert resolved == {"job", "server", "http_client", "rollout"}
     for fine_grained in ("verify", "agent", "model_call", "sandbox"):
@@ -109,19 +120,13 @@ def test_resolution_is_case_and_whitespace_insensitive():
     assert GymSpanGroup.resolve("  DEFAULT , Sandbox ") == GymSpanGroup.resolve("default,sandbox")
 
 
-def test_unknown_group_is_rejected_with_the_valid_options():
-    """A typo must fail loudly — silently resolving to nothing looks identical to
-    'telemetry is on but nothing is instrumented', which is very hard to debug."""
-    with pytest.raises(ValueError, match="Unknown span group or preset"):
-        GymSpanGroup.resolve("rollouts")  # note the plural
+def test_unknown_group_is_reported_as_pending_not_enabled():
+    """nemo-lens no longer raises on an unknown name, because the library that owns it may
+    not be imported in this process. It must still enable nothing and be reported back."""
+    from nemo.lens.groups import SpanRegistry
 
-
-def test_unknown_group_error_lists_gym_groups_not_just_lens_ones():
-    with pytest.raises(ValueError) as excinfo:
-        GymSpanGroup.resolve("nope")
-    message = str(excinfo.value)
-    for name in ("model_call", "per_rollout", "sandbox"):
-        assert name in message, f"the error message should offer {name!r} as a valid option"
+    assert GymSpanGroup.resolve("rollouts") == frozenset()  # note the plural
+    assert SpanRegistry.resolve("default,rollouts")[1] == {"rollouts"}
 
 
 def test_empty_spec_resolves_to_nothing():
@@ -153,21 +158,6 @@ def test_resolving_a_preset_without_lens_fails_loudly():
     """Without lens there is nothing to enable, so resolution must raise rather than
     return an empty set — a silent empty result is indistinguishable from a working
     config that happens to trace nothing."""
-    module = import_without_lens("nemo_gym.telemetry.span_groups")
-
-    with pytest.raises(RuntimeError, match="requires nemo-lens"):
-        module.GymSpanGroup.resolve("default")
-
-
-def test_the_stub_mirrors_the_lens_span_group_surface():
-    """The stub stands in for `nemo.lens.groups.SpanGroup`; if lens grows a group the
-    stub does not have, `GymSpanGroup.ALL_GROUPS` silently differs depending on whether
-    the extra is installed."""
-    from nemo.lens.groups import SpanGroup as RealSpanGroup
-
-    module = import_without_lens("nemo_gym.telemetry.span_groups")
-    stub = module.GymSpanGroup.__mro__[1]
-
-    assert stub.ALL_GROUPS == RealSpanGroup.ALL_GROUPS, (
-        "the no-lens stub in span_groups.py has drifted from nemo.lens.groups.SpanGroup"
-    )
+    with no_lens():
+        with pytest.raises(RuntimeError, match="requires nemo-lens"):
+            GymSpanGroup.resolve("default")

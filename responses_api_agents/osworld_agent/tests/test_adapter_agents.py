@@ -438,7 +438,7 @@ def test_nemotron_snapshot_window_accumulates_from_three_to_ten_then_compacts() 
     assert "# Previous History Actions" in str(payloads[10]["messages"])
 
     agent.reset()
-    assert agent.compacted_before == 0
+    assert agent.compacted_turns == ()
 
 
 def test_nemotron_snapshot_window_rejects_high_water_below_low_water() -> None:
@@ -534,7 +534,11 @@ def test_nemotron_preserves_model_call_when_python_is_invalid() -> None:
 
     assert actions == []
     assert "unterminated string literal" in error
-    assert info["agent_outcome"] == "model_response_invalid"
+    # A model that emitted a stop token mid-string is a different defect from a
+    # rejected request or a truncated one; the outcome must say which.
+    assert info["agent_outcome"] == "model_response_unparseable"
+    assert info["agent_outcome_family"] == "model_response_invalid"
+    assert info["parse_failure"]["last_failure_kind"] == "unparseable"
     assert info["stop_rollout"] is True
     assert info["model_call_completed"] is True
     assert info["parse_failure"]["last_failure_stage"] == "response_parse"
@@ -599,7 +603,11 @@ def test_nemotron_agent_reports_exhausted_length_response_without_deciding_admis
 
     assert "finish_reason='length'" in response
     assert actions == []
-    assert info["agent_outcome"] == "model_response_invalid"
+    # finish_reason is checked before the parser runs, so this is the only
+    # failure kind that really means "the sampler hit its token budget".
+    assert info["agent_outcome"] == "model_output_truncated"
+    assert info["agent_outcome_family"] == "model_response_invalid"
+    assert info["parse_failure"]["last_failure_kind"] == "output_truncated"
     assert info["stop_rollout"] is True
     assert info["model_call_completed"] is True
     assert info["parse_failure"]["last_failure_stage"] == "response_parse"
@@ -621,13 +629,18 @@ def test_nemotron_agent_reports_model_transport_failure_as_a_fact() -> None:
 
     assert response == "policy endpoint unreachable"
     assert actions == []
-    assert info["agent_outcome"] == "model_response_invalid"
+    assert info["agent_outcome"] == "model_call_failed"
+    assert info["agent_outcome_family"] == "model_response_invalid"
+    assert info["parse_failure"]["last_failure_kind"] == "transport_error"
     assert info["stop_rollout"] is True
     assert info["model_call_completed"] is False
     assert info["parse_failure"] == {
         "attempt_count": 1,
         "completed_model_call_count": 0,
         "last_failure_stage": "model_call",
+        "last_failure_kind": "transport_error",
+        "failure_kind_counts": {"transport_error": 1},
+        "prompt_shrink_events": [],
         "last_error_type": "ConnectionError",
         "last_error": "policy endpoint unreachable",
     }

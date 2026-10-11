@@ -1,1 +1,6 @@
 torchvision==0.27.0
+# unbabel-comet (via segale) declares protobuf<5.0.0, but wandb (a core
+# nemo-gym dep, CVE remediation) needs protobuf>=5. Force the version
+# wandb resolves to elsewhere in the repo; see wmt_translation/overrides.txt
+# for the same fix and local validation notes.
+protobuf==6.33.6

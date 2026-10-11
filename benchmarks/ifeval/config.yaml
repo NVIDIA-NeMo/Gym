@@ -11,3 +11,10 @@ ifeval_instruction_following_simple_agent:
         jsonl_fpath: benchmarks/ifeval/data/ifeval_benchmark.jsonl
         prepare_script: benchmarks/ifeval/prepare.py
         license: Apache 2.0
+
+ifeval_instruction_following_environment_server:
+  _inherit_from: instruction_following_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: ifeval_instruction_following_simple_agent

@@ -13,18 +13,24 @@ opencode_sandboxed_agent:
 
       debug: false
 
-      opencode_version: 1.17.11
       # @bxyu-nvidia: This needs to be set appropriately for every model!
       opencode_max_context_window: 262144
+
+      opencode_model_call_timeout: 3600000  # In milliseconds e.g. 600000 is 10min. Leave null for no timeout. Default to 1hr
 
       remote_opencode_install_script_path: null
       remote_opencode_binary_path: null
       remote_opencode_musl_binary_path: null
+      # Optional host-local rg executable to upload for network-restricted sandboxes.
+      local_ripgrep_binary_path: null
 
       # Taken from https://github.com/sdevare-nv/nv-opencode/blob/f261004b4e4269a6e193fd242e5ec8ced9a7aec0/packages/opencode/src/bench/cli.ts#L198-L325
       opencode_config:
         permission:
           "*": allow
+          webfetch: deny
+          websearch: deny
+          skill: deny
 
           edit:
             "**": allow
@@ -127,19 +133,6 @@ opencode_sandboxed_agent:
             "*curl *github.io*": deny
             "*wget *github.io*": deny
 
-        tools:
-          bash: true
-          edit: true
-          read: true
-          glob: true
-          grep: true
-          write: true
-          apply_patch: true
-          webfetch: false
-          websearch: false
-          task: true
-          skill: false
-          todowrite: true
 
       sandbox_timeout: 10800  # 3hr default for harness execution
 
