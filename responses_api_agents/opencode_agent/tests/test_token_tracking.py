@@ -14,9 +14,11 @@
 # limitations under the License.
 from copy import deepcopy
 
+from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.token_tracking import (
     attach_parent_tokens,
     chain_output_items,
+    drop_echoed_reasoning,
     main_chain,
     record_call,
 )
@@ -125,3 +127,23 @@ def test_topk_is_kept_on_output_but_not_sent_back() -> None:
     (item, _) = chain_output_items(calls, num_input_images=0)
     assert item.generation_topk_token_ids == [[3, 4], [11, 5]]
     assert item.generation_topk_log_probs == [[-0.1, -2.5], [-0.01, -5.0]]
+
+
+def test_echoed_reasoning_is_dropped_so_the_policy_server_accepts_the_request() -> None:
+    calls = []
+    user = {"role": "user", "content": [image("data:input"), {"type": "text", "text": "q"}]}
+    first = reply("<think>look</think>Reading.", [1, 2], [3, 11], ("call_a",))
+    assert record_call(calls, None, ["data:input"], first)
+
+    # OpenCode's interleaved-reasoning config sends the turn's reasoning back on the assistant message.
+    sent = [
+        user,
+        {**echoed(first), "reasoning": "look", "reasoning_content": "look"},
+        {"role": "tool", "tool_call_id": "call_a", "content": "ok"},
+    ]
+    assert attach_parent_tokens(sent, calls)[0] == 0
+    drop_echoed_reasoning(sent)
+
+    assert "reasoning" not in sent[1] and "reasoning_content" not in sent[1]
+    assert sent[1]["generation_token_ids"] == [3, 11]
+    NeMoGymChatCompletionCreateParamsNonStreaming(model="policy", messages=sent)

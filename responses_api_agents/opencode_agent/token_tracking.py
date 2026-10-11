@@ -52,6 +52,11 @@ TOKEN_KEYS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs"
 # to the policy server in later requests (only TOKEN_KEYS pin the prompt prefix).
 TOPK_KEYS = ("generation_topk_token_ids", "generation_topk_log_probs")
 _THINK_RE = re.compile(r"<think>.*?</think>", re.S)
+# OpenCode echoes each assistant turn's reasoning back in the field its model config names
+# ("interleaved"): reasoning_content by default, reasoning in older configs. The re-attached TOKEN_KEYS
+# already carry that turn's tokens, reasoning included, so the echo is dropped and the request renders
+# as it did before reasoning was replayed.
+_ECHOED_REASONING_KEYS = ("reasoning", "reasoning_content")
 
 
 @dataclass
@@ -118,6 +123,14 @@ def attach_parent_tokens(messages: list[dict[str, Any]], calls: list[TrackedCall
             messages[last].update({key: calls[index].tokens[key] for key in TOKEN_KEYS})
             return index, _image_urls(messages[last + 1 :])
     return None, _image_urls(messages)
+
+
+def drop_echoed_reasoning(messages: list[dict[str, Any]]) -> None:
+    """Remove OpenCode's echoed reasoning from assistant messages before they reach the policy server."""
+    for message in messages:
+        if message.get("role") == "assistant":
+            for key in _ECHOED_REASONING_KEYS:
+                message.pop(key, None)
 
 
 def record_call(
