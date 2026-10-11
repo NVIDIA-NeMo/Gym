@@ -65,6 +65,7 @@ def _parse_opencode_session(
     *,
     model_ref: ModelServerRef | None = None,
     require_terminal_finish: bool = False,
+    message_ids: set[str] | None = None,
 ) -> AgentObservationBundle:
     """Read OpenCode's persisted session tree before its workspace is removed."""
     if not db_path.is_file():
@@ -93,6 +94,9 @@ def _parse_opencode_session(
     finally:
         con.close()
 
+    if message_ids is not None:
+        message_rows = [row for row in message_rows if row["id"] in message_ids]
+        part_rows = [row for row in part_rows if row["message_id"] in message_ids]
     messages = {row["id"]: _load_json(row["data"]) for row in message_rows}
     message_sessions = {row["id"]: row["session_id"] for row in message_rows}
     conversations: dict[str, list[Any]] = {row["id"]: [] for row in session_rows}
