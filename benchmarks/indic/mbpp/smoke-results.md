@@ -5,6 +5,8 @@
 
 Run date: 2026-10-11. This is a six-example integration check, not a full
 benchmark result or an estimate of multilingual model quality.
+The initial run and inspected outputs are preserved below; a separate
+[post-rebase check](#post-rebase-validation) records the fresh follow-up run.
 
 ## Configuration and provenance
 
@@ -176,3 +178,39 @@ with `AssertionError`, not a harness failure. Preparing all 15 languages yielded
 The CI-collected preparation tests cover provenance and config composition.
 The SciCodePile response-roundtrip tests cover both reward 1 and reward 0 for
 English/Hindi IDs; restoring the old language-less IDs makes those tests fail.
+
+## Post-rebase validation
+
+Repeated on 2026-10-11 after rebasing onto upstream `main` at
+`4a9236e48c82f0dc23365a4c0088b1e54d00d3a8` and adding the explicit
+`indic_mbpp_environment_server` relay, matching the current benchmark layout.
+Used the same six-row input, model snapshot, and generation settings recorded
+above, with fresh model requests rather than reused responses. The live Gym
+configuration confirmed the sampling overrides, thinking flag, 8,192-token
+limit, and relay reference to `indic_mbpp_simple_agent`, with
+`error_on_agent_without_environment_server: true`.
+
+| Returned task ID | Reward | Verifier status | Output tokens |
+| --- | ---: | --- | ---: |
+| `Mbpp/en/11` | 1 | pass | 1,454 |
+| `Mbpp/en/367` | 1 | pass | 3,104 |
+| `Mbpp/hi/11` | 1 | pass | 1,393 |
+| `Mbpp/hi/367` | 1 | pass | 2,859 |
+| `Mbpp/kn/11` | 1 | pass | 1,070 |
+| `Mbpp/kn/367` | 1 | pass | 2,975 |
+
+All six responses completed below the token cap, retained their language-qualified
+IDs, and had null `failure_reason` values. All final answers were inspected:
+the task-11 answers remove the first/last matching character with string slices;
+the task-367 answers define `Node` and use recursive subtree-height checks.
+All original assertions passed. The aggregate harness-failure metric was 0,
+the failed-request artifact was empty, and the evaluation process exited 0.
+The optional telemetry-based rollout-health report classified all six records
+as `unobserved` because no captures were recorded; this is not a rollout-health
+check pass.
+
+Also reran the 500 reference solutions and incorrect-solution control described
+above, all 114 preparation/SciCodePile tests, and all five `legacy_agent` tests.
+Both config-composition tests now check the named relay and require strict
+environment wiring. All-files pre-commit checks passed. The full repository CI
+suite was not run locally.

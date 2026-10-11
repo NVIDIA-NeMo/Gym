@@ -246,6 +246,7 @@ def test_native_config_reuses_prompt_agent_and_verifier():
                             "policy_base_url": "http://unused/v1",
                             "policy_api_key": "dummy",
                             "policy_model_name": "test",
+                            "error_on_agent_without_environment_server": True,
                         }
                     ),
                     skip_load_from_cli=True,
@@ -265,10 +266,13 @@ def test_native_config_reuses_prompt_agent_and_verifier():
     original["resources_server"]["name"] = "indic_mbpp_resources_server"
     assert original == translated
     assert indic.indic_mbpp_resources_server.resources_servers.scicodepile.subprocess_timeout == 120
+    relay = indic.indic_mbpp_environment_server.environment_servers.legacy_agent
+    assert relay.agent_server == {"type": "responses_api_agents", "name": "indic_mbpp_simple_agent"}
     assert {server.name for server in parser.filter_for_server_instance_configs(indic)} == {
         "policy_model",
         "indic_mbpp_resources_server",
         "indic_mbpp_simple_agent",
+        "indic_mbpp_environment_server",
     }
     benchmark = BenchmarkConfig.from_config_path(module.BENCHMARK_DIR / "config.yaml")
     assert benchmark.agent_name == "indic_mbpp_simple_agent"
@@ -291,6 +295,7 @@ def test_standalone_smoke_config_preserves_model_settings():
                     "policy_base_url": "http://unused/v1",
                     "policy_api_key": "dummy",
                     "policy_model_name": "google/gemma-4-31B-it",
+                    "error_on_agent_without_environment_server": True,
                 }
             ),
             skip_load_from_cli=True,
@@ -308,8 +313,11 @@ def test_standalone_smoke_config_preserves_model_settings():
     assert dataset.num_repeats == 1
     assert dataset.type == "benchmark"
     assert dataset.jsonl_fpath == "benchmarks/indic/mbpp/data/review-smoke.jsonl"
+    relay = config.indic_mbpp_environment_server.environment_servers.legacy_agent
+    assert relay.agent_server == {"type": "responses_api_agents", "name": "indic_mbpp_simple_agent"}
     assert {server.name for server in parser.filter_for_server_instance_configs(config)} == {
         "policy_model",
         "indic_mbpp_resources_server",
         "indic_mbpp_simple_agent",
+        "indic_mbpp_environment_server",
     }

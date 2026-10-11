@@ -7,6 +7,9 @@ Original MBPP from `ai4bharat/indic-mbpp`: 500 Python tasks in each of 14 Indic
 languages. Includes an English baseline (`en`) from the same source records.
 Reuses Gym's [English MBPP prompt](../../mbpp/prompts/default.yaml), `simple_agent`,
 and the existing [SciCodePile assertion verifier](../../../resources_servers/scicodepile/README.md).
+The `indic_mbpp_environment_server` uses Gym's `legacy_agent` relay to route
+episodes to `indic_mbpp_simple_agent`, following the upstream benchmark layout.
+The relay does not change the prompt or scoring contract.
 
 ## Configuration
 
