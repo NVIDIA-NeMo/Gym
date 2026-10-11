@@ -26,7 +26,8 @@ own.
 
 1. Run `gh pr diff` and read the whole change first.
 2. Read `CLAUDE.md` at the repo root with the Read tool for conventions and
-   known foot-guns. Deviating from an established pattern is itself a finding.
+   known foot-guns. Check deviations against the contract the pattern protects;
+   a different implementation alone is not a finding.
 3. Only then review.
 
 The order is what makes the review worth reading. A reviewer who forms an
@@ -72,6 +73,67 @@ How you think:
   logic via ServerClient, and meaningful exception messages matter.
 - Trust the formatter. Never comment on style, whitespace, or naming;
   linters own that.
+
+### Contract-focused checks
+
+Apply the checks relevant to the changed behavior, not a mandatory refactoring
+checklist. Trace callers and existing contracts before proposing a fix. These
+lessons come from the reviews of [#3554](https://github.com/NVIDIA-NeMo/Gym/pull/3554)
+and [#3818](https://github.com/NVIDIA-NeMo/Gym/pull/3818); their specific fixes are
+not universal requirements.
+
+- **Preserve the normal user workflow.** An agent lifecycle change should not
+  silently require a new dataset conversion command. Separate independently
+  reviewable data-routing or scoring changes, and retain the working adapter
+  until the standard prepare/run path supports the replacement. Check all
+  affected consumers, not just the new entry point.
+- **Put shared contracts in their owning layer.** Reuse session bookkeeping,
+  row conversion, and process supervision when multiple adapters need the same
+  behavior. Give adapters a public hook for partial-setup cleanup instead of
+  exposing private session records. Remove duplicate checks, locks, timers, or
+  wrappers only after identifying their invariant; do not demand abstractions
+  for hypothetical consumers. Keep generic configuration contracts generic and
+  implementation-specific behavior explicitly scoped.
+- **Honor request semantics or reject unsupported controls.** Compare local
+  and sandbox paths for prompt composition and sampling precedence. Do not
+  silently ignore non-default controls, override model-server settings, or
+  substitute a per-call token limit for a total-response budget. When an
+  adapter implements only a subset of the API, consider an explicit supported
+  set so future fields cannot silently pass through validation.
+- **Attribute failures before changing scores or masks.** Distinguish provider
+  outages from model outcomes and preserve gradable partial work when the
+  benchmark contract allows it. An exception alone does not establish an
+  infrastructure failure: patch extraction runs in agent-modifiable state, so
+  its failure can be model-caused. Trace the error through retry, verification,
+  reward, and masking; do not blanket-mask exceptions or silently change a
+  benchmark's failure policy as part of lifecycle hardening.
+- **Review lifecycle transitions, not only the happy path.** Check identical
+  request replay, disconnects, partial setup, delayed launch versus close, and
+  repeated cleanup. Identify who owns cancellation and the sandbox: borrowed
+  execution needs confirmed process cleanup without destroying the resource,
+  while owned-sandbox teardown can terminate the whole sandbox. Check timeout
+  ordering and bounds, partial-output preservation, and stale-PID signaling
+  against the actual provider behavior. Extra independent reapers or locks can
+  introduce races rather than protection.
+- **Validate before conversion loses evidence.** A taskset/materialization
+  option must not hide malformed source fields that flat-row validation would
+  reject. Shared resolvers need consistent inputs from discovery, preparation,
+  manifest validation, and dispatch. Preserve task-ID precedence and collector
+  identity; document when positional IDs shift with collation order.
+- **Use independent test oracles.** Comparing a wrapper to the same converter
+  it calls cannot catch converter regressions. Assert concrete expected IDs,
+  fields, and outcomes; match errors precisely enough to distinguish failure
+  paths. Test advertised compatibility such as prompt application and shared
+  metrics sidecars. Keep common contract tests in the shared suite and adapter
+  tests focused on integration. Optional-dependency skips must not conceal
+  broken imports of required in-repository components.
+- **Document observable changes at the right level.** Prompt precedence,
+  sampling changes, newly rejected controls, and scoring effects belong in the
+  PR's compatibility notes. User guides need minimal working configuration and
+  operational limits; shared integration docs describe common hooks, while a
+  harness README owns its specific request rules. Describe the mechanism that
+  actually guarantees cleanup, and distinguish timeout from cancellation in
+  diagnostics. Cosmetic wording is not a finding; misleading API semantics are.
 
 ## Posting findings
 
