@@ -117,6 +117,7 @@ class SandboxSession[Artifacts]:
         collect: Callable[[], Awaitable[Artifacts]],
         timeout: float,
         close_timeout: float,
+        timeout_resolver: Callable[[], float] | None = None,
     ) -> Artifacts:
         """Run once, preserving captured artifacts even when execution raises.
 
@@ -133,6 +134,10 @@ class SandboxSession[Artifacts]:
             command = await asyncio.shield(self._stage_task)
             if self.closing or self._finalize_task is not None:
                 raise RuntimeError(f"{self.harness} sandbox session closed before launch")
+            if timeout_resolver is not None:
+                timeout = min(timeout, timeout_resolver())
+            if timeout <= 0:
+                raise TimeoutError(f"{self.harness} activation deadline expired before launch")
             cleanup_timeout, provider_timeout = supervision_timeouts(timeout=timeout, close_timeout=close_timeout)
             launch = supervised_launch_command(
                 session_dir=self.session_dir,
@@ -157,11 +162,11 @@ class SandboxSession[Artifacts]:
             # A harness process's nonzero exit can still carry useful, adapter-specific output.
         except BaseException:
             try:
-                await self._finish(timeout=close_timeout)
+                await self.finish(timeout=close_timeout)
             except Exception:
                 LOG.exception("%s cleanup remains unconfirmed; close must retry", self.harness)
             raise
-        await self._finish(timeout=close_timeout)
+        await self.finish(timeout=close_timeout)
         if result.return_code != 0 and self.capture_error is not None:
             raise RuntimeError(
                 f"{self.harness} sandbox execution failed (exit {result.return_code}): {result.stderr or ''}"
@@ -170,6 +175,34 @@ class SandboxSession[Artifacts]:
             raise self.capture_error
         # Collection either returned artifacts (including a valid None) or recorded an error.
         return cast(Artifacts, self.artifacts)
+
+    async def begin_activation(self, *, session_dir: str, timeout: float) -> None:
+        """Rearm a stopped harness using fresh supervisor files in the same sandbox.
+
+        The adapter retains its native conversation elsewhere in the sandbox. A
+        previous launch must be reaped before any activation fields can be reset.
+        Close fences all later activations, including when release needs retry.
+        """
+        if self.closing:
+            raise RuntimeError(f"{self.harness} sandbox session is closing")
+        if self._stage_task is not None:
+            if session_dir == self.session_dir:
+                raise ValueError("Repeated activations require a fresh supervisor directory")
+            await self.finish(timeout=timeout)
+            if self.closing:
+                raise RuntimeError(f"{self.harness} sandbox session is closing")
+            if self.launch_started and (self.cleanup is None or not self.cleanup["cleanup_confirmed"]):
+                raise RuntimeError(f"{self.harness} previous activation cleanup is unconfirmed")
+        self.session_dir = session_dir
+        self.launch_started = False
+        self.cleanup = None
+        self.artifacts = None
+        self.capture_error = None
+        self._stage_task = None
+        self._exec_task = None
+        self._finalize_task = None
+        self._collect = None
+        self._capture_attempted = False
 
     async def stop_harness(self, *, timeout: float) -> None:
         """Fence a delayed launch or confirm descendant cleanup before transport cancellation."""
@@ -187,7 +220,8 @@ class SandboxSession[Artifacts]:
         except TimeoutError as error:
             raise RuntimeError(f"{self.harness} launch outcome is unknown; cleanup deadline exceeded") from error
 
-    async def _finish(self, *, timeout: float) -> None:
+    async def finish(self, *, timeout: float) -> None:
+        """Confirm cleanup and capture without releasing the conversation sandbox."""
         self._finalize_task = _reuse_or_start(self._finalize_task, lambda: self._finalize(timeout=timeout))
         await asyncio.shield(self._finalize_task)
 
@@ -233,7 +267,7 @@ class SandboxSession[Artifacts]:
 
     async def _close(self, *, timeout: float) -> None:
         try:
-            await self._finish(timeout=timeout)
+            await self.finish(timeout=timeout)
         except Exception:
             if not self.owns_sandbox:
                 raise
