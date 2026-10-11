@@ -294,6 +294,8 @@ class AbstentionVerifyResponse(BaseVerifyResponse):
 
 
 class AbstentionServer(SimpleResourcesServer):
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = False
     config: AbstentionConfig
 

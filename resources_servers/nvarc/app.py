@@ -189,6 +189,8 @@ class NVARCVerifyResponse(BaseVerifyResponse):
 
 
 class NVARCResourcesServer(SimpleResourcesServer):
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = False
     config: NVARCResourcesServerConfig
 

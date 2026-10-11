@@ -187,6 +187,9 @@ class JailbreakDetectionResourcesServer(SimpleResourcesServer):
     An LLM judge evaluates whether the policy model's response is safe or unsafe.
     """
 
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
+
     ray_enabled = False
 
     config: JailbreakDetectionConfig

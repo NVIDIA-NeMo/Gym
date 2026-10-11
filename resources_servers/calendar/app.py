@@ -40,6 +40,8 @@ class CalendarResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class CalendarResourcesServer(SimpleResourcesServer):
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = False
     config: CalendarResourcesServerConfig
 

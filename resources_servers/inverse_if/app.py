@@ -261,6 +261,9 @@ def _extract_verdict(judge_text: str) -> tuple[str, str]:
 class InverseIFServer(SimpleResourcesServer):
     """Inverse IF evaluation server."""
 
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
+
     ray_enabled = False
 
     config: InverseIFConfig

@@ -52,6 +52,8 @@ class Ether0VerifyResponse(BaseVerifyResponse):
 
 
 class Ether0ResourcesServer(SimpleResourcesServer):
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = False
     config: BaseResourcesServerConfig
 
