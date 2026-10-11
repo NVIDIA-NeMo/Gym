@@ -16,6 +16,11 @@
 
 from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
 from nemo_gym.sandbox.api import AsyncSandbox, Sandbox, SandboxPty
+from nemo_gym.sandbox.checkpoint import (
+    SandboxCheckpointError,
+    SandboxCheckpointState,
+    SandboxSessionCheckpointer,
+)
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
@@ -40,6 +45,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxPtyAttach,
     SupportsSandboxRuntimeRequirements,
     SupportsSandboxSharedStorage,
+    SupportsSandboxSnapshot,
     create_provider,
     get_provider_class,
     list_providers,
@@ -54,6 +60,9 @@ __all__ = [
     "AsyncSandboxCompose",
     "ConnectableProvider",
     "ExecResult",
+    "SandboxCheckpointError",
+    "SandboxCheckpointState",
+    "SandboxSessionCheckpointer",
     "SandboxCreateError",
     "SandboxCreateVerificationError",
     "SandboxEndpoint",
@@ -70,6 +79,7 @@ __all__ = [
     "SupportsSandboxEndpoint",
     "SupportsSandboxNetwork",
     "SupportsSandboxPauseResume",
+    "SupportsSandboxSnapshot",
     "SupportsSandboxPortForwarding",
     "SupportsSandboxRuntimeRequirements",
     "SupportsSandboxSharedStorage",
