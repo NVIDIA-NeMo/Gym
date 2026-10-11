@@ -141,6 +141,7 @@ from responses_api_agents.opencode_agent.token_tracking import (
     TrackedCall,
     attach_parent_tokens,
     chain_output_items,
+    drop_echoed_reasoning,
     record_call,
 )
 
@@ -705,6 +706,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             body, include_usage = sanitize_streaming_chat_body(body)
         calls = self._tracked_runs.get(run_key)
         parent, new_images = attach_parent_tokens(body.get("messages") or [], calls or [])
+        drop_echoed_reasoning(body.get("messages") or [])
         model_resp = await self.server_client.post(
             server_name=self.config.model_server.name,
             url_path="/v1/chat/completions",
