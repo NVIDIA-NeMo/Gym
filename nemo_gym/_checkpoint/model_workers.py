@@ -37,6 +37,7 @@ from nemo_gym._checkpoint.model import (
     PolicyGate,
     _Ticket,
     covers,
+    discard_abandoned_calls,
     export_model_records,
     import_model_records,
     merge_reports,
@@ -284,6 +285,8 @@ class PolicyWorkerLink(WorkerLink):
         ledger: Optional[CheckpointableLedger] = None,
     ) -> None:
         super().__init__(socket_path=socket_path, on_coordinator_lost=on_coordinator_lost)
+        # This worker's view of the shared capture ledger, to drop the rows of calls it saw abandoned.
+        self.ledger = ledger
         self.restored_cuts = CoordinatedRestoredCuts(self)
         self.gate = PolicyGate(
             server_name=server_name,
@@ -308,7 +311,10 @@ class PolicyWorkerLink(WorkerLink):
 
     async def open_local(self, body: dict[str, Any]) -> None:
         self.adopt(body)
+        abandoned = self.gate.take_abandoned()
         self.gate.open()
+        if abandoned and self.ledger is not None:
+            await asyncio.to_thread(discard_abandoned_calls, self.ledger, abandoned)
 
     def mark_local(self, episode_ids: list[EpisodeId]) -> None:
         super().mark_local(episode_ids)
