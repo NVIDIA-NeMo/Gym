@@ -61,7 +61,9 @@ def test_sandbox_iteration_limit_stays_on_child_when_observations_are_imported()
     }
 
     invocations = [
-        record for record in agent._sandbox_observations({}, raw).records if isinstance(record, AgentInvocation)
+        record
+        for record in agent._sandbox_observations({}, raw, runtime_info=None).records
+        if isinstance(record, AgentInvocation)
     ]
 
     assert len(invocations) == 2
