@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+claude_code_sandboxed:
+  responses_api_agents:
+    claude_code_sandboxed:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: claude-opus-4-6
+      claude_code_version: 2.1.108
+      executable_path: /opt/gym-runtime/claude
+      python_executable: /opt/gym-runtime/python/bin/python3
+      max_turns: 50
+      timeout: 1200
+      close_timeout: 90
