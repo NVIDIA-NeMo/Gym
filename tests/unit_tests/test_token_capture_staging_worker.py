@@ -8,6 +8,7 @@ import threading
 from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -877,5 +878,29 @@ def test_complete_call_computes_staging_digest_once(child: bool, monkeypatch: py
     assert compute.call_count == 1
     record = sink.records[0]
     assert coords.digest == record.digest
+    assert StagedCallRecord.model_validate_json(record.model_dump_json()) == record
+    assert compute.call_count == 2
+
+
+@pytest.mark.parametrize("chunk_only", [False, True])
+def test_checkpoint_record_computes_digest_once(chunk_only: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    from nemo_gym.token_id_capture.staging import records
+
+    compute = Mock(wraps=records.compute_staging_digest)
+    monkeypatch.setattr(records, "compute_staging_digest", compute)
+    monkeypatch.setattr("nemo_gym.token_id_capture.staging.capture.compute_staging_digest", compute, raising=False)
+    capture, sink = _capture(weight_version=7)
+    call = capture.begin_call(_root())
+    if chunk_only:
+        record = capture.build_generation_chunk_record(call, generated_token_ids=[21], generated_logprobs=[-0.25])
+        assert record.token_ids_delta == [21]
+    else:
+        record = capture.build_prefix_record(
+            call, prompt_token_ids=[10], generated_token_ids=[21], generated_logprobs=[-0.25]
+        )
+        assert record.token_ids_delta == [10, 21]
+    assert compute.call_count == 1
+    assert not call.completed
+    assert sink.records == []
     assert StagedCallRecord.model_validate_json(record.model_dump_json()) == record
     assert compute.call_count == 2

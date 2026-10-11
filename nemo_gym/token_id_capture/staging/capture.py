@@ -12,12 +12,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from nemo_gym.token_id_capture.staging.digest import (
-    EXTRAS_DIGEST_VERSION,
-    STAGING_DIGEST_VERSION,
     build_staging_delta,
     compute_chain_hash,
     compute_extras_digest,
-    compute_staging_digest,
     hash_token_ids,
 )
 from nemo_gym.token_id_capture.staging.protocols import (
@@ -341,10 +338,7 @@ class RolloutTokenCapture:
         # logprobs remain unchanged; stamp the combined record with the oldest
         # contributing version so replay-buffer staleness checks are conservative.
         weight_version = call.oldest_weight_version
-        digest = compute_staging_digest(
-            schema_version=admission.schema_version,
-            digest_version=STAGING_DIGEST_VERSION,
-            extras_digest_version=EXTRAS_DIGEST_VERSION,
+        return StagedCallRecord.from_components(
             rollout_id=admission.rollout_id,
             model_call_id=admission.model_call_id,
             parent_call_id=admission.parent_call_id,
@@ -353,23 +347,6 @@ class RolloutTokenCapture:
             delta_len=delta_len,
             cum_len=cum_len,
             weight_version=weight_version,
-            token_ids_delta=token_ids_delta,
-            token_mask_delta=token_mask_delta,
-            generation_log_probs_delta=logprobs_delta,
-            extras_digest=extras_digest,
-            chain_hash=chain_hash,
-            cumulative_hash=cumulative_hash,
-        )
-        return StagedCallRecord(
-            rollout_id=admission.rollout_id,
-            model_call_id=admission.model_call_id,
-            parent_call_id=admission.parent_call_id,
-            mode=admission.mode,
-            prev_len=admission.prev_len,
-            delta_len=delta_len,
-            cum_len=cum_len,
-            weight_version=weight_version,
-            digest=digest,
             token_ids_delta=token_ids_delta,
             token_mask_delta=token_mask_delta,
             generation_log_probs_delta=logprobs_delta,
@@ -400,10 +377,7 @@ class RolloutTokenCapture:
         chain_hash = compute_chain_hash(admission.parent_chain_hash, token_ids_delta)
         cumulative_hash = hash_token_ids(call.prefix_token_ids + token_ids_delta)
         extras_digest = compute_extras_digest(None)
-        digest = compute_staging_digest(
-            schema_version=admission.schema_version,
-            digest_version=STAGING_DIGEST_VERSION,
-            extras_digest_version=EXTRAS_DIGEST_VERSION,
+        return StagedCallRecord.from_components(
             rollout_id=admission.rollout_id,
             model_call_id=admission.model_call_id,
             parent_call_id=admission.parent_call_id,
@@ -412,23 +386,6 @@ class RolloutTokenCapture:
             delta_len=delta_len,
             cum_len=cum_len,
             weight_version=call.weight_version,
-            token_ids_delta=token_ids_delta,
-            token_mask_delta=token_mask_delta,
-            generation_log_probs_delta=logprobs_delta,
-            extras_digest=extras_digest,
-            chain_hash=chain_hash,
-            cumulative_hash=cumulative_hash,
-        )
-        return StagedCallRecord(
-            rollout_id=admission.rollout_id,
-            model_call_id=admission.model_call_id,
-            parent_call_id=admission.parent_call_id,
-            mode=admission.mode,
-            prev_len=admission.prev_len,
-            delta_len=delta_len,
-            cum_len=cum_len,
-            weight_version=call.weight_version,
-            digest=digest,
             token_ids_delta=token_ids_delta,
             token_mask_delta=token_mask_delta,
             generation_log_probs_delta=logprobs_delta,
