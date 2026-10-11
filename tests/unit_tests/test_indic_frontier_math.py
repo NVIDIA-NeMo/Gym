@@ -11,33 +11,74 @@ import yaml
 
 from benchmarks.indic.frontier_math import prepare as prep
 from benchmarks.indic.frontier_math.summarize import summarize
-from nemo_gym.benchmarks import BenchmarkConfig
 from nemo_gym.cli.main import _asset_config_path
 from nemo_gym.environment.manifest import load_manifest
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.registry import _manifest_entry
-from resources_servers.frontiermath.app import FrontierMathRunRequest
 
 
 def test_manifest_and_committed_requests() -> None:
-    benchmark = Path(__file__).resolve().parents[1]
+    benchmark = prep.BENCHMARK_DIR
     manifest = load_manifest(benchmark / "manifest.yaml")
     assert manifest.name == "indic/frontier_math"
     entry = _manifest_entry(benchmark.parents[1], benchmark / "manifest.yaml", "benchmark")
     config_path = Path(_asset_config_path("benchmark", entry.name))
     assert config_path == benchmark / "config.yaml"
-    config = BenchmarkConfig.from_config_path(config_path)
-    assert config.dataset.prepare_script.resolve() == benchmark / "prepare.py"
-    assert config.dataset.jsonl_fpath.resolve() == benchmark / "data/indic_frontiermath_raw.jsonl"
+    assert manifest.canonical_split == "benchmark"
+    assert manifest.datasets[0].num_repeats == 1
+    assert Path(manifest.datasets[0].prepare_script).resolve() == benchmark / "prepare.py"
     assert all(dataset.jsonl_fpath.endswith("indic_frontiermath_raw.jsonl") for dataset in manifest.datasets)
     template = yaml.safe_load(prep.PROMPT_PATH.read_text())["user"]
     examples = benchmark.parents[2] / "resources_servers/frontiermath/data/example.jsonl"
     for line in examples.read_text().splitlines():
         row = json.loads(line)
-        request = FrontierMathRunRequest.model_validate(row)
-        assert request.responses_create_params.input[0].content == template.format(
+        assert row["responses_create_params"]["input"][0]["content"] == template.format(
             language=row["language"], question=row["question"]
         )
+
+
+def test_native_config_routes_to_frontiermath_without_global_sampling_defaults() -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+
+    parser = GlobalConfigDictParser()
+    config = parser.parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.create(
+                {
+                    "config_paths": [
+                        "responses_api_models/vllm_model/configs/vllm_model.yaml",
+                        str(prep.BENCHMARK_DIR / "config.yaml"),
+                    ],
+                    "policy_base_url": "http://unused/v1",
+                    "policy_api_key": "dummy",
+                    "policy_model_name": "test",
+                    "error_on_agent_without_environment_server": True,
+                }
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    assert {server.name for server in parser.filter_for_server_instance_configs(config)} == {
+        "policy_model",
+        "frontiermath",
+        "indic_frontiermath_simple_agent",
+        "indic_frontiermath_environment_server",
+    }
+    environment = config.indic_frontiermath_environment_server.environment_servers.legacy_agent
+    assert environment.agent_server.name == "indic_frontiermath_simple_agent"
+    agent = config.indic_frontiermath_simple_agent.responses_api_agents.simple_agent
+    assert agent.resources_server.name == "frontiermath"
+    assert agent.datasets[0].num_repeats == 1
+    assert agent.datasets[0].type == "benchmark"
+    assert agent.datasets[0].jsonl_fpath == "benchmarks/indic/frontier_math/data/indic_frontiermath_raw.jsonl"
+    assert not config.get("responses_create_params")
+    policy = config.policy_model.responses_api_models.vllm_model
+    assert policy.chat_template_kwargs is None
+    assert policy.sampling_overrides is None
 
 
 @pytest.fixture

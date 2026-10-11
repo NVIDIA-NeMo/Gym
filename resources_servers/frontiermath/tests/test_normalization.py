@@ -44,3 +44,17 @@ def test_normalized_grade_does_not_search_for_gold_or_override_wrong_answer() ->
     wrong_final = _failed_row(status="incorrect", extracted="999", text=r"\boxed{1234}\boxed{999}")
     assert normalized_grade(wrong_final).reward == 0.0
     assert list(recovery_candidates(wrong_final)) == []
+
+
+@pytest.mark.parametrize(
+    ("extracted", "reward"),
+    [
+        (r"x=\frac{1}{2}", 1.0),
+        (r"\dfrac{1}{2}", 1.0),
+        (r"x=\frac{2}{3}", 0.0),
+    ],
+)
+def test_symbolic_recovery_uses_exact_verifier(extracted: str, reward: float) -> None:
+    row = _failed_row(status="invalid_expression", extracted=extracted)
+    row.update(answer_type="expression", expected_answer=r"\frac{1}{2}")
+    assert normalized_grade(row).reward == reward

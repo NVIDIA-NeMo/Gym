@@ -12,6 +12,7 @@ from nemo_gym.server_utils import ServerClient
 from resources_servers.frontiermath.app import (
     FrontierMathConfig,
     FrontierMathResourcesServer,
+    FrontierMathRunRequest,
     FrontierMathVerifyRequest,
 )
 from resources_servers.frontiermath.grading import extract_answer, grade_answer
@@ -21,6 +22,20 @@ ANSWERS = json.loads(
     (Path(__file__).resolve().parents[3] / "benchmarks/indic/frontier_math/answers.json").read_text()
 )["answers"]
 BMO = ANSWERS[0]["expected_answer"]
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        json.loads(line)
+        for line in (Path(__file__).resolve().parents[1] / "data/example.jsonl").read_text().splitlines()
+    ],
+    ids=lambda row: row["row_id"],
+)
+def test_committed_example_request_schema(row: dict) -> None:
+    request = FrontierMathRunRequest.model_validate(row)
+    assert request.expected_answer == row["expected_answer"]
+    assert request.responses_create_params.input[0].role == "user"
 
 
 @pytest.fixture

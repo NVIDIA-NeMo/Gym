@@ -43,21 +43,25 @@ gym eval run --no-serve \
   --input benchmarks/indic/frontier_math/data/en.jsonl \
   --output results/indic_frontiermath/en.jsonl \
   --num-repeats 1 --concurrency 1 \
-  --temperature 1 --max-output-tokens 240000
+  --temperature 1 --top-p 0.95 --max-output-tokens 240000
 
-python benchmarks/indic/frontier_math/summarize.py \
+resources_servers/frontiermath/.venv/bin/python benchmarks/indic/frontier_math/summarize.py \
   results/indic_frontiermath/en.jsonl
 ```
 
-Configure top-p, top-k, and thinking in the model connection settings. Keep model
+Configure top-k and thinking in the model connection settings. Keep model
 and generation settings consistent across languages. The summary reports strict
 exact boxed-answer accuracy and auxiliary normalized accuracy, which only repairs
 gold-independent formatting failures before exact re-grading. Inspect
 `grading_status` for missing answers, parse failures, and verifier errors. No LLM
 judge is used.
 
+Run the summary in the resources server's virtual environment so symbolic
+normalization uses the verifier's pinned dependencies.
+
 ## Test
 
 ```bash
-python -m pytest resources_servers/frontiermath/tests benchmarks/indic/frontier_math/tests
+python -m pytest tests/unit_tests/test_indic_frontier_math.py
+gym env test --resources-server frontiermath
 ```

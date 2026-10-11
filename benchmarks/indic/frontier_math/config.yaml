@@ -12,3 +12,10 @@ indic_frontiermath_simple_agent:
           prepare_script: benchmarks/indic/frontier_math/prepare.py
           prompt_config: benchmarks/indic/frontier_math/prompts/default.yaml
           num_repeats: 1
+
+indic_frontiermath_environment_server:
+  _inherit_from: frontiermath_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: indic_frontiermath_simple_agent
