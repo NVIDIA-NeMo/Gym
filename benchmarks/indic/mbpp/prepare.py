@@ -4,7 +4,9 @@
 
 import argparse
 import ast
+import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from textwrap import indent
@@ -116,7 +118,7 @@ def build_rows(
             rows.append(
                 {
                     "question": question,
-                    "verifier_metadata": metadata[identity],
+                    "verifier_metadata": {**metadata[identity], "task_id": f"Mbpp/{language}/{identity}"},
                     "language": language,
                     "uuid": f"{SOURCE_ID}/{language}/{identity}",
                 }
@@ -130,7 +132,7 @@ def prepare(
     task_ids: Sequence[int] | None = None,
     output_fpath: str | None = None,
 ) -> Path:
-    """Download the translations and write native Gym tasks."""
+    """Download the latest translations and write tasks plus source provenance."""
     config = maybe_get_global_config_dict()
     token = config.get(HF_TOKEN_KEY_NAME) if config is not None else None
     source = hf_hub_download(
@@ -141,12 +143,30 @@ def prepare(
     )
     records = load_dataset("parquet", data_files={"test": source}, split="test").to_list()
     rows = build_rows(records, languages=languages, task_ids=task_ids)
+    # Do not resolve this symlink: the snapshot path carries the downloaded commit,
+    # while its target is a content-addressed blob. No second lookup of mutable HEAD.
+    source_path = Path(source)
+    revision = source_path.parent.name
+    provenance = {
+        "repo_id": SOURCE_ID,
+        "filename": "test.parquet",
+        "resolved_revision": revision
+        if source_path.parent.parent.name == "snapshots" and re.fullmatch(r"[0-9a-f]{40}", revision)
+        else None,
+        "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "languages": list(languages),
+        "task_ids": list(task_ids) if task_ids is not None else None,
+        "rows": len(rows),
+    }
     output = Path(output_fpath) if output_fpath else OUTPUT_FPATH
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as stream:
         for row in rows:
             stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+    provenance_path = output.with_suffix(".provenance.json")
+    provenance_path.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     print(f"Wrote {len(rows)} problems to {output}")
+    print(f"Dataset revision: {provenance['resolved_revision'] or 'unknown'}; provenance: {provenance_path}")
     return output
 
 

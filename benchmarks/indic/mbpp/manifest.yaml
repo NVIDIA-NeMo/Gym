@@ -25,7 +25,7 @@ datasets:
     prompt_config: benchmarks/mbpp/prompts/default.yaml
     num_repeats: 1
 standard_prompt_config: benchmarks/mbpp/prompts/default.yaml
-canonical_split: test
+canonical_split: benchmark
 session_model: episode
 state: none
 lifecycle: active

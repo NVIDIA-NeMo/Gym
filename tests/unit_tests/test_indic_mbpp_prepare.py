@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
+import hashlib
 import json
 import subprocess
 import sys
@@ -41,7 +42,11 @@ def test_shared_prompt_and_identical_english_indic_tests(records):
     rows = module.build_rows(records, languages=["en", "hi"])
     prompt = load_prompt_config("benchmarks/mbpp/prompts/default.yaml")
     english, hindi = rows[0], rows[2]
-    assert english["verifier_metadata"] == hindi["verifier_metadata"]
+    assert english["verifier_metadata"]["task_id"] == "Mbpp/en/11"
+    assert hindi["verifier_metadata"]["task_id"] == "Mbpp/hi/11"
+    assert english["verifier_metadata"] is not hindi["verifier_metadata"]
+    for field in ("test", "entry_point"):
+        assert english["verifier_metadata"][field] == hindi["verifier_metadata"][field]
     en_input = apply_prompt_to_row(english, prompt)["responses_create_params"]["input"]
     hi_input = apply_prompt_to_row(hindi, prompt)["responses_create_params"]["input"]
     assert hi_input == [
@@ -71,7 +76,7 @@ def test_full_coverage_stable_ids_and_selection(records):
     assert {row["language"] for row in rows} == set(module.DEFAULT_LANGUAGES)
     selected = module.build_rows(records, languages=["hi"], task_ids=[12])
     assert selected == [
-        row for row in rows if row["language"] == "hi" and row["verifier_metadata"]["task_id"] == "Mbpp/12"
+        row for row in rows if row["language"] == "hi" and row["verifier_metadata"]["task_id"] == "Mbpp/hi/12"
     ]
 
 
@@ -171,9 +176,15 @@ def test_setup_runs_after_candidate_classes(records, tmp_path):
 
 def test_prepare_downloads_source_and_preserves_output_on_failure(records, monkeypatch, tmp_path):
     calls = []
+    revision = "a" * 40
+    source = tmp_path / "snapshots" / revision / "test.parquet"
+    source.parent.mkdir(parents=True)
+    blob = tmp_path / "blob"
+    blob.write_bytes(b"test parquet contents")
+    source.symlink_to(blob)
     monkeypatch.setattr(module, "maybe_get_global_config_dict", lambda: None)
     monkeypatch.setattr(module, "get_token", lambda: "test-token")
-    monkeypatch.setattr(module, "hf_hub_download", lambda **kwargs: calls.append(kwargs) or "source.parquet")
+    monkeypatch.setattr(module, "hf_hub_download", lambda **kwargs: calls.append(kwargs) or str(source))
     monkeypatch.setattr(module, "load_dataset", lambda *args, **kwargs: Dataset.from_list(records))
     output = tmp_path / "tasks.jsonl"
     assert module.prepare(languages=["hi"], output_fpath=str(output)) == output
@@ -184,6 +195,17 @@ def test_prepare_downloads_source_and_preserves_output_on_failure(records, monke
         "token": "test-token",
     }
     original = output.read_bytes()
+    provenance_path = output.with_suffix(".provenance.json")
+    provenance_bytes = provenance_path.read_bytes()
+    assert json.loads(provenance_bytes) == {
+        "repo_id": module.SOURCE_ID,
+        "filename": "test.parquet",
+        "resolved_revision": revision,
+        "sha256": hashlib.sha256(blob.read_bytes()).hexdigest(),
+        "languages": ["hi"],
+        "task_ids": None,
+        "rows": 2,
+    }
     assert [json.loads(line) for line in output.read_text().splitlines()] == module.build_rows(
         records, languages=["hi"]
     )
@@ -191,6 +213,24 @@ def test_prepare_downloads_source_and_preserves_output_on_failure(records, monke
     with pytest.raises(ValueError):
         module.prepare(languages=["hi"], output_fpath=str(output))
     assert output.read_bytes() == original
+    assert provenance_path.read_bytes() == provenance_bytes
+
+
+def test_prepare_reports_unknown_revision_without_guessing(records, monkeypatch, tmp_path, capsys):
+    source = tmp_path / "test.parquet"
+    source.write_bytes(b"uncached source")
+    monkeypatch.setattr(module, "maybe_get_global_config_dict", lambda: None)
+    monkeypatch.setattr(module, "get_token", lambda: None)
+    monkeypatch.setattr(module, "hf_hub_download", lambda **kwargs: str(source))
+    monkeypatch.setattr(module, "load_dataset", lambda *args, **kwargs: Dataset.from_list(records))
+    output = module.prepare(languages=["en", "hi"], task_ids=[11], output_fpath=str(tmp_path / "tasks.jsonl"))
+    provenance = json.loads(output.with_suffix(".provenance.json").read_text())
+    assert provenance["resolved_revision"] is None
+    assert provenance["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert provenance["task_ids"] == [11]
+    assert provenance["languages"] == ["en", "hi"]
+    assert provenance["rows"] == 2
+    assert "Dataset revision: unknown" in capsys.readouterr().out
 
 
 def test_native_config_reuses_prompt_agent_and_verifier():
@@ -215,6 +255,9 @@ def test_native_config_reuses_prompt_agent_and_verifier():
             )
         )
     en, indic = configs
+    assert "responses_create_params" not in OmegaConf.load(module.BENCHMARK_DIR / "config.yaml")
+    assert indic.policy_model.responses_api_models.vllm_model.sampling_overrides is None
+    assert indic.policy_model.responses_api_models.vllm_model.chat_template_kwargs is None
     original = OmegaConf.to_container(en.mbpp_evalplus_simple_agent.responses_api_agents.simple_agent, resolve=True)
     translated = OmegaConf.to_container(indic.indic_mbpp_simple_agent.responses_api_agents.simple_agent, resolve=True)
     assert original["datasets"][0]["prompt_config"] == translated["datasets"][0]["prompt_config"]
@@ -230,8 +273,43 @@ def test_native_config_reuses_prompt_agent_and_verifier():
     benchmark = BenchmarkConfig.from_config_path(module.BENCHMARK_DIR / "config.yaml")
     assert benchmark.agent_name == "indic_mbpp_simple_agent"
     manifest = load_manifest(module.BENCHMARK_DIR / "manifest.yaml")
+    assert manifest.canonical_split == "benchmark"
     assert manifest.resources_server == "scicodepile"
     assert manifest.agent_server == "simple_agent"
     assert manifest.datasets[0].model_dump(exclude_none=True) == {
         key: value for key, value in translated["datasets"][0].items() if key != "license"
+    }
+
+
+def test_standalone_smoke_config_preserves_model_settings():
+    parser = GlobalConfigDictParser()
+    config = parser.parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.create(
+                {
+                    "config_paths": ["benchmarks/indic/mbpp/smoke.yaml"],
+                    "policy_base_url": "http://unused/v1",
+                    "policy_api_key": "dummy",
+                    "policy_model_name": "google/gemma-4-31B-it",
+                }
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    model = config.policy_model.responses_api_models.vllm_model
+    assert model.sampling_overrides == {"temperature": 1.0, "top_p": 0.95, "top_k": 64, "seed": 0}
+    assert model.chat_template_kwargs == {"enable_thinking": True}
+    assert model.uses_reasoning_parser and not model.uses_interleaved_reasoning
+    assert config.responses_create_params == {"max_output_tokens": 8192}
+    assert config.resume_from_cache is False
+    dataset = config.indic_mbpp_simple_agent.responses_api_agents.simple_agent.datasets[0]
+    assert dataset.num_repeats == 1
+    assert dataset.type == "benchmark"
+    assert dataset.jsonl_fpath == "benchmarks/indic/mbpp/data/review-smoke.jsonl"
+    assert {server.name for server in parser.filter_for_server_instance_configs(config)} == {
+        "policy_model",
+        "indic_mbpp_resources_server",
+        "indic_mbpp_simple_agent",
     }
