@@ -81,11 +81,21 @@ when rows name no environment server) and, on attempts that carry a failure clas
 ``nemo.gym.failure_class``, ``nemo.gym.failure_kind`` (registered or ``<server>:<kind>``
 namespaced, any other value recorded as ``unregistered``) and ``nemo.gym.failure_type`` (exception
 class name). Free-text reasons are never attributes.
+
+Rollout health
+--------------
+The trajectory-level checks of the rollout health report, evaluated as each rollout finishes.
+``gym.rollout.health_verdict_total`` (counter): one per evaluated rollout, by ``nemo.gym.health.verdict``
+(``healthy``, ``unhealthy`` or ``unobserved``, as in the report) and ``nemo.gym.rollout.outcome``
+(``scored`` or ``failed``; the post-run report reads scored rollouts only).
+``gym.rollout.health_flagged_total`` (counter): one per rollout *and* check with at least one finding,
+by ``nemo.gym.health.check`` (a check id from the health-check registry), so a check's count is the number of
+rollouts it flagged, not the number of findings. Checks in ``health_check_ignored_checks`` are not evaluated.
 """
 
 import logging
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, Optional
 
 
@@ -393,3 +403,24 @@ def _reset_for_testing() -> None:
     """Drop cached instruments. Test-only."""
     with _INSTRUMENT_LOCK:
         _INSTRUMENTS.clear()
+
+
+ROLLOUT_HEALTH_VERDICT_INSTRUMENT = "gym.rollout.health_verdict_total"
+ROLLOUT_HEALTH_FLAGGED_INSTRUMENT = "gym.rollout.health_flagged_total"
+HEALTH_VERDICT_ATTRIBUTE = "nemo.gym.health.verdict"
+HEALTH_CHECK_ATTRIBUTE = "nemo.gym.health.check"
+
+
+def record_rollout_health(verdict: str, *, outcome: str, flagged_checks: Iterable[str]) -> None:
+    """Count one health-evaluated rollout and each distinct check that flagged it."""
+    _record_counter(
+        ROLLOUT_HEALTH_VERDICT_INSTRUMENT,
+        "Rollouts evaluated by the trajectory health checks, by verdict.",
+        {HEALTH_VERDICT_ATTRIBUTE: verdict, ROLLOUT_OUTCOME_ATTRIBUTE: outcome},
+    )
+    for check in sorted(set(flagged_checks)):
+        _record_counter(
+            ROLLOUT_HEALTH_FLAGGED_INSTRUMENT,
+            "Rollouts flagged by a trajectory health check.",
+            {HEALTH_CHECK_ATTRIBUTE: check},
+        )

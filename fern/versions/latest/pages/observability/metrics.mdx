@@ -177,3 +177,28 @@ telemetry:
 Metrics export on a timer. The default interval is 10 seconds and is configurable with the
 standard `OTEL_METRIC_EXPORT_INTERVAL` environment variable, in milliseconds. A process
 that lives for less than one interval may exit before exporting anything.
+
+## Rollout Health Metrics
+
+The trajectory-level checks of the [rollout health report](/main/evaluation/rollout-health) also run as
+each rollout finishes, so problems show up while a run is still in progress. Both counters use the
+same check logic as the report. They depend only on telemetry being initialized: `disable_health_check`
+turns off the post-run report, not these counters, and `health_check_ignored_checks` applies to both.
+
+| Metric | Dimensions |
+| --- | --- |
+| `gym.rollout.health_verdict_total` | `nemo.gym.health.verdict`, `nemo.gym.rollout.outcome` |
+| `gym.rollout.health_flagged_total` | `nemo.gym.health.check` |
+
+`gym.rollout.health_verdict_total` counts each evaluated rollout once. The verdict is `healthy`,
+`unhealthy` or `unobserved`, with the meaning it has in the report. A rollout is `unobserved` when no
+check flagged it but at least one could not run, for example because `observability_enabled` is off
+and no trajectory was captured. The outcome is `scored` or `failed`; the post-run report reads scored
+rollouts only, so filter on `scored` to compare the two. Rollouts that never ran are not evaluated.
+
+`gym.rollout.health_flagged_total` counts a rollout once per check that produced at least one finding,
+however many findings that is. A check's value is therefore the number of rollouts it flagged, which is
+at most the number of unhealthy rollouts, while the sum over checks can be larger because one rollout
+can be flagged by several checks. The report's per-check issue counts are per finding. The check
+ids are the fixed ids of the rollout-level checks in the health report, plus `check_execution_error`.
+Neither counter has task or rollout identifiers as dimensions.
