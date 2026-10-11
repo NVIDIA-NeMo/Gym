@@ -4,6 +4,7 @@
 """Regression coverage for the failure/recovery and checkpoint-controller boundary."""
 
 import asyncio
+import copy
 import multiprocessing
 import os
 import signal
@@ -13,13 +14,21 @@ from unittest.mock import AsyncMock
 import orjson
 import pytest
 
+import nemo_gym.cli.eval as cli_eval
 import nemo_gym.rollout_collection as collection
+from nemo_gym.cli.eval import _check_saved_completion
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError
 from nemo_gym.episode_types import EpisodeFailure, EpisodeId
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_outcomes import RolloutFailure
-from nemo_gym.rollout_records import coverage_path_for, journal_path_for, materialized_path_for, read_records
+from nemo_gym.rollout_records import (
+    coverage_path_for,
+    journal_path_for,
+    materialized_path_for,
+    read_records,
+    resolve_rollout_path,
+)
 from nemo_gym.rollout_recovery import IncompleteEvaluationError, RunManifest, manifest_path_for, run_lock
 from nemo_gym.rollout_store import RolloutStore
 from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
@@ -1525,7 +1534,9 @@ def test_legacy_alias_through_directory_alias_is_one_input(tmp_path):
 async def test_legacy_reply_cannot_echo_collector_bookkeeping(runner_config, monkeypatch, routing, key, value):
     runner_config.route_failures_to_sidecar = routing
     payload = {"reward": 1.0, "response": {"answer": "saved", "echoed": {key: value}}, key: value}
-    install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, payload)))
+    install_fake_server_client(
+        monkeypatch, AsyncMock(side_effect=lambda **_: FakeResponse(200, copy.deepcopy(payload)))
+    )
     await collection.RolloutCollectionHelper().run_from_config(runner_config)
     store = RolloutStore.read(Path(runner_config.output_jsonl_fpath))
     assert store.coverage()["successful"] == 3
@@ -1572,7 +1583,7 @@ async def test_legacy_reply_cleanup_preserves_declared_failure_diagnostics(runne
         assert saved[key] == value
 
 
-@pytest.mark.parametrize("destination_kind", ["alias", "alias_failures"])
+@pytest.mark.parametrize("destination_kind", ["alias", "alias_failures", "alias_materialized_inputs"])
 def test_reverify_fresh_overwrite_refuses_competing_legacy_alias_companions(tmp_path, destination_kind):
     from nemo_gym.rollout_reverification import _prepare_output_fpaths
 
@@ -1583,7 +1594,11 @@ def test_reverify_fresh_overwrite_refuses_competing_legacy_alias_companions(tmp_
     failures_path_for(target).write_text('{"_ng_failure_class": "judge_failed"}\n')
     failures_path_for(alias).write_text('{"_ng_failure_class": "agent_run_error"}\n')
     before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
-    destination = alias if destination_kind == "alias" else failures_path_for(alias)
+    destination = {
+        "alias": alias,
+        "alias_failures": failures_path_for(alias),
+        "alias_materialized_inputs": materialized_path_for(alias),
+    }[destination_kind]
 
     with pytest.raises(ConfigError, match="Recovery artifacts exist beside the rollout alias"):
         _prepare_output_fpaths("", str(destination), False, True, False)
@@ -1591,3 +1606,88 @@ def test_reverify_fresh_overwrite_refuses_competing_legacy_alias_companions(tmp_
     assert alias.is_symlink()
     assert alias.readlink() == Path(target.name)
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
+def test_saved_coverage_without_progress_or_retries_exits_76(tmp_path):
+    output = tmp_path / "out.jsonl"
+    coverage_path_for(output).write_bytes(
+        orjson.dumps(
+            {
+                "complete": False,
+                "expected": 2,
+                "successful": 1,
+                "intentionally_omitted": 0,
+                "retryable": 0,
+                "outcomes_recorded": 0,
+            }
+        )
+    )
+    with pytest.raises(IncompleteEvaluationError) as error:
+        _check_saved_completion(output)
+    assert error.value.exit_code == 76
+    assert "No tasks are eligible for retry" in str(error.value)
+    assert "No new outcomes were saved" not in str(error.value)
+
+
+def test_exit_1_message_names_the_infrastructure_retry_limit(tmp_path):
+    output = tmp_path / "out.jsonl"
+    coverage_path_for(output).write_bytes(
+        orjson.dumps({"complete": False, "expected": 2, "successful": 1, "retryable": 1, "outcomes_recorded": 0})
+    )
+    with pytest.raises(IncompleteEvaluationError) as error:
+        _check_saved_completion(output)
+    assert error.value.exit_code == 1
+    assert str(error.value).endswith(
+        "No new outcomes were saved; automatic restarts use the infrastructure retry limit."
+    )
+
+
+@pytest.mark.parametrize("alias_companions", [False, True])
+def test_read_only_resolver_with_dangling_alias(tmp_path, alias_companions):
+    alias = tmp_path / "latest.jsonl"
+    target = tmp_path / "runs" / "missing.jsonl"
+    alias.symlink_to(target)
+    if alias_companions:
+        failures_path_for(alias).write_bytes(b"")
+        materialized_path_for(alias).write_bytes(b"")
+    resolved = resolve_rollout_path(alias, read_only=True)
+    assert resolved == (alias.absolute() if alias_companions else target.resolve())
+
+
+async def test_none_dispatched_produced_result_exits_76_when_nothing_is_retryable(runner_config, monkeypatch):
+    install_fake_server_client(
+        monkeypatch,
+        AsyncMock(
+            return_value=FakeResponse(200, {"_ng_failure_class": "agent_run_error", "_ng_failure_terminal": True})
+        ),
+    )
+    with pytest.raises(IncompleteEvaluationError, match="None of the 3 dispatched") as error:
+        await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    assert error.value.exit_code == 76
+    assert RolloutStore.read(Path(runner_config.output_jsonl_fpath)).coverage()["retryable"] == 0
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_h_collect_rollouts_cli_reads_real_coverage_writer(prepared_run, monkeypatch, complete):
+    output, prepare = prepared_run
+
+    async def run_from_config(self, config):
+        # Stand-in for collection: the real store writes the coverage file the CLI reads.
+        with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+            for row in store.pending(3)[: 2 if complete else 1]:
+                store.record_dispatch(row)
+                store.record_outcome(row | {"reward": 1.0, "response": {}})
+        return []
+
+    monkeypatch.setattr(
+        cli_eval,
+        "get_global_config_dict",
+        lambda: {"input_jsonl_fpath": str(output.with_name("in.jsonl")), "output_jsonl_fpath": str(output)},
+    )
+    monkeypatch.setattr(collection.RolloutCollectionHelper, "run_from_config", run_from_config)
+    if complete:
+        cli_eval.collect_rollouts()
+    else:
+        with pytest.raises(SystemExit) as error:
+            cli_eval.collect_rollouts()
+        assert error.value.code == 75

@@ -58,11 +58,17 @@ Rows drained by the dispatch budget never ran and are not counted. Every point c
 Attempts with a failure class also carry `nemo.gym.failure_class` and, when supplied,
 `nemo.gym.failure_kind` and `nemo.gym.failure_type` (the exception class name).
 
-Legacy attempts retain their original routing class and exception type. The kind label is included only when
-the producer supplied one: a registered or `<server>:<kind>` namespaced kind is retained, otherwise it is
-`unregistered`. A compatibility fallback in the saved failure record does not add a kind label or replace the
-routing class. Native episode failures use their shared kind for the class and kind labels, with the same
-bounded-name rule. Free-text failure reasons never become attributes.
+Older legacy producers retain their original routing class and exception type. Those two fields remain
+producer-controlled, as on main; producers should supply stable category names, not free-text error details.
+The kind label is included only when supplied: a registered or `<server>:<kind>` namespaced kind is retained,
+otherwise it is `unregistered`. A saved record's compatibility fallback does not add a kind label or replace
+a distinct routing class.
+
+Native episode failures and the legacy Environment Server adapter route by the shared kind. When that kind also
+supplies the class, both labels use the same bounded-name rule. This changes the adapter's dashboard labels:
+previously it reported `environment_server_failed` without a kind label; it now reports the shared kind like a
+native episode. Free-text kinds and reasons are never promoted to class labels. Existing legacy class/type fields
+are retained, so arbitrary producer text in those fields is not automatically bounded.
 
 Transport failures count as saved failures only when failure routing is enabled; otherwise the request error
 aborts collection. An HTTP 500 uses `agent_run_error`; an unavailable server uses `agent_request_failed`.

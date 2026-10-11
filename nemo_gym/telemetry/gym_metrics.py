@@ -67,15 +67,18 @@ only when failure routing saves them: an unavailable server uses class agent_req
 while an agent that ran and failed uses agent_run_error (including HTTP 500). Otherwise the
 request error aborts collection and is not counted. Coverage comes from the output files.
 
-Attributes are bounded: ``nemo.gym.rollout.dispatch.name`` (the environment server, or the agent
+Attributes include ``nemo.gym.rollout.dispatch.name`` (the environment server, or the agent
 when rows name no environment server) and, on attempts that carry a failure class,
 ``nemo.gym.failure_class``, ``nemo.gym.failure_kind`` (registered or ``<server>:<kind>``
 namespaced, any other value recorded as ``unregistered``) and ``nemo.gym.failure_type`` (exception
 class name). Labels come from the dispatch's original routing fields, before persistence maps
-kinds to sidecar classes. Legacy routing classes remain unchanged and a missing producer kind
-adds no kind label, even when the saved record uses a class as its compatibility fallback.
-Native failures derive their class from their shared kind, using the same bounded-name rule.
-Free-text failure kinds and reasons never become class labels.
+kinds to sidecar classes. Older legacy producers retain their routing class and exception type;
+these two attributes remain producer-controlled, as on main, and must use stable category names.
+A missing producer kind adds no kind label, even when the saved record uses a class as its fallback.
+Native failures and the legacy Environment Server adapter route by the shared kind, bucketed when
+it also supplies the class. The adapter previously used environment_server_failed without a kind
+label; it now labels failures like native episodes. Free-text kinds and reasons are never promoted
+to class labels, but arbitrary strings supplied directly as legacy class/type fields are retained.
 """
 
 import logging

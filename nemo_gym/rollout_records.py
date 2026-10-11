@@ -89,7 +89,7 @@ def resolve_rollout_path(output: Path, *, read_only: bool = False) -> Path:
             return output.parent.resolve() / output.name
     raise ConfigError(
         f"Recovery artifacts exist beside the rollout alias ({misplaced[0]}). "
-        "Use the original Gym revision, or move all companions beside the resolved output "
+        "Use the Gym revision that created these files, or move all companions beside the resolved output "
         f"({resolved}) after backing up the run. Saved artifacts were not changed."
     )
 

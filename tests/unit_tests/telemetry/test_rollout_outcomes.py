@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """``gym.rollout.completed_total``: the driver-side attempt counter, against a real in-memory reader."""
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -11,7 +12,7 @@ from nemo_gym import rollout_collection
 from nemo_gym.telemetry import gym_metrics
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics  # noqa: F401 - fixture
-from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
+from tests.unit_tests.test_rollout_collection import FakeResponse, failing_row, install_fake_server_client
 from tests.unit_tests.test_rollout_recovery import runner_config  # noqa: F401 - fixture
 
 
@@ -300,3 +301,129 @@ async def test_native_failure_kind_cannot_become_free_text_counter_class(
         _key(**attrs): 1,
         _key(**{OUTCOME: "scored", DISPATCH: "environment"}): 1,
     }
+
+
+async def _failed_points(tmp_path, monkeypatch, collected_metrics, input_extra, reply):  # noqa: F811
+    monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: group == GymSpanGroup.ROLLOUT)
+    monkeypatch.setattr(rollout_collection, "get_global_config_dict", lambda: {})
+    source = tmp_path / "input.jsonl"
+    source.write_text(json.dumps(failing_row(0) | input_extra) + "\n" + json.dumps(failing_row(1)) + "\n")
+    fields = rollout_collection.RolloutCollectionConfig.model_fields
+    values = {
+        "input_jsonl_fpath": str(source),
+        "output_jsonl_fpath": str(tmp_path / "out.jsonl"),
+        "route_failures_to_sidecar": True,
+        "disable_aggregation": True,
+        "disable_health_check": True,
+        "num_samples_in_parallel": 1,
+    }
+    config = rollout_collection.RolloutCollectionConfig(**{k: v for k, v in values.items() if k in fields})
+
+    async def post(**kwargs):
+        body = dict(kwargs["json"])
+        if body["_ng_task_index"] != 0:
+            return FakeResponse(200, body | {"reward": 1.0, "response": {}})
+        # Real agents build their reply from the request body, so input keys are echoed.
+        return FakeResponse(200, body | reply)
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    await rollout_collection.RolloutCollectionHelper().run_from_config(config)
+    return [
+        dict(point.attributes)
+        for point in collected_metrics().get(gym_metrics.ROLLOUT_COMPLETED_INSTRUMENT, [])
+        if point.attributes.get("nemo.gym.rollout.outcome") == "failed"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("input_extra", "reply", "expected_class", "expected_kind"),
+    [
+        # A stale kind in the input row, echoed back by the agent.
+        (
+            {"_ng_failure_kind": None},
+            {"_ng_failure_class": "timeout_exceeded", "reward": 0.0, "response": {}},
+            "timeout_exceeded",
+            None,
+        ),
+        (
+            {},
+            {"_ng_failure_class": "infrastructure_error", "_ng_failure_kind": "verifier_error"},
+            "infrastructure_error",
+            "verifier_error",
+        ),
+    ],
+)
+async def test_legacy_routing_class_survives_a_kind_key(
+    tmp_path,
+    monkeypatch,
+    collected_metrics,
+    input_extra,
+    reply,
+    expected_class,
+    expected_kind,  # noqa: F811
+):
+    [point] = await _failed_points(tmp_path, monkeypatch, collected_metrics, input_extra, reply)
+    assert point["nemo.gym.failure_class"] == expected_class
+    assert point.get("nemo.gym.failure_kind") == expected_kind
+
+
+@pytest.mark.parametrize("diagnostics", [None, {"error": "custom dispatcher detail"}])
+async def test_custom_typed_dispatcher_keeps_labels_without_routing_diagnostics(
+    runner_config, collected_metrics, monkeypatch, diagnostics
+):  # noqa: F811
+    import asyncio
+
+    from nemo_gym.episode_types import EpisodeFailure, EpisodeId
+    from nemo_gym.rollout_outcomes import RolloutFailure
+    from nemo_gym.rollout_records import logical_rollout_id
+    from nemo_gym.rollout_store import RolloutStore
+
+    _rollout_group_only(monkeypatch)
+    install_fake_server_client(monkeypatch, AsyncMock())
+
+    class TypedDispatcher(rollout_collection.RolloutCollectionHelper):
+        def _run_examples_with_metadata(self, examples, **kwargs):
+            kwargs["on_dispatch_batch"](examples)
+            futures = []
+            for row in examples:
+                result = {"reward": 1.0, "response": {}}
+                if row["_ng_task_index"] == 0:
+                    result = RolloutFailure(
+                        episode_id=EpisodeId(rollout_id=logical_rollout_id(row), attempt=row["_ng_attempt_index"]),
+                        run_id=row["_ng_run_id"],
+                        source="environment",
+                        delivery="delivered",
+                        failure=EpisodeFailure(
+                            failure_reason="Judge unavailable", terminal=False, failure_kind="verifier_error"
+                        ),
+                        exception_type="TimeoutError",
+                    )
+                future = asyncio.get_running_loop().create_future()
+                future.set_result(
+                    rollout_collection._CompletedRollout(
+                        row=row,
+                        result=result,
+                        rollout_latency_ms=None,
+                        diagnostics=diagnostics if isinstance(result, RolloutFailure) else None,
+                    )
+                )
+                futures.append(future)
+            return futures
+
+    await TypedDispatcher().run_from_config(runner_config)
+    assert _by_attrs(collected_metrics) == {
+        _key(**{OUTCOME: "scored", DISPATCH: "my_agent"}): 2,
+        _key(
+            **{
+                OUTCOME: "failed",
+                DISPATCH: "my_agent",
+                CLASS: "verifier_error",
+                KIND: "verifier_error",
+                TYPE: "TimeoutError",
+            }
+        ): 1,
+    }
+    [failure] = RolloutStore.read(Path(runner_config.output_jsonl_fpath)).failures()
+    assert failure["_ng_failure_record"]["failure"]["failure_kind"] == "verifier_error"
+    if diagnostics:
+        assert failure["error"] == diagnostics["error"]

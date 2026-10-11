@@ -1723,10 +1723,11 @@ def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name:
     failure_kind = failure_type = None
     if failure_class is not None:
         if "_ng_failure_kind" in result:
-            # Native failures have one shared kind rather than a legacy routing
-            # class. Do not let an unregistered free-text kind escape via class.
-            failure_class = _metric_failure_kind(failure_class)
             failure_kind = result["_ng_failure_kind"]
+            # Native failures and their legacy adapter route by the shared kind.
+            # A separate legacy routing class must survive an echoed kind marker.
+            if failure_class == failure_kind:
+                failure_class = _metric_failure_kind(failure_class)
         else:
             failure_kind = result.get("failure_kind")
         failure_type = result.get("_ng_failure_type")
@@ -3005,8 +3006,9 @@ class RolloutCollectionHelper(BaseModel):
                 verification_response = completed.verification_response
                 diagnostics = completed.diagnostics or _failure_diagnostics(result)
                 metric_result = diagnostics
-                if not metric_result and isinstance(result, RolloutFailure):
-                    # Custom typed dispatchers may provide no legacy diagnostics.
+                if isinstance(result, RolloutFailure) and metric_result.get(NG_FAILURE_CLASS_KEY) is None:
+                    # Custom typed dispatchers may provide diagnostics without
+                    # legacy routing labels; use the typed failure for those.
                     metric_result = {
                         NG_FAILURE_CLASS_KEY: result.sidecar_failure_class,
                         "_ng_failure_kind": result.failure.failure_kind,
@@ -4248,8 +4250,9 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(
         description=(
             "Path used to derive the aggregate-metrics output location "
-            "('<stem>_aggregate_metrics.json' next to this path) and, when merge_shards=True, "
-            "the merged-rollouts file."
+            "('<stem>_aggregate_metrics.json' beside the resolved output, preserving unambiguous legacy "
+            "alias companions) and, when merge_shards=True, the merged-rollouts file. Metrics-only output "
+            "through a file symlink cannot replace an existing target's reports unless it is the only input."
         ),
     )
     batch_manifest_fpath: Optional[str] = Field(
@@ -4362,27 +4365,23 @@ class RolloutAggregationHelper(BaseModel):
             raise ConfigPathNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
         # Readers and writers must agree before creating any companions. Keep
         # unambiguous legacy alias layouts, but reject competing companion sets.
-        output_fpath = resolve_rollout_path(Path(config.output_jsonl_fpath), read_only=True)
+        given_fpath = Path(config.output_jsonl_fpath)
+        output_fpath = resolve_rollout_path(given_fpath, read_only=True)
+        if (
+            not config.merge_shards
+            and output_fpath != given_fpath.parent.resolve() / given_fpath.name
+            and output_fpath.exists()
+            and {Path(path).resolve() for path in input_paths} != {output_fpath}
+        ):
+            raise ConfigError(
+                f"Metrics-only aggregation through {given_fpath} would replace metrics of {output_fpath}; "
+                "pass that path itself or a new output path. Saved artifacts were not changed."
+            )
         # Metrics-only aggregation may target the source basename. Its report
         # must not replace the collector's run-specific completion snapshot.
         report_path = coverage_path_for(
             output_fpath if config.merge_shards else output_fpath.with_stem(output_fpath.stem + "_aggregate")
         )
-        for source in input_paths:
-            for artifact in (
-                Path(source),
-                manifest_path_for(Path(source)),
-                journal_path_for(Path(source)),
-                materialized_path_for(Path(source)),
-                failures_path_for(Path(source)),
-                coverage_path_for(Path(source)),
-            ):
-                if report_path.resolve() == artifact.resolve() or (
-                    report_path.exists() and artifact.exists() and report_path.samefile(artifact)
-                ):
-                    raise ConfigError(
-                        "Aggregate coverage must not overwrite source rollout artifacts; choose a new output path."
-                    )
         if config.merge_shards:
             sources = {
                 artifact
@@ -4401,7 +4400,9 @@ class RolloutAggregationHelper(BaseModel):
                 or (output_fpath.exists() and source.exists() and output_fpath.samefile(source))
                 for source in sources
             ):
-                raise ConfigError("Merged output must not overwrite a source rollout artifact or its recovery files.")
+                raise ConfigError(
+                    f"Merged output {given_fpath} must not overwrite a source rollout artifact or its recovery files."
+                )
             # A merged projection cannot inherit another run's recovery history.
             # Inspect both names when the destination is a symlink to a saved run.
             for target in {output_fpath, output_fpath.resolve()}:
@@ -4416,6 +4417,21 @@ class RolloutAggregationHelper(BaseModel):
                             f"Merged output has existing recovery artifacts ({companion}); "
                             "choose a new output path to preserve the saved run."
                         )
+        for source in input_paths:
+            for artifact in (
+                Path(source),
+                manifest_path_for(Path(source)),
+                journal_path_for(Path(source)),
+                materialized_path_for(Path(source)),
+                failures_path_for(Path(source)),
+                coverage_path_for(Path(source)),
+            ):
+                if report_path.resolve() == artifact.resolve() or (
+                    report_path.exists() and artifact.exists() and report_path.samefile(artifact)
+                ):
+                    raise ConfigError(
+                        "Aggregate coverage must not overwrite source rollout artifacts; choose a new output path."
+                    )
         print(f"Aggregating {len(input_paths)} shard(s):")
         for p in input_paths:
             print(f"  - {p}")
