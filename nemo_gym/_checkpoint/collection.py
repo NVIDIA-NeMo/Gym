@@ -264,7 +264,7 @@ class CollectionCheckpointer:
                 span.set(in_flight=len(self._in_flight), stop=stop)
                 try:
                     participants = await self._discover()
-                    published = await self._commit(participants, checkpoint_id, deadline)
+                    published = await self._commit(participants, checkpoint_id, deadline, stop=stop)
                 except Exception:
                     published = None
                     LOGGER.exception(
@@ -282,7 +282,7 @@ class CollectionCheckpointer:
             return published
 
     async def _commit(
-        self, participants: coordination.Participants, checkpoint_id: str, deadline: float
+        self, participants: coordination.Participants, checkpoint_id: str, deadline: float, *, stop: bool = False
     ) -> Optional[Path]:
         """Prepare and commit the rows in flight, then publish; ``None`` if prepare missed its deadline."""
         clock = time.monotonic()
@@ -302,7 +302,7 @@ class CollectionCheckpointer:
             if episode not in kept
         ]
         target = self.checkpoint_dir / checkpoint_id
-        await coordination.commit(participants, checkpoint_id, str(target), episodes, deadline_ts=deadline)
+        await coordination.commit(participants, checkpoint_id, str(target), episodes, deadline_ts=deadline, stop=stop)
         manifest = CollectionManifest(
             checkpoint_id=checkpoint_id,
             run_id=self.run_id,

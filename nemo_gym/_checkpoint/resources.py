@@ -85,14 +85,19 @@ class ResourcesSessionHooks(Protocol):
 
     - ``export_session_states`` runs at commit.
       Prepare stops agents before resources servers, so no episode step is using a sandbox by then.
-      Return what a restore needs to rebuild each sandbox as of this checkpoint, such as a snapshot id.
+      Return what a restore needs to rebuild each sandbox as of this checkpoint: a snapshot taken now.
       A descriptor of the live sandbox is not enough on its own: the sandbox keeps changing after the checkpoint.
     - ``restore_session_states`` runs in a fresh process after a crash.
       Rebuild every session's sandbox or raise; the controller then restarts those rollouts from their inputs.
-      The crashed process's sandboxes are still running and can be stopped here.
+      The crashed process's sandboxes may still be running and can be stopped here.
     - ``retire_session_state`` runs when an attempt is discarded, whatever the server's mode.
       Stop its sandbox.
       It runs again for the same session if a retire was cut short, so it must tolerate state it already freed.
+    - ``park_session_states`` runs once a commit the controller stops after is durable,
+      with the sessions that commit exported.
+      Free the compute their sandboxes hold: the stopped Gym leaves nothing running,
+      and the restore rebuilds them from the checkpoint.
+      Optional and best effort: a failure is logged.
 
     Whatever a checkpoint keeps outside Gym, such as snapshots,
     is the server's to delete once no checkpoint the controller may restore refers to it.
@@ -105,6 +110,8 @@ class ResourcesSessionHooks(Protocol):
         """Validate every state, then install all of them; never install a partial set."""
 
     async def retire_session_state(self, session_id: str) -> None: ...
+
+    async def park_session_states(self, session_ids: list[str]) -> None: ...
 
 
 class ResourcesParticipant(CheckpointParticipant):
@@ -242,6 +249,11 @@ class ResourcesParticipant(CheckpointParticipant):
         for session_id in list(self._deferred_ends):
             self.ended(session_id)
         self._open.set()
+
+    async def park_exported(self, records: list[CheckpointRecord]) -> None:
+        if self.mode == "exported":
+            sessions = [record.session_id for record in records if isinstance(record, ResourcesSessionRecord)]
+            await self.hooks.park_session_states([s for s in sessions if s in self._sessions])
 
     def readiness(self) -> PrepareReport:
         # A seed in flight is a restart too: its reply always says so, and prepare does not wait for it.

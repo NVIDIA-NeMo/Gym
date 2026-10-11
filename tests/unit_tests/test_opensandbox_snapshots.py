@@ -170,7 +170,9 @@ def test_audit_lists_matches_without_deleting(
     )
 
     assert session.closed
-    assert connector_calls == [{"limit": snapshots.REAP_CONCURRENCY, "limit_per_host": snapshots.REAP_CONCURRENCY}]
+    assert connector_calls == [
+        {"limit": snapshots.REAP_CONCURRENCY, "limit_per_host": snapshots.REAP_CONCURRENCY, "ssl": False}
+    ]
     assert len(session_calls) == 1
     assert session_calls[0]["connector"] is connector
     assert session_calls[0]["headers"] == {"OPEN-SANDBOX-API-KEY": TEST_ACCESS_KEY}
@@ -506,6 +508,7 @@ def test_cli_forwards_arguments_and_return_codes(
             "snapshot_ids": None,
             "kill_paused": True,
             "reap": True,
+            "tls_verify": False,
         }
     ]
 
@@ -561,6 +564,7 @@ def test_cli_uses_standalone_connection_config(
             "snapshot_ids": ["snap-a", "snap-b"],
             "kill_paused": False,
             "reap": False,
+            "tls_verify": False,
         }
     ]
 
@@ -620,3 +624,29 @@ def test_script_help_runs_by_direct_path() -> None:
     result = subprocess.run([str(SCRIPT), "--help"], check=False, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert "--kill-paused" in result.stdout
+
+
+def test_certificate_verification_follows_tls_verify(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Off by default, like connection.tls_verify, for cells behind a self-signed load balancer; on when asked."""
+    connector_calls, _session_calls, _connector = install_session(monkeypatch, Session(page([]), page([])))
+    assert run_cleanup(domain="https://sandbox.example", protocol="https", reap=False) == 0
+    assert connector_calls[-1]["ssl"] is False
+
+    connector_calls, _session_calls, _connector = install_session(monkeypatch, Session(page([]), page([])))
+    assert (
+        asyncio.run(
+            snapshots.cleanup_snapshots(
+                domain="https://sandbox.example",
+                protocol="https",
+                access_key=TEST_ACCESS_KEY,
+                sandbox_id=None,
+                states=None,
+                snapshot_ids=None,
+                kill_paused=False,
+                reap=False,
+                tls_verify=True,
+            )
+        )
+        == 0
+    )
+    assert "ssl" not in connector_calls[-1]
