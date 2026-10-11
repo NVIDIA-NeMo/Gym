@@ -23,9 +23,10 @@ changing once the episode continues, and never a paused state, which the backend
 - :meth:`~SandboxSessionCheckpointer.stop` frees a session's sandbox. When the episode is over (verified or
   closed) it also marks the snapshots this process knows of it for deletion; they are deleted once the next
   ``export`` succeeds, because only then is there a checkpoint that no longer names them. A retired attempt
-  keeps its snapshots, because a retained checkpoint may still restore it. Gym does not yet reclaim those, nor
-  the snapshots of a process that died before its next export: a checkpoint-aware sweep is a follow-up; until
-  then an operator deletes them with ``nemo_gym.sandbox.providers.opensandbox.snapshots`` by id.
+  keeps its snapshots, because a retained checkpoint may still restore it. Those, and the snapshots of a process
+  that died before its next export, are reclaimed by the operator's sweep,
+  ``nemo_gym.sandbox.providers.opensandbox.snapshots --retain-from <checkpoint dir>``, which keeps every snapshot
+  the retained checkpoints name.
 """
 
 import asyncio
