@@ -96,21 +96,35 @@ source "$launcher_script" "$@"
         eval_command, pd_command, _, _ = self.capture_submission("--config", "benchmark.yaml", *overrides, env=env)
         return eval_command, pd_command
 
-    def eval_arguments(self, *overrides: str, env: dict[str, str] | None = None) -> list[str]:
+    def eval_arguments(self, *overrides: str, env: dict[str, str] | None = None, stage: str = "run") -> list[str]:
         command, _ = self.generate_commands(*overrides, env=env)
         command = command.replace("source /opt/Gym_venv/bin/activate", ":").replace("cd /opt/Gym\n", ":\n")
         stubs = r"""
 # Supply model parameters for the default /dev/null fixture; real configs replace these.
 GYM_MODEL_PARAMS=(++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0)
 gym() {
-    if [[ "$2" == run ]]; then printf '%s\0' "$@"; fi
+    if [[ "$2" == "$TEST_GYM_STAGE" ]]; then printf '%s\0' "$@"; fi
 }
 date() { printf '%s\n' "${TEST_DATE:-20260909_120000}"; }
 getent() { printf '10.0.0.1 node0\n'; }
 """
-        status, stdout, stderr = self.run_shell(stubs + command, env=env)
+        status, stdout, stderr = self.run_shell(stubs + command, env=(env or {}) | {"TEST_GYM_STAGE": stage})
         self.assertEqual(status, 0, stderr)
         return stdout.rstrip("\0").split("\0")
+
+    def test_eval_arguments_survive_generated_shell(self) -> None:
+        """Both Gym stages receive structured overrides and shell characters literally."""
+        overrides = (
+            "++agent.datasets=[{name:smoke,type:benchmark,jsonl_fpath:data/smoke.jsonl,num_repeats:2}]",
+            "++description=two words, 'quotes', and \"double quotes\"",
+            "++literal=$(printf expanded)`printf expanded`$USER;*?[abc]",
+            "++multiline=first\nsecond",
+            "",
+        )
+        for stage in ("prepare", "run"):
+            with self.subTest(stage=stage):
+                args = self.eval_arguments(*overrides, stage=stage)
+                self.assertEqual(args[: 4 + len(overrides)], ["eval", stage, "--config", "benchmark.yaml", *overrides])
 
     def settings(self, args, key):
         return [arg for arg in args if arg.lstrip("+").startswith(key + "=")]
@@ -353,6 +367,7 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
         exit_status: int = 7,
         visible_gpus: str = "GPU-d,GPU-b,GPU-a,GPU-c",
         shutdown_signal: str = "",
+        shutdown_before_registration: bool = False,
     ) -> tuple[int, str, str, dict[str, list[str]]]:
         """Execute generated commands with mock services, recording argv and GPU assignments."""
         with TemporaryDirectory(prefix="gym-tp1-") as directory:
@@ -382,6 +397,17 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
             }
             _, command, _, submissions = self.capture_submission(env=env)
             self.assertIn(f"--nodes={env['NUM_NODES']}", submissions[0])
+            if shutdown_before_registration:
+                # Force a signal in the fork/PID-registration window without timing sleeps.
+                registration = '            worker_pids+=("$!")'
+                self.assertEqual(command.count(registration), 1)
+                interrupt = r"""
+            if (( engine_index == 3 )); then
+                while [[ ! -f "$TEST_STATE_DIR/engine-GPU-c-ready" ]]; do "$TEST_SLEEP" 0.01; done
+                kill -s "$TEST_SHUTDOWN_SIGNAL" "$$"
+            fi
+"""
+                command = command.replace(registration, interrupt + registration)
             stubs = r"""
 run_service() {
     local role=$1
@@ -481,6 +507,20 @@ sleep() { "$TEST_SLEEP" 0.01; }
         self.assertEqual(status, 143, stderr)
         for service in recorded:
             self.assertIn(f"{service}-stopped", stdout)
+
+    def test_tp1_shutdown_before_pid_registration_stops_all_services(self) -> None:
+        for shutdown_signal, expected_status in (("TERM", 143), ("INT", 130)):
+            with self.subTest(signal=shutdown_signal):
+                status, stdout, stderr, recorded = self.run_tp1_services(
+                    mode="pd",
+                    exit_role="none",
+                    shutdown_signal=shutdown_signal,
+                    shutdown_before_registration=True,
+                )
+                self.assertEqual(status, expected_status, stderr)
+                self.assertEqual(set(recorded), {"router", *(f"engine-GPU-{gpu}" for gpu in "dbac")})
+                for service in recorded:
+                    self.assertIn(f"{service}-stopped", stdout)
 
     def test_tp1_requires_four_visible_gpus(self) -> None:
         for visible in ("0,1", ""):

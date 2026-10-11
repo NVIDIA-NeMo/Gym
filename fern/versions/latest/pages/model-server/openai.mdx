@@ -32,6 +32,8 @@ policy_model_name: gpt-4o-mini
 
 Point `policy_base_url` at any OpenAI-compatible Responses endpoint to reuse this server with a different host.
 
+For NVCF endpoints, requests that take longer than 340 seconds to produce a first byte need the [HTTP/2 PING sidecar](/main/infrastructure/nvcf-h2-ping-sidecar).
+
 ## Configuration Reference
 
 | Parameter | Type | Default | Description |

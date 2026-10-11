@@ -194,6 +194,10 @@ class AmbiguousEnvironmentServerError(ConfigError, ValueError):
     """Rows route by an agent that more than one environment server fronts."""
 
 
+class AmbiguousAgentRenameError(ConfigError, ValueError):
+    """An environment server references an agent inherited by several new instances."""
+
+
 class AgentCompositionError(ConfigError, ValueError):
     """A standalone agent config could not be composed onto the merged config's agent instances."""
 

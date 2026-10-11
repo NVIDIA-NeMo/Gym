@@ -293,6 +293,55 @@ digest-covered `media` summary. Deploy the paired RL changes with this adapter; 
 checkpoints written in either older format need a separate migration. Supported
 processors and modalities are enforced by the framework's inference worker.
 
+## Retire capture ledgers
+
+With external staging, the model server keeps a capture ledger for each rollout: one `<rollout_id>.lineage.jsonl` file in the lineage store's directory, recording the model calls the rollout made without their token arrays.
+The training framework reads it once, through the manifest route, when the rollout ends.
+Gym can't tell when the framework is done with a rollout, so the framework removes each ledger itself, using the same two operations the complete-record token store has: retire and delete.
+
+### Retire a rollout the framework is done with
+
+Retiring deletes the rollout's ledger and leaves an empty `<rollout_id>.lineage.retired` file in its place.
+That file acts as a fence: if a model call for the rollout finishes later, Gym discards its row instead of starting a new ledger.
+Late calls are more common than they sound, because an agent the framework gave up on can keep running, and a client retry can run a finished rollout a second time.
+`TokenSource.drop` leaves the same kind of fence in the complete-record token store.
+After a rollout is retired, its manifest route returns HTTP 410 instead of an empty manifest, so a framework that reads it too late finds out rather than building an empty receipt.
+
+A call that starts after its rollout was retired is not admitted for capture, so it stages nothing.
+A call that was already in flight, however, may have staged its tokens before Gym discarded its row, and no manifest names those tokens.
+Gym logs a warning with the call's staging key, and the framework that staged the tokens has to remove them, for example by sweeping staged rows that no receipt references.
+
+Retire every rollout the framework is done with, whether it finished or was abandoned.
+A finished rollout can be retired once its manifest has been read and its receipt built, unless a crash before the receipt is saved would make the framework rerun it under the same ID; in that case, wait until the receipt is saved.
+An abandoned rollout should be retired as soon as the framework gives up on it.
+
+### Delete fences once nothing can still write
+
+Deleting removes a rollout's ledger together with its fence, which is only safe once no call from that rollout can still arrive.
+In practice that means the end of the run, or a point where every Gym server sharing the lineage directory has restarted.
+Until then, the fences accumulate at one empty file per retired rollout.
+Also delete a rollout ID before reusing it, so that the new run starts from an empty ledger, as `TokenCaptureStore.delete` does for the complete-record store.
+
+### Send the requests
+
+Send each request to a model server whose lineage directory holds the rollout's ledger, either the server that served the rollout or any other server configured with the same directory.
+A model server only sees the ledgers in its own lineage directory and reports any other rollout as `absent`.
+
+```http
+POST /training-token-capture/control/rollouts/retire
+POST /training-token-capture/control/rollouts/delete
+Authorization: Bearer <control auth token>
+
+{"rollout_ids": ["<rollout_id>", ...]}
+```
+
+Each request takes at most 4096 rollout IDs, and `RolloutControlClient.retire` and `RolloutControlClient.delete` split longer lists into batches for you.
+The reply lists the rollouts whose ledger was removed under `removed` and the rest under `absent`.
+Because repeating either operation changes nothing, a failed batch can simply be sent again.
+
+Neither operation touches staged token data.
+The framework that staged the data removes it, and it must keep any staged data that a checkpoint it may restore still refers to.
+
 ## Limitations
 
 The model-server boundary observes model HTTP requests and responses. It can record tool calls,

@@ -57,14 +57,15 @@ frontend:
 container_mounts:
   "$GYM_REPO": /opt/Gym
 
-# Gym's inference-metrics collector handles vLLM metrics; SRT collects engine telemetry here.
+# Gym collects inference metrics from each SGLang engine; SRT also collects engine telemetry.
 observability:
   enabled: true
 
 benchmark:
   type: custom
   container_image: gym-eval
-  client_placement: last_decode
+  placement:
+    node: last_decode
   stream_output: true
   env:
     GYM_CONFIG: benchmarks/swebench/verified/opencode.yaml
@@ -87,12 +88,37 @@ benchmark:
     mkdir -p "$output_dir"
     rollouts_fpath="$output_dir/rollouts.jsonl"
 
+    # SRT supplies one endpoint per logical engine, including multi-node engines.
+    inference_metrics_config="$output_dir/inference-metrics.yaml"
+    python - "$inference_metrics_config" <<'PY_METRICS'
+    import json
+    import os
+    import sys
+    from pathlib import Path
+
+    endpoints = {}
+    for role in ("prefill", "decode"):
+        variable = f"SRT_{role.upper()}_ENDPOINTS"
+        addresses = os.environ.get(variable, "")
+        if not addresses.strip():
+            raise SystemExit(f"SRT must provide {variable} for inference metrics")
+        for index, address in enumerate(addresses.split(",")):
+            endpoints[f"{role}{index}"] = f"http://{address.strip()}/metrics"
+    metrics = {"enabled": True, "endpoints": endpoints}
+    # SRT provides this service address only for Mooncake HiCache recipes.
+    if mooncake_host := os.environ.get("SRT_SERVICE_HICACHE_MASTER_IPS"):
+        metrics["mooncake_endpoint"] = f"http://{mooncake_host}:9003/metrics"
+    # JSON is valid YAML and safely quotes endpoint addresses.
+    Path(sys.argv[1]).write_text(json.dumps({"inference_metrics": metrics}))
+    PY_METRICS
+
     gym eval prepare --config $GYM_CONFIG +use_cached_prepared_benchmarks=true
 
     gym eval run \
       --config $GYM_CONFIG \
       --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml \
       --config benchmarks/nemotron_3.5_super/policy_model_override.yaml \
+      --config "$inference_metrics_config" \
       "+wandb_project=${NEMO_GYM_USER}-gym-eval" \
       "+wandb_name=$experiment_name" \
       +uv_venv_dir=/opt/uv_venvs \
