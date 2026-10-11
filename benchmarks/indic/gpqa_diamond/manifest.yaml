@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 name: indic/gpqa_diamond
-version: 2.1.0
+version: 2.2.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
@@ -17,6 +17,7 @@ determinism: seeded
 resources_server: mcqa
 agent_server: simple_agent
 model_server: policy_model
+grading_mode: lenient_answer_colon_md
 datasets:
   - name: indic_gpqa_diamond
     type: benchmark

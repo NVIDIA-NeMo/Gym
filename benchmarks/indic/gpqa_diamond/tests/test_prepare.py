@@ -92,6 +92,8 @@ def test_exact_shuffle_prompt_and_subset_stability(monkeypatch, english_rows):
         ]
     assert full[0]["uuid"] != hindi[0]["uuid"]
     assert hindi[0]["metadata"]["subset_for_metrics"] == "hi"
+    assert hindi[0]["template_metadata"] == {"allow_localized_answer_labels": True}
+    assert "template_metadata" not in full[0]
 
     prompt = load_prompt_config("benchmarks/prompts/eval/aai/mcq-4choices.yaml")
     validate_prompt_compatibility(full, prompt)
@@ -134,11 +136,20 @@ def test_prepare_loads_train_split_once_for_all_languages(tmp_path, monkeypatch)
     monkeypatch.setattr(module, "EXPECTED_ROWS", 2)
     records = [record(index, "hi") for index in range(2)]
     calls = []
+    source_path = tmp_path / "train.parquet"
+    source_path.write_bytes(b"synthetic parquet download")
+    monkeypatch.setattr(module, "SOURCE_SHA256", hashlib.sha256(source_path.read_bytes()).hexdigest())
+    downloads = []
 
-    def load(repo_id, *, split):
-        calls.append((repo_id, split))
+    def download(**kwargs):
+        downloads.append(kwargs)
+        return str(source_path)
+
+    def load(repo_id, *, split, data_files):
+        calls.append((repo_id, split, data_files))
         return records
 
+    monkeypatch.setattr(module, "hf_hub_download", download)
     monkeypatch.setattr(module, "load_dataset", load)
     output = module.prepare(tmp_path / "prepared.jsonl", languages=["en", "hi"], question_ids=["1"])
     with output.open() as handle:
@@ -148,9 +159,21 @@ def test_prepare_loads_train_split_once_for_all_languages(tmp_path, monkeypatch)
     assert "DO NOT INCLUDE" not in output.read_text()
     assert rows[1]["metadata"]["source_id"] == "ai4bharat/indic-gpqa"
     assert rows[0]["metadata"]["record_id"] == "record-1"
-    assert calls == [(module.SOURCE_ID, "train")]
+    assert calls == [("parquet", "train", str(source_path))]
+    assert downloads == [
+        {
+            "repo_id": module.SOURCE_ID,
+            "repo_type": "dataset",
+            "revision": module.SOURCE_REVISION,
+            "filename": "train.parquet",
+        }
+    ]
     assert rows[0]["metadata"]["source_split"] == "train"
-    assert "source_revision" not in rows[0]["metadata"]
+    assert rows[0]["metadata"]["source_revision"] == module.SOURCE_REVISION
+    provenance = json.loads(output.with_suffix(".manifest.json").read_text())
+    assert provenance["source_sha256"] == module.SOURCE_SHA256
+    assert provenance["prepared_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
+    assert provenance["rows_per_language"] == {"en": 1, "hi": 1}
 
 
 def test_config_matches_english_pipeline():
@@ -177,6 +200,7 @@ def test_prepare_rejects_invalid_source_ids(value, tmp_path, monkeypatch):
     source = [record(index, "hi") for index in range(2)]
     source[0]["Record ID"] = value
     monkeypatch.setattr(module, "load_dataset", lambda *args, **kwargs: source)
+    monkeypatch.setattr(module, "_source_file", lambda _: tmp_path / "synthetic.parquet")
     with pytest.raises(ValueError, match="GPQA Record IDs"):
         module.prepare(tmp_path / "invalid.jsonl", languages=["hi"])
     assert not (tmp_path / "invalid.jsonl").exists()
@@ -189,3 +213,57 @@ def test_missing_translation_does_not_fall_back_to_english(value, monkeypatch):
     source["Question_Hindi_translation"] = value
     with pytest.raises(ValueError, match="GPQA hi/0"):
         module.build_rows([source], language="hi")
+
+
+def test_local_parquet_preparation_is_offline_and_hash_checked(tmp_path, monkeypatch):
+    from datasets import Dataset
+
+    source = tmp_path / "train.parquet"
+    Dataset.from_list([record(0, "hi")]).to_parquet(source)
+    monkeypatch.setattr(module, "EXPECTED_ROWS", 1)
+    monkeypatch.setattr(module, "SOURCE_SHA256", hashlib.sha256(source.read_bytes()).hexdigest())
+
+    def no_download(**kwargs):
+        pytest.fail("Local source preparation must not contact the Hub")
+
+    monkeypatch.setattr(module, "hf_hub_download", no_download)
+    output = module.prepare(tmp_path / "prepared.jsonl", languages=["hi"], source_path=source)
+    with output.open() as stream:
+        rows = [json.loads(line) for line in stream]
+    assert len(rows) == 1
+    assert rows[0]["question"] == "अनुवाद Synthetic question 0?"
+    assert rows[0]["template_metadata"]["allow_localized_answer_labels"] is True
+    source.write_bytes(b"wrong dataset")
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        module.prepare(tmp_path / "bad.jsonl", languages=["hi"], source_path=source)
+    assert not (tmp_path / "bad.jsonl").exists()
+
+
+def test_dataset_access_failure_has_actionable_setup(monkeypatch):
+    from httpx import Request, Response
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    def denied(**kwargs):
+        raise RepositoryNotFoundError(
+            "not authorized",
+            response=Response(404, request=Request("GET", "https://huggingface.co/api/datasets/test")),
+        )
+
+    monkeypatch.setattr(module, "hf_hub_download", denied)
+    with pytest.raises(RuntimeError, match="authentication alone does not grant access"):
+        module.prepare(languages=["hi"])
+
+
+def test_missing_local_source_is_actionable(tmp_path):
+    with pytest.raises(FileNotFoundError, match="source_path must be an existing"):
+        module.prepare(languages=["hi"], source_path=tmp_path / "missing.parquet")
+
+
+def test_manifest_matches_resolved_grading_mode(monkeypatch):
+    from nemo_gym.environment import validation
+
+    # Exercise real composition validation without requiring benchmark data in unit tests.
+    monkeypatch.setattr(validation, "_validate_dataset", lambda *args, **kwargs: None)
+    report = validation.validate_environment(module.DIRECTORY / "manifest.yaml")
+    assert report.grading_mode == "lenient_answer_colon_md"
+    assert report.synchronized_fields == ()

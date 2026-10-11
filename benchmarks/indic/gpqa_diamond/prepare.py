@@ -14,11 +14,17 @@ from pathlib import Path
 from typing import Any
 
 from datasets import load_dataset
+from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError, OfflineModeIsEnabled
 
 
 DIRECTORY = Path(__file__).resolve().parent
 SOURCE_ID = "ai4bharat/indic-gpqa"
+# Dataset commit and content hash recorded by the original Hub download, not credentials.
+SOURCE_REVISION = "c3c32b0a0ec7aeebe884c4c55c46730b4274a612"  # pragma: allowlist secret
+SOURCE_SHA256 = "34cd810650109f4c08b842e69dcadcff17da3a23c37a0f75d0d6a667b1e2c0cf"  # pragma: allowlist secret
 SOURCE_SPLIT = "train"
+PROMPT_PATH = DIRECTORY.parents[1] / "prompts/eval/aai/mcq-4choices.yaml"
 LANGUAGES = {
     "en": "English",
     "as": "Assamese",
@@ -96,6 +102,7 @@ def build_rows(
                 "problem": f"{example['Question']}\n{options_text}",
                 "options": options,
                 "expected_answer": "ABCD"[choices.index(example["Correct Answer"])],
+                **({"template_metadata": {"allow_localized_answer_labels": True}} if language != "en" else {}),
                 "uuid": str(
                     uuid.uuid5(
                         uuid.NAMESPACE_URL,
@@ -111,6 +118,7 @@ def build_rows(
                     "source_row_index": index,
                     "duplicate_choice_text": len({example[field] for field in TEXT_FIELDS[1:]}) != 4,
                     "source_id": SOURCE_ID,
+                    "source_revision": SOURCE_REVISION,
                     "source_split": SOURCE_SPLIT,
                 },
             }
@@ -118,20 +126,44 @@ def build_rows(
     return result
 
 
+def _source_file(source_path: str | Path | None) -> Path:
+    if source_path is None:
+        try:
+            source_path = hf_hub_download(
+                repo_id=SOURCE_ID, repo_type="dataset", revision=SOURCE_REVISION, filename="train.parquet"
+            )
+        except (HfHubHTTPError, LocalEntryNotFoundError, OfflineModeIsEnabled) as error:
+            raise RuntimeError(
+                f"Cannot access {SOURCE_ID}@{SOURCE_REVISION}. Authenticate with `hf auth login` using an account "
+                "authorized for this dataset, or pass source_path=/path/to/train.parquet from an authorized "
+                "download of the pinned revision. See benchmarks/indic/gpqa_diamond/README.md; "
+                "authentication alone does not grant access."
+            ) from error
+    path = Path(source_path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"GPQA source_path must be an existing train.parquet file: {path}")
+    actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual_hash != SOURCE_SHA256:
+        raise ValueError(f"GPQA source SHA-256 mismatch: expected {SOURCE_SHA256}, got {actual_hash}")
+    return path
+
+
 def prepare(
     output_fpath: str | Path | None = None,
     *,
     languages: Sequence[str] | None = None,
     question_ids: Sequence[str] | None = None,
+    source_path: str | Path | None = None,
 ) -> Path:
-    """Download the train split and prepare selected languages."""
+    """Prepare selected languages from the pinned Hub file or its verified local copy."""
     if isinstance(languages, str):
         raise ValueError("languages must be a list of language codes")
     selected = list(DEFAULT_LANGUAGES if languages is None else languages)
     if not selected or len(set(selected)) != len(selected) or set(selected) - set(LANGUAGES):
         raise ValueError(f"Select unique language codes from {list(LANGUAGES)}")
 
-    records = list(load_dataset(SOURCE_ID, split=SOURCE_SPLIT))
+    source_file = _source_file(source_path)
+    records = list(load_dataset("parquet", data_files=str(source_file), split=SOURCE_SPLIT))
     rows = []
     for language in selected:
         rows.extend(
@@ -147,6 +179,24 @@ def prepare(
     with output_path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    provenance = {
+        "source_id": SOURCE_ID,
+        "source_revision": SOURCE_REVISION,
+        "source_split": SOURCE_SPLIT,
+        "source_sha256": SOURCE_SHA256,
+        "source_rows": len(records),
+        "languages": selected,
+        "question_ids": list(question_ids) if question_ids is not None else None,
+        "rows_per_language": {
+            language: sum(row["metadata"]["language"] == language for row in rows) for language in selected
+        },
+        "prepared_rows": len(rows),
+        "prepared_sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
+        "adapter_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "prompt_sha256": hashlib.sha256(PROMPT_PATH.read_bytes()).hexdigest(),
+        "localized_answer_labels": "opted in for non-English rows only",
+    }
+    output_path.with_suffix(".manifest.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     return output_path
 
 
@@ -155,12 +205,14 @@ def main() -> None:
     parser.add_argument("--languages", nargs="+", choices=list(LANGUAGES))
     parser.add_argument("--question-ids", nargs="+")
     parser.add_argument("--output-path", type=Path)
+    parser.add_argument("--source-path", type=Path)
     args = parser.parse_args()
     print(
         prepare(
             args.output_path,
             languages=args.languages,
             question_ids=args.question_ids,
+            source_path=args.source_path,
         )
     )
 

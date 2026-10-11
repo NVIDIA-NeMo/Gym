@@ -87,10 +87,11 @@ BOXED_LETTER_LABEL_PATTERN = re.compile(r"^\s*([A-Z])\s*[:).\-]")
 ANSWER_COLON_PATTERN = re.compile(r"(?i)answer\s*:\s*(.+)")
 # Markdown-aware variant: captures the final-answer payload after Answer:.
 ANSWER_COLON_PAYLOAD_PATTERN = re.compile(r"(?im)[*_]{0,2}Answer[*_]{0,2}\s*:[*_\s]{0,2}(.+)")
-# Language-agnostic final-line fallback for localized labels such as
-# ``উত্তর: C`` or ``उत्तर: B``. The label is deliberately not enumerated: Indic
-# models also transliterate or code-switch it. Full-line anchoring and the
-# single-letter payload prevent option definitions and prose from matching.
+# Recognized Indic answer labels only; arbitrary labels such as "Eliminated
+# option" must never supply an answer. This fallback also requires a row opt-in.
+LOCALIZED_ANSWER_LABELS = frozenset(
+    {"উত্তৰ", "উত্তর", "જવાબ", "उत्तर", "ಉತ್ತರ", "ഉത്തരം", "ଉତ୍ତର", "ਉੱਤਰ", "उत्तरम्", "उत्तरं", "பதில்", "விடை", "సమాధానం", "جواب"}
+)
 TERMINAL_LABELED_CHOICE_PATTERN = re.compile(
     r"^[\s*_`#~-]*(?P<label>[^:：\n]{2,80})[:：]"
     r"[\s*_`#~\[({-]*(?P<choice>[A-Za-z])"
@@ -272,19 +273,13 @@ def _extract_from_answer_payloads(
 
 
 def _extract_terminal_labeled_choice(text: str, allowed_letters: set[str]) -> Optional[str]:
-    """Extract a localized ``label: X`` choice from the final non-empty line.
-
-    This fallback intentionally requires a label of at least two characters
-    and a payload containing exactly one choice letter. It therefore accepts
-    translated answer labels without treating ``A: option text`` or ``A: B``
-    as a final answer.
-    """
+    """Accept a recognized Indic label and one choice on the final nonempty line."""
     line = next((line.strip() for line in reversed(text.splitlines()) if line.strip()), "")
     match = TERMINAL_LABELED_CHOICE_PATTERN.fullmatch(unicodedata.normalize("NFKC", line))
     if not match:
         return None
     label = match.group("label").strip("*_`#~ ")
-    if len(label) < 2 or (len(label) == 1 and label.isascii() and label.isalpha()):
+    if label not in LOCALIZED_ANSWER_LABELS:
         return None
     choice = match.group("choice").upper()
     return choice if choice in allowed_letters else None
@@ -461,10 +456,12 @@ class MCQAResourcesServer(SimpleResourcesServer):
                     allowed_letters,
                     answer_prefix=answer_prefix,
                 )
-                if pred is None:
-                    pred = _extract_terminal_labeled_choice(text, allowed_letters)
                 if pred is None and answer_prefix:
                     pred, _, _ = _parse_answer_letter_strict_boxed(text, allowed_letters)
+                # Preserve all existing consumers and fallback precedence. Only
+                # explicitly opted-in rows gain localized-label normalization.
+                if pred is None and (body.template_metadata or {}).get("allow_localized_answer_labels") is True:
+                    pred = _extract_terminal_labeled_choice(text, allowed_letters)
 
         is_correct = (pred == gold) if (pred is not None and gold) else False
         reward = 1.0 if is_correct else 0.0
