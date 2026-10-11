@@ -25,3 +25,10 @@ rolemrc_judge_benchmark_simple_agent:
         prompt_config: null
         num_repeats: 1
         license: Creative Commons Attribution 4.0 International
+
+rolemrc_judge_benchmark_environment_server:
+  _inherit_from: rolemrc_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: rolemrc_judge_benchmark_simple_agent

@@ -162,6 +162,7 @@ class PythonMathVerifyResponse(BaseVerifyResponse):
 
 
 class PythonExecutorResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     # new: create the pool once
 
     config: PythonExecutorResourcesServerConfig

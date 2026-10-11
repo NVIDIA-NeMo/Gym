@@ -1,1 +1,7 @@
 torchvision==0.27.0
+# unbabel-comet declares protobuf<5.0.0 (unchanged through its latest
+# 2.2.7 release), but wandb (a core nemo-gym dep, CVE remediation) needs
+# protobuf>=5. Force the version wandb resolves to elsewhere in the repo;
+# comet's own test suite passes with it (see test validation in the PR
+# that added this override).
+protobuf==6.33.6

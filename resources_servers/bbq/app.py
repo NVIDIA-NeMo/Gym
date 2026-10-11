@@ -142,6 +142,8 @@ class BBQVerifyResponse(BaseVerifyResponse):
 class BBQTwoJudgeResourcesServer(SimpleResourcesServer):
     """Single-turn comparative-QA verifier with two concurrent LLM checks."""
 
+    ray_enabled = False
+
     config: BBQTwoJudgeConfig
     _prompt_templates: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
 

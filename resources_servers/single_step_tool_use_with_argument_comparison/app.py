@@ -50,6 +50,7 @@ class SingleStepToolUseArgumentComparisonVerifyResponse(BaseVerifyResponse):
 
 
 class SingleStepToolUseArgumentComparisonResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: SingleStepToolUseArgumentComparisonResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

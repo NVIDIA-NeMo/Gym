@@ -84,3 +84,11 @@ labbench2_vlm_simple_agent:
         jsonl_fpath: resources_servers/labbench2_vlm/data/example.jsonl
         num_repeats: 1
         license: Creative Commons Attribution-ShareAlike 4.0 International
+
+labbench2_vlm_simple_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: labbench2_vlm_simple_agent

@@ -83,3 +83,11 @@ user_simulator_model:
       openai_api_key: ${user_sim_api_key}
       openai_model: ${user_sim_model_name}
       openai_default_headers: {}
+
+indian_banking_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: indian_banking_agent

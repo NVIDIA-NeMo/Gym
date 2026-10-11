@@ -40,20 +40,27 @@ from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError, UploadRollo
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
+    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
+    rollout_agent_label,
+    rollout_run_key,
+    rollout_run_labels,
 )
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_RESULT_TYPE_KEY,
     NG_TERMINAL_KEY,
     _coverage_report,
     _get_max_rollout_attempts,
     _rollout_for_export,
     _rollout_request_debug_summary,
+    is_terminal_failure,
+    migrate_invalid_judge_main_rows,
 )
 from nemo_gym.server_utils import (
     ServerClient,
@@ -69,6 +76,13 @@ JUDGE_FAILED_FAILURE_CLASS = "judge_failed"
 ATIF_PROVENANCE_KEY = "_ng_atif_provenance"
 ATIF_NO_PERSIST_FAILURE_CLASS = "kill_shaped"
 _CONFIG_BOOL_ADAPTER = TypeAdapter(bool)
+# The judge answered but its verdict could not be scored: `judge_unparseable` in nemo_gym.failure_kinds.
+# The sidecar labels predate that vocabulary and match the ones rollout collection's invalid-judge
+# migration and the GDPVal Stirrup integration write. `permanent` names no kind of failure; the row's
+# `_ng_failure_terminal` stamp is what stops the retry.
+JUDGE_INVALID_FAILURE_CLASS = "judge_invalid"
+JUDGE_INVALID_PERMANENT_FAILURE_CLASS = "permanent"
+_JUDGE_FAILURE_CLASSES = {JUDGE_FAILED_FAILURE_CLASS, JUDGE_INVALID_FAILURE_CLASS}
 
 # Printed at the start of a `--judge-failed-only` run.
 _RECOVERY_TWO_SOURCES_WARNING = (
@@ -156,6 +170,25 @@ class RolloutReverificationConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfi
             "file that already holds the successes (e.g. point --output at the run's rollouts file). The output "
             "is opened in append mode (never cleared) and already-present keys are skipped, so re-running is "
             "idempotent. Only valid together with judge_failed_only=true, and mutually exclusive with overwrite."
+        ),
+    )
+    retry_terminal_timeouts: bool = Field(
+        default=False,
+        description=(
+            "With resume_from_cache, retry failures-sidecar rows of class `timeout_exceeded` (and the "
+            "repairable environment faults) even when they are stamped `_ng_failure_terminal`, as rollout "
+            "collection's option of the same name does. Off (default): a sidecar row is terminal iff it is "
+            "stamped `_ng_failure_terminal`."
+        ),
+    )
+    retry_invalid_judge_responses: bool = Field(
+        default=False,
+        description=(
+            "Route a verifier result flagged `invalid_judge_response` to the failures sidecar as a retryable "
+            "`judge_invalid` failure (`permanent` when it also sets `invalid_judge_retryable=false`) instead "
+            "of scoring it. With judge_failed_only, first move such rows out of rollouts_jsonl_fpath into its "
+            "failures sidecar so they are judged again; this rewrites rollouts_jsonl_fpath. Off (default): "
+            "these results are scored rows and rollouts_jsonl_fpath is never rewritten."
         ),
     )
 
@@ -270,6 +303,13 @@ def _rs_for_row(
         block = global_config_dict.get(ts)
         if isinstance(block, (dict, DictConfig)) and "resources_servers" in block:
             return str(ts)
+    server = row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+    server_block = global_config_dict.get(server) if isinstance(server, str) else None
+    if isinstance(server_block, (dict, DictConfig)):
+        for environment_server in (server_block.get("environment_servers") or {}).values():
+            resources_ref = environment_server.get("resources_server") if environment_server else None
+            if resources_ref and resources_ref.get("name"):
+                return str(resources_ref["name"])
     agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
     try:
         return agent_to_rs[agent_name]
@@ -337,11 +377,10 @@ def _response_has_function_calls(row: Dict[str, Any]) -> bool:
 # Function used to summarize the debug information for a failed verification
 # ---------------------------------------------------------------------------
 def _rollout_verify_debug_summary(row: Dict[str, Any], resources_server_name: str) -> Dict[str, Any]:
-    agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
-        "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
+        "agent_name": rollout_agent_label(row),
         "resources_server_name": resources_server_name,
     }
     return {k: v for k, v in summary.items() if v is not None}
@@ -369,7 +408,9 @@ def _parse_output_line_key(line: bytes) -> tuple[int, int] | None:
     return task_idx, rollout_idx
 
 
-def _load_cache_keys_by_status(output_fpaths: OutputPaths) -> CacheKeysByStatus:
+def _load_cache_keys_by_status(
+    output_fpaths: OutputPaths, *, retry_terminal_timeouts: bool = False
+) -> CacheKeysByStatus:
     if not (output_fpaths.output.exists() or output_fpaths.failures.exists()):
         print("Skipping resume_from_cache because cache paths don't exist!")
         return CacheKeysByStatus(
@@ -398,7 +439,7 @@ def _load_cache_keys_by_status(output_fpaths: OutputPaths) -> CacheKeysByStatus:
                     continue
                 k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
                 attempts_by_key[k] += 1
-                if fr.get(NG_TERMINAL_KEY):
+                if is_terminal_failure(fr, retry_terminal_timeouts=retry_terminal_timeouts):
                     terminal_keys.add(k)
 
     max_attempts = _get_max_rollout_attempts()
@@ -427,7 +468,7 @@ def summarize_cache_usage(cache: CacheKeysByStatus, all_payloads: List[Dict], fi
         f"""Resumed from cache. Found:
 - {len(all_payloads)} total rows to be re-verified
 - {len(cache.successful_keys)} rows already done (in main jsonl)
-- {len(cache.terminal_keys)} sidecar-terminal (timeout_exceeded / skipped) → not retried
+- {len(cache.terminal_keys)} sidecar-terminal (for example skipped) → not retried
 - {len(cache.maxed_out_keys)} hit max_attempts → not retried
 - {len(filtered_payloads)} rows that still need to be run"""
     )
@@ -442,8 +483,20 @@ def summarize_cache_usage(cache: CacheKeysByStatus, all_payloads: List[Dict], fi
 
 
 def _is_judge_failure(row: Dict[str, Any]) -> bool:
-    """Whether a failures-sidecar row is a judge failure (the only recoverable class)."""
-    return row.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED_FAILURE_CLASS
+    """Whether a failures-sidecar row is a judge failure (a failed call or an invalid verdict), the classes
+    `--judge-failed-only` recovers."""
+    return row.get(NG_FAILURE_CLASS_KEY) in _JUDGE_FAILURE_CLASSES
+
+
+def _normalize_invalid_judge_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Route a verifier's invalid judge response through the failure sidecar."""
+    if not result.get("invalid_judge_response") or result.get(NG_FAILURE_CLASS_KEY) is not None:
+        return result
+    retryable = result.get("invalid_judge_retryable") is not False
+    result[NG_FAILURE_CLASS_KEY] = JUDGE_INVALID_FAILURE_CLASS if retryable else JUDGE_INVALID_PERMANENT_FAILURE_CLASS
+    if not retryable:
+        result[NG_TERMINAL_KEY] = True
+    return result
 
 
 def _recovery_rollout_predicate(
@@ -470,6 +523,32 @@ def _recovery_rollout_predicate(
         return True
 
     return predicate
+
+
+def _reject_multistage_recovery_source(rollouts_jsonl_fpath: Path, *, retry_invalid_judge_responses: bool) -> None:
+    """Refuse `--judge-failed-only` on multi-stage rows before any file is written.
+
+    Multi-stage rows carry ``stage_index``. Recovering them outside the multi-stage collection
+    would lose stage identity and the adaptive reference set. Recovery reads the failures sidecar;
+    with ``retry_invalid_judge_responses`` the invalid-judge rows that would be migrated into it
+    from the rollouts file count too.
+    """
+    sources = [(failures_path_for(rollouts_jsonl_fpath), False)]
+    if retry_invalid_judge_responses:
+        sources.append((rollouts_jsonl_fpath, True))
+    for fpath, invalid_judge_rows_only in sources:
+        if not fpath.exists():
+            continue
+        with fpath.open("rb") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                row = orjson.loads(line)
+                if "stage_index" in row and (not invalid_judge_rows_only or row.get("invalid_judge_response")):
+                    raise ConfigError(
+                        "--judge-failed-only does not support multi-stage rows; resume the multi-stage rollout "
+                        "collection so stage identity and adaptive references are preserved"
+                    )
 
 
 def _seed_output_with_successes(successes_fpath: Path, output_fpath: Path) -> set[tuple[int, int]]:
@@ -531,8 +610,40 @@ def _yield_inputs_and_rollouts_paired(
             n_yielded += 1
 
 
+def _rollout_response(rollout: Dict[str, Any]) -> Any:
+    """Return the response a rollout's verifier scored, or explain which result type lacks one."""
+    if "response" not in rollout:
+        result_type = rollout.get(NG_RESULT_TYPE_KEY, "unknown")
+        raise ConfigError(
+            f"reverify: rollout (task {rollout.get(TASK_INDEX_KEY_NAME)}, rollout {rollout.get(ROLLOUT_INDEX_KEY_NAME)}) "
+            f"of result type {result_type!r} has no `response`, which reverification needs"
+        )
+    return rollout["response"]
+
+
 def _build_verify_payload(pair: InputRolloutPair) -> Dict:
-    return pair.input | {"response": pair.rollout["response"]}
+    response = _rollout_response(pair.rollout)
+    task_input = pair.input.get("task_input")
+    if not isinstance(task_input, dict):
+        payload = pair.input | {"response": response}
+    else:
+        # Accept generic flat task input and the historical single-agent task_data container.
+        row_keys = {k: v for k, v in pair.input.items() if k not in ("task_id", "task_input")}
+        fields = dict(task_input)
+        task_data = fields.pop("task_data", {})
+        if not isinstance(task_data, dict):
+            raise ConfigError("reverify: task_input.task_data must be an object")
+        for key in fields.keys() & task_data.keys():
+            if fields[key] != task_data[key]:
+                raise ConfigError(f"reverify: conflicting task field {key!r} inside and outside task_data")
+        payload = row_keys | task_data | fields | {"response": response}
+    # File-backed verifiers need the artifact path produced by the rollout, and
+    # adaptive comparison needs the exact reference subset used for that row.
+    # Preserve only verifier inputs, not rewards or failure bookkeeping.
+    for key in ("deliverables_dir", "reference_ids"):
+        if key in pair.rollout:
+            payload[key] = pair.rollout[key]
+    return payload
 
 
 def _prepare_payloads(
@@ -542,6 +653,7 @@ def _prepare_payloads(
     resume_from_cache: bool,
     limit: Optional[int] = None,
     rollout_predicate: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    retry_terminal_timeouts: bool = False,
 ) -> List[Dict]:
     all_payloads = [
         _build_verify_payload(pair)
@@ -550,7 +662,7 @@ def _prepare_payloads(
         )
     ]
     if resume_from_cache:
-        cache = _load_cache_keys_by_status(output_fpaths)
+        cache = _load_cache_keys_by_status(output_fpaths, retry_terminal_timeouts=retry_terminal_timeouts)
         payloads = list(_drop_cache_from_payloads(all_payloads, cache))
         summarize_cache_usage(cache, all_payloads, payloads)
         prepared_payloads = payloads
@@ -762,10 +874,12 @@ async def _call_aggregate_metrics(
     # fallback). Routing aggregation independently by the agent's configured server allowed a
     # remapped row to be verified by one server and aggregated by another.
     agent_results: Dict[Tuple[str, str], List[Dict]] = {}
+    labels = rollout_run_labels(rows)
     for row, result in zip(rows, results):
-        agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-        if not agent_name:
+        key = rollout_run_key(row)
+        if not key:
             continue
+        agent_name = labels[key]
         rs_name = _rs_for_row(row, agent_to_rs, server_client.global_config_dict)
         agent_results.setdefault((agent_name, rs_name), []).append(result)
 
@@ -879,7 +993,10 @@ def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]
     with output_fpath.open("rb") as f:
         results = [orjson.loads(line) for line in f if line.strip()]
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
-    rows = [{k: r[k] for k in (AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME) if k in r} for r in results]
+    rows = [
+        {k: r[k] for k in (AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME, ENVIRONMENT_SERVER_STAMP_KEY_NAME) if k in r}
+        for r in results
+    ]
     return results, rows
 
 
@@ -911,6 +1028,12 @@ class RolloutReverificationHelper(BaseModel):
                 config.append,
             )
         else:
+            assert config.rollouts_jsonl_fpath is not None
+            rollouts_jsonl_fpath = _resolve_under_cwd_or_install(config.rollouts_jsonl_fpath)
+            if config.judge_failed_only:
+                _reject_multistage_recovery_source(
+                    rollouts_jsonl_fpath, retry_invalid_judge_responses=config.retry_invalid_judge_responses
+                )
             output_fpaths = _prepare_output_fpaths(
                 output_name_prefix,
                 config.output_jsonl_fpath,
@@ -918,13 +1041,16 @@ class RolloutReverificationHelper(BaseModel):
                 config.overwrite,
                 config.append,
             )
-            assert config.rollouts_jsonl_fpath is not None
-            rollouts_jsonl_fpath = _resolve_under_cwd_or_install(config.rollouts_jsonl_fpath)
             reverify_source_fpath = rollouts_jsonl_fpath
             rollout_predicate = None
 
             if config.judge_failed_only:
                 print(_RECOVERY_TWO_SOURCES_WARNING)
+                if config.retry_invalid_judge_responses:
+                    # Older Gym builds persisted invalid judge responses as apparent
+                    # successes. Move them sidecar-first before seeding, otherwise their
+                    # keys are copied into the recovery output and skipped forever.
+                    migrate_invalid_judge_main_rows(rollouts_jsonl_fpath)
                 reverify_source_fpath = failures_path_for(rollouts_jsonl_fpath)
                 # Seed the successes and dedup so the re-verification doesn't judge successes again.
                 skip_keys = _seed_output_with_successes(rollouts_jsonl_fpath, output_fpaths.output)
@@ -937,6 +1063,7 @@ class RolloutReverificationHelper(BaseModel):
                 config.resume_from_cache,
                 config.limit,
                 rollout_predicate=rollout_predicate,
+                retry_terminal_timeouts=config.retry_terminal_timeouts,
             )
 
         semaphore = nullcontext()
@@ -945,7 +1072,8 @@ class RolloutReverificationHelper(BaseModel):
             semaphore = Semaphore(config.num_samples_in_parallel)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
-        counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in payloads_to_reverify)
+        run_labels = rollout_run_labels(payloads_to_reverify)
+        counts_left = Counter(run_labels.get(rollout_run_key(r)) for r in payloads_to_reverify)
         results_file = output_fpaths.output.open("ab")
         failures_file = output_fpaths.failures.open("ab")
         failure_counts: Counter = Counter()
@@ -954,9 +1082,14 @@ class RolloutReverificationHelper(BaseModel):
             for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
                 row, result = await future
 
+                if config.retry_invalid_judge_responses:
+                    _normalize_invalid_judge_result(result)
+
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
-                result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+                for key in (AGENT_REF_KEY_NAME, ENVIRONMENT_SERVER_STAMP_KEY_NAME):
+                    if key in row:
+                        result[key] = row[key]
                 # Keep task_source alongside agent_ref: aggregation routes with the same resolver
                 # as /verify (task_source authoritative), so it must survive into the output file.
                 if TASK_SOURCE_KEY_NAME in row:
@@ -998,9 +1131,10 @@ class RolloutReverificationHelper(BaseModel):
                     results_file.write(serialized + b"\n")
                     results_file.flush()
 
-                counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
-                if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
-                    counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
+                label = run_labels.get(rollout_run_key(row))
+                counts_left[label] -= 1
+                if counts_left[label] <= 0:
+                    counts_left.pop(label)
 
                 completed += 1
                 current_pct = 100 * completed / len(payloads_to_reverify)

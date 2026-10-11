@@ -167,6 +167,8 @@ class UGPhysicsJudgeVerifyResponse(LibraryJudgeMathVerifyResponse):
 class UGPhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
     """math_with_judge subclass with the UGPhysics TRUE/FALSE judge."""
 
+    ray_enabled = False
+
     JUDGE_TRUE_LABEL: ClassVar[str] = "TRUE"
     JUDGE_FALSE_LABEL: ClassVar[str] = "FALSE"
 

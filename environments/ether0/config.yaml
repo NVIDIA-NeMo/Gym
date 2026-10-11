@@ -24,3 +24,11 @@ ether0_simple_agent:
         type: validation
         jsonl_fpath: environments/ether0/data/val.jsonl
         license: Creative Commons Attribution 4.0 International
+
+ether0_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: ether0_simple_agent

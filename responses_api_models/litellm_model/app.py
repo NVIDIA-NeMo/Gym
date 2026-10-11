@@ -204,6 +204,7 @@ class LiteLLMModelServerConfig(SimpleModelServerConfig):
 
 
 class LiteLLMModelServer(SimpleModelServer):
+    ray_enabled = False
     config: LiteLLMModelServerConfig
 
     async def _check_proxy_version(self) -> None:
@@ -281,14 +282,17 @@ class LiteLLMModelServer(SimpleModelServer):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.openai_model
-        async with self._semaphore:
+
+        async def create_and_validate() -> NeMoGymResponse:
             try:
                 openai_response_dict = await self._client.create_response(**body_dict)
             except Exception as e:
                 logger.error("LiteLLM API call failed: %s", _sanitize_error(e))
                 raise
-        openai_response_dict = _normalize_to_response(openai_response_dict)
-        return NeMoGymResponse.model_validate(openai_response_dict)
+            return NeMoGymResponse.model_validate(_normalize_to_response(openai_response_dict))
+
+        # Apply the inherited upstream retry policy, pool timeout, and status propagation.
+        return await self._call_upstream(create_and_validate)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@
 import re
 from difflib import SequenceMatcher
 from enum import Enum
+from typing import ClassVar
 
 from pydantic import ConfigDict
 
@@ -29,6 +30,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 
@@ -40,6 +42,8 @@ class GradingRule(str, Enum):
 
 
 class EquivalenceRuleResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
     name: str = "equivalence_rule"
     # Grading rule to use. Overridable per environment via YAML config block.
     grading_rule: GradingRule = GradingRule.EXACT
@@ -69,6 +73,7 @@ def _normalize(text: str) -> str:
 
 
 class EquivalenceRuleResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: EquivalenceRuleResourcesServerConfig
 
     async def verify(self, body: EquivalenceRuleVerifyRequest) -> EquivalenceRuleVerifyResponse:

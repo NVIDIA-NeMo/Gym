@@ -38,6 +38,12 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
              version
 ```
 
+CLIENT spans measure total request time. When metrics export is enabled, the separate
+`gym.http.connection_pool.queue_duration_ms` histogram measures connection-pool wait without
+requiring a span for every request. See
+[Configuration](/main/reference/configuration#http-connection-pool) for the metric and pool-sizing
+reference.
+
 **Inbound.** Every NeMo Gym server applies OpenTelemetry FastAPI auto-instrumentation,
 which reads `traceparent` off the incoming request and makes the caller's span the parent
 of its own SERVER span.

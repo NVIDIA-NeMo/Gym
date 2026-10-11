@@ -126,6 +126,7 @@ class NSToolsVerifyResponse(BaseVerifyResponse):
 
 
 class NSToolsResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: NSToolsConfig
     tool_manager: Optional[Any] = None
     _tool_name_map: Dict[str, str] = {}  # Maps tool names to qualified names

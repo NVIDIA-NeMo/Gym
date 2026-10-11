@@ -179,6 +179,8 @@ class ArenaJudgeVerifyResponse(BaseVerifyResponse):
 class ArenaJudgeServer(SimpleResourcesServer):
     """Pairwise LLM-judge server for arena-hard-v2."""
 
+    ray_enabled = False
+
     config: ArenaJudgeConfig
 
     def model_post_init(self, context: Any) -> None:
@@ -426,7 +428,9 @@ class ArenaJudgeServer(SimpleResourcesServer):
                     self._best_of_rollouts(base_verdicts, reverse=True),
                 ]
             )
-            categories.append(rollouts[0].get("category"))
+            # The first rollout that has one: a row counted as zero for a rollout that never ran
+            # can come first and carries no category.
+            categories.append(next((r["category"] for r in rollouts if r.get("category")), None))
 
         out: Dict[str, Any] = {}
         overall = self._aggregate_arena_elo(paired_scores)

@@ -28,3 +28,11 @@ structured_outputs_v3_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_v3_example.jsonl
+
+structured_outputs_v3_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: structured_outputs_v3_simple_agent

@@ -18,6 +18,7 @@ from resources_servers.aviary.app import AviaryResourcesServer
 
 
 class HotPotQAResourcesServer(AviaryResourcesServer[HotPotQAEnv, HotPotQADataset]):
+    ray_enabled = False
     dataset: HotPotQADataset = Field(default_factory=lambda: HotPotQADataset(split="train"))
 
 

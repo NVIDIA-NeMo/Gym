@@ -1,0 +1,30 @@
+---
+title: "Daytona Access"
+description: "Obtain hosted Daytona credentials and check permissions and quota before running Gym workloads."
+position: 6
+---
+
+# Daytona Access
+
+Get a sandbox-service key from Daytona. It is separate from model and
+image-registry credentials.
+
+## Hosted service
+
+1. Sign in to the [Daytona dashboard](https://app.daytona.io/dashboard/keys) under
+   the organization approved for your workload; request membership if needed.
+2. [Create an API key](https://www.daytona.io/docs/en/api-keys/) with an appropriate
+   expiry and permissions. Sandbox creation/cleanup needs `write:sandboxes` and
+   `delete:sandboxes`; snapshot operations need additional permissions.
+3. Check [capacity and request limits](https://www.daytona.io/docs/en/limits/)
+   and the organization's spending budget before choosing concurrency.
+4. Set `DAYTONA_API_KEY` in the host environment through your secret manager.
+   Keep it out of source control and logs.
+
+<Warning>
+Daytona scopes sandbox isolation at the organization level. Access to running
+sandboxes is shared across API-key resource scopes within it; see the
+[permissions guidance](https://www.daytona.io/docs/en/api-keys/).
+</Warning>
+
+Continue with the [Harbor Daytona recipe](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harbor_agent#daytona-execution-path).

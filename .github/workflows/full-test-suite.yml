@@ -70,8 +70,10 @@ jobs:
           # The telemetry extra installs nemo-lens so the lens-gated tests under
           # tests/unit_tests/telemetry actually run; without it they skip and the
           # telemetry modules count as uncovered, failing the coverage gate below.
-          # Mirrors scripts/ci/core_unit_tests.sh, which syncs the same extra.
-          uv sync --extra dev --extra sandbox --extra openshell --extra telemetry
+          # mlflow/wandb are optional extras; the core suite covers both their
+          # installed- and missing-dependency paths, so they're synced here too.
+          # Mirrors scripts/ci/core_unit_tests.sh, which syncs the same extras.
+          uv sync --extra dev --extra sandbox --extra openshell --extra telemetry --extra mlflow --extra wandb
 
       - name: Test
         run: |
@@ -278,36 +280,32 @@ jobs:
   notify-failure:
     name: Notify test failure
     runs-on: ubuntu-latest
-    needs: [full-test-suite, server-suite-result, test-wheel-install]
+    needs: [full-test-suite, server-suite, server-suite-result, test-wheel-install]
     environment: main
+    permissions: {}
+    # Use the event directly: setup outputs are empty when setup fails.
     if: >-
       ${{
-        always() && !cancelled() &&
-        (needs.full-test-suite.result == 'failure' ||
-         needs.server-suite-result.result == 'failure' ||
-         needs.test-wheel-install.result == 'failure') &&
+        always() && !cancelled() && failure() &&
+        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
         (github.event_name != 'workflow_dispatch' || inputs.send_notification)
       }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      # workflow_dispatch can be run against any ref via the Actions UI, so
-      # only alert the shared Gym channel for runs against main or a release
-      # branch (rMAJOR.MINOR.PATCH) - not ad-hoc feature-branch dispatches.
+      # Dispatches on feature branches must not alert the shared channel.
       - name: Check ref is main or a release branch
         id: ref_check
-        uses: ./.github/actions/is-main-or-release-ref
-
+        shell: bash
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          if [[ "$REF" == "main" || "$REF" =~ ^r[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "allowed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "allowed=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Notify Gym alerts channel
         if: steps.ref_check.outputs.allowed == 'true'
-        uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@f07495d7a01aad5578a407db8e0c4f4e395375f6 # v1.9.1
+        uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@631c404d00a9e60afc591cd071d35d2e18f82fc6
         with:
-          webhook: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
-          message: |
-            :rotating_light: Full test suite failed on ${{ github.ref_name }}
-
-            • Repository: ${{ github.repository }}
-            • Commit: `${{ github.sha }}`
-            • Trigger: ${{ github.event_name == 'schedule' && 'Nightly schedule' || github.event_name == 'workflow_dispatch' && 'Manual dispatch' || 'Push to main' }}
-            • Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>
+          needs-json: ${{ toJSON(needs) }}
+          webhook: ${{ secrets.SLACK_WEBHOOK }}

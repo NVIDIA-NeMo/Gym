@@ -102,9 +102,6 @@ def get_ruler_data(
             print("Git LFS is not installed. Please install it to prepare 'cwe' ruler task")
             exit(1)
 
-    # 1. installing necessary packages
-    subprocess.run(["pip install wonderwords html2text tenacity"], check=True, shell=True)
-
     # 2. use provided tmp_data_dir or create a temporary directory
     if tmp_data_dir is not None:
         tmpdirname = tmp_data_dir

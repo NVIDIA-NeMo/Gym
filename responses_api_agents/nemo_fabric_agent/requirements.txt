@@ -1,3 +1,6 @@
 -e nemo-gym[dev] @ ../../
 nemo-fabric[claude,codex,deepagents,hermes-agent,mini-swe-agent]==0.2.0
 hermes-agent @ git+https://github.com/NousResearch/hermes-agent@0ee05d72f2b30385d4861fd8e30511c6d51100e4
+# Require a Python 3.13-compatible wheel instead of resolving tokenizers 0.13.3,
+# whose source build fails with current Rust (invalid_reference_casting).
+tokenizers>=0.22.2

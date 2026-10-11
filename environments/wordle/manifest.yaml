@@ -1,0 +1,38 @@
+name: wordle
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-agent-loop
+domain: games
+description: Multi-step Wordle. The model guesses a 5-letter word in 6 attempts with
+  tool calls and is rewarded for winning in fewer turns.
+modality: text
+licensing: Apache-2.0
+authors:
+- yyu22
+- cmunley1
+reward:
+  range:
+  - 0.0
+  - 1.8
+  higher_is_better: true
+determinism: stochastic
+resources_server: wordle
+agent_server: gymnasium_agent
+datasets:
+- name: train
+  type: train
+  jsonl_fpath: environments/wordle/data/train.jsonl
+  num_repeats: 1
+- name: validation
+  type: validation
+  jsonl_fpath: environments/wordle/data/validation.jsonl
+  num_repeats: 1
+- name: example
+  type: example
+  jsonl_fpath: environments/wordle/data/example.jsonl
+  num_repeats: 1
+model_server: policy_model
+session_model: episode
+state: per_session
+lifecycle: active

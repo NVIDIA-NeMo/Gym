@@ -1,0 +1,2 @@
+# swe_agents renders debug profiling graphs with gprof2dot, which Gym otherwise never installs.
+gprof2dot

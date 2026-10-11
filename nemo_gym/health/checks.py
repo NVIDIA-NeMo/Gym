@@ -49,6 +49,12 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.AGENT_TURNS}),
     ),
     CheckSpec(
+        id="rollout_ended_on_failed_model_call",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.ROLLOUT,
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OBSERVED_MODEL_CALLS}),
+    ),
+    CheckSpec(
         id="agent_turn_hollow",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.AGENT_TURN,
@@ -73,16 +79,10 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
-        id="model_call_failed",
-        evaluation_scope=CheckScope.ROLLOUT,
-        subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
-    ),
-    CheckSpec(
         id="rollout_token_count_mismatch",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.ROLLOUT,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
         id="model_call_runaway_generation",
@@ -113,7 +113,13 @@ def normalize_ignored_checks(checks: Sequence[str] | str | None) -> tuple[str, .
     if checks is None:
         return ()
     raw_checks = checks.split(",") if isinstance(checks, str) else checks
-    normalized = tuple(dict.fromkeys(check.strip() for check in raw_checks if check.strip()))
+    normalized = tuple(
+        dict.fromkeys(
+            "rollout_ended_on_failed_model_call" if check.strip() == "model_call_failed" else check.strip()
+            for check in raw_checks
+            if check.strip()
+        )
+    )
     known_checks = {spec.id for spec in CHECK_REGISTRY}
     unknown_checks = sorted(set(normalized) - known_checks)
     if unknown_checks:
@@ -261,6 +267,9 @@ def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, A
         calls.append(
             {
                 "call_index": position,
+                # Ordering signal. `call_index` is the position in the merged
+                # trajectory list, which is not chronological.
+                "started_at": raw.get("started_at"),
                 "model_call_id": raw.get("model_call_id"),
                 "response_id": metadata.get("response_id"),
                 "model_ref": metadata.get("model_ref"),
@@ -268,6 +277,9 @@ def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, A
                 "response_status": metadata.get("response_status"),
                 "finish_reason": metadata.get("finish_reason"),
                 "error_category": metadata.get("error_category"),
+                "upstream_attempted": metadata.get("upstream_attempted"),
+                "upstream_status_code": metadata.get("upstream_status_code"),
+                "local_response_reason": metadata.get("local_response_reason"),
                 "tokens_in": tokens.get("prompt_tokens"),
                 "tokens_out": tokens.get("completion_tokens"),
                 "request": raw.get("request"),
@@ -290,6 +302,36 @@ def _is_failed(call: dict[str, Any]) -> bool:
 def _is_successful(call: dict[str, Any]) -> bool:
     status = call.get("status_code")
     return not _is_failed(call) and (status is None or (isinstance(status, int) and 200 <= status < 400))
+
+
+def _is_context_overflow_rejection(call: dict[str, Any]) -> bool:
+    """Exclude only explicit upstream context rejections, never inferred empty generations."""
+    return (
+        call.get("upstream_attempted") is True
+        and call.get("upstream_status_code") == 400
+        and (
+            call.get("local_response_reason") == "context_length_exceeded"
+            or call.get("error_category") == "context_length_exceeded"
+        )
+    )
+
+
+def _is_failed_attempt(call: dict[str, Any]) -> bool:
+    """A failed model call that returned no finished response, so it has no usage to account for.
+
+    Covers HTTP error replies and calls cut by a cancellation or timeout. This does not mean
+    nothing was generated: the server may have spent tokens on a cut call, and a cut stream may
+    have delivered part of its output first. Gym cannot tell which from the capture (the first
+    streamed event can arrive before any token), so these calls are skipped rather than guessed
+    at; `run.stats.model_call_errors.usage_unknown` counts them. Whether the rollout recovered is
+    `rollout_ended_on_failed_model_call`'s question.
+
+    A failed call that did finish (it has a finish reason) keeps the token checks, as does a
+    body capture could not parse, which is a capture defect rather than a failed call.
+    """
+    return (
+        _is_failed(call) and call.get("finish_reason") is None and call.get("error_category") != "capture_parse_error"
+    )
 
 
 def _call_identity(call: dict[str, Any]) -> str | None:
@@ -488,7 +530,7 @@ def _model_call_zero_completion_tokens(bindings: _CallBindings, subject: dict[st
             detail={"completion_tokens": 0},
         )
         for position, call in enumerate(bindings.matched_calls)
-        if call.get("tokens_out") == 0
+        if not _is_context_overflow_rejection(call) and not _is_failed_attempt(call) and call.get("tokens_out") == 0
     ]
 
 
@@ -507,7 +549,9 @@ def _model_call_missing_token_counts(bindings: _CallBindings, subject: dict[str,
             },
         )
         for position, call in enumerate(bindings.matched_calls)
-        if call.get("tokens_in") is None or call.get("tokens_out") is None
+        if not _is_context_overflow_rejection(call)
+        and not _is_failed_attempt(call)
+        and (call.get("tokens_in") is None or call.get("tokens_out") is None)
     ]
 
 
@@ -567,29 +611,82 @@ def _trajectory_capture_mismatch(
     return findings
 
 
-def _model_call_failed(bindings: _CallBindings, subject: dict[str, int | str]) -> list[Finding]:
-    terminal_call_index = max(
-        (call["call_index"] for call in bindings.matched_calls if type(call.get("call_index")) is int),
-        default=None,
-    )
-    return [
-        Finding(
-            check="model_call_failed",
-            subject=subject,
-            locator=_call_locator(call, position),
-            detail={
-                "status": call.get("status_code"),
-                "error_category": call.get("error_category"),
-                "terminal": (
-                    bindings.complete
-                    and terminal_call_index is not None
-                    and call.get("call_index") == terminal_call_index
-                ),
-            },
+def _model_chains(calls: Sequence[dict[str, Any]]) -> dict[Any, list[dict[str, Any]]]:
+    """Group calls by the model they went to."""
+    chains: dict[Any, list[dict[str, Any]]] = defaultdict(list)
+    for call in calls:
+        ref = call.get("model_ref")
+        key = (ref.get("type"), ref.get("name")) if isinstance(ref, dict) else None
+        chains[key].append(call)
+    return chains
+
+
+def _chain_ended_on_failure(chain: Sequence[dict[str, Any]]) -> bool:
+    """Whether this model's own last call, in time, failed.
+
+    Per model rather than across every captured call: a judge or auxiliary
+    request landing after a failed policy call would otherwise read as the
+    rollout recovering, and hide the failure.
+
+    Without timestamps a multi-call chain cannot be ordered -- `call_index` is
+    the position in the merged trajectory list, so a producer-supplied retry
+    can precede the attempt it retried. Say nothing rather than call a
+    recovered rollout unhealthy.
+    """
+    if not chain:
+        return False
+    failed = [call for call in chain if _is_failed(call)]
+    if not failed:
+        return False
+    if len(failed) == len(chain):
+        # Nothing to order: whichever went last, it failed.
+        return True
+    if any(call.get("started_at") is None for call in chain):
+        return False
+    ordered = sorted(chain, key=lambda call: (call.get("started_at") or 0.0, call.get("call_index") or 0))
+    return _is_failed(ordered[-1])
+
+
+def _ended_on_failed_call(calls: Sequence[dict[str, Any]]) -> bool:
+    """Whether any model's own last call failed."""
+    return any(_chain_ended_on_failure(chain) for chain in _model_chains(calls).values())
+
+
+def _rollout_ended_on_failed_model_call(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+    """Flag a model whose own last call in the rollout failed.
+
+    The bound-call checks cannot see this: binding resolves a reference by
+    `(model_ref, response_id)` or `model_call_id`, and a call that failed came
+    back with none of them, so it is absent from `matched_calls` no matter what
+    the producer claims. Reading the captured calls directly also covers the
+    agents that publish no trajectory at all.
+
+    Judged per model and in time order -- see `_chain_ended_on_failure`. Only
+    the chain's last call counts, so a failure the client retried successfully
+    stays healthy; the signal is that the rollout ENDED on a failure, which is
+    what makes its reward indistinguishable from a genuine zero.
+    """
+    findings = []
+    for key, chain in _model_chains(_normalized_trajectory_calls(trajectory)).items():
+        if not _chain_ended_on_failure(chain):
+            continue
+        ordered = sorted(chain, key=lambda call: (call.get("started_at") or 0.0, call.get("call_index") or 0))
+        last = ordered[-1]
+        findings.append(
+            Finding(
+                check="rollout_ended_on_failed_model_call",
+                subject=subject,
+                locator=_call_locator(last, last.get("call_index")),
+                detail={
+                    "model_ref": "/".join(str(part) for part in key) if key else None,
+                    "status": last.get("status_code"),
+                    "error_category": last.get("error_category"),
+                    "observed_calls": len(chain),
+                    "successful_calls": sum(1 for call in chain if _is_successful(call)),
+                },
+            )
         )
-        for position, call in enumerate(bindings.matched_calls)
-        if _is_failed(call)
-    ]
+    return findings
 
 
 def _rollout_token_count_mismatch(
@@ -625,7 +722,8 @@ def _model_call_runaway_generation(bindings: _CallBindings, subject: dict[str, i
             detail={"finish_reason": call.get("finish_reason")},
         )
         for position, call in enumerate(bindings.matched_calls)
-        if call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
+        if not _is_context_overflow_rejection(call)
+        and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
         and not _response_has_content(call.get("response"))
     ]
 
@@ -643,21 +741,23 @@ _ROLLOUT_CHECKS: dict[
     "rollout_missing_agent_turns": lambda record, trajectory, bindings, subject: _rollout_missing_agent_turns(
         trajectory, subject
     ),
+    "rollout_ended_on_failed_model_call": lambda record, trajectory, bindings, subject: (
+        _rollout_ended_on_failed_model_call(trajectory, subject)
+    ),
     "agent_turn_hollow": lambda record, trajectory, bindings, subject: _agent_turn_hollow(trajectory, subject),
     "model_call_zero_completion_tokens": lambda record, trajectory, bindings, subject: (
         _model_call_zero_completion_tokens(bindings, subject)
     ),
-    "model_call_missing_token_counts": lambda record, trajectory, bindings, subject: (
-        _model_call_missing_token_counts(bindings, subject)
+    "model_call_missing_token_counts": lambda record, trajectory, bindings, subject: _model_call_missing_token_counts(
+        bindings, subject
     ),
-    "trajectory_capture_mismatch": lambda record, trajectory, bindings, subject: (
-        _trajectory_capture_mismatch(trajectory, bindings, subject)
+    "trajectory_capture_mismatch": lambda record, trajectory, bindings, subject: _trajectory_capture_mismatch(
+        trajectory, bindings, subject
     ),
-    "model_call_failed": lambda record, trajectory, bindings, subject: _model_call_failed(bindings, subject),
-    "rollout_token_count_mismatch": lambda record, trajectory, bindings, subject: (
-        _rollout_token_count_mismatch(record, bindings, subject)
+    "rollout_token_count_mismatch": lambda record, trajectory, bindings, subject: _rollout_token_count_mismatch(
+        record, bindings, subject
     ),
-    "model_call_runaway_generation": lambda record, trajectory, bindings, subject: (
-        _model_call_runaway_generation(bindings, subject)
+    "model_call_runaway_generation": lambda record, trajectory, bindings, subject: _model_call_runaway_generation(
+        bindings, subject
     ),
 }

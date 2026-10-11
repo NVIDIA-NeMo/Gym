@@ -11,6 +11,7 @@ from nemo_gym.web.session import CapacityUnavailableError, SessionConflictError
 from nemo_gym.web.session_control import SessionIdentityError, WebSessionControl
 from tests.unit_tests.test_web_session_manager import (
     DelayedBrowserSessionProvider,
+    FakeBackend,
     FakeBrowserSessionProvider,
     _manager,
     _task,
@@ -202,6 +203,35 @@ async def test_close_racing_an_admission_retry_does_not_create_another_browser(t
     with pytest.raises(SessionConflictError, match="closed while waiting for admission"):
         await retry
     assert len(backends) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_seed_runs_again_after_its_cleanup_finishes(tmp_path):
+    provider = FakeBrowserSessionProvider()
+
+    def first_reset_fails(*args):
+        backend = FakeBackend(*args)
+        backend.fail_reset = not backends
+        return backend
+
+    manager, backends = _manager(tmp_path, factory=first_reset_fails, browser_session_provider=provider)
+    control = WebSessionControl(manager, lifetime_seconds=3600)
+    release = provider.release
+    provider.release = AsyncMock(side_effect=RuntimeError("provider unavailable"))
+    with pytest.raises(RuntimeError, match="reset failed"):
+        await control.seed(_body())
+    # The failed seed still holds its browser, so a retry must not start another one.
+    with pytest.raises(RuntimeError, match="reset failed"):
+        await control.seed(_body())
+    assert len(provider.acquired) == 1
+    provider.release = release
+    assert await manager.close_session(_identity()["_ng_session_id"])
+    seeded = await control.seed(_body())
+    assert seeded.info["reset_calls"] == 1
+    assert len(provider.acquired) == len(backends) == 2
+    assert (await manager.health())["sessions"] == 1
+    assert await control.close(WebSessionIdentity(**_identity()))
+    assert len(provider.released) == 2
 
 
 @pytest.mark.asyncio

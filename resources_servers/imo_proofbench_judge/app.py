@@ -330,6 +330,8 @@ class ImoProofBenchVerifyResponse(BaseVerifyResponse):
 class ImoProofBenchJudgeServer(SimpleResourcesServer):
     """LLM-judge grader for IMO-style proof submissions."""
 
+    ray_enabled = False
+
     config: ImoProofBenchJudgeConfig
 
     def model_post_init(self, context):

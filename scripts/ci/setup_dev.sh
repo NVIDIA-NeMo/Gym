@@ -55,6 +55,9 @@ gym_ci_setup_dev() {
     mkdir -p "${setup_uv_cache_dir}"
     setup_uv_cache_dir="$(cd "${setup_uv_cache_dir}" && pwd -P)"
     export UV_CACHE_DIR="${setup_uv_cache_dir}"
+    # Fail before sync can silently repair a stale lockfile that the container
+    # rejects with --locked. Use the same pinned uv and offline policy as sync.
+    uv lock --check "${setup_uv_sync_args[@]}"
     if [[ ! -x "${setup_dev_venv_dir}/bin/python" ]]; then
         uv venv --python "${setup_python_version}" "${setup_dev_venv_dir}"
     fi

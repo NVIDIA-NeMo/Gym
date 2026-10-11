@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -16,8 +17,8 @@ RUN_EVAL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/run_eval.sh"
 CLEANUP_RUN_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_run.sh"
 OPENSANDBOX_CLEANUP_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_opensandbox_run.py"
 OSWORLD_AGENT_CONFIG = REPO_ROOT / "responses_api_agents/osworld_agent/configs/osworld_agent.yaml"
-OSWORLD_AGENT_APP = REPO_ROOT / "responses_api_agents/osworld_agent/app.py"
 OSWORLD_AGENT_REQUIREMENTS = REPO_ROOT / "responses_api_agents/osworld_agent/requirements.txt"
+OSWORLD_AGENT_APP = REPO_ROOT / "responses_api_agents/osworld_agent/app.py"
 OSWORLD_AGENT_OVERRIDES = REPO_ROOT / "responses_api_agents/osworld_agent/overrides.txt"
 OSWORLD_RUNTIME_DEPS_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/install_optional_runtime_deps.sh"
 OSWORLD_RUNTIME_DEPS_CHECKER = REPO_ROOT / "responses_api_agents/osworld_agent/runtime_dependencies.py"
@@ -61,6 +62,53 @@ def test_start_control_preflights_native_build_toolchain() -> None:
     assert "python3-dev" in text
 
 
+def test_runtime_wrappers_support_a_run_specific_env_file() -> None:
+    for script in (START_CONTROL_SCRIPT, RUN_EVAL_SCRIPT):
+        text = script.read_text(encoding="utf-8")
+        assert "OSWORLD_ENV_FILE" in text
+        assert 'cd "${ENV_DIR}"' in text
+        assert "must name env.yaml" in text
+
+
+@pytest.mark.parametrize("script", [START_CONTROL_SCRIPT, RUN_EVAL_SCRIPT])
+def test_runtime_wrappers_execute_from_run_specific_env_directory(tmp_path: Path, script: Path) -> None:
+    env_dir = tmp_path / "profile"
+    env_dir.mkdir()
+    (env_dir / "env.yaml").write_text("config_paths: []\n", encoding="utf-8")
+    cwd_capture = tmp_path / "cwd.txt"
+    fake_gym = tmp_path / "gym"
+    fake_gym.write_text('#!/bin/bash\nprintf "%s\\n" "$PWD" > "$PWD_CAPTURE"\n', encoding="utf-8")
+    fake_gym.chmod(0o755)
+    python_include = tmp_path / "include"
+    python_include.mkdir()
+    (python_include / "Python.h").write_text("/* test header */\n", encoding="utf-8")
+    fake_python = tmp_path / "python"
+    fake_python.write_text(f'#!/bin/bash\nprintf "%s\\n" "{python_include}"\n', encoding="utf-8")
+    fake_python.chmod(0o755)
+    agent_venv = tmp_path / "agent-venv"
+    agent_python = agent_venv / "bin/python"
+    agent_python.parent.mkdir(parents=True)
+    agent_python.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    agent_python.chmod(0o755)
+
+    env = os.environ.copy()
+    env.pop("DOCKER_HOST", None)
+    env.update(
+        {
+            "GYM_BIN": str(fake_gym),
+            "GYM_PYTHON": str(fake_python),
+            "NEMO_GYM_CONTROL_HOST": "127.0.0.1",
+            "OSWORLD_AGENT_VENV": str(agent_venv),
+            "OSWORLD_ENV_FILE": str(env_dir / "env.yaml"),
+            "OSWORLD_RUN_ID": "test-profile",
+            "PWD_CAPTURE": str(cwd_capture),
+        }
+    )
+    subprocess.run([str(script), str(tmp_path / "run")], check=True, env=env)
+
+    assert cwd_capture.read_text(encoding="utf-8").strip() == str(env_dir)
+
+
 def test_start_control_requires_explicit_osworld_runtime_setup() -> None:
     text = START_CONTROL_SCRIPT.read_text(encoding="utf-8")
 
@@ -87,9 +135,9 @@ def test_managed_osworld_agent_installs_opensandbox_sdk() -> None:
     assert "matplotlib==3.10.6" in overrides
     assert "agp-client; sys_platform == 'never'" in overrides
     assert "--no-config" in runtime_script
-    assert '"numpy<2"' in runtime_script
+    assert '"numpy>=2.1,<2.5"' in runtime_script
     assert "cryptography~=46.0" in runtime_script
-    assert "opencv-python-headless~=4.8.1.78" in runtime_script
+    assert "opencv-python-headless~=4.10.0.84" in runtime_script
     assert "torchvision==0.26.0" in runtime_script
 
 

@@ -32,13 +32,17 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
+    BaseResponsesAPIModelConfig,
     CaptureStore,
     ModelCallCaptureConfig,
+    SimpleResponsesAPIModel,
+    _CaptureMiddleware,
     install_model_call_capture,
     merge_model_call_capture_into_record,
 )
 from nemo_gym.config_types import BaseServerConfig
 from nemo_gym.rollout_correlation import (
+    current_rollout_id,
     maybe_rollout_id_from_run_body,
 )
 from nemo_gym.server_utils import ServerClient, get_response_json
@@ -247,3 +251,116 @@ def test_explicit_rollout_alias_stays_request_scoped() -> None:
     )
     assert maybe_rollout_id_from_run_body(body) == "rollout-explicit"
     assert "_ng_rollout_id" not in body.model_dump(by_alias=True)
+
+
+@pytest.mark.asyncio
+async def test_capture_middleware_exposes_current_rollout_id_on_plain_forward() -> None:
+    """``_CaptureMiddleware`` already parses and strips the ``/ng-rollout/<id>`` prefix on
+    every request, capture enabled or not. It should publish that id through
+    ``current_rollout_id()`` around each place it dispatches to the wrapped app, rather than
+    requiring a second middleware to re-parse the same prefix.
+
+    This exercises the plain-forward path (no store, capture not requested) -- the common
+    case for a model server with observability disabled.
+    """
+    observed: dict[str, object] = {}
+
+    async def inner_app(scope, receive, send) -> None:
+        observed["path"] = scope["path"]
+        observed["rollout_id_inside"] = current_rollout_id()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    middleware = _CaptureMiddleware(inner_app, store=None, model_server_name="policy")
+    scope = {
+        "type": "http",
+        "path": "/ng-rollout/rollout-42/v1/chat/completions",
+        "raw_path": b"/ng-rollout/rollout-42/v1/chat/completions",
+        "headers": [],
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    await middleware(scope, receive, send)
+
+    assert observed["path"] == "/v1/chat/completions"  # the prefix is still stripped
+    assert observed["rollout_id_inside"] == "rollout-42"
+    assert current_rollout_id() is None  # does not leak past the request
+
+
+def test_capture_middleware_exposes_current_rollout_id_when_capture_is_enabled(tmp_path) -> None:
+    """Same guarantee on the buffering/full-capture dispatch path (observability
+    enabled), not just the plain-forward path above -- this is the branch with
+    streaming/exception handling around the downstream call.
+    """
+    app = FastAPI()
+
+    @app.post("/v1/responses")
+    async def responses() -> dict:
+        return {"rollout_id": current_rollout_id()}
+
+    install_model_call_capture(
+        app,
+        ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=tmp_path),
+        model_server_name="policy",
+    )
+    client = TestClient(app)
+
+    response = client.post("/ng-rollout/rollout-9/v1/responses", json={})
+    assert response.status_code == 200
+    assert response.json() == {"rollout_id": "rollout-9"}
+
+
+class _EchoRolloutIdConfig(BaseResponsesAPIModelConfig):
+    pass
+
+
+class _EchoRolloutIdModel(SimpleResponsesAPIModel):
+    config: _EchoRolloutIdConfig
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+
+        @app.get("/observed-rollout-id")
+        async def observed_rollout_id() -> dict:
+            return {"rollout_id": current_rollout_id()}
+
+        return app
+
+    async def chat_completions(self, body: dict = Body()) -> dict:
+        raise NotImplementedError
+
+    async def responses(self, body: dict = Body()) -> dict:
+        raise NotImplementedError
+
+
+def test_model_server_exposes_current_rollout_id_to_its_own_handler() -> None:
+    """Regression test for the gap this change fixes.
+
+    Before this change, ``current_rollout_id()`` was populated for resources and
+    agent servers but always ``None`` inside a model server's own handler, even
+    though every correlated call already carries the id in its URL prefix.
+    """
+    server_client = ServerClient(
+        head_server_config=BaseServerConfig(host="head.test", port=80),
+        global_config_dict=OmegaConf.create({}),
+    )
+    model = _EchoRolloutIdModel(
+        config=_EchoRolloutIdConfig(host="policy.test", port=80, entrypoint="app.py", name="policy"),
+        server_client=server_client,
+    )
+    client = TestClient(model.setup_webserver())
+
+    correlated = client.get("/ng-rollout/rollout-7/observed-rollout-id")
+    assert correlated.status_code == 200
+    assert correlated.json() == {"rollout_id": "rollout-7"}
+
+    uncorrelated = client.get("/observed-rollout-id")
+    assert uncorrelated.status_code == 200
+    assert uncorrelated.json() == {"rollout_id": None}

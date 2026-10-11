@@ -63,7 +63,9 @@ class _StubProvider:
         self.closed = False
 
     async def create(self, spec):
-        return "handle-1"
+        from nemo_gym.sandbox.providers.base import SandboxHandle
+
+        return SandboxHandle(sandbox_id="handle-1", provider_name=self.name, raw=None)
 
     async def exec(self, handle, command, **kwargs):
         from nemo_gym.sandbox.providers.base import SandboxExecResult
@@ -94,6 +96,7 @@ async def test_sandbox_start_emits_a_span(recorded_spans, started_sandbox):
     assert "gym.sandbox.start" in [span.name for span in spans]
     start_span = next(span for span in spans if span.name == "gym.sandbox.start")
     assert start_span.attributes["nemo.gym.sandbox.provider"] == "stub"
+    assert start_span.attributes["nemo.gym.sandbox.id"] == "handle-1"
 
 
 async def test_sandbox_exec_emits_a_span_with_the_exit_code(recorded_spans, started_sandbox):
@@ -104,6 +107,18 @@ async def test_sandbox_exec_emits_a_span_with_the_exit_code(recorded_spans, star
     exec_span = next(span for span in recorded_spans() if span.name == "gym.sandbox.exec")
     assert exec_span.attributes["nemo.gym.sandbox.return_code"] == 3
     assert exec_span.attributes["nemo.gym.sandbox.provider"] == "stub"
+    assert exec_span.attributes["nemo.gym.sandbox.id"] == "handle-1"
+
+
+async def test_sandbox_stop_emits_a_span_for_the_release(recorded_spans, started_sandbox):
+    """Start and exec were spans already; the release was invisible, so a trace could not
+    pair a sandbox's start with its end."""
+    sandbox = await started_sandbox().start()
+    await sandbox.stop()
+
+    stop_span = next(span for span in recorded_spans() if span.name == "gym.sandbox.stop")
+    assert stop_span.attributes["nemo.gym.sandbox.provider"] == "stub"
+    assert stop_span.attributes["nemo.gym.sandbox.id"] == "handle-1"
 
 
 async def test_sandbox_span_never_records_the_command(recorded_spans, started_sandbox):

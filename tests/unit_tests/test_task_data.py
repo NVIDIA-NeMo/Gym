@@ -181,6 +181,68 @@ class TestTaskDataValidator:
         assert not v.report.clean
         assert v.report.conflicting_keys == {"question": 1}
 
+    def test_materialized_task_validates_its_task_data(self):
+        v = self._validator()
+        task = {"taskset": "t", "task_id": "0"}
+        v.validate_row(
+            0,
+            {
+                "task_id": task,
+                "task_input": {"responses_create_params": {}, "task_data": {"question": "q", "expected_answer": "a"}},
+            },
+        )
+        assert v.report.clean
+        v.validate_row(
+            1, {"task_id": task, "task_input": {"responses_create_params": {}, "task_data": {"question": 1}}}
+        )
+        assert v.report.error_rows == 1
+
+    def test_generic_materialized_task_validates_flat_fields(self):
+        v = self._validator()
+        v.validate_row(
+            0, {"task_id": {"taskset": "t", "task_id": "0"}, "task_input": {"question": "q", "expected_answer": "a"}}
+        )
+        assert v.report.clean
+        v.validate_row(1, {"task_id": {"taskset": "t", "task_id": "1"}, "task_input": {"question": "q"}})
+        assert v.report.error_rows == 1
+
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_materialized_verifier_metadata_preserves_schema_normalization(self, nested):
+        fields = {"verifier_metadata": {"question": "q", "expected_answer": "a"}}
+        task_input = {"responses_create_params": {}, **({"task_data": fields} if nested else fields)}
+        v = self._validator()
+        v.validate_row(0, {"task_id": {"taskset": "t", "task_id": "0"}, "task_input": task_input})
+        assert v.report.clean
+
+    def test_mixed_materialized_task_reports_conflicting_fields(self):
+        v = self._validator()
+        v.validate_row(
+            0,
+            {
+                "task_id": {"taskset": "t", "task_id": "0"},
+                "task_input": {"task_data": {"question": "q", "expected_answer": "a"}, "question": "different"},
+            },
+        )
+        assert v.report.conflicting_keys == {"question": 1}
+        assert not v.report.clean
+
+    def test_materialized_task_data_that_is_not_an_object_is_an_invalid_row(self):
+        v = self._validator()
+        v.validate_row(0, {"task_id": {"taskset": "t", "task_id": "0"}, "task_input": {"task_data": "bad"}})
+        assert v.report.error_rows == 1
+        assert "task_input.task_data must be an object, got str" in v.report.errors[0]
+
+    @pytest.mark.parametrize("task_data", [[], "", 0, False, None])
+    def test_falsey_non_object_task_data_is_an_invalid_row(self, task_data):
+        v = self._validator()
+        v.validate_row(0, {"task_id": {"taskset": "t", "task_id": "0"}, "task_input": {"task_data": task_data}})
+        assert v.report.error_rows == 1
+
+    def test_missing_task_data_is_an_invalid_row(self):
+        v = self._validator()
+        v.validate_row(0, {"task_id": {"taskset": "t", "task_id": "0"}, "task_input": {"responses_create_params": {}}})
+        assert v.report.error_rows == 1
+
     def test_validate_jsonl_rows_wrapper(self):
         from pydantic import TypeAdapter
 
