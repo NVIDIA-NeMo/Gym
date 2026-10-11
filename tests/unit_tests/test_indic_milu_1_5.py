@@ -272,7 +272,7 @@ def test_examples_and_config(monkeypatch):
     assert config["milu_1_5_simple_agent"]["responses_api_agents"]["simple_agent"]["max_steps"] == 1
     assert config["policy_model"]["responses_api_models"]["vllm_model"].get("use_completions_api", False) is False
     manifest = load_manifest(module.DIRECTORY / "manifest.yaml")
-    assert manifest.name == "milu_1_5"
+    assert manifest.name == "indic/milu_1_5"
     assert manifest.resources_server == "mcqa"
     assert manifest.agent_server == "simple_agent"
     assert manifest.grading_mode == "boxed_and_normalized"
