@@ -13,6 +13,8 @@ Control routes:
 - ``POST /_ctl/hold {"after_calls_per_rollout": n}``:
   each rollout's calls after its own first ``n`` wait until released.
   A call names its rollout in its capture admission, so this needs token capture.
+- ``"release_held": true`` with either hold moves it: the calls held so far are released once the new threshold
+  applies, so a later call is held without a window in which none is.
 - ``POST /_ctl/release``: release held calls, and stop gating.
 - ``POST /_ctl/gate``: from now on every call waits until a step releases it.
 - ``POST /_ctl/step {"calls": n}``: release the ``n`` longest-waiting gated calls; returns how many were released.
@@ -87,12 +89,15 @@ async def models() -> dict:
 
 @app.post("/_ctl/hold")
 async def hold(body: dict) -> dict:
+    previous = STATE["released"]
     # A hold placed before the last one was released keeps the event its held calls wait on,
-    # so the next release frees every one of them.
-    if STATE["released"].is_set():
+    # so the next release frees every one of them, unless this hold releases them itself.
+    if previous.is_set() or body.get("release_held"):
         STATE["released"] = asyncio.Event()
     STATE["hold_after"] = body.get("after_calls")
     STATE["hold_after_per_rollout"] = body.get("after_calls_per_rollout")
+    if body.get("release_held"):
+        previous.set()
     return {"ok": True}
 
 
