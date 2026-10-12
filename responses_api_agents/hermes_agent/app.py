@@ -73,7 +73,7 @@ from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.tool_access import MCPToolAccess
-from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs
+from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs, install_summary_compat
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
 from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, HermesSandboxSession
 
@@ -478,6 +478,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                             invocation_id=invocation_id,
                             parent_invocation_id=raw_invocation.get("parent_invocation_id"),
                             status=raw_invocation.get("status", "unknown"),
+                            stop_reason=raw_invocation.get("stop_reason"),
                             # Every call goes to the configured Model Server, so a response ID identifies the call.
                             model_calls=[
                                 ModelCallRef(model_ref=self.config.model_server, response_id=response_id)
@@ -525,6 +526,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             AgentInvocation(
                 invocation_id="root",
                 status=invocation_status,
+                stop_reason=result.get("stop_reason"),
                 conversation=normalize_hermes_messages(messages),
             )
         ]
@@ -803,6 +805,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             )
 
         agent._build_api_kwargs = _patched_build_api_kwargs
+        install_summary_compat(agent, preserve_reasoning_history=self.config.chat_template_kwargs_enabled)
         observer = None
         if observation_collector is not None:
             try:
@@ -830,6 +833,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 params["history"],
                 task_id=None,
             )
+            if getattr(agent, "_gym_iteration_limit_reached", False):
+                result.setdefault("stop_reason", "max_iterations")
         except BaseException as exc:
             agent_error = exc
             raise
@@ -857,6 +862,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     observation_collector(observations)
                 except Exception:
                     LOG.exception("failed to return Hermes observations")
+
+        # Hermes' early error returns omit the aggregates included by its normal
+        # return. Preserve the actual runtime counters, including known zero after
+        # rejection, without inventing counts when a runtime does not expose them.
+        result = dict(result)
+        for field in ("prompt_tokens", "completion_tokens", "cache_read_tokens", "reasoning_tokens"):
+            count = getattr(agent, f"session_{field}", None)
+            if field not in result and type(count) is int and count >= 0:
+                result[field] = count
 
         return self._response_from_result(
             body=body,

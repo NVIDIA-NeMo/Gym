@@ -2037,8 +2037,16 @@ async def test_file_lineage_resolves_across_spawned_worker_processes(tmp_path):
     context = multiprocessing.get_context("spawn")
     process = context.Process(target=_put_shared_file_entry, args=(str(tmp_path),))
     process.start()
-    process.join(timeout=10)
-    assert process.exitcode == 0
+    # A spawned worker re-imports this test module, which is slow on a loaded host.
+    # Join returns as soon as the worker exits.
+    # The bound only keeps a hung worker from stalling the suite.
+    try:
+        process.join(timeout=120)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join()
 
     store = FileLineageStore(tmp_path)
     parent = await store.resolve(

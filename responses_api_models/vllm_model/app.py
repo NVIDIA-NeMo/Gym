@@ -1768,7 +1768,10 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
-        session_id = request.session[SESSION_ID_KEY]
+        # Route by rollout when the call carries one: agents that drop cookies get a new
+        # session per call, which scatters a rollout's turns and lets the slowest endpoint
+        # collect them. Keying on the rollout keeps its turns on one endpoint.
+        session_id = current_rollout_id() or request.session[SESSION_ID_KEY]
         client = self._session_id_to_client.get(session_id)
         if self.config.route_around_failing_endpoints:
             hashed = self._hashed_client(session_id)
