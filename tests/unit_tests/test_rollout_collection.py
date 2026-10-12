@@ -779,6 +779,97 @@ class TestRolloutCollection:
             release.set()
             await collection
 
+    async def test_run_from_config_preserves_audio_metadata_with_sampling_overrides(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Sampling overrides must retain archive references through materialization and dispatch."""
+        audio_ref = json.dumps({"archive": "alpaca.tar", "member": "alpacaeval_full/test_0.wav"})
+        chat_template_kwargs = json.dumps({"enable_thinking": True})
+        source_row = {
+            "agent_ref": {"name": "my_agent"},
+            "responses_create_params": {
+                "input": [{"role": "user", "content": "Please provide a response to the audio prompt."}],
+                "temperature": 0.1,
+                "metadata": {
+                    "audio_ref": audio_ref,
+                    "chat_template_kwargs": chat_template_kwargs,
+                    "extra_body": json.dumps({"top_k": 10, "min_p": 0.1}),
+                },
+            },
+        }
+        original_row = deepcopy(source_row)
+        source_bytes = orjson.dumps(source_row) + b"\n"
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(source_bytes)
+        sampling_extra_body = json.dumps({"top_k": 20})
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            responses_create_params={"temperature": 0.6, "metadata": {"extra_body": sampling_extra_body}},
+            disable_aggregation=True,
+        )
+        post = AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "response": {}}))
+        install_fake_server_client(monkeypatch, post)
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        [materialized] = [orjson.loads(line) for line in config.materialized_jsonl_fpath.read_bytes().splitlines()]
+        expected_params = {
+            "input": original_row["responses_create_params"]["input"],
+            "temperature": 0.6,
+            "metadata": {
+                "audio_ref": audio_ref,
+                "chat_template_kwargs": chat_template_kwargs,
+                "extra_body": sampling_extra_body,
+            },
+        }
+        assert materialized["responses_create_params"] == expected_params
+        post.assert_awaited_once()
+        assert post.call_args.kwargs["url_path"] == "/run"
+        assert post.call_args.kwargs["json"]["responses_create_params"] == expected_params
+        assert input_fpath.read_bytes() == source_bytes
+        assert source_row == original_row
+
+    @pytest.mark.parametrize(
+        "row_metadata, override_metadata, expected_metadata",
+        [
+            ({"audio_ref": "audio", "shared": "row"}, {"shared": "run"}, {"audio_ref": "audio", "shared": "run"}),
+            ({"audio_ref": "audio"}, None, None),
+            (None, {"extra_body": '{"top_k":20}'}, {"extra_body": '{"top_k":20}'}),
+            ({"audio_ref": "audio"}, {}, {"audio_ref": "audio"}),
+        ],
+    )
+    def test_responses_overrides_merge_metadata_without_merging_other_fields(
+        self, tmp_path: Path, row_metadata: dict | None, override_metadata: dict | None, expected_metadata: dict | None
+    ) -> None:
+        source_row = {
+            "agent_ref": {"name": "my_agent"},
+            "responses_create_params": {
+                "input": [{"role": "user", "content": "row input"}],
+                "metadata": row_metadata,
+                "temperature": 0.1,
+            },
+        }
+        original_row = deepcopy(source_row)
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="<in-memory>",
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            responses_create_params={
+                "input": [{"role": "user", "content": "run input"}],
+                "metadata": override_metadata,
+                "temperature": 0.6,
+            },
+        )
+
+        [row] = RolloutCollectionHelper._preprocess_raw_rows([(0, json.dumps(source_row), source_row.copy())], config)
+
+        assert row["responses_create_params"] == {
+            "input": [{"role": "user", "content": "run input"}],
+            "metadata": expected_metadata,
+            "temperature": 0.6,
+        }
+        assert source_row == original_row
+
     def test_rollout_request_debug_summary_compact(self) -> None:
         row = {
             AGENT_REF_KEY_NAME: {"name": "my_agent"},

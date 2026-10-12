@@ -1030,7 +1030,11 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
     )
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
+        description=(
+            "Overrides for responses_create_params, e.g. temperature or max_output_tokens. "
+            "Metadata mappings merge by key with overrides winning; metadata=null clears row metadata. "
+            "Other fields and individual metadata values are replaced."
+        ),
     )
     disable_aggregation: bool = Field(
         default=False,
@@ -2305,9 +2309,16 @@ class RolloutCollectionHelper(BaseModel):
                 if skills_ref_dict is not None:
                     raise ValueError("run-level skills are not supported for materialized task rows")
             else:
-                row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
-                    row[RESPONSES_CREATE_PARAMS_KEY_NAME] | responses_create_params_overrides
-                )
+                # Preserve row-specific media references and template controls when run-level
+                # sampling settings supply metadata. Values (including JSON strings) still replace
+                # by key, and an explicit metadata=null still clears the row's metadata.
+                row_params = row[RESPONSES_CREATE_PARAMS_KEY_NAME]
+                merged_params = row_params | responses_create_params_overrides
+                row_metadata = row_params.get("metadata")
+                override_metadata = responses_create_params_overrides.get("metadata")
+                if isinstance(row_metadata, Mapping) and isinstance(override_metadata, Mapping):
+                    merged_params["metadata"] = {**row_metadata, **override_metadata}
+                row[RESPONSES_CREATE_PARAMS_KEY_NAME] = merged_params
 
             # Stamp the run-level skills_ref onto the row so it is sent to the agent in the
             # /run request body and propagated to results. The source dataset stays untouched.
