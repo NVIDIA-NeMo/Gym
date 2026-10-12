@@ -578,7 +578,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
             )
             last = gym_resp.output[-1] if gym_resp.output else None
-            # A timed-out run is padded with an empty assistant message, which is not a natural finish.
+            # An assistant message alone does not establish that the run completed.
             naturally = (
                 gym_resp.status == "completed"
                 and getattr(last, "type", None) == "message"
