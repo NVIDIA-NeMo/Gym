@@ -94,7 +94,7 @@ def make_session(tmp_path):
         connection.executescript("""
             create table session(id text, parent_id text, time_created integer);
             create table message(id text, session_id text, data text, time_created integer);
-            create table part(id text, message_id text, data text, time_created integer);
+            create table part(id text, message_id text, session_id text, data text, time_created integer);
             insert into session values('root', null, 0);
         """)
     return state, provider, workdir
@@ -152,8 +152,9 @@ async def test_exec_only_supervision_preserves_task_child_only_after_success(tmp
         assert provider.cancelled_launch is False
         assert provider.deadline > deadline + 3 * 1
         assert provider.snapshots == 1
-        with sqlite3.connect(Path(state.session.session_dir) / "observations.db") as snapshot:
-            assert snapshot.execute("select id from session").fetchall() == [("root",)]
+        assert state.observations is not None
+        assert any(getattr(record, "invocation_id", None) == "root" for record in state.observations.records)
+        assert "observation_capture_failed" not in {gap.code for gap in state.observations.gaps}
         await state.close(3)
         await state.close(3)
         assert provider.disconnected
