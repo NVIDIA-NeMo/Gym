@@ -454,12 +454,12 @@ def test_missing_lens_yields_no_requirements_rather_than_an_unpinned_one(clean_o
     from nemo_gym.telemetry import setup as telemetry_setup
 
     with no_lens():
-        original = telemetry_setup._installed_requirement
-        telemetry_setup._installed_requirement = lambda *args: None
+        original = telemetry_setup.installed_requirement
+        telemetry_setup.installed_requirement = lambda *args: None
         try:
             assert telemetry_setup.server_venv_requirements() == []
         finally:
-            telemetry_setup._installed_requirement = original
+            telemetry_setup.installed_requirement = original
 
 
 def test_head_server_deps_carry_telemetry_into_server_venvs(clean_otel_env):

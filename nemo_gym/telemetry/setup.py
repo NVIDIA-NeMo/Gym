@@ -311,7 +311,7 @@ _SERVER_TELEMETRY_PACKAGES = (
 )
 
 
-def _installed_requirement(dist_name: str, requirement_name: str) -> Optional[str]:
+def installed_requirement(dist_name: str, requirement_name: str) -> Optional[str]:
     """Build a requirement string pinning *dist_name* to the copy installed right here.
 
     Prefers the recorded install source over the version number. A git-installed
@@ -371,7 +371,7 @@ def server_venv_requirements() -> list:
         return []
     requirements = []
     for dist_name, requirement_name in _SERVER_TELEMETRY_PACKAGES:
-        requirement = _installed_requirement(dist_name, requirement_name)
+        requirement = installed_requirement(dist_name, requirement_name)
         if requirement is not None:
             requirements.append(requirement)
     if not any(req.startswith("nemo-lens") for req in requirements):
