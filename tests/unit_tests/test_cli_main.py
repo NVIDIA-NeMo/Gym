@@ -1884,3 +1884,15 @@ def test_eval_run_ambiguous_nonfolders_remain_overrides(tmp_path, monkeypatch, o
     target, overrides = _dispatch_for(monkeypatch, ["eval", "run", override])
     assert target.endswith("e2e_rollout_collection")
     assert overrides == [override]
+
+
+@pytest.mark.parametrize("serve", [False, True])
+def test_eval_run_keeps_long_configuration_values(monkeypatch, serve):
+    value = "x" * 300
+    override = f"+policy_api_key={value}"
+    target, overrides = _dispatch_for(
+        monkeypatch, ["eval", "run", *([] if serve else ["--no-serve"]), override, "+limit=3"]
+    )
+    assert target.endswith("e2e_rollout_collection" if serve else "collect_rollouts")
+    assert overrides == [override, "+limit=3"]
+    assert OverridesParser.create().parse_override(overrides[0]).value() == value

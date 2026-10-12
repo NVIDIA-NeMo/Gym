@@ -1462,8 +1462,9 @@ def _is_positional_hydra_override(token: str) -> bool:
     try:
         if Path(token).is_dir() or Path(token).expanduser().is_dir():
             return False
-    except RuntimeError:
-        # An unknown ~user can still be a valid Hydra deletion (~server or ~group/option).
+    except (OSError, RuntimeError):
+        # Probing an override as a path can fail (e.g. a long value or unknown ~user).
+        # A failed probe does not rule out a valid Hydra override.
         pass
     if "=" in token:
         return True
