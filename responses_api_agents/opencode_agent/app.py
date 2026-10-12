@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import time
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -181,6 +181,9 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Used only when Resources does not supply a borrowed sandbox.
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    # Prebuilt `opencode_version` executables already inside the sandbox, keyed by the sandbox libc,
+    # for sandboxes that cannot download the runtime. Unlisted libcs keep the download.
+    sandbox_runtime_binaries: dict[Literal["glibc", "musl"], str] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
@@ -636,6 +639,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
+        if any(
+            not PurePosixPath(path).is_absolute() or "\x00" in path
+            for path in self.config.sandbox_runtime_binaries.values()
+        ):
+            raise HTTPException(422, "OpenCode sandbox_runtime_binaries must be absolute sandbox paths")
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
             sandbox = AsyncSandbox(provider)
@@ -678,6 +686,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     f"{directory}/{installer}",
                     runtime,
                     self.config.opencode_version,
+                    *(
+                        arg
+                        for libc, path in sorted(self.config.sandbox_runtime_binaries.items())
+                        for arg in (f"--{libc}-binary", path)
+                    ),
                 )
             )
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)

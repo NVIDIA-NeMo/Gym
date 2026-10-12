@@ -707,7 +707,9 @@ def test_session_http_usage_gaps_follow_persisted_optional_counter_availability(
     assert ("token_usage_detail_unavailable" in gaps) == (cache == 0 or reasoning == 0)
 
 
-@pytest.mark.parametrize("option", ["missing-sandbox", "worker", "required-tool", "workdir", "unpinned", "provider"])
+@pytest.mark.parametrize(
+    "option", ["missing-sandbox", "worker", "required-tool", "workdir", "unpinned", "provider", "runtime-binary"]
+)
 def test_invalid_seed_never_connects(setup, option):
     agent, sandbox = setup
     body = seed().model_dump(mode="json")
@@ -724,6 +726,8 @@ def test_invalid_seed_never_connects(setup, option):
         body["sandbox_access"]["workdir"] = "/"
     elif option == "unpinned":
         agent.config.opencode_version = "latest"
+    elif option == "runtime-binary":
+        agent.config.sandbox_runtime_binaries = {"glibc": "relative/opencode"}
     else:
         agent.config.opencode_config = {"provider": {"other": {"apiKey": "must-not-copy"}}}
     with TestClient(agent.setup_webserver()) as client:
@@ -733,6 +737,23 @@ def test_invalid_seed_never_connects(setup, option):
         else:
             assert client.post("/v1/agent_sessions", json=body).status_code == 422
     sandbox.exec.assert_not_awaited()
+
+
+async def test_sandbox_runtime_binaries_reach_the_installer(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_runtime_binaries = {
+        "musl": "/mnt/runtime/opencode-musl",
+        "glibc": "/mnt/runtime dir/opencode",
+    }
+    request = Request({"type": "http", "session": {}})
+    await agent.seed_agent_session(request, seed())
+    install = next(
+        call.args[0] for call in sandbox.exec.await_args_list if "install_opencode_runtime.sh" in call.args[0]
+    )
+    assert install.endswith(
+        "/tmp/nemo-gym-opencode-runtime-1.17.11 1.17.11 "
+        "--glibc-binary '/mnt/runtime dir/opencode' --musl-binary /mnt/runtime/opencode-musl"
+    )
 
 
 @pytest.mark.parametrize("output_budget", [0, -1, 32001])

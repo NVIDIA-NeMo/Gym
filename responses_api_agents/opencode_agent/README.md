@@ -80,7 +80,11 @@ bundle. Missing required packages are installed with apt-get or apk as root;
 non-root images must preinstall them. System `rg` is a best-effort optimization:
 setup tries apt-get or apk as root, but only warns if it is unavailable. OpenCode
 can then download ripgrep on demand; offline images should preinstall it.
-Cached matching OpenCode runtimes need no runtime download. Task dependencies are preserved.
+Cached matching OpenCode runtimes need no runtime download. For sandboxes without
+internet access, set `sandbox_runtime_binaries` to prebuilt executables of the pinned
+version that are already inside the sandbox (for example on a read-only mount), keyed
+by `glibc` or `musl`. Setup copies the one matching the sandbox libc into the runtime
+cache and checks its version instead of downloading. Task dependencies are preserved.
 
 Local and sandbox execution share `runtime.OPENCODE_VERSION` and the model-call
 correlation plugin. The plugin is uploaded into each sandbox when model-call
