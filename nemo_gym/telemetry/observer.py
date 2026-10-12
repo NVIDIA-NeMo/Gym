@@ -203,6 +203,11 @@ def _observe(read: Callable[["_ProcessObserver"], list]) -> Callable[[Any], list
     return observe
 
 
+def _driver_total(read: Callable[["DriverCounts"], int]) -> Callable[[Any], list]:
+    """Report a driver total only in a process that has offered rollouts, so servers export no constant-zero series."""
+    return _observe(lambda state: [_observation(read(state.driver))] if state.driver.offered else [])
+
+
 def _by_generation(values: Callable[["_ProcessObserver"], list[int]]) -> Callable[[Any], list]:
     return _observe(
         lambda state: [
@@ -267,19 +272,19 @@ class _Instruments:
         )
         meter.create_observable_counter(
             DRIVER_OFFERED_INSTRUMENT,
-            callbacks=[_observe(lambda state: [_observation(state.driver.offered)])],
+            callbacks=[_driver_total(lambda driver: driver.offered)],
             unit="{rollout}",
             description="Rollouts the driver handed to dispatch.",
         )
         meter.create_observable_up_down_counter(
             DRIVER_RESIDENT_INSTRUMENT,
-            callbacks=[_observe(lambda state: [_observation(state.driver.resident)])],
+            callbacks=[_driver_total(lambda driver: driver.resident)],
             unit="{rollout}",
             description="Rollout tasks that exist and have not finished, whether waiting for admission or running.",
         )
         meter.create_observable_up_down_counter(
             DRIVER_ACTIVE_INSTRUMENT,
-            callbacks=[_observe(lambda state: [_observation(state.driver.active)])],
+            callbacks=[_driver_total(lambda driver: driver.active)],
             unit="{rollout}",
             description="Rollouts admitted past the driver's concurrency limit and running.",
         )

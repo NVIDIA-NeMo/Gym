@@ -389,6 +389,23 @@ class TestDriverMetrics:
 
         assert asyncio.run(run()) == (4, 1)
 
+    def test_only_a_process_that_offered_rollouts_reports_driver_totals(self, collected):
+        async def run():
+            async with observer.observe_event_loop("server"):
+                before = collected()
+                observer.driver_metrics().driver.offered += 2
+                return before, collected()
+
+        before, after = asyncio.run(run())
+
+        totals = (
+            observer.DRIVER_OFFERED_INSTRUMENT,
+            observer.DRIVER_RESIDENT_INSTRUMENT,
+            observer.DRIVER_ACTIVE_INSTRUMENT,
+        )
+        assert not any(name in before for name in totals), "a server dispatches no rollouts"
+        assert [after[name][0].value for name in totals] == [2, 0, 0]
+
     def test_output_writes_record_their_duration_and_size(self, collected):
         import time
 
