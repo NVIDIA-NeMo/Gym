@@ -42,6 +42,7 @@ import subprocess
 import sys
 import threading
 import types
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -394,7 +395,12 @@ class Harness:
         """Upstream's per-task setup: clean the statement and build the verification context.
 
         Mirrors the top of ``evaluate_single_theorem``. Reads the task's source file from
-        the container, so it needs the Lean container running.
+        the container, so it needs the Lean container running. Upstream's
+        ``_build_verif_context`` catches the read failure and silently falls back to
+        ``imports + local_ctx`` — correct for a genuinely absent file (the synthetic
+        example tasks), wrong for a transport fault: that fallback would be cached and
+        every later candidate of the task scored against degraded context. A fault
+        recorded during the build therefore refuses the entry instead of returning it.
         """
         entry = dict(row)
         entry["thm_stmt"] = self.modules.evaluator._clean_thm_stmt(
@@ -403,6 +409,7 @@ class Harness:
         local_context = entry.get("local_ctxs") or entry.get("local_ctx")
         if local_context is None:
             raise KeyError("Entry must have either 'local_ctxs' or 'local_ctx' key")
+        self._fault_slot.fault = None
         entry["verif_local_ctxs"] = self._shim._build_verif_context(
             entry["lean_root"],
             entry["rel_path"],
@@ -411,6 +418,12 @@ class Harness:
             entry["thm_stmt"],
             entry["thm_name"],
         )
+        fault = self._resolve_fault(entry.get("lean_root"))
+        if fault is not None:
+            raise UpstreamError(
+                f"building the verification context for task {entry.get('id')} hit a backend fault "
+                f"({fault}); refusing to cache the degraded fallback context"
+            )
         return entry
 
     # --- model output ----------------------------------------------------------
@@ -479,7 +492,7 @@ class Harness:
     def _verify_proof(
         self, entry: dict[str, Any], proof: str, lemmas: str, proof_id: str
     ) -> tuple[bool, str, Optional[str]]:
-        """Upstream's verify, plus the backend fault observed at the docker boundary, if any."""
+        """Upstream's verify, plus the confirmed backend fault observed at the docker boundary."""
         self._fault_slot.fault = None
         success, error_msg = self.lean_repl.verify_proof(
             thm_name=entry["thm_name"],
@@ -492,7 +505,88 @@ class Harness:
             aux_lemmas=lemmas,
             suffix=entry.get("suffix", ""),
         )
-        return success, error_msg, getattr(self._fault_slot, "fault", None)
+        return success, error_msg, self._resolve_fault(entry.get("lean_root"))
+
+    # --- backend fault confirmation ----------------------------------------------
+
+    def _resolve_fault(self, lean_root: Optional[str]) -> Optional[str]:
+        """The calling thread's recorded fault, confirmed candidate-free, else ``None``.
+
+        Compiled source is model-controlled, and ``#eval`` can print any marker-shaped
+        line (and even choose the process exit code), so classifier suspicions are not
+        evidence by themselves. Direct evidence (``kind == "direct"``: host exceptions,
+        the write helper's exit code) stands on its own. A suspicion is confirmed only by
+        probes that execute no candidate content: ``docker exec <container> true`` for
+        transport, plus a fixed trivial compile in the task's repository for Lake
+        re-resolution. An unconfirmed suspicion is dropped and the candidate stays
+        charged — the residual risk is a sub-second transient that heals before the
+        probe, which is preferred over a maskable-by-content scoring channel.
+        """
+        recorded = getattr(self._fault_slot, "fault", None)
+        if recorded is None:
+            return None
+        self._fault_slot.fault = None
+        kind, message = recorded
+        if kind == "direct":
+            return message
+        transport_error = self._probe_container()
+        if transport_error is not None:
+            return f"{message} (confirmed candidate-free: {transport_error})"
+        if kind == "lake" and lean_root is not None:
+            probe_error = self._probe_lake_build(lean_root)
+            if probe_error is not None:
+                return f"{message} (confirmed candidate-free: {probe_error})"
+        LOG.warning(
+            "Suspected backend marker was not confirmed by candidate-free probes; charging the candidate: %s", message
+        )
+        return None
+
+    def _probe_container(self) -> Optional[str]:
+        """``None`` when ``docker exec <container> true`` succeeds; the failure otherwise."""
+        try:
+            result = subprocess.run(
+                ["docker", "exec", self.docker_container, "true"], capture_output=True, text=True, timeout=30
+            )
+        except FileNotFoundError as e:
+            return f"docker is not available on the host: {e}"
+        except subprocess.TimeoutExpired:
+            return "the container probe timed out"
+        if result.returncode == 0:
+            return None
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        return f"container probe failed (exit code {result.returncode}): {detail[0] if detail else ''}"
+
+    _PROBE_SOURCE = "theorem nemo_gym_backend_probe : True := trivial"
+    _LEAN_ROOT_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+    def _probe_lake_build(self, lean_root: str) -> Optional[str]:
+        """``None`` when a fixed trivial file compiles in the task's repository.
+
+        The probe source is a constant: nothing model-controlled is executed, so a Lake
+        dependency re-resolution failure it reproduces is genuine repository state.
+        """
+        if not self._LEAN_ROOT_RE.fullmatch(lean_root):
+            return None  # not a pinned-dataset repository name; nothing to confirm with
+        probe_path = f"/tmp/nemo_gym_probe_{uuid.uuid4().hex}.lean"
+        script = (
+            f"cd {DOCKER_LEAN_REPOS_DIR}/{lean_root} && printf '%s\\n' \"{self._PROBE_SOURCE}\" > {probe_path} && "
+            f"lake env lean {probe_path}; rc=$?; rm -f {probe_path}; exit $rc"
+        )
+        try:
+            result = subprocess.run(
+                ["docker", "exec", self.docker_container, "bash", "-lc", script],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+        except FileNotFoundError as e:
+            return f"docker is not available on the host: {e}"
+        except subprocess.TimeoutExpired:
+            return "the trivial-compile probe timed out"
+        if result.returncode == 0:
+            return None
+        detail = f"{result.stdout or ''}\n{result.stderr or ''}".strip().splitlines()
+        return f"trivial-compile probe failed in {lean_root} (exit code {result.returncode}): {detail[0] if detail else ''}"
 
     # --- backend health --------------------------------------------------------
 
@@ -597,8 +691,24 @@ _DOCKER_TRANSPORT_RE = re.compile(
 _LAKE_RESOLUTION_RE = re.compile(r"^error: external command 'git' exited with code \d+", re.MULTILINE)
 
 
-def classify_transport_fault(result: "subprocess.CompletedProcess[str]") -> Optional[str]:
-    """A backend-fault description from a finished ``docker exec`` result, else ``None``.
+@dataclass
+class TransportSuspicion:
+    """Marker-shaped evidence from a ``docker exec`` result, pending confirmation.
+
+    The compiled source is model-controlled and Lean's ``#eval`` can print any line to
+    stdout or stderr (and even pick the process exit code), so no text or code in the
+    result *proves* that docker or Lake produced it. A suspicion only becomes a backend
+    fault after ``Harness._resolve_fault`` confirms it with a candidate-free probe.
+    ``kind`` is ``"transport"`` (docker daemon/exec) or ``"lake"`` (dependency
+    re-resolution before elaboration).
+    """
+
+    message: str
+    kind: str
+
+
+def classify_transport_fault(result: "subprocess.CompletedProcess[str]") -> Optional[TransportSuspicion]:
+    """A backend-fault suspicion from a finished ``docker exec`` result, else ``None``.
 
     Works on the typed result (exit code plus raw stderr/stdout), not on upstream's
     formatted error message: ``compile_file`` keeps only lines that look like Lean
@@ -612,12 +722,12 @@ def classify_transport_fault(result: "subprocess.CompletedProcess[str]") -> Opti
     match = _DOCKER_TRANSPORT_RE.search(stderr)
     if match is not None:
         line = stderr[match.start() :].splitlines()[0]
-        return f"docker exec failed (exit code {result.returncode}): {line}"
+        return TransportSuspicion(f"docker exec failed (exit code {result.returncode}): {line}", "transport")
     output = f"{result.stdout or ''}\n{stderr}"
     match = _LAKE_RESOLUTION_RE.search(output)
     if match is not None:
         line = output[match.start() :].splitlines()[0]
-        return f"Lake re-resolved a dependency before elaboration: {line}"
+        return TransportSuspicion(f"Lake re-resolved a dependency before elaboration: {line}", "lake")
     return None
 
 
@@ -627,34 +737,41 @@ def _observe_transport_faults(repl: Any, slot: threading.local) -> None:
     Upstream's ``verify_proof`` ignores the write helper's exit code, maps read failures
     to ``None`` and formats compile output down to Lean-looking lines; a stopped
     container or daemon error would be charged to the candidate. The wrappers record the
-    first fault seen by the calling thread into ``slot``; ``Harness._verify_proof``
-    clears and reads it around each ``verify_proof`` call.
+    first fault seen by the calling thread into ``slot`` as ``(kind, message)``:
+    ``"direct"`` evidence (a host-level exception, or the exit code of a command whose
+    output the candidate cannot influence) is final, while ``classify_transport_fault``
+    suspicions stay pending until ``Harness._resolve_fault`` confirms them with a
+    candidate-free probe. ``Harness`` clears and reads the slot in the same thread
+    around task preparation and each ``verify_proof`` call.
     """
     orig_exec = repl._docker_exec
     orig_write = repl._docker_write_file
 
-    def record(message: str) -> None:
+    def record(kind: str, message: str) -> None:
         if getattr(slot, "fault", None) is None:
-            slot.fault = message
+            slot.fault = (kind, message)
 
     def observed_exec(cmd: list, cwd: Path, timeout: int) -> "subprocess.CompletedProcess[str]":
         try:
             result = orig_exec(cmd, cwd, timeout)
         except FileNotFoundError as e:  # the docker binary itself is unavailable
-            record(f"docker is not available on the host: {e}")
+            record("direct", f"docker is not available on the host: {e}")
             raise
-        fault = classify_transport_fault(result)
-        if fault is not None:
-            record(fault)
+        suspicion = classify_transport_fault(result)
+        if suspicion is not None:
+            record(suspicion.kind, suspicion.message)
         return result
 
     def observed_write(container_path: str, content: str, timeout: int = 30) -> "subprocess.CompletedProcess[str]":
         result = orig_write(container_path, content, timeout)
         if result.returncode != 0:
             # The candidate file was never materialized; any verdict on it would be about
-            # the backend, not the model.
+            # the backend, not the model. The exit code of ``tee`` cannot be produced by
+            # candidate content, so this is direct evidence.
             stderr = (result.stderr or "").strip()
-            record(f"writing {container_path} in the container failed (exit code {result.returncode}): {stderr}")
+            record(
+                "direct", f"writing {container_path} in the container failed (exit code {result.returncode}): {stderr}"
+            )
         return result
 
     def observed_read(container_path: str, timeout: int = 30) -> Optional[str]:
@@ -665,11 +782,11 @@ def _observe_transport_faults(repl: Any, slot: threading.local) -> None:
         try:
             result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=timeout)
         except FileNotFoundError as e:
-            record(f"docker is not available on the host: {e}")
+            record("direct", f"docker is not available on the host: {e}")
             raise
-        fault = classify_transport_fault(result)
-        if fault is not None:
-            record(f"reading {container_path}: {fault}")
+        suspicion = classify_transport_fault(result)
+        if suspicion is not None:
+            record(suspicion.kind, f"reading {container_path}: {suspicion.message}")
         return result.stdout if result.returncode == 0 else None
 
     repl._docker_exec = observed_exec

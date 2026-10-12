@@ -188,7 +188,12 @@ class TestCheckout:
 
 
 class TestBackendFaultClassification:
-    """``classify_transport_fault`` works on the typed docker exec result, not on message text."""
+    """``classify_transport_fault`` reads the typed docker exec result, not message text.
+
+    Its matches are *suspicions*: candidate source can print marker-shaped lines, so a
+    suspicion becomes a backend fault only after ``Harness._resolve_fault`` confirms it
+    with a candidate-free probe (``test_upstream.TestVerifyCandidate``).
+    """
 
     @staticmethod
     def _result(returncode: int, stdout: str = "", stderr: str = ""):
@@ -207,14 +212,16 @@ class TestBackendFaultClassification:
             "executable file not found in $PATH: unknown",
         ],
     )
-    def test_docker_transport_stderr_is_a_fault(self, stderr) -> None:
-        fault = upstream.classify_transport_fault(self._result(126, stderr=stderr))
-        assert fault is not None and stderr.splitlines()[0] in fault
+    def test_docker_transport_stderr_is_a_suspicion(self, stderr) -> None:
+        suspicion = upstream.classify_transport_fault(self._result(126, stderr=stderr))
+        assert suspicion is not None and stderr.splitlines()[0] in suspicion.message
+        assert suspicion.kind == "transport"
 
-    def test_pre_elaboration_lake_git_failure_is_a_fault(self) -> None:
+    def test_pre_elaboration_lake_git_failure_is_a_suspicion(self) -> None:
         output = "info: Cli: checking out revision 'd9fc8ae'\nerror: external command 'git' exited with code 128"
-        fault = upstream.classify_transport_fault(self._result(1, stdout=output))
-        assert fault is not None and "external command 'git'" in fault
+        suspicion = upstream.classify_transport_fault(self._result(1, stdout=output))
+        assert suspicion is not None and "external command 'git'" in suspicion.message
+        assert suspicion.kind == "lake"
 
     @pytest.mark.parametrize(
         "stdout,stderr",

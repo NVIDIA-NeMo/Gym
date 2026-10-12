@@ -205,6 +205,7 @@ class TestRepoIndex:
             Harness(UPSTREAM_DIR, docker_container="verisoftbench-lean-test")
 
 
+
 class TestPrompts:
     def test_system_prompt_is_init_txt(self, harness) -> None:
         assert harness.system_prompt() == (UPSTREAM_DIR / "prompts/templates/init.txt").read_text()
@@ -327,14 +328,25 @@ class TestPrepareEntry:
         assert entry["verif_local_ctxs"] == "import Lentil.Basic\n" + ROW["local_ctx"]
 
 
-def _docker_run_fake(compile_result=None, write=(0, ""), compile_raises=None):
+def _docker_run_fake(
+    compile_result=None, write=(0, ""), compile_raises=None, container_probe=(0, ""), lake_probe=(0, "")
+):
     """``subprocess.run`` standing in for docker: ``cat`` reads, ``tee`` writes, ``lake`` compiles.
 
     ``compile_result`` is ``(returncode, stdout, stderr)``; ``{file}`` in the stdout is
-    replaced with the container path of the compiled candidate file.
+    replaced with the container path of the compiled candidate file. ``container_probe``
+    answers the candidate-free ``docker exec <c> true`` health probe as
+    ``(returncode, stderr)``, and ``lake_probe`` the trivial-compile probe as
+    ``(returncode, stdout)`` — a genuine backend fault is one these probes reproduce.
     """
 
     def run(cmd, **kwargs):
+        if cmd[-1] == "true":
+            rc, stderr = container_probe
+            return subprocess.CompletedProcess(cmd, rc, stdout="", stderr=stderr)
+        if "bash" in cmd:  # the trivial-compile probe runs no candidate content
+            rc, stdout = lake_probe
+            return subprocess.CompletedProcess(cmd, rc, stdout=stdout, stderr="")
         if "tee" in cmd:
             rc, stderr = write
             return subprocess.CompletedProcess(cmd, rc, stdout="", stderr=stderr)
@@ -462,35 +474,56 @@ class TestVerifyCandidate:
     # failed" — the typed capture at the docker exec boundary must see it first.
 
     @pytest.mark.parametrize(
-        "rc,stdout,stderr,expect",
+        "rc,stdout,stderr,probes,expect",
         [
             (
                 126,
                 "",
                 "Error response from daemon: Container verisoftbench-lean-test is not running",
+                dict(container_probe=(126, "Error response from daemon: Container is not running")),
                 "Error response from daemon",
             ),
             (
                 126,
                 "",
                 "OCI runtime exec failed: exec failed: unable to start container process: error during container init",
+                dict(container_probe=(126, "OCI runtime exec failed: exec failed")),
                 "OCI runtime exec failed",
             ),
             (
                 1,
                 "info: Cli: checking out revision 'd9fc8ae'\nerror: external command 'git' exited with code 128",
                 "",
+                dict(lake_probe=(1, "error: external command 'git' exited with code 128")),
                 "external command 'git'",
             ),
         ],
     )
     def test_transport_and_lake_faults_are_captured_before_formatting_loses_them(
-        self, harness, entry, monkeypatch, rc, stdout, stderr, expect
+        self, harness, entry, monkeypatch, rc, stdout, stderr, probes, expect
     ) -> None:
-        monkeypatch.setattr(subprocess, "run", _docker_run_fake(compile_result=(rc, stdout, stderr)))
+        # Genuine backend faults: the candidate-free probes reproduce the failure.
+        monkeypatch.setattr(subprocess, "run", _docker_run_fake(compile_result=(rc, stdout, stderr), **probes))
         out = harness.verify_candidate(entry, "by\n  simp", "", "p5", max_conflict_attempts=1)
         assert not out.verified and out.backend_fault
-        assert expect in out.error_msg
+        assert expect in out.error_msg and "confirmed candidate-free" in out.error_msg
+
+    @pytest.mark.parametrize(
+        "stdout,stderr",
+        [
+            # ``#eval IO.println`` in accepted auxiliary source can print a Lake-marker
+            # line before the real diagnostic; ``IO.eprintln`` can do the same on stderr
+            # with daemon-shaped text. Healthy probes prove the backend is fine, so the
+            # candidate stays charged.
+            ("error: external command 'git' exited with code 128\n{file}:9:0: error: unsolved goals", ""),
+            ("{file}:9:0: error: unsolved goals", "Error response from daemon: Container x is not running"),
+        ],
+    )
+    def test_candidate_emitted_marker_output_stays_charged(self, harness, entry, monkeypatch, stdout, stderr) -> None:
+        monkeypatch.setattr(subprocess, "run", _docker_run_fake(compile_result=(1, stdout, stderr)))
+        out = harness.verify_candidate(entry, "by\n  exact (0 : Nat)", "", "p5s", max_conflict_attempts=1)
+        assert not out.verified and not out.backend_fault
+        assert out.error_msg  # upstream's formatted message, charged to the candidate
 
     def test_marker_text_inside_a_real_diagnostic_stays_charged(self, harness, entry, monkeypatch) -> None:
         # A genuine elaborator diagnostic whose text contains a backend marker: it sits
@@ -522,6 +555,8 @@ class TestVerifyCandidate:
         daemon = "Error response from daemon: Container verisoftbench-lean-test is not running"
 
         def run(cmd, **kwargs):
+            if cmd[-1] == "true":  # the container probe confirms the fault
+                return subprocess.CompletedProcess(cmd, 126, stdout="", stderr=daemon)
             if "cat" in cmd:
                 return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=daemon)
             if "tee" in cmd or "rm" in cmd:
@@ -532,6 +567,52 @@ class TestVerifyCandidate:
         out = harness.verify_candidate(entry, "by\n  simp", "", "p8", max_conflict_attempts=1)
         assert not out.verified and out.backend_fault
         assert out.error_msg.startswith("reading ") and "Error response from daemon" in out.error_msg
+
+    def test_prepare_phase_transport_fault_is_refused_not_cached(self, harness, monkeypatch) -> None:
+        # Upstream's ``_build_verif_context`` catches the read failure and silently falls
+        # back to ``imports + local_ctx``; a transport fault during task preparation must
+        # refuse the entry (so nothing degraded is cached) and succeed on retry once the
+        # backend has recovered. The genuinely-absent-file fallback stays: it records no
+        # transport fault.
+        daemon = "Error response from daemon: Container verisoftbench-lean-test is not running"
+
+        def failing(cmd, **kwargs):
+            if cmd[-1] == "true":
+                return subprocess.CompletedProcess(cmd, 126, stdout="", stderr=daemon)
+            if "cat" in cmd:
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=daemon)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(subprocess, "run", failing)
+            with pytest.raises(UpstreamError, match="refusing to cache"):
+                harness.prepare_entry(dict(ROW))
+
+        def healthy(cmd, **kwargs):
+            if "cat" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout=SOURCE_FILE, stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", healthy)
+        entry = harness.prepare_entry(dict(ROW))
+        assert entry["verif_local_ctxs"].endswith("theorem earlier (n : Nat) : n = n := rfl\n\n")
+
+    def test_prepare_phase_spoofed_daemon_text_in_the_source_is_not_a_fault(self, harness, monkeypatch) -> None:
+        # The healthy container probe drops a suspicion raised during preparation; a
+        # failed read whose stderr merely looks daemon-shaped while the container is
+        # reachable falls through to upstream's fallback, exactly as before.
+        daemon = "Error response from daemon: Container x is not running"
+
+        def run(cmd, **kwargs):
+            if cmd[-1] == "true":
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if "cat" in cmd:
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=daemon)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", run)
+        entry = harness.prepare_entry(dict(ROW))
+        assert entry["verif_local_ctxs"] == "import Lentil.Basic\n" + ROW["local_ctx"]
 
     def test_compile_timeout_stays_charged(self, harness, entry, monkeypatch) -> None:
         # Upstream's released protocol charges the timeout to the candidate.
