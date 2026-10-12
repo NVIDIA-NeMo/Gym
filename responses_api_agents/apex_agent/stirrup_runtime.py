@@ -1422,6 +1422,7 @@ async def run_stirrup_rollout(
     resume_checkpoint_dir: Path | None = None,
     initial_snapshot_path: Path | None = None,
     segment_started_at: float | None = None,
+    snapshot_world: Callable[[Path], Any] | None = None,
 ) -> dict[str, Any]:
     """Run one 200-turn Stirrup session against the Archipelago MCP gateway."""
     from typing import Annotated, Literal
@@ -1684,7 +1685,7 @@ async def run_stirrup_rollout(
         if resume_checkpoint_dir is not None:
             checkpointer = ResumeCheckpointer(
                 resume_checkpoint_dir,
-                snapshot_world=write_snapshot,
+                snapshot_world=snapshot_world or write_snapshot,
                 apex_state=lambda: collect_apex_state(
                     agent=agent, catalog=managed_tools.catalog, todo_state=todo_state, client=client
                 ),

@@ -120,6 +120,7 @@ class ApexAgentConfig(BaseResponsesAPIAgentConfig):
     # the feature. Requires a sandbox provider with per-sandbox bind mounts
     # (the apptainer provider) and a host path that outlives the node.
     resume_checkpoint_dir: Optional[str] = None
+    prebuilt_resume_enabled: bool = False
     resume_checkpoint_mount: str = "/checkpoint"
     resume_checkpoint_interval_seconds: float = Field(default=60.0, ge=0.0)
     # A resumed segment is not started when less than this much of the
@@ -757,7 +758,11 @@ class ApexAgent(SimpleResponsesAPIAgent):
         await asyncio.to_thread(shutil.rmtree, directory, True)
 
     async def run(self, request: Request, body: ApexAgentRunRequest) -> ApexAgentVerifyResponse:
-        resume_dir = None if body.runtime_mode == "prebuilt_world" else self._resume_checkpoint_dir(body)
+        resume_dir = (
+            None
+            if body.runtime_mode == "prebuilt_world" and not self.config.prebuilt_resume_enabled
+            else self._resume_checkpoint_dir(body)
+        )
         result = await self._run_rollout(request, body, resume_dir)
         # Any row, graded or a classed failure, ends this attempt's lineage. Only a
         # kill mid-flight returns nothing and leaves the checkpoint for the re-dispatch.
@@ -798,7 +803,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
                     if prebuilt_world and self._sandbox_uses_fakeroot()
                     else None
                 )
-                resume_checkpoint = None if prebuilt_world else await self._prepare_resume(resume_dir)
+                resume_checkpoint = await self._prepare_resume(resume_dir)
                 timeout_s = self.config.timeout
                 if resume_checkpoint is not None:
                     remaining = self.config.timeout - resume_checkpoint.elapsed_seconds
@@ -841,7 +846,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
                             prebuilt_world=prebuilt_world,
                             relay=relay,
                             host_stirrup_runtime=host_stirrup_runtime,
-                            resume_dir=None if prebuilt_world else resume_dir,
+                            resume_dir=resume_dir,
                             resume_checkpoint=resume_checkpoint,
                         )
                         async with AsyncSandbox(self._sandbox_provider, spec) as sandbox:
