@@ -378,8 +378,8 @@ openshell = [
 # exclusive, which `telemetry` is not — it needs to coexist with `dev`/`sandbox` in CI).
 telemetry = [
     # nemo-lens: OpenTelemetry instrumentation shared across the NeMo ecosystem. Provides the
-    # tracer/meter lifecycle, span-group gating, W3C context propagation, and the FastAPI /
-    # aiohttp auto-instrumentation Gym uses to stitch one trace across its server processes.
+    # tracer/meter lifecycle, span-group gating, W3C context propagation, and the FastAPI
+    # auto-instrumentation Gym uses to stitch one trace across its server processes.
     # Pinned to a Lens commit via [tool.uv.sources] until 0.2.0 ships to PyPI; then drop that
     # entry and use a version range. NeMo-RL pins this same commit; the two must agree,
     # since an RL job installs Gym into its environment and resolves one nemo-lens.
@@ -387,14 +387,13 @@ telemetry = [
     # License: Apache 2.0 https://github.com/NVIDIA-NeMo/Lens/blob/main/LICENSE
     "nemo-lens[sdk]",
 
-    # FastAPI + aiohttp OTel auto-instrumentation. Not pulled in by nemo-lens[sdk]: its
-    # `contrib.instrument_fastapi` / `instrument_aiohttp_client` helpers import these lazily
-    # and raise ImportError when they are missing. Gym needs both — the FastAPI instrumentor
-    # extracts inbound traceparent on every server, the aiohttp one is the egress side.
+    # FastAPI OTel auto-instrumentation. Not pulled in by nemo-lens[sdk]: its
+    # `contrib.instrument_fastapi` helper imports this lazily and raises ImportError when it
+    # is missing. The instrumentor extracts inbound traceparent on every server. Outbound
+    # calls need no instrumentor: `server_utils.request` injects traceparent itself.
     # Updated: Tue Aug 18, 2026 with opentelemetry-instrumentation-*==0.65b0
     # License: Apache 2.0 https://github.com/open-telemetry/opentelemetry-python-contrib/blob/main/LICENSE
     "opentelemetry-instrumentation-fastapi>=0.60b0",
-    "opentelemetry-instrumentation-aiohttp-client>=0.60b0",
 ]
 
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).

@@ -434,8 +434,9 @@ def test_server_requirements_pin_the_same_lens_this_process_runs(clean_otel_env)
 
 
 def test_server_requirements_include_the_instrumentation_packages(clean_otel_env):
-    """nemo-lens imports these lazily and raises ImportError without them, so a server
-    venv that lacks them loses inbound context extraction and every SERVER span."""
+    """nemo-lens imports the FastAPI instrumentor lazily and raises ImportError without it, so
+    a server venv that lacks it loses inbound context extraction and every SERVER span. The
+    aiohttp client instrumentor is not installed: nothing calls it."""
     pytest.importorskip("nemo.lens")
     clean_otel_env.setenv("NEMO_GYM_OTEL_ENABLED", "1")
 
@@ -443,7 +444,7 @@ def test_server_requirements_include_the_instrumentation_packages(clean_otel_env
 
     requirements = " ".join(server_venv_requirements())
     assert "opentelemetry-instrumentation-fastapi" in requirements
-    assert "opentelemetry-instrumentation-aiohttp-client" in requirements
+    assert "opentelemetry-instrumentation-aiohttp-client" not in requirements
 
 
 def test_missing_lens_yields_no_requirements_rather_than_an_unpinned_one(clean_otel_env):
