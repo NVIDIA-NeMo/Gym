@@ -110,6 +110,7 @@ class JeebenchVerifyResponse(BaseVerifyResponse):
 class JeebenchResourcesServer(SimpleResourcesServer):
     """Single-turn, judge-free JEEBench verification with audit-friendly extraction."""
 
+    ray_enabled = False
     config: JeebenchResourcesServerConfig
 
     async def verify(self, body: JeebenchVerifyRequest) -> JeebenchVerifyResponse:
