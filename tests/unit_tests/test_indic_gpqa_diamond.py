@@ -7,9 +7,11 @@ import random
 
 import pytest
 import yaml
+from omegaconf import OmegaConf
 
 from benchmarks.gpqa import prepare as english_module
 from benchmarks.indic.gpqa_diamond import prepare as module
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 
 
@@ -191,7 +193,56 @@ def test_config_matches_english_pipeline():
     english_dataset = english_params["datasets"][0]
     assert dataset["num_repeats"] == english_dataset["num_repeats"] == 8
     assert dataset["prompt_config"] == english_dataset["prompt_config"]
-    assert set(config) == {"config_paths", "indic_gpqa_diamond_resources_server", "indic_gpqa_diamond_agent"}
+    environment = config["indic_gpqa_diamond_environment_server"]
+    assert environment["_inherit_from"] == english["gpqa_mcqa_environment_server"]["_inherit_from"]
+    assert environment["environment_servers"]["legacy_agent"]["agent_server"]["name"] == "indic_gpqa_diamond_agent"
+    assert set(config) == {
+        "config_paths",
+        "indic_gpqa_diamond_resources_server",
+        "indic_gpqa_diamond_agent",
+        "indic_gpqa_diamond_environment_server",
+    }
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize(
+    "benchmarks",
+    [("indic/gpqa_diamond",), ("gpqa", "indic/gpqa_diamond"), ("indic/gpqa_diamond", "gpqa")],
+)
+def test_environment_routing_alone_and_with_english_gpqa(
+    benchmarks: tuple[str, ...], strict: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    resolved = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.merge(
+                GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                {
+                    "config_paths": [f"benchmarks/{name}/config.yaml" for name in benchmarks],
+                    "error_on_agent_without_environment_server": strict,
+                },
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    expected = {"indic_gpqa_diamond_environment_server": "indic_gpqa_diamond_agent"}
+    if "gpqa" in benchmarks:
+        expected["gpqa_mcqa_environment_server"] = "gpqa_mcqa_simple_agent"
+    environments = {
+        name: block["environment_servers"]["legacy_agent"]
+        for name, block in resolved.items()
+        if OmegaConf.is_dict(block) and "environment_servers" in block
+    }
+    assert "agents without an environment server" not in caplog.text
+    assert set(environments) == set(expected)
+    for name, agent in expected.items():
+        assert environments[name]["entrypoint"] == "app.py"
+        assert environments[name]["agent_server"] == {"type": "responses_api_agents", "name": agent}
+    assert resolved["indic_gpqa_diamond_agent"]["responses_api_agents"]["simple_agent"]["resources_server"] == {
+        "type": "resources_servers",
+        "name": "indic_gpqa_diamond_resources_server",
+    }
 
 
 @pytest.mark.parametrize("value", [None, "", "record-1"])

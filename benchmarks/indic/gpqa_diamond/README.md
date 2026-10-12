@@ -20,6 +20,9 @@ are derived from the language and source Record ID.
 
 This benchmark uses the `mcqa` resource server and `simple_agent`, matching
 [English GPQA](../../gpqa/config.yaml).
+Its dedicated `indic_gpqa_diamond_environment_server` fronts
+`indic_gpqa_diamond_agent`, so it can be composed with English GPQA even with
+`error_on_agent_without_environment_server=true`.
 
 - **Grading mode**: `lenient_answer_colon_md`, with recognized localized answer
   labels enabled only on non-English Indic rows.
@@ -73,6 +76,85 @@ reverify with that opt-in absent or `false`; do not regenerate responses or chan
 the denominator. Keep the two metrics separately labeled. Prepared data from
 before version 2.2.0 must be refreshed to add the row opt-in. Existing cached
 rewards are not automatically rescored.
+
+### Strict rescoring of saved generations
+
+Use the original `rollouts.jsonl` and matching
+`rollouts_materialized_inputs.jsonl` produced by `gym eval run`, not the prepared
+question file. Reverification takes verifier metadata from the **saved inputs**;
+changing preparation settings alone does not change an existing run.
+
+From the repository root, make a separate strict-input copy with `jq`:
+
+```bash
+GPQA_RUN=results/indic_gpqa
+# Keep the original files; use a new destination, never redirect onto the source.
+jq -c '
+  def strict: .template_metadata.allow_localized_answer_labels = false;
+  if (.task_input.task_data? | type) == "object" then
+    .task_input.task_data |= strict
+  elif (.task_input? | type) == "object" then
+    .task_input |= strict
+  else
+    strict
+  end
+' "$GPQA_RUN/rollouts_materialized_inputs.jsonl" \
+  > "$GPQA_RUN/strict_materialized_inputs.jsonl"
+```
+
+This handles flat inputs and Environment Server `task_input` wrappers, including
+the legacy `task_input.task_data` form. It changes only the localized-label opt-in.
+Keep every row, `_ng_task_index`, `_ng_rollout_index`, seed, prompt, gold answer,
+and original response unchanged. Do not discard unextractable answers.
+
+Save this resources-server-only configuration as `gpqa-reverify.yaml`:
+
+```yaml
+indic_gpqa_diamond_resources_server:
+  resources_servers:
+    mcqa:
+      entrypoint: app.py
+      domain: knowledge
+      grading_mode: lenient_answer_colon_md
+```
+
+Reverify both input variants against the **same original responses** and the same
+verifier revision, writing new outputs:
+
+```bash
+gym eval reverify --config gpqa-reverify.yaml \
+  --inputs "$GPQA_RUN/strict_materialized_inputs.jsonl" \
+  --rollouts "$GPQA_RUN/rollouts.jsonl" \
+  --output "$GPQA_RUN/strict.jsonl"
+
+gym eval reverify --config gpqa-reverify.yaml \
+  --inputs "$GPQA_RUN/rollouts_materialized_inputs.jsonl" \
+  --rollouts "$GPQA_RUN/rollouts.jsonl" \
+  --output "$GPQA_RUN/normalized.jsonl"
+```
+
+No model server, agent, Hub access, or new generation is needed. The normalized
+command assumes the saved non-English inputs already have the opt-in set to
+`true`. Use GPQA-only artifacts: this resources-only configuration routes every
+row to the MCQA verifier, regardless of its saved agent name.
+The strict command keeps the English GPQA grading mode unchanged; it
+disables only the added localized-label fallback, not all lenient extraction.
+
+Compare `strict_aggregate_metrics.json` and `normalized_aggregate_metrics.json`
+beside the output files. Before reporting scores, confirm both outputs contain
+exactly the original set of `(_ng_task_index, _ng_rollout_index)` pairs, without
+duplicates, unchanged `response` values, and no failed or missing reverifications.
+Do not use `--limit` or `--judge-failed-only` for this comparison. A complete
+language still has 1,584 attempts; missing generations must be resumed or reported
+as incomplete, never removed from the denominator. Keep the original artifacts
+and record the verifier commit alongside both scores.
+
+Preparation and composition regressions are collected by the normal core CI
+suite from `tests/unit_tests/test_indic_gpqa_diamond.py`:
+
+```bash
+pytest tests/unit_tests/test_indic_gpqa_diamond.py
+```
 
 ## Prepare data
 

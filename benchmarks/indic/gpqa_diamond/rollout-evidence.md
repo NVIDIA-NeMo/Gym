@@ -171,6 +171,34 @@ Existing English GPQA, MMLU-Pro, SuperGPQA, and MMLU-ProX configurations retain
 their prior extraction and rewards. Synthetic tests establish these contracts;
 they do not establish the frequency of these shapes in real outputs.
 
+### Follow-up Environment Server and rescoring validation
+
+The follow-up review's strict-routing failure was reproduced with English and
+Indic GPQA composed in either order. The explicit
+`indic_gpqa_diamond_environment_server` now fronts only
+`indic_gpqa_diamond_agent`, inheriting the same `legacy_agent` implementation as
+English GPQA. All six routing cases (Indic alone and both composition orders,
+with strict routing on/off) pass without an automatically generated relay.
+The 29 preparation/routing tests now live in
+`tests/unit_tests/test_indic_gpqa_diamond.py` for normal core CI collection.
+
+Validation of the follow-up:
+
+- Targeted preparation, MCQA, global config, reverification, manifest/validation,
+  prompt, benchmark discovery, and seed-metadata tests: **813 passed**.
+- `gym env validate indic/gpqa_diamond`: passed against all 2,772 prepared rows.
+- The README's strict-input transformation was checked for flat, `task_input`,
+  and legacy `task_input.task_data` rows.
+- Both documented `gym eval reverify` commands were exercised against the same
+  16 saved Gnani smoke responses above: **16/16 reverified, 13/16 correct** in
+  each mode, with no failed reverifications. Task/attempt sets, response values,
+  and the original input/rollout hashes were unchanged. The input copy differed
+  only in `allow_localized_answer_labels: false`.
+
+No new model generation was needed for this follow-up: it declares routing for
+the existing relay and documents CPU-only rescoring; it does not change the
+prompt, parser, agent execution, generation settings, or benchmark scores.
+
 Artifact location on the validation machine:
 `commits/GPQA/pr3603-review-20261011/`, alongside the `commits/GPQA/Indic_Gym`
 checkout. Raw authorized data, model outputs, and logs are intentionally not

@@ -23,3 +23,10 @@ indic_gpqa_diamond_agent:
         prompt_config: benchmarks/prompts/eval/aai/mcq-4choices.yaml
         prepare_script: benchmarks/indic/gpqa_diamond/prepare.py
         num_repeats: 8
+
+indic_gpqa_diamond_environment_server:
+  _inherit_from: mcqa_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: indic_gpqa_diamond_agent
