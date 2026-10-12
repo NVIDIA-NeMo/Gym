@@ -99,6 +99,16 @@ class TestFernDocsLinks(unittest.TestCase):
             set(), {item for item in labels if item[1] not in ("Model-Call Capture", "model-call capture")}
         )
 
+    def test_latest_docs_explain_kill_shaped_failures_in_plain_language(self):
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        jargon = sorted(
+            path.relative_to(pages).as_posix() for path in pages.rglob("*.mdx") if "kill-shaped" in path.read_text()
+        )
+        metrics = " ".join(read("fern/versions/latest/pages/observability/metrics.mdx").split())
+
+        self.assertEqual([], jargon)
+        self.assertIn("a Slurm SIGTERM, a dead Ray actor, or an out-of-memory kill", metrics)
+
     def test_observability_index_routes_both_observability_families(self):
         overview = read("fern/versions/latest/pages/observability/index.mdx")
 
