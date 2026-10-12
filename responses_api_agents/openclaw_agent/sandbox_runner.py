@@ -25,7 +25,7 @@ class RunnerInput(TypedDict):
 
 
 def run(params: RunnerInput) -> int:
-    """Run the harness with isolated files and let the supervisor reap descendants."""
+    """Run the harness with isolated files and let the supervisor apply the sandbox ownership policy."""
     directory = Path(params["directory"])
     (directory / "runtime.json").write_text(json.dumps({"hostname": os.uname().nodename, "pid": os.getpid()}))
     (directory / "prompt.txt").write_text(params["prompt"])

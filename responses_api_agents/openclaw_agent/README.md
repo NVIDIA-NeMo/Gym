@@ -225,8 +225,10 @@ An explicit wall or model-output limit returns partial output as `incomplete`; u
 raise HTTP 502 even when a useful patch exists. Do not infer rollout success from reward alone. Close returns the captured observations,
 including salvaged transcript evidence after cancellation.
 
-A Linux child subreaper supervises each activation and reaps detached/background descendants before
-writing an explicit cleanup receipt. Close is serialized and checks the receipt, process handle,
+A Linux child subreaper supervises each activation. Successful borrowed executions preserve
+task services through verification; Resources then destroys the sandbox. Failed, timed-out,
+cancelled, and agent-owned executions still reap descendants before writing a cleanup receipt.
+Services must use task-owned files rather than the temporary agent session directory. Close is serialized and checks the receipt, process handle,
 adapter-owned file removal, and disconnect before succeeding. Unknown launch outcomes and missing
 or negative cleanup evidence fail closed and block verification. Successful close receipts remain
 retryable for `session_close_retry_window_seconds` after cleanup (300 seconds by default); traffic
@@ -257,3 +259,12 @@ It creates a sandbox, runs there, and destroys it on close; the default workdir 
 never triggers a replacement or host execution. With neither access nor a usable
 provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
+
+## Terminal-Bench 2.1
+
+Use the [single-task recipe](../../benchmarks/terminal_bench_2_1/README.md#openclaw-in-a-task-sandbox)
+to compose the independent TB Resources, OpenClaw, EnvironmentServer and model
+configs. Resources owns the task sandbox and verifier; OpenClaw borrows it through
+the same session contract as SWE-Pro. `single_agent_turn_legacy` adapts prepared
+flat rows to that lifecycle; it does not invoke the agent's legacy `/run` path.
+The EnvironmentServer closes the agent before grading, then closes Resources.

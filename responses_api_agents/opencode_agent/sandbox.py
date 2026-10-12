@@ -171,7 +171,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             ) from error
 
     async def snapshot(self, timeout: float) -> None:
-        """Copy SQLite output after all harness database writers have stopped."""
+        """Capture SQLite after CLI completion; borrowed task services may remain alive."""
         if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
             raise RuntimeError("OpenCode transcript capture requires confirmed cleanup")
         captured = await self.session.sandbox.exec(

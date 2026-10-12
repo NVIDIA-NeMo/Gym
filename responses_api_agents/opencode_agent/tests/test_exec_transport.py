@@ -31,7 +31,7 @@ class ExecOnlySandbox:
         self.disconnected = False
         self.deadline = None
         self.snapshots = 0
-        self.worker_child = None
+        self.worker_pid = None
 
     async def upload(self, source, destination):
         shutil.copyfile(source, destination)
@@ -45,9 +45,10 @@ class ExecOnlySandbox:
     async def exec(self, command, *, cwd=None, timeout_s=30):
         if "--snapshot" in command:
             self.snapshots += 1
-            if self.worker_child is not None:
+            # The CLI writer must finish before capture; task services can remain.
+            if self.worker_pid is not None:
                 with pytest.raises(ProcessLookupError):
-                    os.kill(int(self.worker_child.read_text()), 0)
+                    os.kill(int(self.worker_pid.read_text()), 0)
         launch = "--receipt" in command and "process_supervisor.py" in command
         if launch:
             self.deadline = timeout_s
@@ -111,15 +112,16 @@ def payload(state, code, timeout=0.5):
     }
 
 
-@pytest.mark.parametrize("ending", ["natural", "timeout", "cancel", "close"])
-async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
+@pytest.mark.parametrize("ending", ["natural", "crash", "timeout", "cancel", "close"])
+async def test_exec_only_supervision_preserves_task_child_only_after_success(tmp_path, ending):
     state, provider, workdir = make_session(tmp_path)
-    provider.worker_child = workdir / "child.pid"
+    provider.worker_pid = workdir / "worker.pid"
     code = (
-        "import subprocess,sys,time,pathlib; "
+        "import os,subprocess,sys,time,pathlib; "
+        "pathlib.Path('worker.pid').write_text(str(os.getpid())); "
         "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
         "pathlib.Path('child.pid').write_text(str(p.pid)); "
-        + ("print('{}')" if ending == "natural" else "time.sleep(60)")
+        + {"natural": "print('{}')", "crash": "raise SystemExit(7)"}.get(ending, "time.sleep(60)")
     )
     deadline = 0.5 if ending == "timeout" else 60
     task = state.task = asyncio.create_task(
@@ -141,18 +143,34 @@ async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
         assert state.session.cleanup["cleanup_confirmed"] is True
         if ending == "timeout":
             assert state.session.cleanup["timed_out"] is True
-        with pytest.raises(ProcessLookupError):
-            os.kill(int((workdir / "child.pid").read_text()), 0)
+        child_pid = int((workdir / "child.pid").read_text())
+        if ending == "natural":
+            os.kill(child_pid, 0)
+        else:
+            with pytest.raises(ProcessLookupError):
+                os.kill(child_pid, 0)
         assert provider.cancelled_launch is False
         assert provider.deadline > deadline + 3 * 1
         assert provider.snapshots == 1
+        with sqlite3.connect(Path(state.session.session_dir) / "observations.db") as snapshot:
+            assert snapshot.execute("select id from session").fetchall() == [("root",)]
         await state.close(3)
         await state.close(3)
         assert provider.disconnected
         assert not Path(state.session.session_dir).exists()
+        if ending == "natural":
+            # Resources still owns the task process while the verifier inspects it.
+            os.kill(child_pid, 0)
     finally:
-        if not state.session.closed:
-            await state.close(3)
+        try:
+            if not state.session.closed:
+                await state.close(3)
+        finally:
+            if (workdir / "child.pid").exists():
+                try:
+                    os.kill(int((workdir / "child.pid").read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):

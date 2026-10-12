@@ -87,7 +87,11 @@ correlation plugin. The plugin is uploaded into each sandbox when model-call
 observability is enabled. Sessions disable automatic updates and models.dev fetches.
 
 The runner uses ordinary sandbox `exec`, with an internal deadline and a Linux
-subreaper to clean detached tool processes. Close succeeds only after confirmed
+subreaper to supervise detached tool processes. Successful borrowed executions preserve
+task services through verification; Resources then destroys the sandbox. Failed, timed-out,
+cancelled, and agent-owned executions still stop descendants. The CLI must exit before
+SQLite observations are captured; services must use task-owned files rather than the
+agent session directory, which close removes. Close succeeds only after confirmed
 cleanup; uncertain cleanup remains retryable and blocks verification. Successful
 close receipts are retained for `session_close_retry_window_seconds` (default 300).
 Session state is process-local; use one worker. Provider TTL and the episode owner
@@ -135,3 +139,12 @@ stricter, single-activation contract described above. The intentional difference
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
 Different prompt placement can affect results; this integration does not establish
 local/session score parity or migrate existing benchmark defaults.
+
+## Terminal-Bench 2.1
+
+Use the [single-task recipe](../../benchmarks/terminal_bench_2_1/README.md#opencode-in-a-task-sandbox)
+to compose the independent TB Resources, OpenCode, EnvironmentServer and model
+configs. Resources owns the task sandbox and verifier; OpenCode borrows it through
+the same session contract as SWE-Pro. `single_agent_turn_legacy` adapts prepared
+flat rows to that lifecycle; it does not invoke the agent's legacy `/run` path.
+The EnvironmentServer closes the agent before grading, then closes Resources.
