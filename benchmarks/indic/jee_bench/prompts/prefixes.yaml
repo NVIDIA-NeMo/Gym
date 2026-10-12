@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Prompts from JEEBench (MIT), Copyright (c) 2023 DAIR Group, IIT Delhi.
+# See resources_servers/jeebench/NOTICE for the upstream license.
+# Exact upstream CoT prefixes; MIT attribution: resources_servers/jeebench/NOTICE.
+MCQ: In this problem, only one option will be correct. Give a detailed solution and end the solution with the final answer.
+MCQ(multiple): In this problem, multiple options can be correct. Give a detailed solution and end the solution with the final answer.
+Integer: In this problem, the final answer will be a non-negative integer. Give a detailed solution and end the solution with the final answer.
+Numeric: In this problem, the final will be a numeric value. Give the numerical answer correct upto the 2nd decimal digit. Give a detailed solution and end the solution with the final answer.
