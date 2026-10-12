@@ -145,36 +145,87 @@ def validate_git_url(git_url: str) -> str:
     )
 
 
-def load_registry(cache_dir: Path, *, refresh: bool = False) -> list[RegistryDataset]:
-    """Read the registry, downloading it into ``cache_dir`` when missing or ``refresh`` is set."""
-    cache = Path(cache_dir) / "registry.json"
-    if refresh or not cache.is_file():
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with urllib.request.urlopen(REGISTRY_URL, timeout=120) as response:
-                payload = response.read()
-        except OSError as exc:
-            raise HubError(f"Could not download the Harbor registry from {REGISTRY_URL}: {exc}") from exc
-        cache.write_bytes(payload)
+def _parse_registry(payload: bytes) -> list[RegistryDataset]:
+    entries = json.loads(payload)
+    if not isinstance(entries, list):
+        raise ValueError("expected a list of datasets")
     datasets: list[RegistryDataset] = []
-    for entry in json.loads(cache.read_text()):
-        tasks = tuple(
-            RegistryTask(
-                name=validate_task_name(task["name"]),
-                git_url=validate_git_url(task["git_url"]),
-                git_commit_id=task["git_commit_id"],
-                path=task["path"],
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry["name"], str):
+            raise ValueError("each dataset must be an object with a string name")
+        task_entries = entry.get("tasks", [])
+        if not isinstance(task_entries, list):
+            raise ValueError(f"dataset {entry['name']!r}: tasks must be a list")
+        tasks: list[RegistryTask] = []
+        for task in task_entries:
+            if not isinstance(task, dict):
+                raise ValueError(f"dataset {entry['name']!r}: each task must be an object")
+            for key in ("name", "git_url", "git_commit_id", "path"):
+                if not isinstance(task[key], str):
+                    raise ValueError(f"dataset {entry['name']!r}: task {key} must be a string")
+            tasks.append(
+                RegistryTask(
+                    name=validate_task_name(task["name"]),
+                    git_url=validate_git_url(task["git_url"]),
+                    git_commit_id=task["git_commit_id"],
+                    path=task["path"],
+                )
             )
-            for task in entry.get("tasks", [])
-        )
         datasets.append(
             RegistryDataset(
                 name=entry["name"],
                 version=str(entry.get("version", "")),
                 description=entry.get("description", ""),
-                tasks=tasks,
+                tasks=tuple(tasks),
             )
         )
+    return datasets
+
+
+def load_registry(cache_dir: Path, *, refresh: bool = False) -> list[RegistryDataset]:
+    """Read the registry, validating downloads before atomically replacing the cache.
+
+    A damaged cache raises ``HubError`` with its path and recovery instructions.
+    Failed downloads or updates leave any previous cache intact.
+    """
+    cache = Path(cache_dir).resolve() / "registry.json"
+    download = refresh or not cache.is_file()
+    if download:
+        try:
+            with urllib.request.urlopen(REGISTRY_URL, timeout=120) as response:
+                payload = response.read()
+        except OSError as exc:
+            raise HubError(f"Could not download the Harbor registry from {REGISTRY_URL}: {exc}") from exc
+    else:
+        try:
+            payload = cache.read_bytes()
+        except OSError as exc:
+            raise HubError(
+                f"Could not read Harbor registry cache {cache}: {exc}. Check file permissions and retry."
+            ) from exc
+    try:
+        datasets = _parse_registry(payload)
+    except (ValueError, KeyError, TypeError) as exc:
+        if download:
+            hint = "The downloaded registry is invalid; retry later. Any existing cache was left unchanged."
+        else:
+            hint = "Remove this file and retry to download a fresh registry."
+        raise HubError(f"Invalid Harbor registry at {cache}: {exc}. {hint}") from exc
+    if download:
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=cache.parent, prefix=".registry-", delete=False) as stream:
+                temporary = Path(stream.name)
+                try:
+                    stream.write(payload)
+                    stream.close()
+                    temporary.replace(cache)
+                finally:
+                    temporary.unlink(missing_ok=True)
+        except OSError as exc:
+            raise HubError(
+                f"Could not update Harbor registry cache {cache}: {exc}. Check write permissions and retry."
+            ) from exc
     return datasets
 
 

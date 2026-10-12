@@ -668,7 +668,12 @@ TASK_TARGET = Flag(
         "target",
         nargs="?",
         metavar="TARGET",
-        help="Harbor task folder, folder of task folders, or `harbor:<dataset>[@<version>]` hub reference.",
+        help=(
+            "Harbor task folder, folder of task folders, or `harbor:<dataset>[@<version>]` hub reference. "
+            "Existing folders (including expanded ~user paths) and explicit ./, ../, /, or ~/ paths "
+            "take precedence over Hydra overrides. Prefix an ambiguous relative path with ./; "
+            "otherwise key=value and ~key are configuration overrides."
+        ),
     ),
 )
 
@@ -1450,11 +1455,21 @@ def _extra_roots_from_search_dir(search_dirs: list[str] | None):
 
 
 def _is_positional_hydra_override(token: str) -> bool:
+    # Explicit paths and existing folders win, even when '=' or '~' also fits Hydra's grammar.
+    # Do not treat '/' inside an override value or a deletion's config-group name as a path prefix.
+    if token == "~" or token.startswith(("./", "../", "/", "~/", "harbor:")):
+        return False
+    try:
+        if Path(token).is_dir() or Path(token).expanduser().is_dir():
+            return False
+    except RuntimeError:
+        # An unknown ~user can still be a valid Hydra deletion (~server or ~group/option).
+        pass
     if "=" in token:
         return True
     if not token.startswith("~"):
         return False
-    # Deletions need no '='. Parse them so home-relative paths such as ~/tasks remain targets.
+    # Only syntactically valid, otherwise unclaimed deletions belong to Hydra.
     from hydra.core.override_parser.overrides_parser import OverridesParser
     from hydra.errors import HydraException
 

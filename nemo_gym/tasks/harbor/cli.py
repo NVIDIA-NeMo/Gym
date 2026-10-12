@@ -173,12 +173,14 @@ def build_run(
     if sandbox is not None:
         config_paths.append(resolve_sandbox_config(sandbox))
     # Later config files win: explicit user overlays must follow component/provider defaults.
-    tokens = [f"+config_paths=[{','.join(str(path) for path in config_paths)}]"]
+    tokens = [f"+config_paths=[{','.join(json.dumps(str(path), ensure_ascii=False) for path in config_paths)}]"]
     tokens += [token for token in overrides if not token.startswith("+agent_name=")]
     if not _has_override(tokens, "split"):
         tokens.append("+split=validation")
     if not _has_override(tokens, "output_jsonl_fpath"):
-        tokens.append(f"+output_jsonl_fpath={prepared.output_dir / 'rollouts.jsonl'}")
+        tokens.append(
+            f"+output_jsonl_fpath={json.dumps(str(prepared.output_dir / 'rollouts.jsonl'), ensure_ascii=False)}"
+        )
     return config_path, tokens
 
 

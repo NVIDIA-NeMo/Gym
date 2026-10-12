@@ -1830,7 +1830,7 @@ def test_eval_run_restores_positional_override_before_config_merge(monkeypatch, 
 
 
 @pytest.mark.parametrize("serve", [False, True])
-@pytest.mark.parametrize("deletion", ["~unused_server", "~unused_server@pkg"])
+@pytest.mark.parametrize("deletion", ["~unused_server", "~unused_server@pkg", "~unused_group/option"])
 def test_eval_run_restores_equals_free_hydra_deletions(monkeypatch, serve, deletion):
     target, overrides = _dispatch_for(
         monkeypatch,
@@ -1848,3 +1848,39 @@ def test_eval_run_keeps_home_relative_target(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "~/tasks", "--agent", "hermes"])
     cli_main.main()
     assert captured == ["~/tasks"]
+
+
+@pytest.mark.parametrize(
+    "target", ["~", "~/tasks", "~harbor_test_user/tasks", "trial=1", "./trial=1", "../trial=1", "/missing/trial=1"]
+)
+def test_eval_run_ambiguous_folder_targets_take_precedence(tmp_path, monkeypatch, target):
+    import pwd
+    from types import SimpleNamespace
+
+    import nemo_gym.tasks.harbor.cli as harbor_cli
+
+    home = tmp_path / "home"
+    (home / "tasks").mkdir(parents=True)
+    (tmp_path / "trial=1").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    real_getpwnam = pwd.getpwnam
+    monkeypatch.setattr(
+        pwd,
+        "getpwnam",
+        lambda name: SimpleNamespace(pw_dir=str(home)) if name == "harbor_test_user" else real_getpwnam(name),
+    )
+    captured = []
+    monkeypatch.setattr(harbor_cli, "run_target", lambda args, overrides: captured.append((args.target, overrides)))
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", target, "--agent", "hermes", "+limit=3"])
+    cli_main.main()
+    assert captured == [(target, ["+agent_name=hermes", "+limit=3"])]
+
+
+@pytest.mark.parametrize("override", ["trial=1", "+folder=/tmp/tasks", "~unused_server=value"])
+def test_eval_run_ambiguous_nonfolders_remain_overrides(tmp_path, monkeypatch, override):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "trial=1").write_text("a file, not a task folder")
+    target, overrides = _dispatch_for(monkeypatch, ["eval", "run", override])
+    assert target.endswith("e2e_rollout_collection")
+    assert overrides == [override]

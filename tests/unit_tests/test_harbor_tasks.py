@@ -583,6 +583,8 @@ class TestCli:
             resolve_agent("no_such_agent_xyz")
 
     def test_build_run_writes_config_and_overrides(self, tmp_path):
+        from hydra.core.override_parser.overrides_parser import OverridesParser
+
         folder = tmp_path / "ds"
         tasks = [load_task(write_task(folder / "a"))]
         prepared = PreparedTaskset("ds", folder, tasks, tmp_path / "out" / "tasks.jsonl", tmp_path / "out")
@@ -602,7 +604,9 @@ class TestCli:
         assert str(config_path.resolve()) in config_paths
         assert "single_agent_turn/configs/single_agent_turn.yaml" in config_paths
         assert "opensandbox/configs/opensandbox.yaml" in config_paths
-        assert f"+output_jsonl_fpath={tmp_path / 'out' / 'rollouts.jsonl'}" in tokens
+        parsed = OverridesParser.create().parse_overrides(tokens)
+        output = next(token.value() for token in parsed if token.key_or_group == "output_jsonl_fpath")
+        assert output == str(tmp_path / "out" / "rollouts.jsonl")
 
 
 @pytest.mark.parametrize(
@@ -827,6 +831,8 @@ def test_existing_unpinned_task_is_never_relabeled(tmp_path, registry_repo):
 
 
 def test_registry_versions_keep_distinct_rows_routes_and_outputs(tmp_path, monkeypatch):
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+
     import nemo_gym.tasks.harbor.cli as harbor_cli
 
     for version in ("1.0", "2.0"):
@@ -843,10 +849,13 @@ def test_registry_versions_keep_distinct_rows_routes_and_outputs(tmp_path, monke
     for prepared, (path, tokens) in zip((first, second), configs):
         assert json.loads(prepared.rows_path.read_text())["task_id"]["taskset"] == prepared.taskset
         assert list(yaml.safe_load(path.read_text())["environment_server_routes"]) == [prepared.taskset]
-        assert f"+output_jsonl_fpath={prepared.output_dir / 'rollouts.jsonl'}" in tokens
+        parsed = OverridesParser.create().parse_overrides(tokens)
+        output = next(token.value() for token in parsed if token.key_or_group == "output_jsonl_fpath")
+        assert output == str(prepared.output_dir / "rollouts.jsonl")
 
 
 def test_config_overlays_win_after_real_loading_and_inheritance(tmp_path):
+    from hydra.core.override_parser.overrides_parser import OverridesParser
     from omegaconf import OmegaConf
 
     from nemo_gym.cli.main import _merge_config_paths
@@ -860,7 +869,7 @@ def test_config_overlays_win_after_real_loading_and_inheritance(tmp_path):
     )
     _, tokens = build_run(prepared, resolve_agent("hermes"), sandbox=None, overrides=[f"+config_paths=[{overlay}]"])
     paths_token = next(t for t in _merge_config_paths(tokens) if t.startswith("+config_paths="))
-    paths = paths_token[len("+config_paths=[") : -1].split(",")
+    paths = OverridesParser.create().parse_override(paths_token).value()
     parser = GlobalConfigDictParser()
     _, configs = parser.load_extra_config_paths(paths)
     config = OmegaConf.merge(*configs)
@@ -937,7 +946,7 @@ def test_all_unloadable_tasks_still_record_reasons(tmp_path):
     assert "task.toml" in skipped["bad"]
 
 
-@pytest.mark.parametrize("taskset", ["ds", "terminal-bench-2.0"])
+@pytest.mark.parametrize("taskset", ["ds", "terminal-bench-2.0", "trial=1", "中文=1"])
 def test_generated_run_passes_full_config_validation(tmp_path, monkeypatch, taskset):
     import sys
 
@@ -1144,3 +1153,123 @@ def test_unexpected_harbor_programming_errors_remain_visible(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "harbor:hello-world", "--agent", "hermes"])
     with pytest.raises(TypeError, match="unexpected implementation bug"):
         main()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"[{",
+        b"\xff",
+        b"{}",
+        b"[null]",
+        b"[{}]",
+        b'[{"name": "ds", "tasks": [{}]}]',
+        b'[{"name": "ds", "tasks": null}]',
+        b'[{"name": "ds", "tasks": [null]}]',
+        b'[{"name": 1}]',
+        b'[{"name": "ds", "tasks": [{"name": "a", "git_url": null}]}]',
+    ],
+)
+def test_damaged_registry_cache_reports_recovery_at_cli(tmp_path, monkeypatch, capsys, payload):
+    import sys
+
+    from nemo_gym.cli.main import main
+
+    root = tmp_path / "datasets"
+    cache = root / ".harbor" / "registry.json"
+    cache.parent.mkdir(parents=True)
+    cache.write_bytes(payload)
+    monkeypatch.setenv("NEMO_GYM_DATASETS_DIR", str(root))
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "harbor:ds", "--agent", "hermes"])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
+    message = capsys.readouterr().err
+    assert str(cache) in message
+    assert "Remove this file and retry" in message
+    assert "Traceback" not in message
+    assert cache.read_bytes() == payload
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("payload", [b"[{", b'[{"tasks": []}]'])
+def test_invalid_registry_download_does_not_publish(tmp_path, monkeypatch, existing, payload):
+    from io import BytesIO
+
+    cache = tmp_path / "registry.json"
+    previous = b'[{"name": "previous"}]'
+    if existing:
+        cache.write_bytes(previous)
+    monkeypatch.setattr(hub_module.urllib.request, "urlopen", lambda *args, **kwargs: BytesIO(payload))
+    with pytest.raises(HubError, match="registry"):
+        load_registry(tmp_path, refresh=True)
+    assert cache.read_bytes() == previous if existing else not cache.exists()
+    assert not list(tmp_path.glob(".registry-*"))
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_registry_publication_is_atomic_and_recovers(tmp_path, monkeypatch, existing):
+    from io import BytesIO
+
+    cache = tmp_path / "registry.json"
+    previous = b'[{"name": "previous"}]'
+    payload = b'[{"name": "replacement"}]'
+    if existing:
+        cache.write_bytes(previous)
+    monkeypatch.setattr(hub_module.urllib.request, "urlopen", lambda *args, **kwargs: BytesIO(payload))
+    replace = Path.replace
+    attempted = []
+
+    def interrupted(path, target):
+        if Path(target) == cache:
+            assert path.parent == cache.parent
+            assert path.read_bytes() == payload
+            assert cache.read_bytes() == previous if existing else not cache.exists()
+            attempted.append(path)
+            raise OSError("interrupted registry publication")
+        return replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", interrupted)
+    with pytest.raises(HubError, match="interrupted registry publication"):
+        load_registry(tmp_path, refresh=True)
+    assert attempted
+    assert cache.read_bytes() == previous if existing else not cache.exists()
+    assert not list(tmp_path.glob(".registry-*"))
+    monkeypatch.setattr(Path, "replace", replace)
+    assert load_registry(tmp_path, refresh=True)[0].name == "replacement"
+    assert cache.read_bytes() == payload
+    assert not list(tmp_path.glob(".registry-*"))
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_interrupted_registry_cache_write_preserves_previous_file(tmp_path, monkeypatch, existing):
+    from io import BytesIO
+
+    cache = tmp_path / "registry.json"
+    previous = b'[{"name": "previous"}]'
+    payload = b'[{"name": "replacement"}]'
+    if existing:
+        cache.write_bytes(previous)
+    monkeypatch.setattr(hub_module.urllib.request, "urlopen", lambda *args, **kwargs: BytesIO(payload))
+    create = hub_module.tempfile.NamedTemporaryFile
+    attempted = []
+
+    def interrupted_file(*args, **kwargs):
+        stream = create(*args, **kwargs)
+        write = stream.write
+
+        def partial_write(data):
+            write(data[:5])
+            stream.flush()
+            attempted.append(Path(stream.name))
+            raise OSError("interrupted registry write")
+
+        stream.write = partial_write
+        return stream
+
+    monkeypatch.setattr(hub_module.tempfile, "NamedTemporaryFile", interrupted_file)
+    with pytest.raises(HubError, match="interrupted registry write"):
+        load_registry(tmp_path, refresh=True)
+    assert attempted
+    assert cache.read_bytes() == previous if existing else not cache.exists()
+    assert not list(tmp_path.glob(".registry-*"))
