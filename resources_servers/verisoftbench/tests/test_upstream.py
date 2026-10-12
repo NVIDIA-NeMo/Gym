@@ -173,24 +173,31 @@ class TestLoader:
                 else:
                     sys.modules[name] = module
 
-    def test_checkout_modified_after_the_cached_load_is_refused(self, harness, monkeypatch, tmp_path) -> None:
-        # ``load_upstream`` returns its cached modules on every later call; the tracked
-        # tree must still be rechecked there so a checkout edited after the first load
-        # is not presented as the pinned instrument.
+    def test_checkout_changed_after_the_cached_load_is_refused(self, harness, monkeypatch, tmp_path) -> None:
+        # ``load_upstream`` returns its cached modules on every later call; the FULL pin
+        # must still be rechecked there. Importing modules does not lock Git HEAD, so
+        # both halves matter: an edited tracked file (dirty tree at the right commit)
+        # and a clean checkout moved to a different commit.
         repo = tmp_path / "checkout"
         repo.mkdir()
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         (repo / "tracked.py").write_text("original\n")
-        subprocess.run(["git", "-C", str(repo), "add", "tracked.py"], check=True)
-        subprocess.run(
-            ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"],
-            check=True,
-        )
+        (repo / "evaluate.py").write_text("# stand-in for upstream's entry point\n")
+        git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run([*git, "add", "tracked.py", "evaluate.py"], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "x"], check=True)
+        monkeypatch.setattr(upstream, "UPSTREAM_COMMIT", upstream.checkout_head(repo))
         cached = UpstreamModules(None, None, None, None, repo.resolve())
         monkeypatch.setattr(upstream, "_LOADED", cached)
         assert upstream.load_upstream(repo) is cached
         (repo / "tracked.py").write_text("tampered\n")
         with pytest.raises(UpstreamError, match="modified tracked files"):
+            upstream.load_upstream(repo)
+        subprocess.run([*git, "checkout", "-q", "--", "tracked.py"], check=True)
+        assert upstream.load_upstream(repo) is cached
+        (repo / "tracked.py").write_text("a different committed revision\n")
+        subprocess.run([*git, "commit", "-q", "-am", "y"], check=True)  # clean tree, moved HEAD
+        with pytest.raises(UpstreamError, match="expected"):
             upstream.load_upstream(repo)
 
 
@@ -203,7 +210,18 @@ class TestRepoIndex:
         monkeypatch.setattr(harness.modules.utils, "REPO_INDEX_DIR", tmp_path)
         with pytest.raises(UpstreamError, match="does not cover the benchmark"):
             Harness(UPSTREAM_DIR, docker_container="verisoftbench-lean-test")
-
+    def test_wrong_index_with_valid_shape_fails_closed(self, harness, monkeypatch, tmp_path) -> None:
+        # A present, well-formed index can still be the wrong index: upstream's anti-leak
+        # pass silently no-ops when a task's target theorem is absent from its file's
+        # records. Every benchmark (lean_root, rel_path, thm_name) must resolve to a
+        # usable record, so a stale or mismatched file is refused, not scored under.
+        real_dir = Path(harness.modules.utils.REPO_INDEX_DIR)
+        for path in real_dir.glob("*.json"):
+            (tmp_path / path.name).write_bytes(path.read_bytes())
+        (tmp_path / "Lentil.json").write_text(json.dumps({"theorems_by_file": {"Other.lean": []}}))
+        monkeypatch.setattr(harness.modules.utils, "REPO_INDEX_DIR", tmp_path)
+        with pytest.raises(UpstreamError, match="has no usable index record"):
+            Harness(UPSTREAM_DIR, docker_container="verisoftbench-lean-test")
 
 
 class TestPrompts:

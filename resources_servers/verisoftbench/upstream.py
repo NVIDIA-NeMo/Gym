@@ -179,13 +179,13 @@ def require_repo_index(modules: "UpstreamModules") -> str:
     index_dir = Path(modules.utils.REPO_INDEX_DIR)
     dataset_path = modules.root / DATASET_RELATIVE_PATH
     try:
-        required = sorted(
-            {json.loads(line)["lean_root"] for line in dataset_path.read_text().splitlines() if line.strip()}
-        )
+        tasks = [json.loads(line) for line in dataset_path.read_text().splitlines() if line.strip()]
+        required = sorted({task["lean_root"] for task in tasks})
     except (OSError, KeyError, TypeError, json.JSONDecodeError) as e:
         raise UpstreamError(f"cannot read the benchmark's repositories from {dataset_path}: {e}") from e
     problems = []
     digest = hashlib.sha256()
+    indexes: dict[str, dict] = {}
     for root in required:
         path = index_dir / f"{root}.json"
         try:
@@ -200,7 +200,37 @@ def require_repo_index(modules: "UpstreamModules") -> str:
         if not isinstance(theorems_by_file, dict) or not theorems_by_file:
             problems.append(f"{path.name} has no 'theorems_by_file'")
             continue
+        indexes[root] = theorems_by_file
         digest.update(f"{path.name}:{hashlib.sha256(data).hexdigest()}\n".encode())
+    # A present, well-formed index can still be the wrong index: upstream's anti-leak
+    # pass silently no-ops when the task's target theorem is not in its file's record
+    # list, so every benchmark task's (lean_root, rel_path, thm_name) must resolve to a
+    # record carrying the fields the pass reads (``name``/``aliases`` for the lookup,
+    # ``line`` to filter earlier theorems). Up to five misses are named.
+    uncovered = 0
+    for task in tasks:
+        theorems_by_file = indexes.get(task["lean_root"])
+        if theorems_by_file is None:
+            continue  # the whole index is already a named problem
+        records = theorems_by_file.get(task.get("rel_path"), [])
+        target = next(
+            (
+                record
+                for record in records
+                if isinstance(record, dict)
+                and (record.get("name") == task.get("thm_name") or task.get("thm_name") in record.get("aliases", []))
+            ),
+            None,
+        )
+        if target is None or not isinstance(target.get("line"), int):
+            uncovered += 1
+            if uncovered <= 5:
+                problems.append(
+                    f"task {task.get('id')} ({task['lean_root']}/{task.get('rel_path')}: {task.get('thm_name')}) "
+                    "has no usable index record"
+                )
+    if uncovered > 5:
+        problems.append(f"... and {uncovered - 5} more uncovered tasks")
     if problems:
         raise UpstreamError(
             f"repo index at {index_dir} does not cover the benchmark: {'; '.join(problems)}. "
@@ -266,9 +296,11 @@ def load_upstream(upstream_dir: Path) -> UpstreamModules:
     if _LOADED is not None:
         if _LOADED.root != upstream_dir:
             raise UpstreamError(f"upstream already loaded from {_LOADED.root}; cannot also load {upstream_dir}")
-        # The commit cannot move under an open checkout unnoticed, but tracked files can:
-        # recheck them cheaply so a checkout edited after the first load is refused.
-        require_clean_tracked_tree(upstream_dir)
+        # Importing modules does not lock Git HEAD: the checkout can be moved to another
+        # (clean) commit after the first load, with the loaded Python still from the pin
+        # while prompt templates and data are re-read from the moved tree. Recheck the
+        # full pin — HEAD and tracked cleanliness — on every cached load.
+        require_pinned_checkout(upstream_dir)
         return _LOADED
     require_pinned_checkout(upstream_dir)
     for name in UPSTREAM_TOP_LEVEL_MODULES:
