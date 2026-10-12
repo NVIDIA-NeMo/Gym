@@ -30,6 +30,7 @@ class GradeResult:
     reward: float
     extracted_answer: str | None
     grading_status: str
+    failure_reason: str | None = None
 
 
 def extract_answer(text: str) -> str | None:

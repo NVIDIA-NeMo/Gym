@@ -225,9 +225,10 @@ async def test_cannot_start_worker(server: FrontierMathResourcesServer) -> None:
     assert result.grading_status == "verifier_error"
 
 
-async def test_verify_response_preserves_metadata(server: FrontierMathResourcesServer) -> None:
+@pytest.fixture
+def verify_request() -> FrontierMathVerifyRequest:
     row = json.loads((Path(__file__).resolve().parents[1] / "data/example.jsonl").read_text().splitlines()[0])
-    request = FrontierMathVerifyRequest.model_validate(
+    return FrontierMathVerifyRequest.model_validate(
         {
             **row,
             "response": {
@@ -256,10 +257,48 @@ async def test_verify_response_preserves_metadata(server: FrontierMathResourcesS
             },
         }
     )
+
+
+async def test_verify_response_preserves_metadata(
+    server: FrontierMathResourcesServer, verify_request: FrontierMathVerifyRequest
+) -> None:
+    request = verify_request
     result = await server.verify(request)
     assert result.reward == 1
-    assert result.row_id == row["row_id"]
-    assert result.language_code == row["language_code"]
-    assert result.judge_pass_stage == row["judge_pass_stage"]
+    assert not result.mask_sample and result.failure_kind is None and result.failure_reason is None
+    assert result.row_id == request.row_id
+    assert result.language_code == request.language_code
+    assert result.judge_pass_stage == request.judge_pass_stage
     request.response.output = []
-    assert (await server.verify(request)).grading_status == "missing_answer"
+    result = await server.verify(request)
+    assert result.grading_status == "missing_answer"
+    assert not result.mask_sample and result.failure_kind is None
+
+
+@pytest.mark.parametrize("failure", ["spawn", "crash", "invalid_output", "pipe"])
+async def test_verify_masks_worker_failure(
+    server: FrontierMathResourcesServer, verify_request: FrontierMathVerifyRequest, failure: str
+) -> None:
+    process = MagicMock(returncode=1 if failure == "crash" else 0)
+    process.communicate = AsyncMock(return_value=(b"not json", b"worker failed"))
+    if failure == "pipe":
+        process.communicate.side_effect = OSError("Broken pipe")
+    spawn = AsyncMock(side_effect=OSError("Unavailable")) if failure == "spawn" else AsyncMock(return_value=process)
+    with patch("resources_servers.frontiermath.app.asyncio.create_subprocess_exec", new=spawn):
+        result = await server.verify(verify_request)
+    assert result.grading_status == "verifier_error"
+    assert result.mask_sample
+    assert result.failure_kind == "verifier_error"
+    assert result.failure_reason
+
+
+async def test_extraction_is_inside_worker_timeout(
+    server: FrontierMathResourcesServer, verify_request: FrontierMathVerifyRequest
+) -> None:
+    server.config.verifier_timeout_seconds = 0.001
+    verify_request.response.output[0].content[0].text = "<think>" * 8000
+    result = await server.verify(verify_request)
+    assert result.grading_status == "timeout"
+    assert result.mask_sample
+    assert result.failure_kind == "verifier_error"
+    assert "timeout" in result.failure_reason.lower()

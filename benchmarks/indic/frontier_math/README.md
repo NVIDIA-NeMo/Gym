@@ -56,6 +56,21 @@ gold-independent formatting failures before exact re-grading. Inspect
 `grading_status` for missing answers, parse failures, and verifier errors. No LLM
 judge is used.
 
+Equality recovery accepts only a single-letter answer assignment such as `n=214`.
+It does not recover values from inequalities, chained equalities, or expressions
+on the left-hand side such as `2n=214`.
+
+Masked attempts and verifier errors or timeouts are excluded from both accuracy
+calculations. Missing or mathematically invalid model answers still count as
+incorrect. The summary retains total problem/attempt counts and grading statuses,
+and reports scored, excluded, masked, and verifier-failure counts separately.
+`complete_12_problem_coverage` requires a successful grading attempt for all twelve
+problems; `observed_12_problem_coverage` includes failed attempts. Languages with
+no successfully graded attempts have `null` accuracy.
+Failures during auxiliary normalized re-grading also exclude the attempt from
+both scores, keeping their denominators aligned, and appear in
+`normalization_failure_attempts` and `normalization_failures`.
+
 Run the summary in the resources server's virtual environment so symbolic
 normalization uses the verifier's pinned dependencies.
 

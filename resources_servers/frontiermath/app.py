@@ -20,7 +20,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from resources_servers.frontiermath.grading import MAX_ANSWER_CHARS, GradeResult, extract_answer
+from nemo_gym.failure_kinds import VERIFIER_ERROR
+from resources_servers.frontiermath.grading import GradeResult
 
 
 logger = logging.getLogger(__name__)
@@ -60,17 +61,12 @@ class FrontierMathResourcesServer(SimpleResourcesServer):
         self._semaphore = asyncio.Semaphore(self.config.verifier_max_concurrency)
 
     async def grade(self, *, expected_answer: str, answer_type: str, generated_answer: str) -> GradeResult:
-        """Run symbolic work with bounded concurrency and a killable wall-clock timeout."""
-        extracted = extract_answer(generated_answer)
-        if extracted is None:
-            return GradeResult(0.0, None, "missing_answer")
-        if len(extracted) > MAX_ANSWER_CHARS:
-            return GradeResult(0.0, None, "answer_too_long")
+        """Bound extraction and symbolic work together in a killable worker."""
         payload = json.dumps(
             {
                 "expected_answer": expected_answer,
                 "answer_type": answer_type,
-                "generated_answer": "\\boxed{" + extracted + "}",
+                "generated_answer": generated_answer,
             }
         ).encode()
         async with self._semaphore:
@@ -82,22 +78,27 @@ class FrontierMathResourcesServer(SimpleResourcesServer):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-            except OSError:
+            except OSError as exc:
                 logger.exception("Could not start FrontierMath grader")
-                return GradeResult(0.0, extracted, "verifier_error")
+                return GradeResult(0.0, None, "verifier_error", f"Could not start verifier: {exc}")
             try:
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(payload), timeout=self.config.verifier_timeout_seconds
                 )
                 if process.returncode:
                     logger.error("FrontierMath grader failed: %s", stderr.decode(errors="replace")[:1000])
-                    return GradeResult(0.0, extracted, "verifier_error")
+                    return GradeResult(0.0, None, "verifier_error", f"Verifier exited with code {process.returncode}")
                 return GradeResult(**json.loads(stdout.decode(errors="replace")))
             except TimeoutError:
-                return GradeResult(0.0, extracted, "timeout")
-            except (ValueError, TypeError):
+                return GradeResult(
+                    0.0, None, "timeout", f"Verifier timeout after {self.config.verifier_timeout_seconds:g} seconds"
+                )
+            except OSError as exc:
+                logger.exception("Could not communicate with FrontierMath grader")
+                return GradeResult(0.0, None, "verifier_error", f"Verifier communication failed: {exc}")
+            except (ValueError, TypeError) as exc:
                 logger.exception("Invalid FrontierMath grader response")
-                return GradeResult(0.0, extracted, "verifier_error")
+                return GradeResult(0.0, None, "verifier_error", f"Invalid verifier response: {exc}")
             finally:
                 if process.returncode is None:
                     with contextlib.suppress(ProcessLookupError):
@@ -116,6 +117,9 @@ class FrontierMathResourcesServer(SimpleResourcesServer):
             reward=result.reward,
             extracted_answer=result.extracted_answer,
             grading_status=result.grading_status,
+            mask_sample=result.grading_status in {"verifier_error", "timeout"},
+            failure_kind=VERIFIER_ERROR if result.grading_status in {"verifier_error", "timeout"} else None,
+            failure_reason=result.failure_reason,
         )
 
 

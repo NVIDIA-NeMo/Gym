@@ -16,6 +16,11 @@ def summarize(path: Path) -> dict:
     """Return strict and normalized pass@1 estimates plus grading diagnostics."""
     tasks = defaultdict(lambda: defaultdict(list))
     normalized_tasks = defaultdict(lambda: defaultdict(list))
+    observed = defaultdict(Counter)
+    masked = Counter()
+    failures = Counter()
+    excluded = Counter()
+    normalization_failures = defaultdict(Counter)
     statuses = defaultdict(Counter)
     recoveries = defaultdict(Counter)
     review = defaultdict(dict)
@@ -38,15 +43,28 @@ def summarize(path: Path) -> dict:
             if row["reward"] not in (0.0, 1.0):
                 raise ValueError(f"Line {line_number}: expected a binary reward")
             code, row_id = row["language_code"], row["row_id"]
-            tasks[code][row_id].append(float(row["reward"]))
-            normalized = normalized_grade(row)
-            normalized_tasks[code][row_id].append(normalized.reward)
-            if normalized.recovery_method:
-                recoveries[code][normalized.recovery_method] += 1
+            observed[code][row_id] += 1
             statuses[code][row["grading_status"]] += 1
             review[code][row_id] = row["judge_pass_stage"]
             pending[code][row_id] = row["human_evaluation_pending"]
-    if not tasks:
+            is_masked = bool(row.get("mask_sample", False))
+            verifier_failed = row["grading_status"] in {"verifier_error", "timeout"}
+            masked[code] += is_masked
+            failures[code] += verifier_failed
+            if is_masked or verifier_failed:
+                excluded[code] += 1
+                continue
+            normalized = normalized_grade(row)
+            if normalized.failure_reason:
+                normalization_failures[code][normalized.failure_reason] += 1
+                failures[code] += 1
+                excluded[code] += 1
+                continue
+            tasks[code][row_id].append(float(row["reward"]))
+            normalized_tasks[code][row_id].append(normalized.reward)
+            if normalized.recovery_method:
+                recoveries[code][normalized.recovery_method] += 1
+    if not observed:
         raise ValueError("No verified rollouts found")
     rates = {code: {row_id: mean(values) for row_id, values in problems.items()} for code, problems in tasks.items()}
     normalized_rates = {
@@ -54,8 +72,9 @@ def summarize(path: Path) -> dict:
         for code, problems in normalized_tasks.items()
     }
     result = {}
-    for code, per_problem in sorted(rates.items()):
-        counts = [len(values) for values in tasks[code].values()]
+    for code, observed_problems in sorted(observed.items()):
+        per_problem = rates.get(code, {})
+        counts = list(observed_problems.values())
         passed_review = [
             rate
             for row_id, rate in per_problem.items()
@@ -63,15 +82,23 @@ def summarize(path: Path) -> dict:
         ]
         paired = set(per_problem) & rates.get("en", {}).keys()
         result[code] = {
-            "problems": len(per_problem),
+            "problems": len(observed_problems),
             "attempts": sum(counts),
+            "scored_problems": len(per_problem),
+            "scored_attempts": sum(len(values) for values in tasks[code].values()),
+            "excluded_attempts": excluded[code],
+            "masked_attempts": masked[code],
+            "verifier_failure_attempts": failures[code],
+            "normalization_failure_attempts": sum(normalization_failures[code].values()),
+            "normalization_failures": dict(normalization_failures[code]),
             "min_attempts_per_problem": min(counts),
             "max_attempts_per_problem": max(counts),
-            "pass_at_1": mean(per_problem.values()),
-            "normalized_pass_at_1": mean(normalized_rates[code].values()),
+            "pass_at_1": mean(per_problem.values()) if per_problem else None,
+            "normalized_pass_at_1": mean(normalized_rates[code].values()) if per_problem else None,
             "normalized_recovered_attempts": sum(recoveries[code].values()),
             "normalization_methods": dict(recoveries[code]),
             "complete_12_problem_coverage": len(per_problem) == 12,
+            "observed_12_problem_coverage": len(observed_problems) == 12,
             "translation_review_passed_problems": len(passed_review),
             "pass_at_1_translation_review_passed": mean(passed_review) if passed_review else None,
             "human_review_pending_problems": sum(pending[code].values()),

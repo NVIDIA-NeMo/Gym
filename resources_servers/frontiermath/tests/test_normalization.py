@@ -1,9 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import subprocess
+from dataclasses import asdict
+from unittest.mock import patch
+
 import pytest
 
 from benchmarks.indic.frontier_math.normalization import normalized_grade, recovery_candidates
+from resources_servers.frontiermath.grading import grade_answer
 
 
 def _failed_row(*, status: str, extracted: str | None, text: str = "") -> dict:
@@ -58,3 +63,55 @@ def test_symbolic_recovery_uses_exact_verifier(extracted: str, reward: float) ->
     row = _failed_row(status="invalid_expression", extracted=extracted)
     row.update(answer_type="expression", expected_answer=r"\frac{1}{2}")
     assert normalized_grade(row).reward == reward
+
+
+@pytest.mark.parametrize(
+    ("answer", "reward"),
+    [
+        ("n=214", 1.0),
+        ("x = 214", 1.0),
+        ("n=215", 0.0),
+        ("2n=214", 0.0),
+        ("n!=214", 0.0),
+        ("n<=214", 0.0),
+        ("n>=214", 0.0),
+        ("n+1=214", 0.0),
+        ("n^2=214", 0.0),
+        ("n=107=214", 0.0),
+        (r"n\ne=214", 0.0),
+        (r"\frac{n}{2}=214", 0.0),
+    ],
+)
+def test_assignment_recovery_from_real_strict_grades(answer: str, reward: float) -> None:
+    text = rf"\boxed{{{answer}}}"
+    strict = grade_answer(expected_answer="214", answer_type="integer", generated_answer=text)
+    assert strict.reward == 0.0
+    row = _failed_row(status=strict.grading_status, extracted=strict.extracted_answer, text=text)
+    row.update(asdict(strict), expected_answer="214")
+    assert normalized_grade(row).reward == reward
+
+
+def test_assignment_recovery_preserves_exact_factorials() -> None:
+    text = r"\boxed{n=5!}"
+    strict = grade_answer(expected_answer="120", answer_type="integer", generated_answer=text)
+    assert strict.reward == 0.0
+    row = _failed_row(status=strict.grading_status, extracted=strict.extracted_answer, text=text)
+    row.update(asdict(strict), expected_answer="120")
+    assert normalized_grade(row).reward == 1.0
+
+
+@pytest.mark.parametrize("failure", ["spawn", "timeout", "crash", "invalid_json", "invalid_grade"])
+def test_normalization_preserves_verifier_failures(failure: str) -> None:
+    row = _failed_row(status="invalid_expression", extracted=r"x=\frac{1}{2}")
+    row.update(answer_type="expression", expected_answer=r"\frac{1}{2}")
+    stdout = "not json" if failure == "invalid_json" else "{}"
+    process = subprocess.CompletedProcess([], 1 if failure == "crash" else 0, stdout=stdout)
+    error = OSError("Unavailable") if failure == "spawn" else subprocess.TimeoutExpired([], 5)
+    with patch(
+        "benchmarks.indic.frontier_math.normalization.subprocess.run",
+        side_effect=error if failure in {"spawn", "timeout"} else None,
+        return_value=process,
+    ):
+        result = normalized_grade(row)
+    assert result.failure_reason
+    assert result.recovered_answer is None

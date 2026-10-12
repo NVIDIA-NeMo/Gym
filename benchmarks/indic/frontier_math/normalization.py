@@ -22,6 +22,11 @@ class NormalizedGrade:
     reward: float
     recovered_answer: str | None = None
     recovery_method: str | None = None
+    failure_reason: str | None = None
+
+
+class NormalizationVerifierError(RuntimeError):
+    """An auxiliary verification attempt failed without producing a valid grade."""
 
 
 def _response_text(row: dict) -> str:
@@ -55,17 +60,11 @@ def _last_complete_box(text: str) -> str | None:
 
 
 def _top_level_rhs(text: str) -> str | None:
-    """Return the final right-hand side when an answer is written as an equality."""
-    depth = 0
-    last_equals = None
-    for index, character in enumerate(text):
-        depth += (character == "{") - (character == "}")
-        if character == "=" and depth == 0:
-            last_equals = index
-    if last_equals is None:
+    """Recover only a single-letter answer assignment, never solve an equation."""
+    assignment = re.fullmatch(r"\s*[A-Za-z]\s*=\s*([^=<>]+)", text)
+    if assignment is None:
         return None
-    answer = text[last_equals + 1 :].strip()
-    return answer or None
+    return assignment[1].strip() or None
 
 
 def _normalize_latex_format(text: str) -> str:
@@ -122,9 +121,18 @@ def _grade_candidate(row: dict, candidate: str) -> bool:
             timeout=5,
             check=False,
         )
-        result = json.loads(process.stdout) if process.returncode == 0 else {}
+        if process.returncode:
+            raise NormalizationVerifierError(f"Normalization verifier exited with code {process.returncode}")
+        result = json.loads(process.stdout)
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
-        return False
+        raise NormalizationVerifierError("Normalization verifier could not run or returned invalid output") from None
+    if (
+        not isinstance(result, dict)
+        or result.get("reward") not in (0.0, 1.0)
+        or result.get("grading_status")
+        not in {"correct", "incorrect", "missing_answer", "invalid_expression", "answer_too_long"}
+    ):
+        raise NormalizationVerifierError("Normalization verifier returned an invalid grade")
     return result.get("reward") == 1.0
 
 
@@ -133,7 +141,10 @@ def normalized_grade(row: dict) -> NormalizedGrade:
     strict_reward = float(row["reward"])
     if strict_reward == 1.0 or row["grading_status"] not in RECOVERABLE_STATUSES:
         return NormalizedGrade(strict_reward)
-    for method, candidate in recovery_candidates(row):
-        if _grade_candidate(row, candidate):
-            return NormalizedGrade(1.0, candidate, method)
+    try:
+        for method, candidate in recovery_candidates(row):
+            if _grade_candidate(row, candidate):
+                return NormalizedGrade(1.0, candidate, method)
+    except NormalizationVerifierError as exc:
+        return NormalizedGrade(strict_reward, failure_reason=str(exc))
     return NormalizedGrade(0.0)

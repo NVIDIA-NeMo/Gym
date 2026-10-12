@@ -199,3 +199,88 @@ def test_summary_weights_problems_and_reports_coverage(tmp_path: Path) -> None:
     path.write_text("{}\n")
     with pytest.raises(ValueError, match="missing"):
         summarize(path)
+
+
+def _summary_row(problem: str, **updates) -> dict:
+    return {
+        "row_id": problem,
+        "language_code": "hi",
+        "reward": 0.0,
+        "grading_status": "incorrect",
+        "judge_pass_stage": "first_judge_pass",
+        "human_evaluation_pending": False,
+        **updates,
+    }
+
+
+@pytest.mark.parametrize("failure_status", ["verifier_error", "timeout"])
+def test_summary_excludes_failed_and_masked_attempts(tmp_path: Path, failure_status: str) -> None:
+    rows = [
+        _summary_row("a", reward=1.0, grading_status="correct"),
+        _summary_row("a", reward=1.0, grading_status="correct"),
+        _summary_row("a", grading_status=failure_status),
+        _summary_row(
+            "b",
+            grading_status="invalid_expression",
+            extracted_answer="n=214",
+            answer_type="integer",
+            expected_answer="214",
+        ),
+        _summary_row("b", reward=1.0, grading_status="correct", mask_sample=True),
+        _summary_row("c", grading_status=failure_status, mask_sample=True),
+        _summary_row("c", language_code="en", reward=1.0, grading_status="correct"),
+    ]
+    path = tmp_path / "rollouts.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in rows))
+    report = summarize(path)["languages"]["hi"]
+    assert report["pass_at_1"] == 0.5
+    assert report["normalized_pass_at_1"] == 1.0
+    assert report["normalized_recovered_attempts"] == 1
+    assert report["problems"] == 3 and report["attempts"] == 6
+    assert report["scored_problems"] == 2 and report["scored_attempts"] == 3
+    assert report["excluded_attempts"] == 3
+    assert report["masked_attempts"] == 2
+    assert report["verifier_failure_attempts"] == 2
+    assert report["grading_statuses"][failure_status] == 2
+    assert report["pass_at_1_translation_review_passed"] == 0.5
+    assert report["paired_english_problems"] == 0
+    assert report["paired_delta_vs_english"] is None
+
+
+def test_summary_retains_language_with_no_successful_grades(tmp_path: Path) -> None:
+    rows = [_summary_row(str(i), grading_status="verifier_error", mask_sample=True) for i in range(12)]
+    path = tmp_path / "rollouts.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in rows))
+    report = summarize(path)["languages"]["hi"]
+    assert report["pass_at_1"] is None and report["normalized_pass_at_1"] is None
+    assert report["problems"] == 12 and report["attempts"] == 12
+    assert report["scored_problems"] == 0 and report["scored_attempts"] == 0
+    assert report["excluded_attempts"] == 12 and report["verifier_failure_attempts"] == 12
+    assert report["observed_12_problem_coverage"]
+    assert not report["complete_12_problem_coverage"]
+    assert report["grading_statuses"] == {"verifier_error": 12}
+
+
+def test_summary_excludes_normalization_worker_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_to_start(*args, **kwargs):
+        raise OSError("Unavailable")
+
+    monkeypatch.setattr("benchmarks.indic.frontier_math.normalization.subprocess.run", fail_to_start)
+    rows = [
+        _summary_row("a", reward=1.0, grading_status="correct"),
+        _summary_row(
+            "b",
+            grading_status="invalid_expression",
+            extracted_answer=r"x=\frac{1}{2}",
+            answer_type="expression",
+            expected_answer=r"\frac{1}{2}",
+        ),
+    ]
+    path = tmp_path / "rollouts.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in rows))
+    report = summarize(path)["languages"]["hi"]
+    assert report["pass_at_1"] == report["normalized_pass_at_1"] == 1.0
+    assert report["scored_attempts"] == report["scored_problems"] == 1
+    assert report["excluded_attempts"] == report["normalization_failure_attempts"] == 1
+    assert report["verifier_failure_attempts"] == 1
+    assert sum(report["normalization_failures"].values()) == 1
