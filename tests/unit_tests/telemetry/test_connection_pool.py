@@ -152,6 +152,7 @@ async def test_client_span_is_kept_when_queue_metrics_are_enabled(collected_metr
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     monkeypatch.setattr(trace, "get_tracer", provider.get_tracer)
     monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _group: True)
+    monkeypatch.setattr(server_utils, "is_trace_exporter_active", lambda: True)
 
     async def immediate(_request):
         return web.json_response({"ok": True})

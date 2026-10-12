@@ -167,7 +167,7 @@ Host usage is `total - available`, matching the memory the operating system cann
 
 Descendants remain attributed while they stay in the server's Linux process tree. Detached or reparented processes and remote Ray actors are not included.
 
-Compare these series with `http.server.active_requests` while increasing workload concurrency. Separate server processes export their HTTP metrics independently, so sum active requests by Gym server name when a server uses several Uvicorn workers.
+Compare these series with `http.server.active_requests`, which requires traces, while increasing workload concurrency. Separate server processes export their HTTP metrics independently, so sum active requests by Gym server name when a server uses several Uvicorn workers.
 
 ### What `gym.verify.success_rate` Measures
 
@@ -192,12 +192,21 @@ so it is the only writer. It sets the count after startup and zero on shutdown.
 ## HTTP Metrics
 
 FastAPI auto-instrumentation emits the standard HTTP server metrics on every NeMo Gym
-server:
+server while traces are exported. The pinned instrumentation package uses the older
+OpenTelemetry HTTP semantic conventions:
 
-| Metric | Dimensions |
-| --- | --- |
-| `http.server.active_requests` | `http.server_name`, `http.method` |
-| `http.server.request.duration` | `http.route`, `http.request.method`, `http.response.status_code` |
+| Metric | Unit | Dimensions |
+| --- | --- | --- |
+| `http.server.active_requests` | requests | `http.server_name`, `http.method` |
+| `http.server.duration` | ms | `http.target`, `http.method`, `http.status_code` |
+| `http.server.request.size` | bytes | `http.target`, `http.method`, `http.status_code` |
+| `http.server.response.size` | bytes | `http.target`, `http.method`, `http.status_code` |
+
+`http.target` carries the route template, such as `/verify`, not the raw path.
+
+With `traces_enabled: false`, NeMo Gym does not install the instrumentor, because it costs
+every request tens of microseconds even when no span is exported. A metrics-only run
+therefore has no `http.server.*` metrics. Turn traces on to get them.
 
 Use these for request latency. They are dimensioned, so you can compare `/verify` against
 `/v1/responses`, or isolate 500s, which is what latency questions usually require.
@@ -232,7 +241,7 @@ it.
 At the pinned `nemo-lens` version, that instrument records without attributes. Every
 endpoint of every server type would land in one undimensioned histogram: a verification,
 an inference call, and a liveness probe sharing one set of buckets. The result answers no
-question anyone has. The dimensioned `http.server.request.duration` above supersedes it.
+question anyone has. The dimensioned `http.server.duration` above supersedes it.
 
 ## Enabling and Disabling
 

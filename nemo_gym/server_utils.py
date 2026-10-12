@@ -97,6 +97,7 @@ from nemo_gym.telemetry.connection_pool import (
     set_server_name,
 )
 from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
+from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
 
@@ -528,7 +529,9 @@ async def request(
 
     # Gate first: a disabled site costs one frozenset lookup and nothing else. Gym runs at
     # 16k+ concurrency, so this is a hot path (kb/knowledge/conventions/hot-path-overhead.md).
-    send = _traced_request if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT) else _request_with_retries
+    # The span and its `traceparent` are the only outputs, so they are skipped while traces are off.
+    traced = is_span_group_enabled(GymSpanGroup.HTTP_CLIENT) and is_trace_exporter_active()
+    send = _traced_request if traced else _request_with_retries
     counts = request_counts()
     if counts is None:
         return await send(
@@ -1412,11 +1415,14 @@ class SimpleServer(BaseServer):
         )
 
     def instrument_app_for_telemetry(self, app: FastAPI) -> None:
-        """Apply OTel FastAPI auto-instrumentation to *app*, if telemetry is exporting.
+        """Apply OTel FastAPI auto-instrumentation to *app*, if telemetry is exporting traces.
 
         Gives every server the inbound half of context propagation plus dimensioned
         `http.server.*` metrics, which is why Gym does not use nemo-lens's undimensioned
         `gym.server.request_duration_ms` (see `nemo_gym/telemetry/metrics.py`).
+
+        The instrumentor costs tens of microseconds per request even when no span is exported, so a
+        metrics-only run skips it and does without the `http.server.*` metrics.
 
         A server whose instrumentation could not be applied keeps serving; it just does not
         extract inbound trace context.
@@ -1425,7 +1431,7 @@ class SimpleServer(BaseServer):
         from nemo_gym.telemetry.setup import get_telemetry
 
         telemetry = get_telemetry()
-        if telemetry is None or not telemetry.is_exporting:
+        if telemetry is None or not telemetry.is_exporting or not is_trace_exporter_active():
             return
         # Gated on the span group like every other site, so `server` actually controls
         # something. Checked here rather than per request because the instrumentor is
