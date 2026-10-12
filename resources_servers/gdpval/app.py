@@ -494,9 +494,7 @@ class GDPValVerifyRequest(BaseVerifyRequest):
     # Without a session or ``deliverables_dir``: score the deliverable an earlier rollout of this task repeat
     # persisted, or answer 404 when there is none.
     reuse_cached_deliverable: bool = False
-    # Preserve multistage identity through /verify so Stirrup's namespace-keyed
-    # cache and the incrementally tagged output remain auditable.
-    verify_cache_namespace: Optional[str] = None
+    # Preserve multistage identity through /verify so the incrementally tagged output remains auditable.
     stage_index: Optional[int] = None
     expected_final_stage_index: Optional[int] = None
     expected_stage_row_count: Optional[int] = None
