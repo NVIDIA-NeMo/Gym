@@ -76,6 +76,8 @@ jobs:
           {
             source scripts/ci/setup_dev.sh
             python -m scripts.harness_conformance.ci install --harness "$HARNESS"
+            # Agent session setup needs the installer in later steps too.
+            dirname "$(command -v uv)" >> "$GITHUB_PATH"
           } 2>&1 | tee "$RESULTS/setup.log"
           echo "$NPM_CONFIG_PREFIX/bin" >> "$GITHUB_PATH"
       - name: Validate probes, checker, and adapter
