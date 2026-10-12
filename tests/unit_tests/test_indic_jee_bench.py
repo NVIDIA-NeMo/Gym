@@ -267,6 +267,46 @@ def test_native_config_and_manifest_agree():
     assert not config.get("responses_create_params")
 
 
+def test_prepared_and_example_rows_match_task_schema(source):
+    from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+
+    configs, _ = source
+    server_dir = prep.BENCHMARK_DIR.parents[2] / "resources_servers/jeebench"
+    validator = TaskDataValidator(
+        server_name="jeebench", adapter=load_task_data_schema(server_dir), dataset_fpath="fixture"
+    )
+    rows = prep.build_rows(configs["hi"][:1], language="hi", revision="fixture")
+    rows += [json.loads(line) for line in (server_dir / "data/example.jsonl").read_text().splitlines()]
+    for index, row in enumerate(rows):
+        validator.validate_row(index, row)
+    assert validator.report.clean, validator.report.summary()
+    assert validator.report.rows == 6
+
+
+@pytest.mark.parametrize("failure", ["missing_gold", "wrong_type", "misplaced_gold"])
+def test_task_schema_rejects_missing_malformed_or_misplaced_grading_fields(source, failure):
+    from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+
+    configs, _ = source
+    row = prep.build_rows(configs["hi"][:1], language="hi", revision="fixture")[0]
+    if failure == "wrong_type":
+        row["verifier_metadata"]["question_type"] = "unsupported"
+    else:
+        gold = row["verifier_metadata"].pop("gold")
+        if failure == "misplaced_gold":
+            row["gold"] = gold
+    server_dir = prep.BENCHMARK_DIR.parents[2] / "resources_servers/jeebench"
+    validator = TaskDataValidator(
+        server_name="jeebench", adapter=load_task_data_schema(server_dir), dataset_fpath="fixture"
+    )
+    validator.validate_row(0, row)
+    assert not validator.report.clean
+    if failure == "misplaced_gold":
+        assert validator.report.misplaced_keys == {"gold": 1}
+    else:
+        assert validator.report.error_rows == 1
+
+
 @pytest.mark.parametrize(
     "flags,expected",
     [([], (0.0, 2048)), (["--temperature", "1", "--top-p", "0.95", "--max-output-tokens", "50000"], (1.0, 50000))],

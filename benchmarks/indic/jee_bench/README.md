@@ -140,6 +140,6 @@ truncation or extraction failures. This bounded automatic score remains
 provisional and is not a full benchmark result.
 
 The focused preparation, CLI, verifier, rescore-audit, and vLLM request suites
-passed 195 tests. Preparation produced 7,208 translated rows, with missing
+passed 199 tests. Preparation produced 7,208 translated rows, with missing
 translations and source hashes recorded in the generated manifest. The PR
 description records exact commands, live rollout hashes, and broader CI status.

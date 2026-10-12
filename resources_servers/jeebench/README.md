@@ -12,6 +12,10 @@ Requests carry `verifier_metadata` with `task_id`, `language`, `subject`,
 `question_type` (`MCQ`, `MCQ(multiple)`, `Integer`, or `Numeric`), and `gold`.
 The optional `description` and `index` preserve original question identity.
 
+The dependency-light [`task_data.py`](task_data.py) schema describes these fields
+for Gym's dataset validation, including their required `verifier_metadata`
+placement. It also declares prepared prompt fields and translation provenance.
+
 Responses retain the raw generation and metadata, reward, extracted answer,
 extraction method/failure, provisional status, and truncation status. Missing,
 malformed, refusal-only, and reasoning-only responses receive zero. Infrastructure
