@@ -234,6 +234,26 @@ export NCCL_NVLS_ENABLE=1
 export ENABLE_MOONCAKE=$ENABLE_MOONCAKE
 source "$VLLM_CONFIG"
 
+# Custom images contain patched AOT kernels and their build-time smoke check.
+# Do this once on every node before any prefill/decode/headless/TP1 workers fork.
+flashinfer_manifest=/opt/super-vl-evals/flashinfer-build.env
+if [[ -f "\$flashinfer_manifest" ]]; then
+    if ! grep -qx 'FLASHINFER_REPLAY_VERIFIED=1' "\$flashinfer_manifest"; then
+        echo "ERROR: Rebuild this image with the updated custom_flashinfer_version.sh (unverified ReplaySSM kernels)." >&2
+        exit 1
+    fi
+    # Retain the caller's cache root, but never reuse a different image build's
+    # kernels under the unchanged public FlashInfer version (e.g. 0.7.0.post1).
+    flashinfer_build_id=\$(sha256sum "\$flashinfer_manifest")
+    flashinfer_build_id=\${flashinfer_build_id%% *}
+    export FLASHINFER_WORKSPACE_BASE="\${FLASHINFER_WORKSPACE_BASE:-/tmp}/flashinfer-builds/\$flashinfer_build_id"
+    mkdir -p "\$FLASHINFER_WORKSPACE_BASE"
+    unset FLASHINFER_DISABLE_JIT
+    echo "FlashInfer build=\$flashinfer_build_id workspace=\$FLASHINFER_WORKSPACE_BASE on \$(hostname)"
+    FLASHINFER_DISABLE_JIT=1 python3 /opt/super-vl-evals/verify-flashinfer.py \\
+        --verify /opt/super-vl-evals/flashinfer-warmup.env
+fi
+
 # Increase the number of file descriptors to 65k
 if [[ \$(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt \$(ulimit -Hn) ]]; then
   ulimit -Sn 65535

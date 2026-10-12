@@ -48,6 +48,8 @@ if [[ "${1:-}" == __inside_build ]]; then
     mkdir -p "${BUILD_ROOT}"
     BUILD_DIR=$(mktemp -d "${BUILD_ROOT}/flashinfer-build.XXXXXX")
     trap 'rm -rf "${BUILD_DIR}"' EXIT
+    # Isolate provider builds as well as warmup from the base image's JIT cache.
+    export FLASHINFER_WORKSPACE_BASE="${BUILD_DIR}/build-cache"
     git init "${BUILD_DIR}/source"
     cd "${BUILD_DIR}/source"
     git remote add origin "${FLASHINFER_REPO}"
@@ -160,7 +162,7 @@ PY
     # Keep build hooks from silently replacing runtime dependencies outside uv's
     # constrained resolution above (supported by newer FlashInfer branches).
     export FLASHINFER_BUILD_NO_PIP=1
-    uv pip install --system --no-deps --no-build-isolation .
+    uv pip install --no-cache --system --no-deps --no-build-isolation .
     export FLASHINFER_JIT_CACHE_PROVIDER_ARCH="${FLASHINFER_CUDA_ARCH_LIST}"
     export FLASHINFER_JIT_CACHE_PROVIDER_ARCHS="${FLASHINFER_CUDA_ARCH_LIST}"
     export MAX_JOBS="${MAX_JOBS:-4}"
@@ -175,10 +177,10 @@ PY
             --index-url "https://flashinfer.ai/whl/${FLASHINFER_CACHE_VERSION##*+}"
     else
         # Cubins are downloaded/packaged; the provider compiles the broad AOT set.
-        uv pip install --system --no-deps --no-build-isolation ./flashinfer-cubin
+        uv pip install --no-cache --system --no-deps --no-build-isolation ./flashinfer-cubin
         echo ">>> Build FlashInfer JIT-cache provider for ${FLASHINFER_JIT_CACHE_PROVIDER_ARCH}"
-        uv pip install --system --no-deps --no-build-isolation --verbose ./flashinfer-jit-cache-provider
-        uv pip install --system --no-deps --no-build-isolation ./flashinfer-jit-cache
+        uv pip install --no-cache --system --no-deps --no-build-isolation --verbose ./flashinfer-jit-cache-provider
+        uv pip install --no-cache --system --no-deps --no-build-isolation ./flashinfer-jit-cache
     fi
 
     cd /
@@ -281,6 +283,7 @@ from pathlib import Path
 
 import torch
 
+from flashinfer._build_meta import __git_commit__
 from flashinfer.artifacts import ArtifactPath, CheckSumHash
 from flashinfer.jit import env as jit_env
 from flashinfer.jit.attention.modules import gen_trtllm_gen_fmha_module
@@ -289,7 +292,7 @@ from flashinfer.jit.fused_moe import gen_trtllm_gen_fused_moe_sm100_module
 from flashinfer.jit.mamba.checkpointing_ssu import gen_checkpointing_ssu_module
 from flashinfer.jit.mamba.replayssm_materialize import gen_replayssm_materialize_module
 
-modules = (
+modules = [
     ("FMHA", gen_trtllm_gen_fmha_module, ArtifactPath.TRTLLM_GEN_FMHA, CheckSumHash.TRTLLM_GEN_FMHA),
     (
         "FUSED_MOE_SM100",
@@ -297,49 +300,75 @@ modules = (
         ArtifactPath.TRTLLM_GEN_BMM,
         CheckSumHash.TRTLLM_GEN_BMM,
     ),
-    # Exact specializations from super_3.5_GA-BF16-p2d2-rssm-rustfrontend-mcfp16-bxyu.log.
-    (
-        "CHECKPOINTING_SSU",
-        partial(
-            gen_checkpointing_ssu_module,
-            state_dtype=torch.float16,
-            input_dtype=torch.bfloat16,
-            dt_dtype=torch.bfloat16,
-            weight_dtype=torch.bfloat16,
-            matrixA_dtype=torch.float32,
-            stateIndex_dtype=torch.int32,
-            state_scale_dtype=None,
-            dim=64,
-            dstate=128,
-            npredicted=6,
-            max_window=16,
-            heads_per_group=16,
-            num_groups=2,
-            philox_rounds=5,
-            enable_pdl=False,
-        ),
-        None,
-        None,
-    ),
-    (
-        "REPLAYSSM_MATERIALIZE",
-        partial(
-            gen_replayssm_materialize_module,
-            state_dtype=torch.float16,
-            input_dtype=torch.bfloat16,
-            matrixA_dtype=torch.float32,
-            dim=64,
-            dstate=128,
-            heads_per_group=16,
-            max_window=16,
-            philox_rounds=5,
-        ),
-        None,
-        None,
-    ),
-)
+]
+# TP4 Nemotron: both PD prefill (one token) and speculative decode (six
+# tokens), with RN and SR. Other shapes JIT in a build-specific workspace.
+for rounds in (0, 5):
+    for tokens in (1, 6):
+        modules.append(
+            (
+                f"CHECKPOINTING_SSU_NP{tokens}_PR{rounds}",
+                partial(
+                    gen_checkpointing_ssu_module,
+                    state_dtype=torch.float16,
+                    input_dtype=torch.bfloat16,
+                    dt_dtype=torch.bfloat16,
+                    weight_dtype=torch.bfloat16,
+                    matrixA_dtype=torch.float32,
+                    stateIndex_dtype=torch.int32,
+                    state_scale_dtype=None,
+                    dim=64,
+                    dstate=128,
+                    npredicted=tokens,
+                    max_window=16,
+                    heads_per_group=16,
+                    num_groups=2,
+                    philox_rounds=rounds,
+                    enable_pdl=False,
+                ),
+                None,
+                None,
+            )
+        )
+    modules.append(
+        (
+            f"REPLAYSSM_MATERIALIZE_PR{rounds}",
+            partial(
+                gen_replayssm_materialize_module,
+                state_dtype=torch.float16,
+                input_dtype=torch.bfloat16,
+                matrixA_dtype=torch.float32,
+                dim=64,
+                dstate=128,
+                heads_per_group=16,
+                max_window=16,
+                philox_rounds=rounds,
+            ),
+            None,
+            None,
+        )
+    )
 verify_only = sys.argv[1] == "--verify"
-records = []
+records = [f"FLASHINFER_SHA={__git_commit__}\n"]
+expected = dict(line.split("=", 1) for line in Path(sys.argv[2]).read_text().splitlines()) if verify_only else {}
+install_mode = expected["FLASHINFER_INSTALL_MODE"] if verify_only else os.environ["FLASHINFER_INSTALL_MODE"]
+records.append(f"FLASHINFER_INSTALL_MODE={install_mode}\n")
+if verify_only:
+    assert __git_commit__ == expected["FLASHINFER_SHA"], "Installed FlashInfer commit changed"
+for index, name in enumerate(
+    (
+        "kernel_checkpointing_ssu.cuh",
+        "kernel_checkpointing_ssu_main.cuh",
+        "kernel_checkpointing_ssu_common.cuh",
+    )
+):
+    header = jit_env.FLASHINFER_INCLUDE_DIR / "flashinfer" / "mamba" / name
+    digest = hashlib.sha256(header.read_bytes()).hexdigest()
+    key = f"REPLAY_HEADER_{index}_SHA256"
+    if verify_only:
+        assert digest == expected[key], f"Installed header changed: {header}"
+    else:
+        records.append(f"{key}={digest}\n")
 for label, generate_spec, artifact, expected_sha in modules:
     if artifact is not None and not verify_only:
         manifest = jit_env.FLASHINFER_CUBIN_DIR / artifact / "checksums.txt"
@@ -350,7 +379,7 @@ for label, generate_spec, artifact, expected_sha in modules:
 
     spec = generate_spec()
     destination = jit_env.FLASHINFER_AOT_DIR / spec.name / f"{spec.name}.so"
-    reuse_binary = os.environ["FLASHINFER_INSTALL_MODE"] == "reuse" and artifact is not None
+    reuse_binary = install_mode == "reuse" and artifact is not None
     if reuse_binary:
         # FMHA and fused MoE are unchanged in the checked diff. Load the official
         # provider instead of recompiling or copying its dispatchers.
@@ -367,6 +396,9 @@ for label, generate_spec, artifact, expected_sha in modules:
             continue
     if verify_only:
         assert spec.aot_path == destination and destination.is_file(), f"Missing warmed module: {destination}"
+        assert hashlib.sha256(destination.read_bytes()).hexdigest() == expected[f"{label}_DISPATCHER_SHA256"], (
+            f"Installed binary changed: {destination}"
+        )
         spec.build_and_load()
         print(f"Loaded warmed module with JIT disabled: {destination}")
         continue
@@ -387,6 +419,60 @@ for label, generate_spec, artifact, expected_sha in modules:
     print(f"Saved warmed module: {destination}")
 if not verify_only:
     Path(sys.argv[1]).write_text("".join(records))
+else:
+    # Loading a .so is insufficient: old kernels load successfully but round
+    # replay through FP16 before the BF16 readout. Exercise a checkpoint.
+    from flashinfer.mamba.checkpointing_ssu import (
+        allocate_checkpointing_ssu_scratch,
+        checkpointing_ssu,
+    )
+
+    for tokens in (1, 6):
+        for rounds in (0, 5):
+            for algorithm in ("monolith", "two-kernel"):
+                dtype, device = torch.bfloat16, "cuda"
+                heads, groups, dim, dstate, window = 32, 2, 64, 128, 16
+                state = torch.ones(1, heads, dim, dstate, dtype=torch.float16, device=device)
+                x_cache = torch.zeros(1, heads, window + tokens, dim, dtype=dtype, device=device)
+                b_cache = torch.zeros(1, groups, window + tokens, dstate, dtype=dtype, device=device)
+                dt_cache = torch.zeros(1, heads, window + tokens, dtype=torch.float32, device=device)
+                x_cache[:, :, 0] = 1
+                b_cache[:, :, 0] = 1
+                dt_cache[:, :, 0] = 17 / 4096
+                ring_start = torch.zeros(1, dtype=torch.int32, device=device)
+                prev = torch.full((1,), window, dtype=torch.int32, device=device)
+                x = torch.zeros(1, tokens, heads, dim, dtype=dtype, device=device)
+                dt = torch.zeros(1, tokens, heads, 1, dtype=dtype, device=device).expand_as(x)
+                a = torch.zeros(heads, device=device).as_strided((heads, dim, dstate), (1, 0, 0))
+                b = torch.zeros(1, tokens, groups, dstate, dtype=dtype, device=device)
+                c = torch.zeros_like(b)
+                c[..., 0] = 1
+                out = torch.empty_like(x)
+                scratch = {}
+                if algorithm == "two-kernel":
+                    buffers = allocate_checkpointing_ssu_scratch(1, heads, tokens, window, dtype, device)
+                    scratch = dict(zip(("cb_scaled", "cumAdt_vec", "cb_old"), buffers))
+                checkpointing_ssu(
+                    state,
+                    x_cache,
+                    b_cache,
+                    dt_cache,
+                    ring_start,
+                    prev,
+                    x,
+                    dt,
+                    a,
+                    b,
+                    c,
+                    out,
+                    rand_seed=torch.tensor([12345], dtype=torch.int64, device=device) if rounds else None,
+                    philox_rounds=rounds,
+                    algorithm=algorithm,
+                    **scratch,
+                )
+                torch.testing.assert_close(out, torch.full_like(out, 1.0078125), rtol=0, atol=0)
+                print(f"ReplaySSM checkpoint smoke passed: tokens={tokens}, SR={rounds}, {algorithm}")
+    torch.cuda.synchronize()
 PY
 
     echo ">>> Warm up TRTLLM-GEN and ReplaySSM JIT modules"
@@ -397,17 +483,19 @@ PY
     # workspace or permission to JIT compile a replacement.
     rm -rf "${BUILD_DIR}/warmup-cache"
     FLASHINFER_WORKSPACE_BASE="${BUILD_DIR}/warmup-verify-cache" FLASHINFER_DISABLE_JIT=1 \
-        python3 "${BUILD_DIR}/warmup.py" --verify
+        python3 "${BUILD_DIR}/warmup.py" --verify "${BUILD_DIR}/warmup.env"
+    install -m 644 "${BUILD_DIR}/warmup.py" "${BUILD_ROOT}/verify-flashinfer.py"
+    install -m 644 "${BUILD_DIR}/warmup.env" "${BUILD_ROOT}/flashinfer-warmup.env"
 
     # Leave the vLLM build manifest intact when layering onto a custom image.
     {
-        printf 'BASE_IMAGE=%s\nFLASHINFER_REPO=%s\nFLASHINFER_BRANCH=%s\nFLASHINFER_SHA=%s\n' \
-            "${BASE_IMAGE}" "${FLASHINFER_REPO}" "${FLASHINFER_BRANCH}" "${FLASHINFER_HEAD_SHA}"
-        printf 'FLASHINFER_INSTALL_MODE=%s\nFLASHINFER_RELEASE_SHA=%s\n' \
-            "${FLASHINFER_INSTALL_MODE}" "${FLASHINFER_RELEASE_SHA}"
+        printf 'BASE_IMAGE=%s\nFLASHINFER_REPO=%s\nFLASHINFER_BRANCH=%s\n' \
+            "${BASE_IMAGE}" "${FLASHINFER_REPO}" "${FLASHINFER_BRANCH}"
+        printf 'FLASHINFER_RELEASE_SHA=%s\n' "${FLASHINFER_RELEASE_SHA}"
         python3 -c 'import flashinfer; print(f"FLASHINFER_VERSION={flashinfer.__version__}")'
         cat "${BUILD_DIR}/jit-cache.env"
         cat "${BUILD_DIR}/warmup.env"
+        printf 'FLASHINFER_REPLAY_VERIFIED=1\n'
     } > "${BUILD_ROOT}/flashinfer-build.env"
     cat "${BUILD_ROOT}/flashinfer-build.env"
     uv cache clean
