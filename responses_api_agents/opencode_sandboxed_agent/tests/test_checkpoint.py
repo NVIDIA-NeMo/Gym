@@ -23,7 +23,7 @@ from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.opencode_sandboxed_agent.app import (
-    _CONTINUE_PROMPT,
+    _REMOTE_RESUME_HELPER,
     OpenCodeSandboxedAgent,
     OpenCodeSandboxedAgentConfig,
     OpenCodeSandboxedAgentRunRequest,
@@ -114,7 +114,7 @@ class FakeSandbox:
         if "[o]pencode run" in command:
             self.killed.set()
             return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
-        if "opencode run" in command:
+        if "opencode run" in command or f"python3 {_REMOTE_RESUME_HELPER}" in command:
             self.runs += 1
             self.started.set()
             if self.runs > self.finish_runs_after:
@@ -192,7 +192,11 @@ def body_for(rollout_id: str, attempt: int = 0) -> OpenCodeSandboxedAgentRunRequ
 
 
 def launch_commands(sandbox: FakeSandbox) -> list[str]:
-    return [c for c in sandbox.commands if "opencode run" in c and "[o]pencode" not in c]
+    return [
+        c
+        for c in sandbox.commands
+        if ("opencode run" in c or f"python3 {_REMOTE_RESUME_HELPER}" in c) and "[o]pencode" not in c
+    ]
 
 
 def data_home_of(command: str) -> str:
@@ -230,8 +234,9 @@ async def test_a_checkpoint_interrupts_opencode_and_the_resume_continues_the_ses
     assert record.episode["sandbox_handle"] == "sb-1" and record.episode["workdir"] == "/testbed"
     assert record.episode["cookies"]["ng_session"] == "s"
     first, second = launch_commands(sandbox)
-    assert "--continue" not in first and "--continue" in second
-    assert _CONTINUE_PROMPT in second
+    assert "opencode run" in first and f"python3 {_REMOTE_RESUME_HELPER}" in second
+    assert "--continue" not in second and "Your previous session was interrupted" not in second
+    assert any(call.args[1] == _REMOTE_RESUME_HELPER for call in sandbox.upload.await_args_list)
     assert data_home_of(first) == data_home_of(second) == record.episode["data_home"]
     assert 'test -x "$HOME/.opencode/bin/opencode"' in second, "the install is skipped when the binary is present"
     interrupts = [c for c in sandbox.commands if "[o]pencode run" in c]
@@ -273,7 +278,8 @@ async def test_a_replacement_attempt_continues_from_the_opencode_boundary_withou
     result = await asyncio.wait_for(agent.run(make_request("agent-session-2", {}), body_for("r", attempt=1)), 10)
 
     [launch] = launch_commands(sandbox)
-    assert "--continue" in launch and data_home_of(launch) == "/tmp/nemo-gym-opencode-fixed"
+    assert f"python3 {_REMOTE_RESUME_HELPER}" in launch
+    assert data_home_of(launch) == "/tmp/nemo-gym-opencode-fixed"
     assert resources.calls == ["/sandbox_access", "/verify"], "no re-seed: the session is the checkpoint's"
     # The run continued in the fork the resources server named, not in the sandbox the boundary recorded.
     assert agent._start_sandbox.await_args.kwargs == {"sandbox_id": "sb-2", "workdir": "/testbed"}

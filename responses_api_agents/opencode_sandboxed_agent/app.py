@@ -96,6 +96,8 @@ from responses_api_agents.opencode_agent.runtime import (
 
 
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
+_RESUME_HELPER = Path(__file__).with_name("resume_opencode.py")
+_REMOTE_RESUME_HELPER = "/tmp/nemo-gym-opencode-resume.py"
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -468,25 +470,30 @@ class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
 
 # Session keys of legacy /run episodes in the checkpoint participant; everything a restore needs is in the boundary.
 _LEGACY_SESSION_PREFIX = "run:"
-# The prompt a continued session gets: OpenCode's session database on the sandbox root filesystem carries the
-# turns before the interruption, so the continued run only has to pick the task back up.
-_CONTINUE_PROMPT = "Your previous session was interrupted. Continue working on the task from where you left off."
 # How long an interrupted OpenCode gets to exit after SIGINT before it is killed, and after the kill.
 _INTERRUPT_GRACE_S = 45.0
 _KILL_GRACE_S = 30.0
 
 
 def _interrupt_command(signal_name: str) -> str:
-    """Signal every ``opencode run`` process in the sandbox without matching the shell that runs this command.
+    """Signal OpenCode runs and resume helpers, whose cleanup also stops their loopback servers.
 
     The ``[o]`` bracket keeps the pattern from matching its own command line (pkill and the /proc fallback
     alike); the fallback is for images without procps.
     """
+    pattern = f"[o]pencode run|[p]ython3 {_REMOTE_RESUME_HELPER}"
+    fallback = f"*[o]pencode\\ run*|*[p]ython3\\ {_REMOTE_RESUME_HELPER}*"
+    if signal_name == "KILL":
+        # SIGKILL cannot run the helper's cleanup: stop its separately grouped server too.
+        pattern += "|[o]pencode serve --hostname 127.0.0.1 --port 0"
+        fallback += "|*[o]pencode\\ serve\\ --hostname\\ 127.0.0.1\\ --port\\ 0*"
     return (
-        f"if command -v pkill >/dev/null 2>&1; then pkill -{signal_name} -f '[o]pencode run'; "
+        f"if command -v pkill >/dev/null 2>&1; then pkill -{signal_name} -f "
+        f"'{pattern}'; "
         'else for d in /proc/[0-9]*; do p=${d#/proc/}; [ "$p" = "$$" ] && continue; '
         "c=$(tr '\\0' ' ' < \"$d/cmdline\" 2>/dev/null); "
-        f'case "$c" in *[o]pencode\\ run*) kill -{signal_name} "$p" 2>/dev/null;; esac; done; fi; true'
+        f'case "$c" in {fallback}) '
+        f'kill -{signal_name} "$p" 2>/dev/null;; esac; done; fi; true'
     )
 
 
@@ -494,7 +501,7 @@ def _interrupt_command(signal_name: str) -> str:
 class _OpenCodeRunContext:
     """What a checkpointed ``/run`` tells ``responses()`` about the OpenCode launch it is making.
 
-    ``data_home`` pins OpenCode's data directory for the rollout so a later launch with ``--continue`` finds the
+    ``data_home`` pins OpenCode's data directory for the rollout so a later resume finds the
     session; ``continue_session`` relaunches the interrupted session instead of starting one; ``legacy_run`` is the
     checkpoint handle whose park request interrupts the run.
     """
@@ -588,7 +595,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     config: OpenCodeSandboxedAgentConfig
     # A legacy /run takes part in partial-rollout checkpoints: between its steps it records a boundary, and the
     # OpenCode step itself is interrupted at a checkpoint's request (SIGINT to OpenCode in the sandbox) and
-    # relaunched with ``opencode run --continue`` after the resume, or by the replacement attempt after a crash.
+    # relaunched at its saved user turn after the resume, or by the replacement attempt after a crash.
     # The sandbox is the resources server's; its snapshot at commit and the fork at restore are that server's
     # checkpoint hooks, so after a restore the run asks the server which sandbox to continue in.
     checkpoint_sessions_supported: ClassVar[bool] = True
@@ -930,20 +937,22 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         xdg_home_str = ""
         remote_data_home = None
         if run_context is not None:
-            # Pinned per rollout: a relaunch with --continue must find the same session database.
+            # Pinned per rollout: a resume must find the same session database.
             remote_data_home = run_context.data_home
             xdg_home_str = f"XDG_DATA_HOME={remote_data_home}"
         elif collect_observations:
             remote_data_home = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
             xdg_home_str = f"XDG_DATA_HOME={remote_data_home}"
-        continue_str = ""
+        opencode_command = (
+            f'opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)}'
+        )
         if run_context is not None and run_context.continue_session:
-            # The binary survived on the root filesystem; the session is continued, with Gym's prompt.
+            # Re-enter the existing user turn: a new continuation prompt invalidates saved generation cuts.
             install_str = (
                 f'(test -x "$HOME/.opencode/bin/opencode" && echo "OpenCode already installed") || ({install_str})'
             )
-            continue_str = "--continue"
-            query = _CONTINUE_PROMPT
+            await sandbox.upload(_RESUME_HELPER, _REMOTE_RESUME_HELPER)
+            opencode_command = f"python3 {quote(_REMOTE_RESUME_HELPER)}"
 
         # OpenCode's glob/grep tools otherwise download rg inside the sandbox.
         ripgrep_remote_path = None
@@ -972,7 +981,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
         && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
-            opencode run {continue_str} --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
+            {opencode_command} \
         && echo "OpenCode run finished"
         """
 
@@ -1277,7 +1286,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     ) -> OpenCodeSandboxedAgentVerifyResponse:
         # Steps: seed → OpenCode in the sandbox → verify. With checkpointing, a boundary before each step names
         # the next step and what it needs, so a resumed or replacement run continues at that step. The OpenCode
-        # step is interrupted at a checkpoint's request and relaunched with --continue (see _exec_opencode).
+        # step is interrupted at a checkpoint's request and resumes its existing user turn (see _exec_opencode).
         continuation = (legacy_run.continuation if legacy_run is not None else None) or {}
         stage = continuation.get("next", "seed")
         cookies: Any = continuation.get("cookies", dict(request.cookies))

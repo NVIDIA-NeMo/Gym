@@ -47,6 +47,25 @@ checksum before use. Gym uploads it through the sandbox file API and installs it
 alongside OpenCode before execution; no sandbox internet access or root package
 installation is needed. The default is `null`, preserving existing behavior.
 
+## Checkpoint resume
+
+Checkpointed runs keep OpenCode's session database inside the sandbox snapshot.
+On resume, Gym uploads `resume_opencode.py` and re-enters the saved user message
+through OpenCode's API, using its existing ID and no new message parts. This
+preserves the request an unfinished generation prefix belongs to. Adding an
+"interrupted session" prompt changes that request and forces regeneration.
+
+The helper runs an authenticated OpenCode server bound to loopback for the
+duration of the resumed run, and stops it on completion or checkpoint interruption.
+The sandbox needs `python3` (3.8+) and the same OpenCode version used before the
+checkpoint. OpenCode 1.17.11 is covered by an interruption/resume regression with
+a real runtime and a local model stub:
+
+```bash
+OPENCODE_TEST_BINARY=/path/to/opencode OPENCODE_TEST_PYTHON=/path/to/sandbox-python3 uv run pytest \
+    responses_api_agents/opencode_sandboxed_agent/tests/test_resume_opencode.py
+```
+
 ## Offline scientific evaluation with OpenCode or Pi
 
 The dedicated `opencode_sandboxed_agent` and `pi_sandboxed_agent` run their native

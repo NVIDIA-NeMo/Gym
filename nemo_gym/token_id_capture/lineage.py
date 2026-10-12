@@ -57,6 +57,8 @@ from nemo_gym.token_id_capture.fingerprint import (
     FINGERPRINT_VERSION,
     assistant_fingerprint,
     conversation_digest,
+    tool_call_ids,
+    trailing_assistant_turn,
 )
 from nemo_gym.token_id_capture.fingerprint import (
     canonicalize_tool_arguments as canonicalize_tool_arguments,
@@ -259,6 +261,10 @@ class RolloutLineage:
 
     by_fingerprint: dict[str, list[str]] = field(default_factory=dict)
     by_call_id: dict[str, LineageNode] = field(default_factory=dict)
+    # Tool-call id -> model calls whose response carried it. Harnesses may rewrite tool-call *arguments* before
+    # echoing history (Claude Code strips `cd <cwd> &&` from Bash commands and fills schema defaults such as
+    # `replace_all: false`), which changes the assistant fingerprint, but they echo tool-call ids verbatim.
+    by_tool_call_id: dict[str, list[str]] = field(default_factory=dict)
     # Cache the cumulative token count for memory bounds.
     total_tokens: int = 0
 
@@ -284,9 +290,37 @@ class RolloutLineage:
             digests = {(node.digest, node.cum_len) for node in candidates}
             if len(digests) == 1 and candidates[0].digest:
                 candidates = [min(candidates, key=lambda node: node.call_id)]
+        if not candidates:
+            # Fallback: the harness rewrote the model's tool-call arguments, so the content fingerprint
+            # misses, but the tool-call ids of the last model-authored turn still name exactly one served
+            # call. The context digest check below still guards against rewritten or compacted history.
+            fallback = self._candidates_by_tool_call_id(messages)
+            if fallback:
+                candidates = fallback
         if len(candidates) != 1:
             return ParentResolutionStatus.UNRESOLVED, None, "no_match" if not candidates else "ambiguous"
         return ParentResolutionStatus.RESOLVED, candidates[0], ""
+
+    def _candidates_by_tool_call_id(self, messages: list[dict]) -> list["LineageNode"]:
+        ids = tool_call_ids(trailing_assistant_turn(messages))
+        if not ids:
+            return []
+        call_ids: list[str] = []
+        for tool_id in ids:
+            for call_id in self.by_tool_call_id.get(tool_id) or []:
+                if call_id not in call_ids:
+                    call_ids.append(call_id)
+        return [
+            node
+            for call_id in call_ids
+            if (node := self.by_call_id.get(call_id)) is not None and self._continues(node, messages)
+        ]
+
+    def _index_tool_call_ids(self, call_id: str, response_items: list[dict]) -> None:
+        for tool_id in tool_call_ids(response_items):
+            bucket = self.by_tool_call_id.setdefault(tool_id, [])
+            if call_id not in bucket:
+                bucket.append(call_id)
 
     def resolve(self, messages: list[dict]) -> LineageResolution:
         """Return the immutable parent decision for this request.
@@ -359,6 +393,7 @@ class RolloutLineage:
         self.total_tokens += node.cum_len
         self.by_call_id[entry.model_call_id] = node
         self.by_fingerprint.setdefault(entry.continuation_fingerprint, []).append(entry.model_call_id)
+        self._index_tool_call_ids(entry.model_call_id, list(entry.output_items or []))
 
     def record(
         self,
@@ -403,6 +438,7 @@ class RolloutLineage:
         fingerprint = assistant_fingerprint(messages)
         if fingerprint:
             self.by_fingerprint.setdefault(fingerprint, []).append(call_id)
+        self._index_tool_call_ids(call_id, list((messages or [])[node.context_len :]))
 
 
 class LineageIndex:
@@ -981,12 +1017,22 @@ class FileLineageStore(IncrementalLineageStore):
             return None
         with self._locked(rollout_id):
             # Failure rows and fingerprints from incompatible algorithms cannot resolve as parents.
-            records = [
-                record
-                for record in self._read(rollout_id)
-                if record.get("fingerprint") == fingerprint
-                and record.get("fingerprint_version") == FINGERPRINT_VERSION
+            compatible_records = [
+                record for record in self._read(rollout_id) if record.get("fingerprint_version") == FINGERPRINT_VERSION
             ]
+            records = [record for record in compatible_records if record.get("fingerprint") == fingerprint]
+            if not records:
+                # Mirror the index's fallback for token-free custody rows. Persisted IDs let another
+                # worker, or a fresh reader after restore, resolve a harness-rewritten tool call.
+                ids = set(tool_call_ids(trailing_assistant_turn(request_items)))
+                for record in compatible_records:
+                    if not ids.intersection(record.get("response_tool_call_ids") or []):
+                        continue
+                    context_len = int(record["context_len"])
+                    if len(request_items) < context_len:
+                        continue
+                    if conversation_digest(request_items[:context_len]) == record["context_digest"]:
+                        records.append(record)
         if len(records) != 1:
             return None
         record = records[0]
@@ -1017,6 +1063,7 @@ class FileLineageStore(IncrementalLineageStore):
         record = {
             "model_call_id": model_call_id,
             "fingerprint": assistant_fingerprint(request_items + list(commit.response_items)),
+            "response_tool_call_ids": tool_call_ids(list(commit.response_items)),
             "context_len": len(request_items),
             "context_digest": conversation_digest(request_items),
             "digest": commit.record.cumulative_hash,
