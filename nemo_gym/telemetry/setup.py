@@ -90,8 +90,8 @@ TELEMETRY_KEY_NAME = "telemetry"
 #: function that actually connects a ``telemetry:`` YAML block (or any other
 #: ``TelemetryConfig``) to these env vars via ``setdefault`` — a user does not set them by
 #: hand. ``service_name`` is handled separately because it maps to the standard unprefixed
-#: ``OTEL_SERVICE_NAME``, and the Gym-owned flags (``service_name_per_server``,
-#: ``instrument_aiohttp``) are not lens config fields.
+#: ``OTEL_SERVICE_NAME``, and the Gym-owned ``service_name_per_server`` flag is not a lens
+#: config field.
 _ENV_FIELD_MAP = {
     "enabled": f"{_OTEL_PREFIX}_ENABLED",
     "span_groups": f"{_OTEL_PREFIX}_SPAN_GROUPS",
@@ -100,9 +100,8 @@ _ENV_FIELD_MAP = {
     "logs_enabled": f"{_OTEL_PREFIX}_LOGS_ENABLED",
     "exporter": f"{_OTEL_PREFIX}_EXPORTER",
     "run_id": f"{_OTEL_PREFIX}_RUN_ID",
-    # Gym-owned flags, read back by init_telemetry / server_utils rather than by lens.
+    # Gym-owned flag, read back by init_telemetry rather than by lens.
     "service_name_per_server": f"{_OTEL_PREFIX}_SERVICE_NAME_PER_SERVER",
-    "instrument_aiohttp": f"{_OTEL_PREFIX}_INSTRUMENT_AIOHTTP",
 }
 
 #: The ``_ENV_FIELD_MAP`` fields that nemo-lens itself reads, each with a ``NEMO_LENS_<KEY>`` fallback.

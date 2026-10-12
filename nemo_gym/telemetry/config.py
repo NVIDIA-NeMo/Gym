@@ -120,14 +120,6 @@ class TelemetryConfig(BaseModel, extra="allow"):
     ``${oc.env:MY_API_KEY}`` interpolation for the secret portion so the raw credential
     does not live in a committed YAML file."""
 
-    instrument_aiohttp: bool = True
-    """Use nemo-lens's aiohttp auto-instrumentation for outbound calls, which produces a
-    CLIENT span per request in addition to injecting ``traceparent``.
-
-    When false, ``nemo_gym.server_utils.request`` still injects ``traceparent`` manually,
-    so cross-process traces stay joined — you lose the client-side span, not the trace.
-    Turn it off if the per-request patching cost matters at very high concurrency."""
-
     run_id: Optional[str] = None
     """Correlates every process of one ``gym env start`` / ``gym env test`` invocation.
     Generated in the supervisor and inherited by the servers when unset."""
