@@ -98,7 +98,6 @@ from nemo_gym.rollout_collection import (
     _has_observation_gap,
     get_max_rollout_attempts,
     is_terminal_failure,
-    migrate_invalid_judge_main_rows,
     observed_elapsed,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
@@ -116,13 +115,6 @@ from resources_servers.gdpval.multistage_elo import (
 )
 
 
-# GDPVal opts into the shared failure contract, which rollout collection keeps
-# off by default: rows carrying an invalid judge response are retried instead of
-# scored. The single-pass delegate applies it when the config leaves it unset;
-# the multistage bookkeeping below applies the same contract directly and so
-# refuses a config that explicitly turns it off.
-GDPVAL_FAILURE_CONTRACT = {"retry_invalid_judge_responses": True}
-
 # Top-level server-config fields the resume fingerprint ignores (see
 # ``compute_fingerprint``). Connection fields say how a server is reached;
 # operational fields are knobs a resume is expected to change without
@@ -130,27 +122,6 @@ GDPVAL_FAILURE_CONTRACT = {"retry_invalid_judge_responses": True}
 # resume reuses cached work, and ``concurrency`` only bounds parallelism.
 _CONNECTION_SERVER_FIELDS = frozenset({"host", "port", "base_url", "api_key", "default_headers"})
 _OPERATIONAL_SERVER_FIELDS = frozenset({"rerun_incomplete", "concurrency"})
-
-
-def _failure_contract_updates(rollout_collection_config: Any) -> Dict[str, bool]:
-    """The failure-contract keys to apply: every key the config leaves unset."""
-    explicitly_set = getattr(rollout_collection_config, "model_fields_set", None) or set()
-    return {name: value for name, value in GDPVAL_FAILURE_CONTRACT.items() if name not in explicitly_set}
-
-
-def _reject_failure_contract_opt_out(rollout_collection_config: Any) -> None:
-    """Refuse an explicit ``false`` the multistage bookkeeping cannot honour."""
-    explicitly_set = getattr(rollout_collection_config, "model_fields_set", None) or set()
-    opted_out = sorted(
-        name
-        for name in GDPVAL_FAILURE_CONTRACT
-        if name in explicitly_set and getattr(rollout_collection_config, name, None) is False
-    )
-    if opted_out:
-        raise ValueError(
-            f"multistage GDPVal runs always apply the failure contract, but {opted_out} "
-            "is explicitly set to false; remove the override or run without multistage.enabled"
-        )
 
 
 # A rollout runner: given a list of fully-formed rollout rows, run them and
@@ -242,11 +213,7 @@ def _is_retryable_failure(row: Mapping[str, Any]) -> bool:
 
 def _is_success_row(row: Mapping[str, Any]) -> bool:
     """A row is a success iff it carries neither a failure class nor no-persist."""
-    return (
-        row.get(NG_FAILURE_CLASS_KEY) is None
-        and not row.get(NG_NO_PERSIST_KEY)
-        and not row.get("invalid_judge_response")
-    )
+    return row.get(NG_FAILURE_CLASS_KEY) is None and not row.get(NG_NO_PERSIST_KEY)
 
 
 def _stage_key(row: Mapping[str, Any]) -> Tuple[Any, Any]:
@@ -2259,8 +2226,6 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
     """Build a file-backed :class:`StageResume` from the journal + rollout files."""
     output_fpath = Path(output_fpath)
     journal_fpath = Path(journal_fpath)
-    migrate_invalid_judge_main_rows(output_fpath)
-
     # Finish an interrupted cleanup before reading any reusable stage state.
     recovered_restart = _pending_restart_stage(journal_fpath)
     if recovered_restart is not None:
@@ -2399,17 +2364,14 @@ async def run_rollout_collection(
 
     Runs the multi-stage adaptive ELO procedure when ``multistage.enabled=true``;
     otherwise delegates to the standard single-pass collection, so rubric and
-    non-staged comparison runs behave as they would without a driver except that
-    ``GDPVAL_FAILURE_CONTRACT`` fills in any key the config leaves unset.
+    non-staged comparison runs behave as they would without a driver.
     """
     if (global_config_dict.get("multistage") or {}).get("enabled"):
         return await run_e2e_multistage(rollout_collection_config, global_config_dict)
 
     from nemo_gym.rollout_collection import RolloutCollectionHelper
 
-    await RolloutCollectionHelper().run_from_config(
-        rollout_collection_config.model_copy(update=_failure_contract_updates(rollout_collection_config))
-    )
+    await RolloutCollectionHelper().run_from_config(rollout_collection_config)
     return None
 
 
@@ -2430,7 +2392,6 @@ async def run_e2e_multistage(
     from nemo_gym.rollout_collection import RolloutCollectionHelper, _attach_ng_perf
 
     multistage_config = parse_multistage_config(global_config_dict.get("multistage") or {})
-    _reject_failure_contract_opt_out(rollout_collection_config)
     observability_enabled = observability_enabled_from_config(global_config_dict)
 
     helper = RolloutCollectionHelper()

@@ -46,7 +46,6 @@ from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from resources_servers.gdpval.multistage_elo import PartialStagePolicy
 from resources_servers.gdpval.multistage_orchestrator import (
     ACCEPTED_STAGE_ROW_COUNT_KEY,
-    GDPVAL_FAILURE_CONTRACT,
     MultiStageRunConfig,
     StageResume,
     _cached_partial_snapshot_is_valid,
@@ -76,7 +75,6 @@ from resources_servers.gdpval.multistage_orchestrator import (
     row_task_id,
     run_e2e_multistage,
     run_multistage_stages,
-    run_rollout_collection,
     tag_results,
     write_rollouts,
 )
@@ -1438,7 +1436,7 @@ class TestResumeSeam:
             stage_index = rows_in[0]["stage_index"]
             seen_attempts.append((stage_index, rows_in[0].get(ATTEMPT_INDEX_KEY_NAME)))
             if stage_index == 0:
-                return [(rows_in[0], {NG_FAILURE_CLASS_KEY: "judge_invalid"})]
+                return [(rows_in[0], {NG_FAILURE_CLASS_KEY: "judge_failed"})]
             return await run(rows_in)
 
         await run_multistage_stages(
@@ -2964,7 +2962,7 @@ class TestFailureRouting:
                 "stage_index": 0,
                 TASK_INDEX_KEY_NAME: 0,
                 ROLLOUT_INDEX_KEY_NAME: 0,
-                NG_FAILURE_CLASS_KEY: "judge_invalid",
+                NG_FAILURE_CLASS_KEY: "judge_failed",
                 "elapsed_seconds": 10,
                 "reuse_cached_deliverable": True,
             },
@@ -2972,7 +2970,7 @@ class TestFailureRouting:
                 "stage_index": 1,
                 TASK_INDEX_KEY_NAME: 1,
                 ROLLOUT_INDEX_KEY_NAME: 0,
-                NG_FAILURE_CLASS_KEY: "judge_invalid",
+                NG_FAILURE_CLASS_KEY: "judge_failed",
                 "elapsed_seconds": 20,
                 "reuse_cached_deliverable": True,
             },
@@ -3022,7 +3020,7 @@ class TestFailureRouting:
                     "stage_index": 0,
                     TASK_INDEX_KEY_NAME: 0,
                     ROLLOUT_INDEX_KEY_NAME: 0,
-                    NG_FAILURE_CLASS_KEY: "judge_invalid",
+                    NG_FAILURE_CLASS_KEY: "judge_failed",
                 }
             )
             + "\n"
@@ -3083,47 +3081,6 @@ class TestFailureRouting:
         assert load_reuse_cached_keys(out)[1] == {(7, 0)}
         assert resume.reuse_cached_keys[1] == {(7, 0)}
         assert resume.attempts_by_stage[1][(7, 0)] == 1
-
-    def test_legacy_invalid_judge_main_row_migrates_before_resume(self, tmp_path: Path) -> None:
-        out = tmp_path / "rollouts.jsonl"
-        deliverables_dir = tmp_path / "deliverables" / "task-4"
-        deliverables_dir.mkdir(parents=True)
-        (deliverables_dir / "answer.txt").write_text("answer")
-        out.write_text(
-            json.dumps(
-                {
-                    "stage_index": 0,
-                    TASK_INDEX_KEY_NAME: 4,
-                    ROLLOUT_INDEX_KEY_NAME: 0,
-                    "task_id": "t4",
-                    "invalid_judge_response": True,
-                    "reward": 0.0,
-                    "deliverables_dir": str(deliverables_dir),
-                }
-            )
-            + "\n"
-        )
-        journal = journal_path_for(out)
-        from resources_servers.gdpval.multistage_orchestrator import append_journal_record
-
-        append_journal_record(
-            journal,
-            {"stage_index": 0, "status": "planned", "reference_ids": ["a"], "task_ids": ["t4"]},
-            "FP",
-        )
-        append_journal_record(journal, {"stage_index": 0, "status": "complete"}, "FP")
-
-        resume = build_file_resume(out, journal, "FP")
-
-        assert out.read_bytes() == b""
-        assert resume.rows_by_stage == {}
-        assert resume.outcomes == {}
-        assert resume.reuse_cached_keys[0] == {(4, 0)}
-        assert resume.attempts_by_stage[0][(4, 0)] == 1
-        migrated = [json.loads(line) for line in failures_path_for(out).read_text().splitlines()]
-        assert len(migrated) == 1
-        assert migrated[0][NG_FAILURE_CLASS_KEY] == "judge_invalid"
-        assert migrated[0]["reuse_cached_deliverable"] is True
 
     def test_skipped_failure_keeps_stage_complete(self, tmp_path: Path) -> None:
         out = tmp_path / "rollouts.jsonl"
@@ -3751,72 +3708,6 @@ class TestCachedDeliverableReuse:
         row = {AGENT_REF_KEY_NAME: {"name": "gdpval_stirrup_agent"}}
 
         assert resources_server_for_row(row, OmegaConf.create(_ROUTING_CONFIG)) == "gdpval_resources_server"
-
-
-class TestFailureContractOptIn:
-    """Shared collection keeps the failure contract off; GDPVal opts in unless a key is explicitly set."""
-
-    async def test_single_pass_delegate_opts_in_without_mutating_the_callers_config(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        seen: List[Any] = []
-
-        async def fake_run_from_config(self, config):
-            seen.append(config)
-
-        monkeypatch.setattr(rollout_collection_module.RolloutCollectionHelper, "run_from_config", fake_run_from_config)
-        config = rollout_collection_module.RolloutCollectionConfig(
-            input_jsonl_fpath=str(tmp_path / "input.jsonl"), output_jsonl_fpath=str(tmp_path / "rollouts.jsonl")
-        )
-
-        assert await run_rollout_collection(config, {}) is None
-
-        assert [c.retry_invalid_judge_responses for c in seen] == [True]
-        assert config.retry_invalid_judge_responses is False
-
-    async def test_single_pass_delegate_keeps_an_explicit_false(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        seen: List[Any] = []
-
-        async def fake_run_from_config(self, config):
-            seen.append(config)
-
-        monkeypatch.setattr(rollout_collection_module.RolloutCollectionHelper, "run_from_config", fake_run_from_config)
-        config = rollout_collection_module.RolloutCollectionConfig.model_validate(
-            {
-                "input_jsonl_fpath": str(tmp_path / "input.jsonl"),
-                "output_jsonl_fpath": str(tmp_path / "rollouts.jsonl"),
-                "retry_invalid_judge_responses": False,
-            }
-        )
-
-        assert await run_rollout_collection(config, {}) is None
-
-        assert [c.retry_invalid_judge_responses for c in seen] == [False]
-
-    @pytest.mark.parametrize("opted_out", sorted(GDPVAL_FAILURE_CONTRACT))
-    async def test_multistage_refuses_an_explicit_false(self, tmp_path: Path, opted_out: str) -> None:
-        config = rollout_collection_module.RolloutCollectionConfig.model_validate(
-            {
-                "input_jsonl_fpath": str(tmp_path / "input.jsonl"),
-                "output_jsonl_fpath": str(tmp_path / "rollouts.jsonl"),
-                opted_out: False,
-            }
-        )
-        global_config = {"multistage": {"enabled": True, "stages": ["1"]}}
-
-        with pytest.raises(ValueError, match=opted_out):
-            await run_rollout_collection(config, global_config)
-
-        assert not (tmp_path / "rollouts.jsonl").exists()
-
-    def test_benchmark_config_opts_in_where_the_driver_does_not_run(self) -> None:
-        from omegaconf import OmegaConf
-
-        benchmark = OmegaConf.load(Path(__file__).resolve().parents[3] / "benchmarks/gdpval/config.yaml")
-
-        assert {key: benchmark[key] for key in GDPVAL_FAILURE_CONTRACT} == GDPVAL_FAILURE_CONTRACT
 
 
 class TestReferenceMissingCoverage:

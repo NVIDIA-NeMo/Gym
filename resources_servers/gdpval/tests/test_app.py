@@ -34,6 +34,7 @@ from resources_servers.gdpval.app import (
     GDPValVerifyRequest,
     _strict_comparison_trial_failure,
 )
+from resources_servers.gdpval.scoring import SCORING_ERROR_KEY
 
 
 # A request without a seeded session, as reverify and multistage reuse send.
@@ -436,9 +437,11 @@ class TestApp:
         resp = await server.verify(_NO_SESSION, body)
         assert resp.reward == 0.0
         assert resp.verify_mode == "rubric"
-        assert resp.invalid_judge_response is True
-        assert resp.invalid_judge_retryable is False
         assert resp.judge_response == {"scoring_error": "missing_rubric"}
+        dumped = resp.model_dump()
+        assert dumped["_ng_failure_class"] == "missing_rubric"
+        assert dumped["_ng_failure_terminal"] is True
+        assert (dumped["failure_kind"], dumped["mask_sample"]) == ("gdpval:missing_rubric", True)
 
     @pytest.mark.asyncio
     async def test_verify_rubric_with_canned_judge(self) -> None:
@@ -462,8 +465,27 @@ class TestApp:
 
         assert resp.reward == 0.7
         assert resp.verify_mode == "rubric"
-        assert resp.invalid_judge_response is False
+        assert "_ng_failure_class" not in resp.model_dump()
         assert resp.judge_response == canned_result
+
+    @pytest.mark.asyncio
+    async def test_verify_rubric_without_a_usable_judgement_is_a_judge_failure(self) -> None:
+        server = _server(reward_mode="rubric")
+
+        async def fake_score_with_rubric(**_kwargs):
+            return 0.0, {SCORING_ERROR_KEY: "no_valid_scores"}
+
+        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}], deliverable_text="Text.")
+
+        with (
+            patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+        ):
+            dumped = (await server.verify(_NO_SESSION, body)).model_dump()
+
+        assert dumped["_ng_failure_class"] == "judge_failed"
+        assert "_ng_failure_terminal" not in dumped
+        assert (dumped["failure_kind"], dumped["mask_sample"]) == ("judge_failed", True)
 
     @pytest.mark.asyncio
     async def test_verify_rubric_passes_create_overrides_through(self) -> None:
@@ -1103,67 +1125,6 @@ class TestApp:
 
         assert captured_kwargs["include_raw_responses"] is True
         assert resp.judge_response["raw_responses"] == ["FINAL_SCORE[7]\nMAX_POSSIBLE_SCORE[10]"]
-
-    def test_rubric_aggregate_excludes_invalid_judge_rows(self) -> None:
-        """Judge-failure sentinel zeros must not reduce aggregate reward."""
-        import asyncio as _asyncio
-
-        from nemo_gym.config_types import AggregateMetricsRequest
-
-        server = _server(reward_mode="rubric")
-        responses = [
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 0,
-                "reward": 0.8,
-                "invalid_judge_response": False,
-                "response": {},
-            },
-            {
-                "_ng_task_index": 1,
-                "_ng_rollout_index": 0,
-                "reward": 0.0,
-                "invalid_judge_response": True,
-                "response": {},
-            },
-        ]
-
-        result = _asyncio.run(server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses)))
-
-        assert result.agent_metrics["mean/reward"] == 0.8
-        assert result.agent_metrics["rubric/aggregate_rows_total"] == 2
-        assert result.agent_metrics["rubric/aggregate_rows_included"] == 1
-        assert result.agent_metrics["rubric/legacy_invalid_rows_excluded"] == 1
-        assert result.agent_metrics["rubric/aggregate_rows_included_fraction"] == 0.5
-        assert [group["_ng_task_index"] for group in result.group_level_metrics] == [0]
-
-    def test_rubric_aggregate_all_invalid_has_no_reward_headline(self) -> None:
-        """An all-invalid judge run reports coverage instead of mean reward zero."""
-        import asyncio as _asyncio
-
-        from nemo_gym.config_types import AggregateMetricsRequest
-
-        server = _server(reward_mode="rubric")
-        responses = [
-            {
-                "_ng_task_index": task_index,
-                "_ng_rollout_index": 0,
-                "reward": 0.0,
-                "invalid_judge_response": True,
-                "response": {},
-            }
-            for task_index in range(2)
-        ]
-
-        result = _asyncio.run(server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses)))
-
-        assert "mean/reward" not in result.agent_metrics
-        assert "mean/reward" not in result.key_metrics
-        assert result.group_level_metrics == []
-        assert result.key_metrics["rubric/aggregate_rows_total"] == 2
-        assert result.key_metrics["rubric/aggregate_rows_included"] == 0
-        assert result.key_metrics["rubric/legacy_invalid_rows_excluded"] == 2
-        assert result.key_metrics["rubric/aggregate_rows_included_fraction"] == 0.0
 
     def test_aggregate_metrics_comparison_elo(self) -> None:
         from nemo_gym.config_types import AggregateMetricsRequest

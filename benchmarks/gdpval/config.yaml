@@ -36,13 +36,6 @@ config_paths:
 # otherwise behaves exactly like the standard single-pass collection.
 rollout_collection_driver: resources_servers.gdpval.multistage_orchestrator:run_rollout_collection
 
-# GDPVal's failure contract, off by default in shared rollout collection and
-# reverification: on resume, retry rows whose judge response was invalid
-# instead of scoring them as zero. The driver above applies it when this key is
-# unset, and a multistage run refuses an explicit false. This key also applies it
-# where the driver does not run (`gym eval run --no-serve`, `gym eval reverify`).
-retry_invalid_judge_responses: true
-
 # Judge endpoints throttle in bursts (429/502/503). Retries and timeouts stack:
 # - Each judge proxy below retries upstream 404/408/429/500/502/503/504/520
 #   responses 0.5 s apart, up to max_http_attempts (Gym's default is 3). 1800
