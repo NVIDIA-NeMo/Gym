@@ -1331,16 +1331,21 @@ async def test_close_confirms_cleanup_before_provider_cancellation(local_session
         processes.append(json.loads((Path(state.session.session_dir) / "runtime.json").read_text())["pid"])
         await state.close(3)
         assert state.session.closed and state.session.cleanup["cleanup_confirmed"] is True
-        assert all(not Path(f"/proc/{pid}").exists() for pid in processes)
+        cli_pid, task_pid, wrapper_pid = processes
+        assert not Path(f"/proc/{cli_pid}").exists()
+        assert not Path(f"/proc/{wrapper_pid}").exists()
+        # The borrowed sandbox owner keeps task processes alive until sandbox teardown.
+        task_stat = Path(f"/proc/{task_pid}/stat").read_text()
+        assert task_stat.split(") ", 1)[1].split()[0] not in {"Z", "X"}
         state.session.sandbox.disconnect.assert_awaited_once()
         state.session.sandbox.stop.assert_not_awaited()
     finally:
-        if not state.session.closed:
-            for pid in processes:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+        # This fixture uses host processes rather than a real container owner.
+        for pid in processes:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         if not state.task.done():
             state.task.cancel()
         await asyncio.gather(state.task, return_exceptions=True)
