@@ -1,4 +1,4 @@
--e nemo-gym[dev] @ ../../
+-e nemo-gym[dev,sandbox] @ ../../
 # Deliverable-processing deps (scoring.py + preconvert.py + file_reader.py).
 jinja2>=3.1
 python-docx>=1.1
