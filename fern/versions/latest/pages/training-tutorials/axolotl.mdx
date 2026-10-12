@@ -1,0 +1,28 @@
+---
+title: "Training with Axolotl"
+description: "Use NeMo Gym environments as reward sources for Axolotl GRPO training."
+position: 6
+---
+
+# Training with Axolotl
+
+Axolotl's `NemoGymPlugin` uses one or more NeMo Gym environments as reward sources for GRPO training. It supports single-turn verification, multi-turn agent rollouts, and multi-environment training. In single-turn mode, it scores generated completions through a NeMo Gym resource server's `/verify` endpoint. In multi-turn mode, it delegates rollout orchestration to a NeMo Gym agent server through `/run`.
+
+With automatic setup enabled, the plugin can clone NeMo Gym, create its Python environment, start the configured NeMo Gym services, load the specified datasets, and stop the services it started when training finishes.
+
+The integration is developed and maintained by Axolotl. Refer to Axolotl's integration guide for currently validated models, versions, and training configurations.
+
+## Prerequisites
+
+- An Axolotl installation and hardware supported by the selected training configuration
+- A compatible NeMo Gym checkout and training dataset
+
+<Warning>
+The revisions checked for this page were [Axolotl `7419d92bacc8`](https://github.com/axolotl-ai-cloud/axolotl/commit/7419d92bacc815c8e2a53bd39b56e1cb1f82f91b) and [NeMo Gym `4ba2d4f87ab6`](https://github.com/NVIDIA-NeMo/Gym/commit/4ba2d4f87ab690113a23106885a9a826fbfb4744). Axolotl's bundled examples at that revision reference `resources_servers/reasoning_gym/data/train_mini_sudoku.jsonl`, which is not present in the NeMo Gym revision. This pair is not validated end to end; confirm a supported version pair and dataset with Axolotl before training.
+</Warning>
+
+## References
+
+- [Axolotl NeMo Gym integration guide](https://docs.axolotl.ai/docs/custom_integrations.html#nemo-gym-integration-for-axolotl)
+- [NemoGymPlugin API reference](https://docs.axolotl.ai/docs/api/integrations.nemo_gym.plugin.html)
+- [Axolotl NeMo Gym integration source](https://github.com/axolotl-ai-cloud/axolotl/tree/main/src/axolotl/integrations/nemo_gym)
