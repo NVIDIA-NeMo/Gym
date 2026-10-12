@@ -255,7 +255,6 @@ def inspect_behavior(
             reason="expected verifier outcome was not observed",
             predicate=lambda: len(verifications) == 1 and verifications[0]["reward"] == expected_reward,
             available=available,
-            applies=not terminal_error,
         )
     )
     results.run(
@@ -279,7 +278,17 @@ def inspect_behavior(
             reason="rollout reward differs from the verifier witness",
             predicate=lambda: record.get("reward") == expected_reward,
             available=record is not None and available,
-            applies=not terminal_error,
+        )
+    )
+    results.run(
+        BehavioralCheck(
+            id="verifier.saved_outcome",
+            tier="P0",
+            evidence=("TE-6",),
+            location="$",
+            reason="completed verification must retain evaluation_completed=true and mask_sample=false",
+            predicate=lambda: record.get("evaluation_completed") is True and record.get("mask_sample") is False,
+            available=record is not None and available,
         )
     )
     return (

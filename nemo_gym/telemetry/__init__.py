@@ -23,7 +23,7 @@ Public surface
 --------------
 * :class:`~nemo_gym.telemetry.config.TelemetryConfig` — the ``telemetry:`` config block.
 * :class:`~nemo_gym.telemetry.span_groups.GymSpanGroup` — Gym span groups and presets.
-* :func:`~nemo_gym.telemetry.setup.configure_telemetry_env` — orchestrator side; hands
+* :func:`~nemo_gym.telemetry.setup.configure_telemetry_env` — supervisor side; hands
   the settings to spawned server processes through the environment.
 * :func:`~nemo_gym.telemetry.setup.init_telemetry` /
   :func:`~nemo_gym.telemetry.setup.get_telemetry` /

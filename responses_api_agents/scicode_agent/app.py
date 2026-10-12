@@ -29,6 +29,7 @@ Templated on responses_api_agents/proof_refinement_agent (the multi-turn run() s
 
 import logging
 import statistics
+from time import time
 from typing import Any, Dict, List
 
 from fastapi import Request, Response
@@ -57,6 +58,13 @@ from nemo_gym.openai_utils import (
     accumulate_response_usage,
 )
 from nemo_gym.prompt import PromptConfig, load_prompt_config
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    ModelCallRef,
+    ObservationGap,
+    TrajectoryRecord,
+    TrajectoryTurn,
+)
 from nemo_gym.server_utils import raise_for_status
 
 
@@ -214,6 +222,13 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         usage = zero_usage
         usage_complete = True
         step_usage = []
+        rollout_id = self.rollout_id_from_run(body)
+        trajectory = (
+            TrajectoryRecord(task_id=body.problem_id, rollout_id=rollout_id)
+            if self._model_call_capture_enabled() and rollout_id is not None
+            else None
+        )
+        invocation = AgentInvocation(invocation_id="root")
         response_create_params = body.responses_create_params.model_dump(exclude_unset=True, exclude_none=True)
         response_create_params.pop("input", None)
         response_create_params["model"] = body.responses_create_params.model or self.config.model_server.name
@@ -244,6 +259,7 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                 problem_steps_str=problem_steps_str, next_step_str=next_step_str, dependencies=dependencies
             )
 
+            turn_timestamp = time()
             try:
                 gen_response = await self.server_client.post(
                     server_name=self.config.name,
@@ -267,6 +283,30 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             cookies = gen_response.cookies
             last_response_json = await gen_response.json()
             model_response = NeMoGymResponse.model_validate(last_response_json)
+            if trajectory is not None:
+                refs = (
+                    [ModelCallRef(model_ref=self.config.model_server, response_id=model_response.id)]
+                    if model_response.id
+                    else []
+                )
+                if not refs:
+                    trajectory.gaps.append(
+                        ObservationGap(code="model_call_reference_unavailable", invocation_id="root")
+                    )
+                invocation.model_calls.extend(refs)
+                trajectory.turns.append(
+                    TrajectoryTurn(
+                        invocation_id="root",
+                        task_id=trajectory.task_id,
+                        rollout_id=trajectory.rollout_id,
+                        turn_no=len(trajectory.turns) + 1,
+                        timestamp=turn_timestamp,
+                        question=[{"role": "user", "content": user_content}],
+                        answer=model_response.output,
+                        step_count=len(trajectory.turns) + 1,
+                        model_calls=refs,
+                    )
+                )
             step_record["status"] = "generated"
             step_record["usage"] = model_response.usage.model_dump() if model_response.usage is not None else None
             usage_complete = usage_complete and model_response.usage is not None
@@ -291,7 +331,14 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(verify_response)
-        return await verify_response.json()
+        result = await verify_response.json()
+        if trajectory is not None:
+            # Prefilled/skipped subproblems are not model decisions.
+            if trajectory.turns:
+                invocation.status = "incomplete" if out_of_context else "completed"
+                trajectory.invocations.append(invocation)
+            result["ng_trajectory"] = trajectory.model_dump(mode="json")
+        return result
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         if any(

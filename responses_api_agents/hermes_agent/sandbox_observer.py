@@ -13,12 +13,17 @@ from typing import Any
 
 
 class _ObservedChildren(list):
+    _gym_child_hook_supported = True
+
     def __init__(self, values: Iterable[Any], observer: "SandboxHermesObserver", parent_id: str):
         super().__init__(values)
         self.observer = observer
         self.parent_id = parent_id
+        self._gym_prepare_child = getattr(values, "_gym_prepare_child", None)
 
     def append(self, child: Any) -> None:
+        if self._gym_prepare_child is not None:
+            self._gym_prepare_child(child)
         super().append(child)
         self.observer._child_added(child, self.parent_id)
 
@@ -46,6 +51,16 @@ class SandboxHermesObserver:
         self._instrument(agent, "root", wrap_conversation=False)
         return self
 
+    def on_iteration_limit_reached(self, *, invocation_id: str) -> None:
+        """Record this invocation's budget stop once, without affecting its parent or summary."""
+        with self._lock:
+            invocation = self._invocations.get(invocation_id)
+            if invocation is None:
+                self._gap("hermes_observer_error", invocation_id, "iteration_limit: unknown invocation")
+                return
+            invocation["stop_reason"] = "max_iterations"
+            invocation["status"] = "incomplete"
+
     def finish(
         self,
         result: dict[str, Any] | None,
@@ -64,6 +79,8 @@ class SandboxHermesObserver:
             }
 
     def _instrument(self, agent: Any, invocation_id: str, *, wrap_conversation: bool) -> None:
+        agent._gym_invocation_id = invocation_id
+        agent._gym_on_iteration_limit_reached = self.on_iteration_limit_reached
         self._chain_callback(agent, "tool_start_callback", self._tool_started, invocation_id)
         self._chain_callback(agent, "tool_complete_callback", self._tool_completed, invocation_id)
         self._wrap_model_calls(agent, invocation_id)
@@ -221,7 +238,9 @@ class SandboxHermesObserver:
                 status = "incomplete"
         with self._lock:
             self._invocations[invocation_id]["messages"] = messages or []
-            self._invocations[invocation_id]["status"] = status
+            self._invocations[invocation_id]["status"] = (
+                "incomplete" if self._invocations[invocation_id].get("stop_reason") == "max_iterations" else status
+            )
 
     @staticmethod
     def _failed_result(tool_name: Any, result: Any) -> bool:
