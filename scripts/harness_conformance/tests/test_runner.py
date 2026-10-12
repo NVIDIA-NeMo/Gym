@@ -39,10 +39,10 @@ def test_catalog_covers_p0_without_exposing_expectations():
     assert main(["--list-scenarios"]) == 0
 
 
-@pytest.mark.parametrize("native_sessions", [False, True])
+@pytest.mark.parametrize("use_agent_sessions", [False, True])
 @pytest.mark.parametrize("harness", HARNESSES)
-def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, native_sessions, tmp_path):
-    config = _config(harness, tmp_path, [10001, 10002, 10003, 10004], 12, native_sessions=native_sessions)
+def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_sessions, tmp_path):
+    config = _config(harness, tmp_path, [10001, 10002, 10003, 10004], 12, use_agent_sessions=use_agent_sessions)
     from omegaconf import OmegaConf
 
     from nemo_gym.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
@@ -54,9 +54,9 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, native_ses
     agent = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
     assert agent["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
     assert config["model_call_capture_dir"] == str(tmp_path / "capture")
-    environment_type = "single_agent_turn_legacy" if native_sessions else "legacy_agent"
+    environment_type = "single_agent_turn_legacy" if use_agent_sessions else "legacy_agent"
     assert set(config["probe_environment"]["environment_servers"]) == {environment_type}
-    if native_sessions:
+    if use_agent_sessions:
         from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
 
         SingleAgentTurnEnvironmentServerConfig.model_validate(
@@ -87,11 +87,11 @@ def test_session_detection_distinguishes_base_stubs_and_inherited_implementation
         async def _seed_agent_session_state(self, body):
             raise RuntimeError("setup failed")
 
-    class NativeAgent(SeedOnlyAgent):
+    class SessionAgent(SeedOnlyAgent):
         async def _close_agent_session_state(self, state):
             raise RuntimeError("cleanup failed")
 
-    class InheritedNativeAgent(NativeAgent):
+    class InheritedSessionAgent(SessionAgent):
         pass
 
     class PublicSessionAgent(LegacyAgent):
@@ -103,22 +103,22 @@ def test_session_detection_distinguishes_base_stubs_and_inherited_implementation
 
     assert not _supports_agent_sessions(LegacyAgent)
     assert not _supports_agent_sessions(SeedOnlyAgent)
-    assert _supports_agent_sessions(NativeAgent)
-    assert _supports_agent_sessions(InheritedNativeAgent)
+    assert _supports_agent_sessions(SessionAgent)
+    assert _supports_agent_sessions(InheritedSessionAgent)
     assert _supports_agent_sessions(PublicSessionAgent)
 
 
-def test_native_runtime_does_not_require_host_cli(monkeypatch):
+def test_session_runtime_does_not_require_host_cli(monkeypatch):
     from scripts.harness_conformance import episode
 
     monkeypatch.setattr(episode.shutil, "which", lambda _: None)
-    assert episode.check_runtime("pi", native_sessions=True) == {"installation": "agent_session"}
+    assert episode.check_runtime("pi", use_agent_sessions=True) == {"installation": "agent_session"}
     with pytest.raises(RuntimeError, match="install the pi runtime"):
         episode.check_runtime("pi")
 
 
 @pytest.mark.parametrize(
-    "interface", ["legacy", "native", "native_setup_error", "native_response_error", "native_close_error"]
+    "interface", ["legacy", "session", "session_setup_error", "session_response_error", "session_close_error"]
 )
 async def test_episode_selects_interface_and_collects_through_environment(tmp_path, monkeypatch, interface):
     from types import SimpleNamespace
@@ -166,11 +166,11 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
             calls.append("run")
             return BaseVerifyResponse(**body.model_dump(), response=response, reward=1.0)
 
-    class NativeAgent(LegacyAgent):
+    class SessionAgent(LegacyAgent):
         async def _seed_agent_session_state(self, body):
             calls.append("seed")
             assert body.sandbox_access is None
-            if interface == "native_setup_error":
+            if interface == "session_setup_error":
                 raise HTTPException(422, "controlled setup failure")
             return AgentSessionState(request=body)
 
@@ -178,13 +178,13 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
             state = self._require_agent_session(self._agent_session_id_from_request(request))
             assert state.request.episode_id.capture_key in request.url.path
             calls.append("responses")
-            if interface == "native_response_error":
+            if interface == "session_response_error":
                 raise HTTPException(422, "controlled activation failure")
             return response
 
         async def _close_agent_session_state(self, state):
             calls.append("close")
-            if interface == "native_close_error":
+            if interface == "session_close_error":
                 raise HTTPException(422, "controlled cleanup failure")
             return AgentCloseSessionResponse(
                 agent_session_id=state.request.agent_session_id,
@@ -192,7 +192,7 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
             )
 
     module = SimpleNamespace(
-        TestAgent=LegacyAgent if interface == "legacy" else NativeAgent, TestAgentConfig=BaseResponsesAPIAgentConfig
+        TestAgent=LegacyAgent if interface == "legacy" else SessionAgent, TestAgentConfig=BaseResponsesAPIAgentConfig
     )
     monkeypatch.setitem(episode.HARNESSES, "codex", "TestAgent")
     monkeypatch.setattr(episode, "importlib", SimpleNamespace(import_module=lambda _: module))
@@ -213,11 +213,11 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
         assert calls == ["run"]
         assert runtime["agent_interface"] == "legacy_run"
     else:
-        assert runtime["agent_interface"] == "native_sessions"
+        assert runtime["agent_interface"] == "agent_sessions"
         assert witness["seeded"] == 1 and witness["closed"] == 1
-        if interface == "native_setup_error":
+        if interface == "session_setup_error":
             assert calls == ["seed"]
-        elif interface == "native_close_error":
+        elif interface == "session_close_error":
             assert calls[:2] == ["seed", "responses"]
             assert calls[2:] and set(calls[2:]) == {"close"}
         else:
@@ -226,13 +226,13 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
         assert witness["verifications"] == []
         failures = list(json_rows(tmp_path / "rollouts_failures.jsonl"))
         assert len(failures) == 1
-        assert failures[0][1]["_ng_failure_stage"] == ("cleanup" if interface == "native_close_error" else "agent")
+        assert failures[0][1]["_ng_failure_stage"] == ("cleanup" if interface == "session_close_error" else "agent")
         assert not list(json_rows(tmp_path / "rollouts.jsonl"))
     else:
         [(_, rollout)] = list(json_rows(tmp_path / "rollouts.jsonl"))
         assert rollout["reward"] == 1.0
         assert rollout["response"]["id"] == response.id
-        if interface == "native":
+        if interface == "session":
             assert rollout["ng_agent_observations"]["source"] == "test"
             assert witness["verifications"] == [{"reward": 1.0, "answer_seen": True}]
 

@@ -34,9 +34,9 @@ class _Server(uvicorn.Server):
         return nullcontext()
 
 
-def check_runtime(harness: str, *, native_sessions: bool = False) -> dict:
+def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
     """Record session runtime pins or require a preinstalled legacy runtime."""
-    if native_sessions and harness != "hermes":
+    if use_agent_sessions and harness != "hermes":
         return {"installation": "agent_session"}
     if harness == "hermes":
         if importlib.util.find_spec("run_agent") is None or importlib.util.find_spec("model_tools") is None:
@@ -64,7 +64,9 @@ def _supports_agent_sessions(agent_cls: type[SimpleResponsesAPIAgent]) -> bool:
     )
 
 
-def _config(harness: str, directory: Path, ports: list[int], timeout: float, *, native_sessions: bool = False) -> dict:
+def _config(
+    harness: str, directory: Path, ports: list[int], timeout: float, *, use_agent_sessions: bool = False
+) -> dict:
     def server(port: int) -> dict:
         return {"name": "unused", "host": "127.0.0.1", "port": port, "entrypoint": "app.py", "num_workers": 1}
 
@@ -75,7 +77,7 @@ def _config(harness: str, directory: Path, ports: list[int], timeout: float, *, 
         "model": "conformance-model",
         "model_server": {"type": "responses_api_models", "name": "policy_model"},
     }
-    if not native_sessions:
+    if not use_agent_sessions:
         agent["resources_server"] = {"type": "resources_servers", "name": "probe_resources"}
     defaults_path = (
         Path(__file__).resolve().parents[2] / f"responses_api_agents/{harness}_agent/configs/{harness}_agent.yaml"
@@ -84,19 +86,19 @@ def _config(harness: str, directory: Path, ports: list[int], timeout: float, *, 
         f"{harness}_agent"
     ]
     agent.update({key: value for key, value in defaults.items() if key.endswith("_version")})
-    if native_sessions:
+    if use_agent_sessions:
         # The verifier only reads retained output, so the agent can own this local sandbox.
         agent.update(sandbox_provider="probe_sandbox", sandbox_config={"workdir": str(directory / "workspace")})
     if harness in ("opencode", "pi"):
         agent["timeout"] = timeout
-        if not native_sessions:
+        if not use_agent_sessions:
             agent["workspace_root"] = str(directory / "workspace")
     if harness == "opencode":
         # Auxiliary title/summary requests would consume the scripted policy replies.
         agent["opencode_config"] = {"permission": {"bash": "allow"}}
-        if not native_sessions:
+        if not use_agent_sessions:
             agent["opencode_config"]["agent"] = {"title": {"disable": True}, "summary": {"disable": True}}
-    if harness == "codex" and not native_sessions:
+    if harness == "codex" and not use_agent_sessions:
         workspace = directory / "workspace"
         workspace.mkdir()
         agent.update(
@@ -115,13 +117,13 @@ def _config(harness: str, directory: Path, ports: list[int], timeout: float, *, 
             checkpoints_enabled=False,
             api_key="conformance",
         )
-    environment_type = "single_agent_turn_legacy" if native_sessions else "legacy_agent"
+    environment_type = "single_agent_turn_legacy" if use_agent_sessions else "legacy_agent"
     environment = {
         **server(ports[3]),
         "name": "probe_environment",
         "agent_server": {"type": "responses_api_agents", "name": "probe_agent"},
     }
-    if native_sessions:
+    if use_agent_sessions:
         environment.update(
             resources_server={"type": "resources_servers", "name": "probe_resources"},
             resources_tool_transports=[],
@@ -137,7 +139,7 @@ def _config(harness: str, directory: Path, ports: list[int], timeout: float, *, 
         "probe_agent": {"responses_api_agents": {f"{harness}_agent": agent}},
         "probe_environment": {"environment_servers": {environment_type: environment}},
     }
-    if native_sessions:
+    if use_agent_sessions:
         config["probe_sandbox"] = {"local": {"concurrency": 1}}
     return config
 
@@ -147,13 +149,13 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
     agent_cls = getattr(module, HARNESSES[harness])
     config_cls = getattr(module, HARNESSES[harness] + "Config")
-    native_sessions = _supports_agent_sessions(agent_cls)
-    if native_sessions and sys.platform != "linux":
+    use_agent_sessions = _supports_agent_sessions(agent_cls)
+    if use_agent_sessions and sys.platform != "linux":
         raise RuntimeError(
-            "Native harness conformance requires Linux; run the probes on a Linux host or in a container"
+            "Conformance probes using agent sessions require Linux; run the probes on a Linux host or in a container"
         )
-    runtime = check_runtime(harness, native_sessions=native_sessions)
-    runtime["agent_interface"] = "native_sessions" if native_sessions else "legacy_run"
+    runtime = check_runtime(harness, use_agent_sessions=use_agent_sessions)
+    runtime["agent_interface"] = "agent_sessions" if use_agent_sessions else "legacy_run"
     runtime["adapter_sha256"] = digest_file(
         Path(__file__).resolve().parents[2] / f"responses_api_agents/{harness}_agent/app.py"
     )
@@ -168,11 +170,11 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
         for sock in sockets:
             sock.bind(("127.0.0.1", 0))
         config = _config(
-            harness, directory, [s.getsockname()[1] for s in sockets], timeout, native_sessions=native_sessions
+            harness, directory, [s.getsockname()[1] for s in sockets], timeout, use_agent_sessions=use_agent_sessions
         )
         os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps(config)
         (directory / "launch.json").write_text(json.dumps(config, indent=2) + "\n")
-        if native_sessions:
+        if use_agent_sessions:
             from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
             from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 
@@ -194,7 +196,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             config=config_cls.model_validate(config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]),
             server_client=client,
         )
-        if native_sessions:
+        if use_agent_sessions:
             runtime["requested_versions"] = {
                 key: value for key, value in agent.config.model_dump().items() if key.endswith("_version")
             }
