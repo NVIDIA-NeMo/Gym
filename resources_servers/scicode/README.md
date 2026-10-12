@@ -43,6 +43,26 @@ Because the generated code runs in this server's own venv, `requirements.txt` pi
   `problem_accuracy`. The headline `subtask_accuracy` (total passed / total over all rollouts) is
   computed on the **agent** (`/aggregate_metrics` runs there), not this server.
 
+**Per-sub-step execution records (opt-in).** By default the server keeps only the pass/fail bit per
+sub-step: the subprocess's stdout is never read and its stderr is discarded after the exit code is
+known. Set `record_step_outputs: true` to add `step_outputs` to the verify response (and therefore to
+every rollout row): one record per scored sub-step, aligned with `step_results`, with `step_id`,
+`step_number`, `status` (`executed`, or `out_of_context` / `empty` for sentinels that never ran),
+`passed`, `returncode` (`null` on a timeout), `timed_out`, `duration_s`, `exception_class` (the class
+named on the last traceback line, e.g. `AssertionError`, `ImportError`, `numpy.linalg.LinAlgError`;
+`null` when there is none) and the last `output_tail_chars` characters (default 2000) of `stdout_tail`
+and `stderr_tail`. The tails contain model-generated output and tracebacks, so the flag is off by
+default and the rows grow by up to `2 * output_tail_chars` per sub-step when it is on. The agent's
+per-step generations are a separate concern: enable model-call observability to keep them.
+
+```yaml
+scicode:
+  resources_servers:
+    scicode:
+      record_step_outputs: true
+      output_tail_chars: 2000
+```
+
 ## Test data (required, staged manually)
 
 `test_data.h5` (~1 GB) holds the numeric ground-truth targets. It is **not** auto-downloaded — stage
@@ -89,9 +109,10 @@ gym eval run --no-serve \
 gym env test +entrypoint=resources_servers/scicode
 ```
 
-Covers test sanitization, the program builder, subprocess pass/fail/timeout, and the `verify()`
-paths (no solutions, missing/unconfigured test data, all-pass, all-fail, prefilled-excluded,
-out-of-context).
+Covers test sanitization, the program builder, subprocess pass/fail/timeout and the execution
+details it reports (exit code, timeout, duration, bounded output tails, exception class), and the
+`verify()` paths (no solutions, missing/unconfigured test data, all-pass, all-fail, prefilled-excluded,
+out-of-context, `step_outputs` on and off).
 
 ## Licensing
 

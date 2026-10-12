@@ -30,6 +30,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 
 # Helper functions ported verbatim from nemo-skills scicode_utils.eval_prefix. H5PY_FILE and the
@@ -195,7 +196,33 @@ def cmp_tuple_or_list(var1, var2):
     return True
 """
 
-_STDERR_TAIL = 2000
+# Bound on the stdout/stderr tails a result carries; the server's `output_tail_chars` overrides it.
+DEFAULT_OUTPUT_TAIL_CHARS = 2000
+_STDERR_TAIL = DEFAULT_OUTPUT_TAIL_CHARS
+
+# The last line of a Python traceback: `ValueError: boom`, `numpy.linalg.LinAlgError: Singular matrix`,
+# or a bare `AssertionError`. The final name component must start with an upper-case letter, which
+# rules out prose and the "timeout" marker.
+_EXCEPTION_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*(?::(?:\s.*)?)?$")
+
+
+def exception_class_from_stderr(stderr: str) -> str | None:
+    """The exception class named on the last non-empty line of a Python traceback, else None.
+
+    A bounded token for categorising failures (AssertionError vs ImportError vs a numerics error)
+    without storing free text; None when the last line does not look like `Class: message`."""
+    lines = [line.rstrip() for line in (stderr or "").splitlines() if line.strip()]
+    if not lines:
+        return None
+    last = lines[-1]
+    if not _EXCEPTION_LINE.match(last):
+        return None
+    return last.split(":", 1)[0]
+
+
+def _tail(data: bytes | None, limit: int) -> str:
+    text = (data or b"").decode("utf-8", errors="replace")
+    return text[-limit:] if limit >= 0 else text
 
 
 def sanitize_test(test_case: str) -> str:
@@ -216,13 +243,19 @@ def build_test_program(full_generation: str, h5_path: str, step_number: str, san
     return program
 
 
-def run_substep(program: str, timeout_secs: float) -> dict:
-    """Run one sub-step program in a subprocess. Exit code 0 == all assertions passed."""
+def run_substep(program: str, timeout_secs: float, output_tail_chars: int = DEFAULT_OUTPUT_TAIL_CHARS) -> dict:
+    """Run one sub-step program in a subprocess. Exit code 0 == all assertions passed.
+
+    Returns `passed` and the legacy `error` (the stderr tail on failure, "timeout" on a timeout, "" on a
+    pass) plus the execution details a caller may record: `returncode` (None on a timeout), `timed_out`,
+    `duration_s`, `exception_class` (see exception_class_from_stderr) and the bounded `stdout_tail` /
+    `stderr_tail` (the last `output_tail_chars` characters of each stream)."""
     # Passing a large generated solution through `python -c <program>` is
     # bounded by Linux's execve argument-size limit (ARG_MAX). SciCode's
     # accumulated solutions can exceed that late in a run. A temporary source
     # file has no such limit and preserves the per-substep subprocess isolation.
     source_path = None
+    started = time.monotonic()
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -234,13 +267,33 @@ def run_substep(program: str, timeout_secs: float) -> dict:
             source.write(program)
             source_path = source.name
         proc = subprocess.run([sys.executable, source_path], capture_output=True, timeout=timeout_secs)
-    except subprocess.TimeoutExpired:
-        return {"passed": False, "error": "timeout"}
+    except subprocess.TimeoutExpired as expired:
+        return {
+            "passed": False,
+            "error": "timeout",
+            "returncode": None,
+            "timed_out": True,
+            "duration_s": time.monotonic() - started,
+            "exception_class": None,
+            "stdout_tail": _tail(expired.stdout, output_tail_chars),
+            "stderr_tail": _tail(expired.stderr, output_tail_chars),
+        }
     finally:
         if source_path is not None:
             try:
                 os.unlink(source_path)
             except FileNotFoundError:
                 pass
+    duration_s = time.monotonic() - started
     passed = proc.returncode == 0
-    return {"passed": passed, "error": "" if passed else proc.stderr.decode("utf-8", errors="replace")[-_STDERR_TAIL:]}
+    stderr_tail = _tail(proc.stderr, output_tail_chars)
+    return {
+        "passed": passed,
+        "error": "" if passed else stderr_tail,
+        "returncode": proc.returncode,
+        "timed_out": False,
+        "duration_s": duration_s,
+        "exception_class": None if passed else exception_class_from_stderr(stderr_tail),
+        "stdout_tail": _tail(proc.stdout, output_tail_chars),
+        "stderr_tail": stderr_tail,
+    }

@@ -114,6 +114,21 @@ gym eval run \
 `num_repeats: 3` comes from Gym's dataset config and can be overridden independently of the
 AA-aligned problem set and prompt.
 
+### Keeping each sub-step's test output
+
+The rollout rows carry one pass/fail bit per sub-step (`step_results`). To also keep each sub-step's
+exit code, timeout flag, duration, exception class and bounded stdout/stderr tails, turn on the
+resources server's opt-in record (see `resources_servers/scicode/README.md`):
+
+```bash
+gym eval run ... --benchmark scicode \
+    ++scicode_benchmark_resources_server.resources_servers.scicode.record_step_outputs=true \
+    ++scicode_benchmark_resources_server.resources_servers.scicode.output_tail_chars=2000
+```
+
+Each row then has `step_outputs`, aligned with `step_results`. The tails are model-generated output,
+so treat the rollout file accordingly.
+
 ## Licensing
 
 Code: Apache 2.0
