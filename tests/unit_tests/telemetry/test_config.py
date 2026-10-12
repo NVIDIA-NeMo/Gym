@@ -79,6 +79,18 @@ def test_unknown_keys_are_preserved_not_rejected():
     assert config.some_future_knob == 7
 
 
+def test_removed_instrument_aiohttp_key_still_loads_and_exports_nothing(clean_otel_env):
+    """`instrument_aiohttp` was removed because nothing read it; configs that still set it keep loading."""
+    global_config = OmegaConf.create({"telemetry": {"enabled": True, "instrument_aiohttp": False}})
+    config = telemetry_config_from_global_config(global_config)
+    assert config.enabled is True
+    assert "instrument_aiohttp" not in TelemetryConfig.model_fields
+
+    configure_telemetry_env(config)
+    assert os.environ["NEMO_GYM_OTEL_ENABLED"] == "1"
+    assert "NEMO_GYM_OTEL_INSTRUMENT_AIOHTTP" not in os.environ
+
+
 def test_config_reads_the_telemetry_block_from_a_gym_config(clean_otel_env):
     global_config = OmegaConf.create(
         {
