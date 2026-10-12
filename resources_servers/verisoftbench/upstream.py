@@ -817,8 +817,13 @@ def _observe_transport_faults(repl: Any, slot: threading.local) -> None:
         docker_cmd = ["docker", "exec", repl.docker_container, "cat", container_path]
         try:
             result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=timeout)
-        except FileNotFoundError as e:
-            record("direct", f"docker is not available on the host: {e}")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            # Upstream's context builder catches this exception and falls back, so the
+            # evidence must be recorded before re-raising: a read timeout or a host
+            # launch failure is as candidate-free as daemon stderr. (This 30 s transport
+            # timeout is distinct from the released 600 s compile timeout, which stays
+            # charged.)
+            record("direct", f"reading {container_path} failed on the host: {type(e).__name__}: {e}")
             raise
         suspicion = classify_transport_fault(result)
         if suspicion is not None:

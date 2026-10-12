@@ -613,12 +613,24 @@ class TestVerifyCandidate:
         entry = harness.prepare_entry(dict(ROW))
         assert entry["verif_local_ctxs"].endswith("theorem earlier (n : Nat) : n = n := rfl\n\n")
 
-    def test_recovered_read_fault_during_preparation_is_still_refused(self, harness, monkeypatch) -> None:
-        # The source ``cat`` executes no candidate content, so its daemon stderr is
-        # authoritative — direct evidence that must survive a health probe that succeeds
-        # because the transport recovered a moment later. Discarding it would cache
-        # upstream's degraded fallback context for every later candidate of the task.
-        daemon = "Error response from daemon: Container verisoftbench-lean-test is not running"
+    _DAEMON_READ = subprocess.CompletedProcess(
+        ["docker"], 1, stdout="", stderr="Error response from daemon: Container verisoftbench-lean-test is not running"
+    )
+
+    @pytest.mark.parametrize(
+        "read_outcome",
+        [_DAEMON_READ, subprocess.TimeoutExpired(cmd="docker exec cat", timeout=30), PermissionError("docker")],
+        ids=["daemon-stderr", "read-timeout", "host-launch-error"],
+    )
+    def test_recovered_read_fault_during_preparation_is_still_refused(
+        self, harness, monkeypatch, read_outcome
+    ) -> None:
+        # The source ``cat`` executes no candidate content, so its failure — daemon
+        # stderr, a transport timeout, or a host launch error — is authoritative: direct
+        # evidence that must survive a health probe that succeeds because the transport
+        # recovered a moment later. Upstream's context builder swallows the read
+        # exception, so without recorded evidence the degraded fallback context would be
+        # cached for every later candidate of the task.
         probes = []
 
         def transient(cmd, **kwargs):
@@ -626,7 +638,9 @@ class TestVerifyCandidate:
                 probes.append(cmd)
                 return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
             if "cat" in cmd:
-                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=daemon)
+                if isinstance(read_outcome, BaseException):
+                    raise read_outcome
+                return read_outcome
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
         with pytest.MonkeyPatch.context() as mp:
