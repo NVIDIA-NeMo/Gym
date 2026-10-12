@@ -500,11 +500,12 @@ def test_script_lets_an_explicit_driver_env_win_over_telemetry_defaults():
 def test_script_ships_gym_logs_by_default_and_can_switch_them_off():
     line = _driver_line(_script(_config(driver=_DRIVER_WITH_INSTALL)))
     assert "NEMO_GYM_OTEL_LOGS_ENABLED=1" in line
-    # No per-signal logs endpoint: logs follow OTEL_EXPORTER_OTLP_PROTOCOL to the collector's
-    # HTTP port. Gym never installs the gRPC exporter, so pinning logs to the gRPC port made
-    # every batch time out.
+    # No per-signal logs endpoint: the pinned nemo-lens builds the log exporter from
+    # OTEL_EXPORTER_OTLP_PROTOCOL like the span and metric exporters, so logs follow the shared
+    # endpoint and protocol in every environment.
     assert "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" not in line
     assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" in line
+    assert "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf" in line
     off = _config(driver=_DRIVER_WITH_INSTALL, otel={"gym_logs": False})
     assert "NEMO_GYM_OTEL_LOGS_ENABLED=0" in _driver_line(_script(off))
 

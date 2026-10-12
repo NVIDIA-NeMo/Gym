@@ -30,8 +30,10 @@ from typing import (
 from unittest.mock import AsyncMock, call
 
 import openai
+import orjson
 import pytest
 from aiohttp import ClientResponseError, ClientTimeout
+from openai.types.chat import ChatCompletionToolChoiceOptionParam
 from openai.types.chat.completion_create_params import CompletionCreateParamsNonStreaming
 from openai.types.responses import (
     EasyInputMessage,
@@ -46,7 +48,7 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseReasoningItem,
 )
-from openai.types.responses.response_create_params import ResponseCreateParamsBase
+from openai.types.responses.response_create_params import ResponseCreateParamsBase, ToolChoice, ToolParam
 from openai.types.responses.response_input_item import (
     AdditionalTools as InputAdditionalTools,
 )
@@ -744,6 +746,58 @@ class TestNeMoGymResponse:
         assert isinstance(params.input, list)
         assert isinstance(params.input[0], NeMoGymResponseFunctionWebSearch)
         assert params.input[0].model_dump(mode="json") == payload
+
+    def test_output_text_logprobs_replay_as_input_and_serialize_repeatedly(self) -> None:
+        """A next-turn request that replays assistant logprobs encodes completely on every serialization."""
+        logprobs = [
+            {
+                "token": "hi",
+                "bytes": [104, 105],
+                "logprob": -0.1,
+                "top_logprobs": [{"token": "hi", "bytes": [104, 105], "logprob": -0.1}],
+            }
+        ]
+        response = NeMoGymResponse.model_validate(
+            {
+                "id": "resp_1",
+                "created_at": 0,
+                "model": "m",
+                "object": "response",
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "msg_1",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "hi", "annotations": [], "logprobs": logprobs}],
+                    },
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "lookup",
+                        "arguments": "{}",
+                        "status": "completed",
+                    },
+                ],
+            }
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": [{"role": "user", "content": "q"}]})
+        # This follows simple_agent, which deep-copies the body and then appends the model output and the tool result.
+        body = body.model_copy(deep=True)
+        new_body = body.model_copy(
+            update={"input": [*body.input, *response.output, NeMoGymFunctionCallOutput(call_id="call_1", output="ok")]}
+        )
+
+        for _ in range(2):
+            encoded = orjson.loads(orjson.dumps(new_body.model_dump(exclude_unset=True)))
+            assert encoded["input"][1]["content"][0]["logprobs"] == logprobs
+            assert encoded["input"][2]["type"] == "function_call"
+            assert encoded["input"][3] == {"call_id": "call_1", "output": "ok"}
+            assert response.model_dump(mode="json")["output"][0]["content"][0]["logprobs"] == logprobs
 
     def test_web_search_call_keeps_typed_sdk_actions(self) -> None:
         from openai.types.responses.response_function_web_search import (
@@ -2319,3 +2373,169 @@ def test_response_field_set_is_pinned() -> None:
         f"openai {openai.__version__} changed Response's field set: added={added} removed={removed}.\n"
         f"Decide what Gym does with each, then update this list."
     )
+
+
+_PUBLIC_WIRE_MODELS = [
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponse,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymChatCompletion,
+]
+
+
+def _generator_schema_paths(schema: Any, path: str, definitions: Dict[str, Any], seen: frozenset[str]) -> List[str]:
+    """Return the field path of every ``generator`` schema reachable from ``schema``."""
+    if isinstance(schema, list):
+        return [found for item in schema for found in _generator_schema_paths(item, path, definitions, seen)]
+    if not isinstance(schema, dict):
+        return []
+    schema_type = schema.get("type")
+    if schema_type == "generator":
+        return [path]
+    if schema_type == "definitions":
+        definitions = {**definitions, **{item["ref"]: item for item in schema["definitions"]}}
+        return _generator_schema_paths(schema["schema"], path, definitions, seen)
+    if schema_type == "definition-ref":
+        ref = schema["schema_ref"]
+        if ref in seen:
+            return []
+        return _generator_schema_paths(definitions[ref], path, definitions, seen | {ref})
+    if schema_type in ("model-fields", "typed-dict"):
+        owner = f"{schema['cls'].__name__}:" if schema_type == "typed-dict" else ""
+        return [
+            found
+            for name, field in schema["fields"].items()
+            for found in _generator_schema_paths(field, f"{path}.{owner}{name}", definitions, seen)
+        ]
+    return [
+        found
+        for value in schema.values()
+        if isinstance(value, (dict, list))
+        for found in _generator_schema_paths(value, path, definitions, seen)
+    ]
+
+
+@pytest.mark.parametrize("model", _PUBLIC_WIRE_MODELS, ids=lambda m: m.__name__)
+def test_public_wire_models_have_no_lazy_iterable_fields(model: type) -> None:
+    """Pydantic validates an ``Iterable`` field into an iterator that can be read only once.
+
+    orjson cannot encode it, ``model_copy(deep=True)`` cannot pickle it,
+    and a second ``model_dump`` returns an empty list.
+    """
+    paths = _generator_schema_paths(model.__pydantic_core_schema__, model.__name__, {}, frozenset())
+    assert not paths, (
+        f"{paths} validate into lazy iterators.\n"
+        f"Fix: add a Gym copy of the SDK type that declares the field as a List."
+    )
+
+
+@pytest.mark.parametrize(
+    "gym_union, sdk_union",
+    [
+        (openai_utils_module.NeMoGymToolParam, ToolParam),
+        (openai_utils_module.NeMoGymToolChoice, ToolChoice),
+        (openai_utils_module.NeMoGymChatCompletionToolChoiceOptionParam, ChatCompletionToolChoiceOptionParam),
+    ],
+    ids=["ToolParam", "ToolChoice", "ChatCompletionToolChoiceOptionParam"],
+)
+def test_list_copies_of_sdk_unions_keep_every_member_in_order(gym_union: Any, sdk_union: Any) -> None:
+    """Each Gym union member is the SDK member or a subclass of it, so no SDK shape is dropped or reordered."""
+    gym_members = get_args(gym_union)
+    sdk_members = get_args(sdk_union)
+    assert len(gym_members) == len(sdk_members), (
+        f"openai {openai.__version__} changed the members of {sdk_union}.\nFix: mirror the change in {gym_union}."
+    )
+    for gym_member, sdk_member in zip(gym_members, sdk_members):
+        # A TypedDict subclass records its SDK base in __orig_bases__ rather than __mro__.
+        assert gym_member == sdk_member or sdk_member in getattr(gym_member, "__orig_bases__", ())
+
+
+@pytest.mark.parametrize(
+    "model, payload",
+    [
+        (
+            NeMoGymResponseCreateParamsNonStreaming,
+            {
+                "input": "q",
+                "tools": [
+                    {
+                        "type": "namespace",
+                        "name": "ns",
+                        "description": "d",
+                        "tools": [{"type": "function", "name": "f", "parameters": {}}],
+                    }
+                ],
+            },
+        ),
+        (
+            NeMoGymResponseCreateParamsNonStreaming,
+            {
+                "input": "q",
+                "tool_choice": {"type": "allowed_tools", "mode": "auto", "tools": [{"type": "function", "name": "f"}]},
+            },
+        ),
+        (
+            NeMoGymResponseCreateParamsNonStreaming,
+            {
+                "input": "q",
+                "tools": [
+                    {
+                        "type": "file_search",
+                        "vector_store_ids": ["vs_1"],
+                        "filters": {
+                            "type": "and",
+                            "filters": [
+                                {"type": "eq", "key": "a", "value": "x"},
+                                {"type": "or", "filters": [{"type": "eq", "key": "b", "value": "y"}]},
+                            ],
+                        },
+                    }
+                ],
+            },
+        ),
+        (
+            NeMoGymResponseCreateParamsNonStreaming,
+            {
+                "input": "q",
+                "tools": [
+                    {
+                        "type": "shell",
+                        "environment": {
+                            "type": "container_auto",
+                            "network_policy": {
+                                "type": "allowlist",
+                                "allowed_domains": ["example.com"],
+                                "domain_secrets": [{"domain": "example.com", "name": "TOKEN", "value": "v"}],
+                            },
+                            "skills": [{"type": "skill_reference", "skill_id": "skill_1"}],
+                        },
+                    },
+                    {
+                        "type": "shell",
+                        "environment": {"type": "local", "skills": [{"name": "n", "description": "d", "path": "/p"}]},
+                    },
+                ],
+            },
+        ),
+        (
+            NeMoGymChatCompletionCreateParamsNonStreaming,
+            {
+                "messages": [{"role": "user", "content": "q"}],
+                "prediction": {"type": "content", "content": [{"type": "text", "text": "p"}]},
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "allowed_tools": {"mode": "auto", "tools": [{"type": "function", "function": {"name": "f"}}]},
+                },
+            },
+        ),
+    ],
+    ids=["namespace_tools", "allowed_tool_choice", "compound_filter", "shell_skills", "chat_prediction_tool_choice"],
+)
+def test_requests_with_sdk_iterable_fields_encode_copy_and_dump_repeatedly(model: type, payload: dict) -> None:
+    """``ServerClient.request`` encodes a python-mode dump with orjson; agents deep-copy and re-send request bodies."""
+    params = model.model_validate(payload)
+
+    for _ in range(2):
+        assert orjson.loads(orjson.dumps(params.model_dump(exclude_unset=True))) == payload
+        assert params.model_dump(mode="json", exclude_unset=True) == payload
+    assert orjson.loads(orjson.dumps(params.model_copy(deep=True).model_dump(exclude_unset=True))) == payload

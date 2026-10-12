@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+chembench:
+  resources_servers:
+    chembench:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: ChemBench multiple-choice and numeric chemistry questions
+      value: Measure chemistry knowledge using exact answer-set and numeric grading
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/chembench/data/example.jsonl
+        num_repeats: 1
+chembench_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: chembench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+chembench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: chembench_simple_agent

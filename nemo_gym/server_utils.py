@@ -27,6 +27,7 @@ from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
 from functools import partial
 from importlib import import_module
+from importlib.util import find_spec
 from ipaddress import ip_network
 from os import environ, getenv
 from pathlib import Path
@@ -94,6 +95,7 @@ from nemo_gym.telemetry.connection_pool import (
     set_server_name,
 )
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.telemetry.startup import ServerStartupTimeline
 
 
 logger = logging.getLogger(__name__)
@@ -1017,9 +1019,19 @@ class UvicornProxyHeadersConfig(BaseModel):
 _NEMO_GYM_STARTED_RAY_CLUSTER: bool = False
 
 
+def ray_is_installed() -> bool:
+    """Whether Ray can be imported in this process, checked without importing it."""
+    return find_spec("ray") is not None
+
+
 def _get_ray():
     """Import Ray only for processes configured to use it."""
-    import ray
+    try:
+        import ray
+    except ImportError as e:
+        raise ImportError(
+            "This process needs Ray, but Ray isn't installed in its environment. Install the `nemo-gym[ray]` extra."
+        ) from e
 
     return ray
 
@@ -1191,21 +1203,19 @@ class ClientDisconnectCancellationMiddleware:
             task_group.start_soon(listen_for_disconnect)
 
 
-_WARNED_IMPLICIT_RAY_SERVERS: set[type] = set()
-
-
-def _server_uses_ray(server_class: type) -> bool:
-    ray_enabled = server_class.ray_enabled
-    if ray_enabled is not None:
-        return ray_enabled
-    if server_class not in _WARNED_IMPLICIT_RAY_SERVERS:
-        logger.warning(
-            f"{server_class.__module__}.{server_class.__name__} does not declare ray_enabled; "
-            "Ray remains enabled for backward compatibility. Set ray_enabled explicitly because "
-            "a future release will default it to false."
+def _connect_server_to_ray(server_class: type, global_config_dict: DictConfig) -> None:
+    """Join the run's Ray cluster if this server declares that it uses Ray."""
+    if not server_class.ray_enabled:
+        return
+    if _has_injected_global_config_env() and not global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME):
+        # Gym only launches servers without a cluster address when it decided no server needs Ray. Fail instead
+        # of letting initialize_ray start a private cluster in this process and in each of its workers.
+        raise RuntimeError(
+            f"{server_class.__module__}.{server_class.__name__} uses Ray, but this run has no Ray cluster. "
+            f"Declare `ray_enabled = True` on {server_class.__name__} itself so `gym` starts Ray for it, and "
+            "install the `nemo-gym[ray]` extra where `gym` runs."
         )
-        _WARNED_IMPLICIT_RAY_SERVERS.add(server_class)
-    return True
+    initialize_ray()
 
 
 def _declared_ray_enabled(class_node: ast.ClassDef) -> bool | None:
@@ -1220,14 +1230,16 @@ def _declared_ray_enabled(class_node: ast.ClassDef) -> bool | None:
     return None
 
 
-def entrypoint_may_use_ray(entrypoint_fpath: Path) -> bool:
-    """Whether the server started by this entrypoint may connect to Ray.
+def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
+    """The `ray_enabled` declaration of the server an entrypoint starts, read from source.
 
-    The orchestrator must decide whether to start Ray before any server exists, and each server runs in its
-    own venv, so this reads the source instead of importing it. It finds the classes the entrypoint calls
-    `run_webserver()` on and checks their `ray_enabled` declarations. Anything it cannot settle from the
-    source alone, such as an inherited declaration or a class imported from another module, counts as using
-    Ray, which matches the runtime default for undeclared servers.
+    The supervisor must decide whether to start Ray before any server exists, and each server runs in its own
+    venv, so this reads the source instead of importing it. It finds the classes the entrypoint calls
+    `run_webserver()` on and checks their literal `ray_enabled` declarations.
+
+    Returns True when any of them declares True, False when all of them declare False, and None when that can't
+    be settled from the source alone, such as an inherited declaration, a class imported from another module, or
+    an unreadable entrypoint.
     """
     try:
         source = entrypoint_fpath.read_text()
@@ -1235,7 +1247,7 @@ def entrypoint_may_use_ray(entrypoint_fpath: Path) -> bool:
             warnings.simplefilter("ignore", SyntaxWarning)
             tree = ast.parse(source)
     except (OSError, SyntaxError, UnicodeDecodeError):
-        return True
+        return None
 
     classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
     invoked_class_names = {
@@ -1247,15 +1259,20 @@ def entrypoint_may_use_ray(entrypoint_fpath: Path) -> bool:
         and isinstance(node.func.value, ast.Name)
     }
     if not invoked_class_names:
+        return None
+    declarations = [_declared_ray_enabled(classes[name]) if name in classes else None for name in invoked_class_names]
+    if True in declarations:
         return True
-    return any(
-        name not in classes or _declared_ray_enabled(classes[name]) is not False for name in invoked_class_names
-    )
+    if all(declaration is False for declaration in declarations):
+        return False
+    return None
 
 
 class SimpleServer(BaseServer):
     server_client: ServerClient
-    ray_enabled: ClassVar[bool | None] = None
+    # Servers that use Ray must declare `ray_enabled = True` on the class their entrypoint runs. Gym reads it
+    # before launch to decide whether to start Ray, and connects only those servers to it.
+    ray_enabled: ClassVar[bool] = False
 
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
@@ -1265,7 +1282,7 @@ class SimpleServer(BaseServer):
         """Initialise this process's nemo-lens telemetry. Idempotent, once per process.
 
         Every Gym server is its own process with its own providers — there is no parent
-        handle to inherit, only the `NEMO_GYM_OTEL_*` environment the orchestrator
+        handle to inherit, only the `NEMO_GYM_OTEL_*` environment the supervisor
         exported before spawning it. A failure here is logged and swallowed: telemetry
         must never stop a server from serving.
         """
@@ -1437,19 +1454,27 @@ repr(e): {repr(e)}"""
 
     @classmethod
     def run_webserver(cls) -> Optional[FastAPI]:  # pragma: no cover
+        startup = ServerStartupTimeline(
+            getenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, cls.__name__),
+            _telemetry_server_type(cls),
+            worker=is_nemo_gym_fastapi_worker(),
+        )
         global_config_dict = get_global_config_dict()
 
         is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
 
         server_config = cls.load_config_from_global_config()
-        if _server_uses_ray(cls):
-            initialize_ray()
+        startup.mark("load_config")
+        _connect_server_to_ray(cls, global_config_dict)
+        if cls.ray_enabled:
+            startup.mark("init_ray")
 
         server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
             global_config_dict=global_config_dict,
         )
         server = cls(config=server_config, server_client=server_client)
+        startup.mark("init_server")
 
         if global_config_dict[DRY_RUN_KEY_NAME]:
             return
@@ -1460,14 +1485,17 @@ repr(e): {repr(e)}"""
         # Once per process — uvicorn's multi-worker path re-enters run_webserver in each
         # worker via the module import, and init_telemetry is idempotent.
         server.setup_telemetry()
+        startup.mark("init_telemetry")
 
         app = server.setup_webserver()
+        startup.mark("setup_webserver")
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
             from nemo_gym.mcp_auto_exposure import maybe_auto_expose
 
             maybe_auto_expose(server, app)
+            startup.mark("expose_tools_over_mcp")
         server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()
@@ -1492,6 +1520,7 @@ repr(e): {repr(e)}"""
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
         if profiling_config.profiling_enabled:
             server.setup_profiling(app, profiling_config)
+        startup.mark("configure_app")
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
         uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
@@ -1545,7 +1574,15 @@ repr(e): {repr(e)}"""
         else:
             uvicorn_kwargs["app"] = app
 
+        # The main process of a multi-worker server hands the app to Uvicorn workers and never serves it, so it reports now.
+        # Every process that serves the app reports when the app's lifespan startup finishes.
+        if is_main_fastapi_proc and uvicorn_kwargs.get("workers"):
+            startup.report()
+        else:
+            startup.report_when_serving(app)
+
         if is_main_fastapi_proc:
+            startup.announce_serve()
             try:
                 uvicorn.run(**uvicorn_kwargs)
             finally:
