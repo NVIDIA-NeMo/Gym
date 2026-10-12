@@ -3017,7 +3017,8 @@ class RolloutCollectionHelper(BaseModel):
                 async def _timing_heartbeat() -> None:
                     while True:
                         await asyncio.sleep(config.timing_summary_interval_s)
-                        tqdm.write(run_timing.table())
+                        # stdout is block-buffered when written to a log file; flush so the table shows up live.
+                        print(run_timing.table(), flush=True)
 
                 if config.timing_summary_interval_s:
                     timing_heartbeat = asyncio.create_task(_timing_heartbeat())
@@ -3307,7 +3308,7 @@ class RolloutCollectionHelper(BaseModel):
                     timing_heartbeat.cancel()
                 _restore_sigterm(sigterm_previous)
                 if run_timing is not None:
-                    print(run_timing.table())
+                    print(run_timing.table(), flush=True)
                 if isinstance(completion_iterator, _BoundedCompletionIterator):
                     await completion_iterator.aclose()
             finally:
