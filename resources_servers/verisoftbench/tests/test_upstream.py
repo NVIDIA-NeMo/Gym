@@ -613,17 +613,45 @@ class TestVerifyCandidate:
         entry = harness.prepare_entry(dict(ROW))
         assert entry["verif_local_ctxs"].endswith("theorem earlier (n : Nat) : n = n := rfl\n\n")
 
-    def test_prepare_phase_spoofed_daemon_text_in_the_source_is_not_a_fault(self, harness, monkeypatch) -> None:
-        # The healthy container probe drops a suspicion raised during preparation; a
-        # failed read whose stderr merely looks daemon-shaped while the container is
-        # reachable falls through to upstream's fallback, exactly as before.
-        daemon = "Error response from daemon: Container x is not running"
+    def test_recovered_read_fault_during_preparation_is_still_refused(self, harness, monkeypatch) -> None:
+        # The source ``cat`` executes no candidate content, so its daemon stderr is
+        # authoritative — direct evidence that must survive a health probe that succeeds
+        # because the transport recovered a moment later. Discarding it would cache
+        # upstream's degraded fallback context for every later candidate of the task.
+        daemon = "Error response from daemon: Container verisoftbench-lean-test is not running"
+        probes = []
 
-        def run(cmd, **kwargs):
-            if cmd[-1] == "true":
+        def transient(cmd, **kwargs):
+            if cmd[-1] == "true":  # the transport has already recovered
+                probes.append(cmd)
                 return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
             if "cat" in cmd:
                 return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=daemon)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(subprocess, "run", transient)
+            with pytest.raises(UpstreamError, match="refusing to cache"):
+                harness.prepare_entry(dict(ROW))
+        assert probes == []  # direct evidence is never submitted to probe confirmation
+
+        def healthy(cmd, **kwargs):
+            if "cat" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout=SOURCE_FILE, stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", healthy)
+        entry = harness.prepare_entry(dict(ROW))
+        assert entry["verif_local_ctxs"].endswith("theorem earlier (n : Nat) : n = n := rfl\n\n")
+
+    def test_genuinely_absent_source_file_keeps_the_fallback(self, harness, monkeypatch) -> None:
+        # Through the real observed read: a plain failed ``cat`` with no docker transport
+        # marker (the synthetic example tasks' deliberately absent file) records no fault
+        # and falls through to upstream's ``imports + local_ctx`` fallback.
+        def run(cmd, **kwargs):
+            if "cat" in cmd:
+                stderr = f"cat: {cmd[-1]}: No such file or directory"
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=stderr)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
         monkeypatch.setattr(subprocess, "run", run)

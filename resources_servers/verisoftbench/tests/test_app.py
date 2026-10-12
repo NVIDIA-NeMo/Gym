@@ -320,6 +320,31 @@ class TestHarnessFaults:
         r = await verify(server, "<lean4_proof>by GOOD</lean4_proof>")
         assert r.status == "backend_error" and r.reward == 0.0
 
+    @pytest.mark.asyncio
+    async def test_failed_preparation_is_masked_and_never_cached(self, monkeypatch) -> None:
+        # A transport fault while building the task's verification context refuses the
+        # entry (upstream.Harness.prepare_entry raises): the rollout is a masked backend
+        # error, nothing is cached, and the next request prepares again — succeeding once
+        # the backend has recovered, after which the entry is cached as usual.
+        server = make_server()
+        original = FakeHarness.prepare_entry
+        calls = []
+
+        def failing_once(self, row):
+            calls.append(row["id"])
+            if len(calls) == 1:
+                raise app_module.UpstreamError("building the verification context hit a backend fault")
+            return original(self, row)
+
+        monkeypatch.setattr(FakeHarness, "prepare_entry", failing_once)
+        r = await verify(server, "<lean4_proof>by GOOD</lean4_proof>")
+        assert (r.status, r.mask_sample, r.harness_failure) == ("backend_error", True, 1.0)
+        assert "prepare_entry" in r.failure_reason
+        r = await verify(server, "<lean4_proof>by GOOD</lean4_proof>")
+        assert r.status == "verified"
+        r = await verify(server, "<lean4_proof>by GOOD</lean4_proof>")
+        assert r.status == "verified" and calls == [7, 7]  # cached only after success
+
     def test_startup_refuses_a_stopped_container_unless_told_otherwise(self) -> None:
         FakeHarness.running = False
         with pytest.raises(RuntimeError, match="not running"):

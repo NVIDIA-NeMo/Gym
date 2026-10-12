@@ -810,6 +810,10 @@ def _observe_transport_faults(repl: Any, slot: threading.local) -> None:
         # Upstream's helper returns None for any nonzero ``cat`` and loses the result;
         # run the same command and keep that contract (a genuinely absent file has an
         # upstream fallback), but surface a docker transport failure as a backend fault.
+        # Unlike compile output, this command executes no candidate content: daemon/OCI
+        # stderr from a failed read is authoritative, so it is DIRECT evidence — a later
+        # healthy probe must not discard it, or a healed transient would cache degraded
+        # verification context for every later candidate of the task.
         docker_cmd = ["docker", "exec", repl.docker_container, "cat", container_path]
         try:
             result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=timeout)
@@ -818,7 +822,7 @@ def _observe_transport_faults(repl: Any, slot: threading.local) -> None:
             raise
         suspicion = classify_transport_fault(result)
         if suspicion is not None:
-            record(suspicion.kind, f"reading {container_path}: {suspicion.message}")
+            record("direct", f"reading {container_path}: {suspicion.message}")
         return result.stdout if result.returncode == 0 else None
 
     repl._docker_exec = observed_exec
