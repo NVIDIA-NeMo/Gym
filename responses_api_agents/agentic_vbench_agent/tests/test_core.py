@@ -186,6 +186,15 @@ def test_agent_timeout_keeps_the_verifier_score_without_a_trajectory(tmp_path):
     assert result["reward"] == 0.0 and result["status"] == "AGENT_TIMEOUT" and result["trajectory"] == {"steps": []}
 
 
+def test_step_runner_timeout_type_is_recognized(tmp_path):
+    task = fixture_result(tmp_path, reward="0")
+    _write_trial_record(
+        tmp_path,
+        {"task_name": "repair1", "step_results": [{"step_name": "solve", "exception_info": {"exception_type": "TimeoutError"}}]},
+    )
+    assert core.read_result(tmp_path, task)["status"] == "AGENT_TIMEOUT"
+
+
 def test_missing_trajectory_without_timeout_still_rejected(tmp_path):
     task = fixture_result(tmp_path, trajectory=False)
     _write_trial_record(tmp_path, {"task_name": "repair1", "step_results": [{"exception_info": None}]})

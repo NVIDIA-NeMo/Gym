@@ -189,10 +189,17 @@ def judge_crash(trial_dir: Path) -> str | None:
     return lines[-1].strip()[:500] if lines else "judge raised"
 
 
+# Harbor's step runner records the bare ``asyncio.TimeoutError`` from ``wait_for``
+# (type name "TimeoutError"); its single-step path raises ``AgentTimeoutError``.
+_AGENT_TIMEOUT_TYPES = {"AgentTimeoutError", "TimeoutError"}
+
+
 def _agent_timed_out(trial: dict) -> bool:
     infos = [trial.get("exception_info")]
     infos.extend((step or {}).get("exception_info") for step in trial.get("step_results") or [])
-    return any(isinstance(info, dict) and info.get("exception_type") == "AgentTimeoutError" for info in infos)
+    return any(
+        isinstance(info, dict) and info.get("exception_type") in _AGENT_TIMEOUT_TYPES for info in infos
+    )
 
 
 # --- Run-time inputs ---------------------------------------------------------------

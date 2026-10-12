@@ -373,8 +373,12 @@ def main() -> None:
 
 
 DOCKER_CHECK_FAILURE = "Docker daemon is not running"
-HARBOR_START_ATTEMPTS = 4
-HARBOR_START_BACKOFF_SECONDS = 30.0
+# Harbor's start-up probe is a single ``docker info`` under a 10 s timeout. A
+# rootless backend serving ~64 containers answers in 3 s most of the time but
+# stalls past 10 s under load, so the probe fails in bursts; each exhausted retry
+# costs a whole re-dispatched rollout. Defaults keep trying for ~12 minutes.
+HARBOR_START_ATTEMPTS = int(os.environ.get("AGENTIC_VBENCH_HARBOR_START_ATTEMPTS", "12"))
+HARBOR_START_BACKOFF_SECONDS = float(os.environ.get("AGENTIC_VBENCH_HARBOR_START_BACKOFF_SECONDS", "20"))
 
 
 def run_harbor(command: list[str], *, env: dict, jobs_dir: Path, sleep=time.sleep) -> None:
