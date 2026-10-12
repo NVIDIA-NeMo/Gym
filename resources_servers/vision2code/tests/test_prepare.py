@@ -3,11 +3,13 @@
 import base64
 import hashlib
 import json
+from typing import get_args
 
 import pytest
 from PIL import Image
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from resources_servers.vision2code.evaluation import RubricName
 from resources_servers.vision2code.prepare import prepare
 
 
@@ -15,11 +17,12 @@ def test_manifest(tmp_path):
     image = tmp_path / "reference.png"
     Image.new("RGB", (60, 80)).save(image)
     manifest = tmp_path / "manifest.jsonl"
-    names = ["ChemVQA-2K", "DocVQA", "ChartQA", "EEE-Bench"]
+    names = get_args(RubricName)
     manifest.write_text("".join(json.dumps({"id": n, "rubric": n, "image_path": image.name}) + "\n" for n in names))
     output = tmp_path / "tasks.jsonl"
-    assert prepare(manifest, output) == 4
+    assert prepare(manifest, output) == 17
     rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert {row["verifier_metadata"]["rubric"] for row in rows} == set(names)
     for row in rows:
         metadata = row["verifier_metadata"]
         assert (metadata["width"], metadata["height"]) == (60, 80)
@@ -34,7 +37,7 @@ def test_manifest(tmp_path):
         assert "/workspace/output.png" in content[1]["text"]
 
 
-@pytest.mark.parametrize("bad", ["unknown", "ChemVQA-2K-spacing-v1", "duplicate", "corrupt"])
+@pytest.mark.parametrize("bad", ["unknown", "strict-category", "geometry", "graph_algorithms", "duplicate", "corrupt"])
 def test_invalid_manifest_is_atomic(tmp_path, bad):
     image = tmp_path / "reference.png"
     Image.new("RGB", (60, 80)).save(image)

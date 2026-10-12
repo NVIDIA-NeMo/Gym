@@ -6,7 +6,7 @@ experimental: true
 kind: environment
 integration_profile: custom-gym-verifier
 domain: coding
-description: Recreate reference images with Python in Enroot and score them with four Vision2Code rubrics.
+description: Recreate images with Python in Enroot and score them with 16 dataset rubrics or a generic rubric.
 modality: multimodal
 licensing: Apache-2.0
 authors:

@@ -1,4 +1,238 @@
 {
+  "ChartQA": {
+    "dataset": "ChartQA",
+    "guidance": "This is an easy chart recreation dataset. Be strict about preserving both the information and the chart structure. Wrong chart orientation, wrong chart type, crowded labels, illegible text, bad title placement, or legend overlap should all be penalized.",
+    "prompt_notes": [
+      "Preserve recreation structure, not just semantic content.",
+      "If a horizontal chart becomes vertical, preserve some credit for correct data but do not award a perfect score.",
+      "Color scheme matters less than readable text, correct numbers, and faithful structure."
+    ],
+    "categories": [
+      {
+        "id": "numeric_information_fidelity",
+        "label": "Numeric Information Fidelity",
+        "weight": 0.3,
+        "description": "Values, trends, ordering, and answer-relevant chart information are correct."
+      },
+      {
+        "id": "structure_layout_fidelity",
+        "label": "Structure and Layout Fidelity",
+        "weight": 0.3,
+        "description": "Chart type, orientation, title placement, legend placement, and overall chart structure match the reference."
+      },
+      {
+        "id": "text_label_legibility_accuracy",
+        "label": "Text, Label, and Legibility Accuracy",
+        "weight": 0.25,
+        "description": "Labels, numbers, headings, and text remain accurate, legible, and not crowded."
+      },
+      {
+        "id": "cleanliness_completeness",
+        "label": "Cleanliness and Completeness",
+        "weight": 0.15,
+        "description": "The chart is unclipped, readable, and not missing major visible content."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.5,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 3.5,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.6,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "chart_orientation_or_type_mismatch",
+        "cap_to": 3.5,
+        "reason": "A wrong chart orientation or chart type cannot receive full credit even when the core numbers are preserved.",
+        "all_of": [
+          {
+            "id": "numeric_information_fidelity",
+            "min": 3.0
+          },
+          {
+            "id": "structure_layout_fidelity",
+            "max": 2.9
+          }
+        ],
+        "any_of": []
+      },
+      {
+        "type": "material_text_or_numeric_error",
+        "cap_to": 2.5,
+        "reason": "Material numeric or text errors cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "numeric_information_fidelity",
+            "max": 2.4
+          },
+          {
+            "id": "text_label_legibility_accuracy",
+            "max": 2.4
+          }
+        ]
+      }
+    ]
+  },
+  "dvqa": {
+    "dataset": "dvqa",
+    "guidance": "This is an easy chart recreation dataset. Be strict about exact plotted information, faithful structure, and readable labels. Preserve the same chart structure rather than only approximate semantics.",
+    "prompt_notes": [
+      "Wrong orientation, wrong chart structure, or poor label legibility should clearly lower the score.",
+      "Legend placement or labels crowding the plot should be penalized.",
+      "Colors matter less than correct information, structure, and readable text."
+    ],
+    "categories": [
+      {
+        "id": "numeric_information_fidelity",
+        "label": "Numeric Information Fidelity",
+        "weight": 0.3,
+        "description": "Values, trends, grouping, and answer-relevant chart information are correct."
+      },
+      {
+        "id": "structure_layout_fidelity",
+        "label": "Structure and Layout Fidelity",
+        "weight": 0.3,
+        "description": "Chart type, grouping or stacking structure, orientation, title placement, and legend placement match the reference."
+      },
+      {
+        "id": "text_label_legibility_accuracy",
+        "label": "Text, Label, and Legibility Accuracy",
+        "weight": 0.25,
+        "description": "Axis labels, category labels, numbers, and titles remain accurate, legible, and not crowded."
+      },
+      {
+        "id": "cleanliness_completeness",
+        "label": "Cleanliness and Completeness",
+        "weight": 0.15,
+        "description": "The chart is unclipped, readable, and not missing major visible content."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.5,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 3.5,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.6,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "chart_orientation_or_type_mismatch",
+        "cap_to": 3.5,
+        "reason": "A wrong chart orientation or chart type cannot receive full credit even when the core numbers are preserved.",
+        "all_of": [
+          {
+            "id": "numeric_information_fidelity",
+            "min": 3.0
+          },
+          {
+            "id": "structure_layout_fidelity",
+            "max": 2.9
+          }
+        ],
+        "any_of": []
+      },
+      {
+        "type": "material_text_or_numeric_error",
+        "cap_to": 2.5,
+        "reason": "Material numeric or text errors cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "numeric_information_fidelity",
+            "max": 2.4
+          },
+          {
+            "id": "text_label_legibility_accuracy",
+            "max": 2.4
+          }
+        ]
+      }
+    ]
+  },
+  "figureqa": {
+    "dataset": "figureqa",
+    "guidance": "This is an easy chart recreation dataset. Be strict about preserving the same structure, readable labels, and correct plotted information. Semantic preservation alone is not enough for a top score.",
+    "prompt_notes": [
+      "If the data are right but the plot structure changes meaningfully, keep partial credit but not full credit.",
+      "Crowded or illegible labels should be penalized.",
+      "Minor color differences matter less than correct structure and readable information."
+    ],
+    "categories": [
+      {
+        "id": "numeric_information_fidelity",
+        "label": "Numeric Information Fidelity",
+        "weight": 0.3,
+        "description": "Values, trends, series relationships, and answer-relevant information are correct."
+      },
+      {
+        "id": "structure_layout_fidelity",
+        "label": "Structure and Layout Fidelity",
+        "weight": 0.3,
+        "description": "Plot type, orientation, legend placement, series structure, and overall chart layout match the reference."
+      },
+      {
+        "id": "text_label_legibility_accuracy",
+        "label": "Text, Label, and Legibility Accuracy",
+        "weight": 0.25,
+        "description": "Legends, labels, headings, and textual chart content remain accurate and readable."
+      },
+      {
+        "id": "cleanliness_completeness",
+        "label": "Cleanliness and Completeness",
+        "weight": 0.15,
+        "description": "The chart is unclipped, readable, and not missing major visible content."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.5,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 3.5,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.6,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "chart_orientation_or_type_mismatch",
+        "cap_to": 3.5,
+        "reason": "A wrong chart orientation or chart type cannot receive full credit even when the core numbers are preserved.",
+        "all_of": [
+          {
+            "id": "numeric_information_fidelity",
+            "min": 3.0
+          },
+          {
+            "id": "structure_layout_fidelity",
+            "max": 2.9
+          }
+        ],
+        "any_of": []
+      },
+      {
+        "type": "material_text_or_numeric_error",
+        "cap_to": 2.5,
+        "reason": "Material numeric or text errors cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "numeric_information_fidelity",
+            "max": 2.4
+          },
+          {
+            "id": "text_label_legibility_accuracy",
+            "max": 2.4
+          }
+        ]
+      }
+    ]
+  },
   "ChemVQA-2K": {
     "dataset": "ChemVQA-2K",
     "guidance": "Focus on chemistry semantics: molecular structure, chemical symbols, bond lines, and important colored difference markers. Missing a non-core red difference marker should hurt moderately, not collapse the score.",
@@ -120,84 +354,6 @@
       }
     ]
   },
-  "ChartQA": {
-    "dataset": "ChartQA",
-    "guidance": "This is an easy chart recreation dataset. Be strict about preserving both the information and the chart structure. Wrong chart orientation, wrong chart type, crowded labels, illegible text, bad title placement, or legend overlap should all be penalized.",
-    "prompt_notes": [
-      "Preserve recreation structure, not just semantic content.",
-      "If a horizontal chart becomes vertical, preserve some credit for correct data but do not award a perfect score.",
-      "Color scheme matters less than readable text, correct numbers, and faithful structure."
-    ],
-    "categories": [
-      {
-        "id": "numeric_information_fidelity",
-        "label": "Numeric Information Fidelity",
-        "weight": 0.3,
-        "description": "Values, trends, ordering, and answer-relevant chart information are correct."
-      },
-      {
-        "id": "structure_layout_fidelity",
-        "label": "Structure and Layout Fidelity",
-        "weight": 0.3,
-        "description": "Chart type, orientation, title placement, legend placement, and overall chart structure match the reference."
-      },
-      {
-        "id": "text_label_legibility_accuracy",
-        "label": "Text, Label, and Legibility Accuracy",
-        "weight": 0.25,
-        "description": "Labels, numbers, headings, and text remain accurate, legible, and not crowded."
-      },
-      {
-        "id": "cleanliness_completeness",
-        "label": "Cleanliness and Completeness",
-        "weight": 0.15,
-        "description": "The chart is unclipped, readable, and not missing major visible content."
-      }
-    ],
-    "cap_profile": {
-      "critical_any_threshold": 1.5,
-      "critical_any_cap": 2.5,
-      "critical_pair_threshold": 2.5,
-      "critical_pair_cap": 3.5,
-      "top_score_trigger": 4.8,
-      "top_score_min_critical": 4.6,
-      "top_score_cap": 4.5
-    },
-    "extra_caps": [
-      {
-        "type": "chart_orientation_or_type_mismatch",
-        "cap_to": 3.5,
-        "reason": "A wrong chart orientation or chart type cannot receive full credit even when the core numbers are preserved.",
-        "all_of": [
-          {
-            "id": "numeric_information_fidelity",
-            "min": 3.0
-          },
-          {
-            "id": "structure_layout_fidelity",
-            "max": 2.9
-          }
-        ],
-        "any_of": []
-      },
-      {
-        "type": "material_text_or_numeric_error",
-        "cap_to": 2.5,
-        "reason": "Material numeric or text errors cap the score on this dataset.",
-        "all_of": [],
-        "any_of": [
-          {
-            "id": "numeric_information_fidelity",
-            "max": 2.4
-          },
-          {
-            "id": "text_label_legibility_accuracy",
-            "max": 2.4
-          }
-        ]
-      }
-    ]
-  },
   "EEE-Bench": {
     "dataset": "EEE-Bench",
     "revision": "eee_background_v1",
@@ -266,6 +422,716 @@
             "max": 2.4
           }
         ]
+      }
+    ]
+  },
+  "GEOQA_8K_R1V": {
+    "dataset": "GEOQA_8K_R1V",
+    "guidance": "These are geometry-heavy figures. Be strict about structural precision, labels, markers, numbers, and whether each annotation clearly belongs to the right object.",
+    "prompt_notes": [
+      "Slight label shifts are acceptable if the association is still unambiguous.",
+      "Ambiguous or wrong label association should be penalized strongly.",
+      "Precise geometry matters more than decorative drawing style."
+    ],
+    "categories": [
+      {
+        "id": "geometric_structure_precision",
+        "label": "Geometric Structure Precision",
+        "weight": 0.35,
+        "description": "Shapes, relations, and the core geometric construction remain precise and faithful."
+      },
+      {
+        "id": "numbers_labels_markers",
+        "label": "Numbers, Labels, and Markers",
+        "weight": 0.3,
+        "description": "Lengths, angles, labels, givens, and geometric markers remain accurate and readable."
+      },
+      {
+        "id": "association_placement_precision",
+        "label": "Association and Placement Precision",
+        "weight": 0.2,
+        "description": "Annotations are placed clearly enough that their target edge, angle, or point is unambiguous."
+      },
+      {
+        "id": "readability_completeness",
+        "label": "Readability and Completeness",
+        "weight": 0.15,
+        "description": "The figure is legible, unclipped, and not missing major visible content."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.5,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 3.5,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.6,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "geometric_relation_or_association_error",
+        "cap_to": 2.5,
+        "reason": "Wrong geometric relations or ambiguous label association cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "geometric_structure_precision",
+            "max": 2.4
+          },
+          {
+            "id": "association_placement_precision",
+            "max": 2.4
+          }
+        ]
+      }
+    ]
+  },
+  "Geoperception": {
+    "dataset": "Geoperception",
+    "guidance": "These are geometry-heavy figures. Be strict about structure, labels, markers, and whether annotations clearly belong to the correct object or angle.",
+    "prompt_notes": [
+      "Small label shifts are acceptable only if the target remains unambiguous.",
+      "Wrong or ambiguous geometric association should be penalized strongly.",
+      "Precise relation fidelity matters more than decorative style."
+    ],
+    "categories": [
+      {
+        "id": "geometric_structure_precision",
+        "label": "Geometric Structure Precision",
+        "weight": 0.35,
+        "description": "Shapes, intersections, and the core geometric relations remain precise and faithful."
+      },
+      {
+        "id": "numbers_labels_markers",
+        "label": "Numbers, Labels, and Markers",
+        "weight": 0.3,
+        "description": "Point labels, givens, numeric annotations, and geometric markers remain accurate and readable."
+      },
+      {
+        "id": "association_placement_precision",
+        "label": "Association and Placement Precision",
+        "weight": 0.2,
+        "description": "Annotations are positioned clearly enough that their intended target is unambiguous."
+      },
+      {
+        "id": "readability_completeness",
+        "label": "Readability and Completeness",
+        "weight": 0.15,
+        "description": "The figure is legible, unclipped, and not missing major visible content."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.5,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 3.5,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.6,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "geometric_relation_or_association_error",
+        "cap_to": 2.5,
+        "reason": "Wrong geometric relations or ambiguous label association cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "geometric_structure_precision",
+            "max": 2.4
+          },
+          {
+            "id": "association_placement_precision",
+            "max": 2.4
+          }
+        ]
+      }
+    ]
+  },
+  "geometry3k": {
+    "dataset": "geometry3k",
+    "guidance": "These are geometry problem diagrams. Be strict about shape, relation fidelity, markers, labels, and whether annotations clearly belong to the correct geometric object.",
+    "prompt_notes": [
+      "Do not give high scores to diagrams that are only approximately correct.",
+      "Angle or length text can move slightly, but only if the association remains obvious.",
+      "Missing or ambiguous markers should be penalized strongly."
+    ],
+    "categories": [
+      {
+        "id": "geometric_structure_precision",
+        "label": "Geometric Structure Precision",
+        "weight": 0.35,
+        "description": "Shapes, relations, and the core geometric construction remain precise and faithful."
+      },
+      {
+        "id": "numbers_labels_markers",
+        "label": "Numbers, Labels, and Markers",
+        "weight": 0.3,
+        "description": "Lengths, angles, point labels, and geometric markers remain accurate and readable."
+      },
+      {
+        "id": "association_placement_precision",
+        "label": "Association and Placement Precision",
+        "weight": 0.2,
+        "description": "Annotations are placed clearly enough that their target edge, angle, or point is unambiguous."
+      },
+      {
+        "id": "readability_completeness",
+        "label": "Readability and Completeness",
+        "weight": 0.15,
+        "description": "The figure is legible, unclipped, and not missing major visible content."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.5,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 3.5,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.6,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "geometric_relation_or_association_error",
+        "cap_to": 2.5,
+        "reason": "Wrong geometric relations or ambiguous label association cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "geometric_structure_precision",
+            "max": 2.4
+          },
+          {
+            "id": "association_placement_precision",
+            "max": 2.4
+          }
+        ]
+      }
+    ]
+  },
+  "Graph-Algorithms": {
+    "dataset": "Graph-Algorithms",
+    "guidance": "Be strict about graph topology, directions, ordering, and labels. These diagrams can be dense, so stay fair when the source itself is messy, but do not forgive wrong graph structure.",
+    "prompt_notes": [
+      "Exact topology and direction semantics matter more than cosmetic layout differences.",
+      "Treat wrong ordering, weights, or labels as important errors.",
+      "If the source graph is itself very cluttered, avoid over-penalizing ambiguity that already exists in the reference."
+    ],
+    "categories": [
+      {
+        "id": "graph_structure_fidelity",
+        "label": "Graph Structure Fidelity",
+        "weight": 0.4,
+        "description": "Nodes, edges, and overall graph topology remain correct."
+      },
+      {
+        "id": "ordering_direction_semantics",
+        "label": "Ordering and Direction Semantics",
+        "weight": 0.25,
+        "description": "Directions, ordering, and weights or edge semantics remain faithful."
+      },
+      {
+        "id": "label_number_precision",
+        "label": "Label and Number Precision",
+        "weight": 0.2,
+        "description": "Node ids, edge labels, and numeric annotations remain accurate and readable."
+      },
+      {
+        "id": "readability_completeness",
+        "label": "Readability and Completeness",
+        "weight": 0.15,
+        "description": "The graph remains readable and is not missing major visible content."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.5,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 3.5,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.6,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "graph_topology_or_direction_error",
+        "cap_to": 2.5,
+        "reason": "Wrong graph topology, ordering, or direction semantics cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "graph_structure_fidelity",
+            "max": 2.4
+          },
+          {
+            "id": "ordering_direction_semantics",
+            "max": 2.4
+          }
+        ]
+      }
+    ]
+  },
+  "GraphVQA-Swift": {
+    "dataset": "GraphVQA-Swift",
+    "guidance": "Be strict about graph structure, label precision, and correct attribute-to-node or attribute-to-edge binding. Treat wrong label ordering or wrong attribute attachment as important errors.",
+    "prompt_notes": [
+      "Topology and label precision matter more than cosmetic layout differences.",
+      "Attributes such as colors or other markers must remain attached to the correct graph elements.",
+      "If the source is visually messy, be fair about ambiguity already present in the reference."
+    ],
+    "categories": [
+      {
+        "id": "graph_structure_fidelity",
+        "label": "Graph Structure Fidelity",
+        "weight": 0.35,
+        "description": "Node-edge structure and the overall graph topology remain faithful."
+      },
+      {
+        "id": "label_number_precision",
+        "label": "Label and Number Precision",
+        "weight": 0.3,
+        "description": "Labels, counts, and numeric annotations remain accurate and attached to the correct elements."
+      },
+      {
+        "id": "attribute_mapping_fidelity",
+        "label": "Attribute Mapping Fidelity",
+        "weight": 0.2,
+        "description": "Colors or other attributes remain attached to the correct nodes or edges."
+      },
+      {
+        "id": "readability_completeness",
+        "label": "Readability and Completeness",
+        "weight": 0.15,
+        "description": "The graph remains readable and is not missing major visible content."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.5,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 3.5,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.6,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "graph_label_or_attribute_error",
+        "cap_to": 2.5,
+        "reason": "Wrong label ordering or wrong attribute binding cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "label_number_precision",
+            "max": 2.4
+          },
+          {
+            "id": "attribute_mapping_fidelity",
+            "max": 2.4
+          }
+        ]
+      }
+    ]
+  },
+  "matplotlib": {
+    "dataset": "matplotlib",
+    "guidance": "This is a coding-heavy recreation dataset with ground-truth code behind the reference. Be strict about layout, plot elements, ticks, annotations, and rendering fidelity. Unknown library-specific styling should not cause over-penalization when the core figure is otherwise correct.",
+    "prompt_notes": [
+      "This dataset should generally score high only when the recreation is genuinely close.",
+      "Wrong layout or missing major plot elements are important errors.",
+      "Pure style misses from unknown libraries matter less than missing structure or annotations."
+    ],
+    "categories": [
+      {
+        "id": "layout_composition_fidelity",
+        "label": "Layout and Composition Fidelity",
+        "weight": 0.3,
+        "description": "Axes, subplot layout, framing, and composition match the reference."
+      },
+      {
+        "id": "plot_element_fidelity",
+        "label": "Plot Element Fidelity",
+        "weight": 0.25,
+        "description": "Lines, bars, markers, patches, and other major plotted elements are faithful."
+      },
+      {
+        "id": "text_ticks_annotations",
+        "label": "Text, Ticks, and Annotations",
+        "weight": 0.25,
+        "description": "Titles, labels, tick text, legends, and annotations are present, accurate, and well placed."
+      },
+      {
+        "id": "style_rendering_fidelity",
+        "label": "Style and Rendering Fidelity",
+        "weight": 0.2,
+        "description": "Line styles, fonts, colors, and overall rendering feel resemble the reference."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.5,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 3.5,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.6,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "major_plot_layout_failure",
+        "cap_to": 3.0,
+        "reason": "Wrong layout or missing major plot elements cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "layout_composition_fidelity",
+            "max": 2.4
+          },
+          {
+            "id": "plot_element_fidelity",
+            "max": 2.4
+          }
+        ]
+      }
+    ]
+  },
+  "OlympiadBench": {
+    "dataset": "OlympiadBench",
+    "guidance": "These figures are harder and often denser than basic geometry. Be strict about the problem-relevant structure, labels, givens, and symbols, but stay fair when the source itself is complex or visually noisy.",
+    "prompt_notes": [
+      "Judge whether the recreated figure would support the same downstream reasoning problem.",
+      "Wrong core problem structure matters more than decorative style.",
+      "Because these are harder figures, do not over-penalize small cosmetic differences that do not change meaning."
+    ],
+    "categories": [
+      {
+        "id": "problem_structure_semantics",
+        "label": "Problem Structure and Semantics",
+        "weight": 0.35,
+        "description": "The core problem diagram and its essential relations remain faithful."
+      },
+      {
+        "id": "labels_numbers_symbols",
+        "label": "Labels, Numbers, and Symbols",
+        "weight": 0.25,
+        "description": "Given values, labels, and symbols remain accurate and readable."
+      },
+      {
+        "id": "spatial_precision",
+        "label": "Spatial Precision",
+        "weight": 0.2,
+        "description": "Placement and construction remain faithful enough for the same reasoning task."
+      },
+      {
+        "id": "readability_completeness",
+        "label": "Readability and Completeness",
+        "weight": 0.2,
+        "description": "The diagram remains readable, unclipped, and complete enough to use."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.8,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 4.0,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.4,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "wrong_core_problem_semantics",
+        "cap_to": 2.5,
+        "reason": "Wrong core problem semantics cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "problem_structure_semantics",
+            "max": 2.4
+          }
+        ]
+      }
+    ]
+  },
+  "Physics": {
+    "dataset": "Physics",
+    "guidance": "Focus on physical setup, object placement, vectors, labels, and numerical givens. Wrong force direction or physically inconsistent placement should be penalized strongly.",
+    "prompt_notes": [
+      "Check vector direction, labels, and scene consistency carefully.",
+      "The object should sit correctly in the depicted setup, for example on a slope rather than floating away from it.",
+      "Minor cosmetic style differences matter less than physical correctness."
+    ],
+    "categories": [
+      {
+        "id": "physical_setup_fidelity",
+        "label": "Physical Setup Fidelity",
+        "weight": 0.35,
+        "description": "The overall scene and essential physical setup remain faithful."
+      },
+      {
+        "id": "vectors_labels_numbers",
+        "label": "Vectors, Labels, and Numbers",
+        "weight": 0.3,
+        "description": "Force arrows, directions, angles, labels, and values remain accurate and readable."
+      },
+      {
+        "id": "object_geometry_consistency",
+        "label": "Object Geometry Consistency",
+        "weight": 0.2,
+        "description": "Object placement and geometry remain physically consistent with the reference."
+      },
+      {
+        "id": "readability_completeness",
+        "label": "Readability and Completeness",
+        "weight": 0.15,
+        "description": "The diagram is readable, unclipped, and not missing major visible content."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.8,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 4.0,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.4,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "vector_or_physical_consistency_error",
+        "cap_to": 2.5,
+        "reason": "Wrong vector direction or physically inconsistent placement cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "vectors_labels_numbers",
+            "max": 2.4
+          },
+          {
+            "id": "object_geometry_consistency",
+            "max": 2.4
+          }
+        ]
+      }
+    ]
+  },
+  "spatialvlm_qa": {
+    "dataset": "spatialvlm_qa",
+    "guidance": "This is a hard 3D spatial reconstruction dataset. Judge object identity, spatial relations, depth, and scene completion carefully. Stay fair on difficulty, but do not ignore wrong core spatial relations.",
+    "prompt_notes": [
+      "Correct objects but a flattened 2D recreation should land around the low-to-mid range rather than score highly.",
+      "Wrong core spatial relation such as front versus behind is a major error.",
+      "Depth, volume, and 3D cues matter more here than on flat diagram datasets."
+    ],
+    "categories": [
+      {
+        "id": "object_shape_identity_fidelity",
+        "label": "Object Shape and Identity Fidelity",
+        "weight": 0.25,
+        "description": "The right objects, basic shapes, and counts are present."
+      },
+      {
+        "id": "spatial_relation_correctness",
+        "label": "Spatial Relation Correctness",
+        "weight": 0.35,
+        "description": "Relative positions such as left or right, above or below, and front or behind are correct."
+      },
+      {
+        "id": "three_d_depth_rendering",
+        "label": "3D Depth Rendering",
+        "weight": 0.25,
+        "description": "Depth, volume, shadows, and 3D reconstruction cues are preserved."
+      },
+      {
+        "id": "color_scene_completeness",
+        "label": "Color and Scene Completeness",
+        "weight": 0.15,
+        "description": "The scene remains reasonably complete, with major colors and scene elements preserved."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.2,
+      "critical_any_cap": 3.0,
+      "critical_pair_threshold": 2.2,
+      "critical_pair_cap": 4.0,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.2,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "flattened_two_d_scene",
+        "cap_to": 2.5,
+        "reason": "A scene that preserves objects but collapses the reference into a flat 2D depiction cannot score highly.",
+        "all_of": [
+          {
+            "id": "object_shape_identity_fidelity",
+            "min": 3.0
+          },
+          {
+            "id": "three_d_depth_rendering",
+            "max": 2.4
+          }
+        ],
+        "any_of": []
+      },
+      {
+        "type": "wrong_core_spatial_relation",
+        "cap_to": 2.0,
+        "reason": "Wrong core spatial relations cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "spatial_relation_correctness",
+            "max": 2.0
+          }
+        ]
+      }
+    ]
+  },
+  "ChemVQA-2K-spacing-v1": {
+    "dataset": "ChemVQA-2K-spacing-v1",
+    "guidance": "Focus on chemistry semantics: molecular structure, chemical symbols, bond lines, and important colored difference markers. Missing a non-core red difference marker should hurt moderately, not collapse the score. Correct chemistry alone is insufficient for 5: local label and bond clearance must also match the reference.",
+    "prompt_notes": [
+      "Atom symbols such as O, OH, Cl, charges, and bond identities are critical.",
+      "Preserve important colored markers or difference lines when they are semantically meaningful.",
+      "Small orientation changes matter less than structure and symbol correctness.",
+      "Inspect the tightest atom-symbol/bond junction, atom-index placement, and charge/subscript group. In the readability rationale, name the tightest location and compare its clearance with the reference.",
+      "New crowding includes bonds touching or crossing glyphs, indices touching bonds or atom symbols, and charges/subscripts merging with neighboring labels. Penalize added crowding even if the chemistry is inferable.",
+      "Readability anchors: 5 = no added crowding; 4.5-4.9 = slightly reduced but clear separation; at most 4 = clear new crowding or contact; at most 3 = overlap obscures a symbol, charge, index, or bond order.",
+      "Do not penalize density already present in the reference, harmless font/scale changes, or intended bond junctions. Lower symbol or bond scores too only when their own accuracy or legibility is affected.",
+      "Any reported spacing defect must lower readability below 5. Clear new crowding caps the final score at 4.5; obscuring overlap caps it at 4.0. Any category below 5 prevents a rounded perfect score."
+    ],
+    "categories": [
+      {
+        "id": "molecular_structure_fidelity",
+        "label": "Molecular Structure Fidelity",
+        "weight": 0.4,
+        "description": "Connectivity, overall structure, and core arrangement of the molecule are correct."
+      },
+      {
+        "id": "chemical_symbol_accuracy",
+        "label": "Chemical Symbol Accuracy",
+        "weight": 0.3,
+        "description": "Atom labels, charges, and bond notation remain accurate and readable."
+      },
+      {
+        "id": "bond_line_marker_fidelity",
+        "label": "Bond Line and Marker Fidelity",
+        "weight": 0.2,
+        "description": "Bond lines, highlighting, color-coded difference markers, and related visual indicators are preserved."
+      },
+      {
+        "id": "readability_completeness",
+        "label": "Readability and Completeness",
+        "weight": 0.1,
+        "description": "The structure is complete and unclipped; atom symbols, indices, charges, subscripts, and adjacent bonds retain clear separation relative to the reference."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.8,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 4.0,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.4,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "structure_or_symbol_failure",
+        "cap_to": 2.5,
+        "reason": "Wrong molecular structure or wrong chemical symbols cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "molecular_structure_fidelity",
+            "max": 2.4
+          },
+          {
+            "id": "chemical_symbol_accuracy",
+            "max": 2.4
+          }
+        ]
+      },
+      {
+        "type": "chemistry_no_rounded_perfect",
+        "cap_to": 4.9,
+        "reason": "A category below 5 cannot round to a perfect chemistry rating.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "molecular_structure_fidelity",
+            "max": 4.9
+          },
+          {
+            "id": "chemical_symbol_accuracy",
+            "max": 4.9
+          },
+          {
+            "id": "bond_line_marker_fidelity",
+            "max": 4.9
+          },
+          {
+            "id": "readability_completeness",
+            "max": 4.9
+          }
+        ]
+      },
+      {
+        "type": "chemistry_added_crowding",
+        "cap_to": 4.5,
+        "reason": "Clear added crowding prevents a near-perfect chemistry rating.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "readability_completeness",
+            "max": 4.0
+          }
+        ]
+      },
+      {
+        "type": "chemistry_obscuring_overlap",
+        "cap_to": 4.0,
+        "reason": "Overlap obscuring notation limits the chemistry rating.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "readability_completeness",
+            "max": 3.0
+          }
+        ]
+      }
+    ]
+  },
+  "generic": {
+    "rubric_dataset": "generic",
+    "categories": [
+      {
+        "id": "core_information_fidelity",
+        "label": "Core Information Fidelity",
+        "weight": 0.25,
+        "description": "Preserves important visible information, values, objects, relations, or semantics."
+      },
+      {
+        "id": "structure_layout_fidelity",
+        "label": "Structure and Layout Fidelity",
+        "weight": 0.25,
+        "description": "Preserves overall layout, geometry, chart or diagram structure, document structure, and spatial arrangement."
+      },
+      {
+        "id": "text_annotation_accuracy",
+        "label": "Text and Annotation Accuracy",
+        "weight": 0.25,
+        "description": "Preserves readable labels, numbers, symbols, legends, annotations, and text."
+      },
+      {
+        "id": "visual_completeness_cleanliness",
+        "label": "Visual Completeness and Cleanliness",
+        "weight": 0.25,
+        "description": "The output is complete, unclipped, readable, nonblank, and visually clean."
       }
     ]
   }
