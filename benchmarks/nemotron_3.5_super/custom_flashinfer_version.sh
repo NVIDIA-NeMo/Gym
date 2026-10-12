@@ -7,7 +7,7 @@
 #   SLURM_ACCOUNT=my_account BASE_IMAGE=/lustre/images/custom-vllm.sqsh \
 #     FLASHINFER_BRANCH=my-branch bash custom_flashinfer_version.sh /lustre/images/custom-flashinfer.sqsh
 # Optional: FLASHINFER_REPO, EXPECTED_FLASHINFER_SHA, SLURM_PARTITION,
-# SLURM_QOS, SLURM_TIME (default 04:00:00), MAX_JOBS (default 4),
+# SLURM_QOS, SLURM_TIME (default 04:00:00), SLURM_CPUS_PER_TASK (default 64), MAX_JOBS (default 32),
 # FLASHINFER_NVCC_THREADS (default 1), FLASHINFER_CUDA_ARCH_LIST (10.0a or 10.0f).
 # FLASHINFER_BUILD_MODE=auto (default), reuse (require compatible official
 # binaries), or source (rebuild everything); FLASHINFER_CUBIN_DOWNLOAD_THREADS=32.
@@ -20,6 +20,9 @@ export FLASHINFER_REPO="${FLASHINFER_REPO:-https://github.com/bxyu-nvidia/flashi
 export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-10.0a}"
 export FLASHINFER_BUILD_MODE="${FLASHINFER_BUILD_MODE:-auto}"
 export FLASHINFER_CUBIN_DOWNLOAD_THREADS="${FLASHINFER_CUBIN_DOWNLOAD_THREADS:-32}"
+export SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-64}"
+export MAX_JOBS="${MAX_JOBS:-32}"
+export FLASHINFER_NVCC_THREADS="${FLASHINFER_NVCC_THREADS:-1}"
 case "${FLASHINFER_BUILD_MODE}" in
     auto|reuse|source) ;;
     *) echo "ERROR: FLASHINFER_BUILD_MODE must be auto, reuse, or source." >&2; exit 2 ;;
@@ -165,8 +168,6 @@ PY
     uv pip install --no-cache --system --no-deps --no-build-isolation .
     export FLASHINFER_JIT_CACHE_PROVIDER_ARCH="${FLASHINFER_CUDA_ARCH_LIST}"
     export FLASHINFER_JIT_CACHE_PROVIDER_ARCHS="${FLASHINFER_CUDA_ARCH_LIST}"
-    export MAX_JOBS="${MAX_JOBS:-4}"
-    export FLASHINFER_NVCC_THREADS="${FLASHINFER_NVCC_THREADS:-1}"
     if [[ "${FLASHINFER_INSTALL_MODE}" == reuse ]]; then
         echo ">>> Reuse official cubins and SM100a JIT-cache wheels"
         uv pip install --system --no-deps --only-binary=:all: \
@@ -550,6 +551,7 @@ if ! srun \
     --partition="${SLURM_PARTITION:-batch}" \
     --job-name=super-vl-evals-flashinfer \
     --nodes=1 --ntasks=1 --segment=1 \
+    --cpus-per-task="${SLURM_CPUS_PER_TASK}" \
     --gpus-per-node=4 --mem=0 \
     --time="${SLURM_TIME:-04:00:00}" \
     --container-image="${BASE_IMAGE}" \
