@@ -343,6 +343,36 @@ async def test_ambiguous_siblings_are_unresolved(store):
 
 
 @pytest.mark.asyncio
+async def test_repeated_fingerprint_selects_the_deepest_matching_context(store):
+    """A reasoning-only response may repeat its parent's assistant fingerprint."""
+    await _record_call_1(store)
+    tokens_2 = TOKENS_1 + [901]
+    chain_hash_2 = compute_chain_hash(CHAIN_HASH_1, [901])
+    await store.record(
+        _commit(
+            _call_record(
+                "c2",
+                parent_call_id="c1",
+                prev_len=len(TOKENS_1),
+                delta_len=1,
+                chain_hash=chain_hash_2,
+                cumulative_hash=hash_token_ids(tokens_2),
+            ),
+            [USER_1, ASSISTANT_1, USER_2],
+            [{"role": "assistant", "content": ""}],
+            staging_chain=("r1/c1", "r1/c2"),
+        )
+    )
+
+    match = (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match
+
+    assert match is not None
+    assert match.model_call_id == "c2"
+    assert match.prev_len == len(tokens_2)
+    assert match.staging_chain == ("r1/c1", "r1/c2")
+
+
+@pytest.mark.asyncio
 async def test_commit_ordering_parent_resolvable_only_after_record(store):
     # Before the ledger row exists, the follow-up cannot resolve a parent.
     assert (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match is None
@@ -356,7 +386,7 @@ async def test_commit_ordering_parent_resolvable_only_after_record(store):
 
 
 @pytest.mark.asyncio
-async def test_file_store_reports_why_a_ledger_row_did_not_match(tmp_path):
+async def test_file_store_rebases_when_a_known_continuation_changes_context(tmp_path):
     store = FileLineageStore(tmp_path)
     missing = await store.resolve("r1", [USER_1, ASSISTANT_SEEDED, USER_2])
     assert missing.status == ParentResolutionStatus.UNRESOLVED
@@ -367,8 +397,18 @@ async def test_file_store_reports_why_a_ledger_row_did_not_match(tmp_path):
         "r1",
         [{"role": "user", "content": "changed"}, ASSISTANT_1, USER_2],
     )
-    assert changed_context.status == ParentResolutionStatus.UNRESOLVED
-    assert changed_context.reason == "ledger_context_digest_mismatch"
+    assert changed_context.status == ParentResolutionStatus.ROOT
+    assert changed_context.reason == "ledger_context_rebased"
+
+    context = await _admit(
+        store,
+        [{"role": "user", "content": "changed"}, ASSISTANT_1, USER_2],
+    )
+    assert context.capture_admission is not None
+    assert context.capture_admission.mode == "text"
+    assert context.capture_admission.parent_call_id is None
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.failures == []
 
 
 @pytest.mark.asyncio
