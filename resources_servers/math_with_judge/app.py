@@ -129,14 +129,18 @@ _ANSWER_LABELS = (
     r"جواب",
 )
 _ANSWER_LABEL_RE = re.compile(
-    rf"(?i)(?<!\w)(?:\*\*|__)?(?:the[ \t]+)?(?:{'|'.join(_ANSWER_LABELS)})(?!\w)"
-    r"[ \t]*(?:\*\*|__)?[ \t]*(?:(?:is|है|আছে|છે|ಆಗಿದೆ|ആണ്|आहे|ਹੈ|ہے)[ \t]*)?(?:[:：=]|-[ \t]+)?[ \t]*"
+    r"(?im)^[ \t]*+(?:\#{1,6}[ \t]+|[-*][ \t]+)?"
+    r"(?:(?:therefore|thus|hence|so|इसलिए)[,،]?[ \t]+)?"
+    rf"(?:\*\*|__)?(?:the[ \t]+)?(?:{'|'.join(_ANSWER_LABELS)})(?!\w)"
+    r"[ \t]*+(?:\*\*|__)?[ \t]*+"
+    r"(?:(?:is|है|আছে|છે|ಆಗಿದೆ|ആണ്|आहे|ਹੈ|ہے)(?!\w)[ \t]*+[:：=]?|[:：=]|-[ \t]+|(?=\r?$))"
+    r"[ \t]*+(?:\*\*|__)?[ \t]*+"
 )
 _OUTER_MATH_DELIMITERS = ((r"\(", r"\)"), (r"\[", r"\]"), ("$$", "$$"), ("$", "$"))
 
 
 def _clean_answer_candidate(candidate: str) -> Optional[str]:
-    """Remove presentation-only wrappers from one final-answer line."""
+    """Remove Markdown wrappers while retaining math delimiters for the verifier."""
     candidate = candidate.strip()
     # Bound cleanup before running regexes, including for explicitly labelled answers.
     if len(candidate) > 512:
@@ -146,28 +150,41 @@ def _clean_answer_candidate(candidate: str) -> Optional[str]:
     candidate = re.sub(r"^[ \t]*(?:[:：=]|-[ \t]+)[ \t]*", "", candidate)
     candidate = re.sub(r"(?:\*\*|__)+$", "", candidate.rstrip()).strip()
 
-    for opening, closing in _OUTER_MATH_DELIMITERS:
-        if (
-            candidate.startswith(opening)
-            and candidate.endswith(closing)
-            and len(candidate) > len(opening) + len(closing)
-        ):
-            candidate = candidate[len(opening) : -len(closing)].strip()
-            break
-
     candidate = candidate.rstrip(".|।۔").strip()
     return candidate or None
+
+
+def _extract_leading_answer_block(response: str) -> Optional[str]:
+    """Select one line or one complete math block immediately following a label."""
+    response = response.lstrip()
+    if not response:
+        return None
+    first_line = response.splitlines()[0]
+    for opening, closing in _OUTER_MATH_DELIMITERS:
+        if response.startswith(opening) and closing not in first_line[len(opening) :]:
+            end = response.find(closing, len(opening), 512)
+            if end < 0:
+                return None
+            return _clean_answer_candidate(response[: end + len(closing)])
+    return _clean_answer_candidate(first_line)
 
 
 def _extract_unboxed_answer_candidate(response: str) -> Optional[str]:
     """Extract an explicitly marked or concise final answer without using the reference answer."""
     matches = list(_ANSWER_LABEL_RE.finditer(response))
     if matches:
-        tail = response[matches[-1].end() :]
-        for line in tail.splitlines():
-            candidate = _clean_answer_candidate(line)
-            if candidate:
-                return candidate
+        return _extract_leading_answer_block(response[matches[-1].end() :])
+
+    # A final display-math block can span lines even without an answer heading.
+    tail = response.rstrip().rstrip(".|।۔").rstrip()
+    for opening, closing in _OUTER_MATH_DELIMITERS:
+        if tail.endswith(closing):
+            start = tail.rfind(opening, max(0, len(tail) - 512), len(tail) - len(closing))
+            if start < 0:
+                return None
+            if "\n" in tail[start:]:
+                return _clean_answer_candidate(tail[start:])
+            break
 
     nonempty_lines = [line for line in response.splitlines() if line.strip()]
     if not nonempty_lines:
@@ -184,6 +201,17 @@ def _extract_unboxed_answer_candidate(response: str) -> Optional[str]:
     if (has_math_signal and len(candidate.split()) <= 50) or short_text_answer:
         return candidate
     return None
+
+
+def _prepare_unboxed_verification_response(candidate: str) -> str:
+    """Preserve mathematical syntax without treating explanatory prose as LaTeX."""
+    # Bare symbolic expressions and tuples need math delimiters. Restrict this
+    # conversion to math tokens, so words and Indic units stay outside LaTeX.
+    if re.fullmatch(r"(?:\\[A-Za-z]+|[A-Za-z](?![A-Za-z])|[\d\s{}\[\]().,+*/^=<>_|!%:;−±-])+", candidate):
+        candidate = f"${candidate}$"
+    # The anchor gives a leading answer precedence over numbers in an explanation.
+    # Only the selected span is passed here; earlier answers are never reintroduced.
+    return f"Final answer is {candidate}"
 
 
 def _normalize_unicode_digits(response: str) -> str:
@@ -371,7 +399,9 @@ Example output: "My final verdict is different [[A!=B]]"."""
             answer_candidate = _extract_unboxed_answer_candidate(verification_response)
             # Grade only the selected final answer. Parsing the full response can
             # award credit for a conflicting intermediate number or earlier label.
-            verification_response = "\\boxed{" + answer_candidate + "}" if answer_candidate else ""
+            verification_response = (
+                _prepare_unboxed_verification_response(answer_candidate) if answer_candidate else ""
+            )
         if answer_candidate is None or not answer_candidate.strip():
             return 0.0, None, 0.0, None
 

@@ -20,8 +20,11 @@ using the shared math agent, prompt, and symbolic verifier used by English
   Indic enables `format_tolerant_answer_extraction` to accept explicit final-answer
   formats beyond `\boxed{}`; this setting is isolated from the English verifier.
   For an unboxed response, only the selected final-answer candidate is graded;
-  earlier intermediate answers cannot earn credit. Unboxed candidate lines longer
-  than 512 characters after trimming whitespace are rejected before cleanup.
+  earlier intermediate answers cannot earn credit. Answer labels must introduce
+  an answer line or heading, rather than occur inside ordinary prose. Multiline
+  math blocks remain intact, and accompanying prose or units are parsed as text
+  instead of being boxed as part of a mathematical expression. Unboxed candidates
+  longer than 512 characters after trimming whitespace are rejected before cleanup.
 - Metric: accuracy (pass@1), with one response per problem by default. Report
   results by language; pooled accuracy averages across the selected languages.
   For combined runs, join rollouts to prepared rows using `_ng_task_index` to

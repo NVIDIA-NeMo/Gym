@@ -93,6 +93,10 @@ def _extract_long_whitespace_answers(result_connection: Any) -> None:
         response = "x" + " " * 64_000 + "y"
         result_connection.send(
             [_extract_unboxed_answer_candidate(prefix + response) for prefix in ("", "Answer: ", "उत्तर: ")]
+            + [
+                _extract_unboxed_answer_candidate(prefix + " " * 64_000 + "by substitution")
+                for prefix in ("Answer", "**Answer**", "उत्तर")
+            ]
         )
     finally:
         result_connection.close()
@@ -186,7 +190,7 @@ class TestApp:
 
     def test_extract_unboxed_answer_candidate(self) -> None:
         assert _extract_unboxed_answer_candidate("Work\n**Answer:** 18") == "18"
-        assert _extract_unboxed_answer_candidate("Work\n### Final answer\n\\(\\frac{1}{2}\\)") == r"\frac{1}{2}"
+        assert _extract_unboxed_answer_candidate("Work\n### Final answer\n\\(\\frac{1}{2}\\)") == r"\(\frac{1}{2}\)"
         assert _extract_unboxed_answer_candidate("गणना\n**उत्तर:** 42") == "42"
         assert _extract_unboxed_answer_candidate("इसलिए उत्तर है 1।") == "1"
         assert _extract_unboxed_answer_candidate("इस प्रकार न्यूनतम मान 9 है।") == "इस प्रकार न्यूनतम मान 9 है"
@@ -212,7 +216,7 @@ class TestApp:
             # A process deadline catches event-loop-blocking regex regressions
             # without hanging the test worker. The old cleanup takes tens of seconds.
             assert parent.poll(3.0), "Answer extraction blocked on a long whitespace run"
-            assert parent.recv() == [None, None, None]
+            assert parent.recv() == [None] * 6
         finally:
             if process.is_alive():
                 process.terminate()
@@ -222,6 +226,28 @@ class TestApp:
     @mark.parametrize(
         ("generated", "expected", "reward", "extracted"),
         [
+            ("Answer: 18 (since x must be positive)", "18", 1.0, "18"),
+            ("उत्तर: 18 सेमी", "18", 1.0, "18"),
+            ("Answer: 18\nCorrection.\nउत्तर: 19 सेमी", "18", 0.0, "19"),
+            ("Answer: 18\nCorrection.\nउत्तर: 19 सेमी", "19", 1.0, "19"),
+            ("Intermediate $18$\nFinal answer: 19 (not $18$)", "18", 0.0, "19"),
+            ("Intermediate $18$\nFinal answer: 19 (not $18$)", "19", 1.0, "19"),
+            ("Final Answer\n$$\n\\frac{1}{2}\n$$", r"\frac{1}{2}", 1.0, "1/2"),
+            ("### Final Answer\n\\[\n\\frac{1}{2}\n\\]", r"\frac{1}{2}", 1.0, "1/2"),
+            ("Intermediate $18$\nFinal Answer\n$$\n19\n$$", "18", 0.0, "19"),
+            ("Intermediate $18$\nFinal Answer\n$$\n19\n$$", "19", 1.0, "19"),
+            ("Work\n$$\n\\frac{1}{2}\n$$", r"\frac{1}{2}", 1.0, "1/2"),
+            ("Work\n\\[\n\\frac{1}{2}\n\\]", r"\frac{1}{2}", 1.0, "1/2"),
+            ("We check the answer by substitution:\n2 * 3 = 6\nHence x = 3.", "3", 1.0, "3"),
+            ("We check the answer by substitution:\n2 * 3 = 6\nHence x = 3.", "6", 0.0, "3"),
+            ("Answer by substitution:\n2 * 3 = 6\nHence x = 3.", "3", 1.0, "3"),
+            ("Answer: p - q", "p - q", 1.0, "p - q"),
+            ("Answer: (3, 4)", "(3,4)", 1.0, "Interval.open(3, 4)"),
+            ("Answer: $3$ and $4$", "3,4", 1.0, "{3, 4}"),
+            ("Work\n$3$ and $4$", "3,4", 1.0, "{3, 4}"),
+            ("Intermediate $18$\nFinal Answer\n$$\n19", "18", 0.0, None),
+            ("Intermediate $18$\nFinal Answer\n$$\n$$", "18", 0.0, None),
+            ("Intermediate $18$\nFinal Answer\n" + "x" * 513 + "\n18", "18", 0.0, None),
             ("Answer: 18\nCorrection.\nउत्तर: 19", "18", 0.0, "19"),
             ("Answer: 18\nCorrection.\nउत्तर: 19", "19", 1.0, "19"),
             ("Intermediate $18$\nFinal answer: no solution", "18", 0.0, None),
