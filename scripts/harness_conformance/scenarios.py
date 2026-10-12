@@ -3,7 +3,9 @@
 
 """Versioned, model-independent requests used by every harness preset."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+
+from nemo_gym.health.types import Verdict
 
 
 SUITE = "harness-p0-probes/v1"
@@ -22,6 +24,7 @@ class Scenario:
     terminal_error: bool = False
     expected_reward: float = 1.0
     steps: bool = True
+    health_expectations: dict[str, Verdict] = field(default_factory=dict)
 
     def task(self) -> dict:
         """Only the task reaches the harness; expectations stay in the runner."""
@@ -38,9 +41,28 @@ class Scenario:
 SCENARIOS = (
     Scenario("tool_success", "Two successful tool executions, changed history, reasoning and a final answer."),
     Scenario("tool_failure", "A shell command exits 7, followed by recovery and a final answer.", tool_exit_code=7),
-    Scenario("usage_omitted", "The provider omits usage; counts must remain unknown.", usage=False),
-    Scenario("retry_429", "Two identical requests receive 429 before recovery.", http_errors=(429, 429)),
-    Scenario("retry_500", "A model HTTP 500 is followed by recovery.", http_errors=(500,)),
+    Scenario(
+        "usage_omitted",
+        "The provider omits usage; counts must remain unknown.",
+        usage=False,
+        health_expectations={
+            "model_call_missing_token_counts": "unhealthy",
+            # The fixture deliberately supplies no counts to reconcile.
+            "rollout_token_count_mismatch": "unobserved",
+        },
+    ),
+    Scenario(
+        "retry_429",
+        "Two identical requests receive 429 before recovery.",
+        http_errors=(429, 429),
+        # A failed attempt has no tokens to account for, and the retry recovers: healthy.
+    ),
+    Scenario(
+        "retry_500",
+        "A model HTTP 500 is followed by recovery.",
+        http_errors=(500,),
+        # A failed attempt has no tokens to account for, and the retry recovers: healthy.
+    ),
     Scenario(
         "model_error",
         "A terminal model HTTP 400 with an error body and no response ID.",
@@ -50,6 +72,11 @@ SCENARIOS = (
         terminal_error=True,
         expected_reward=0.0,
         steps=False,  # The first request fails permanently; no model decision is returned.
+        health_expectations={
+            "rollout_ended_on_failed_model_call": "unhealthy",
+            # No successful decision or provider usage exists to reconcile.
+            "rollout_token_count_mismatch": "unobserved",
+        },
     ),
     Scenario("verifier_failure", "A completed trajectory receives a known zero reward.", expected_reward=0.0),
 )

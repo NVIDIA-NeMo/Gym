@@ -540,6 +540,18 @@ class TestMetricRows:
             warnings.simplefilter("error")
             build_metric_rows(baseline, [])
 
+    def test_compare_ignores_token_only_repeat_for_quality_coverage_warning(self, tmp_path):
+        repeats = [
+            {"sample_count": 2, "missing_count": 0},
+            {"_ng_rollout_index": 1, "mean_completion_tokens": 30.0, "mean_tokens_per_turn": 10.0},
+        ]
+        baseline = _load(tmp_path, "base", [_entry(repeat_level_metrics=repeats)])
+        candidate = _load(tmp_path, "candidate", [_entry()], role="candidate")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            compare_runs(baseline, [candidate])
+
     def test_welch_delta_ci_supports_unequal_variance_and_repeat_counts(self, tmp_path):
         baseline_values = [0.0, 0.1, 0.2]
         candidate_values = [0.1, 0.5, 0.9, 1.3]
@@ -1389,10 +1401,52 @@ class TestReportEdgeCases:
         markdown = render_markdown(self._result(tmp_path, baseline, candidate))
         # No key metrics were recorded, and the one-sided metric has no delta to show.
         assert "No key metrics were recorded for this agent." in markdown
+        assert "mean_completion_tokens" not in markdown
+        assert "mean_tokens_per_turn" not in markdown
         assert "| `pass@1/accuracy` | — | — | 10.00 | — | — | — |" in markdown
         # A zero baseline has no meaningful relative change.
         assert "| `mean/reward` | +0.5000 (n/a) |" in markdown
         assert "### Metrics present in only one run" in markdown
+
+    def test_token_rows_use_existing_repeat_intervals_and_welch_delta(self, tmp_path):
+        def token_entry(completion, per_turn, completion_ci, per_turn_ci):
+            metrics = {"mean/reward": 0.5}
+            repeat_rows = []
+            for name, values, ci in (
+                ("mean_completion_tokens", completion, completion_ci),
+                ("mean_tokens_per_turn", per_turn, per_turn_ci),
+            ):
+                metrics[f"mean_across_repeats/{name}"] = sum(values) / len(values)
+                metrics[f"ci_low_95_across_repeats/{name}"] = ci[0]
+                metrics[f"ci_high_95_across_repeats/{name}"] = ci[1]
+            for index, (tokens, ratio) in enumerate(zip(completion, per_turn)):
+                repeat_rows.append(
+                    {"_ng_rollout_index": index, "mean_completion_tokens": tokens, "mean_tokens_per_turn": ratio}
+                )
+            return _entry(agent_metrics=metrics, key_metrics={"mean/reward": 0.5}, repeat_level_metrics=repeat_rows)
+
+        result = self._result(
+            tmp_path,
+            token_entry([100, 110, 120], [50, 55, 60], (100, 120), (50, 60)),
+            token_entry([130, 140, 150], [60, 70, 80], (120, 160), (55, 85)),
+        )
+        rows = {row.metric: row for row in result.comparisons[0].metrics}
+        for name, baseline_point, delta, base_ci, cand_ci in (
+            ("mean_completion_tokens", 110.0, 30.0, (100, 120), (120, 160)),
+            ("mean_tokens_per_turn", 55.0, 15.0, (50, 60), (55, 85)),
+        ):
+            row = rows[name]
+            assert row.is_key_metric
+            assert row.baseline.value == pytest.approx(baseline_point)
+            assert row.candidates[0].value == pytest.approx(baseline_point + delta)
+            assert (row.baseline.ci_low, row.baseline.ci_high) == base_ci
+            assert (row.candidates[0].ci_low, row.candidates[0].ci_high) == cand_ci
+            assert row.candidates[0].delta == pytest.approx(delta)
+            assert row.candidates[0].delta_ci_low < delta < row.candidates[0].delta_ci_high
+
+        markdown = render_markdown(result)
+        assert "| `mean_completion_tokens` | +30.00 (+27.3%) |" in markdown
+        assert "| `mean_tokens_per_turn` | +15.00 (+27.3%) |" in markdown
 
     def test_continuous_mode_section(self, tmp_path):
         baseline = _entry(groups=[_group(0, [0.20]), _group(1, [0.90])])

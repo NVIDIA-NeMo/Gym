@@ -21,10 +21,8 @@ import yaml
 from nemo_gym.harness_capabilities.cli import digest_file
 
 from .provider import Probe
+from .registry import HARNESSES
 from .scenarios import SCENARIOS
-
-
-HARNESSES = {"opencode": "OpenCodeAgent", "pi": "PiAgent", "codex": "CodexAgent", "hermes": "HermesAgent"}
 
 
 class _Server(uvicorn.Server):
@@ -156,7 +154,12 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             server_client=client,
         )
         try:
-            apps = (probe.model_app(), probe.resources_app(), agent.setup_webserver(), environment.setup_webserver())
+            apps = (
+                probe.model_app(assistant_message_header=client.assistant_message_header("policy_model")),
+                probe.resources_app(),
+                agent.setup_webserver(),
+                environment.setup_webserver(),
+            )
             for app, sock in zip(apps, sockets, strict=True):
                 server = _Server(uvicorn.Config(app, log_level="warning", timeout_graceful_shutdown=3))
                 servers.append(server)

@@ -10,9 +10,11 @@ from typing import ClassVar, Literal
 
 from jsonschema import Draft202012Validator
 
+from nemo_gym.health.types import Verdict
+
 
 PriorityTier = Literal["P0", "P1", "P2"]
-Kind = Literal["schema", "semantic", "behavioral"]
+Kind = Literal["schema", "semantic", "behavioral", "health"]
 
 
 @dataclass(frozen=True)
@@ -85,3 +87,15 @@ class BehavioralCheck(_PredicateCheck):
     """Evaluate behavior or evidence against independent controlled observations."""
 
     kind: ClassVar[Kind] = "behavioral"
+
+
+@dataclass(frozen=True, kw_only=True)
+class HealthCheck(Check):
+    """Match an individual Gym health result against the scenario's expectation."""
+
+    expected: Verdict
+    actual: Verdict | None
+    kind: ClassVar[Kind] = "health"
+
+    def evaluate(self) -> Evaluation:
+        return Evaluation(self.actual is not None and self.actual == self.expected)

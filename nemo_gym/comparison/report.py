@@ -50,7 +50,7 @@ CI_FOOTNOTE = (
     "otherwise the metric value. "
     "Delta CI = two-sided independent-sample 95% Welch t-interval for candidate minus baseline, "
     "computed from the named metric's values in each run's `repeat_level_metrics`. "
-    f"`{MISSING}` means the required interval data was unavailable: "
+    f"`{MISSING}` means a point value or interval was unavailable: "
     "delta intervals require at least 2 finite repeat-level values on each side. "
     "Baseline/candidate CI = 95% t-interval of the per-repeat mean across repeats, read verbatim from "
     "`ci_{low,high}_95_across_repeats/<metric>` in `*_aggregate_metrics.json`."
@@ -292,8 +292,8 @@ def render_markdown(result: ComparisonResult) -> str:
             lines += [
                 "### Metrics present in only one run",
                 "",
-                "Metric names embed the repeat count (`pass@1[avg-of-3]` vs `pass@1[avg-of-5]`), so runs "
-                "collected with different `--num-repeats` will not line these up.",
+                "A metric may be unavailable in one run; different `--num-repeats` can also change "
+                "pass@k metric names.",
                 "",
                 *(
                     f"- `{row.metric}` — {', '.join(row.present_in) or 'no numeric value on either side'}"

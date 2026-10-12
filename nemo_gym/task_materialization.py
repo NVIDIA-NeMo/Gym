@@ -16,6 +16,10 @@ from nemo_gym.global_config import (
 )
 
 
+# Row fields that hold a task's own id, in precedence order.
+TASK_ID_FIELDS = ("task_id", "problem_id", "instance_id")
+
+
 def materialize_task(
     row: Mapping[str, JsonValue], *, taskset: str, task_index: int | None = None
 ) -> dict[str, JsonValue]:
@@ -29,7 +33,7 @@ def materialize_task(
     if "task_input" in row or isinstance(row.get("task_id"), Mapping):
         raise ValueError("Expected a flat dataset row, not an already materialized task")
     task_id = next(
-        (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
+        (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
         None,
     )
     if task_id is None:

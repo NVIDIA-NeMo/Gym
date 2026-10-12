@@ -129,7 +129,8 @@ dependencies = [
     # FastAPI: Used for server infrastructure
     # Updated Thu Mar 26, 2026 with fastapi==0.135.2
     # License: MIT https://github.com/fastapi/fastapi/blob/25a3697cedc6e7dfb84e93c8ff965801486f00f4/LICENSE
-    "fastapi",
+    # 0.142.x exports telemetry a second time next to nemo-lens; 0.143 made that opt-in (fastapi/fastapi#16476)
+    "fastapi!=0.142.*",
 
     # MCP Python SDK: Used by Gym-owned Streamable HTTP MCP resources servers.
     # Updated Tue Jul 29, 2026 with mcp>=1.28.1,<2
@@ -258,7 +259,19 @@ dependencies = [
 
 [project.optional-dependencies]
 all = [
-    "nemo-gym[dev,mlflow,sandbox,wandb]",
+    "nemo-gym[dev,mlflow,ray,sandbox,wandb]",
+]
+
+# Ray: needed where `gym` runs and in server venvs whose servers declare `ray_enabled = True`.
+# Ray is also still a core dependency above; this extra lets servers and installs request it explicitly
+# before it moves out of the core dependencies (#3669).
+ray = [
+    # Updated Mon Sep 28, 2026 with ray[default]>=2.58.0 (CVE mitigation: httpcore5 bundled in ray_dist.jar)
+    # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
+    "ray[default]>=2.58.0",
+    # Ray Serve's HAProxy ingress imports jinja2 but ray[default] doesn't declare it; see the core entry above.
+    # License: BSD 3-Clause https://github.com/pallets/jinja/blob/main/LICENSE.txt
+    "jinja2>=3.1",
 ]
 
 # MLflow is used both by the rollout exporter (nemo_gym/exporters/mlflow.py) and by the
