@@ -30,41 +30,38 @@ probe job fails or is cancelled, making the result visible in the workflow job l
 
 To enforce P0 before merging, add the fixed **Harness conformance P0** check name to
 the repository's required checks. Until configured, it remains optional. It is
-independent of the existing `Nemo_CICD_Test` gate. This workflow does not regenerate
-documentation.
+independent of the existing `Nemo_CICD_Test` gate. Completed scheduled/manual main
+runs trigger the Fern publisher, which consumes the same retained measurements.
 
 Use the diagnostic command below to reproduce a warning at the reported commit.
 When registering another harness in `registry.HARNESSES`, provide its pinned runtime
 installation in `ci.install_runtime` as well as its episode configuration.
 
-## Regenerate the documentation table
+## Automatically published documentation
 
-From a checkout matching a full Gym commit SHA, rebuild the TE table in
-[`reference/trajectory-capabilities`](../../fern/versions/latest/pages/reference/trajectory-capabilities.mdx):
+Scheduled CI runs every four hours. A separate job with read-only credentials
+renders the measured checks with the shared table renderer and uploads one `harness-conformance-docs-<run>-<attempt>`
+artifact. Fern inserts that block into the main capability matrix; the page and
+table are the published output. No generation report is retained for this job.
+
+Periodic publication uses the triggering run and attempt, independently of its P0
+conclusion. An unavailable artifact stops that update. Ordinary docs pushes, tags,
+and manual publications warn and show an unavailable measurement instead, so an
+artifact outage does not block other docs work. Released pages stay pinned.
+
+To insert the same CI-rendered block locally (Python and authenticated `gh`):
 
 ```bash
-python -m scripts.harness_conformance.table \
-    --commit <40-character-gym-commit-sha> \
-    --output /absolute/path/to/new-conformance-results
+python -m scripts.harness_conformance.publish --run-id <main-ci-run-id> --strict
 ```
 
-The command runs runner unit tests, each selected harness's adapter unit tests,
-checker unit tests, and then the full live scenario suite. The checkout must match
-the source commit before and after validation (Git and jj are supported). There is
-no test-skip switch. Failed, empty, or entirely skipped test suites, dependency or
-execution errors, and checker errors leave the previous table unchanged. Evidence
-FAILs are valid results and appear in the generated table.
-
-All four harnesses are selected by default. Repeat `--harness NAME` to select a
-subset; omitted harnesses show **Not run**, and no previous row is reused. Runtime
-versions/source hashes, test results, scenario results, and artifact hashes are
-saved in a content-addressed JSON report under `fern/assets/trajectory-capabilities/`.
-Test logs and full probe artifacts are retained in the new `--output` directory.
-Commit the generated page and report after the source commit to keep its pin stable.
-
-Checker and runner unit tests use the synthetic contracts in
-`tests/unit_tests/harness_capabilities/synthetic.py`. Actual harness capabilities
-are measured by probes; expected harness verdicts do not belong in library tests.
+For a local preview with fresh tests and probes, install the selected harnesses
+and use `python -m scripts.harness_conformance.table --commit <full-source-sha>
+--output <new-directory>`. The checkout must match that revision; validation or
+execution errors preserve the previous table, while measured failures are shown.
+The local command retains diagnostic logs and `generation_report.json` in
+`--output`. Generated page changes are for preview; the docs publisher supplies
+current results at build time.
 
 ## Run diagnostic probes
 
