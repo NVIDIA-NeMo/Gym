@@ -10,8 +10,9 @@ from pathlib import Path
 
 import pytest
 import yaml
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile, load_manifest
 from nemo_gym.environment.scaffold import (
     ScaffoldConflictError,
@@ -20,7 +21,12 @@ from nemo_gym.environment.scaffold import (
     scaffold_resources_server,
 )
 from nemo_gym.environment.validation import validate_environment
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.global_config import (
+    ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME,
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+)
+from nemo_gym.rollout_collection import _environment_servers_by_agent
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
 
 
@@ -461,10 +467,7 @@ def test_reuse_reports_unreadable_inputs(tmp_path: Path, setup: str, message: st
         )
 
 
-def test_reuse_supports_a_bundled_default_agent(tmp_path: Path) -> None:
-    _synthetic_verifier(
-        tmp_path,
-        extra_config="""
+_BUNDLED_AGENT = """
 shared_agent:
   responses_api_agents:
     simple_agent:
@@ -472,8 +475,40 @@ shared_agent:
       resources_server: {type: resources_servers, name: shared_resources}
       model_server: {type: responses_api_models, name: policy_model}
       datasets: []
-""",
+"""
+
+_BUNDLED_ENVIRONMENT_SERVER = """
+shared_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server: {type: responses_api_agents, name: shared_agent}
+"""
+
+
+def _resolve_workloads(root: Path, *asset_dirs: Path) -> DictConfig:
+    """Resolve scaffolded workload configs as a run does, failing on any agent left without a server."""
+    initial = OmegaConf.merge(
+        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        {
+            "config_paths": [str(asset_dir / "config.yaml") for asset_dir in asset_dirs],
+            ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME: True,
+        },
     )
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(root))
+        return GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=initial,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+
+def test_reuse_supports_a_bundled_default_agent(tmp_path: Path) -> None:
+    _synthetic_verifier(tmp_path, extra_config=_BUNDLED_AGENT)
 
     result = scaffold_environment(
         root=tmp_path,
@@ -487,6 +522,242 @@ shared_agent:
     assert "_inherit_from: shared_agent" in result.asset_dir.joinpath("config.yaml").read_text(encoding="utf-8")
     assert load_manifest(result.asset_dir / "manifest.yaml").reward.range == (-1, 1)
     validate_environment(result.asset_dir / "manifest.yaml")
+    # The reused config fronts no agent, so the scaffold declares a fresh server for the renamed one.
+    resolved = _resolve_workloads(tmp_path, result.asset_dir)
+    assert _environment_servers_by_agent(resolved) == {"reused_agent": ["reused_environment_server"]}
+
+
+@pytest.mark.parametrize(
+    "agent_ref",
+    ["{type: responses_api_agents, name: shared_agent}", "{name: shared_agent}"],
+    ids=["typed", "untyped"],
+)
+def test_reuse_moves_the_bundled_environment_server_with_its_agent(tmp_path: Path, agent_ref: str) -> None:
+    _synthetic_verifier(
+        tmp_path,
+        extra_config=_BUNDLED_AGENT
+        + _BUNDLED_ENVIRONMENT_SERVER.replace("{type: responses_api_agents, name: shared_agent}", agent_ref),
+    )
+
+    result = scaffold_environment(
+        root=tmp_path,
+        kind="benchmark",
+        name="reused",
+        reuse_verifier="shared",
+        reward_range=(0, 1),
+        higher_is_better=True,
+    )
+
+    config = yaml.safe_load(result.asset_dir.joinpath("config.yaml").read_text(encoding="utf-8"))
+    assert config["reused_environment_server"] == {
+        "_inherit_from": "shared_environment_server",
+        "environment_servers": {"legacy_agent": {"agent_server": {"name": "reused_agent"}}},
+    }
+    validate_environment(result.asset_dir / "manifest.yaml")
+    resolved = _resolve_workloads(tmp_path, result.asset_dir)
+    # Rollout collection needs exactly one server per agent; the moved agent and server leave no stale names.
+    assert _environment_servers_by_agent(resolved) == {"reused_agent": ["reused_environment_server"]}
+    assert "shared_agent" not in resolved
+    assert "shared_environment_server" not in resolved
+
+
+def test_reuse_inherits_under_a_catalog_name_when_the_workload_is_named_after_its_scorer(tmp_path: Path) -> None:
+    _synthetic_verifier(tmp_path, extra_config=_BUNDLED_AGENT + _BUNDLED_ENVIRONMENT_SERVER)
+
+    # A workload named after its scorer would share the scorer's agent and environment-server names.
+    result = scaffold_environment(
+        root=tmp_path,
+        kind="benchmark",
+        name="shared",
+        reuse_verifier="shared",
+        reward_range=(0, 1),
+        higher_is_better=True,
+    )
+
+    config = yaml.safe_load(result.asset_dir.joinpath("config.yaml").read_text(encoding="utf-8"))
+    assert config["shared_catalog_environment_server"] == {
+        "_inherit_from": "shared_environment_server",
+        "environment_servers": {"legacy_agent": {"agent_server": {"name": "shared_catalog_agent"}}},
+    }
+    assert "shared_environment_server" not in config
+    validate_environment(result.asset_dir / "manifest.yaml")
+    resolved = _resolve_workloads(tmp_path, result.asset_dir)
+    assert _environment_servers_by_agent(resolved) == {"shared_catalog_agent": ["shared_catalog_environment_server"]}
+
+
+def test_workloads_reusing_one_scorer_each_keep_their_own_environment_server(tmp_path: Path) -> None:
+    _synthetic_verifier(tmp_path, extra_config=_BUNDLED_AGENT + _BUNDLED_ENVIRONMENT_SERVER)
+    asset_dirs = [
+        scaffold_environment(
+            root=tmp_path,
+            kind="benchmark",
+            name=name,
+            reuse_verifier="shared",
+            reward_range=(0, 1),
+            higher_is_better=True,
+        ).asset_dir
+        for name in ("shared", "first", "second")
+    ]
+
+    # Every config inherits the same scorer server in one run; none may take over another's agent,
+    # including the workload named after the scorer.
+    resolved = _resolve_workloads(tmp_path, *asset_dirs)
+    assert _environment_servers_by_agent(resolved) == {
+        "shared_catalog_agent": ["shared_catalog_environment_server"],
+        "first_agent": ["first_environment_server"],
+        "second_agent": ["second_environment_server"],
+    }
+
+
+_COLLIDING_SCORER = """
+{resources_instance}:
+  resources_servers:
+    shared:
+      entrypoint: app.py
+      domain: other
+shared_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server: {{type: resources_servers, name: {resources_instance}}}
+reused_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server: {{type: responses_api_agents, name: shared_agent}}
+"""
+
+
+def test_reuse_moves_a_server_named_like_the_workload_under_a_catalog_name(tmp_path: Path) -> None:
+    _synthetic_verifier(tmp_path)
+    config_path = tmp_path / "resources_servers/shared/configs/shared.yaml"
+    config_path.write_text(_COLLIDING_SCORER.format(resources_instance="shared_resources"), encoding="utf-8")
+
+    result = scaffold_environment(
+        root=tmp_path,
+        kind="environment",
+        name="reused",
+        reuse_verifier="shared",
+        reward_range=(0, 1),
+        higher_is_better=True,
+    )
+
+    config = yaml.safe_load(result.asset_dir.joinpath("config.yaml").read_text(encoding="utf-8"))
+    assert config["reused_catalog_environment_server"]["_inherit_from"] == "reused_environment_server"
+    resolved = _resolve_workloads(tmp_path, result.asset_dir)
+    assert _environment_servers_by_agent(resolved) == {"reused_agent": ["reused_catalog_environment_server"]}
+
+
+def test_reuse_rejects_a_workload_name_whose_server_names_are_both_taken(tmp_path: Path) -> None:
+    _synthetic_verifier(tmp_path)
+    config_path = tmp_path / "resources_servers/shared/configs/shared.yaml"
+    config_path.write_text(
+        _COLLIDING_SCORER.format(resources_instance="reused_catalog_environment_server"), encoding="utf-8"
+    )
+
+    with pytest.raises(ScaffoldError, match="name 'reused' collides with instances in reused verifier 'shared'"):
+        scaffold_environment(
+            root=tmp_path,
+            kind="environment",
+            name="reused",
+            reuse_verifier="shared",
+            reward_range=(0, 1),
+            higher_is_better=True,
+        )
+
+    assert not (tmp_path / "environments/reused").exists()
+
+
+def test_reuse_rejects_a_bundled_agent_behind_several_environment_servers(tmp_path: Path) -> None:
+    second_server = _BUNDLED_ENVIRONMENT_SERVER.replace("shared_environment_server:", "other_environment_server:")
+    _synthetic_verifier(tmp_path, extra_config=_BUNDLED_AGENT + _BUNDLED_ENVIRONMENT_SERVER + second_server)
+
+    with pytest.raises(
+        ScaffoldError,
+        match="at most one environment server, found: other_environment_server, shared_environment_server; compose",
+    ):
+        scaffold_environment(
+            root=tmp_path,
+            kind="environment",
+            name="reused",
+            reuse_verifier="shared",
+            reward_range=(0, 1),
+            higher_is_better=True,
+        )
+
+    assert not (tmp_path / "environments/reused").exists()
+
+
+@pytest.mark.parametrize("directive", ["_inherit_from", "_copy"])
+def test_reuse_rejects_a_bundled_environment_server_that_is_itself_derived(tmp_path: Path, directive: str) -> None:
+    derived_server = f"""
+shared_environment_server:
+  {directive}: base_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server: {{type: responses_api_agents, name: shared_agent}}
+"""
+    _synthetic_verifier(tmp_path, extra_config=_BUNDLED_AGENT + derived_server)
+
+    with pytest.raises(
+        ScaffoldError, match="'shared_environment_server' is itself derived with _inherit_from or _copy"
+    ):
+        scaffold_environment(
+            root=tmp_path,
+            kind="environment",
+            name="reused",
+            reuse_verifier="shared",
+            reward_range=(0, 1),
+            higher_is_better=True,
+        )
+
+    assert not (tmp_path / "environments/reused").exists()
+
+
+@pytest.mark.parametrize("name", ["reused", "shared"])
+def test_reuse_rejects_renaming_an_environment_server_that_tasksets_route_to(tmp_path: Path, name: str) -> None:
+    routes = "\nenvironment_server_routes:\n  shared_taskset: shared_environment_server\n"
+    _synthetic_verifier(tmp_path, extra_config=_BUNDLED_AGENT + _BUNDLED_ENVIRONMENT_SERVER + routes)
+
+    # The workload always inherits the server under a new name, even when named after the scorer.
+    with pytest.raises(
+        ScaffoldError,
+        match="routes tasksets to environment server 'shared_environment_server', which reuse would rename; compose",
+    ):
+        scaffold_environment(
+            root=tmp_path,
+            kind="environment",
+            name=name,
+            reuse_verifier="shared",
+            reward_range=(0, 1),
+            higher_is_better=True,
+        )
+
+    assert not (tmp_path / f"environments/{name}").exists()
+
+
+@pytest.mark.parametrize("scorer", ["example_single_tool_call", "equivalence_llm_judge"])
+def test_reuse_of_a_shipped_scorer_validates_and_routes(tmp_path: Path, scorer: str) -> None:
+    # Shipped scorers bundle a simple_agent behind an environment server; the documented reuse
+    # command must produce a workload that validates and routes to exactly one server.
+    result = scaffold_environment(
+        root=tmp_path,
+        kind="benchmark",
+        name="reused",
+        profile="custom-gym-verifier",
+        reuse_verifier=scorer,
+        reward_range=(0, 1),
+        higher_is_better=True,
+    )
+
+    config = yaml.safe_load(result.asset_dir.joinpath("config.yaml").read_text(encoding="utf-8"))
+    # Pin the inherit path: if the scorer stopped bundling its server, this test should notice.
+    assert config["reused_environment_server"]["_inherit_from"] == f"{scorer}_environment_server"
+    validate_environment(result.asset_dir / "manifest.yaml")
+    resolved = _resolve_workloads(tmp_path, result.asset_dir)
+    assert _environment_servers_by_agent(resolved) == {"reused_agent": ["reused_environment_server"]}
+    assert f"{scorer}_simple_agent" not in resolved
+    assert f"{scorer}_environment_server" not in resolved
 
 
 def test_reuse_supports_every_profile(tmp_path: Path) -> None:

@@ -124,6 +124,41 @@ def test_manifest_accepts_external_agent_without_resources(tmp_path: Path) -> No
     assert all(c.role != "resources_server" for c in report.components)
 
 
+@pytest.mark.parametrize("tasksets", [["demo:test"], ["demo:test", "demo:other"], ["demo:test", None]])
+def test_manifest_resolves_taskset_datasets_through_environment(tmp_path: Path, tasksets: list[str | None]) -> None:
+    path = _asset(tmp_path)
+    config_path = path.with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    agent = config["demo_agent"]["responses_api_agents"]["simple_agent"]
+    (dataset,) = agent.pop("datasets")
+    config["demo_resources"]["resources_servers"]["demo"]["datasets"] = [
+        dict(dataset, name=f"dataset-{index}", taskset=taskset) for index, taskset in enumerate(tasksets)
+    ]
+    if None not in tasksets:
+        del agent["resources_server"]
+    config["demo_environment_server"] = {
+        "environment_servers": {
+            "single_agent_turn": {
+                "entrypoint": "app.py",
+                "agent_server": {"type": "responses_api_agents", "name": "demo_agent"},
+                "resources_server": {"type": "resources_servers", "name": "demo_resources"},
+            }
+        }
+    }
+    config["environment_server_routes"] = {taskset: "demo_environment_server" for taskset in tasksets if taskset}
+    config_path.write_text(yaml.safe_dump(config))
+
+    report = validate_environment(path, sync=True)
+    assert next(c.name for c in report.components if c.role == "agent_server") == "demo_agent"
+    assert len(report.datasets) == len(tasksets)
+
+    # Every declared taskset must be checked, even if another route already resolved.
+    del config["environment_server_routes"]["demo:test"]
+    config_path.write_text(yaml.safe_dump(config))
+    with pytest.raises(EnvironmentValidationError, match="No Environment Server route for taskset 'demo:test'"):
+        validate_environment(path)
+
+
 def _manifest(*, kind: str = "environment", profile: str = "custom-gym-verifier") -> dict:
     root = f"{'benchmarks' if kind == 'benchmark' else 'environments'}/demo"
     dataset = {

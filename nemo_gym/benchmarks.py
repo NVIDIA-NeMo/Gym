@@ -24,7 +24,7 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.config_types import BenchmarkDatasetConfig, ConfigError
+from nemo_gym.config_types import BenchmarkDatasetConfig, ConfigError, DatasetConfig
 from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values, discover_components
 from nemo_gym.global_config import (
     POLICY_MODEL_KEY_NAME,
@@ -32,6 +32,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     resolve_dataset_agent,
+    taskset_environment_server_name,
 )
 
 
@@ -43,9 +44,12 @@ MANIFEST_FILENAME = "manifest.yaml"
 class BenchmarkConfig(BaseModel):
     name: str  # this is a dataset name, not the config name (they are usually the same)
     path: Path
-    agent_name: str
+    # None when the dataset routes by taskset to an Environment Server that fronts several agents.
+    agent_name: Optional[str]
     num_repeats: int
-    dataset: BenchmarkDatasetConfig
+    dataset: BenchmarkDatasetConfig | DatasetConfig
+    # The Environment Server a taskset dataset routes to; None for datasets routed by agent.
+    environment_server: Optional[str] = None
 
     @classmethod
     def from_config_path(cls, config_path: Path, *, strict: bool = True) -> "Optional[BenchmarkConfig]":
@@ -109,7 +113,9 @@ class BenchmarkConfig(BaseModel):
         dataset = datasets[0]
 
         try:
-            agent_name = resolve_dataset_agent(global_config_dict, declaring_instance_names[0], pin=dataset.agent)
+            agent_name = resolve_dataset_agent(
+                global_config_dict, declaring_instance_names[0], pin=dataset.agent, taskset=dataset.taskset
+            )
         except ConfigError as e:
             raise ConfigError(f"Benchmark config {path}: dataset {dataset.name!r}: {e}") from e
 
@@ -119,6 +125,7 @@ class BenchmarkConfig(BaseModel):
             agent_name=agent_name,
             num_repeats=dataset.num_repeats,
             dataset=dataset,
+            environment_server=taskset_environment_server_name(global_config_dict, dataset.taskset),
         )
 
 

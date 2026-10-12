@@ -33,7 +33,7 @@ def prepare(source: Path = SOURCE_PATH, output: Path = OUTPUT_PATH) -> Path:
                         "sample_id": row["sample_id"],
                         "dataset_name": "aegis_v4_safety",
                         "prompt": row["prompt"],
-                        "responses_create_params": {"max_output_tokens": 1024},
+                        "responses_create_params": {"max_output_tokens": 131072},
                     }
                 )
                 + "\n"
