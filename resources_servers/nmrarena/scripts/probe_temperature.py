@@ -53,6 +53,7 @@ REPO_ROOT = SERVER_DIR.parents[1]
 sys.path.insert(0, str(SERVER_DIR))
 
 from prompting import build_messages  # noqa: E402
+from scoring import parse_candidates  # noqa: E402
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming  # noqa: E402
 from nemo_gym.server_utils import ServerClient  # noqa: E402
@@ -83,6 +84,11 @@ def make_server(model: str):
     return mod.SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
 
+def _secrets() -> list[str]:
+    env = yaml.safe_load((REPO_ROOT / "env.yaml").read_text())
+    return [str(v) for k, v in env.items() if "key" in k or "token" in k]
+
+
 def _text(response: Any) -> str:
     texts = []
     for o in response.output:
@@ -102,10 +108,14 @@ async def _draw(server, messages: list[dict], temperature: float, max_output_tok
     text = _text(response)
     usage = response.usage.model_dump() if response.usage else {}
     details = usage.get("output_tokens_details") or {}
+    candidates = parse_candidates(text).candidates
     return {
         "draw": index,
         "requested_temperature": temperature,
         "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        # The answer the verifier would score, which varies less than the prose around it.
+        "candidates_sha256": hashlib.sha256(json.dumps(candidates).encode("utf-8")).hexdigest(),
+        "n_candidates": len(candidates),
         "text_chars": len(text),
         "echoed_temperature": getattr(response, "temperature", None),
         "echoed_top_p": getattr(response, "top_p", None),
@@ -120,17 +130,33 @@ async def _draw(server, messages: list[dict], temperature: float, max_output_tok
 async def probe_model(model: str, messages: list[dict], n: int, max_output_tokens: int) -> dict:
     server = make_server(model)
     out: dict[str, Any] = {"model": model, "n_per_setting": n, "max_output_tokens": max_output_tokens, "settings": {}}
+    # Is the value transmitted at all? A provider that reads it rejects an out-of-range
+    # value with a range message; one that drops it answers normally.
+    try:
+        body = NeMoGymResponseCreateParamsNonStreaming(input=messages, temperature=3.5, max_output_tokens=16)
+        response = await server.responses(body)
+        out["out_of_range_temperature"] = {"accepted": True, "status": getattr(response, "status", None)}
+    except Exception as exc:  # the gateway wraps the provider error; keep its class and a short message
+        message = str(exc)
+        for secret in _secrets():
+            message = message.replace(secret, "***")
+        out["out_of_range_temperature"] = {"accepted": False, "error": type(exc).__name__, "message": message[:300]}
     for temperature in (0.0, 1.0):
         draws = await asyncio.gather(*(_draw(server, messages, temperature, max_output_tokens, i) for i in range(n)))
         shas = [d["text_sha256"] for d in draws]
         out["settings"][str(temperature)] = {
             "draws": draws,
             "distinct_outputs": len(set(shas)),
+            "distinct_candidate_lists": len({d["candidates_sha256"] for d in draws}),
             "empty_outputs": sum(d["text_chars"] == 0 for d in draws),
             "distinct_reasoning_token_counts": len({d["reasoning_tokens"] for d in draws}),
             "echoed_temperatures": sorted({str(d["echoed_temperature"]) for d in draws}),
         }
     return out
+
+
+async def _probe_all(models: list[str], messages: list[dict], n: int, max_output_tokens: int) -> list[dict]:
+    return [await probe_model(m, messages, n, max_output_tokens) for m in models]
 
 
 def main(argv: Optional[list[str]] = None) -> dict:
@@ -162,7 +188,8 @@ def main(argv: Optional[list[str]] = None) -> dict:
         "compound_id": row["verifier_metadata"]["compound_id"],
         "prompt_sha256": hashlib.sha256(json.dumps(messages, ensure_ascii=False).encode("utf-8")).hexdigest(),
         "path": "responses_api_models/openai_model SimpleModelServer.responses (in-process, production class)",
-        "models": [asyncio.run(probe_model(m, messages, args.n, args.max_output_tokens)) for m in args.model],
+        # One event loop for every model: the shared HTTP client binds to the first loop.
+        "models": asyncio.run(_probe_all(args.model, messages, args.n, args.max_output_tokens)),
     }
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.output).write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -170,9 +197,10 @@ def main(argv: Optional[list[str]] = None) -> dict:
         for t, s in m["settings"].items():
             print(
                 f"{m['model']:40s} T={t}: distinct_outputs={s['distinct_outputs']}/{m['n_per_setting']} "
-                f"empty={s['empty_outputs']} distinct_reasoning_counts={s['distinct_reasoning_token_counts']} "
-                f"echoed_T={s['echoed_temperatures']}"
+                f"distinct_candidate_lists={s['distinct_candidate_lists']} empty={s['empty_outputs']} "
+                f"distinct_reasoning_counts={s['distinct_reasoning_token_counts']} echoed_T={s['echoed_temperatures']}"
             )
+        print(f"{m['model']:40s} temperature=3.5: {m['out_of_range_temperature']}")
     return report
 
 
