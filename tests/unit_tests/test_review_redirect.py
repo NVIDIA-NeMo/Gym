@@ -44,11 +44,22 @@ def test_review_redirect_is_least_privilege_and_does_not_execute_review() -> Non
     assert len(job["steps"]) == 1
     step = job["steps"][0]
     assert "uses" not in step
-    assert step["run"] == 'gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$NOTICE"'
+    assert step["env"]["COMMENT_BODY"] == "${{ github.event.comment.body }}"
+    assert step["run"].splitlines() == [
+        "# Actions string equality ignores case; enforce literal commands here.",
+        'case "$COMMENT_BODY" in',
+        "  '/claude review'|'/claude strict-review')",
+        '    gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$NOTICE"',
+        "    ;;",
+        "esac",
+    ]
     assert "${{" not in step["run"]
     assert "model=claude" in step["env"]["NOTICE"]
     assert "model=codex" in step["env"]["NOTICE"]
     assert "/review help" in step["env"]["NOTICE"]
+    assert job["env"]["RETIRED_COMMAND"] == (
+        "${{ github.event.comment.body == '/claude strict-review' && '/claude strict-review' || '/claude review' }}"
+    )
     assert job["env"]["REVIEW_COMMAND"] == (
         "${{ github.event.comment.body == '/claude strict-review' && '/review mode=strict' || '/review' }}"
     )
@@ -64,6 +75,27 @@ def test_review_redirect_workflow_has_no_other_execution_or_permissions() -> Non
 
 
 @pytest.mark.parametrize(
+    "comment_body, accepted",
+    [
+        ("/claude review", True),
+        ("/claude strict-review", True),
+        ("/CLAUDE REVIEW", False),
+        ("/CLAUDE STRICT-REVIEW", False),
+        ("/Claude Review", False),
+        ("/Claude Strict-Review", False),
+        ("/claude review ", False),
+        ("/claude strict-review ", False),
+        (" /claude review", False),
+        (" /claude strict-review", False),
+        ("/claude review\n", False),
+        ("/claude strict-review\n", False),
+        ("`/claude review`", False),
+        ("`/claude strict-review`", False),
+        ("> /claude review", False),
+        ("> /claude strict-review", False),
+    ],
+)
+@pytest.mark.parametrize(
     "notice",
     [
         "Use /review",
@@ -71,12 +103,14 @@ def test_review_redirect_workflow_has_no_other_execution_or_permissions() -> Non
         "$(touch injected) `touch injected` ' \" ;\n/review",
     ],
 )
-def test_notice_is_passed_as_one_literal_argument(tmp_path: Path, notice: str) -> None:
-    """Ensure notice text reaches gh unchanged without shell evaluation."""
+def test_notice_requires_exact_command_and_is_passed_as_one_literal_argument(
+    tmp_path: Path, notice: str, comment_body: str, accepted: bool
+) -> None:
+    """Only literal commands may send a notice, without shell evaluation."""
     workflow = yaml.safe_load((ROOT / ".github/workflows/claude-review.yml").read_text())
     script = workflow["jobs"]["redirect-to-review"]["steps"][0]["run"]
     gh = tmp_path / "gh"
-    gh.write_text('#!/bin/sh\nprintf \'%s\\0\' "$@" > "$CAPTURE"\n')
+    gh.write_text('#!/bin/sh\nprintf \'%s\\0\' "$@" >> "$CAPTURE"\n')
     gh.chmod(0o755)
     capture = tmp_path / "args"
     env = dict(
@@ -86,19 +120,23 @@ def test_notice_is_passed_as_one_literal_argument(tmp_path: Path, notice: str) -
         PR_NUMBER="123",
         REPO="NVIDIA-NeMo/example",
         NOTICE=notice,
+        COMMENT_BODY=comment_body,
         CAPTURE=str(capture),
     )
     env.pop("BASH_ENV", None)
     env.pop("ENV", None)
     subprocess.run(["/bin/bash", "-eu", "-c", script], cwd=tmp_path, env=env, check=True)
-    assert capture.read_bytes().split(b"\0") == [
-        b"pr",
-        b"comment",
-        b"123",
-        b"--repo",
-        b"NVIDIA-NeMo/example",
-        b"--body",
-        notice.encode(),
-        b"",
-    ]
+    if accepted:
+        assert capture.read_bytes().split(b"\0") == [
+            b"pr",
+            b"comment",
+            b"123",
+            b"--repo",
+            b"NVIDIA-NeMo/example",
+            b"--body",
+            notice.encode(),
+            b"",
+        ]
+    else:
+        assert not capture.exists()
     assert not (tmp_path / "injected").exists()

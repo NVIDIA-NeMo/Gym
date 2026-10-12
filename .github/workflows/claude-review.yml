@@ -28,6 +28,7 @@ jobs:
     steps:
       - name: Explain the replacement command
         env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
           NOTICE: |
             @${{ github.event.comment.user.login }} `${{ env.RETIRED_COMMAND }}` has been retired. Pull-request reviews now run through `/review`; comment this instead:
 
@@ -36,4 +37,10 @@ jobs:
             ```
 
             Add `model=claude` to keep a Claude reviewer (the default is `model=codex`). `mode=light|strict` selects the review depth. Comment `/review help` for all options.
-        run: gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$NOTICE"
+        run: |
+          # Actions string equality ignores case; enforce literal commands here.
+          case "$COMMENT_BODY" in
+            '/claude review'|'/claude strict-review')
+              gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$NOTICE"
+              ;;
+          esac
