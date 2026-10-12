@@ -120,4 +120,4 @@ class TelemetryConfig(BaseModel, extra="allow"):
 
     run_id: Optional[str] = None
     """Correlates every process of one ``gym env start`` / ``gym env test`` invocation.
-    Generated in the orchestrator and inherited by the servers when unset."""
+    Generated in the supervisor and inherited by the servers when unset."""

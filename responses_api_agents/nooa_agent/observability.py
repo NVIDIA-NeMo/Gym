@@ -162,7 +162,10 @@ class GymTraceHooks:
 
     def after_code_execution(self, *, context: Any, result: Any, exception: BaseException | None, **_: Any) -> None:
         if isinstance(context, _ToolCall):
-            context.observation.output = result
+            # ExecutionResult retains live REPL locals, including imported modules.
+            # Snapshot its serializable evidence before locals change or projection
+            # deep-copies the observation; Pydantic excludes interpreter-only fields.
+            context.observation.output = _json_output(result)
             self._finish_tool(context, exception)
 
     def before_tool_execution(
