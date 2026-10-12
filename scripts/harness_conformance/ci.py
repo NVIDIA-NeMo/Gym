@@ -24,6 +24,8 @@ def select_harnesses(paths: list[str]) -> list[str]:
         adapter = next((name for name in HARNESSES if path.startswith(f"responses_api_agents/{name}_agent/")), None)
         if adapter:
             selected.add(adapter)
+            if adapter == "opencode":
+                selected.add("opencode_sandboxed")
         elif path.startswith(("fern/", "docs/")) or ("/" not in path and path.endswith(".md")) or path == "LICENSE":
             continue
         else:
@@ -56,6 +58,11 @@ def install_runtime(harness: str) -> None:
 
     adapter = ROOT / "responses_api_agents" / f"{harness}_agent"
     subprocess.run(["uv", "pip", "install", "-r", "requirements.txt"], cwd=adapter, check=True)
+    if harness == "opencode_sandboxed":
+        from .sandbox import build_image
+
+        build_image()
+        return
     if harness == "hermes":
         return  # The Python requirements contain its pinned runtime.
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())

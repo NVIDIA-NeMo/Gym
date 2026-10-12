@@ -7,6 +7,7 @@ import copy
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import psutil
 import pytest
@@ -59,6 +60,34 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, tmp_path):
 
         module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
         getattr(module, HARNESSES[harness] + "Config").model_validate(agent)
+
+
+def test_sandbox_workspace_keeps_witness_private(tmp_path):
+    config = _config("opencode_sandboxed", tmp_path, [10001, 10002, 10003, 10004], 12)
+    sandbox = config["probe_agent"]["responses_api_agents"]["opencode_sandboxed_agent"]["sandbox_config"]
+    workspace = tmp_path / "workspace"
+    assert sandbox["provider_options"]["volumes"] == [f"{workspace}:{workspace}"]
+    probe = Probe(SCENARIO["tool_success"], tmp_path, tool_directory=workspace)
+    body = {
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "bash", "parameters": {"properties": {"command": {"type": "string"}}}},
+            }
+        ]
+    }
+    probe._tool(body)
+    call = probe.tool_calls[0]
+    marker = Path(call["marker"])
+    assert marker.parent == workspace
+    probe._observe_tool_results({})
+    assert not call["executed"]
+    marker.write_text(call["token"])
+    probe._observe_tool_results({})
+    assert call["executed"]
+    probe.save()
+    assert (tmp_path / "witness.json").is_file()
+    assert not (workspace / "witness.json").exists()
 
 
 @pytest.mark.parametrize("scenario_name", ["tool_success", "retry_429"])

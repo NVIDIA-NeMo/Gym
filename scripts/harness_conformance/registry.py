@@ -3,4 +3,10 @@
 
 """Local probe adapters, importable by CI before Gym dependencies are installed."""
 
-HARNESSES = {"opencode": "OpenCodeAgent", "pi": "PiAgent", "codex": "CodexAgent", "hermes": "HermesAgent"}
+HARNESSES = {
+    "opencode": "OpenCodeAgent",
+    "opencode_sandboxed": "OpenCodeSandboxedAgent",
+    "pi": "PiAgent",
+    "codex": "CodexAgent",
+    "hermes": "HermesAgent",
+}

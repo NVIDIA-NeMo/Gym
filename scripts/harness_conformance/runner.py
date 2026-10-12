@@ -269,7 +269,10 @@ def run_suite(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--harness", action="append", choices=HARNESSES, help="repeat for a matrix; defaults to all four"
+        "--harness",
+        action="append",
+        choices=HARNESSES,
+        help="repeat for a matrix; defaults to all registered harnesses",
     )
     parser.add_argument(
         "--scenario", action="append", choices=[s.name for s in SCENARIOS], help="run a diagnostic subset"

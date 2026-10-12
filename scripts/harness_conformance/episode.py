@@ -34,6 +34,10 @@ class _Server(uvicorn.Server):
 
 def check_runtime(harness: str) -> dict:
     """Require preinstalled runtimes so a probe cannot trigger auto-installation."""
+    if harness == "opencode_sandboxed":
+        from .sandbox import check_image
+
+        return check_image()
     if harness == "hermes":
         if importlib.util.find_spec("run_agent") is None or importlib.util.find_spec("model_tools") is None:
             raise RuntimeError("install responses_api_agents/hermes_agent/requirements.txt in this Python environment")
@@ -68,12 +72,34 @@ def _config(harness: str, directory: Path, ports: list[int], timeout: float) -> 
     agent.update({key: value for key, value in defaults.items() if key.endswith("_version")})
     if harness in ("opencode", "pi"):
         agent.update(workspace_root=str(directory / "workspace"), timeout=timeout)
-    if harness == "opencode":
+    if harness in ("opencode", "opencode_sandboxed"):
         # Auxiliary title/summary requests would consume the scripted policy replies.
         agent["opencode_config"] = {
             "permission": {"bash": "allow"},
             "agent": {"title": {"disable": True}, "summary": {"disable": True}},
         }
+    if harness == "opencode_sandboxed":
+        from .sandbox import IMAGE
+
+        workspace = directory / "workspace"
+        workspace.mkdir()
+        agent.update(
+            preinstalled_opencode=True,
+            opencode_max_context_window=32768,
+            sandbox_provider="probe_sandbox",
+            sandbox_timeout=timeout,
+            artifacts_dir=str(directory / "native"),
+            sandbox_config={
+                "image": IMAGE,
+                "ttl_s": timeout + 20,
+                "workdir": str(workspace),
+                "provider_options": {
+                    # Only the tool workspace is shared; witnesses and expectations stay private.
+                    "volumes": [f"{workspace}:{workspace}"],
+                    "run_args": ["--add-host=host.docker.internal:host-gateway"],
+                },
+            },
+        )
     if harness == "codex":
         workspace = directory / "workspace"
         workspace.mkdir()
@@ -94,10 +120,19 @@ def _config(harness: str, directory: Path, ports: list[int], timeout: float) -> 
             api_key="conformance",
         )
     return {
+        "probe_sandbox": {"docker": {}},
         "head_server": {"host": "127.0.0.1", "port": ports[0]},
         "observability_enabled": True,
         "model_call_capture_dir": str(directory / "capture"),
-        "policy_model": {"responses_api_models": {"probe": {**server(ports[0]), "name": "policy_model"}}},
+        "policy_model": {
+            "responses_api_models": {
+                "probe": {
+                    **server(ports[0]),
+                    "name": "policy_model",
+                    "host": "host.docker.internal" if harness == "opencode_sandboxed" else "127.0.0.1",
+                }
+            }
+        },
         "probe_resources": {"resources_servers": {"probe": {**server(ports[1]), "name": "probe_resources"}}},
         "probe_agent": {"responses_api_agents": {f"{harness}_agent": agent}},
         "probe_environment": {
@@ -120,14 +155,17 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     )
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
-    probe = Probe(scenario, directory)
+    probe = Probe(
+        scenario, directory, tool_directory=directory / "workspace" if harness == "opencode_sandboxed" else None
+    )
     probe.save()
     tasks = []
     servers = []
     with ExitStack() as stack:
         sockets = [stack.enter_context(socket.socket()) for _ in range(4)]
-        for sock in sockets:
-            sock.bind(("127.0.0.1", 0))
+        for index, sock in enumerate(sockets):
+            host = "0.0.0.0" if harness == "opencode_sandboxed" and index == 0 else "127.0.0.1"
+            sock.bind((host, 0))
         config = _config(harness, directory, [s.getsockname()[1] for s in sockets], timeout)
         os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps(config)
         (directory / "launch.json").write_text(json.dumps(config, indent=2) + "\n")

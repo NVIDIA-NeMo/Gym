@@ -55,7 +55,7 @@ no test-skip switch. Failed, empty, or entirely skipped test suites, dependency 
 execution errors, and checker errors leave the previous table unchanged. Evidence
 FAILs are valid results and appear in the generated table.
 
-All four harnesses are selected by default. Repeat `--harness NAME` to select a
+All registered harnesses are selected by default. Repeat `--harness NAME` to select a
 subset; omitted harnesses show **Not run**, and no previous row is reused. Runtime
 versions/source hashes, test results, scenario results, and artifact hashes are
 saved in a content-addressed JSON report under `fern/assets/trajectory-capabilities/`.
@@ -82,7 +82,7 @@ installed. Put the selected `codex`, `pi`, and `opencode` executables on `PATH`;
 Hermes must be importable in the same Python environment. The versions pinned in
 `responses_api_agents/*/configs/` are the recommended starting point. The runner
 requires installed runtimes; missing dependencies are execution failures.
-Omitting `--harness` selects all four.
+Omitting `--harness` selects all registered harnesses.
 
 No model service or model credentials are needed. Each scenario starts fresh
 local model, resources, agent, and compatibility environment servers on dynamically assigned loopback ports.
@@ -182,3 +182,21 @@ To add another local harness, add its adapter class to `registry.HARNESSES`, sup
 its launch settings in `episode._config`, and make its advertised shell-tool
 schema consumable by `provider.Probe._tool`. Keep expectations and witnesses out
 of the task input and preserve the normal Gym collection path.
+
+### Docker-backed OpenCode
+
+`--harness opencode_sandboxed` runs `opencode_sandboxed_agent` through Gym's
+Docker provider. Prepare it once with:
+
+```bash
+python -m scripts.harness_conformance.ci install --harness opencode_sandboxed
+python scripts/run_harness_conformance.py --harness opencode_sandboxed --output results/opencode-sandboxed
+```
+
+Docker must be running. The image installs the shared OpenCode runtime pin;
+the agent uploads the shared observability plugin on each run. No model or cloud
+credentials are required. Installation downloads public Docker/npm packages.
+The container reaches the scripted model via `host.docker.internal`; only the tool
+workspace is bind-mounted, so the host verifier can inspect actual tool writes
+without exposing its witness or expectations. This qualifies local Docker execution,
+not remote sandbox providers. CI installs and exercises the same seven scenarios.

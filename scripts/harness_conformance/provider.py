@@ -27,6 +27,7 @@ from .scenarios import Scenario
 class Probe:
     scenario: Scenario
     directory: Path
+    tool_directory: Path | None = None
     attempts: list[dict] = field(default_factory=list)
     tool_calls: list[dict] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
@@ -56,7 +57,7 @@ class Probe:
             if bare in ("bash", "terminal", "shell", "shell_command", "exec_command"):
                 index = len(self.tool_calls)
                 token = f"probe_{uuid4().hex}"
-                marker = self.directory / f"tool-{index}.txt"
+                marker = (self.tool_directory or self.directory) / f"tool-{index}.txt"
                 code = self.scenario.tool_exit_code if index == 0 else 0
                 command = f"printf %s {shlex.quote(token)} > {shlex.quote(str(marker))}; printf %s {shlex.quote(token)}; exit {code}"
                 if "cmd" in properties:

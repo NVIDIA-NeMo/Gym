@@ -14,8 +14,9 @@ from scripts.harness_conformance.registry import HARNESSES
 
 
 @pytest.mark.parametrize("harness", HARNESSES)
-def test_adapter_changes_select_only_that_harness(harness):
-    assert select_harnesses([f"responses_api_agents/{harness}_agent/requirements.txt", "fern/docs.yml"]) == [harness]
+def test_adapter_changes_select_consuming_harnesses(harness):
+    expected = ["opencode", "opencode_sandboxed"] if harness == "opencode" else [harness]
+    assert select_harnesses([f"responses_api_agents/{harness}_agent/requirements.txt", "fern/docs.yml"]) == expected
 
 
 @pytest.mark.parametrize(
@@ -25,7 +26,6 @@ def test_adapter_changes_select_only_that_harness(harness):
         "nemo_gym/prompts/system.md",
         "responses_api_agents/shared/prompts.md",
         "environment_servers/legacy_agent/app.py",
-        "responses_api_agents/opencode_sandboxed_agent/app.py",
         "resources_servers/example_mcp_weather/app.py",
         "scripts/harness_conformance/registry.py",
         "tests/unit_tests/harness_capabilities/test_checker.py",
