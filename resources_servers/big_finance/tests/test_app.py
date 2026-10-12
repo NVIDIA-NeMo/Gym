@@ -120,6 +120,23 @@ def test_big_finance_model_copy_without_openai_overlay(model_type: str) -> None:
     assert config[agent_name].responses_api_agents.finance_agent.model_server.name == "big_finance_policy_model"
 
 
+def test_big_finance_cache_settings_are_opt_in_and_isolated(tmp_path: Path) -> None:
+    paths = [
+        "resources_servers/finance_sec_search/configs/finance_sec_search.yaml",
+        "resources_servers/big_finance/configs/big_finance.yaml",
+    ]
+    default = _resolved_config(paths)
+    assert default.big_finance_resources_server.resources_servers.big_finance.use_cache is False
+    assert default.big_finance_resources_server.resources_servers.big_finance.cache_dir is None
+    enabled = _resolved_config(
+        paths, {"big_finance_use_cache": True, "big_finance_cache_dir": str(tmp_path / "big-finance")}
+    )
+    resources = enabled.big_finance_resources_server.resources_servers.big_finance
+    assert resources.use_cache is True
+    assert resources.cache_dir == str(tmp_path / "big-finance")
+    assert enabled.finance_sec_search_resources_server == default.finance_sec_search_resources_server
+
+
 @pytest.mark.parametrize("extra_body", [{}, {"reasoning": {"effort": "high"}, "max_output_tokens": 1000}])
 def test_big_finance_model_overlay_preserves_mixed_vals_policy(extra_body: dict) -> None:
     vals_paths = [

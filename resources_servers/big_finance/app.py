@@ -27,8 +27,6 @@ import logging
 from typing import Any, ClassVar, Literal, Optional
 
 from big_finance_harness.tools import (
-    EdgarSearchTool,
-    FetchUrlTool,
     FinalAnswerTool,
     PythonExecTool,
     ToolError,
@@ -58,6 +56,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from resources_servers.big_finance.sec_cache import CachedEdgarSearchTool, CachedFetchUrlTool, SecHttpCache
 
 
 logger = logging.getLogger(__name__)
@@ -82,6 +81,8 @@ class BigFinanceResourcesServerConfig(BaseResourcesServerConfig):
     serp_api_key: Optional[str] = None
     tavily_api_key: Optional[str] = None
     sec_edgar_user_agent: Optional[str] = None
+    use_cache: bool = False
+    cache_dir: Optional[str] = None
     web_search_timeout_s: float = 30.0
     edgar_timeout_s: float = 20.0
     fetch_timeout_s: float = 30.0
@@ -343,6 +344,7 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
     _tools: dict[str, Any]
 
     def model_post_init(self, context: Any) -> None:
+        cache = SecHttpCache(cache_dir=self.config.cache_dir, use_cache=self.config.use_cache)
         backend = None
         if self.config.serp_api_key:
             backend = _SerpApiBackend(self.config.serp_api_key, self.config.web_search_timeout_s)
@@ -352,14 +354,16 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
         self._tools: dict[str, Any] = {
             "web_search": WebSearchTool(backend=backend, timeout_s=self.config.web_search_timeout_s),
             "edgar_search": (
-                EdgarSearchTool(
+                CachedEdgarSearchTool(
+                    cache=cache,
                     user_agent=self.config.sec_edgar_user_agent,
                     timeout_s=self.config.edgar_timeout_s,
                 )
                 if self.config.sec_edgar_user_agent
                 else None
             ),
-            "fetch_url": FetchUrlTool(
+            "fetch_url": CachedFetchUrlTool(
+                cache=cache,
                 timeout_s=self.config.fetch_timeout_s,
                 sec_user_agent=self.config.sec_edgar_user_agent,
             ),
