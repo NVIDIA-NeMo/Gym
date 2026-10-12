@@ -151,9 +151,18 @@ fi
         "assert all(workdir != root and workdir not in root.parents and root not in workdir.parents "
         "for root in roots), 'OpenCode runtime/session storage overlaps the task workdir'"
     )
+    # OpenCode keeps its config, cache and state under the task's HOME, as the shell expands them.
+    home_storage = " ".join(
+        f'"${{{variable}:-${{HOME:-}}/{default}}}/opencode"'
+        for variable, default in (
+            ("XDG_CONFIG_HOME", ".config"),
+            ("XDG_CACHE_HOME", ".cache"),
+            ("XDG_STATE_HOME", ".local/state"),
+        )
+    )
     return (
         bootstrap + f"python3 -I -c {quote(validate_paths)} {quote(workdir)} "
-        f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)} && mkdir -p {quote(directory)}"
+        f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)} {home_storage} && mkdir -p {quote(directory)}"
     )
 
 
@@ -890,11 +899,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             "command": command,
             "prompt": prompt,
             "env": {
-                "HOME": f"{state.session.session_dir}/home",
+                # Only OpenCode's session database moves to the session directory. HOME and the other XDG
+                # directories stay the task image's: OpenCode's shell and formatter processes inherit them, and
+                # task toolchains keep their prepared state there (git identity, Go module caches, rustup).
                 "XDG_DATA_HOME": f"{state.session.session_dir}/data",
-                "XDG_CONFIG_HOME": f"{state.session.session_dir}/config",
-                "XDG_CACHE_HOME": f"{state.session.session_dir}/cache",
-                "XDG_STATE_HOME": f"{state.session.session_dir}/state",
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
                 "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",

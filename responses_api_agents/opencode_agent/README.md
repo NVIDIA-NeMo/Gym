@@ -86,6 +86,12 @@ version that are already inside the sandbox (for example on a read-only mount), 
 by `glibc` or `musl`. Setup copies the one matching the sandbox libc into the runtime
 cache and checks its version instead of downloading. Task dependencies are preserved.
 
+OpenCode runs with the sandbox's own HOME and XDG config, cache and state directories,
+so its shell commands and formatters see the toolchains and git identity the image
+prepared, such as Go module caches and rustup toolchains. Only its session database
+moves to the session directory. HOME must be writable, and setup rejects a workdir that
+would contain OpenCode's config, cache or state directories.
+
 Local and sandbox execution share `runtime.OPENCODE_VERSION` and the model-call
 correlation plugin. The plugin is uploaded into each sandbox when model-call
 observability is enabled. Sessions disable automatic updates and models.dev fetches.

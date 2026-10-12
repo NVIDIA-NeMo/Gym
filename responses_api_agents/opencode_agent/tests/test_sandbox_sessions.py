@@ -268,7 +268,9 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
         payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
         assert payload["prompt"] == "Fix the code"
         assert payload["command"][0].endswith("nemo-gym-opencode-runtime-1.17.11/opencode")
-        assert payload["env"]["HOME"].startswith("/tmp/")
+        # Task toolchains keep the image's HOME and XDG directories; only OpenCode's database moves.
+        assert payload["env"]["XDG_DATA_HOME"] == f"{sandbox.directory}/data"
+        assert not {"HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"} & payload["env"].keys()
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"] == {
             "context": 32000,
