@@ -7,12 +7,17 @@ RUN_ROOT=${1:-${OSWORLD_RUN_ROOT:-${GYM_ROOT}}}
 RUN_ID=${OSWORLD_RUN_ID:?set OSWORLD_RUN_ID}
 CONTROL_HOST=${NEMO_GYM_CONTROL_HOST:-127.0.0.1}
 GYM_BIN=${GYM_BIN:-${GYM_ROOT}/.venv/bin/gym}
-ENV_FILE=${GYM_ROOT}/benchmarks/osworld/env.yaml
+ENV_FILE=${OSWORLD_ENV_FILE:-${GYM_ROOT}/benchmarks/osworld/env.yaml}
 STATE_DIR=${RUN_ROOT}/run/osworld/${RUN_ID}
 PID_FILE=${STATE_DIR}/eval.pid
 
 [[ -x "${GYM_BIN}" ]] || { echo "Gym executable is not available: ${GYM_BIN}" >&2; exit 2; }
 [[ -r "${ENV_FILE}" ]] || { echo "prepared Gym environment is not readable: ${ENV_FILE}" >&2; exit 2; }
+[[ $(basename "${ENV_FILE}") == env.yaml ]] || {
+    echo "OSWORLD_ENV_FILE must name env.yaml because Gym loads it from the working directory: ${ENV_FILE}" >&2
+    exit 2
+}
+ENV_DIR="$(cd "$(dirname "${ENV_FILE}")" && pwd)"
 
 umask 077
 mkdir -p "${RUN_ROOT}/logs" "${STATE_DIR}"
@@ -22,7 +27,7 @@ exec >>"${RUN_ROOT}/logs/eval-${RUN_ID}.log" 2>&1
 export PYTHONPATH="${GYM_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export OSWORLD_RUN_ID=${RUN_ID}
 
-cd "${GYM_ROOT}/benchmarks/osworld"
+cd "${ENV_DIR}"
 exec "${GYM_BIN}" eval run --no-serve \
   +use_absolute_ip=false \
   +default_host="${CONTROL_HOST}"

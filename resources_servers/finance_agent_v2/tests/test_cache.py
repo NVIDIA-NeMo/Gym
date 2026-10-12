@@ -25,12 +25,12 @@ import logging
 import pytest
 from finance_agent.tools import EDGARSearch, ParseHtmlPage, PriceHistory
 
-from resources_servers.finance_agent_v2.cache import ToolCache
 from resources_servers.finance_agent_v2.cached_tools import (
     CachedEDGARSearch,
     CachedParseHtmlPage,
     CachedPriceHistory,
 )
+from resources_servers.sec_local_index.cache import ToolCache
 
 
 _LOG = logging.getLogger("test")

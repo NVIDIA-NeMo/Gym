@@ -83,6 +83,7 @@ class ScicodeVerifyResponse(BaseVerifyResponse):
 
 
 class ScicodeResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: ScicodeResourcesServerConfig
 
     def model_post_init(self, context):

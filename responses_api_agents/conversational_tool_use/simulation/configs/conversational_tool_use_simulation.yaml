@@ -10,3 +10,11 @@ conversational_tool_use_agent:
         name: policy_model
       max_agent_steps: 50
       seed_first_user_message: true
+
+conversational_tool_use_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: conversational_tool_use_agent

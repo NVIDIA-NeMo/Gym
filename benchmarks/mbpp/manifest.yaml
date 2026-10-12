@@ -1,0 +1,31 @@
+name: mbpp
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: coding
+description: Function-completion code judged by EvalPlus base + plus tests (HumanEval+,
+  MBPP+)
+modality: text
+licensing: unknown
+authors:
+- gwarmstrong
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: evalplus
+agent_server: simple_agent
+datasets:
+- name: mbpp
+  type: benchmark
+  jsonl_fpath: benchmarks/mbpp/data/mbpp_benchmark.jsonl
+  prepare_script: benchmarks/mbpp/prepare.py
+  prompt_config: benchmarks/mbpp/prompts/default.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/mbpp/prompts/default.yaml
+lifecycle: active

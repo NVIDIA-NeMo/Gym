@@ -50,3 +50,11 @@ simple_strands_math_agent:
       - name: example
         type: example
         jsonl_fpath: environments/simple_strands_math/data/example.jsonl
+
+simple_strands_math_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: simple_strands_math_agent

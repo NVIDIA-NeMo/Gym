@@ -21,7 +21,7 @@ INTERNAL span on a cross-service hop means a backend cannot tell that the agent 
 called the model server, so Jaeger/Tempo/Honeycomb service maps lose the edge and
 client-vs-server latency attribution stops working.
 
-Gym is pinned to nemo-lens ``b85578fc``, so rather than change lens this module creates
+Gym is pinned to nemo-lens ``b0f977d4``, so rather than change lens this module creates
 that one span directly against the OTel API. Adding a ``kind`` parameter to
 ``managed_span`` is the proper fix and is raised as a decision in the PR body; when it
 lands, delete this module and pass ``kind=`` instead.

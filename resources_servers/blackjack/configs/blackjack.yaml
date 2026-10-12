@@ -22,3 +22,11 @@ blackjack_gymnasium_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/blackjack/data/example.jsonl
+
+blackjack_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: blackjack_gymnasium_agent

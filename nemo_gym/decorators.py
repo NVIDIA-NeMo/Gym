@@ -15,15 +15,18 @@
 
 import functools
 
-import rich
+from rich.console import Console
+
+
+_stderr = Console(stderr=True)
 
 
 def experimental(fn):
-    """Decorator that prints an experimental warning before the function runs."""
+    """Decorator that warns on stderr that a function is experimental, then runs it."""
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        rich.print(
+        _stderr.print(
             f"[yellow]Warning:[/yellow] [bold]{fn.__name__}[/bold] is experimental and may change or be removed without notice."
         )
         return fn(*args, **kwargs)

@@ -350,6 +350,7 @@ def _soft_numeric_grade(gt_answer: str, pred_answer: str) -> float:
 
 
 class StringMatchResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: StringMatchResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

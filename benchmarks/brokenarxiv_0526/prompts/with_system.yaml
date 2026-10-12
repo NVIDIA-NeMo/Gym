@@ -1,0 +1,13 @@
+# Same user prompt as default.yaml; the only difference is the system prompt,
+# so a run against this file isolates the effect of adding one.
+system: |-
+  Your response should be in the following format:
+  Explanation: {{your explanation for your final answer}}
+  Exact Answer: {{your succinct, final answer}}
+  Confidence: {{your confidence score between 0% and 100% for your answer}}
+
+user: |-
+  Try to generate a proof for the following statement:
+
+
+  {question}

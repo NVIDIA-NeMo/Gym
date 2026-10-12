@@ -10,6 +10,10 @@ Every NeMo Gym model server speaks the [Anthropic Messages API](https://docs.ant
 
 `SimpleResponsesAPIModel` registers `POST /v1/messages` on every model server by default. The handler maps the inbound Anthropic Messages request to Gym's native Responses schema, calls that server's own `responses()` implementation (whatever upstream the server is configured for), and maps the result back to an Anthropic Messages response. When the client sets `stream: true` (Claude Code always does), the complete response is re-emitted as a synthesized Anthropic SSE event stream.
 
+Buffered SSE also supports [external token staging](/model-server/model-call-capture#buffered-sse-with-external-token-staging).
+The inference worker stores training tokens separately, and Gym replays the completed answer as SSE.
+Generation completes before replay begins, so no content is delivered during generation.
+
 ```mermaid
 flowchart LR
   CLI["Claude Code CLI"] -->|"POST /v1/messages"| MS["Gym model server"]

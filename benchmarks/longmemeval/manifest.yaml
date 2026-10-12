@@ -1,0 +1,29 @@
+name: longmemeval
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: long_context
+description: LongMemEval oracle-split memory question answering scored by an LLM judge.
+modality: text
+licensing: MIT
+authors:
+- Maria Bagdasarova
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: longmemeval
+agent_server: simple_agent
+datasets:
+- name: longmemeval
+  type: benchmark
+  jsonl_fpath: benchmarks/longmemeval/data/longmemeval_benchmark.jsonl
+  prepare_script: benchmarks/longmemeval/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

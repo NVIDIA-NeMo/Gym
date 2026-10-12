@@ -5,10 +5,13 @@
 
 import asyncio
 import threading
+from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from nemo_gym.token_id_capture.adapters.megatron import MegatronCaptureAdapter
 from nemo_gym.token_id_capture.adapters.vllm import (
     VLLMCaptureAdapter,
     extract_generation_token_info,
@@ -37,27 +40,47 @@ from nemo_gym.token_id_capture.staging.capture import (
 
 
 class _MemorySink:
+    """Attachment-capable sink: stores the record and its attachments together."""
+
     def __init__(
         self,
         *,
         result_key: str = "backend/key",
         reject: bool = False,
         error: Exception | None = None,
+        accept_attachments: bool = True,
     ) -> None:
         self.result_key = result_key
         self.reject = reject
         self.error = error
+        self.accept_attachments = accept_attachments
         self.records: list[StagedCallRecord] = []
+        self.attachments: list[Mapping[str, Any] | None] = []
         self.events: list[str] = []
 
-    def stage(self, record: StagedCallRecord) -> StageResult:
+    def stage(self, record: StagedCallRecord, *, attachments: Mapping[str, Any] | None = None) -> StageResult:
         self.events.append("stage")
         if self.error is not None:
             raise self.error
         if self.reject:
             return StageResult(ok=False, error="store rejected row")
+        if attachments is not None and not self.accept_attachments:
+            # A sink that cannot store attachments must reject, never drop them.
+            return StageResult(ok=False, error="attachments unsupported")
         self.records.append(record)
+        self.attachments.append(attachments)
         return StageResult(ok=True, staging_key=self.result_key)
+
+
+class _LegacySink:
+    """Pre-attachments ``stage(record)`` signature, still valid for text-only calls."""
+
+    def __init__(self) -> None:
+        self.records: list[StagedCallRecord] = []
+
+    def stage(self, record: StagedCallRecord) -> StageResult:
+        self.records.append(record)
+        return StageResult(ok=True, staging_key="legacy/key")
 
 
 class _IncompleteSink:
@@ -176,6 +199,12 @@ def test_weight_version_is_stamped_at_admission() -> None:
     first = capture.begin_call(_root("c1"))
     second = capture.begin_call(_root("c2"))
     assert (first.weight_version, second.weight_version) == (3, 9)
+
+
+def test_explicit_worker_weight_version_overrides_provider() -> None:
+    capture, _ = _capture(weight_version=1)
+    call = capture.begin_call(_root(), weight_version=9)
+    assert call.weight_version == 9
 
 
 @pytest.mark.parametrize("bad_version", [-1, 1.5, True])
@@ -304,6 +333,120 @@ def test_child_rejects_a_generation_prompt_with_the_wrong_parent_prefix() -> Non
     assert sink.events == []
 
 
+def test_legacy_sink_stages_text_calls_without_the_attachments_keyword() -> None:
+    sink = _LegacySink()
+    capture = RolloutTokenCapture(sink=sink, weight_version_fn=lambda: 7)
+    coords = capture.complete_call(
+        capture.begin_call(_root()),
+        prompt_token_ids=[10, 11],
+        generated_token_ids=[12],
+        generated_logprobs=[-0.25],
+    )
+    assert coords.disposition == "staged"
+    assert coords.staging_key == "legacy/key"
+    assert len(sink.records) == 1
+
+
+def test_attachments_reach_the_sink_unchanged_and_stay_out_of_the_record() -> None:
+    capture, sink = _capture()
+    attachments = {"imgs": object(), "imgs_sizes": object(), "num_frames": None}
+    coords = capture.complete_call(
+        capture.begin_call(_root()),
+        prompt_token_ids=[10, 11],
+        generated_token_ids=[12],
+        generated_logprobs=[-0.25],
+        attachments=attachments,
+    )
+    assert coords.disposition == "staged"
+    assert sink.attachments == [attachments]
+    assert sink.attachments[0] is attachments
+    assert sink.records[0].extras is None
+    assert "attachments" not in sink.records[0].model_dump()
+
+
+def test_empty_attachment_mapping_is_forwarded_explicitly() -> None:
+    capture, sink = _capture()
+    coords = capture.complete_call(
+        capture.begin_call(_root()),
+        prompt_token_ids=[10, 11],
+        generated_token_ids=[12],
+        generated_logprobs=[-0.25],
+        attachments={},
+    )
+    assert coords.disposition == "staged"
+    assert sink.attachments == [{}]
+
+
+def test_absent_attachments_use_the_legacy_call_shape() -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    class _RecordingSink:
+        def stage(self, *args: Any, **kwargs: Any) -> StageResult:
+            calls.append((args, kwargs))
+            return StageResult(ok=True, staging_key="k")
+
+    capture = RolloutTokenCapture(sink=_RecordingSink(), weight_version_fn=lambda: 7)
+    capture.complete_call(
+        capture.begin_call(_root()),
+        prompt_token_ids=[10, 11],
+        generated_token_ids=[12],
+        generated_logprobs=[-0.25],
+    )
+    assert len(calls) == 1
+    assert calls[0][1] == {}
+
+
+@pytest.mark.parametrize("sink", [_LegacySink(), _MemorySink(accept_attachments=False)])
+def test_unsupported_attachments_poison_capture_without_a_fallback_write(sink: Any) -> None:
+    """A legacy signature (TypeError) or an explicit rejection both yield
+    capture_failed; Gym must never retry the write with the attachments dropped."""
+    capture = RolloutTokenCapture(sink=sink, weight_version_fn=lambda: 7)
+    coords = capture.complete_call(
+        capture.begin_call(_root()),
+        prompt_token_ids=[10, 11],
+        generated_token_ids=[12],
+        generated_logprobs=[-0.25],
+        attachments={"imgs": object()},
+    )
+    assert coords.disposition == "capture_failed"
+    assert sink.records == []
+
+
+def test_attachments_do_not_change_digests_or_coordinates() -> None:
+    def _stage(attachments: Mapping[str, Any] | None) -> tuple[Any, StagedCallRecord]:
+        capture, sink = _capture()
+        coords = capture.complete_call(
+            capture.begin_call(_root()),
+            prompt_token_ids=[10, 11],
+            generated_token_ids=[12],
+            generated_logprobs=[-0.25],
+            extras={"media_spans": [{"placeholder_offset": 1}]},
+            attachments=attachments,
+        )
+        return coords, sink.records[0]
+
+    plain_coords, plain_record = _stage(None)
+    attached_coords, attached_record = _stage({"imgs": object()})
+    assert plain_coords == attached_coords
+    assert plain_record == attached_record
+    assert plain_record.digest == attached_record.digest
+    assert plain_record.extras_digest == attached_record.extras_digest
+
+
+def test_complete_call_from_response_forwards_attachments() -> None:
+    capture, sink = _capture(adapter=VLLMCaptureAdapter())
+    attachments = {"imgs": object(), "imgs_sizes": object()}
+    payload = {
+        "prompt_token_ids": [10, 11],
+        "choices": [{"message": {"generation_token_ids": [12], "generation_log_probs": [-0.2]}}],
+        "media_spans": [{"placeholder_offset": 0}],
+    }
+    coords = capture.complete_call_from_response(capture.begin_call(_root()), payload, attachments=attachments)
+    assert coords.disposition == "staged"
+    assert sink.attachments == [attachments]
+    assert sink.records[0].extras == {"media_spans": [{"placeholder_offset": 0}]}
+
+
 def test_slow_sink_write_does_not_serialize_other_completions() -> None:
     """One call's in-flight stage() must not block unrelated completions.
 
@@ -314,11 +457,11 @@ def test_slow_sink_write_does_not_serialize_other_completions() -> None:
     release_first = threading.Event()
 
     class _BlockingSink(_MemorySink):
-        def stage(self, record: StagedCallRecord) -> StageResult:
+        def stage(self, record: StagedCallRecord, *, attachments: Mapping[str, Any] | None = None) -> StageResult:
             if record.model_call_id == "c1":
                 first_staging.set()
                 assert release_first.wait(timeout=10.0), "test deadlocked releasing the first stage"
-            return super().stage(record)
+            return super().stage(record, attachments=attachments)
 
     capture, sink = _capture(_BlockingSink())
     first_call = capture.begin_call(_root("c1"))
@@ -422,6 +565,43 @@ def test_vllm_adapter_supports_message_prompt_ids_and_logprob_tokens() -> None:
     assert extract_generation_token_info(payload["choices"][0]) == ([3], [-0.5])
 
 
+@pytest.mark.parametrize("routes", [None, [[[1]]]])
+def test_vllm_extract_extras_keeps_spans_and_routes_without_a_media_summary(routes) -> None:
+    message = {} if routes is None else {"routed_experts": routes}
+    payload = {"choices": [{"message": message}], "media_spans": [{"placeholder_offset": 2}]}
+    extras = VLLMCaptureAdapter().extract_extras(payload)
+    assert "media" not in extras
+    assert extras["media_spans"] == payload["media_spans"]
+    if routes is None:
+        assert set(extras) == {"media_spans"}
+    else:
+        assert extras["routed_experts"] == routes
+
+
+def test_vllm_text_call_has_no_extras() -> None:
+    assert VLLMCaptureAdapter().extract_extras({"choices": [{"message": {}}]}) is None
+
+
+def test_vllm_rejects_malformed_media_spans() -> None:
+    with pytest.raises(ValueError):
+        VLLMCaptureAdapter().extract_extras({"choices": [{"message": {}}], "media_spans": "bad"})
+
+
+def test_staging_package_no_longer_exports_the_media_summary_helpers() -> None:
+    import nemo_gym.token_id_capture.staging as staging
+
+    for name in (
+        "MEDIA_FIELD",
+        "MediaCaptureExtras",
+        "build_multimodal_extras",
+        "parse_multimodal_extras",
+        "COMPACT_TOKEN_IDS_DELTA_FIELD",
+        "build_compact_token_ids_delta",
+    ):
+        assert not hasattr(staging, name), name
+        assert name not in staging.__all__
+
+
 def test_vllm_extraction_failure_returns_poisoned_coords() -> None:
     capture, sink = _capture(adapter=VLLMCaptureAdapter())
     coords = capture.complete_call_from_response(
@@ -430,6 +610,85 @@ def test_vllm_extraction_failure_returns_poisoned_coords() -> None:
     )
     assert coords.disposition == "capture_failed"
     assert sink.events == []
+
+
+def _minf_payload(**overrides: Any) -> SimpleNamespace:
+    fields: dict[str, Any] = {
+        "prompt_token_ids": [10, 11],
+        "generated_token_ids": [12, 13],
+        "generated_log_probs": [-0.2, -0.3],
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**{name: value for name, value in fields.items() if value is not ...})
+
+
+def test_megatron_adapter_stages_offloaded_payload_objects() -> None:
+    capture, sink = _capture(adapter=MegatronCaptureAdapter())
+    coords = capture.complete_call_from_response(capture.begin_call(_root()), _minf_payload())
+    assert coords.disposition == "staged"
+    assert sink.records[0].token_ids_delta == [10, 11, 12, 13]
+    assert sink.records[0].generation_log_probs_delta == [0.0, 0.0, -0.2, -0.3]
+    assert sink.records[0].extras is None
+
+
+def test_megatron_adapter_reads_mapping_payloads_and_casts_scalars() -> None:
+    adapter = MegatronCaptureAdapter()
+    payload = {"prompt_token_ids": (1, 2), "generated_token_ids": [3], "generated_log_probs": [-1]}
+    assert adapter.extract_prompt_ids(payload) == [1, 2]
+    assert adapter.extract_generation(payload) == ([3], [-1.0])
+    assert adapter.extract_extras(payload) is None
+
+
+@pytest.mark.parametrize("missing", ["prompt_token_ids", "generated_token_ids", "generated_log_probs"])
+def test_megatron_adapter_missing_field_poisons_capture(missing: str) -> None:
+    capture, sink = _capture(adapter=MegatronCaptureAdapter())
+    coords = capture.complete_call_from_response(
+        capture.begin_call(_root()),
+        _minf_payload(**{missing: ...}),
+    )
+    assert coords.disposition == "capture_failed"
+    assert sink.events == []
+
+
+def test_megatron_adapter_rejects_malformed_fields() -> None:
+    adapter = MegatronCaptureAdapter()
+    with pytest.raises(ValueError, match="prompt_token_ids must be a token-id sequence"):
+        adapter.extract_prompt_ids(_minf_payload(prompt_token_ids=5))
+    with pytest.raises(ValueError, match="lengths differ"):
+        adapter.extract_generation(_minf_payload(generated_log_probs=[-0.1]))
+
+
+@pytest.mark.parametrize("bad_ids", [[1.0, 2], ["1", 2], [True, 2], [None]])
+def test_megatron_adapter_rejects_non_integer_token_ids(bad_ids: list) -> None:
+    adapter = MegatronCaptureAdapter()
+    with pytest.raises(ValueError, match="prompt_token_ids must contain only integer token ids"):
+        adapter.extract_prompt_ids(_minf_payload(prompt_token_ids=bad_ids))
+    with pytest.raises(ValueError, match="generated_token_ids must contain only integer token ids"):
+        adapter.extract_generation(
+            _minf_payload(generated_token_ids=bad_ids, generated_log_probs=[-0.1] * len(bad_ids))
+        )
+
+
+@pytest.mark.parametrize("bad_log_probs", [["-0.1", -0.2], [True, -0.2], [None, -0.2]])
+def test_megatron_adapter_rejects_non_numeric_log_probs(bad_log_probs: list) -> None:
+    adapter = MegatronCaptureAdapter()
+    with pytest.raises(ValueError, match="generated_log_probs must contain only numeric log probabilities"):
+        adapter.extract_generation(_minf_payload(generated_log_probs=bad_log_probs))
+
+
+def test_megatron_adapter_malformed_element_poisons_capture() -> None:
+    capture, sink = _capture(adapter=MegatronCaptureAdapter())
+    coords = capture.complete_call_from_response(
+        capture.begin_call(_root()),
+        _minf_payload(generated_token_ids=[12.0, 13.0]),
+    )
+    assert coords.disposition == "capture_failed"
+    assert sink.events == []
+
+
+def test_megatron_adapter_enter_prefix_writes_the_required_prefix_field() -> None:
+    request = MegatronCaptureAdapter().enter_prefix({"n": 1}, [1, 2])
+    assert request == {"n": 1, "required_prefix_token_ids": [1, 2]}
 
 
 def test_install_capture_uses_the_worker_host_seam() -> None:

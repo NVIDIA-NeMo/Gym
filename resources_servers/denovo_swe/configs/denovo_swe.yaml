@@ -1,0 +1,65 @@
+# Resources server for AweAI-Team/DeNovoSWE.
+#
+# A "document-to-repository" benchmark: every row ships its own prebuilt image
+# (docker.io/aweaiteam/denovoswe:<instance_id>) containing the original package source at
+# base_commit plus a document (README/spec) the agent must regenerate the package from. There is
+# no golden model-style patch -- the image's pre-existing source at base_commit IS the golden
+# answer -- so golden-patch validation grades that source directly (patch: ""). See verification.py.
+denovo_swe_resources_server:
+  resources_servers:
+    denovo_swe:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      # pip install -e . + a per-file pytest sweep over passed_ptp, not a build -- similar shape
+      # to Scale-SWE's Python-only sizing.
+      evaluation_timeout: 1800
+      is_verifying_golden_patch: false
+      apply_anti_cheating: true
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 4
+          memory_mib: 16384
+          disk_gib: 20
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 20
+        metadata:
+          benchmark: denovo-swe
+
+# Golden-patch validation: grade the image's own pre-existing source instead of an agent's. A row
+# whose golden source does not resolve is a broken row, and scoring an agent against it measures
+# noise. Run it with resources_servers/denovo_swe/apply_golden_patch.py.
+denovo_swe_golden_patch_resources_server:
+  resources_servers:
+    denovo_swe:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      evaluation_timeout: 1800
+      is_verifying_golden_patch: true
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 4
+          memory_mib: 16384
+          disk_gib: 20
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 20
+        metadata:
+          benchmark: denovo-swe-golden-patch

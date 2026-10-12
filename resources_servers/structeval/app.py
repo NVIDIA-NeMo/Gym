@@ -75,6 +75,7 @@ class StructEvalVerifyResponse(BaseVerifyResponse):
 
 
 class StructEvalResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: StructEvalResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

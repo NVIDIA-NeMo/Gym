@@ -121,6 +121,7 @@ class ConversationalToolUseAgentVerifyResponse(BaseVerifyResponse):
 
 
 class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     AGENT_SYSTEM_MESSAGE_TEMPLATE: ClassVar[str] = AGENT_SYSTEM_MESSAGE_TEMPLATE
     AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE: ClassVar[str] = AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE
 

@@ -36,7 +36,7 @@ papered over, so this module takes an explicit position on each of the five:
     Used from **exactly one process**. A gauge is last-value semantics, so if every
     server process set it the exported value would be whichever process happened to write
     last — a meaningless number that looks like a real one. :func:`record_active_servers`
-    is orchestrator-only and refuses to run anywhere else.
+    is supervisor-only and refuses to run anywhere else.
 
 ``gym.server.request_duration_ms`` (histogram)
     **Deliberately unused.** With no attributes it would collapse every endpoint of every
@@ -46,6 +46,8 @@ papered over, so this module takes an explicit position on each of the five:
     already emits ``http.server.request.duration`` dimensioned by ``http.route``,
     ``http.request.method`` and ``http.response.status_code``, which is strictly better.
     Use that instead; see ``fern/versions/latest/pages/observability/metrics.mdx``.
+
+Attributed instruments (the sandbox lifecycle set) live in :mod:`nemo_gym.telemetry.gym_metrics`.
 
 Every function here is a no-op unless telemetry is initialised *and* exporting, so call
 sites do not need their own guards for correctness — though they should still sit under a
@@ -106,12 +108,12 @@ def record_verify(duration_ms: float, succeeded: bool) -> None:
 
 
 def record_active_servers(count: int) -> None:
-    """Set ``gym.servers.active`` — orchestrator only.
+    """Set ``gym.servers.active`` — supervisor only.
 
     ``gym.servers.active`` is a gauge, so the exported value is whatever was written last.
     Calling this from more than one process produces a number that is not the fleet size,
     not any process's view of it, and impossible to interpret after the fact. The
-    orchestrator is the only process that knows the fleet size, so it is the only caller.
+    supervisor is the only process that knows the fleet size, so it is the only caller.
     """
     _record(active_servers=count)
 

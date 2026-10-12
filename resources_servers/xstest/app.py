@@ -155,6 +155,7 @@ def _parse_wildguard_verdict(text: str) -> Optional[str]:
 
 
 class XSTestResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: XSTestResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:

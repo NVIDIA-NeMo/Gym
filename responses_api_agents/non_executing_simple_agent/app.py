@@ -56,6 +56,7 @@ class NonExecutingSimpleAgentVerifyResponse(BaseVerifyResponse):
 
 
 class NonExecutingSimpleAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: NonExecutingSimpleAgentConfig
 
     async def responses(

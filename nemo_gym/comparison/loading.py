@@ -14,11 +14,13 @@
 # limitations under the License.
 """Reading `*_aggregate_metrics.json` for `gym eval compare`, and picking which agent to compare.
 
-All filesystem I/O for the compare feature lives here. The rollouts JSONL a user points at is
-never opened: it is the run's identity and the handle its `_aggregate_metrics.json` sibling is
-derived from.
+Input file I/O for the compare feature lives here. The rollouts JSONL a user points at is
+never opened: it is the run's identity and the handle from which its `_aggregate_metrics.json`
+sibling is derived. Aggregate files written before repeat-level statistics existed are enriched from
+their already-recorded per-rollout summaries in memory.
 """
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
@@ -31,9 +33,10 @@ from nemo_gym.comparison.schema import RunFile
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
-    CI_LOW_95_ACROSS_REPEATS_PREFIX,
     EXPECTED_NUM_ROLLOUTS_KEY_NAME,
+    ROLLOUT_INFOS_KEY_NAME,
 )
+from nemo_gym.metrics_config import Stat
 from nemo_gym.path_utils import aggregate_metrics_path_for
 
 
@@ -42,16 +45,13 @@ RunRole = Literal["baseline", "candidate"]
 
 @dataclass(frozen=True)
 class LoadedRun:
-    """One side of the comparison, narrowed to a single agent.
-
-    Only what the diff actually consumes. Run identity (role, paths, label) stays on `RunFile`,
-    which the report carries directly, so it is deliberately not duplicated here.
-    """
+    """One side of the comparison, narrowed to a single agent."""
 
     agent_name: str
     agent_metrics: Dict[str, Any]
     key_metrics: Dict[str, Any]
     group_level_metrics: List[Dict[str, Any]]
+    repeat_level_metrics: List[Dict[str, Any]]
     num_tasks: int = 0
     num_repeats: Optional[int] = None
     has_repeat_cis: bool = False
@@ -105,6 +105,21 @@ def _read_agent_entries(metrics_fpath: Path) -> Dict[str, Dict[str, Any]]:
     return entries
 
 
+def _compute_repeat_metrics(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Add repeat metrics to one legacy aggregate entry."""
+    from nemo_gym.reward_profile import compute_aggregate_metrics
+
+    computed = compute_aggregate_metrics(
+        [info for group in entry.get("group_level_metrics", []) for info in group.get(ROLLOUT_INFOS_KEY_NAME, [])]
+    )
+    return entry | {
+        "agent_metrics": computed.agent_metrics
+        | (entry.get("agent_metrics") or {})
+        | {"num_repeats": _derive_num_repeats(entry.get("group_level_metrics", []), computed.repeat_level_metrics)},
+        "repeat_level_metrics": computed.repeat_level_metrics,
+    }
+
+
 def load_agg_metrics_file(
     rollouts_jsonl_fpath: str,
     role: RunRole,
@@ -121,13 +136,22 @@ def load_agg_metrics_file(
             "or point at the metrics file directly with "
             "'baseline_aggregate_metrics_fpath' or 'candidate_aggregate_metrics_fpaths'."
         )
-
+    entries_by_agent = _read_agent_entries(metrics_path)
+    if any("repeat_level_metrics" not in entry for entry in entries_by_agent.values()):
+        warnings.warn(
+            f"Repeat-level metrics are missing in '{metrics_path}'; calculating them from stored rollout summaries.",
+            stacklevel=2,
+        )
+        entries_by_agent = {
+            name: entry if "repeat_level_metrics" in entry else _compute_repeat_metrics(entry)
+            for name, entry in entries_by_agent.items()
+        }
     return RunFile(
         role=role,
         index=index,
         rollouts_jsonl_fpath=_resolve_under_cwd_or_install(rollouts_jsonl_fpath),
         aggregate_metrics_fpath=metrics_path,
-        entries_by_agent=_read_agent_entries(metrics_path),
+        entries_by_agent=entries_by_agent,
     )
 
 
@@ -250,7 +274,8 @@ def build_loaded_run(run_file: RunFile, agent_name: str) -> LoadedRun:
         agent_metrics=agent_metrics,
         key_metrics=key_metrics,
         group_level_metrics=group_level_metrics,
+        repeat_level_metrics=repeat_level_metrics,
         num_tasks=len(group_level_metrics),
         num_repeats=_derive_num_repeats(group_level_metrics, repeat_level_metrics),
-        has_repeat_cis=any(key.startswith(CI_LOW_95_ACROSS_REPEATS_PREFIX) for key in agent_metrics),
+        has_repeat_cis=any(key.startswith(Stat.CI_LOW_95.across_repeats_prefix) for key in agent_metrics),
     )

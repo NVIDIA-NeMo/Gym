@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import json
 from asyncio import Semaphore
 from collections import defaultdict
 from pathlib import Path
@@ -22,6 +23,7 @@ import orjson
 import pytest
 from pydantic import ValidationError
 
+from nemo_gym.atif_reverification import AtifProjectionError
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import (
@@ -33,7 +35,9 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
+    ATIF_PROVENANCE_KEY,
     JUDGE_FAILED_FAILURE_CLASS,
+    JUDGE_INVALID_FAILURE_CLASS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
@@ -50,19 +54,33 @@ from nemo_gym.rollout_reverification import (
     _check_reverify_mode,
     _drop_cache_from_payloads,
     _get_rs_names,
+    _guard_atif_preflight,
     _guard_reverify_mode,
     _is_judge_failure,
     _load_cache_keys_by_status,
     _load_reverified_results,
+    _normalize_invalid_judge_result,
     _parse_output_line_key,
+    _prepare_atif_payloads,
     _prepare_output_fpaths,
     _prepare_payloads,
     _recovery_rollout_predicate,
+    _reject_multistage_recovery_source,
+    _resources_server_exposes_tools_over_mcp,
     _rollout_verify_debug_summary,
+    _rs_for_row,
     _run_verification_payloads,
     _seed_output_with_successes,
     _yield_inputs_and_rollouts_paired,
     summarize_cache_usage,
+)
+
+
+_TOOL_TRAJECTORY_SHA256 = (
+    "431aae09e1a1a3cfd478c44f730d0432c0052eb06fe387d4d90aec4bacf4b660"  # pragma: allowlist secret
+)
+_RESPONSES_TRAJECTORY_SHA256 = (
+    "8d9c3c2d21c4ef0a8d9488eac560b1fdfaa532712b8a4fc628023a94d0bab825"  # pragma: allowlist secret
 )
 
 
@@ -120,6 +138,79 @@ class TestRolloutReverificationConfig:
     def test_append_with_judge_failed_only_is_valid(self) -> None:
         cfg = RolloutReverificationConfig(**self._kwargs(append=True, judge_failed_only=True))
         assert cfg.append is True
+
+    def test_atif_manifest_is_a_distinct_input_mode(self) -> None:
+        cfg = RolloutReverificationConfig(
+            **self._kwargs(
+                input_format="atif",
+                rollouts_jsonl_fpath=None,
+                atif_manifest_jsonl_fpath="manifest.jsonl",
+            )
+        )
+
+        assert cfg.input_format == "atif"
+        assert cfg.atif_manifest_jsonl_fpath == "manifest.jsonl"
+
+    @pytest.mark.parametrize(
+        ("overrides", "match"),
+        [
+            ({"rollouts_jsonl_fpath": None}, "requires `rollouts_jsonl_fpath`"),
+            ({"atif_manifest_jsonl_fpath": "manifest.jsonl"}, "only valid with input_format=atif"),
+            (
+                {"input_format": "atif", "rollouts_jsonl_fpath": None, "atif_manifest_jsonl_fpath": None},
+                "requires `atif_manifest_jsonl_fpath`",
+            ),
+            (
+                {"input_format": "atif", "atif_manifest_jsonl_fpath": "manifest.jsonl"},
+                "cannot be combined with input_format=atif",
+            ),
+            (
+                {
+                    "input_format": "atif",
+                    "rollouts_jsonl_fpath": None,
+                    "atif_manifest_jsonl_fpath": "manifest.jsonl",
+                    "judge_failed_only": True,
+                },
+                "does not support judge-failure recovery",
+            ),
+            (
+                {
+                    "input_format": "atif",
+                    "rollouts_jsonl_fpath": None,
+                    "atif_manifest_jsonl_fpath": "manifest.jsonl",
+                    "force": True,
+                },
+                "requires a stateless verifier",
+            ),
+            (
+                {
+                    "input_format": "atif",
+                    "rollouts_jsonl_fpath": None,
+                    "atif_manifest_jsonl_fpath": "manifest.jsonl",
+                    "resume_from_cache": True,
+                },
+                "cache keys include source hashes",
+            ),
+        ],
+    )
+    def test_input_mode_conflicts_are_rejected(self, overrides: dict, match: str) -> None:
+        with pytest.raises(ValidationError, match=match):
+            RolloutReverificationConfig(**self._kwargs(**overrides))
+
+    def test_atif_projection_error_exits_the_cli_cleanly(self, capsys: pytest.CaptureFixture[str]) -> None:
+        from nemo_gym.cli.utils import exit_cleanly_on_config_error
+
+        @exit_cleanly_on_config_error
+        def fail_projection() -> None:
+            raise AtifProjectionError("invalid ATIF manifest row 2")
+
+        with pytest.raises(SystemExit) as exc_info:
+            fail_projection()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Error: invalid ATIF manifest row 2" in captured.out
+        assert "Traceback" not in captured.out + captured.err
 
 
 class TestAgentToRsMappingFromAgentBlocks:
@@ -218,6 +309,296 @@ class TestBuildAgentToResourcesServerMapping:
         }
         result = _build_agent_to_resources_server_mapping(config)
         assert result["any_agent_name"] == "verifier_block"
+
+
+class TestAtifPreflight:
+    @staticmethod
+    def _tool_payload(agent_name: str = "fixture-agent") -> dict:
+        return {
+            AGENT_REF_KEY_NAME: {"name": agent_name},
+            "response": {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "name": "lookup",
+                        "arguments": "{}",
+                    },
+                    {"type": "function_call_output", "call_id": "call-1", "output": "ok"},
+                ]
+            },
+        }
+
+    @staticmethod
+    def _config(*, exposes_tools_over_mcp: bool) -> dict:
+        return {
+            "fixture-agent": {
+                "responses_api_agents": {
+                    "fixture": {"resources_server": {"name": "fixture-rs"}},
+                }
+            },
+            "fixture-rs": {
+                "resources_servers": {
+                    "fixture": {"expose_tools_over_mcp": exposes_tools_over_mcp},
+                }
+            },
+        }
+
+    def _patch_client(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        config: dict,
+        modes: dict[str, ReverifyMode] | None = None,
+    ) -> MagicMock:
+        client = MagicMock()
+        client.global_config_dict = config
+
+        async def get(*, server_name: str, url_path: str) -> ReverifyMode:
+            assert url_path == "/reverify_mode"
+            return (modes or {}).get(server_name, ReverifyMode.STATELESS)
+
+        client.get = AsyncMock(side_effect=get)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: client)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.get_response_json",
+            AsyncMock(side_effect=lambda response: response),
+        )
+        return client
+
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_reads_boolean_mcp_exposure_flag(self, enabled: bool) -> None:
+        config = self._config(exposes_tools_over_mcp=enabled)
+
+        assert _resources_server_exposes_tools_over_mcp(config, "fixture-rs") is enabled
+
+    def test_missing_mcp_exposure_flag_defaults_to_false(self) -> None:
+        config = self._config(exposes_tools_over_mcp=False)
+        del config["fixture-rs"]["resources_servers"]["fixture"]["expose_tools_over_mcp"]
+
+        assert _resources_server_exposes_tools_over_mcp(config, "fixture-rs") is False
+
+    @pytest.mark.parametrize(("configured", "expected"), [("false", False), ("true", True), (0, False), (1, True)])
+    def test_mcp_exposure_uses_resources_server_bool_parsing(self, configured: object, expected: bool) -> None:
+        config = self._config(exposes_tools_over_mcp=False)
+        config["fixture-rs"]["resources_servers"]["fixture"]["expose_tools_over_mcp"] = configured
+
+        assert _resources_server_exposes_tools_over_mcp(config, "fixture-rs") is expected
+
+    def test_invalid_mcp_exposure_flag_fails_closed(self) -> None:
+        config = self._config(exposes_tools_over_mcp=False)
+        config["fixture-rs"]["resources_servers"]["fixture"]["expose_tools_over_mcp"] = "not-a-bool"
+
+        with pytest.raises(ConfigError, match="invalid expose_tools_over_mcp"):
+            _resources_server_exposes_tools_over_mcp(config, "fixture-rs")
+
+    @pytest.mark.parametrize(
+        ("config", "match"),
+        [
+            ({}, "is missing from the config"),
+            ({"fixture-rs": {"resources_servers": {}}}, "must contain exactly one resources_servers entry"),
+            ({"fixture-rs": {"resources_servers": {"fixture": "invalid"}}}, "has an invalid config entry"),
+        ],
+        ids=["missing-block", "missing-implementation", "invalid-implementation"],
+    )
+    def test_malformed_resources_server_config_fails_closed(self, config: dict, match: str) -> None:
+        with pytest.raises(ConfigError, match=match):
+            _resources_server_exposes_tools_over_mcp(config, "fixture-rs")
+
+    @pytest.mark.parametrize(
+        ("mode", "exposes_mcp", "error", "match"),
+        [
+            (ReverifyMode.STATELESS, False, None, None),
+            (ReverifyMode.UNSUPPORTED, False, ConfigError, "requires stateless verifiers"),
+            (ReverifyMode.STATELESS, True, AtifProjectionError, "does not carry Gym's canonical"),
+        ],
+    )
+    async def test_selected_route_must_be_stateless_and_not_mcp_for_tool_calls(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: ReverifyMode,
+        exposes_mcp: bool,
+        error: type[Exception] | None,
+        match: str | None,
+    ) -> None:
+        self._patch_client(
+            monkeypatch,
+            self._config(exposes_tools_over_mcp=exposes_mcp),
+            {"fixture-rs": mode},
+        )
+
+        if error is None:
+            await _guard_atif_preflight([self._tool_payload()])
+        else:
+            with pytest.raises(error, match=match):
+                await _guard_atif_preflight([self._tool_payload()])
+
+    @pytest.mark.parametrize(
+        ("agent_mode", "agent_mcp", "task_mode", "task_mcp", "error"),
+        [
+            (ReverifyMode.UNSUPPORTED, True, ReverifyMode.STATELESS, False, None),
+            (ReverifyMode.STATELESS, False, ReverifyMode.UNSUPPORTED, False, ConfigError),
+            (ReverifyMode.STATELESS, False, ReverifyMode.STATELESS, True, AtifProjectionError),
+        ],
+    )
+    async def test_task_source_is_authoritative_for_the_whole_preflight(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        agent_mode: ReverifyMode,
+        agent_mcp: bool,
+        task_mode: ReverifyMode,
+        task_mcp: bool,
+        error: type[Exception] | None,
+    ) -> None:
+        config = self._config(exposes_tools_over_mcp=agent_mcp)
+        config["task-rs"] = {
+            "resources_servers": {"task": {"expose_tools_over_mcp": task_mcp}},
+        }
+        client = self._patch_client(
+            monkeypatch,
+            config,
+            {"fixture-rs": agent_mode, "task-rs": task_mode},
+        )
+        payload = self._tool_payload() | {TASK_SOURCE_KEY_NAME: "task-rs"}
+
+        if error is None:
+            await _guard_atif_preflight([payload])
+        else:
+            with pytest.raises(error):
+                await _guard_atif_preflight([payload])
+        assert [call.kwargs["server_name"] for call in client.get.await_args_list] == ["task-rs"]
+
+    async def test_low_level_preflight_resolver_can_route_without_agent_ref(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The shared resolver supports task_source; ATIF materialization requires agent_ref earlier."""
+        config = self._config(exposes_tools_over_mcp=False)
+        config["task-rs"] = {
+            "resources_servers": {"task": {"expose_tools_over_mcp": False}},
+        }
+        self._patch_client(monkeypatch, config)
+        payload = self._tool_payload()
+        payload.pop(AGENT_REF_KEY_NAME)
+        payload[TASK_SOURCE_KEY_NAME] = "task-rs"
+
+        await _guard_atif_preflight([payload])
+
+    async def test_unselected_resources_servers_do_not_control_preflight(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = self._config(exposes_tools_over_mcp=False)
+        config["unrelated-agent"] = {
+            "responses_api_agents": {"fixture": {"resources_server": {"name": "unrelated-rs"}}},
+        }
+        config["unrelated-rs"] = {
+            "resources_servers": {"unrelated": {"expose_tools_over_mcp": True}},
+        }
+        client = self._patch_client(
+            monkeypatch,
+            config,
+            {"fixture-rs": ReverifyMode.STATELESS, "unrelated-rs": ReverifyMode.UNSUPPORTED},
+        )
+
+        await _guard_atif_preflight([self._tool_payload()])
+
+        assert [call.kwargs["server_name"] for call in client.get.await_args_list] == ["fixture-rs"]
+
+    async def test_resources_only_config_uses_its_single_mcp_server(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = {
+            "fixture-rs": {
+                "resources_servers": {
+                    "fixture": {"expose_tools_over_mcp": True},
+                }
+            }
+        }
+        self._patch_client(monkeypatch, config)
+
+        with pytest.raises(AtifProjectionError, match="MCP-exposed resources server 'fixture-rs'"):
+            await _guard_atif_preflight([self._tool_payload("external-agent")])
+
+    async def test_text_only_atif_validates_routing_without_inspecting_mcp_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_client(monkeypatch, self._config(exposes_tools_over_mcp=True))
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._resources_server_exposes_tools_over_mcp",
+            lambda *_args: pytest.fail("text-only ATIF should not inspect MCP configuration"),
+        )
+        payload = {
+            AGENT_REF_KEY_NAME: {"name": "fixture-agent"},
+            "response": {"output": [{"type": "message", "content": []}]},
+        }
+
+        await _guard_atif_preflight([payload])
+
+    async def test_text_only_atif_rejects_an_unroutable_agent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch_client(monkeypatch, self._config(exposes_tools_over_mcp=False))
+        payload = {
+            AGENT_REF_KEY_NAME: {"name": "unknown-agent"},
+            "response": {"output": [{"type": "message", "content": []}]},
+        }
+
+        with pytest.raises(ConfigError, match="cannot find a resources server for row"):
+            await _guard_atif_preflight([payload])
+
+    async def test_run_rejects_before_preparing_output_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch_client(monkeypatch, self._config(exposes_tools_over_mcp=True))
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._resolve_under_cwd_or_install",
+            lambda value: Path(value),
+        )
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._prepare_atif_payloads",
+            lambda *_args, **_kwargs: [self._tool_payload()],
+        )
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._prepare_output_fpaths",
+            lambda *_args, **_kwargs: pytest.fail("output paths must not be touched before the ATIF guard"),
+        )
+        config = RolloutReverificationConfig(
+            input_format="atif",
+            materialized_inputs_jsonl_fpath="inputs.jsonl",
+            rollouts_jsonl_fpath=None,
+            atif_manifest_jsonl_fpath="manifest.jsonl",
+            output_jsonl_fpath="existing-output.jsonl",
+            overwrite=True,
+        )
+
+        with pytest.raises(AtifProjectionError, match="does not carry Gym's canonical"):
+            await RolloutReverificationHelper().run_from_config(config)
+
+    async def test_invalid_text_routing_preserves_existing_output_before_overwrite(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch_client(monkeypatch, self._config(exposes_tools_over_mcp=False))
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._resolve_under_cwd_or_install",
+            lambda value: Path(value),
+        )
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._prepare_atif_payloads",
+            lambda *_args, **_kwargs: [
+                {
+                    AGENT_REF_KEY_NAME: {"name": "unknown-agent"},
+                    "response": {"output": [{"type": "message", "content": []}]},
+                }
+            ],
+        )
+        output = tmp_path / "existing-output.jsonl"
+        output.write_text("existing result\n")
+        config = RolloutReverificationConfig(
+            input_format="atif",
+            materialized_inputs_jsonl_fpath="inputs.jsonl",
+            rollouts_jsonl_fpath=None,
+            atif_manifest_jsonl_fpath="manifest.jsonl",
+            output_jsonl_fpath=str(output),
+            overwrite=True,
+        )
+
+        with pytest.raises(ConfigError, match="cannot find a resources server for row"):
+            await RolloutReverificationHelper().run_from_config(config)
+
+        assert output.read_text() == "existing result\n"
 
 
 class TestGetRsNames:
@@ -425,6 +806,68 @@ class TestBuildVerifyPayload:
 
         assert result == {"task": "q1", "verifier_metadata": {"answer": 42}, "response": {"output": "hello"}}
 
+    def test_materialized_task_rebuilds_the_verify_body_from_its_task_input(self) -> None:
+        pair = InputRolloutPair(
+            input={
+                "task_id": {"taskset": "swe_pro", "task_id": "a"},
+                "task_input": {"responses_create_params": {"input": "q1"}, "task_data": {"instance_id": "a"}},
+                "_ng_task_index": 0,
+                "_ng_environment_server": "environment",
+            },
+            rollout={"response": {"output": "hello"}, "reward": 1.0},
+        )
+
+        result = _build_verify_payload(pair)
+
+        assert result == {
+            "_ng_task_index": 0,
+            "_ng_environment_server": "environment",
+            "instance_id": "a",
+            "responses_create_params": {"input": "q1"},
+            "response": {"output": "hello"},
+        }
+
+    def test_generic_task_input_preserves_verifier_fields(self) -> None:
+        fields = {"responses_create_params": {"input": "q1"}, "instance_id": "a", "verifier_metadata": {"answer": 42}}
+        pair = InputRolloutPair(
+            input={"task_id": {"taskset": "t", "task_id": "a"}, "task_input": fields, "_ng_task_index": 0},
+            rollout={"response": {"output": "hello"}},
+        )
+        assert _build_verify_payload(pair) == {"_ng_task_index": 0, **fields, "response": {"output": "hello"}}
+
+    def test_mixed_input_preserves_fields_and_rejects_conflicts(self) -> None:
+        pair = InputRolloutPair(
+            input={"task_input": {"task_data": {"answer": 42}, "instance_id": "a"}},
+            rollout={"response": {}},
+        )
+        assert _build_verify_payload(pair) == {"answer": 42, "instance_id": "a", "response": {}}
+        pair.input["task_input"]["answer"] = 43
+        with pytest.raises(ConfigError, match="conflicting task field 'answer'"):
+            _build_verify_payload(pair)
+
+    def test_rows_stamped_with_an_environment_server_route_to_its_resources_server(self) -> None:
+        config = {
+            "environment": {
+                "environment_servers": {
+                    "single_agent_turn": {
+                        "agent_server": {"type": "responses_api_agents", "name": "hermes"},
+                        "resources_server": {"type": "resources_servers", "name": "swe"},
+                    }
+                }
+            },
+        }
+
+        assert _rs_for_row({"_ng_environment_server": "environment"}, {}, config) == "swe"
+
+    def test_rollout_without_a_response_names_its_result_type(self) -> None:
+        pair = InputRolloutPair(
+            input={"task": "q1"},
+            rollout={"_ng_task_index": 3, "_ng_rollout_index": 1, "_ng_result_type": "user_simulation", "reward": 1.0},
+        )
+
+        with pytest.raises(ConfigError, match="result type 'user_simulation' has no `response`"):
+            _build_verify_payload(pair)
+
     def test_response_key_overwrites_any_existing_response_in_input(self) -> None:
         pair = InputRolloutPair(
             input={"response": {"output": "stale"}, "task": "q1"},
@@ -452,6 +895,33 @@ class TestBuildVerifyPayload:
 
         assert set(result.keys()) == {"task", "response"}
 
+    @pytest.mark.parametrize("shape", ["legacy", "flat_task_input", "canonical_task_input"])
+    def test_preserves_file_and_reference_context_required_by_verifier(self, shape: str) -> None:
+        fields = {"task": "q1", "deliverables_dir": "/stale"}
+        input_row = fields
+        if shape != "legacy":
+            input_row = {
+                "task_id": {"taskset": "t", "task_id": "a"},
+                "task_input": {"task_data": fields} if shape == "canonical_task_input" else fields,
+            }
+        pair = InputRolloutPair(
+            input=input_row,
+            rollout={
+                "response": {"output": "x"},
+                "deliverables_dir": "/artifacts/task-1/repeat_0",
+                "reference_ids": ["ref-b"],
+                "reward": 0.0,
+                NG_FAILURE_CLASS_KEY: JUDGE_INVALID_FAILURE_CLASS,
+            },
+        )
+
+        result = _build_verify_payload(pair)
+
+        assert result["deliverables_dir"] == "/artifacts/task-1/repeat_0"
+        assert result["reference_ids"] == ["ref-b"]
+        assert result["task"] == "q1"
+        assert "reward" not in result and NG_FAILURE_CLASS_KEY not in result
+
 
 # ---------------------------------------------------------------------------
 # Judge-failure recovery helpers (--judge-failed-only)
@@ -461,6 +931,7 @@ class TestBuildVerifyPayload:
 class TestIsJudgeFailure:
     def test_true_only_for_judge_failed_class(self) -> None:
         assert _is_judge_failure({NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS}) is True
+        assert _is_judge_failure({NG_FAILURE_CLASS_KEY: JUDGE_INVALID_FAILURE_CLASS}) is True
 
     def test_false_for_other_failure_classes(self) -> None:
         assert _is_judge_failure({NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) is False
@@ -471,6 +942,15 @@ class TestIsJudgeFailure:
     def test_legacy_judge_failed_boolean_is_not_honored(self) -> None:
         """v2 marks judge failures only via _ng_failure_class; the older boolean is ignored."""
         assert _is_judge_failure({"_ng_failure_judge_failed": True}) is False
+
+    def test_invalid_judge_result_is_retryable_unless_verifier_marks_it_permanent(self) -> None:
+        retryable = _normalize_invalid_judge_result({"invalid_judge_response": True})
+        assert retryable[NG_FAILURE_CLASS_KEY] == JUDGE_INVALID_FAILURE_CLASS
+        assert NG_TERMINAL_KEY not in retryable
+
+        permanent = _normalize_invalid_judge_result({"invalid_judge_response": True, "invalid_judge_retryable": False})
+        assert permanent[NG_FAILURE_CLASS_KEY] == "permanent"
+        assert permanent[NG_TERMINAL_KEY] is True
 
 
 class TestRecoveryRolloutPredicate:
@@ -614,6 +1094,50 @@ class TestLoadCacheKeysByStatus:
             ],
         )
         cache = _load_cache_keys_by_status(paths)
+        assert cache.terminal_keys == {(5, 0)}
+
+    def test_legacy_terminal_timeout_is_retryable(self, tmp_path: Path) -> None:
+        paths = self._paths(tmp_path)
+        self._write(
+            paths.failures,
+            [
+                {
+                    TASK_INDEX_KEY_NAME: 5,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    NG_FAILURE_CLASS_KEY: "timeout_exceeded",
+                    NG_TERMINAL_KEY: True,
+                },
+                {
+                    TASK_INDEX_KEY_NAME: 6,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    NG_FAILURE_CLASS_KEY: "skipped",
+                    NG_TERMINAL_KEY: True,
+                },
+            ],
+        )
+
+        cache = _load_cache_keys_by_status(paths, retry_terminal_timeouts=True)
+
+        assert cache.terminal_keys == {(6, 0)}
+
+    def test_terminal_timeout_stays_terminal_by_default(self, tmp_path: Path) -> None:
+        paths = self._paths(tmp_path)
+        self._write(
+            paths.failures,
+            [
+                {
+                    TASK_INDEX_KEY_NAME: 5,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    NG_FAILURE_CLASS_KEY: "timeout_exceeded",
+                    NG_TERMINAL_KEY: True,
+                },
+                # Unstamped skip: terminal only under the opt-in contract.
+                {TASK_INDEX_KEY_NAME: 6, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "skipped"},
+            ],
+        )
+
+        cache = _load_cache_keys_by_status(paths)
+
         assert cache.terminal_keys == {(5, 0)}
 
     def test_maxed_out_keys_when_attempts_reach_configured_max(
@@ -819,6 +1343,135 @@ class TestPreparePayloads:
         assert capture["rollout_predicate"] is None
 
 
+class TestPrepareAtifPayloads:
+    def _paths(self, tmp_path: Path) -> OutputPaths:
+        return OutputPaths(output=tmp_path / "out.jsonl", failures=tmp_path / "out_failures.jsonl")
+
+    def _write_inputs_and_manifest(self, tmp_path: Path) -> tuple[Path, Path]:
+        fixture = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_tool_trajectory.json"
+        trajectory = tmp_path / "trajectory.json"
+        trajectory.write_bytes(fixture.read_bytes())
+        materialized = tmp_path / "materialized.jsonl"
+        materialized.write_bytes(
+            orjson.dumps(
+                {
+                    TASK_INDEX_KEY_NAME: 7,
+                    ROLLOUT_INDEX_KEY_NAME: 2,
+                    AGENT_REF_KEY_NAME: {"name": "fixture-agent"},
+                    "responses_create_params": {
+                        "input": [{"role": "user", "content": "What is the weather in Raleigh?"}],
+                        "tools": [],
+                    },
+                }
+            )
+            + b"\n"
+        )
+        manifest = tmp_path / "manifest.jsonl"
+        manifest.write_bytes(
+            orjson.dumps(
+                {
+                    "trajectory_path": trajectory.name,
+                    TASK_INDEX_KEY_NAME: 7,
+                    ROLLOUT_INDEX_KEY_NAME: 2,
+                }
+            )
+            + b"\n"
+        )
+        return materialized, manifest
+
+    def test_builds_payload_and_declared_path_provenance(self, tmp_path: Path) -> None:
+        materialized, manifest = self._write_inputs_and_manifest(tmp_path)
+
+        payloads = _prepare_atif_payloads(
+            materialized,
+            manifest,
+        )
+
+        assert len(payloads) == 1
+        payload = payloads[0]
+        assert payload[TASK_INDEX_KEY_NAME] == 7
+        assert payload[ROLLOUT_INDEX_KEY_NAME] == 2
+        assert [item["type"] for item in payload["response"]["output"]] == [
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+        assert payload[ATIF_PROVENANCE_KEY] == {
+            "trajectory_id": "gym-atif-spike-session",
+            "session_id": "gym-atif-spike-session",
+            "source_sha256": _TOOL_TRAJECTORY_SHA256,
+            "schema_version": "ATIF-v1.7",
+            "projection_status": "complete",
+        }
+
+    def test_rejects_non_object_materialized_rows(self, tmp_path: Path) -> None:
+        _, manifest = self._write_inputs_and_manifest(tmp_path)
+        materialized = tmp_path / "materialized-invalid.jsonl"
+        materialized.write_text("[]\n")
+
+        with pytest.raises(AtifProjectionError, match="is not an object"):
+            _prepare_atif_payloads(
+                materialized,
+                manifest,
+            )
+
+    def test_reports_an_unreadable_materialized_input(self, tmp_path: Path) -> None:
+        _, manifest = self._write_inputs_and_manifest(tmp_path)
+        missing_materialized = tmp_path / "missing-materialized.jsonl"
+
+        with pytest.raises(AtifProjectionError, match="could not read materialized inputs"):
+            _prepare_atif_payloads(missing_materialized, manifest)
+
+    def test_limit_is_applied_before_projecting_and_blank_input_lines_are_ignored(self, tmp_path: Path) -> None:
+        materialized, manifest = self._write_inputs_and_manifest(tmp_path)
+        materialized.write_bytes(b"\n" + materialized.read_bytes() + b"\n")
+        manifest.write_bytes(
+            manifest.read_bytes()
+            + orjson.dumps(
+                {
+                    "trajectory_path": "excluded-missing-trajectory.json",
+                    TASK_INDEX_KEY_NAME: 999,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                }
+            )
+            + b"\n"
+        )
+
+        with pytest.warns(UserWarning, match="2 of 2 entries without expected_sha256"):
+            payloads = _prepare_atif_payloads(materialized, manifest, limit=1)
+
+        assert [(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in payloads] == [(7, 2)]
+
+    def test_materialized_input_preserves_arbitrary_size_json_integers(self, tmp_path: Path) -> None:
+        materialized, manifest = self._write_inputs_and_manifest(tmp_path)
+        row = json.loads(materialized.read_text())
+        value = 10**100 + 123
+        row["verifier_metadata"] = {"large_integer": value}
+        materialized.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+        payload = _prepare_atif_payloads(materialized, manifest)[0]
+
+        assert payload["verifier_metadata"]["large_integer"] == value
+        assert isinstance(payload["verifier_metadata"]["large_integer"], int)
+
+    @pytest.mark.parametrize(
+        "invalid_member",
+        [
+            '"duplicate":1,"duplicate":2',
+            '"nonfinite":NaN',
+            '"overflow":1e400',
+        ],
+    )
+    def test_materialized_input_rejects_ambiguous_or_nonstandard_json(
+        self, tmp_path: Path, invalid_member: str
+    ) -> None:
+        materialized, manifest = self._write_inputs_and_manifest(tmp_path)
+        materialized.write_text("{" + invalid_member + "}\n", encoding="utf-8")
+
+        with pytest.raises(AtifProjectionError, match="invalid materialized input row 1"):
+            _prepare_atif_payloads(materialized, manifest)
+
+
 class TestRunVerificationPayloads:
     """Tests for _run_verification_payloads: routing, success/error paths, and semaphore enforcement."""
 
@@ -885,6 +1538,24 @@ class TestRunVerificationPayloads:
         await self._collect(_run_verification_payloads([row_a, row_b]))
 
         assert set(posted_to) == {("rs_a", "agent_a"), ("rs_b", "agent_b")}
+
+    async def test_atif_provenance_is_not_sent_to_the_verifier(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        row = self._make_row("agent_a") | {ATIF_PROVENANCE_KEY: {"source_sha256": "a" * 64}}
+        mock_client = MagicMock()
+        mock_client.global_config_dict = {}
+        posted_rows: list[dict] = []
+
+        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+            posted_rows.append(json)
+            return MagicMock()
+
+        mock_client.post = capture_post
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"})
+
+        returned = await self._collect(_run_verification_payloads([row]))
+
+        assert ATIF_PROVENANCE_KEY not in posted_rows[0]
+        assert returned[0][0][ATIF_PROVENANCE_KEY] == {"source_sha256": "a" * 64}
 
     async def test_failed_response_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         row = self._make_row("agent_a")
@@ -1246,6 +1917,10 @@ class TestCallAggregateMetrics:
                     "usage": {"prompt_tokens": 10, "completion_tokens": 5},
                 },
                 "responses_create_params": {"input": "large prompt content", "model": "llm"},
+                ATIF_PROVENANCE_KEY: {
+                    "trajectory_id": "trajectory-1",
+                    "source_sha256": "a" * 64,
+                },
             }
         ]
 
@@ -1267,6 +1942,7 @@ class TestCallAggregateMetrics:
 
         # response body stripped, responses_create_params stripped
         assert "responses_create_params" not in sent
+        assert ATIF_PROVENANCE_KEY not in sent
         assert sent.get("response") == {"usage": {"prompt_tokens": 10, "completion_tokens": 5}}
 
         # other fields preserved
@@ -1549,6 +2225,114 @@ class TestRolloutReverificationRunFromConfig:
 
     # ------------------------------------------------------------------ tests
 
+    async def test_atif_manifest_uses_only_its_selected_stateless_verifier_and_persists_provenance(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Exercise public ATIF mode while an unrelated configured verifier is unsupported."""
+
+        fixture = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_responses_tool_trajectory.json"
+        materialized = tmp_path / "inputs.jsonl"
+        materialized.write_bytes(
+            orjson.dumps(
+                {
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    AGENT_REF_KEY_NAME: {"name": "codex-relay-fixture"},
+                    "responses_create_params": {
+                        "input": [{"role": "user", "content": "Run the command, then answer B."}],
+                        "tools": [],
+                    },
+                    "expected_answer": "B",
+                }
+            )
+            + b"\n"
+        )
+        manifest = tmp_path / "manifest.jsonl"
+        manifest.write_bytes(
+            orjson.dumps(
+                {
+                    "trajectory_path": str(fixture),
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    "expected_sha256": _RESPONSES_TRAJECTORY_SHA256,
+                }
+            )
+            + b"\n"
+        )
+
+        reverify_mode_response = object()
+        verify_response = object()
+        mock_client = MagicMock()
+        mock_client.global_config_dict = {
+            "codex-relay-fixture": {
+                "responses_api_agents": {"fixture": {"resources_server": {"name": "fixture-rs"}}},
+            },
+            "fixture-rs": {"resources_servers": {"fixture": {}}},
+            "unrelated-agent": {
+                "responses_api_agents": {"fixture": {"resources_server": {"name": "unrelated-rs"}}},
+            },
+            "unrelated-rs": {"resources_servers": {"unrelated": {}}},
+        }
+        queried_reverify_modes: list[str] = []
+
+        async def capture_reverify_mode(*, server_name: str, url_path: str) -> object:
+            assert url_path == "/reverify_mode"
+            queried_reverify_modes.append(server_name)
+            if server_name == "fixture-rs":
+                return reverify_mode_response
+            pytest.fail("run_from_config must not query an unrelated unsupported resources server")
+
+        mock_client.get = capture_reverify_mode
+        posted_rows: list[dict] = []
+
+        async def capture_verify(server_name: str, url_path: str, json: dict) -> object:
+            assert server_name == "fixture-rs"
+            assert url_path == "/verify"
+            posted_rows.append(json)
+            return verify_response
+
+        async def response_json(response: object) -> str | dict:
+            if response is reverify_mode_response:
+                return ReverifyMode.STATELESS
+            assert response is verify_response
+            return {"reward": 1.0}
+
+        mock_client.post = capture_verify
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: mock_client)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_response_json", response_json)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", list)
+
+        config = RolloutReverificationConfig(
+            input_format="atif",
+            materialized_inputs_jsonl_fpath=str(materialized),
+            rollouts_jsonl_fpath=None,
+            atif_manifest_jsonl_fpath=str(manifest),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+
+        returned = await RolloutReverificationHelper().run_from_config(config)
+
+        assert len(posted_rows) == 1
+        assert queried_reverify_modes == ["fixture-rs"]
+        assert ATIF_PROVENANCE_KEY not in posted_rows[0]
+        correlated_items = [item for item in posted_rows[0]["response"]["output"] if "call_id" in item]
+        assert [item["call_id"] for item in correlated_items] == [
+            "call-abab8ac6-3a43-46a2-9224-d14a2d380504",
+            "call-abab8ac6-3a43-46a2-9224-d14a2d380504",
+        ]
+        assert all(item["call_id"] != "fc_56a9401eb39a449c982424abb3b0fdc2" for item in correlated_items)
+        assert returned == self._read_jsonl(tmp_path / "output.jsonl")
+        assert returned[0]["reward"] == 1.0
+        assert returned[0][ATIF_PROVENANCE_KEY] == {
+            "trajectory_id": "relay-887-live-trajectory",
+            "session_id": "relay-887-live-session",
+            "source_sha256": _RESPONSES_TRAJECTORY_SHA256,
+            "schema_version": "ATIF-v1.7",
+            "projection_status": "complete",
+        }
+
     async def test_results_routed_to_correct_output_files_and_metadata_stamped_on_results(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -1559,7 +2343,7 @@ class TestRolloutReverificationRunFromConfig:
         The output file must contain exactly the same fields as the verify response plus the
         stamped metadata — no extra or missing keys.
         """
-        success_row = self._make_row("agent_a", task=0, skills=True)
+        success_row = self._make_row("agent_a", task=0, skills=True) | {TASK_SOURCE_KEY_NAME: "authoritative-rs"}
         failure_row = self._make_row("agent_a", task=1)
         no_persist_row = self._make_row("agent_a", task=2)
 
@@ -1590,6 +2374,7 @@ class TestRolloutReverificationRunFromConfig:
         assert stamped[ROLLOUT_INDEX_KEY_NAME] == 0
         assert stamped[AGENT_REF_KEY_NAME] == {"name": "agent_a"}
         assert stamped[SKILLS_REF_KEY_NAME] == ["skill_a"]
+        assert stamped[TASK_SOURCE_KEY_NAME] == "authoritative-rs"
         assert stamped["reward"] == 1.0
         assert set(stamped.keys()) == {
             "reward",
@@ -1597,6 +2382,7 @@ class TestRolloutReverificationRunFromConfig:
             ROLLOUT_INDEX_KEY_NAME,
             AGENT_REF_KEY_NAME,
             SKILLS_REF_KEY_NAME,
+            TASK_SOURCE_KEY_NAME,
         }
 
         # failure row: exact field set = verify response fields + 3 stamped metadata fields (no SKILLS_REF)
@@ -1617,6 +2403,70 @@ class TestRolloutReverificationRunFromConfig:
         assert len(returned) == 1
         assert returned[0][TASK_INDEX_KEY_NAME] == 0
         assert returned[0]["reward"] == 1.0
+
+    @pytest.mark.parametrize(
+        ("include_failure_class", "reported_failure_class", "expected_failure_class"),
+        [
+            (False, None, "kill_shaped"),
+            (True, None, "kill_shaped"),
+            (True, "", "kill_shaped"),
+            (True, "worker_lost", "worker_lost"),
+        ],
+        ids=["absent", "null", "blank", "explicit"],
+    )
+    async def test_atif_no_persist_result_is_visible_in_failures_and_coverage(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        include_failure_class: bool,
+        reported_failure_class: str | None,
+        expected_failure_class: str,
+    ) -> None:
+        row = self._make_row("agent_a", task=0) | {
+            ATIF_PROVENANCE_KEY: {
+                "trajectory_id": "trajectory-1",
+                "session_id": "session-1",
+                "source_sha256": "0" * 64,
+                "schema_version": "ATIF-v1.7",
+                "projection_status": "complete",
+            }
+        }
+        result = {"reward": 0.0, NG_NO_PERSIST_KEY: True}
+        if include_failure_class:
+            result[NG_FAILURE_CLASS_KEY] = reported_failure_class
+        self._patch_common(monkeypatch, [(row, result)])
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._prepare_atif_payloads",
+            lambda *_args, **_kwargs: [row],
+        )
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._guard_atif_preflight",
+            AsyncMock(return_value=None),
+        )
+        config = RolloutReverificationConfig(
+            input_format="atif",
+            materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
+            rollouts_jsonl_fpath=None,
+            atif_manifest_jsonl_fpath=str(tmp_path / "manifest.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+
+        returned = await RolloutReverificationHelper().run_from_config(config)
+
+        assert returned == []
+        assert self._read_jsonl(tmp_path / "output.jsonl") == []
+        [failed] = self._read_jsonl(tmp_path / "output_failures.jsonl")
+        assert failed[NG_NO_PERSIST_KEY] is True
+        assert failed[NG_FAILURE_CLASS_KEY] == expected_failure_class
+        assert failed[TASK_INDEX_KEY_NAME] == 0
+        assert failed[ROLLOUT_INDEX_KEY_NAME] == 0
+        assert failed[AGENT_REF_KEY_NAME] == {"name": "agent_a"}
+        assert failed[ATIF_PROVENANCE_KEY] == row[ATIF_PROVENANCE_KEY]
+        output = capsys.readouterr().out
+        assert f"1 {expected_failure_class} routed this run" in output
+        assert "Metrics cover: 0 of 1 rollouts" in output
 
     async def test_results_sorted_by_task_and_rollout_index_before_aggregate_metrics(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1868,7 +2718,13 @@ class TestRunFromConfigResumeFromCache:
     """
 
     def _make_config(
-        self, tmp_path: Path, *, resume_from_cache: bool, disable_aggregation: bool = True, overwrite: bool = False
+        self,
+        tmp_path: Path,
+        *,
+        resume_from_cache: bool,
+        disable_aggregation: bool = True,
+        overwrite: bool = False,
+        **overrides: bool,
     ) -> RolloutReverificationConfig:
         return RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
@@ -1877,12 +2733,19 @@ class TestRunFromConfigResumeFromCache:
             disable_aggregation=disable_aggregation,
             resume_from_cache=resume_from_cache,
             overwrite=overwrite,
+            **overrides,
         )
 
     def _row(self, agent: str, task: int, rollout: int = 0) -> dict:
         return {AGENT_REF_KEY_NAME: {"name": agent}, TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: rollout}
 
-    def _patch(self, monkeypatch: pytest.MonkeyPatch, pairs: list[InputRolloutPair], dispatched: list) -> None:
+    def _patch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        pairs: list[InputRolloutPair],
+        dispatched: list,
+        result: dict | None = None,
+    ) -> None:
         monkeypatch.setattr(
             "nemo_gym.rollout_reverification._yield_inputs_and_rollouts_paired", lambda *_a, **_kw: iter(pairs)
         )
@@ -1892,7 +2755,7 @@ class TestRunFromConfigResumeFromCache:
             dispatched.extend(payloads)
 
             async def fut(p: dict) -> tuple[dict, dict]:
-                return p, {"reward": 0.5}
+                return p, dict(result or {"reward": 0.5})
 
             return [fut(p) for p in payloads]
 
@@ -1939,6 +2802,58 @@ class TestRunFromConfigResumeFromCache:
         assert len(returned) == 2
         assert [r[TASK_INDEX_KEY_NAME] for r in returned] == [0, 1]
         assert next(r for r in returned if r[TASK_INDEX_KEY_NAME] == 0)["reward"] == 1.0
+
+    @pytest.mark.parametrize(("retry_terminal_timeouts", "expected_dispatch"), [(False, [0]), (True, [0, 1])])
+    async def test_terminal_timeout_is_retried_on_resume_only_when_opted_in(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        retry_terminal_timeouts: bool,
+        expected_dispatch: list[int],
+    ) -> None:
+        (tmp_path / "output_failures.jsonl").write_bytes(
+            orjson.dumps({**self._row("agent_a", 1), NG_FAILURE_CLASS_KEY: "timeout_exceeded", NG_TERMINAL_KEY: True})
+            + b"\n"
+        )
+        pairs = [InputRolloutPair(input=self._row("agent_a", t), rollout={"response": {}}) for t in range(2)]
+        dispatched: list = []
+        self._patch(monkeypatch, pairs, dispatched)
+
+        await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, resume_from_cache=True, retry_terminal_timeouts=retry_terminal_timeouts)
+        )
+
+        assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched) == expected_dispatch
+
+    async def test_invalid_judge_result_is_scored_by_default(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        pairs = [InputRolloutPair(input=self._row("agent_a", 0), rollout={"response": {}})]
+        self._patch(monkeypatch, pairs, [], result={"reward": 0.0, "invalid_judge_response": True})
+
+        returned = await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, resume_from_cache=False)
+        )
+
+        assert [(r[TASK_INDEX_KEY_NAME], r["reward"]) for r in returned] == [(0, 0.0)]
+        assert NG_FAILURE_CLASS_KEY not in returned[0]
+        assert self._read_jsonl(tmp_path / "output_failures.jsonl") == []
+
+    async def test_invalid_judge_result_goes_to_the_sidecar_when_opted_in(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        pairs = [InputRolloutPair(input=self._row("agent_a", 0), rollout={"response": {}})]
+        self._patch(monkeypatch, pairs, [], result={"reward": 0.0, "invalid_judge_response": True})
+
+        returned = await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, resume_from_cache=False, retry_invalid_judge_responses=True)
+        )
+
+        assert returned == []
+        failures = self._read_jsonl(tmp_path / "output_failures.jsonl")
+        assert [(r[TASK_INDEX_KEY_NAME], r[NG_FAILURE_CLASS_KEY]) for r in failures] == [
+            (0, JUDGE_INVALID_FAILURE_CLASS)
+        ]
 
     async def test_overwrite_without_resume_deletes_prior_output_and_reruns_everything(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2071,6 +2986,7 @@ class TestRunFromConfigJudgeFailedOnly:
         overwrite: bool = False,
         append: bool = False,
         output_name: str = "recovered.jsonl",
+        **overrides: bool,
     ) -> RolloutReverificationConfig:
         return RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
@@ -2081,6 +2997,7 @@ class TestRunFromConfigJudgeFailedOnly:
             resume_from_cache=resume_from_cache,
             overwrite=overwrite,
             append=append,
+            **overrides,
         )
 
     def _mat(self, task: int, rollout: int = 0, agent: str = "agent_a") -> dict:
@@ -2188,6 +3105,101 @@ class TestRunFromConfigJudgeFailedOnly:
         # judge_failed_only), so the output is un-prefixed (no `unsafe_`), regardless of RS mode
         assert (tmp_path / "recovered.jsonl").exists()
         assert not (tmp_path / "unsafe_recovered.jsonl").exists()
+
+    async def test_migrates_legacy_invalid_main_row_before_seeding(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        legacy_invalid = self._success(0, reward=0.0)
+        legacy_invalid["invalid_judge_response"] = True
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(0)],
+            successes=[legacy_invalid],
+            failures=[],
+        )
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched, recovered_reward=0.8)
+
+        returned = await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, retry_invalid_judge_responses=True)
+        )
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in dispatched] == [0]
+        assert [row["reward"] for row in returned] == [0.8]
+        assert self._read_jsonl(tmp_path / "rollouts.jsonl") == []
+        migrated = self._read_jsonl(tmp_path / "rollouts_failures.jsonl")
+        assert migrated[0][NG_FAILURE_CLASS_KEY] == JUDGE_INVALID_FAILURE_CLASS
+
+    async def test_invalid_main_row_is_seeded_not_migrated_by_default(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        scored_invalid = self._success(0, reward=0.0)
+        scored_invalid["invalid_judge_response"] = True
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(0), self._mat(1)],
+            successes=[scored_invalid],
+            failures=[self._failure(1)],
+        )
+        rollouts_before = (tmp_path / "rollouts.jsonl").read_bytes()
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched, recovered_reward=0.8)
+
+        returned = await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in dispatched] == [1]
+        assert [(row[TASK_INDEX_KEY_NAME], row["reward"]) for row in returned] == [(0, 0.0), (1, 0.8)]
+        assert (tmp_path / "rollouts.jsonl").read_bytes() == rollouts_before
+        assert [row[TASK_INDEX_KEY_NAME] for row in self._read_jsonl(tmp_path / "rollouts_failures.jsonl")] == [1]
+
+    @pytest.mark.parametrize(
+        ("stage_row_in", "retry_invalid_judge_responses"),
+        [("sidecar", False), ("sidecar", True), ("rollouts", True)],
+    )
+    async def test_rejects_multistage_rows_before_writing_anything(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        stage_row_in: str,
+        retry_invalid_judge_responses: bool,
+    ) -> None:
+        """The multi-stage check runs before the output is created, successes are seeded, or the
+        rollouts file is rewritten by the invalid-judge migration."""
+        staged_failure = {**self._failure(1), "stage_index": 1}
+        staged_invalid = {**self._success(2, reward=0.0), "stage_index": 1, "invalid_judge_response": True}
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(3)],
+            successes=[self._success(0)] + ([staged_invalid] if stage_row_in == "rollouts" else []),
+            failures=[staged_failure] if stage_row_in == "sidecar" else [],
+        )
+        before = {name: (tmp_path / name).read_bytes() for name in ("rollouts.jsonl", "rollouts_failures.jsonl")}
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        with pytest.raises(ConfigError, match="does not support multi-stage rows"):
+            await RolloutReverificationHelper().run_from_config(
+                self._make_config(tmp_path, retry_invalid_judge_responses=retry_invalid_judge_responses)
+            )
+
+        assert dispatched == []
+        assert {name: (tmp_path / name).read_bytes() for name in before} == before
+        assert not (tmp_path / "recovered.jsonl").exists()
+        assert not (tmp_path / "recovered_failures.jsonl").exists()
+
+    def test_staged_rows_in_the_rollouts_file_are_ignored_unless_they_would_be_migrated(self, tmp_path: Path) -> None:
+        staged_success = {**self._success(0), "stage_index": 1}
+        staged_invalid = {**self._success(1, reward=0.0), "stage_index": 1, "invalid_judge_response": True}
+        self._setup_fixture(tmp_path, materialized=[], successes=[staged_success, staged_invalid], failures=[])
+        rollouts = tmp_path / "rollouts.jsonl"
+
+        # Recovery reads only the sidecar, and without the opt-in nothing moves into it.
+        _reject_multistage_recovery_source(rollouts, retry_invalid_judge_responses=False)
+        with pytest.raises(ConfigError, match="does not support multi-stage rows"):
+            _reject_multistage_recovery_source(rollouts, retry_invalid_judge_responses=True)
+
+        rollouts.write_bytes(orjson.dumps(staged_success) + b"\n\n")
+        _reject_multistage_recovery_source(rollouts, retry_invalid_judge_responses=True)
 
     async def test_prints_two_sources_warning(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
@@ -2417,8 +3429,24 @@ class TestRunFromConfigJudgeFailedOnly:
         with pytest.raises(FileNotFoundError, match="rollouts_failures.jsonl"):
             await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
 
+    @pytest.mark.parametrize(
+        ("retry_invalid_judge_responses", "refail_result", "expected_class"),
+        [
+            # Default: the verifier itself routes the failed judge call to the sidecar.
+            (False, {"reward": 0.0, NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS}, JUDGE_FAILED_FAILURE_CLASS),
+            # Opt-in: resource servers return this semantic invalid marker directly, and reverify
+            # must normalize it into the retry sidecar itself.
+            (True, {"reward": 0.0, "invalid_judge_response": True}, JUDGE_INVALID_FAILURE_CLASS),
+        ],
+        ids=["judge_failed by default", "invalid judge response opted in"],
+    )
     async def test_resume_incrementally_recovers_judge_failures_across_invocations(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        retry_invalid_judge_responses: bool,
+        refail_result: dict,
+        expected_class: str,
     ) -> None:
         """--judge-failed-only + --resume: a first pass recovers some judge failures while others re-fail;
         a second --resume pass re-verifies ONLY the still-failing ones and completes the population.
@@ -2436,26 +3464,29 @@ class TestRunFromConfigJudgeFailedOnly:
         def first_pass(payload: dict) -> dict:
             if payload[TASK_INDEX_KEY_NAME] == 1:
                 return {"reward": 1.0, "verdict": "correct"}
-            return {"reward": 0.0, NG_FAILURE_CLASS_KEY: "judge_failed"}
+            return refail_result
 
         dispatched1: list = []
         self._patch_with_result(monkeypatch, dispatched1, first_pass)
-        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+        await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, retry_invalid_judge_responses=retry_invalid_judge_responses)
+        )
 
         # all three judge failures were attempted; output has seeded 0 + recovered 1; 2,3 in the sidecar
         assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched1) == [1, 2, 3]
         assert sorted(r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered.jsonl")) == [0, 1]
-        assert sorted(r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered_failures.jsonl")) == [
-            2,
-            3,
-        ]
+        first_failures = self._read_jsonl(tmp_path / "recovered_failures.jsonl")
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in first_failures) == [2, 3]
+        assert {r[NG_FAILURE_CLASS_KEY] for r in first_failures} == {expected_class}
 
         # Second pass (--resume): only the still-failing 2,3 are retried (0,1 are cached in the output),
         # and now succeed.
         dispatched2: list = []
         self._patch_with_result(monkeypatch, dispatched2, lambda _p: {"reward": 1.0, "verdict": "correct"})
         returned = await RolloutReverificationHelper().run_from_config(
-            self._make_config(tmp_path, resume_from_cache=True)
+            self._make_config(
+                tmp_path, resume_from_cache=True, retry_invalid_judge_responses=retry_invalid_judge_responses
+            )
         )
 
         assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched2) == [2, 3]

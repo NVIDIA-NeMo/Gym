@@ -151,6 +151,7 @@ class TestEvalRunFlags:
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["--limit", "1024"], "+limit=1024"),
             (["--num-repeats", "4"], "+num_repeats=4"),
+            (["--interleave-repeats"], "+interleave_repeats=true"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),
             (["--prompt-config", "p.yaml"], "+prompt_config=p.yaml"),
             (["--split", "benchmark"], "+split=benchmark"),
@@ -262,6 +263,36 @@ class TestEvalRunFlags:
         assert "+config_paths=[b.yaml]" in overrides
         assert "+agent_name=a" in overrides
         assert "+responses_create_params.tool_choice=auto" in overrides  # unknown +override passes through
+
+
+class TestEvalExportFlags:
+    def test_flags_dispatch_as_hydra_overrides(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "eval",
+                "export",
+                "--format",
+                "atif",
+                "--rollouts",
+                "rollouts.jsonl",
+                "--output-dir",
+                "atif",
+                "--session-id",
+                "evaluation-42",
+                "--agent-version",
+                "2.3.1",
+            ],
+        )
+
+        assert target == "nemo_gym.cli.eval:export_rollouts_as_atif"
+        assert set(overrides) == {
+            "+format=atif",
+            '+rollouts_jsonl_fpath="rollouts.jsonl"',
+            '+output_dirpath="atif"',
+            '+session_id="evaluation-42"',
+            '+agent_version="2.3.1"',
+        }
 
 
 class TestEnvTestResourceServerFlag:
@@ -669,8 +700,10 @@ class TestEvalReverifyFlags:
     @pytest.mark.parametrize(
         "flag_argv, expected_override",
         [
+            (["--input-format", "atif"], "+input_format=atif"),
             (["--inputs", "in.jsonl"], "+materialized_inputs_jsonl_fpath=in.jsonl"),
             (["--rollouts", "r.jsonl"], "+rollouts_jsonl_fpath=r.jsonl"),
+            (["--atif-manifest", "manifest.jsonl"], "+atif_manifest_jsonl_fpath=manifest.jsonl"),
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),
@@ -1470,6 +1503,49 @@ class TestDidYouMean:
 
         assert did_you_mean("zzzzzz", ["list", "eval", "env"]) == ""
 
+    def test_helper_does_not_suggest_exact_match(self) -> None:
+        from nemo_gym.cli.utils import did_you_mean
+
+        assert did_you_mean("eval", ["list", "eval", "env"]) == ""
+
+    def test_helper_suggests_next_close_match_after_excluding_exact(self) -> None:
+        from nemo_gym.cli.utils import did_you_mean
+
+        assert did_you_mean("eval", ["eval", "eval2"]) == " Did you mean `eval2`?"
+
+    def _isolate_roots(self, monkeypatch: MonkeyPatch, root: Path) -> None:
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", root)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", root)
+        monkeypatch.chdir(root)
+
+    def _make_agents(self, root: Path) -> None:
+        agents = root / "responses_api_agents"
+        (agents / "foo" / "configs").mkdir(parents=True)  # folder exists, but no YAML configs
+        (agents / "fooo" / "configs").mkdir(parents=True)
+        (agents / "fooo" / "configs" / "fooo.yaml").write_text("{}\n")
+
+    def test_existing_folder_without_configs_gets_no_hint(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        # `foo/` exists but has no configs: report the missing config, don't suggest `fooo`.
+        self._make_agents(tmp_path)
+        self._isolate_roots(monkeypatch, tmp_path)
+
+        with pytest.raises(ValueError) as exc_info:
+            cli_main._asset_config_path("agent-type", "foo")
+
+        message = str(exc_info.value)
+        assert "responses_api_agents/foo/configs/foo.yaml" in message
+        assert "does not exist" in message
+        assert "Did you mean" not in message
+
+    def test_typo_in_folder_name_still_gets_hint(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        self._make_agents(tmp_path)
+        self._isolate_roots(monkeypatch, tmp_path)
+
+        with pytest.raises(ValueError) as exc_info:
+            cli_main._asset_config_path("agent-type", "foooo")
+
+        assert "Did you mean `fooo`?" in str(exc_info.value)
+
     def _run_expecting_exit(self, monkeypatch: MonkeyPatch, capsys, argv: list[str]) -> str:
         monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
         monkeypatch.setattr(sys, "argv", ["gym", *argv])
@@ -1667,7 +1743,8 @@ class TestListEnvironmentsRouting:
         assert error.value.code == 1
         assert "Unknown benchmark 'gsm8kk'" in " ".join(capsys.readouterr().out.split())
 
-    def test_catalog_filters_translate_to_reserved_keys(self, monkeypatch: MonkeyPatch) -> None:
+    @pytest.mark.parametrize("status", ["experimental", "no-manifest"])
+    def test_catalog_filters_translate_to_reserved_keys(self, monkeypatch: MonkeyPatch, status: str) -> None:
         target, overrides = _dispatch_for(
             monkeypatch,
             [
@@ -1682,7 +1759,7 @@ class TestListEnvironmentsRouting:
                 "--licensing",
                 "Apache-2.0",
                 "--status",
-                "experimental",
+                status,
                 "--lifecycle",
                 "active",
             ],
@@ -1693,7 +1770,7 @@ class TestListEnvironmentsRouting:
             "+catalog_kind=benchmark",
             '+modality="text"',
             '+licensing="Apache-2.0"',
-            "+status=experimental",
+            f"+status={status}",
             "+lifecycle=active",
         }
 

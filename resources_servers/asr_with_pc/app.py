@@ -322,6 +322,7 @@ def _asr_to_response_scores(asr: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class ASRWithPCResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: ASRWithPCConfig
 
     async def verify(self, body: ASRWithPCVerifyRequest) -> ASRWithPCVerifyResponse:

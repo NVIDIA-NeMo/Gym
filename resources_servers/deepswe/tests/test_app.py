@@ -147,7 +147,7 @@ async def test_create_sandbox_scales_phase_limits_from_task_toml(
     created = await server._create_sandbox(server._task_store.get("example-task"), phase=phase)
 
     assert created is sandbox
-    spec = sandbox.start.await_args.args[0]
+    spec = sandbox.start_with_setup.await_args.args[0]
     assert spec.resources == expected_resources
     assert spec.image == UPSTREAM_IMAGE
 
@@ -172,7 +172,7 @@ async def test_create_sandbox_allows_resource_multiplier_and_explicit_overrides(
 
     await server._create_sandbox(server._task_store.get("example-task"), phase="agent")
 
-    spec = sandbox.start.await_args.args[0]
+    spec = sandbox.start_with_setup.await_args.args[0]
     assert spec.resources == SandboxResources(cpu=3, memory_mib=20000, disk_gib=20)
 
 

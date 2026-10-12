@@ -36,6 +36,10 @@ def _make_model() -> VLLMModelWithCompaction:
     )
 
 
+def test_tokenize_route_is_non_generating() -> None:
+    assert ("POST", "/tokenize") in VLLMModelWithCompaction.non_generating_model_routes
+
+
 def test_base_vllm_model_has_no_compaction_routes() -> None:
     config = VLLMModelConfig(
         host="0.0.0.0",

@@ -46,6 +46,7 @@ from nemo_gym.base_resources_server import (  # noqa: E402
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSeedSessionResponse,
     SimpleResourcesServer,
     normalize_tool_name,
 )
@@ -497,6 +498,34 @@ def test_session_hook_restricts_that_sessions_token():
         assert {t["name"] for t in _list(client, token)} == {"append"}
         blocked = _call(client, "raw_step", {}, token=token)
         assert blocked["isError"] is True and "not allowed" in blocked["content"][0]["text"]
+        assert _payload(_call(client, "append", {"value": "x"}, token=token))["values"] == ["x"]
+
+
+def _typed_seed_body(task_data: dict) -> dict:
+    return {
+        "resources_session_id": "resources-session-1",
+        "episode_id": {"rollout_id": "rollout-1"},
+        "task_id": {"taskset": "store", "task_id": "task-1"},
+        "task_data": task_data,
+    }
+
+
+def test_environment_server_seed_returns_mcp_access_in_resources_tools():
+    # SessionScoped keeps the default seed_session, so this is a stateless server that opts into MCP. The Environment
+    # Server validates the seed reply as ResourcesSeedSessionResponse, which forbids any extra key such as "mcp".
+    server = _server(SessionScoped)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        resp = client.post("/seed_session", json=_typed_seed_body({"allowed_tools": ["append"]}))
+        assert resp.status_code == 200, resp.text
+        seed = ResourcesSeedSessionResponse.model_validate(resp.json())
+        assert seed.resources_session_id == "resources-session-1"
+        assert seed.resources_tools.server_name == "store"
+        token = seed.resources_tools.headers[TOKEN_HEADER]
+        _handshake(client)
+        # The session hook read the task's fields, so the token is narrowed to the tool the task allows.
+        assert {t["name"] for t in _list(client, token)} == {"append"}
         assert _payload(_call(client, "append", {"value": "x"}, token=token))["values"] == ["x"]
 
 

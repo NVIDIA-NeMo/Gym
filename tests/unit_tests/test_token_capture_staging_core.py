@@ -298,13 +298,9 @@ def test_coords_enforce_staged_and_failed_shapes() -> None:
         )
 
 
-def test_stage_result_and_receipt_validate_identity() -> None:
-    assert StageResult(ok=True, staging_key="backend/key").staging_key == "backend/key"
-    with pytest.raises(ValidationError, match="requires an error"):
-        StageResult(ok=False)
-
+def _manifest_row() -> CallRecord:
     payload = _record_payload()
-    manifest = CallRecord(
+    return CallRecord(
         model_call_id=payload["model_call_id"],
         parent_call_id=payload["parent_call_id"],
         prev_len=payload["prev_len"],
@@ -319,6 +315,14 @@ def test_stage_result_and_receipt_validate_identity() -> None:
         cumulative_hash=payload["cumulative_hash"],
         response_id="chatcmpl-call-1",
     )
+
+
+def test_stage_result_and_receipt_validate_identity() -> None:
+    assert StageResult(ok=True, staging_key="backend/key").staging_key == "backend/key"
+    with pytest.raises(ValidationError, match="requires an error"):
+        StageResult(ok=False)
+
+    manifest = _manifest_row()
     receipt = RolloutReceipt(
         rollout_id="rollout-1",
         terminal_model_call_id="call-1",
@@ -333,6 +337,53 @@ def test_stage_result_and_receipt_validate_identity() -> None:
             manifest=[manifest],
             terminal_selection="declared",
         )
+    # No attribution stage ran (e.g. the manifest failed to parse): the
+    # selection stays unset rather than being stamped with a method, and the
+    # receipt must be poisoned so the row is not trainable.
+    unattributed = RolloutReceipt(
+        rollout_id="rollout-1",
+        manifest=[manifest],
+        capture_poisoned=True,
+        failure_reason="invalid_manifest_row",
+    )
+    assert unattributed.terminal_selection is None
+    with pytest.raises(ValidationError):
+        RolloutReceipt(rollout_id="rollout-1", manifest=[manifest], terminal_selection="guess")
+    # Attribution succeeded before a later call poisoned the rollout: the
+    # terminal and its method stay on the poisoned receipt.
+    poisoned_after_attribution = RolloutReceipt(
+        rollout_id="rollout-1",
+        terminal_model_call_id="call-1",
+        manifest=[manifest],
+        capture_poisoned=True,
+        failure_reason="worker_capture_failed",
+        terminal_selection="heuristic",
+    )
+    assert poisoned_after_attribution.terminal_model_call_id == "call-1"
+
+
+@pytest.mark.parametrize(
+    ("fields", "match"),
+    [
+        # Unpoisoned receipts must be fully attributed.
+        ({"terminal_model_call_id": None, "terminal_selection": "declared"}, "unpoisoned receipt must name"),
+        ({"terminal_model_call_id": "call-1", "terminal_selection": None}, "unpoisoned receipt must name"),
+        ({}, "unpoisoned receipt must name"),
+        (
+            {"terminal_model_call_id": "call-1", "terminal_selection": "declared", "failure_reason": "x"},
+            "cannot carry a failure_reason",
+        ),
+        # An unset selection is reserved for "no attribution stage ran".
+        (
+            {"terminal_model_call_id": "call-1", "capture_poisoned": True, "failure_reason": "x"},
+            "requires a terminal_selection",
+        ),
+        ({"capture_poisoned": True}, "must be poisoned with a failure_reason"),
+    ],
+)
+def test_rollout_receipt_rejects_inconsistent_attribution_state(fields: dict, match: str) -> None:
+    with pytest.raises(ValidationError, match=match):
+        RolloutReceipt(rollout_id="rollout-1", manifest=[_manifest_row()], **fields)
 
 
 def test_staging_namespace_has_no_serving_or_framework_dependencies() -> None:

@@ -1,0 +1,31 @@
+name: assaybench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: AssayBench -- rank the hit genes of a CRISPR screen from its plain-text
+  description (arXiv:2605.10876)
+modality: text
+licensing: unknown
+authors:
+- lilithgrigoryan
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: assaybench
+agent_server: simple_agent
+datasets:
+- name: assaybench
+  type: benchmark
+  jsonl_fpath: benchmarks/assaybench/data/assaybench_benchmark.jsonl
+  prepare_script: benchmarks/assaybench/prepare.py
+  prompt_config: benchmarks/prompts/eval/assaybench/paper.yaml
+  num_repeats: 5
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/eval/assaybench/paper.yaml
+lifecycle: active

@@ -73,3 +73,11 @@ legal_agent_bench_harbor_agent:
       harbor_verifier_max_timeout: null
       harbor_timeout_multiplier: null
       harbor_jobs_dir: results/legal_agent_bench/harbor_jobs
+
+legal_agent_bench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: legal_agent_bench_harbor_agent

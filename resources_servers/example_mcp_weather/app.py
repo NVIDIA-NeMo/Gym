@@ -90,6 +90,7 @@ class ExampleMCPWeatherVerifyResponse(BaseVerifyResponse):
 
 
 class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: ExampleMCPWeatherResourcesServerConfig
     session_id_to_state: dict[str, dict[str, Any]] = Field(default_factory=dict)
 

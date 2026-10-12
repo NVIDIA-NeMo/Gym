@@ -1,0 +1,32 @@
+name: swebench/pro/opencode
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: SWE-bench pro test-split software engineering tasks using prepared repair
+  prompts, a sandboxed OpenCode agent, and binary patch-resolution scoring.
+modality: text
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../opencode.yaml
+dataset_owner: swebench_pro_opencode_sandboxed_agent
+resources_server: swebench_pro
+agent_server: opencode_sandboxed_agent
+datasets:
+- name: swebench_pro
+  type: benchmark
+  jsonl_fpath: benchmarks/swebench/data/swebench_pro_benchmark.jsonl
+  prepare_script: benchmarks/swebench/pro/prepare.py
+  num_repeats: 3
+model_server: policy_model
+canonical_split: test
+prompt_source: prepared
+lifecycle: active

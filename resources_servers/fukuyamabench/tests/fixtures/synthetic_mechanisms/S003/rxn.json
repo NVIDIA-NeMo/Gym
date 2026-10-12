@@ -1,0 +1,12 @@
+{
+    "mechanism_rxn": [
+        {
+            "step": "1",
+            "rxn_smiles": "CC(C)(C)Cl>>C[C+](C)C.[Cl-]"
+        },
+        {
+            "step": "2",
+            "rxn_smiles": "C[C+](C)C.[Cl-]>>C=C(C)C.[OH3+]"
+        }
+    ]
+}

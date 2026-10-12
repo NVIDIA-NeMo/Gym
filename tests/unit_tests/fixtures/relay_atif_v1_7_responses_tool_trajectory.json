@@ -1,0 +1,144 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "relay-887-live-session",
+  "trajectory_id": "relay-887-live-trajectory",
+  "agent": {
+    "name": "codex-relay-gym-e2e",
+    "version": "0.147.0",
+    "model_name": "nvidia/nemotron-3-super-120b-a12b",
+    "extra": {
+      "fixture_origin": "minimized live Codex through merged Relay release/0.8 source"
+    }
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "timestamp": "2026-08-25T14:31:21.503043+00:00",
+      "source": "user",
+      "message": "Run the shell command printf RELAY_ATIF_GYM_OK using exec_command exactly once. After it succeeds, answer exactly \\boxed{B}."
+    },
+    {
+      "step_id": 2,
+      "timestamp": "2026-08-25T14:31:24.397491+00:00",
+      "source": "agent",
+      "model_name": "nvidia/nemotron-3-super-120b-a12b",
+      "message": "",
+      "tool_calls": [
+        {
+          "tool_call_id": "call-abab8ac6-3a43-46a2-9224-d14a2d380504",
+          "function_name": "exec_command",
+          "arguments": {
+            "cmd": "printf RELAY_ATIF_GYM_OK"
+          },
+          "extra": {
+            "status": "completed"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "source_call_id": "call-abab8ac6-3a43-46a2-9224-d14a2d380504",
+            "content": "RELAY_ATIF_GYM_OK"
+          }
+        ]
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "invocation": {
+          "framework": "nemo_relay",
+          "status": "completed"
+        },
+        "tool_invocations": [
+          {
+            "invocation_id": "call-abab8ac6-3a43-46a2-9224-d14a2d380504",
+            "framework": "nemo_relay",
+            "status": "completed"
+          }
+        ],
+        "llm_response": {
+          "status": "completed",
+          "output": [
+            {
+              "id": "rs_88ddc1a706db4b3a932bc16a8bca804e",
+              "type": "reasoning",
+              "status": "completed",
+              "summary": [],
+              "content": [
+                {
+                  "text": "Use the requested tool exactly once."
+                }
+              ]
+            },
+            {
+              "id": "fc_56a9401eb39a449c982424abb3b0fdc2",
+              "call_id": "call-abab8ac6-3a43-46a2-9224-d14a2d380504",
+              "type": "function_call",
+              "name": "exec_command",
+              "arguments": "{\"cmd\":\"printf RELAY_ATIF_GYM_OK\"}",
+              "status": "completed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "step_id": 3,
+      "timestamp": "2026-08-25T14:31:26.303002+00:00",
+      "source": "agent",
+      "model_name": "nvidia/nemotron-3-super-120b-a12b",
+      "message": "\\boxed{B}",
+      "llm_call_count": 1,
+      "extra": {
+        "invocation": {
+          "framework": "nemo_relay",
+          "status": "completed"
+        },
+        "llm_response": {
+          "status": "completed",
+          "output": [
+            {
+              "id": "rs_c69afb80b5b04c60b32fa2ff5bc00bda",
+              "type": "reasoning",
+              "status": "completed",
+              "summary": [],
+              "content": [
+                {
+                  "text": "Return the requested boxed answer."
+                }
+              ]
+            },
+            {
+              "id": "msg_b11f5c0e0f1a4b9c9b27a6b51001dce3",
+              "type": "message",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "\\boxed{B}",
+                  "annotations": [],
+                  "logprobs": []
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 27935,
+    "total_completion_tokens": 169,
+    "total_cached_tokens": 8448,
+    "total_steps": 3
+  },
+  "extra": {
+    "relay_revision": "3333333333333333333333333333333333333333",
+    "relay_binary_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "raw_atif_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "relay_qualification": "built from a merged release/0.8 revision on 2026-08-25; no published 0.8 artifact containing that revision existed at qualification time",
+    "provider": "NVIDIA OpenAI-compatible Responses endpoint",
+    "fixture_transform": "Sanitized and minimized derivative of the recorded raw ATIF; prompt, reasoning, trajectory/session IDs, and nonessential metadata were rewritten or removed, while provider function-item and semantic call correlation IDs are unchanged"
+  }
+}

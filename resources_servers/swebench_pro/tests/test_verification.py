@@ -167,12 +167,14 @@ async def test_run_verification_returns_resolved_result(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_verification_rejects_malformed_parser_output(tmp_path) -> None:
+@pytest.mark.parametrize("error_type", [None, "timeout"])
+async def test_run_verification_rejects_malformed_parser_output(tmp_path, error_type) -> None:
     sandbox = SimpleNamespace(
         exec=AsyncMock(
             side_effect=[
                 SimpleNamespace(return_code=0, stdout="", stderr=""),
-                SimpleNamespace(return_code=1, stdout="", stderr="failed"),
+                SimpleNamespace(return_code=1, stdout="", stderr="failed", error_type=error_type),
+                *([SimpleNamespace(return_code=0, stdout="", stderr="")] if error_type else []),
                 SimpleNamespace(return_code=0, stdout="", stderr=""),
                 SimpleNamespace(return_code=0, stdout="failed", stderr=""),
                 SimpleNamespace(return_code=0, stdout="1\n", stderr=""),
@@ -186,7 +188,7 @@ async def test_run_verification_rejects_malformed_parser_output(tmp_path) -> Non
     assert not result.completed
     assert not result.resolved
     assert result.test_output == "STDOUT:\n\n\nSTDERR:\nfailed"
-    assert "invalid JSON" in result.error
+    assert ("invalid JSON" if error_type is None else "execution timeout (limit: 30s)") in result.error
 
 
 def test_patch_section_path_reads_adds_deletes_and_binaries() -> None:
@@ -226,6 +228,9 @@ def _make_repo(path: Path) -> str:
     (path / "src").mkdir(parents=True)
     (path / "src" / "sorted.js").write_text("module.exports = OLD;\n")
     _git(path, "init", "-q", ".")
+    # Tests copy this repository; background maintenance must not race that snapshot.
+    _git(path, "config", "maintenance.auto", "false")
+    _git(path, "config", "gc.auto", "0")
     _git(path, "config", "user.email", "t@example.com")
     _git(path, "config", "user.name", "t")
     _git(path, "add", "-A")
@@ -387,22 +392,27 @@ def _result(**overrides) -> VerificationInputs:
 
 def test_inconclusive_reason_treats_a_failing_test_as_a_verdict() -> None:
     """The retry hangs off this: re-running FAILED tests would be re-rolling for a nicer answer."""
-    sample = asdict(make_inputs(fail_to_pass='["test_new"]', pass_to_pass='["test_old"]'))
     ran_and_failed = {"tests": [{"name": "test_new", "status": "FAILED"}, {"name": "test_old", "status": "PASSED"}]}
     all_passed = {"tests": [{"name": "test_new", "status": "PASSED"}, {"name": "test_old", "status": "PASSED"}]}
 
-    assert inconclusive_reason(_result(test_results=ran_and_failed), sample) is None
-    assert inconclusive_reason(_result(test_results=all_passed), sample) is None
+    assert inconclusive_reason(_result(test_results=ran_and_failed)) is None
+    assert inconclusive_reason(_result(test_results=all_passed)) is None
+    assert inconclusive_reason(_result(test_results={"tests": ran_and_failed["tests"][:1]})) is None
+
+
+@pytest.mark.parametrize("tests", [[], [{"name": "test_old", "status": "PASSED"}]])
+def test_completed_partial_parser_reports_score_as_failures(tests) -> None:
+    """Pro's pass-only parsers omit failed tests; these must stay in the denominator."""
+    sample = asdict(make_inputs(fail_to_pass='["test_new"]', pass_to_pass='["test_old"]'))
+    output = {"tests": tests}
+
+    assert inconclusive_reason(_result(test_results=output)) is None
+    assert not grade_output(output, sample)
 
 
 def test_inconclusive_reason_flags_runs_that_produced_no_verdict() -> None:
-    sample = asdict(make_inputs(fail_to_pass='["test_new"]', pass_to_pass='["test_old"]'))
-    only_one = {"tests": [{"name": "test_old", "status": "PASSED"}]}
-
-    assert "never reported an outcome" in inconclusive_reason(_result(test_results=only_one), sample)
-    assert "no tests at all" in inconclusive_reason(_result(), sample)
-    assert "no usable output" in inconclusive_reason(_result(test_results=None), sample)
-    assert "did not complete" in inconclusive_reason(_result(completed=False, error="OOM"), sample)
+    assert "no usable output" in inconclusive_reason(_result(test_results=None))
+    assert "did not complete" in inconclusive_reason(_result(completed=False, error="OOM"))
 
 
 def test_inconclusive_reason_ignores_tests_the_task_does_not_grade_on() -> None:
@@ -410,7 +420,11 @@ def test_inconclusive_reason_ignores_tests_the_task_does_not_grade_on() -> None:
     sample = asdict(make_inputs(fail_to_pass='["test_new"]', pass_to_pass="[]"))
     extra = {"tests": [{"name": "test_new", "status": "PASSED"}, {"name": "unrelated", "status": "FAILED"}]}
 
-    assert inconclusive_reason(_result(test_results=extra), sample) is None
+    assert inconclusive_reason(_result(test_results=extra)) is None
+    assert grade_output(extra, sample)
+    only_unrelated = {"tests": extra["tests"][1:]}
+    assert inconclusive_reason(_result(test_results=only_unrelated)) is None
+    assert not grade_output(only_unrelated, sample)
 
 
 def test_environment_repairs_are_individually_selectable() -> None:
@@ -454,3 +468,30 @@ def test_seed_normalization_only_carries_repairs_that_outlive_one_command() -> N
     # Nothing that dies with the shell that set it belongs here.
     assert "ulimit -c 0" not in script
     assert "dns-result-order" not in script
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "test_name,status,conclusive",
+    [("test_new", "FAILED", True), ("other", "FAILED", False), ("test_new", "PASSED", False)],
+)
+async def test_timeout_only_scores_an_explicit_required_test_failure(tmp_path, test_name, status, conclusive):
+    output = {"tests": [{"name": test_name, "status": status}]}
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(return_code=0),
+                SimpleNamespace(return_code=125, error_type="timeout", stdout="", stderr="deadline"),
+                SimpleNamespace(return_code=0),  # Parse partial logs after the test process stopped.
+                SimpleNamespace(stdout="test output"),
+                SimpleNamespace(stdout=""),
+                SimpleNamespace(stdout="0"),
+                SimpleNamespace(stdout=json.dumps(output)),
+            ]
+        )
+    )
+    result = await run_verification(sandbox, make_inputs(), tmp_path, timeout_s=30)
+    assert result.timed_out and not result.resolved
+    assert result.completed == conclusive
+    assert (result.error is None) == conclusive
+    assert sandbox.exec.call_args_list[2].kwargs["timeout_s"] == 60

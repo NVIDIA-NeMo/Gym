@@ -169,6 +169,7 @@ class SimpleStrandsAgentVerifyResponse(BaseVerifyResponse):
 
 
 class SimpleStrandsAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: SimpleStrandsAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)

@@ -1,0 +1,85 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/assaybench/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "MIT",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 374.4,
+        "Min": 367.0,
+        "Max": 384.0,
+        "Standard deviation": 7.23
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "dataset_name": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "split": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "question": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "cleaned_phenotype": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "screen_category": {
+        "unique_count": 2,
+        "total_count": 5
+    },
+    "author": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "source_id": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "num_genes": {
+        "Total # non-null values": 5,
+        "Average": 40.0,
+        "Min": 40.0,
+        "Max": 40.0,
+        "Standard deviation": 0.0
+    },
+    "relevance_genes": {
+        "unique_count": 40,
+        "total_count": 200
+    },
+    "relevance_scores": {
+        "Total # non-null values": 200,
+        "Average": 0.106,
+        "Min": -1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.298
+    }
+}

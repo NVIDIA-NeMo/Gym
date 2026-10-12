@@ -29,10 +29,12 @@ from resources_servers.gymnasium import GymnasiumServer, extract_text
 
 
 class ExampleMultiTurnEnv(GymnasiumServer):
+    ray_enabled = False
     session_turns: Dict[str, int] = Field(default_factory=dict)
 
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
         """Returns (observation, info)."""
+        self._cleanup_session(session_id)
         self.session_turns[session_id] = 0
         return None, {}
 
@@ -51,6 +53,10 @@ class ExampleMultiTurnEnv(GymnasiumServer):
         text = extract_text(action)
         reward = 1.0 if expected and expected.lower() in text.lower() else 0.0
         return None, reward, True, False, {}
+
+    def _cleanup_session(self, session_id: Optional[str]) -> None:
+        self.session_turns.pop(session_id, None)
+        super()._cleanup_session(session_id)
 
 
 if __name__ == "__main__":

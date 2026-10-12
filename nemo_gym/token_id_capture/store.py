@@ -32,7 +32,7 @@ import hashlib
 import logging
 import os
 import tempfile
-import time
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -40,7 +40,12 @@ from uuid import uuid4
 
 import orjson
 
-from nemo_gym.token_id_capture.protocols import TokenCaptureSnapshot
+from nemo_gym.token_id_capture.protocols import (
+    RolloutRemovalPayload,
+    TokenCaptureFrozenError,
+    TokenCaptureRetiredError,
+    TokenCaptureSnapshot,
+)
 from nemo_gym.token_id_capture.records import TokenEntry
 
 
@@ -52,6 +57,16 @@ def validate_rollout_id(rollout_id: str) -> str:
     if not rollout_id or any(not (char.isascii() and (char.isalnum() or char in "._-")) for char in rollout_id):
         raise ValueError(f"Invalid rollout id: {rollout_id!r}")
     return rollout_id
+
+
+def validate_rollout_ids(rollout_ids: Sequence[str]) -> list[str]:
+    """Validate a whole batch before anything changes, and drop duplicates.
+
+    A bare string is rejected: it is a sequence of one-character rollout IDs.
+    """
+    if isinstance(rollout_ids, str):
+        raise TypeError(f"expected a sequence of rollout ids, got the string {rollout_ids!r}")
+    return list(dict.fromkeys(validate_rollout_id(rollout_id) for rollout_id in rollout_ids))
 
 
 class TokenCaptureStore:
@@ -177,8 +192,10 @@ class TokenCaptureStore:
             state["version"] = int(state.get("version", 0)) + recovered
         return True
 
-    def _write_state(self, rollout_id: str, state: dict[str, Any], *, durable: bool = True) -> None:
-        # durable=False skips both fsyncs.
+    def _write_state(
+        self, rollout_id: str, state: dict[str, Any], *, durable: bool = True, sync_root: bool = True
+    ) -> None:
+        # durable=False skips both fsyncs; sync_root=False leaves the directory fsync to the caller.
         # The temporary-file replacement remains atomic.
         # Use it only for state reconstructed from the JSONL tail.
         # Lifecycle flags are not reconstructible.
@@ -195,7 +212,7 @@ class TokenCaptureStore:
                 raise
         try:
             os.replace(temporary_path, self.state_path_for(rollout_id))
-            if durable:
+            if durable and sync_root:
                 self._fsync_root()
         finally:
             temporary_path.unlink(missing_ok=True)
@@ -211,7 +228,7 @@ class TokenCaptureStore:
         with self._locked(rollout_id):
             state = self._read_state(rollout_id)
             if state.get("retired", False):
-                raise RuntimeError(f"Token capture for rollout {rollout_id} is retired")
+                raise TokenCaptureRetiredError(f"Token capture for rollout {rollout_id} is retired")
             state["incomplete"] = True
             state["version"] = int(state.get("version", 0)) + 1
             self._write_state(rollout_id, state)
@@ -238,9 +255,9 @@ class TokenCaptureStore:
         with self._locked(rollout_id):
             state = self._read_state(rollout_id)
             if state.get("retired", False):
-                raise RuntimeError(f"Token capture for rollout {rollout_id} is retired")
+                raise TokenCaptureRetiredError(f"Token capture for rollout {rollout_id} is retired")
             if state.get("frozen", False):
-                raise RuntimeError(f"Token capture for rollout {rollout_id} is already frozen")
+                raise TokenCaptureFrozenError(f"Token capture for rollout {rollout_id} is already frozen")
             index_changed = self._sync_entry_index(rollout_id, state)
             entry_digests = state["entry_digests"]
             existing_digest = entry_digests.get(entry.model_call_id)
@@ -289,9 +306,9 @@ class TokenCaptureStore:
         with self._locked(rollout_id):
             state = self._read_state(rollout_id)
             if state.get("retired", False):
-                raise RuntimeError(f"Token capture for rollout {rollout_id} is retired")
+                raise TokenCaptureRetiredError(f"Token capture for rollout {rollout_id} is retired")
             if state.get("frozen", False):
-                raise RuntimeError(f"Token capture for rollout {rollout_id} is already frozen")
+                raise TokenCaptureFrozenError(f"Token capture for rollout {rollout_id} is already frozen")
             with self.intents_path_for(rollout_id).open("ab") as handle:
                 handle.write(model_call_id.encode("utf-8") + b"\n")
                 handle.flush()
@@ -316,7 +333,7 @@ class TokenCaptureStore:
         with self._locked(rollout_id):
             state = self._read_state(rollout_id)
             if state.get("retired", False):
-                raise RuntimeError(f"Token capture for rollout {rollout_id} is retired")
+                raise TokenCaptureRetiredError(f"Token capture for rollout {rollout_id} is retired")
             index_changed = self._sync_entry_index(rollout_id, state)
             if not state.get("frozen", False):
                 state["frozen"] = True
@@ -338,7 +355,7 @@ class TokenCaptureStore:
             )
 
     async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:
-        """Delete snapshot payloads while retaining its tombstone and lock."""
+        """Delete snapshot payloads while retaining its fence."""
         return await asyncio.to_thread(self._drop, rollout_id, snapshot_id, version)
 
     def _drop(self, rollout_id: str, snapshot_id: str, version: int) -> bool:
@@ -350,66 +367,137 @@ class TokenCaptureStore:
                 or int(state.get("version", 0)) != version
             ):
                 return False
-            self.path_for(rollout_id).unlink(missing_ok=True)
-            self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-            self.intents_path_for(rollout_id).unlink(missing_ok=True)
-            # Keep a frozen tombstone until explicit pre-dispatch cleanup.
-            # A late writer from this attempt must still observe the freeze.
-            state["indexed_size"] = 0
-            state["entry_digests"] = {}
-            state["retired"] = True
-            self._write_state(rollout_id, state)
+            # The same two phases as ``retire_now``: a durable fence first, then the records.
+            self._write_fence_unlocked(rollout_id, state)
+            self._fsync_root()
+            self._remove_record_files(rollout_id)
             self._fsync_root()
             return True
 
+    def _write_fence_unlocked(self, rollout_id: str, state: dict[str, Any]) -> None:
+        # The fence stays until ``delete``: a late writer from this attempt must still observe it. It is written,
+        # and synced by the caller, before any record is removed, so a rollout is never left without records and
+        # without a fence, and a late writer never finds an index that points past missing records.
+        state["indexed_size"] = 0
+        state["entry_digests"] = {}
+        state["retired"] = True
+        self._write_state(rollout_id, state, sync_root=False)
+
+    def _remove_record_files(self, rollout_id: str) -> None:
+        """Remove a rollout's records, intents, and incomplete marker, whichever exist."""
+        for path in (
+            self.path_for(rollout_id),
+            self.incomplete_path_for(rollout_id),
+            self.intents_path_for(rollout_id),
+        ):
+            path.unlink(missing_ok=True)
+
+    async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+        """Remove rollouts' records and keep a fence, whatever their state.
+
+        This is ``drop`` without the snapshot check, for rollouts the consumer is done with but won't
+        drop as a consumed snapshot: masked or failed captures once their evidence is no longer needed,
+        and abandoned attempts. Like ``drop``, it leaves the fence that makes later writes for the
+        rollout fail, including writes from a duplicate execution of the same rollout. Retiring again
+        is a no-op.
+        """
+        return await asyncio.to_thread(self.retire_now, rollout_ids)
+
+    def retire_now(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+        """Synchronous ``retire``.
+
+        Two phases, each ending in one directory sync: write every missing fence, then remove the records. The
+        first sync runs for every non-empty batch, even one that writes no fence, because the fences it finds
+        may have been written by an overlapping or crashed retire that has not synced yet: a removal must never
+        become durable before its fence, and the call must not return before the fence is durable.
+        """
+        removed, absent, to_clear = [], [], []
+        unsynced = False
+        try:
+            for rollout_id in validate_rollout_ids(rollout_ids):
+                with self._locked(rollout_id):
+                    had_records = self._has_records(rollout_id)
+                    state = self._read_state(rollout_id)
+                    if not state.get("retired", False):
+                        self._write_fence_unlocked(rollout_id, state)
+                        unsynced = True
+                    (removed if had_records else absent).append(rollout_id)
+                    if had_records:
+                        to_clear.append(rollout_id)
+            # Sync every non-empty batch, even one that wrote no fence: an overlapping or crashed retire may have
+            # written a fence this batch found without syncing it, and this call must not report it durable early.
+            if unsynced or to_clear or removed or absent:
+                self._fsync_root()
+                unsynced = False
+            if to_clear:
+                # Set before removing: a removal that fails part way has already removed some files.
+                unsynced = True
+                for rollout_id in to_clear:
+                    with self._locked(rollout_id):
+                        # The lock was released after phase one. If a delete cleared the fence since, the rollout
+                        # ID may already be in use again, and its records belong to the new attempt.
+                        if self._read_state(rollout_id).get("retired", False):
+                            self._remove_record_files(rollout_id)
+                self._fsync_root()
+                unsynced = False
+        finally:
+            if unsynced:
+                self._sync_after_error()
+        return {"removed": removed, "absent": absent}
+
+    def _sync_after_error(self) -> None:
+        # Make what a failed batch already changed durable, since a retry may find nothing left to change.
+        # A failing sync is logged, not raised, so that it does not hide the error that failed the batch.
+        try:
+            self._fsync_root()
+        except OSError:
+            logger.warning("Could not sync capture directory %s after a failed batch.", self._root, exc_info=True)
+
+    async def delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+        """Remove rollouts' records and fences.
+
+        Delete retired rollouts once nothing of those attempts can still write, for example at the end
+        of the run, which removes their fences. Delete a rollout ID before reusing it, so the new
+        execution starts empty. Deleting again is a no-op.
+        """
+        return await asyncio.to_thread(self.delete_now, rollout_ids)
+
+    def delete_now(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+        """Synchronous ``delete``.
+
+        Every non-empty batch syncs the directory before returning, even when it found nothing to remove: an
+        overlapping delete may have removed the files without syncing yet, and a caller that reuses the rollout
+        ID after this returns must not see the old fence or records come back after a crash.
+        """
+        removed, absent = [], []
+        rollout_ids = validate_rollout_ids(rollout_ids)
+        if not rollout_ids:
+            return {"removed": removed, "absent": absent}
+        try:
+            for rollout_id in rollout_ids:
+                with self._locked(rollout_id):
+                    (removed if self._has_records(rollout_id) else absent).append(rollout_id)
+                    self._remove_record_files(rollout_id)
+                    self.state_path_for(rollout_id).unlink(missing_ok=True)
+        except BaseException:
+            # A batch that fails part way still syncs what it removed, since a retry would find nothing left.
+            self._sync_after_error()
+            raise
+        self._fsync_root()
+        return {"removed": removed, "absent": absent}
+
+    def _has_records(self, rollout_id: str) -> bool:
+        return any(
+            path.exists()
+            for path in (
+                self.path_for(rollout_id),
+                self.incomplete_path_for(rollout_id),
+                self.intents_path_for(rollout_id),
+            )
+        )
+
     async def close(self) -> None:
         """The file store owns no persistent handles."""
-
-    def delete(self, rollout_id: str) -> None:
-        """Unconditionally remove a rollout's records.
-
-        This compatibility helper supports administrative cleanup.
-        Normal consumers use conditional ``drop``.
-        The lock file remains so concurrent callers keep using one inode.
-        """
-        with self._locked(rollout_id):
-            self.path_for(rollout_id).unlink(missing_ok=True)
-            self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-            self.intents_path_for(rollout_id).unlink(missing_ok=True)
-            self.state_path_for(rollout_id).unlink(missing_ok=True)
-            self._fsync_root()
-
-    def sweep_retired(self, older_than_seconds: float) -> int:
-        """Remove retired tombstones older than the cutoff and return the count removed.
-
-        Callers choose the retention policy.
-        ``drop`` already removed entries and JSONL payloads.
-        This removes state, locks, intents, and incomplete markers.
-        """
-        cutoff = time.time() - older_than_seconds
-        removed = 0
-        for state_path in self._root.glob("*.tokens.state.json"):
-            rollout_id = state_path.name[: -len(".tokens.state.json")]
-            try:
-                validate_rollout_id(rollout_id)
-            except ValueError:
-                continue
-            with self._locked(rollout_id):
-                try:
-                    if state_path.stat().st_mtime > cutoff:
-                        continue
-                except FileNotFoundError:
-                    continue
-                if not self._read_state(rollout_id).get("retired", False):
-                    continue
-                state_path.unlink(missing_ok=True)
-                self.intents_path_for(rollout_id).unlink(missing_ok=True)
-                self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-                self.lock_path_for(rollout_id).unlink(missing_ok=True)
-                removed += 1
-        if removed:
-            self._fsync_root()
-        return removed
 
     def read_entries(self, rollout_id: str) -> list[TokenEntry]:
         with self._locked(rollout_id, shared=True):

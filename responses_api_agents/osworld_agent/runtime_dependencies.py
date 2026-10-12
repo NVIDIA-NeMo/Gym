@@ -36,11 +36,11 @@ class RuntimeDependency:
 
 
 OPTIONAL_RUNTIME_DEPENDENCIES = (
-    # OpenCV 4.8 wheels use NumPy's 1.x ABI. This repeats the normal agent
-    # requirement so the opt-in installer can repair a drifted managed venv.
-    RuntimeDependency("numpy", "numpy", "<2"),
+    # NumPy 1.26 has no CPython 3.13 wheel. OpenCV 4.10 provides an abi3
+    # manylinux wheel and supports the NumPy 2 ABI used by this managed venv.
+    RuntimeDependency("numpy", "numpy", ">=2.1,<2.5"),
     RuntimeDependency("cryptography", "cryptography", "~=46.0"),
-    RuntimeDependency("opencv-python-headless", "cv2", "~=4.8.1.78"),
+    RuntimeDependency("opencv-python-headless", "cv2", "~=4.10.0.84"),
     RuntimeDependency("torchvision", "torchvision", "==0.26.0"),
 )
 
@@ -117,9 +117,9 @@ def validate_optional_runtime_dependencies(
                 version_ready.append(dependency)
 
     for dependency in version_ready:
-        # Importing OpenCV against NumPy 2 prints a native ABI traceback before
-        # Python can catch the ImportError. The NumPy version error is already
-        # sufficient and more actionable, so avoid that noisy dependent import.
+        # A bad NumPy version can make OpenCV print a native ABI traceback before
+        # Python catches the import error. Report the NumPy problem without that
+        # dependent noise.
         if dependency.import_name == "cv2" and "numpy" in invalid_distributions:
             continue
         try:

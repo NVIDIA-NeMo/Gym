@@ -191,6 +191,8 @@ def _strict_json_object(raw: str) -> dict[str, Any]:
 class OpenAirCongestionEnv(GymnasiumServer):
     """GymnasiumServer subclass: /reset + /step, driven by gymnasium_agent."""
 
+    ray_enabled = False
+
     config: OpenAirCongestionResourcesServerConfig
 
     # Backend built once at startup so an unknown backend fails at boot, not

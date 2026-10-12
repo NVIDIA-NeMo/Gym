@@ -1,0 +1,67 @@
+terminal_bench_4:
+  resources_servers:
+    terminal_bench_4:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Official pinned TB4 setup, state, separate verification, and cleanup.
+      environment:
+        sandbox_env: {}
+        image_rewrites: []
+        workdir: null
+        efs_logs_init_image: python:3.13-slim
+        cpu_enforcement_policy: limit
+        memory_enforcement_policy: limit
+        exec_shell: bash -c
+        efs_logs_host_path: /mnt/efs/data/shared
+        sandbox_request_gpu_type: false
+        sandbox_split_endpoints: ${oc.select:tb4_split_sandbox_endpoints,false}
+        sandbox_env_by_task:
+          nextjs-performance:
+            CIRCLE_NODE_TOTAL: '3'
+        sandbox_provider_options:
+          resource_requests: limits
+        compose_image_configs: benchmarks/terminal_bench_4/compose-images.json
+        sandbox_provider:
+          opensandbox:
+            connection:
+              domain: ${oc.env:OPENSANDBOX_DOMAIN,localhost}
+              protocol: http
+              use_server_proxy: true
+              transport_backend: aiohttp
+              tls_verify: false
+            create:
+              retries: 5
+              retry_delay_s: 5
+              retry_max_delay_s: 60
+              request_timeout_s: 120
+              timeout_s: 150
+              connect_attempt_timeout_s: 150
+              renew_interval_s: 1800
+            operations:
+              background_exec: true
+              retries: 5
+              retry_delay_s: 5
+              retry_max_delay_s: 60
+              status_poll_timeout_s: 20
+            networking:
+              enabled: true
+              loopback_forwarding: true
+              setup_command: "if ! command -v python3 >/dev/null 2>&1; then\n  apt-get update && DEBIAN_FRONTEND=noninteractive\
+                \ apt-get install -y --no-install-recommends python3;\nfi"
+            runtime_requirements:
+              shm_size_metadata_key: nemo.nvidia.com/shm
+              capability_metadata:
+                SYS_PTRACE:
+                  nemo.nvidia.com/ptrace: 'true'
+              capability_probes:
+                SYS_PTRACE: awk '/^CapEff:/ { print $2 }' /proc/self/status | { read caps; test $((0x$caps & (1
+                  << 19))) -ne 0; }
+        sandbox_metadata:
+          nemo.nvidia.com/resources: custom
+        sandbox_ttl_s: 28800
+        sandbox_ready_timeout_s: 1200
+        default_exec_timeout_s: 64800
+      artifacts_dir: ${oc.select:tb4_jobs_dir,results/terminal_bench_4/resources}
+      max_concurrent_sessions: ${oc.select:tb4_concurrency,8}
+      seeded_session_timeout_sec: ${oc.select:tb4_seeded_session_timeout_sec,36000}

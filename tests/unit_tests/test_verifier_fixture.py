@@ -112,6 +112,18 @@ async def test_exercises_the_four_case_floor(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8") == original
 
 
+async def test_constant_reward_contract_still_rejects_out_of_range_observations(tmp_path: Path) -> None:
+    path = tmp_path / "cases.jsonl"
+    _write_cases(path, expected_full=0.0, determinism=False)
+    results = await exercise_verifier_fixture(
+        _fixture(path, full_reward=0.0), reward_range=(0, 0), determinism="unknown"
+    )
+    assert results[0].observed_rewards == (0.0,)
+    assert results[1].observed_rewards == (0.0,)
+    with pytest.raises(VerifierFixtureError, match="outside declared range"):
+        await exercise_verifier_fixture(_fixture(path), reward_range=(0, 0), determinism="unknown")
+
+
 @pytest.mark.parametrize(
     ("content", "message"),
     [
@@ -155,7 +167,7 @@ async def test_enforces_range_endpoints_and_determinism(tmp_path: Path) -> None:
         await exercise_verifier_fixture(_fixture(path, full_reward=0.75), reward_range=(0, 1), determinism="seeded")
     with pytest.raises(VerifierFixtureError, match="changed"):
         await exercise_verifier_fixture(_fixture(path, deterministic=False), reward_range=(0, 1), determinism="seeded")
-    with pytest.raises(VerifierFixtureError, match="lower < upper"):
+    with pytest.raises(VerifierFixtureError, match="lower <= upper"):
         await exercise_verifier_fixture(_fixture(path), reward_range=(1, 0), determinism="seeded")
 
 

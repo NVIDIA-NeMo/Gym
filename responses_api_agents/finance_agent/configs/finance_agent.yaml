@@ -5,6 +5,10 @@ finance_agent:
       # Loop policy mirroring vals-ai/finance-agent: bounded by turns rather than
       # wall clock, and every tool error is handed back to the model.
       no_tool_call_nudge: Continue.
+      # Keep declared: overlays merged in OmegaConf struct mode cannot add a key
+      # that is absent here, and the app's own default is invisible to config
+      # composition. Removing this line breaks such overlays with a hard error.
+      continue_if_not_tool_call: true
       max_time_seconds: null
       abort_on_tool_error_types: []
       max_steps: 50

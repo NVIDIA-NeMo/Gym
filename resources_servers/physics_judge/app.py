@@ -89,6 +89,8 @@ class PhysicsJudgeResourcesServerConfig(LibraryJudgeMathResourcesServerConfig):
 class PhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
     """math_with_judge subclass with NeMo Skills' physics judge."""
 
+    ray_enabled = False
+
     config: PhysicsJudgeResourcesServerConfig
 
     # Verdict tokens — Skills' physics judge prompt asks for `[Correct]` /

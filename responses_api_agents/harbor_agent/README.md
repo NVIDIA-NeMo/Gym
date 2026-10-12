@@ -306,10 +306,15 @@ harbor_agent_kwargs:
     output_cost_per_token: 0.0
 ```
 
-Before running, export Daytona credentials:
+Before running, follow the [Daytona access prerequisites](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/daytona-access)
+for an organization key, sandbox permissions, and quota. This example uses Harbor's
+Daytona environment and its configuration.
+
+Set the key in the host environment using your secret manager. The example below
+uses a placeholder:
 
 ```bash
-export DAYTONA_API_KEY=<your-daytona-api-key>
+export DAYTONA_API_KEY="<your-daytona-api-key>"
 ```
 
 Then add the policy model server settings to repo-root `env.yaml`, using the
@@ -369,7 +374,7 @@ with five trials, zero errors, and mean reward `1.000`.
 To regenerate the Harbor-side smoke evidence:
 
 ```bash
-export DAYTONA_API_KEY=<your-daytona-api-key>
+export DAYTONA_API_KEY="<your-daytona-api-key>"
 
 harbor run --dataset terminal-bench@2.0 \
   --n-tasks 5 \
@@ -387,7 +392,7 @@ For an environment-only smoke that does not require a model provider key, run th
 Terminal-Bench 2.0 `fix-git` task through Harbor's Oracle agent on Daytona:
 
 ```bash
-export DAYTONA_API_KEY=<your-daytona-api-key>
+export DAYTONA_API_KEY="<your-daytona-api-key>"
 
 harbor run --dataset terminal-bench@2.0 \
   --task-name fix-git \
