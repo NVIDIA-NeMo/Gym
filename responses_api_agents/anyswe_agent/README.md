@@ -72,6 +72,16 @@ agent into each task image. `agent_runtime_source` controls other delivery modes
 
 Each archive must contain the runtime's `bin/python` at its root.
 
+`agent_network_policy` sets an OpenSandbox `network_policy` on the agent sandbox only (grading keeps its network):
+
+```yaml
+agent_network_policy:
+  defaultAction: deny
+  egress:
+    - action: allow
+      target: <model server CIDR>
+```
+
 Private task images can pass registry credentials through
 `sandbox_spec.provider_options.image_auth`.
 

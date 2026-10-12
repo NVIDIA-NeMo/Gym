@@ -23,6 +23,8 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from nemo_gym.openai_utils import NeMoGymResponse
 from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snapshot_repo
 from responses_api_agents.anyswe_agent.app import (
@@ -166,6 +168,28 @@ class TestSandboxAPI:
         assert spec.metadata["sandbox-api"] == "opensandbox-sdk"
         assert spec.provider_options == {"platform": {"arch": "amd64"}}
         assert spec.files == {"/tmp/input": "data"}
+
+    def test_agent_network_policy_applies_to_agent_box_only(self) -> None:
+        policy = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.0.0.0/16"}]}
+        params = SimpleNamespace(
+            sandbox_spec={"provider_options": {"platform": {"arch": "amd64"}}},
+            sandbox_default_metadata={},
+            swebench_agent_timeout=100,
+            swebench_tests_timeout=200,
+            instance_id="astropy__astropy-12907",
+            container="image:tag",
+            resolved_sandbox_provider={"opensandbox": {}},
+            agent_network_policy=policy,
+        )
+        agent_spec = AnySweAgent._sandbox_spec(params, agent=True)
+        grading_spec = AnySweAgent._sandbox_spec(params)
+        assert agent_spec.provider_options == {"platform": {"arch": "amd64"}, "network_policy": policy}
+        assert grading_spec.provider_options == {"platform": {"arch": "amd64"}}
+
+        params.agent_network_policy = policy
+        params.resolved_sandbox_provider = {"docker": {}}
+        with pytest.raises(ValueError, match="opensandbox"):
+            AnySweAgent._sandbox_spec(params, agent=True)
 
     def test_agent_config_is_forwarded_without_harness_specific_changes(self) -> None:
         params = SimpleNamespace(
