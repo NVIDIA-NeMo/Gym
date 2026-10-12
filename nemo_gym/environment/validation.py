@@ -36,6 +36,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     dataset_agent_pins,
+    get_first_server_config_dict,
     resolve_dataset_agent,
     translate_interpolation_error,
 )
@@ -161,9 +162,25 @@ def _resolve_dataset_owner_agent(resolved: DictConfig, owner_instance_name: str)
             "declaring instance alone, so all pins on one instance must agree."
         )
     try:
-        return resolve_dataset_agent(resolved, owner_instance_name, pin=pins[0] if pins else None)
+        inner = get_first_server_config_dict(resolved, owner_instance_name)
+        tasksets = {dataset.get("taskset") for dataset in inner.get("datasets") or []} or {None}
+        agents = {
+            resolve_dataset_agent(resolved, owner_instance_name, pin=pins[0] if pins else None, taskset=taskset)
+            for taskset in tasksets
+        }
     except ConfigError as e:
         raise EnvironmentValidationError(f"Datasets on {owner_instance_name!r}: {e}") from e
+    if None in agents:
+        raise EnvironmentValidationError(
+            f"Datasets on {owner_instance_name!r} route by taskset to an Environment Server that fronts several "
+            "agents. An environment manifest describes one agent, so it cannot describe this composition."
+        )
+    if len(agents) != 1:
+        raise EnvironmentValidationError(
+            f"Datasets on {owner_instance_name!r} route to different agents ({sorted(agents)}); "
+            "a manifest must resolve to one agent."
+        )
+    return agents.pop()
 
 
 def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | None = None) -> ResolvedComposition:

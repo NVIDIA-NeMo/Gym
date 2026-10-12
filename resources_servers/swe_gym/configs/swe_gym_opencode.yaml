@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Wires the opencode sandboxed agent to swe_gym_resources_server for a training run. swe_gym.yaml alone
+# only defines the resources server, which is enough for golden-patch validation but not to run an
+# agent against the dataset.
+#
+# This is training data (data/swe_gym_training.jsonl, only the instances whose golden patch resolved
+# in every pass of the 3x sweep -- see the README), not a fixed eval benchmark.
+#
+#   gym env start --config resources_servers/swe_gym/configs/swe_gym_opencode.yaml
+
+config_paths:
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+  - resources_servers/swe_gym/configs/swe_gym.yaml
+
+swe_gym_opencode_sandboxed_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: swe_gym_resources_server
+      datasets:
+        - name: swe_gym
+          type: train
+          jsonl_fpath: resources_servers/swe_gym/data/swe_gym_training.jsonl
+          num_repeats: 1
+          # SWE-Gym/SWE-Gym's own Hub metadata license.
+          license: MIT
+
+swe_gym_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swe_gym_opencode_sandboxed_agent

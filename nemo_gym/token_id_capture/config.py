@@ -158,6 +158,11 @@ class TokenIdCaptureSettings(BaseModel):
     # This avoids repeatedly storing the growing full prompt.
     # Root and unresolved records remain full-prompt reconstruction anchors.
     delta_records: bool = False
+    # Whether an incomplete snapshot always masks the sample.
+    # Incomplete means a model call registered its capture intent and never committed a record.
+    # ``False`` keeps the sample when terminal attribution delivered its chain whole, which
+    # places the uncaptured call outside the trajectory the verifier scored.
+    mask_incomplete_when_attributed: bool = True
     # Abort when the finalized-rollout masked fraction exceeds this limit.
     # Enforcement begins after ``mask_fraction_min_samples`` observations.
     # ``None`` disables the kill switch.

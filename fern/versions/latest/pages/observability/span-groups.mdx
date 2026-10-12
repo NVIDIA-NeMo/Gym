@@ -66,9 +66,10 @@ telemetry:
   span_groups: "server,http_client,verify"
 ```
 
-Names are case-insensitive and surrounding whitespace is ignored. An unknown name raises
-an error listing the valid options rather than silently resolving to nothing — a typo in
-`span_groups` would otherwise look identical to telemetry being broken.
+Names are case-insensitive and surrounding whitespace is ignored. An unknown name does not
+raise an error. Each server logs a warning that names the unknown entry and lists the
+registered groups, then ignores it. If telemetry looks broken, check the server logs for
+that warning first.
 
 ## Cost
 
@@ -94,6 +95,13 @@ without a second layer.
 There is no `dataset` group. NeMo Gym's dataset code is command-line upload and download
 tooling rather than a runtime path, so there is nothing worth tracing.
 
-Span groups inherited from `nemo-lens` that relate to training, such as `checkpoint`,
-`step`, and `optimizer`, remain resolvable and are reachable through `all`, but no NeMo
-Gym code emits under them.
+## Running Inside NeMo RL
+
+When NeMo Gym runs in the same process as NeMo RL, both libraries register their span
+groups with `nemo-lens`, and presets combine across libraries. `default` selects NeMo RL's
+default groups and NeMo Gym's. The `job` and `rollout` names belong to both libraries, so
+enabling either name enables both libraries' spans.
+
+`nemo-lens` allows one telemetry setup per process. If NeMo RL sets up telemetry first,
+NeMo Gym reuses it. NeMo RL's span-group setting, service name, and exporter then apply,
+and NeMo Gym's `telemetry:` block is ignored in that process.

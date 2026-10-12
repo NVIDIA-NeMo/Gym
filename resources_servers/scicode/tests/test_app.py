@@ -106,6 +106,17 @@ def test_run_substep_timeout():
     assert result == {"passed": False, "error": "timeout"}
 
 
+def test_run_substep_null_byte_fails_instead_of_raising():
+    result = run_substep("x = 1\n\0\nassert x == 1", timeout_secs=10.0)
+    assert result["passed"] is False
+    assert "null bytes" in result["error"]
+
+
+def test_run_substep_program_larger_than_arg_max():
+    program = f"payload = {'a' * 4_000_000!r}\nassert len(payload) == 4_000_000"
+    assert run_substep(program, timeout_secs=30.0)["passed"] is True
+
+
 # ----------------------------
 # server
 # ----------------------------

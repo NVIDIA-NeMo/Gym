@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 from fastapi.encoders import jsonable_encoder
 from pytest import approx, fixture, mark
 
+from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import AggregateMetricsRequest, ModelServerRef
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
@@ -70,6 +71,10 @@ class TestApp:
         cfg.judge_equal_label = "[[A=B]]"
         cfg.judge_not_equal_label = "[[A!=B]]"
         return cfg
+
+    async def test_reverify_mode(self, config: LLMJudgeResourcesServerConfig) -> None:
+        resources_server = LLMJudgeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        assert await resources_server.get_reverify_mode() == ReverifyMode.STATELESS
 
     def _create_response(self, id: str, output_item: NeMoGymResponseOutputItem) -> str:
         return NeMoGymResponse(

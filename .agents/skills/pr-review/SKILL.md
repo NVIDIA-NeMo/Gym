@@ -3,7 +3,7 @@ name: pr-review
 description: Inert repository rubric for the formal /review service.
 license: Apache-2.0
 disable-model-invocation: true
-user_invocable: false
+user-invocable: false
 ---
 
 # Pull-request Review

@@ -109,9 +109,30 @@ git remote add upstream https://github.com/NVIDIA-NeMo/Gym.git
 # With write access, use https://github.com/NVIDIA-NeMo/Gym.git as the clone URL
 # and omit the `git remote add upstream` step.
 uv venv --python 3.13.14 && source .venv/bin/activate
-uv sync --extra dev
+uv sync --extra dev --extra telemetry --extra mlflow --extra wandb
 pre-commit install
 ```
+
+The `dev` extra provides development tools, but it does not install the optional
+SDKs exercised by the core unit tests. Include `telemetry`, `mlflow`, and `wandb`
+as above so their installed-dependency tests run rather than fail or skip.
+To run the same non-sandbox unit tests as CI from the repository root:
+
+```bash
+./scripts/ci/core_unit_tests.sh
+```
+
+For the complete unit suite, also install the sandbox provider SDKs:
+
+```bash
+uv sync --extra dev --extra telemetry --extra mlflow --extra wandb \
+  --extra sandbox --extra openshell
+gym dev test
+```
+
+`--extra all` is not a substitute: it includes `dev`, `mlflow`, `sandbox`, and
+`wandb`, but not `telemetry` or `openshell`. The `vllm` extra is not required for
+these unit tests.
 
 Cloning a public repository over HTTPS needs no GitHub credentials. If you have
 an SSH key registered with GitHub, you can use `git@github.com:OWNER/Gym.git`
@@ -141,6 +162,11 @@ If DCO checks fail after you have already pushed, see the [Development Setup Gui
   `.pre-commit-config.yaml` are the enforced configuration. Annotate new or
   changed public boundaries and document generated public APIs; mypy is useful
   for focused type-checkable areas but is not a repository-wide strict CI gate.
+- This repository is public. Do not publish NVIDIA internal or confidential
+  information, including internal URLs, employee filesystem paths, private
+  dataset or checkpoint details, or personal access contacts. Before merge,
+  review docs, comments, scripts, configs, example data, logs, and screenshots
+  against the [public repository content guidelines](https://docs.nvidia.com/nemo/gym/main/contribute/development-setup#public-repository-content).
 - Every change must assess whether tests and documentation need updating. State
   what was added or changed, or record a justified `N/A` in the PR body.
   Significant user-facing features should document their motivation,

@@ -1,0 +1,147 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Harness conformance
+
+on:
+  workflow_call:
+    inputs:
+      base-ref:
+        description: Base ref for the full PR diff; empty runs all registered harnesses
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # Explicit bash enables pipefail, so tee cannot hide installation/test failures.
+    shell: bash
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      harnesses: ${{ steps.select.outputs.harnesses }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select affected harnesses
+        id: select
+        env:
+          BASE_REF: ${{ inputs.base-ref }}
+          FORCE_ALL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+        run: |
+          if [[ "$FORCE_ALL" == 'true' ]]; then BASE_REF=''; fi
+          python3 -m scripts.harness_conformance.ci select --base "$BASE_REF"
+      - name: Report selection failure
+        if: failure()
+        run: echo '::warning::Harness conformance could not select affected harnesses; see the selection log.'
+
+  probe:
+    name: ${{ matrix.harness }} conformance probes
+    needs: select
+    if: needs.select.outputs.harnesses != '' && needs.select.outputs.harnesses != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: ${{ fromJSON(needs.select.outputs.harnesses) }}
+    env:
+      HARNESS: ${{ matrix.harness }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Set output and runtime directories
+        run: |
+          echo "RESULTS=$RUNNER_TEMP/harness-conformance-$HARNESS" >> "$GITHUB_ENV"
+          echo "PROBE_OUTPUT=$RUNNER_TEMP/harness-conformance-$HARNESS/probes" >> "$GITHUB_ENV"
+          # Install our own executable, even if the runner image has another version.
+          echo "NPM_CONFIG_PREFIX=$RUNNER_TEMP/harness-runtime" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+      - name: Install pinned dependencies and runtime
+        timeout-minutes: 12
+        env:
+          HARNESS: ${{ matrix.harness }}
+        run: |
+          mkdir -p "$RESULTS"
+          {
+            source scripts/ci/setup_dev.sh
+            python -m scripts.harness_conformance.ci install --harness "$HARNESS"
+          } 2>&1 | tee "$RESULTS/setup.log"
+          echo "$NPM_CONFIG_PREFIX/bin" >> "$GITHUB_PATH"
+      - name: Validate probes, checker, and adapter
+        timeout-minutes: 5
+        env:
+          HARNESS: ${{ matrix.harness }}
+        run: |
+          .venv/bin/python -m pytest -o addopts= --import-mode=importlib -q \
+            scripts/harness_conformance/tests tests/unit_tests/harness_capabilities \
+            "responses_api_agents/${HARNESS}_agent/tests" 2>&1 | tee "$RESULTS/tests.log"
+      - name: Run full scenario suite
+        id: probes
+        timeout-minutes: 15
+        env:
+          HARNESS: ${{ matrix.harness }}
+        run: |
+          if .venv/bin/python scripts/run_harness_conformance.py \
+            --harness "$HARNESS" --output "$PROBE_OUTPUT"; then
+            code=0
+          else
+            code=$?
+          fi
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          # Exit 1 is a valid nonconforming result; execution errors fail the job.
+          if [[ "$code" -gt 1 ]]; then exit "$code"; fi
+      - name: Record conformance results
+        if: always()
+        env:
+          HARNESS: ${{ matrix.harness }}
+          PROBE_EXIT_CODE: ${{ steps.probes.outputs.exit_code || '2' }}
+        run: |
+          python3 -m scripts.harness_conformance.ci report --harness "$HARNESS" \
+            --output "$PROBE_OUTPUT" --exit-code "$PROBE_EXIT_CODE"
+      - name: Upload conformance evidence
+        id: evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: harness-conformance-${{ matrix.harness }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.RESULTS }}
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Link downloadable report
+        if: always() && steps.evidence.outputs.artifact-url != ''
+        env:
+          ARTIFACT_URL: ${{ steps.evidence.outputs.artifact-url }}
+        run: |
+          echo "[Download conformance report and logs]($ARTIFACT_URL) — open probes/conformance_report.md in the artifact." >> "$GITHUB_STEP_SUMMARY"
+
+  report:
+    name: Publish P0 check
+    needs: [select, probe]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Publish P0 result from this attempt's evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELECTED_HARNESSES: ${{ needs.select.outputs.harnesses }}
+          PROBE_JOB_RESULT: ${{ needs.probe.result }}
+        run: python3 -m scripts.harness_conformance.checks

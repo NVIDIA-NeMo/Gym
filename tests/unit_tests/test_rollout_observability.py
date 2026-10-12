@@ -405,3 +405,69 @@ def test_join_model_calls_rejects_cross_invocation_compaction_ownership() -> Non
 def test_sandbox_observation_rejects_negative_usage() -> None:
     with pytest.raises(ValidationError):
         SandboxObservation(role="agent", cpu_time_s=-1)
+
+
+def test_capture_merge_joins_declared_message_ids_for_any_harness(tmp_path):
+    from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
+    from nemo_gym.rollout_observability import TrajectoryTurn
+
+    model = ModelServerRef(type="responses_api_models", name="policy")
+    bundle = AgentObservationBundle(
+        source="custom_harness",
+        records=[
+            AgentInvocation(invocation_id="root"),
+            AgentInvocation(invocation_id="child", parent_invocation_id="root"),
+            ContextCompactionObservation(invocation_id="root", source_message_ids=["summary"], source_model_ref=model),
+        ],
+    )
+    trajectory = TrajectoryRecord(
+        task_id="0",
+        rollout_id="0-0",
+        turns=[
+            TrajectoryTurn(
+                invocation_id=session,
+                source_message_id="reply",
+                source_model_ref=model,
+                task_id="0",
+                rollout_id="0-0",
+                turn_no=1,
+                step_count=1,
+                timestamp=0,
+            )
+            for session in ("root", "child")
+        ],
+    )
+    store = CaptureStore(tmp_path)
+    for call_id, session, message in [
+        ("retry", "root", "reply"),
+        ("success", "root", "reply"),
+        ("child-call", "child", "reply"),
+        ("summary-call", "root", "summary"),
+    ]:
+        store.record(
+            "0-0",
+            {
+                "model_call_id": call_id,
+                "client_session_id": session,
+                "client_assistant_message_id": message,
+                "model_ref": model.model_dump(),
+            },
+        )
+    row = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "ng_agent_observations": bundle.model_dump(mode="json"),
+        "ng_trajectory": trajectory.model_dump(mode="json"),
+    }
+    merge_model_call_capture_into_record(row, [tmp_path])
+    joined = TrajectoryRecord.model_validate(row["ng_trajectory"])
+    assert [[call.model_call_id for call in turn.model_calls] for turn in joined.turns] == [
+        ["retry", "success"],
+        ["child-call"],
+    ]
+    observations = AgentObservationBundle.model_validate(row["ng_agent_observations"])
+    assert observations.source == "custom_harness"
+    [compaction] = [r for r in observations.records if isinstance(r, ContextCompactionObservation)]
+    assert [call.model_call_id for call in compaction.model_calls] == ["summary-call"]
+    assert not observations.gaps
+    assert all(not turn.model_calls for turn in trajectory.turns)

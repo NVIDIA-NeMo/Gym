@@ -3,11 +3,16 @@
 
 import asyncio
 import json
+import os
+import signal
 import socket
+import subprocess
+import sys
 import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import openai
@@ -16,13 +21,18 @@ import uvicorn
 from run_agent import AIAgent
 from tools.mcp_tool import shutdown_mcp_servers
 
+from nemo_gym.agent_utils import process_supervisor
+from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
+from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherResourcesServer,
     ExampleMCPWeatherResourcesServerConfig,
 )
+from responses_api_agents.hermes_agent.app import HermesAgent, HermesAgentConfig
 from responses_api_agents.hermes_agent.sandbox_runner import _run, _use_model_server
+from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
 def _completion(message: dict) -> dict:
@@ -128,6 +138,42 @@ def _payload(model_base_url: str, **overrides) -> dict:
     }
 
 
+@pytest.mark.parametrize("marker", ["present", "absent", "omitted"])
+def test_interruption_uses_supplied_stop_request_path(tmp_path, monkeypatch, restore_process_globals, marker):
+    from responses_api_agents.hermes_agent import sandbox_runner
+
+    class Agent:
+        def __init__(self, **kwargs):
+            self._session_messages = [{"role": "assistant", "content": "partial answer"}]
+
+        def _build_api_kwargs(self, messages):
+            return {}
+
+        def run_conversation(self, *args, **kwargs):
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            return {"completed": True, "messages": self._session_messages}
+
+        def interrupt(self, message):
+            assert message == ("sandbox cancellation" if marker == "present" else "sandbox timeout")
+
+    monkeypatch.setattr("run_agent.AIAgent", Agent)
+    monkeypatch.setattr(sandbox_runner, "_use_model_server", lambda _url: None)
+    payload = _payload("http://unused/v1")
+    if marker != "omitted":
+        marker_path = tmp_path / "custom-stop-marker"
+        payload["stop_request_path"] = str(marker_path)
+        if marker == "present":
+            marker_path.touch()
+    output_path = tmp_path / "output.json"
+    result = _run(payload, tmp_path, output_path=output_path)["result"]
+    expected = "cancelled" if marker == "present" else "wall_time"
+    assert result["stop_reason"] == expected
+    assert result["interrupted"] and not result["completed"]
+    checkpoint = json.loads(output_path.read_text())["result"]
+    assert checkpoint["stop_reason"] == expected
+    assert checkpoint["messages"][-1]["content"] == "partial answer"
+
+
 def test_granted_mcp_tools_reach_the_seeded_resources_session(tmp_path, restore_process_globals) -> None:
     resources = ExampleMCPWeatherResourcesServer(
         config=ExampleMCPWeatherResourcesServerConfig(
@@ -212,7 +258,21 @@ def test_required_mcp_server_that_does_not_connect_fails_before_the_model(tmp_pa
     assert model_server.requests == []
 
 
-def test_iteration_limit_summary_reaches_the_model_server(tmp_path, restore_process_globals) -> None:
+@pytest.mark.parametrize("template_enabled", [False, True])
+@pytest.mark.parametrize("execution", ["sandbox", "local"])
+@pytest.mark.parametrize("conflicting_override", [False, True])
+def test_iteration_limit_summary_reaches_the_model_server(
+    tmp_path, restore_process_globals, monkeypatch, template_enabled, execution, conflicting_override
+) -> None:
+    if conflicting_override:
+        original = AIAgent._build_api_kwargs
+
+        def with_override(self, messages):
+            kwargs = original(self, messages)
+            kwargs.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})["enable_thinking"] = True
+            return kwargs
+
+        monkeypatch.setattr(AIAgent, "_build_api_kwargs", with_override)
     tool_call = {
         "content": None,
         "tool_calls": [
@@ -226,14 +286,76 @@ def test_iteration_limit_summary_reaches_the_model_server(tmp_path, restore_proc
     answers = [_completion(tool_call), _completion({"content": "summary of the work"})]
 
     with _ModelServer(answers) as model_server:
-        output = _run(
-            _payload(model_server.base_url),
-            tmp_path,
-        )
+        if execution == "sandbox":
+            output = _run(
+                _payload(model_server.base_url, chat_template_kwargs_enabled=template_enabled),
+                tmp_path,
+            )
+            assert output["result"]["final_response"] == "summary of the work"
+        else:
+            from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+            agent = HermesAgent(
+                config=HermesAgentConfig(
+                    host="127.0.0.1",
+                    port=0,
+                    name="hermes",
+                    entrypoint="app.py",
+                    model_server={"type": "responses_api_models", "name": "model"},
+                    resources_server={"type": "resources_servers", "name": "resources"},
+                    max_turns=1,
+                    max_tokens=128,
+                    enabled_toolsets=["terminal"],
+                    chat_template_kwargs_enabled=template_enabled,
+                ),
+                server_client=MagicMock(
+                    spec=ServerClient,
+                    global_config_dict={
+                        "model": {
+                            "responses_api_models": {
+                                "vllm_model": {
+                                    "chat_template_kwargs": {
+                                        "enable_thinking": False,
+                                    }
+                                }
+                            }
+                        }
+                    },
+                ),
+            )
+            monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args: model_server.base_url)
+            output = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="fix bug")))
+            assert output.output[-1].content[0].text == "summary of the work"
 
     assert len(model_server.requests) == 2
     assert all(not request.get("stream") for request in model_server.requests)
-    assert output["result"]["final_response"] == "summary of the work"
+    first = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(model_server.requests[0])
+    assert all("chat_template_kwargs" not in body for body in model_server.requests)
+    if template_enabled:
+        assert json.loads(first.metadata["chat_template_kwargs"]) == {
+            "truncate_history_thinking": False,
+        }
+    # Exercise Gym's actual merge order: neither path may override a server-configured thinking mode.
+    for thinking in (False, True):
+        server = VLLMModel(
+            config=VLLMModelConfig(
+                host="127.0.0.1",
+                port=0,
+                name="model",
+                entrypoint="app.py",
+                model="policy_model",
+                base_url="http://unused/v1",
+                api_key="gym",
+                chat_template_kwargs={"enable_thinking": thinking},
+                return_token_id_information=False,
+                uses_reasoning_parser=False,
+            ),
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+        forwarded = server._preprocess_chat_completion_create_params(
+            request=None, body_dict=first.model_dump(exclude_unset=True)
+        )
+        assert forwarded["chat_template_kwargs"]["enable_thinking"] is thinking
 
 
 def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globals) -> None:
@@ -252,3 +374,110 @@ def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globa
     # Delegated children are AIAgents Hermes constructs itself; the Model Server rejects streaming.
     child = AIAgent(base_url=model_server.base_url, api_key="gym", model="m", quiet_mode=True)
     assert child.use_streaming is False
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
+@pytest.mark.parametrize("cooperative", [True, False])
+@pytest.mark.parametrize("ending", ["deadline", "close"])
+def test_worker_stop_checkpoints_partial_work_before_hard_cleanup(tmp_path, cooperative, ending):
+    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from responses_api_agents.hermes_agent import sandbox_runner
+
+    input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
+    stop_request_path = tmp_path / STOP_REQUEST_FILE
+    input_path.write_text(json.dumps({**_payload("http://unused/v1"), "stop_request_path": str(stop_request_path)}))
+    # Run the real worker/observer under the real supervisor, with a deterministic slow harness.
+    driver = """
+import os, pathlib, sys, time, types
+sys.path.insert(0, sys.argv[1])
+class Agent:
+    def __init__(self, **kwargs):
+        self._session_messages = []
+        self.stopping = False
+    def _build_api_kwargs(self, messages):
+        return {}
+    def interrupt(self, message):
+        pathlib.Path('interrupted').write_text(message)
+        self.stopping = True
+    def run_conversation(self, *args, **kwargs):
+        self._session_messages = [
+            {'role': 'user', 'content': 'fix bug'},
+            {'role': 'assistant', 'content': 'Partial work', 'prompt_token_ids': [1], 'generation_token_ids': [2]},
+        ]
+        pathlib.Path('model.patch').write_bytes(b'partial patch\\n')
+        while not self.stopping or sys.argv[4] == 'False':
+            time.sleep(0.01)
+        return {'completed': False, 'messages': self._session_messages}
+module = types.ModuleType('run_agent')
+module.AIAgent = Agent
+sys.modules['run_agent'] = module
+import sandbox_runner
+raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])))
+"""
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            process_supervisor.__file__,
+            "--timeout",
+            "2" if ending == "deadline" else "10",
+            "--cleanup-timeout",
+            "0.5",
+            "--stop-file",
+            str(stop_request_path),
+            "--receipt",
+            str(tmp_path / "cleanup.json"),
+            "--",
+            sys.executable,
+            "-I",
+            "-c",
+            driver,
+            str(Path(sandbox_runner.__file__).parent),
+            str(input_path),
+            str(output_path),
+            str(cooperative),
+        ],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+    )
+    try:
+        if ending == "close":
+            deadline = time.monotonic() + 5
+            while not (tmp_path / "model.patch").exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert (tmp_path / "model.patch").exists()
+            stop_request_path.touch()
+            process.terminate()
+        _, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, stderr
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=5)
+    receipt = json.loads((tmp_path / "cleanup.json").read_text())
+    assert receipt["timed_out"] is (ending == "deadline")
+    assert receipt["cleanup_confirmed"] is True
+    output = json.loads(output_path.read_text())
+    reason = "wall_time" if ending == "deadline" else "cancelled"
+    assert (tmp_path / "interrupted").read_text() == (
+        "sandbox timeout" if ending == "deadline" else "sandbox cancellation"
+    )
+    assert (tmp_path / "model.patch").read_bytes() == b"partial patch\n"
+    response = HermesAgent._response_from_result(
+        None,
+        body=NeMoGymResponseCreateParamsNonStreaming(input="fix bug"),
+        result=output["result"],
+        model_name="model",
+        n_input=1,
+    )
+    assert response.status == "incomplete"
+    assert response.error is None
+    assert response.metadata["stop_reason"] == reason
+    assert response.output[0].content[0].text == "Partial work"
+    assert response.output[0].generation_token_ids == [2]
+    assert output["observations"]["invocations"][0]["status"] == "incomplete"
+    with pytest.raises(ProcessLookupError):
+        os.kill(output["runtime"]["pid"], 0)
