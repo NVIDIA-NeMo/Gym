@@ -39,7 +39,6 @@ class CircleCountVerifyResponse(BaseVerifyResponse):
 
 
 class CircleCountResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: CircleCountConfig
 
     async def verify(self, body: CircleCountVerifyRequest) -> CircleCountVerifyResponse:

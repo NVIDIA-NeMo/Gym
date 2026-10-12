@@ -73,7 +73,6 @@ def _normalize(text: str) -> str:
 
 
 class EquivalenceRuleResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: EquivalenceRuleResourcesServerConfig
 
     async def verify(self, body: EquivalenceRuleVerifyRequest) -> EquivalenceRuleVerifyResponse:

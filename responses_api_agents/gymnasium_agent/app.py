@@ -82,7 +82,6 @@ class GymnasiumRunResponse(BaseVerifyResponse):
 
 
 class GymnasiumAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: GymnasiumAgentConfig
     _model_response_semaphore: asyncio.Semaphore | None = PrivateAttr(default=None)
 

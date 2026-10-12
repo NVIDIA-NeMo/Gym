@@ -121,7 +121,6 @@ class IndianBankingResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class IndianBankingResourcesServer(GymnasiumServer):
-    ray_enabled = False
     config: IndianBankingResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:

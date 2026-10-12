@@ -145,7 +145,6 @@ class SwemerUltraVerifyResponse(BaseVerifyResponse):
 
 
 class SwemerUltraResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: SwemerUltraResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:

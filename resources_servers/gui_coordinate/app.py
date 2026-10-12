@@ -95,7 +95,6 @@ def _compute_reward(
 
 
 class GuiCoordinateResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: GuiCoordinateResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

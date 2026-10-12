@@ -347,7 +347,6 @@ class _ConversationBridge:
 class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, UserSimEpisodeResponse]):
     """Run one UserSim ConversationLoop as a Gym episode."""
 
-    ray_enabled = False
     config: UserSimEnvironmentServerConfig
     request_model = UserSimEpisodeRequest
     response_model = UserSimEpisodeResponse

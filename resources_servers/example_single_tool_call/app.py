@@ -55,7 +55,6 @@ class SimpleWeatherVerifier:
 
 
 class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer):
-    ray_enabled = False
     config: SimpleWeatherResourcesServerConfig
     _session_episodes: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
     _closed_session_ids: set[str] = PrivateAttr(default_factory=set)

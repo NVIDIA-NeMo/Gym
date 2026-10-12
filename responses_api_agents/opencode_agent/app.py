@@ -205,8 +205,6 @@ class OpenCodeAgentVerifyResponse(BaseVerifyResponse):
 class OpenCodeAgent(SimpleResponsesAPIAgent):
     """Run OpenCode locally or in a borrowed or agent-owned sandbox session."""
 
-    ray_enabled = False
-
     config: OpenCodeAgentConfig
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
     sem: Semaphore = None

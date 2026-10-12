@@ -56,7 +56,6 @@ class ProofGenSelectVerifyRequest(BaseVerifyRequest):
 
 
 class ProofGenSelectResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ProofGenSelectResourcesServerConfig
 
     _log_lock: Optional[Any] = PrivateAttr(default=None)

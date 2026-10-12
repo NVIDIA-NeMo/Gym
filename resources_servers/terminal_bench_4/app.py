@@ -62,7 +62,6 @@ def atomic_json(path, value):
 
 
 class TerminalBench4ResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: TerminalBench4Config
 
     def model_post_init(self, context):

@@ -157,7 +157,6 @@ class SWEGymVerifyResponse(BaseVerifyResponse):
 
 
 class SWEGymResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: SWEGymResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:

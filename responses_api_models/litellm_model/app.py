@@ -204,7 +204,6 @@ class LiteLLMModelServerConfig(SimpleModelServerConfig):
 
 
 class LiteLLMModelServer(SimpleModelServer):
-    ray_enabled = False
     config: LiteLLMModelServerConfig
 
     async def _check_proxy_version(self) -> None:

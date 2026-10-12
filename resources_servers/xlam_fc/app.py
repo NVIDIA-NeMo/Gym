@@ -41,7 +41,6 @@ class XlamFcVerifyResponse(BaseVerifyResponse):
 
 
 class XlamFcResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: XlamFcResourcesServerConfig
 
     @staticmethod

@@ -66,7 +66,6 @@ class GraphWalksVerifyResponse(GraphWalksVerifyRequest, BaseVerifyResponse):
 
 
 class GraphWalksResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: GraphWalksResourcesServerConfig
 
     async def verify(self, body: GraphWalksVerifyRequest) -> GraphWalksVerifyResponse:

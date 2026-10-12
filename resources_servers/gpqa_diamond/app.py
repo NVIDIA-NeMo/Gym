@@ -55,8 +55,6 @@ class GPQADiamondResourcesServerConfig(MCQAResourcesServerConfig):
 class GPQADiamondResourcesServer(MCQAResourcesServer):
     """GPQA-Diamond verifier with GPQA-specific answer extraction."""
 
-    ray_enabled = False
-
     config: GPQADiamondResourcesServerConfig
 
     async def verify(self, body: MCQAVerifyRequest) -> MCQAVerifyResponse:

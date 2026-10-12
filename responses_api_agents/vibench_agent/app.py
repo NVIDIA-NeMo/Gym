@@ -154,7 +154,6 @@ class VibenchAgentConfig(OpenCodeSandboxedAgentConfig):
 
 
 class VibenchAgent(OpenCodeSandboxedAgent):
-    ray_enabled = False
     config: VibenchAgentConfig
 
     def _uses_docker_provider(self) -> bool:

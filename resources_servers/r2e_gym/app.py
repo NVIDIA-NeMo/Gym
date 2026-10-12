@@ -141,7 +141,6 @@ class R2EGymVerifyResponse(BaseVerifyResponse):
 
 
 class R2EGymResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: R2EGymResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:

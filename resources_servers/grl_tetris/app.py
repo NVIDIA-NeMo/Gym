@@ -55,7 +55,6 @@ class TetrisSessionState:
 
 
 class GrlTetrisResourcesServer(GymnasiumServer):
-    ray_enabled = False
     config: GrlTetrisResourcesServerConfig
     session_id_to_state: Dict[str, TetrisSessionState] = Field(default_factory=dict)
 

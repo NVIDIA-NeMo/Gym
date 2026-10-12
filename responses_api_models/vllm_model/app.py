@@ -406,7 +406,6 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
 
 class VLLMModel(SimpleResponsesAPIModel):
-    ray_enabled = False
     config: VLLMModelConfig
 
     _TOKENIZE_CHAT_FIELDS: ClassVar[tuple[str, ...]] = (

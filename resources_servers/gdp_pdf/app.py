@@ -231,7 +231,6 @@ def _criterion_passes(score: Decimal) -> bool:
 
 
 class GdpPdfResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: GdpPdfConfig
 
     def model_post_init(self, __context: Any) -> None:

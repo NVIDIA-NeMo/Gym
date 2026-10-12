@@ -214,7 +214,6 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
 
 
 class SimpleModelServer(SimpleResponsesAPIModel):
-    ray_enabled = False
     config: SimpleModelServerConfig
 
     def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:

@@ -101,7 +101,6 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 
 
 class SimpleAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: SimpleAgentConfig
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> SimpleAgentSessionState:

@@ -453,7 +453,6 @@ class CodexAgentVerifyResponse(BaseVerifyResponse):
 
 
 class CodexAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: CodexAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)

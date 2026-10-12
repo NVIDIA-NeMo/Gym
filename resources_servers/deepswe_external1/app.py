@@ -127,7 +127,6 @@ class DeepsweExternal1VerifyResponse(DeepSWEVerifyResponse):
 class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
     """Reuse DeepSWE collection/grading with self-contained task rows."""
 
-    ray_enabled = False
     config: DeepsweExternal1ResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:

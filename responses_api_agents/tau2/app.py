@@ -220,7 +220,6 @@ class Tau2FailureResponse(BaseVerifyResponse):
 
 
 class Tau2Agent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: Tau2Config
 
     __key_metrics: Optional[List[str]] = None
