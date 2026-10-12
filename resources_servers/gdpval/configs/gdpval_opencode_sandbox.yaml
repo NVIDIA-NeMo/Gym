@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Experimental file-task pairing, not the AA-v2/Stirrup protocol.
+config_paths:
+- resources_servers/gdpval/configs/gdpval.yaml
+- responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+- environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+# Prepare native rows with task_data.py --taskset gdpval; flat source rows stay unchanged.
+environment_routing_mode: taskset
+environment_server_routes:
+  gdpval: single_agent_turn
+num_repeats_add_seed: false
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      entrypoint: app.py
+      sandbox_provider: sandbox
+      num_workers: 1
+      allowed_agents:
+      - opencode_agent
+      image: ???
+      deliverables_root: ???
+      verified: false
+      # GDPval inputs include video/archive references of several hundred MB.
+      max_reference_bytes: 1073741824
+      reference_download_timeout_seconds: 600
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      # Native session: borrow the GDP task sandbox; Resources owns its lifecycle.
+      model: ${policy_model_name}
+      # Explicit per-call budget, matching the OpenClaw recipe.
+      max_output_tokens: 32768
+      # Episode wall clock in seconds. GDPval tasks produce multi-file
+      # deliverables and routinely outlast the harness default.
+      timeout: 7200
+single_agent_turn:
+  environment_servers:
+    single_agent_turn:
+      resources_server:
+        name: gdpval_resources_server
+      agent_server:
+        name: opencode_agent
+      max_concurrent_episodes: 1
+      queue_timeout_seconds: 60
+# Requires an existing, audited GDP SIF and Apptainer installation.
+sandbox:
+  apptainer:
+    create:
+      mount_point: /workspace
+      extra_start_args: [--containall, --writable-tmpfs]
+    exec:
+      extra_exec_args: [--writable-tmpfs]
+gdpval_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ???
+      openai_api_key: ???
+      openai_model: ???
