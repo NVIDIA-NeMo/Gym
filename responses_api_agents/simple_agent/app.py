@@ -69,7 +69,8 @@ _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 @dataclass
 class SimpleAgentSessionState(AgentSessionState):
     tool_access: DirectHTTPToolAccess | None
-    resources_cookies: dict[str, str]
+    # None means the session holds no resources cookie jar, so close leaves the Environment Server's jar unchanged.
+    resources_cookies: dict[str, str] | None
     observations: AgentObservationBundle | None = None
     activations: int = 0
 
@@ -119,7 +120,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return SimpleAgentSessionState(
             request=body,
             tool_access=direct_access,
-            resources_cookies=dict(direct_access.cookies) if direct_access is not None else {},
+            resources_cookies=dict(direct_access.cookies) if direct_access is not None else None,
         )
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
@@ -394,7 +395,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             collect_trajectory=collect_trajectory,
         )
         if state is not None:
-            state.resources_cookies = dict(resources_server_cookies or {})
+            if state.tool_access is not None:
+                state.resources_cookies = dict(resources_server_cookies or {})
             if trajectory is not None:
                 # A session returns agent evidence at close, where the Environment Server records it.
                 previous = state.observations
