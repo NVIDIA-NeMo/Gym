@@ -75,7 +75,7 @@ def _invocations(bundle):
 
 
 def _config(**kwargs) -> OpenClawAgentConfig:
-    kwargs.setdefault("openclaw_version", "2026.6.35")
+    kwargs.setdefault("openclaw_version", "2026.6.11")
     return OpenClawAgentConfig(
         host="0.0.0.0",
         port=8080,

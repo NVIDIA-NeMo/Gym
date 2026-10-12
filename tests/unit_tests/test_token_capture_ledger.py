@@ -16,8 +16,12 @@ import pytest
 
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore, _custody_columns
-from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolution
-from nemo_gym.token_id_capture.protocols import RolloutRemovalPayload, RolloutRetiredError
+from nemo_gym.token_id_capture.protocols import (
+    CaptureLedger,
+    LineageResolution,
+    RolloutRemovalPayload,
+    RolloutRetiredError,
+)
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, compute_digest
 from nemo_gym.token_id_capture.sink import (
     UNRESOLVED_PARENT_REASON,
