@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Reuse the existing Stirrup benchmark, including its dataset and judge settings.
+# Prepare its flat rows with gym eval prepare --benchmark gdpval.
+# Set PERSIST_DELIVERABLES_DIR to an absolute path for persisted deliverables.
+config_paths:
+- benchmarks/gdpval/config.yaml
