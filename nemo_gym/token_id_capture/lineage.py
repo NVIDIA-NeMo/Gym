@@ -55,6 +55,7 @@ import orjson
 from nemo_gym.token_id_capture.fingerprint import (
     FINGERPRINT_VERSION,
     assistant_fingerprint,
+    assistant_item_fingerprints,
     conversation_digest,
 )
 from nemo_gym.token_id_capture.fingerprint import (
@@ -255,6 +256,7 @@ class RolloutLineage:
     """Keep an append-only per-rollout call index."""
 
     by_fingerprint: dict[str, list[str]] = field(default_factory=dict)
+    output_fingerprints: set[str] = field(default_factory=set)
     by_call_id: dict[str, LineageNode] = field(default_factory=dict)
     # Cache the cumulative token count for memory bounds.
     total_tokens: int = 0
@@ -270,6 +272,16 @@ class RolloutLineage:
             return ParentResolutionStatus.ROOT, None, ""
         # dict.fromkeys: a call id indexed twice (e.g. by racing refreshes) is one candidate.
         call_ids = list(dict.fromkeys(self.by_fingerprint.get(fingerprint) or []))
+        if not call_ids:
+            item_fingerprints = assistant_item_fingerprints(messages)
+            if any(item_fingerprint in self.output_fingerprints for item_fingerprint in item_fingerprints):
+                # The harness retained a response we served but merged it with
+                # another model-authored branch or appended an assistant-shaped
+                # control message (for example OpenCode's maximum-step marker).
+                # No single token chain covers that prompt. Capture it as a
+                # fresh text root instead of poisoning the rollout or reusing
+                # an invalid prefix.
+                return ParentResolutionStatus.ROOT, None, "context_rebased"
         candidates = [
             node
             for call_id in call_ids
@@ -370,6 +382,9 @@ class RolloutLineage:
         self.total_tokens += node.cum_len
         self.by_call_id[entry.model_call_id] = node
         self.by_fingerprint.setdefault(entry.continuation_fingerprint, []).append(entry.model_call_id)
+        output_fingerprint = assistant_fingerprint(list(entry.output_items))
+        if output_fingerprint:
+            self.output_fingerprints.add(output_fingerprint)
 
     def record(
         self,
@@ -383,6 +398,7 @@ class RolloutLineage:
         parent_staging_chain: list[str] | None = None,
         cum_len: int | None = None,
         chain_hash: str = "",
+        output_fingerprint: str | None = None,
     ) -> None:
         """Index a completed call by its continuation fingerprint.
 
@@ -414,6 +430,8 @@ class RolloutLineage:
         fingerprint = assistant_fingerprint(messages)
         if fingerprint:
             self.by_fingerprint.setdefault(fingerprint, []).append(call_id)
+        if output_fingerprint:
+            self.output_fingerprints.add(output_fingerprint)
 
 
 class LineageIndex:
@@ -525,6 +543,7 @@ class InMemoryLineageStore:
             parent_staging_chain=list(commit.staging_chain),
             cum_len=record.cum_len,
             chain_hash=record.chain_hash,
+            output_fingerprint=record.output_fingerprint,
         )
         rows.append(row)
 
@@ -966,6 +985,22 @@ class FileLineageStore(IncrementalLineageStore):
                 and record.get("fingerprint_version") == FINGERPRINT_VERSION
             ]
         if not records:
+            item_fingerprints = set(assistant_item_fingerprints(request_items))
+            if item_fingerprints:
+                with self._locked(rollout_id):
+                    output_matches = [
+                        record
+                        for record in self._read(rollout_id)
+                        if record.get("output_fingerprint") in item_fingerprints
+                        and record.get("fingerprint_version") == FINGERPRINT_VERSION
+                    ]
+                if output_matches:
+                    # At least one assistant item is ours, but the harness
+                    # merged it with another assistant branch or appended its
+                    # own assistant-shaped control message. Reusing either
+                    # branch's token prefix would be wrong; a text root is the
+                    # safe continuation boundary.
+                    return None, "ledger_context_rebased"
             return None, "ledger_fingerprint_missing"
         candidates = []
         for record in records:

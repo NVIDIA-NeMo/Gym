@@ -79,6 +79,40 @@ def assistant_fingerprint(messages: list[dict]) -> str:
     return hasher.hexdigest()
 
 
+def last_assistant_item_fingerprint(messages: list[dict]) -> str:
+    """Fingerprint the last model-authored item in a request.
+
+    Some harnesses merge an independently generated context summary with the
+    main conversation.  The cumulative assistant fingerprint then names no
+    single model call, even though the final assistant item is still an exact
+    response emitted by this rollout.  This bounded witness lets lineage
+    recognize that safe context-rebase boundary without guessing a parent.
+    """
+    fingerprints = assistant_item_fingerprints(messages)
+    return fingerprints[0] if fingerprints else ""
+
+
+def assistant_item_fingerprints(messages: list[dict]) -> list[str]:
+    """Fingerprint each model-authored item, newest first.
+
+    Harnesses can append their own assistant-shaped control message after a
+    response (OpenCode does this when its native step budget is exhausted).
+    The newest item then has no ledger row, but an earlier exact response still
+    proves that the request belongs to this rollout.  Callers can use these
+    bounded witnesses to start a fresh text root without reusing an invalid
+    token prefix.
+    """
+    fingerprints: list[str] = []
+    for message in reversed(messages or []):
+        if not isinstance(message, dict):
+            raise ValueError(f"request item is not an object: {type(message).__name__}")
+        if _is_assistant_authored(message):
+            fingerprint = assistant_fingerprint([message])
+            if fingerprint:
+                fingerprints.append(fingerprint)
+    return fingerprints
+
+
 def conversation_digest(messages: list[dict]) -> str:
     """Hash every turn of a conversation, model-authored or not.
 

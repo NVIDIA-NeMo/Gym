@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION
+from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore, _custody_columns
 from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolution
 from nemo_gym.token_id_capture.protocols import RolloutRemovalPayload, RolloutRetiredError
@@ -410,6 +410,44 @@ async def test_file_store_rebases_when_a_known_continuation_changes_context(tmp_
         store,
         [{"role": "user", "content": "changed"}, ASSISTANT_1, USER_2],
     )
+    assert context.capture_admission is not None
+    assert context.capture_admission.mode == "text"
+    assert context.capture_admission.parent_call_id is None
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.failures == []
+
+
+@pytest.mark.asyncio
+async def test_ledger_rebases_when_harness_merges_an_independent_assistant_branch(store):
+    record = _call_record("c1").model_copy(update={"output_fingerprint": assistant_fingerprint([ASSISTANT_1])})
+    await store.record(_commit(record, [USER_1], [ASSISTANT_1]))
+
+    independent_summary = {"role": "assistant", "content": "independent compacted summary"}
+    merged_request = [USER_1, independent_summary, ASSISTANT_1, USER_2]
+    resolution = await store.resolve("r1", merged_request)
+
+    assert resolution.status == ParentResolutionStatus.ROOT
+    assert resolution.reason in {"context_rebased", "ledger_context_rebased"}
+    context = await _admit(store, merged_request)
+    assert context.capture_admission is not None
+    assert context.capture_admission.mode == "text"
+    assert context.capture_admission.parent_call_id is None
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.failures == []
+
+
+@pytest.mark.asyncio
+async def test_ledger_rebases_past_an_assistant_shaped_harness_control_message(store):
+    record = _call_record("c1").model_copy(update={"output_fingerprint": assistant_fingerprint([ASSISTANT_1])})
+    await store.record(_commit(record, [USER_1], [ASSISTANT_1]))
+
+    max_steps_marker = {"role": "assistant", "content": "CRITICAL - MAXIMUM STEPS REACHED"}
+    request = [USER_1, ASSISTANT_1, USER_2, max_steps_marker, USER_3]
+    resolution = await store.resolve("r1", request)
+
+    assert resolution.status == ParentResolutionStatus.ROOT
+    assert resolution.reason in {"context_rebased", "ledger_context_rebased"}
+    context = await _admit(store, request)
     assert context.capture_admission is not None
     assert context.capture_admission.mode == "text"
     assert context.capture_admission.parent_call_id is None

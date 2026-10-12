@@ -238,12 +238,19 @@ async def resolve_parent(request_messages: list | None) -> None:
             # visible by the time admission checks ledger state. Re-resolve
             # once after observing a non-empty ledger; the normal fingerprint
             # and context-digest checks still decide whether the parent is safe.
+            should_retry = False
             if (
                 context.external_staging
                 and context.parent_resolution.status == ParentResolutionStatus.UNRESOLVED
                 and isinstance(context.lineage_store, CaptureLedger)
-                and await context.lineage_store.has_rows(context.rollout_id)
             ):
+                try:
+                    should_retry = await context.lineage_store.has_rows(context.rollout_id)
+                except RolloutRetiredError:
+                    # Admission below owns the late-call behavior. Preserve the
+                    # unresolved result here so it can decline capture cleanly.
+                    pass
+            if should_retry:
                 context.parent_resolution = await context.lineage_store.resolve(
                     context.rollout_id,
                     request_messages,

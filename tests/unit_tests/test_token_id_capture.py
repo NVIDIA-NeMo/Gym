@@ -2154,10 +2154,11 @@ def test_separate_model_worker_instances_share_committed_lineage(tmp_path):
 
 
 def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
-    """Reject lineage across a changed system prompt.
+    """Break lineage across a changed system prompt and capture a new root.
 
     Anthropic sends the system prompt beside the message list.
-    Reusing the old prefix would continue instructions that the harness did not send.
+    Reusing the old prefix would continue instructions that the harness did not
+    send, but the second call's full prompt tokens are still safe as a text root.
     """
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     store = TokenCaptureStore(tmp_path)
@@ -2180,7 +2181,7 @@ def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
     entries = store.read_entries("sys0")
     assert len(entries) == 2
     assert entries[1].parent_call_id is None
-    assert entries[1].parent_resolution == ParentResolutionStatus.UNRESOLVED
+    assert entries[1].parent_resolution == ParentResolutionStatus.ROOT
 
     # Unchanged instructions preserve the link.
     call("sys1", "SYSTEM ONE", first)
@@ -2237,7 +2238,7 @@ async def test_lineage_lookup_failure_is_persisted_as_unresolved(tmp_path):
 
 
 def test_a_changed_tool_schema_breaks_the_link():
-    """Reject lineage across a changed tool schema."""
+    """Break lineage across a changed tool schema and start a text root."""
     turn = [{"role": "user", "content": "hi"}, _ASSISTANT_TURN]
     with_search = _request_messages({"messages": turn, "tools": [{"name": "search"}]})
     with_bash = _request_messages({"messages": turn, "tools": [{"name": "bash"}]})
@@ -2248,7 +2249,7 @@ def test_a_changed_tool_schema_breaks_the_link():
         lineage.resolve(with_search + [{"role": "user", "content": "next"}]).status == ParentResolutionStatus.RESOLVED
     )
     assert (
-        lineage.resolve(with_bash + [{"role": "user", "content": "next"}]).status == ParentResolutionStatus.UNRESOLVED
+        lineage.resolve(with_bash + [{"role": "user", "content": "next"}]).status == ParentResolutionStatus.ROOT
     )
 
 
@@ -2772,15 +2773,15 @@ def test_digest_and_cum_len_are_filled_for_every_entry():
     assert normal.cum_len == 3 and normal.digest == compute_digest([1, 2, 3])
 
 
-def test_a_rewritten_conversation_does_not_resolve_to_the_original_call():
-    """Reject an assistant match when the earlier conversation changed."""
+def test_a_rewritten_conversation_starts_a_new_text_root():
+    """Do not reuse a parent when earlier context changed."""
     lineage = RolloutLineage()
     original = [{"role": "user", "content": "solve task ALPHA"}]
     lineage.record("call-1", original + [_ASSISTANT_TURN], cum_tokens=[1, 2, 3], digest="d1")
 
     compacted = [{"role": "user", "content": "SUMMARY: we were working on task BETA"}, _ASSISTANT_TURN]
 
-    assert lineage.resolve(compacted).status == ParentResolutionStatus.UNRESOLVED
+    assert lineage.resolve(compacted).status == ParentResolutionStatus.ROOT
 
 
 def test_appending_a_tool_result_still_resolves():

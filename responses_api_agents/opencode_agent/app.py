@@ -21,6 +21,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 from asyncio import Semaphore
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
@@ -125,6 +126,86 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
+def _completed_root_model_turns(db_path: Path) -> int:
+    """Count committed, non-compaction model turns in the root OpenCode session."""
+    if not db_path.is_file():
+        return 0
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.1) as connection:
+            roots = connection.execute(
+                "select id from session where parent_id is null order by time_created, id"
+            ).fetchall()
+            if len(roots) != 1:
+                return 0
+            rows = connection.execute(
+                "select data from message where session_id=? order by time_created, id", (roots[0][0],)
+            ).fetchall()
+    except (OSError, sqlite3.Error):
+        # The database and its schema are created asynchronously by OpenCode.
+        return 0
+
+    completed = 0
+    for (raw_message,) in rows:
+        try:
+            message = json.loads(raw_message)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        timestamp = message.get("time") if isinstance(message.get("time"), dict) else {}
+        if (
+            message.get("role") == "assistant"
+            and message.get("summary") is not True
+            and message.get("agent") != "compaction"
+            and isinstance(timestamp.get("completed"), (int, float))
+            and not isinstance(timestamp.get("completed"), bool)
+        ):
+            completed += 1
+    return completed
+
+
+async def _communicate_with_turn_limit(
+    process: asyncio.subprocess.Process,
+    db_path: Path,
+    *,
+    timeout: float,
+    max_model_turns: Optional[int],
+) -> tuple[bytes, bool, bool]:
+    """Wait for OpenCode, terminating it after a committed root-turn boundary."""
+    communication = asyncio.create_task(process.communicate())
+    deadline = asyncio.get_running_loop().time() + timeout
+    turn_limit_reached = False
+    try:
+        while not communication.done():
+            if max_model_turns is not None:
+                completed = await asyncio.to_thread(_completed_root_model_turns, db_path)
+                if completed >= max_model_turns:
+                    turn_limit_reached = True
+                    LOG.info("OpenCode reached the configured hard limit of %d model turns", max_model_turns)
+                    try:
+                        process.terminate()
+                    except ProcessLookupError:
+                        pass
+                    break
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                process.kill()
+                _, stderr = await communication
+                return stderr, True, False
+            await asyncio.wait({communication}, timeout=min(0.05, remaining))
+
+        if turn_limit_reached and not communication.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(communication), timeout=5)
+            except TimeoutError:
+                process.kill()
+        _, stderr = await communication
+        return stderr, False, turn_limit_reached
+    except BaseException:
+        if not communication.done():
+            process.kill()
+        await asyncio.gather(communication, return_exceptions=True)
+        raise
+
+
 def _sandbox_prepare_command(workdir: str, directory: str, runtime: str) -> str:
     # Bootstrap with POSIX sh; the runtime installer itself requires Bash.
     bootstrap = """set -eu
@@ -172,6 +253,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     thinking: bool = True
     system_prompt: Optional[str] = None
     timeout: int = 900
+    max_model_turns: Optional[int] = Field(default=None, gt=0)
     extra_args: list[str] = []
     opencode_config: dict[str, Any] = Field(default_factory=dict)
     context_window: int = 262144
@@ -362,15 +444,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
-            try:
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
-            except asyncio.TimeoutError:
-                proc.kill()
-                _, stderr = await proc.communicate()
-                timed_out = True
+            stderr, timed_out, turn_limit_reached = await _communicate_with_turn_limit(
+                proc,
+                data_home / "opencode" / "opencode.db",
+                timeout=self.config.timeout,
+                max_model_turns=self.config.max_model_turns,
+            )
+            if timed_out:
                 LOG.warning("opencode timed out after %ds", self.config.timeout)
 
-            if proc.returncode not in (0, None):
+            if proc.returncode not in (0, None) and not turn_limit_reached:
                 LOG.warning("opencode exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
             db_path = data_home / "opencode" / "opencode.db"
@@ -397,12 +480,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                             ObservationGap(code="model_call_ownership_unavailable"),
                         ],
                     )
-            run_status = "incomplete" if timed_out else "completed" if proc.returncode == 0 else "failed"
+            run_status = (
+                "incomplete" if timed_out or turn_limit_reached else "completed" if proc.returncode == 0 else "failed"
+            )
             for invocation in observations.records:
                 if not isinstance(invocation, AgentInvocation):
                     continue
                 if invocation.parent_invocation_id is None:
                     invocation.status = run_status
+                    if turn_limit_reached:
+                        invocation.stop_reason = "max_iterations"
             if timed_out:
                 observations.gaps.append(ObservationGap(code="agent_run_timeout"))
             return output_items, usage, self.config.model, observations
@@ -860,7 +947,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                             "interleaved": {"field": "reasoning_content"},
                             "limit": {
                                 "context": self.config.context_window,
-                                "input": self.config.context_window,
+                                "input": self.config.max_input_tokens
+                                if self.config.max_input_tokens is not None
+                                else self.config.context_window,
                                 "output": self.config.max_output_tokens,
                             },
                         }
