@@ -1131,6 +1131,8 @@ _ROLLOUT_PATH_RE = re.compile(
     rf"(?:/(?P<token_capture>{re.escape(TOKEN_CAPTURE_PATH_SEGMENT)}))?"
     rf"(?P<rest>/.*)$"
 )
+# Keeps the stripped rollout id visible to model servers for routing.
+ROLLOUT_ID_SCOPE_KEY = "ng_rollout_id"
 
 
 def make_capture_store(config: ModelCallCaptureConfig) -> Optional[CaptureStore]:
@@ -1527,7 +1529,7 @@ class _CaptureMiddleware:
             token_capture_requested = prefix_match.group("token_capture") is not None
             capture_prefix = path[: prefix_match.start("rest")]
             path = prefix_match.group("rest")
-            scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
+            scope = {**scope, "path": path, "raw_path": path.encode("utf-8"), ROLLOUT_ID_SCOPE_KEY: rollout_from_path}
 
         method = str(scope.get("method") or "").upper()
         dialect = _OBSERVED_PATHS.get(path)

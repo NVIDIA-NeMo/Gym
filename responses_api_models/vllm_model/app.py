@@ -29,6 +29,7 @@ from fastapi import Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.base_responses_api_model import (
+    ROLLOUT_ID_SCOPE_KEY,
     BaseResponsesAPIModelConfig,
     Body,
     SimpleResponsesAPIModel,
@@ -1768,7 +1769,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
-        session_id = request.session[SESSION_ID_KEY]
+        session_id = self._routing_key(request)
         client = self._session_id_to_client.get(session_id)
         if self.config.route_around_failing_endpoints:
             hashed = self._hashed_client(session_id)
@@ -1786,6 +1787,15 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._session_id_to_client[session_id] = client
 
         return client
+
+    @staticmethod
+    def _routing_key(request: Request) -> str:
+        # Cookie-less harness CLIs get a new session per call, so route by the stable rollout id.
+        scope = getattr(request, "scope", None)
+        rollout_id = scope.get(ROLLOUT_ID_SCOPE_KEY) if isinstance(scope, dict) else None
+        if isinstance(rollout_id, str) and rollout_id:
+            return f"rollout:{rollout_id}"
+        return request.session[SESSION_ID_KEY]
 
     def _hashed_client(self, session_id: str) -> NeMoGymAsyncOpenAI:
         # Uvicorn workers do not share the session cache. A stable assignment keeps
