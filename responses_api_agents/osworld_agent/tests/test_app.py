@@ -23,6 +23,7 @@ from nemo_gym.config_types import AggregateMetricsRequest, ModelServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.token_id_capture.completion import output_item_fingerprint
 from responses_api_agents.osworld_agent.app import (
     OSWorldAgent,
     OSWorldAgentConfig,
@@ -278,7 +279,7 @@ def test_messages_model_fn_preserves_structured_length_response_for_adapter_fact
         },
     )
     mock_openai.return_value.chat.completions.create.return_value = SimpleNamespace(
-        choices=[SimpleNamespace(message=message, finish_reason="length")]
+        id="chatcmpl-capture-1", choices=[SimpleNamespace(message=message, finish_reason="length")]
     )
     call = _build_messages_model_fn(
         base_url="http://policy/v1",
@@ -307,6 +308,8 @@ def test_messages_model_fn_preserves_structured_length_response_for_adapter_fact
     assert normalized["prompt_token_ids"] == [1, 2]
     assert normalized["generation_token_ids"] == [3, 4]
     assert normalized["generation_log_probs"] == [-0.1, -0.2]
+    assert normalized["response_id"] == "chatcmpl-capture-1"
+    assert normalized["served_output_items"][0]["content"][0]["text"] == "partial action"
 
 
 @patch("openai.DefaultHttpxClient")
@@ -876,6 +879,75 @@ def test_build_response_always_emits_semantic_trajectory() -> None:
     assert response.mask_sample is False
     assert response.response.context_compaction_contract is None
     assert len(response.response.trajectory_transitions or []) == 2
+
+
+def test_build_response_joins_external_capture_without_inline_token_arrays() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    raw_generation = "<think>inspect the screen</think>\n## Code:\n```python\npyautogui.click(10, 20)\n```"
+    captured_item = {
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [
+            {
+                "type": "output_text",
+                "annotations": [],
+                "text": raw_generation,
+            }
+        ],
+    }
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "steps": [
+            {
+                "step": 0,
+                # The executable semantic text is deliberately not the
+                # generation fingerprinted by external capture.
+                "model_text": "pyautogui.click(10, 20)",
+                "actions": ["pyautogui.click(10, 20)"],
+                "reward": 1.0,
+                "done": True,
+                "info": {
+                    "agent": {
+                        "model_calls": [
+                            {
+                                "parse_attempt": 1,
+                                "prompt_messages": [{"role": "user", "content": "inspect"}],
+                                "response": {
+                                    "raw_content": raw_generation,
+                                    "response_id": "chatcmpl-capture-1",
+                                    "served_output_items": [captured_item],
+                                    "finish_reason": "stop",
+                                },
+                                "accepted": True,
+                                "parse_error": None,
+                                "parsed_actions": ["pyautogui.click(10, 20)"],
+                            }
+                        ]
+                    }
+                },
+            }
+        ],
+    }
+
+    response = _build_response(request, result, "test-policy", 1.0, 0.9)
+
+    contract = response.response.trajectory_contract
+    assert contract is not None
+    assert contract["capabilities"]["exact_model_call_evidence"] is False
+    output = [item.model_dump(mode="json", exclude_none=True) for item in response.response.output]
+    assert output[0]["content"][0]["text"] == raw_generation
+    assert output_item_fingerprint(output[0]) == output_item_fingerprint(captured_item)
+    assert response.terminal_response_id == "chatcmpl-capture-1"
+    assert response.ng_trajectory == {
+        "schema_version": 1,
+        "turns": [
+            {
+                "turn_id": 1,
+                "model_calls": [{"response_id": "chatcmpl-capture-1"}],
+            }
+        ],
+    }
 
 
 @pytest.mark.parametrize(("score", "reward"), [(0.0, 0.0), (1.0, 1.0)])
