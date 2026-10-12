@@ -35,6 +35,40 @@ BigFinance's retry and timeout settings to its own `big_finance_policy_model`
 instance without changing the shared `policy_model`. Omit this overlay when
 selecting another model type.
 
+## Optional SEC cache
+
+To reuse SEC downloads across rollouts and server restarts, add these settings
+to the Gym configuration used when starting the environment:
+
+```yaml
+big_finance_use_cache: true
+big_finance_cache_dir: /absolute/path/to/big-finance-sec-cache
+```
+
+Caching defaults to `false`. If enabled without an explicit directory, it uses
+`~/.cache/nemo_gym/big_finance/`. These BigFinance-specific settings do not
+change the cache settings of other benchmarks in a mixed run.
+
+The cache stores successful SEC HTTP responses: ticker mappings, company
+submissions metadata, and SEC documents fetched through `fetch_url`. It stores
+the downloaded bytes and text encoding, not Vals-parsed text or a final tool
+answer. The upstream tools still apply `form_type`, `limit`, HTML/PDF parsing,
+`query` retrieval, and `max_tokens` on every call. Other websites and
+`web_search`, Python execution, and judging are not cached.
+
+Entries are snapshots with no automatic expiry. Use a new cache directory to
+refresh them, or set `big_finance_use_cache: false` to bypass disk reads and
+writes. The upstream ticker mapping still has its existing process-local memory
+cache; restart the resources server to refresh that mapping as well. Concurrent
+requests for the same uncached URL share one download within a server process.
+Unreadable cache entries fall back to a download; HTTP failures are not stored.
+The cache does not pre-download all filing bodies.
+
+This option preserves the upstream search coverage: `edgar_search` still reads
+only `filings.recent`, with a default limit of 20 matching records. It does not
+load historical `filings.files` or add date filtering. Use a separate directory
+from Vals caches, whose metadata and parsed-body formats are different.
+
 See `benchmarks/big_finance/README.md` for credentials, scoring, safety,
 preparation, and standalone parity notes.
 
