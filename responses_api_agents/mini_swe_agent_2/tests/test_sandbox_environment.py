@@ -15,6 +15,9 @@
 
 from typing import Any
 
+import pytest
+
+from nemo_gym.sandbox.providers.base import SandboxStatus
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import (
     MiniSWESandboxEnvironment,
     MiniSWESandboxEnvironmentConfig,
@@ -114,3 +117,36 @@ def test_execute_passes_configured_cwd_to_exec() -> None:
     assert "for __base in" in cmd and "conda activate testbed && python -V" in cmd
     assert "cd /repo" not in cmd
     assert fake_sandbox.calls[-1]["cwd"] == "/repo"
+
+
+def _env_with_sandbox(sandbox: Any) -> MiniSWESandboxEnvironment:
+    env = MiniSWESandboxEnvironment.__new__(MiniSWESandboxEnvironment)
+    env.config = MiniSWESandboxEnvironmentConfig(
+        image="image:tag", provider={"fake": {}}, cwd="/default", activate_conda=False
+    )
+    env._sandbox = sandbox
+    return env
+
+
+class _LostSandbox:
+    def __init__(self, status: SandboxStatus) -> None:
+        self._status = status
+
+    def exec(self, command: str, **kwargs: Any):
+        return type(
+            "Result", (), {"stdout": "", "stderr": "actor not found", "return_code": 125, "error_type": "sandbox"}
+        )()
+
+    def status(self) -> SandboxStatus:
+        return self._status
+
+
+def test_execute_raises_when_sandbox_is_gone() -> None:
+    env = _env_with_sandbox(_LostSandbox(SandboxStatus.ERROR))
+    with pytest.raises(RuntimeError, match="sandbox is error"):
+        env.execute({"command": "ls"})
+
+
+def test_execute_returns_provider_failure_while_sandbox_lives() -> None:
+    env = _env_with_sandbox(_LostSandbox(SandboxStatus.RUNNING))
+    assert env.execute({"command": "ls"})["returncode"] == 125

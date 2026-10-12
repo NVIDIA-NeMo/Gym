@@ -19,6 +19,8 @@ import shlex
 from dataclasses import dataclass, field
 from typing import Any
 
+from nemo_gym.sandbox.providers.base import SandboxStatus
+
 
 try:
     from minisweagent.exceptions import Submitted
@@ -156,6 +158,12 @@ class MiniSWESandboxEnvironment:
             cwd=exec_cwd,
             user=self.config.user,
         )
+        if getattr(result, "error_type", None) == "sandbox":
+            # A crashed or deleted sandbox never comes back; end the rollout
+            # instead of stepping against it until the step limit.
+            status = self._sandbox.status()
+            if status in (SandboxStatus.ERROR, SandboxStatus.STOPPED):
+                raise RuntimeError(f"sandbox is {status.value}: {result.stderr or result.stdout or 'exec failed'}")
         output = "\n".join(part for part in (result.stdout, result.stderr) if part)
         response = {
             "output": output,
