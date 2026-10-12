@@ -78,11 +78,12 @@ round verifies `<fixed_lean4_thm_proof>` / `<fixed_lean4_lemmas>`, falling back 
 previous round's text when a tag is missing, as upstream does. Verification runs
 upstream's code unchanged (`upstream.py`): the verification context is rebuilt from
 the source file inside the container, invented-lemma names that clash with the file
-are renamed, identifiers of lemmas defined later in the same file are renamed so
-they cannot be used, the file is assembled with `format_generated_lean`, compiled
-with `lake env lean` in the repository's toolchain, and "has already been declared"
-clashes are resolved once on round 0 and up to ten times on repair rounds.
-`sorry` and `admit` are rejected before compilation.
+are renamed, references to theorems defined *earlier* in the same file (the ones the
+prompt's `<local_ctx>` stops before) are renamed so they cannot be used, the file is
+assembled with `format_generated_lean`, compiled with `lake env lean` in the
+repository's toolchain, and "has already been declared" clashes are resolved once on
+round 0 and up to ten times on repair rounds. Upstream detects `sorry`/`admit`
+before compiling, still runs the compilation, and combines both into the rejection.
 
 `reward` is 1.0 if the round verified. The agent's final response adds
 `solved_without_repair` and `repair_rounds_used`. Every verify response carries a
