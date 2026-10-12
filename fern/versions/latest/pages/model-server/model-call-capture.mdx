@@ -1,5 +1,5 @@
 ---
-title: "Model-call capture"
+title: "Model-Call Capture"
 description: "Optional per-rollout model-call evidence for evaluation and debugging"
 position: 5
 ---
@@ -205,12 +205,12 @@ partial reconstruction and is marked `stream_truncated`.
 
 ## Configure capture
 
-The CLI workflow above sets these top-level global-config fields:
+The CLI workflow above sets these top-level fields in Gym's [global config](/main/reference/configuration):
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `observability_enabled` | `bool` | `false` | Enables model-call capture for the run. |
-| `model_call_capture_dir` | `str` | required when enabled | Absolute shared capture directory used by model servers and rollout collection. |
+| `model_call_capture_dir` | `str` | — | Absolute shared capture directory used by model servers and rollout collection. Required when `observability_enabled` is true. |
 
 You can put the same settings in a YAML config instead:
 
@@ -242,15 +242,17 @@ Use `/ng-rollout/<rollout_id>` as the model-server URL prefix. SDKs append `/v1/
 routing. An unprefixed call is forwarded normally but is not captured. Calls sent directly to an
 external provider instead of through a Gym model server are also not captured.
 
-Agents based on `SimpleResponsesAPIAgent` can use `url_path_for_run(url_path, body)` to prefix a
-downstream call from the run request's task and rollout indices. Use
-`url_path_for_request(url_path, request)` to carry an inbound prefixed self-call through to the model
-call. The prefixed self-call route (`/ng-rollout/{rollout_id}/v1/responses`) is registered on every
-agent by default.
+Agents based on `SimpleResponsesAPIAgent` can add the prefix with these helpers:
 
-SDK harnesses that configure a client once can use `base_url_for_run(base_url, body)`. Harnesses that
-must thread the id through multiple layers can use `rollout_id_from_run(body)` with
-`resolve_model_base_url(name, rollout_id)`.
+| Helper | Use it when |
+|---|---|
+| `url_path_for_run(url_path, body)` | The agent makes a downstream call while handling a run request, such as the self-call to its own `/v1/responses`. The prefix comes from the request's task and rollout indices. |
+| `url_path_for_request(url_path, request)` | The agent handles a prefixed self-call and carries its prefix through to the model call. |
+| `base_url_for_run(base_url, body)` | An SDK harness configures its client once per run. Append the API-version suffix, such as `/v1`, to the result. |
+| `rollout_id_from_run(body)` with `resolve_model_base_url(name, rollout_id)` | The harness must thread the rollout id through several layers before it builds the model-server URL. |
+
+The prefixed self-call route (`/ng-rollout/{rollout_id}/v1/responses`) is registered on every agent by
+default.
 
 ## Add agent-side evidence
 
