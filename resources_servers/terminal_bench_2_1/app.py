@@ -16,7 +16,7 @@ from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
@@ -317,7 +317,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         """Bind an EnvironmentServer episode to its benchmark-owned sandbox."""
         if self.config.is_verifying_golden_patch:
             raise HTTPException(422, "Golden-patch mode cannot be used with agent sandbox sessions")
-        task = TerminalBench21SeedSessionRequest.model_validate(body.task_data)
+        try:
+            task = TerminalBench21SeedSessionRequest.model_validate(body.task_data)
+        except ValidationError as error:
+            raise HTTPException(422, detail=error.errors(include_input=False)) from error
         task_folder = Path(task.task_folder)
         if not task_folder.is_absolute():
             task_folder = PARENT_DIR / task_folder
@@ -437,80 +440,92 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             if self.config.debug:
                 print(f"Creating eval sandbox for {body.task_name}", file=stderr)
             eval_sandbox = await self._create_sandbox(body)
-            cwd = (await eval_sandbox.exec("pwd")).stdout.strip()
-            await self._upload_folder(
-                eval_sandbox, task_folder / "solution", cwd, GOLDEN_PATCH_SOLVE_SH_PATCHES, task_name=body.task_name
-            )
-
-            if self.config.debug:
-                print(f"Running golden patch for {body.task_name}", file=stderr)
-            golden_patch_result = await eval_sandbox.exec(
-                f"bash {cwd}/solve.sh",
-                timeout_s=self.config.evaluation_timeout,
-                preserve_background_services=True,
-            )
-            golden_patch_output = (golden_patch_result.stderr or "") + (golden_patch_result.stdout or "")
-            if self.config.debug:
-                print(f"Golden patch output for {body.task_name}: {golden_patch_output}", file=stderr)
         else:
-            # Re-use the original sandbox
+            # Re-use the original sandbox; Resources retains session-owned cleanup.
             eval_sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
-            golden_patch_output = None
 
-        if self.config.debug:
-            print(f"Running tests for {body.task_name}", file=stderr)
-        start_time = time()
         try:
-            await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
-            # Test scripts write rewards here even if their test runner fails to start.
-            setup_result = await eval_sandbox.exec("mkdir -p /logs/verifier", timeout_s=self.config.evaluation_timeout)
-            if setup_result.return_code != 0:
-                raise RuntimeError(f"Failed to prepare TerminalBench verifier output directory: {setup_result}")
-            eval_result = await eval_sandbox.exec(
-                "bash /tests/test.sh",
-                timeout_s=self.config.evaluation_timeout,
-            )
-            test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
-        except:
-            print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
-            eval_result = None
-            test_output = ""
-        verification_time_taken = time() - start_time
+            if self.config.is_verifying_golden_patch:
+                cwd = (await eval_sandbox.exec("pwd")).stdout.strip()
+                await self._upload_folder(
+                    eval_sandbox,
+                    task_folder / "solution",
+                    cwd,
+                    GOLDEN_PATCH_SOLVE_SH_PATCHES,
+                    task_name=body.task_name,
+                )
 
-        if self.config.debug:
-            print(f"Test output for {body.task_name}: {test_output}", file=stderr)
-
-        evaluation_completed = False
-        reward = 0.0
-        if eval_result is not None:
-            try:
-                with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
-                    await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
-                    # Providers such as Docker can replace the destination file during download.
-                    reward = float(Path(temp_file.name).read_text())
-
-                evaluation_completed = True
-            except:
                 if self.config.debug:
-                    print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
+                    print(f"Running golden patch for {body.task_name}", file=stderr)
+                golden_patch_result = await eval_sandbox.exec(
+                    f"bash {cwd}/solve.sh",
+                    timeout_s=self.config.evaluation_timeout,
+                    preserve_background_services=True,
+                )
+                golden_patch_output = (golden_patch_result.stderr or "") + (golden_patch_result.stdout or "")
+                if self.config.debug:
+                    print(f"Golden patch output for {body.task_name}: {golden_patch_output}", file=stderr)
+            else:
+                golden_patch_output = None
 
-        if not keep_sandbox_for_close:
+            if self.config.debug:
+                print(f"Running tests for {body.task_name}", file=stderr)
+            start_time = time()
             try:
-                if self.config.is_verifying_golden_patch:
-                    await eval_sandbox.stop()
-                else:
-                    await self._stop_session_sandbox(request.session[SESSION_ID_KEY])
+                await self._upload_folder(
+                    eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name
+                )
+                # Test scripts write rewards here even if their test runner fails to start.
+                setup_result = await eval_sandbox.exec(
+                    "mkdir -p /logs/verifier", timeout_s=self.config.evaluation_timeout
+                )
+                if setup_result.return_code != 0:
+                    raise RuntimeError(f"Failed to prepare TerminalBench verifier output directory: {setup_result}")
+                eval_result = await eval_sandbox.exec(
+                    "bash /tests/test.sh",
+                    timeout_s=self.config.evaluation_timeout,
+                )
+                test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
             except Exception:
-                LOG.exception("Failed to stop Terminal-Bench sandbox after legacy verification")
+                print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
+                eval_result = None
+                test_output = ""
+            verification_time_taken = time() - start_time
 
-        return TerminalBench21VerifyResponse(
-            **body.model_dump(),
-            evaluation_completed=evaluation_completed,
-            reward=reward,
-            verification_time_taken=verification_time_taken,
-            test_output=test_output,
-            golden_patch_output=golden_patch_output,
-        )
+            if self.config.debug:
+                print(f"Test output for {body.task_name}: {test_output}", file=stderr)
+
+            evaluation_completed = False
+            reward = 0.0
+            if eval_result is not None:
+                try:
+                    with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
+                        await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
+                        # Providers such as Docker can replace the destination file during download.
+                        reward = float(Path(temp_file.name).read_text())
+
+                    evaluation_completed = True
+                except Exception:
+                    if self.config.debug:
+                        print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
+
+            return TerminalBench21VerifyResponse(
+                **body.model_dump(),
+                evaluation_completed=evaluation_completed,
+                reward=reward,
+                verification_time_taken=verification_time_taken,
+                test_output=test_output,
+                golden_patch_output=golden_patch_output,
+            )
+        finally:
+            if not keep_sandbox_for_close:
+                try:
+                    if self.config.is_verifying_golden_patch:
+                        await eval_sandbox.stop()
+                    else:
+                        await self._stop_session_sandbox(request.session[SESSION_ID_KEY])
+                except Exception:
+                    LOG.exception("Failed to stop Terminal-Bench sandbox after legacy verification")
 
 
 if __name__ == "__main__":

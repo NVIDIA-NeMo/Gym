@@ -19,6 +19,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.terminal_bench_2_1.app import (
     TerminalBench21ResourcesServer,
     TerminalBench21ResourcesServerConfig,
+    TerminalBench21SeedSessionRequest,
     TerminalBench21VerifyRequest,
 )
 
@@ -405,3 +406,76 @@ def test_process_local_sessions_reject_multiple_workers(setup) -> None:
         TerminalBench21ResourcesServer(
             config=server.config.model_copy(update={"num_workers": 2}), server_client=server.server_client
         )
+
+
+@pytest.mark.parametrize("invalid_image", [None, 42])
+def test_resources_seed_invalid_task_data_returns_422_without_allocating(setup, invalid_image: int | None) -> None:
+    server, sandbox, seed, _ = setup
+    body = seed.model_dump(mode="json")
+    if invalid_image is None:
+        body["task_data"].pop("docker_image")
+    else:
+        body["task_data"]["docker_image"] = invalid_image
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        response = client.post("/seed_session", json=body)
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"][0]["loc"] == ["docker_image"]
+        server._create_sandbox.assert_not_awaited()
+        assert not server._session_id_to_state
+        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 200
+    sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize("mode", ["resources", "legacy", "golden"])
+@pytest.mark.parametrize("phase", ["upload", "execute", "download"])
+async def test_verification_cancellation_propagates_and_preserves_cleanup(setup, mode: str, phase: str) -> None:
+    server, sandbox, seed, request = setup
+    if mode == "resources":
+        await server.seed_session(request, seed)
+    elif mode == "legacy":
+        await server.seed_session(request, TerminalBench21SeedSessionRequest.model_validate(seed.task_data))
+    else:
+        server.config.is_verifying_golden_patch = True
+    entered = asyncio.Event()
+
+    async def blocked(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    if phase == "upload":
+        server._upload_folder.side_effect = blocked
+    elif phase == "download":
+        sandbox.download.side_effect = blocked
+    else:
+
+        async def execute(command, **kwargs):
+            if command == "bash /tests/test.sh":
+                await blocked()
+            return sandbox.exec.return_value
+
+        sandbox.exec.side_effect = execute
+
+    pending = asyncio.create_task(server.verify(request, verify_body(seed)))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+    finally:
+        if not pending.done():
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+    if mode == "resources":
+        state = server._session_id_to_state[seed.resources_session_id]
+        assert state.verification_request is not None
+        assert state.verification_response is None
+        calls = (server._upload_folder.await_count, sandbox.exec.await_count, sandbox.download.await_count)
+        with pytest.raises(HTTPException, match="retry the episode") as error:
+            await server.verify(request, verify_body(seed))
+        assert error.value.status_code == 503
+        assert calls == (server._upload_folder.await_count, sandbox.exec.await_count, sandbox.download.await_count)
+        sandbox.stop.assert_not_awaited()
+        await server.close_resources_session(close_body(seed))
+    sandbox.stop.assert_awaited_once()
+    assert not server._session_id_to_sandbox
