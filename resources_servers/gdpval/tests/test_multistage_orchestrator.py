@@ -3481,7 +3481,6 @@ class TestIntegrationWiring:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: List[Dict[str, Any]] = []
-        cache_namespaces: List[str] = []
 
         class FakeHelper:
             def _preprocess_rows_from_config(self, config):
@@ -3489,7 +3488,6 @@ class TestIntegrationWiring:
 
             def _run_examples_with_metadata(self, rows, **kwargs):
                 calls.append(kwargs)
-                cache_namespaces.extend(row["verify_cache_namespace"] for row in rows)
 
                 async def done(row):
                     reference_id = row["reference_ids"][0]
@@ -3549,8 +3547,6 @@ class TestIntegrationWiring:
         persisted = [json.loads(line) for line in (tmp_path / "rollouts.jsonl").read_text().splitlines()]
         assert {row["expected_final_stage_index"] for row in persisted} == {1}
         assert {row["expected_stage_row_count"] for row in persisted} == {1}
-        assert len(set(cache_namespaces)) == 1
-        assert len(cache_namespaces[0]) == 64
 
     async def test_multistage_fails_when_aggregate_metrics_service_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

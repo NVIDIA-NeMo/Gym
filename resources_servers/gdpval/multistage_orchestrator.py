@@ -988,8 +988,6 @@ def tag_results(
         out[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
         if ATTEMPT_INDEX_KEY_NAME in row:
             out[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
-        if "verify_cache_namespace" in row:
-            out["verify_cache_namespace"] = row["verify_cache_namespace"]
         out["stage_index"] = stage_index
         if expected_final_stage_index is not None:
             out["expected_final_stage_index"] = expected_final_stage_index
@@ -2600,9 +2598,6 @@ async def run_e2e_multistage(
         rollout_collection_config=rollout_collection_config,
         resolved_global_config=global_config_dict,
     )
-    for row in materialized_rows:
-        row["verify_cache_namespace"] = fingerprint
-
     # Validate the repair config before ``_prepare_resume`` can set prior state
     # aside, so a misconfigured run fails without touching it.
     assignment_repair = None
