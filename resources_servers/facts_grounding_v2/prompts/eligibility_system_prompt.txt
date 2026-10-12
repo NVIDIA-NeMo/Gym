@@ -1,0 +1,1 @@
+You are a helpful assistant. Your task is to evaluate the quality of a Response.

@@ -1,0 +1,58 @@
+facts_grounding_v2:
+  resources_servers:
+    facts_grounding_v2:
+      entrypoint: app.py
+      domain: long_context
+      verified: false
+      description: FACTS Grounding v2 long-form grounded generation judged for eligibility and sentence-level grounding by Gemini 2.5 Flash and GPT-5
+      value: Measure whether long-form answers stay grounded in a supplied document and still address the request
+      # Official judge order (paper section 6.2, starter notebook): Gemini 2.5 Flash, then GPT-5 (gpt-5-2025-08-07).
+      judge_model_servers:
+        - type: responses_api_models
+          name: facts_grounding_judge_gemini
+        - type: responses_api_models
+          name: facts_grounding_judge_gpt5
+      judge_labels: [gemini-2.5-flash, gpt-5]
+      # Rating and baseline calls use the judge providers' default sampling, as the starter does.
+      judge_responses_create_params:
+        input: []
+      baseline_responses_create_params:
+        input: []
+      grade_ineligible_responses: true
+
+# Official judges reached through any OpenAI-compatible Chat Completions endpoint; endpoint details stay out of
+# the repo. Model ids default to the paper's judge names.
+facts_grounding_judge_gemini:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: ${oc.env:FACTS_GROUNDING_JUDGE_GEMINI_BASE_URL,''}
+      api_key: ${oc.env:FACTS_GROUNDING_JUDGE_GEMINI_API_KEY,''}
+      model: ${oc.env:FACTS_GROUNDING_JUDGE_GEMINI_MODEL,gemini-2.5-flash}
+      num_concurrent_requests: ${oc.decode:${oc.env:FACTS_GROUNDING_JUDGE_CONCURRENCY,8}}
+
+facts_grounding_judge_gpt5:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: ${oc.env:FACTS_GROUNDING_JUDGE_GPT5_BASE_URL,''}
+      api_key: ${oc.env:FACTS_GROUNDING_JUDGE_GPT5_API_KEY,''}
+      model: ${oc.env:FACTS_GROUNDING_JUDGE_GPT5_MODEL,gpt-5-2025-08-07}
+      num_concurrent_requests: ${oc.decode:${oc.env:FACTS_GROUNDING_JUDGE_CONCURRENCY,8}}
+
+facts_grounding_v2_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: facts_grounding_v2
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/facts_grounding_v2/data/example.jsonl
+          license: Apache 2.0
