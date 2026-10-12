@@ -201,9 +201,10 @@ Sandbox request support is deliberately explicit:
   This includes `metadata.extra_body.seed` added by `num_repeats_add_seed`; disable that option
   for sandbox sessions. Request `metadata.chat_template_kwargs` is also rejected; configure it
   on the Gym model server instead.
-  The sandbox config also rejects `max_output_tokens`: model metadata does not prove an effective
-  inference limit. Configure sampling and per-call limits on the Gym model server and inspect the
-  effective captured requests. An episode-wide token budget is not implemented.
+  The configured `max_output_tokens` is written as `maxTokens` of the generated model entry, so it
+  is the per-call output limit OpenClaw requests; when unset, OpenClaw's own default applies. Model
+  metadata does not prove an effective inference limit: verify it against the captured requests on
+  the Gym model server. An episode-wide token budget is not implemented.
 - Custom command, environment, OpenClaw config, Node path, extra arguments, and agent-ID overrides
   are rejected for sandbox sessions. Existing callers without an agent-session cookie retain the
   local CLI behavior and configuration. Both paths now include request `instructions` in the

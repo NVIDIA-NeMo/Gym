@@ -330,6 +330,38 @@ def test_unsupported_seed_rejected_before_connection(setup, option):
     sandbox.exec.assert_not_awaited()
 
 
+@pytest.mark.parametrize(("context_window", "max_output_tokens"), [(None, 32768), (32768, 32768)])
+def test_configured_max_output_tokens_reaches_sandbox_model_entry(setup, context_window, max_output_tokens):
+    agent, sandbox = setup
+    agent.config.context_window = context_window
+    agent.config.max_output_tokens = max_output_tokens
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        config = json.loads(sandbox.files[f"{sandbox.directory}/home/.openclaw/openclaw.json"])
+        entry = config["models"]["providers"]["nemo"]["models"][0]
+        assert entry["maxTokens"] == max_output_tokens
+        assert entry.get("contextWindow") == context_window
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [{"max_output_tokens": 0}, {"max_output_tokens": -1}, {"context_window": 1000, "max_output_tokens": 1001}],
+)
+def test_invalid_max_output_tokens_rejected_before_connection(setup, limits):
+    agent, sandbox = setup
+    for name, value in limits.items():
+        setattr(agent.config, name, value)
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert response.status_code == 422
+    assert "max_output_tokens" in response.json()["detail"]
+    sandbox.exec.assert_not_awaited()
+
+
 def test_cookie_identity_and_single_activation(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:

@@ -65,10 +65,10 @@ def recorded_spans(monkeypatch, enabled_groups):
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = provider.get_tracer("test")
 
-    # managed_span falls back to the *global* tracer, so point it at ours for the duration.
+    # managed_span falls back to Lens's cached default tracer, so point that lookup at ours.
     import nemo.lens.helpers as lens_helpers
 
-    monkeypatch.setattr(lens_helpers.trace, "get_tracer", lambda *a, **k: tracer)
+    monkeypatch.setattr(lens_helpers, "get_tracer", lambda *a, **k: tracer)
     return exporter.get_finished_spans
 
 
