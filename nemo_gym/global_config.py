@@ -22,6 +22,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
 from importlib import import_module
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
 from os import environ, getenv
 from pathlib import Path
@@ -73,7 +74,17 @@ from nemo_gym.telemetry.setup import (
 
 logger = logging.getLogger(__name__)
 
-ray_version = distribution_version("ray")
+
+def _installed_version(distribution: str) -> Optional[str]:
+    """The installed version of a distribution, or None when it isn't installed."""
+    try:
+        return distribution_version(distribution)
+    except PackageNotFoundError:
+        return None
+
+
+# None when Ray isn't installed. Gym imports Ray only in processes that use it.
+ray_version = _installed_version("ray")
 
 _GLOBAL_CONFIG_DICT = None
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
@@ -84,6 +95,7 @@ DEFAULT_HOST_KEY_NAME = "default_host"
 HEAD_SERVER_KEY_NAME = "head_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
+HEAD_SERVER_CONSTRAINTS_KEY_NAME = "head_server_constraints"
 PYTHON_VERSION_KEY_NAME = "python_version"
 PIP_INSTALL_VERBOSE_KEY_NAME = "pip_install_verbose"
 USE_ABSOLUTE_IP = "use_absolute_ip"
@@ -138,6 +150,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     HEAD_SERVER_KEY_NAME,
     DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
+    HEAD_SERVER_CONSTRAINTS_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     USE_ABSOLUTE_IP,
@@ -1554,11 +1567,11 @@ Found global config dict yaml:
             global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
 
             # Constrain sensitive package versions
-            head_server_deps = [
-                # The ray version is very sensitive. The children ray versions must exactly match those of the parent ray.
-                # The ray extra [default] should also exactly match the extra in the top-level Gym pyproject.toml.
-                f"ray[default]=={ray_version}",
-            ]
+            head_server_deps = []
+            # The ray version is very sensitive: a server that joins this process's Ray cluster must run exactly
+            # the same version. Pin it as a constraint rather than a requirement, so a server venv gets Ray only
+            # when that server's own dependencies ask for it.
+            global_config_dict[HEAD_SERVER_CONSTRAINTS_KEY_NAME] = [f"ray=={ray_version}"] if ray_version else []
             # OpenAI version is also sensitive since it changes so often and may introduce subtle
             # incompatibilities — but only pin the parent's version when nemo-gym's own constraint
             # accepts it; otherwise the sub-venv resolutions are unsatisfiable and the venvs come

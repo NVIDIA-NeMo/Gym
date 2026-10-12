@@ -677,11 +677,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
         model_name: str,
         interrupted_by_dispatch: bool = False,
         n_input: int = 0,
+        retain_provider_failure: bool = False,
     ) -> NeMoGymResponse:
         # The pinned Hermes marks provider/API failures with `failed`, but model-limit and
         # invalid-tool outcomes with `partial`. Keep those partial patches gradable. Its one
         # model-caused `failed` outcome is first-response truncation (run_agent.py).
-        if result.get("failed") and result.get("error") != "First response truncated due to output length limit":
+        provider_failed = (
+            bool(result.get("failed")) and result.get("error") != "First response truncated due to output length limit"
+        )
+        if provider_failed and not retain_provider_failure:
             raise RuntimeError(f"Hermes agent failed: {result.get('error') or 'unknown provider/API failure'}")
 
         messages = result.get("messages") or []
@@ -735,6 +739,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if harness_error:
             metadata["hermes_error"] = str(harness_error)[:2000]
 
+        if provider_failed:
+            metadata["provider_failed"] = "true"
+            harness_error = harness_error or "unknown provider/API failure"
         response_error = None
         if harness_error:
             from openai.types.responses import ResponseError  # pyright: ignore[reportMissingImports]
@@ -799,7 +806,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         observer = None
         if observation_collector is not None:
             try:
-                observer = HermesAgentObserver(model_ref=self.config.model_server).instrument(agent)
+                observer = HermesAgentObserver(
+                    model_ref=self.config.model_server, capture_correlated=rollout_id is not None
+                ).instrument(agent)
             except Exception:
                 LOG.exception("failed to initialize Hermes observability")
 
@@ -855,6 +864,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             model_name=model_name,
             interrupted_by_dispatch=interrupted_by_dispatch,
             n_input=len(params["history"]) + 1,
+            retain_provider_failure=True,
         )
 
     async def responses(
@@ -991,6 +1001,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
             naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
 
             result = verify_json | {"turns_used": turns, "finished_naturally": naturally}
+            if (gym_resp.metadata or {}).get("provider_failed") == "true":
+                # Keep the verifier result and evidence without admitting an
+                # infrastructure failure into benchmark or training scores.
+                result.update(
+                    mask_sample=True,
+                    failure_kind="agent_request_failed",
+                    failure_reason=gym_resp.error.message if gym_resp.error else "Hermes provider failure",
+                    finished_naturally=False,
+                )
             if observations is not None:
                 result["ng_agent_observations"] = observations.model_dump(mode="json")
             return HermesAgentVerifyResponse.model_validate(result)

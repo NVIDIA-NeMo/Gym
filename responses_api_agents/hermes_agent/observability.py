@@ -118,11 +118,13 @@ class HermesAgentObserver:
         *,
         root_invocation_id: str = "root",
         model_ref: ModelServerRef | None = None,
+        capture_correlated: bool = False,
     ) -> None:
         self._lock = threading.RLock()
         self._current = threading.local()
         self._root_id = root_invocation_id
         self._model_ref = model_ref
+        self._capture_correlated = capture_correlated
         self._child_index = 0
         self._agents: set[int] = set()
         self._invocation_agents: dict[str, Any] = {}
@@ -154,7 +156,7 @@ class HermesAgentObserver:
                 if tool.status == "unknown":
                     tool.status = "incomplete"
             for invocation in self._invocations.values():
-                if not invocation.model_calls:
+                if not invocation.model_calls and not self._capture_correlated:
                     self._gap("model_call_ownership_unavailable", invocation.invocation_id)
             return AgentObservationBundle(
                 source=_SOURCE,
@@ -226,6 +228,15 @@ class HermesAgentObserver:
             return
 
         def call(*args: Any, **kwargs: Any) -> Any:
+            if self._capture_correlated:
+                # The SDK repeats these headers on every HTTP retry, including
+                # attempts that fail without returning a response ID.
+                api_kwargs = dict(args[0] if args else kwargs["api_kwargs"])
+                api_kwargs["extra_headers"] = {**api_kwargs.get("extra_headers", {}), "x-session-id": invocation_id}
+                if args:
+                    args = (api_kwargs, *args[1:])
+                else:
+                    kwargs = {**kwargs, "api_kwargs": api_kwargs}
             try:
                 response = original(*args, **kwargs)
             except BaseException as exc:

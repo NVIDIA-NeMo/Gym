@@ -227,12 +227,13 @@ class Probe:
         )
         return StreamingResponse(events, media_type="text/event-stream")
 
-    def model_app(self) -> FastAPI:
+    def model_app(self, *, assistant_message_header: bytes | None = None) -> FastAPI:
         app = FastAPI()
         install_model_call_capture(
             app,
             ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=self.directory / "capture"),
             model_server_name="policy_model",
+            assistant_message_header=assistant_message_header,
         )
         app.post("/v1/chat/completions", response_model=None)(self.model)
         app.post("/v1/responses", response_model=None)(self.model)
