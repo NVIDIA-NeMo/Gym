@@ -2253,8 +2253,10 @@ class RolloutCollectionHelper(BaseModel):
                 )
                 if mapped is None:
                     mapped = config.agent_map.get("_default")
-                if mapped is not None:
-                    if agent_name is not None and agent_name != mapped:
+                if mapped is not None and mapped != agent_name:
+                    # Restamp only on a real re-route; a row already on `mapped` keeps its
+                    # agent_ref dict byte-for-byte (it may carry extra fields like type).
+                    if agent_name is not None:
                         overridden_agents.add((agent_name, mapped))
                     agent_name = mapped
                     row[AGENT_REF_KEY_NAME] = {"name": agent_name}

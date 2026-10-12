@@ -7740,6 +7740,16 @@ class TestAgentMapRouting:
         rows = RolloutCollectionHelper._preprocess_rows_from_config(None, self._config(tmp_path, fpath))
         assert rows[0]["agent_ref"]["name"] == "x"
 
+    def test_agent_name_matching_row_keeps_agent_ref_dict(self, tmp_path) -> None:
+        """`gym eval run --agent X` on rows already routed to X must not strip extra agent_ref fields."""
+        row = self._rcp_row()
+        row["agent_ref"] = {"type": "responses_api_agents", "name": "x"}
+        config = self._config(tmp_path, self._write_rows(tmp_path, [row]), agent_name="x")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["agent_ref"] == {"type": "responses_api_agents", "name": "x"}
+
     def test_missing_agent_still_hard_errors(self, tmp_path) -> None:
         fpath = self._write_rows(tmp_path, [self._rcp_row()])
         config = self._config(tmp_path, fpath, agent_map={"x": "y"})
