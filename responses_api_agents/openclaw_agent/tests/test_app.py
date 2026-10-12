@@ -68,7 +68,7 @@ def _invocations(bundle):
 
 
 def _config(**kwargs) -> OpenClawAgentConfig:
-    kwargs.setdefault("openclaw_version", "2026.6.11")
+    kwargs.setdefault("openclaw_version", "2026.6.35")
     return OpenClawAgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -308,6 +308,45 @@ class TestBuildOpenclawConfig:
         cfg = agent._build_openclaw_config({"tools": {"deny": ["message", "gateway"]}})
         assert cfg["tools"]["deny"] == ["message", "gateway"]
 
+    def test_terminal_only_tool_and_lean_prompt_policy_preserved_with_headless_deny(self) -> None:
+        agent = _make_agent(
+            openclaw_config={
+                "agents": {
+                    "defaults": {
+                        "skipBootstrap": True,
+                        "contextInjection": "never",
+                        "startupContext": {"enabled": False},
+                        "skills": [],
+                    }
+                },
+                "skills": {
+                    "limits": {
+                        "maxSkillsInPrompt": 0,
+                        "maxSkillsPromptChars": 0,
+                    }
+                },
+                "tools": {
+                    "profile": "minimal",
+                    "alsoAllow": ["exec"],
+                    "deny": ["session_status"],
+                },
+            }
+        )
+        cfg = agent._build_openclaw_config({})
+
+        defaults = cfg["agents"]["defaults"]
+        assert defaults["skipBootstrap"] is True
+        assert defaults["contextInjection"] == "never"
+        assert defaults["startupContext"] == {"enabled": False}
+        assert defaults["skills"] == []
+        assert cfg["skills"]["limits"] == {
+            "maxSkillsInPrompt": 0,
+            "maxSkillsPromptChars": 0,
+        }
+        assert cfg["tools"]["profile"] == "minimal"
+        assert cfg["tools"]["alsoAllow"] == ["exec"]
+        assert cfg["tools"]["deny"] == ["session_status", "message"]
+
     def test_user_openclaw_config_merged(self) -> None:
         agent = _make_agent(
             openclaw_config={"models": {"providers": {"nvinf": {"baseUrl": "https://x/v1"}}}, "extra": {"k": "v"}}
@@ -329,6 +368,54 @@ class TestBuildOpenclawConfig:
             cfg = agent._build_openclaw_config({}, "7-2")
 
         assert cfg["models"]["providers"]["nemo"]["baseUrl"] == "http://policy/ng-rollout/7-2/v1"
+
+    def test_training_capture_routes_compaction_model_outside_rollout_ledger(self) -> None:
+        agent = _make_agent(
+            model="model",
+            model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        )
+
+        def resolve(rollout_id: str | None = None) -> str:
+            suffix = f"/ng-rollout/{rollout_id}/training-token-capture" if rollout_id else ""
+            return f"http://policy{suffix}/v1"
+
+        with (
+            patch.object(agent, "_token_id_capture_enabled", return_value=True),
+            patch.object(agent, "_resolve_model_base_url", side_effect=resolve),
+        ):
+            cfg = agent._build_openclaw_config({}, "7-2")
+
+        providers = cfg["models"]["providers"]
+        assert providers["nemo"]["baseUrl"] == "http://policy/ng-rollout/7-2/training-token-capture/v1"
+        assert providers["nemo_compaction"]["baseUrl"] == "http://policy/v1"
+        assert cfg["agents"]["defaults"]["compaction"]["model"] == "nemo_compaction/model"
+
+    def test_training_capture_preserves_explicit_compaction_model(self) -> None:
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy"),
+            openclaw_config={"agents": {"defaults": {"compaction": {"model": "other/summarizer"}}}},
+        )
+        with (
+            patch.object(agent, "_token_id_capture_enabled", return_value=True),
+            patch.object(agent, "_resolve_model_base_url", return_value="http://policy/v1"),
+        ):
+            cfg = agent._build_openclaw_config({}, "7-2")
+
+        assert cfg["agents"]["defaults"]["compaction"]["model"] == "other/summarizer"
+        assert "nemo_compaction" not in cfg["models"]["providers"]
+
+    def test_evaluation_capture_keeps_compaction_on_correlated_provider(self) -> None:
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        )
+        with (
+            patch.object(agent, "_token_id_capture_enabled", return_value=False),
+            patch.object(agent, "_resolve_model_base_url", return_value="http://policy/ng-rollout/7-2/v1"),
+        ):
+            cfg = agent._build_openclaw_config({}, "7-2")
+
+        assert "nemo_compaction" not in cfg["models"]["providers"]
+        assert "compaction" not in cfg.get("agents", {}).get("defaults", {})
 
     def test_responses_propagates_rollout_path(self) -> None:
         agent = _make_agent()
@@ -932,3 +1019,4 @@ class TestConfigYaml:
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 32
         assert inner["command"] == "openclaw"
+        assert inner["openclaw_version"] == "2026.6.35"

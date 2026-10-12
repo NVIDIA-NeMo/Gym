@@ -1,8 +1,8 @@
 # anyterminal_agent
 
 Runs any Gym agent inside a Terminal Bench task container and evaluates the result
-by running the task's `tests/test.sh` in the same container. Works with
-`hermes_agent`, `claude_code_agent`, `terminus_2_agent`, or any other compatible Gym agent.
+by running the task's `tests/test.sh` in the same container. Shipped profiles cover
+Hermes, OpenClaw, OpenCode, Pi, Claude Code, NeMo Fabric, and Terminus 2.
 
 Unlike `anyswe_agent` (which runs agent and eval in two concurrent containers),
 anyterminal runs everything sequentially in one container: agent finishes, then
@@ -10,10 +10,62 @@ anyterminal runs everything sequentially in one container: agent finishes, then
 directory is mounted read-only so the agent cannot tamper with the tests before
 they run.
 
+## Multi-harness training
+
+`configs/anyterminal_multi_harness.yaml` owns one Terminal-Bench dataset under the
+neutral source route `anyterminal_multi_harness`. Use `fan_out` to run every source
+task through all P0 harnesses in this order:
+
+1. OpenCode
+2. OpenClaw
+3. Pi
+4. Hermes
+
+Each task/harness pair is independent. In GRPO, all sibling generations for one
+pair stay on the same harness, so group-relative advantages never mix harnesses.
+Use `agent_pool` instead only when the desired behavior is selecting one harness
+per source task.
+
+Prepare four real Terminal-Bench 2.1 tasks from an existing checkout and collate them:
+
+```bash
+python responses_api_agents/anyterminal_agent/prepare.py \
+  --tasks-cache /path/to/terminal-bench-2-1 \
+  --dataset-name tasks \
+  --task-name fix-git log-summary-date-ranges configure-git-webserver modernize-scientific-stack
+
+gym dataset collate \
+  --config responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness.yaml \
+  --output-dir data/anyterminal_multi_harness \
+  --mode train_preparation
+```
+
+Start all four harnesses and collect one rollout per task and harness. No `--agent`
+is needed; `fan_out` creates the cross-product:
+
+```bash
+gym env start \
+  --config responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness.yaml \
+  --model-type vllm_model
+
+gym eval run --no-serve \
+  --config responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness.yaml \
+  '+fan_out={anyterminal_multi_harness:[anyterminal_opencode,anyterminal_openclaw,anyterminal_pi,anyterminal_hermes]}' \
+  --input data/anyterminal_multi_harness/train.jsonl \
+  --output results/anyterminal_multi_harness.jsonl
+```
+
+For an Enroot cluster, use `configs/anyterminal_multi_harness_enroot.yaml` for both
+commands. The host needs Enroot, and compute nodes need registry access for the task
+images. The same profile can be placed in NeMo RL's `env.nemo_gym.config_paths`; use
+`env.nemo_gym.fan_out.anyterminal_multi_harness` with the four target names and
+`token_capture.enabled: true` for policy training with external harnesses.
+
 ## Prerequisites
 
-Every task runs inside an [Apptainer](https://apptainer.org/) (formerly Singularity) container,
-so Apptainer must be installed on each machine that runs rollouts. It is not bundled with Gym.
+Every task runs inside the configured Gym sandbox provider. The base profiles default
+to Docker. The multi-harness cluster profile selects the built-in Enroot provider.
+Apptainer is also supported through an inline provider config.
 
 ```bash
 apt-get update && apt-get install -y wget
@@ -52,11 +104,11 @@ gym env start \
   --model-type vllm_model
 ```
 
-If you pre-built SIFs into a custom directory, override `tb_sif_dir`:
+If you pre-built SIFs into a custom directory, override `container_formatter`:
 
 ```bash
 gym env start --config ... \
-  ++anyterminal_hermes.responses_api_agents.anyterminal_agent.tb_sif_dir=/shared/sifs
+  ++anyterminal_hermes.responses_api_agents.anyterminal_agent.container_formatter=/shared/sifs/{task_name}.sif
 ```
 
 **3. Collect rollouts:**
@@ -95,18 +147,19 @@ new agent, add `responses_api_agents/<agent_dir>/scripts/<agent_dir>_deps.sh` (s
 Each Terminal Bench task specifies a Docker image in its `task.toml`. You can
 either:
 
-- **Pull at runtime** (default, `tb_sif_dir: null`): Apptainer pulls
-  `docker://<image>` on first use. Requires internet access on compute nodes.
-- **Pre-build SIFs** (`prepare.py --sif-dir PATH`): Converts each image to a
-  `.sif` file. Faster and works on air-gapped clusters.
+- **Pull at runtime** (default): Docker, Enroot, or Apptainer imports the task's
+  `docker://<image>`. This requires registry access on compute nodes.
+- **Pre-build SIFs** (`prepare.py --build-image --image-dir PATH`): Apptainer
+  converts each image to a `.sif` file. Point `container_formatter` at that
+  directory for faster or air-gapped runs.
 
 ## Key config options
 
 | Field | Default | Description |
 |---|---|---|
-| `tb_tasks_cache_dir` | `~/.cache/harbor/tasks` | Where Harbor stores downloaded task definitions |
-| `tb_sif_dir` | `null` | Pre-built SIF directory; `null` = pull docker:// at runtime |
+| `container_formatter` | `docker://{docker_image}` | Runtime image or pre-built SIF path template |
+| `sandbox_provider` | `{docker: {}}` | Inline provider config or named provider block |
+| `agent_runtime_source` | `auto` | Build runtime, use a baked runtime, URL, or archive |
 | `tb_agent_timeout` | `1800` | Seconds before the agent is killed |
 | `tb_eval_timeout` | `300` | Seconds for `test.sh` to complete |
-| `apptainer_memory_limit_mb` | `32768` | Per-container memory cap via `ulimit -v` |
 | `concurrency` | `256` | Max concurrent tasks dispatched to Ray |

@@ -231,6 +231,22 @@ async def resolve_parent(request_messages: list | None) -> None:
                 )
         else:
             context.parent_resolution = await context.lineage_store.resolve(context.rollout_id, request_messages)
+            # A harness can submit its tool continuation as soon as it consumes
+            # the preceding SSE tool-call event. If that overlaps the ledger
+            # publication boundary, the first lookup can miss a row that is
+            # visible by the time admission checks ledger state. Re-resolve
+            # once after observing a non-empty ledger; the normal fingerprint
+            # and context-digest checks still decide whether the parent is safe.
+            if (
+                context.external_staging
+                and context.parent_resolution.status == ParentResolutionStatus.UNRESOLVED
+                and isinstance(context.lineage_store, CaptureLedger)
+                and await context.lineage_store.has_rows(context.rollout_id)
+            ):
+                context.parent_resolution = await context.lineage_store.resolve(
+                    context.rollout_id,
+                    request_messages,
+                )
         _count_resolution(context.parent_resolution.status.value)
     except Exception as error:
         # Worker custody fails closed: an unresolved parent would silently
@@ -294,9 +310,10 @@ async def resolve_parent(request_messages: list | None) -> None:
         )
         return
     logger.warning(
-        "Unresolved parent for model call %s of rollout %s; poisoning the call.",
+        "Unresolved parent for model call %s of rollout %s (reason=%s); poisoning the call.",
         context.model_call_id,
         context.rollout_id,
+        context.parent_resolution.reason if context.parent_resolution is not None else "missing_resolution",
     )
     await ledger.record_failure(
         context.rollout_id,

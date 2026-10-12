@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Run the four AnyTerminal harnesses in task containers provisioned by the
+# OpenSandbox service. OpenSandbox creates those sandboxes as Kubernetes
+# resources and reads its endpoint and API key from OPENSANDBOX_DOMAIN and
+# OPENSANDBOX_API_KEY.
+config_paths:
+  - responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+anyterminal_opencode:
+  responses_api_agents:
+    anyterminal_agent:
+      sandbox_provider: sandbox
+
+anyterminal_openclaw:
+  responses_api_agents:
+    anyterminal_agent:
+      sandbox_provider: sandbox
+
+anyterminal_pi:
+  responses_api_agents:
+    anyterminal_agent:
+      sandbox_provider: sandbox
+
+anyterminal_hermes:
+  responses_api_agents:
+    anyterminal_agent:
+      sandbox_provider: sandbox
+
+anyterminal_multi_harness:
+  responses_api_agents:
+    anyterminal_agent:
+      sandbox_provider: sandbox

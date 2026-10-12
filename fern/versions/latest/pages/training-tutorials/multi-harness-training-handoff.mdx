@@ -1,0 +1,554 @@
+---
+title: "Multi-Harness Training Development Handoff"
+description: "Resume and validate the NeMo Gym and NeMo RL multi-harness Terminal-Bench implementation on another cluster."
+position: 7
+---
+
+# Multi-Harness Training Development Handoff
+
+This handoff describes how to resume the two-repository implementation and
+complete its GPU validation. The target behavior matches FineEnvs fan-out:
+each source task is expanded once for every configured harness, repeated GRPO
+siblings stay inside their task-and-harness prompt group, and all groups train
+one shared policy.
+
+The P0 harnesses are:
+
+- OpenCode (`anyterminal_opencode`)
+- OpenClaw (`anyterminal_openclaw`)
+- Pi (`anyterminal_pi`)
+- Hermes (`anyterminal_hermes`)
+
+## Current stop line
+
+This snapshot was updated on **2026-10-08 at 14:34 PDT**. The routing
+implementation, terminal-only OpenClaw tool policy, and 15,872 context / 4,096
+output OpenClaw limits are pushed. Slurm job `2178116`, W&B run
+[`9uirholo`](https://wandb.ai/adlr/multi-harness-RL/runs/9uirholo), tested all
+of those changes and exposed the remaining blocker:
+
+- OpenClaw still rejects the prompt locally before making its first vLLM
+  request, even when `exec` is its only effective tool.
+- Both OpenClaw siblings returned the literal `Context overflow: prompt too
+  large for the model...` message with zero usage and were rejected by token
+  capture as `rollout_failed:no_records`.
+- The remaining fixed prompt is OpenClaw's workspace/bootstrap and skill
+  injection, not the broad `coding` tool schema that was already removed.
+- Therefore no optimizer step completed, and neither PR should yet be called
+  end-to-end runtime validated.
+
+The branch now disables bootstrap/context injection, startup memory, and skill
+prompt material for the Terminal-Bench OpenClaw profile. Its unit and native
+schema checks pass, but a real Nano rerun is still required. The change and its
+validation status are recorded in
+[OpenClaw runtime blocker](#openclaw-runtime-blocker).
+
+## Pull requests and exact heads
+
+Both repositories use the branch
+`ehosseiniasl/multi-harness-training-routing`.
+
+| Repository | Pull request | Minimum implementation commit |
+|---|---|---|
+| NeMo Gym | [NVIDIA-NeMo/Gym#4082](https://github.com/NVIDIA-NeMo/Gym/pull/4082) | `39679a4a7d23c16bb07bb03daaacbad8c699c63a` |
+| NeMo RL | [NVIDIA-NeMo/RL#4521](https://github.com/NVIDIA-NeMo/RL/pull/4521) | `abe512a44f6cd2fc1a7c5620c7564759a5a182e7` |
+
+At the snapshot above, each implementation head exactly matched its fork
+branch and both Git worktrees were clean. The final handoff documentation
+commit will make the Gym branch newer than the minimum shown in the table.
+Always fetch the branch tip rather than checking out the table hash:
+
+```bash
+git clone https://github.com/NVIDIA-NeMo/Gym.git nemo-gym-multi-harness
+cd nemo-gym-multi-harness
+git remote add contributor https://github.com/ehosseiniasl/Gym.git
+git fetch contributor ehosseiniasl/multi-harness-training-routing
+git switch -c ehosseiniasl/multi-harness-training-routing \
+  --track contributor/ehosseiniasl/multi-harness-training-routing
+git merge-base --is-ancestor 39679a4a7d23c16bb07bb03daaacbad8c699c63a HEAD
+
+cd ..
+git clone https://github.com/NVIDIA-NeMo/RL.git nemorl-multi-harness
+cd nemorl-multi-harness
+git remote add contributor https://github.com/ehosseiniasl/NeMo-RL.git
+git fetch contributor ehosseiniasl/multi-harness-training-routing
+git switch -c ehosseiniasl/multi-harness-training-routing \
+  --track contributor/ehosseiniasl/multi-harness-training-routing
+git merge-base --is-ancestor abe512a44f6cd2fc1a7c5620c7564759a5a182e7 HEAD
+```
+
+## Implemented contract
+
+Gym exposes three distinct routing modes:
+
+| Field | Contract |
+|---|---|
+| `agent_map` | Route every matching row to one named harness. |
+| `agent_pool` | Deterministically choose one configured harness per source task. |
+| `fan_out` | Create the task-by-harness cross-product. |
+
+The training configuration uses this generic source route:
+
+```yaml
+env:
+  nemo_gym:
+    fan_out:
+      anyterminal_multi_harness:
+        - anyterminal_opencode
+        - anyterminal_openclaw
+        - anyterminal_pi
+        - anyterminal_hermes
+```
+
+`fan_out` expansion happens before repeated generations, dataloader batching,
+and NeMo RL Gym-shard selection. Every expanded row receives a concrete
+`agent_ref` and `_ng_fan_out_index`. NeMo RL consumes that assignment before
+Gym dispatch so a row is not expanded twice. A rollout never changes harness
+after it starts.
+
+Do not rename the generic source to a harness-specific name such as
+`anyterminal_hermes`; the source route is intentionally neutral.
+
+## Code map
+
+### NeMo Gym
+
+- `nemo_gym/rollout_collection.py`: validates routing, selects from
+  `agent_pool`, and expands `fan_out` for direct Gym collection.
+- `nemo_gym/global_config.py`: reserves and composes run-wide routing fields.
+- `nemo_gym/train_data_utils.py`: applies routing to in-memory training rows.
+- `responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness.yaml`:
+  defines the generic Terminal-Bench source and composes all four harnesses.
+- `responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness_enroot.yaml`:
+  adds the Enroot sandbox profile used on the cluster.
+- `responses_api_agents/anyterminal_agent/app.py`: adapts sampling fields at
+  the AnyTerminal boundary.
+- `responses_api_agents/opencode_agent/app.py`: exposes the optional input
+  limit used by OpenCode compaction.
+- `responses_api_agents/pi_agent/app.py`: supports the Pi output-token policy.
+- `tests/unit_tests/test_anyterminal_multi_harness.py` and the focused routing,
+  materialization, and preprocessing tests cover the Gym contract.
+
+The design plan is `multi-harness-training-plan.md` in the Gym checkout.
+
+### NeMo RL
+
+- `nemo_rl/data/datasets/response_datasets/nemogym_dataset.py`: expands rows
+  before trainer batching.
+- `nemo_rl/environments/nemo_gym.py`: validates and consumes trainer-owned
+  routing metadata.
+- `nemo_rl/environments/nemo_gym_shards.py`: resolves the shard that owns the
+  stamped destination harness.
+- `nemo_rl/experience/rollouts.py`: preserves routing metadata through rollout
+  handling.
+- `examples/nemo_gym/grpo_anyterminal_multi_harness_qwen3_0_6b_single_controller.yaml`:
+  small async plumbing recipe.
+- `examples/nemo_gym/grpo_anyterminal_multi_harness_nemotron_super_omni_single_controller.yaml`:
+  16-node async Super recipe.
+- `examples/nemo_gym/grpo_anyterminal_multi_harness_nemotron_super_omni_sync_8n_single_controller.yaml`:
+  8-node synchronous Super recipe.
+- `examples/nemo_gym/grpo_anyterminal_multi_harness_nemotron_nano_omni_sync_2n_debug_single_controller.yaml`:
+  minimum two-node synchronous debugging recipe.
+- `tests/unit/environments/test_anyterminal_multi_harness_recipe.py` and the
+  focused dataset, shard, and router tests cover the RL integration.
+
+## Portable environment setup
+
+Keep credentials outside both repositories. The launch environment needs
+`WANDB_API_KEY` and, for gated or uncached Hugging Face models, `HF_TOKEN`.
+Never commit either value.
+
+```bash
+export WANDB_API_KEY=...
+export HF_TOKEN=...
+export WANDB_MODE=online
+export WANDB_ENTITY=adlr
+export WANDB_PROJECT=multi-harness-RL
+```
+
+On the source cluster those values were loaded from
+`/lustre/fsw/portfolios/nemotron/users/ehosseiniasl/codex/credentials.env`.
+Copy or recreate that file securely on the target cluster; do not copy it into
+a repository or paste its contents into logs. Recreate GitHub authentication
+with the target cluster's normal `gh auth login` or `ssh-agent` workflow.
+
+Place the Gym checkout where NeMo RL can import it. One option is to replace or
+overlay the RL `3rdparty/Gym-workspace/Gym` checkout. Another is to prepend the
+Gym checkout to `PYTHONPATH` in every driver and Ray worker environment. Verify
+the imported locations before allocating GPUs:
+
+```bash
+python -c 'import nemo_gym, nemo_rl; print(nemo_gym.__file__); print(nemo_rl.__file__)'
+```
+
+The two paths must point at the two PR checkouts. A system-installed Gym or RL
+package does not validate these changes.
+
+The source-cluster checkouts were:
+
+```text
+/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/github_repos/nemo-gym-multi-harness
+/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/github_repos/nemorl-multi-harness
+```
+
+## Prepare Terminal-Bench data
+
+The AnyTerminal profile includes a small Terminal-Bench dataset suitable for
+the first end-to-end check. From the Gym checkout:
+
+```bash
+ng_prepare_data \
+  '+config_paths=[responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness_enroot.yaml]' \
+  +output_dirpath=data/anyterminal_multi_harness \
+  +mode=train_preparation \
+  +should_download=false
+```
+
+Point `data.train.data_path` in the RL recipe at the generated `train.jsonl`.
+If the new cluster has a larger Terminal-Bench 2.1 registry, collate a small,
+known-good text-only subset first and preserve the source name
+`anyterminal_multi_harness` on every row.
+
+The source-cluster validation file was
+`/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/validation/anyterminal-p0/collated/train.jsonl`.
+It contained these four stable tasks:
+
+| Stable index | Terminal-Bench 2.1 task |
+|---|---|
+| 0 | `configure-git-webserver` |
+| 1 | `fix-git` |
+| 2 | `log-summary-date-ranges` |
+| 3 | `modernize-scientific-stack` |
+
+The desired behavior is the cross-product: **each of these four rows must run
+under all four harnesses**. The older one-row-to-one-harness smoke test is not
+proof of multi-harness training.
+
+Before training, confirm that task directories, verifier tests, and container
+images are present on every node. Set the Enroot image cache through the
+cluster's shared filesystem. The previous cluster used pre-cached
+Terminal-Bench images; those cache paths are not portable.
+
+## Required W&B settings
+
+All multi-harness recipes enable W&B and full Gym result tables by default.
+Launchers should still set the values explicitly so a parent recipe cannot
+disable them:
+
+```text
+logger.wandb_enabled=true
++logger.wandb.entity=adlr
+logger.wandb.project=multi-harness-RL
+logger.wandb.log_nemo_gym_full_result_tables=true
+```
+
+The target project is
+[adlr/multi-harness-RL](https://wandb.ai/adlr/multi-harness-RL).
+
+## OpenClaw runtime blocker
+
+The relevant configuration is in
+`responses_api_agents/anyterminal_agent/configs/anyterminal_openclaw.yaml`.
+It previously selected `tools.profile: coding`. OpenClaw 2026.6.11 expands
+that profile into a broad tool catalog, including web, memory, sessions, cron,
+media, planning, and other tools that Terminal-Bench does not need. Their
+schemas overflow this model's initial context before the first model request.
+
+The pushed branch now uses this minimal Terminal-Bench policy:
+
+```yaml
+openclaw_config:
+  agents:
+    defaults:
+      workspace: "."
+  tools:
+    profile: minimal
+    alsoAllow:
+      - exec
+    deny:
+      - session_status
+```
+
+OpenClaw's `minimal` profile contributes `session_status`; `alsoAllow` adds the
+shell `exec` tool; the explicit deny removes `session_status`. Gym's
+`OpenClawAgent._merge_headless_tool_denies()` additionally denies `message`,
+so the intended effective tool set is only `exec`. That is enough to inspect,
+edit, and test files in a Terminal-Bench container while keeping the prompt
+small.
+
+The resolved profile is asserted in
+`tests/unit_tests/test_anyterminal_multi_harness.py`. An OpenClaw app unit test
+also verifies that config construction preserves `profile`, `alsoAllow`, and
+the user deny while adding the headless `message` deny. The focused tests pass
+57/57 with:
+
+```bash
+uv run pytest -q tests/unit_tests/test_anyterminal_multi_harness.py
+uv run pytest -q responses_api_agents/openclaw_agent/tests/test_app.py
+git diff --check
+```
+
+Job `2178116` was the decisive runtime check for this patch. It proved that
+the resolved terminal-only policy and the 15,872 context / 4,096 output limits
+were active, but both OpenClaw siblings still overflowed locally with zero
+usage. Tool reduction alone is therefore insufficient.
+
+OpenClaw still injects workspace/bootstrap and skill material into its fixed
+prompt unless explicitly disabled. The branch now adds:
+
+```yaml
+openclaw_config:
+  agents:
+    defaults:
+      workspace: "."
+      skipBootstrap: true
+      contextInjection: never
+      startupContext:
+        enabled: false
+      skills: []
+  skills:
+    limits:
+      maxSkillsInPrompt: 0
+      maxSkillsPromptChars: 0
+  tools:
+    profile: minimal
+    alsoAllow:
+      - exec
+    deny:
+      - session_status
+```
+
+These controls exist in the OpenClaw 2026.6.11 schema. The config-resolution
+and merge tests pass in the focused 57-test Gym suite, and native `openclaw
+config validate --json` reports `valid: true` with no warnings. The branch
+deliberately omits `localModelLean`: this release can use it to add a
+tool-search surface, whereas the explicit terminal policy is stricter. Repeat
+Nano before treating the fix as runtime validated. Do not advertise the full
+16,384 vLLM boundary as a shortcut; an earlier run proved that it leaves no
+serving token.
+
+## Fast validation sequence
+
+### 1. Resolve the configuration without GPUs
+
+From the RL checkout, load the two-node recipe and confirm:
+
+- `policy.max_total_sequence_length == 16384`
+- `policy.generation.max_new_tokens == 8192`
+- `policy.generation.vllm_kwargs.kernel_config.enable_flashinfer_autotune == false`
+- OpenCode limits are context `15872`, input `7680`, output `8192`. The
+  512-token difference from vLLM's 16K limit is required for OpenCode's
+  automatic compaction request.
+- OpenClaw context is `15872` for the same serving-boundary guard and its
+  output limit is explicitly `4096`, leaving more input space for its fixed
+  prompt.
+- the fan-out list contains exactly the four P0 harnesses
+- W&B and full Gym result tables are enabled
+
+The focused assertion lives in
+`tests/unit/environments/test_anyterminal_multi_harness_recipe.py`.
+
+### 2. Run the two-node synchronous debug recipe
+
+Use one eight-GPU node for Megatron training and one eight-GPU node for TP=8
+vLLM generation:
+
+```bash
+python examples/run_grpo_single_controller.py \
+  --config examples/nemo_gym/grpo_anyterminal_multi_harness_nemotron_nano_omni_sync_2n_debug_single_controller.yaml \
+  data.train.data_path=/shared/data/anyterminal_multi_harness/train.jsonl \
+  logger.wandb_enabled=true \
+  +logger.wandb.entity=adlr \
+  logger.wandb.project=multi-harness-RL \
+  logger.wandb.log_nemo_gym_full_result_tables=true
+```
+
+Wrap this driver with the cluster's standard two-node Ray or Slurm launcher.
+The recipe deliberately disables the one-time FlashInfer autotune so an
+interactive debug allocation reaches rollouts quickly. Production Super
+recipes retain normal tuning behavior.
+
+### 3. Run Super sync and async
+
+After the debug recipe proves the data plane, run both Super topologies with
+the same data and W&B project:
+
+- 8-node synchronous:
+  `grpo_anyterminal_multi_harness_nemotron_super_omni_sync_8n_single_controller.yaml`
+- 16-node asynchronous:
+  `grpo_anyterminal_multi_harness_nemotron_super_omni_single_controller.yaml`
+
+Override `policy.model_name` and `policy.tokenizer.name` with the cluster-local
+Super checkpoint. If the checkpoint supplies `chat_template.jinja`, also pass
+it to the tokenizer and vLLM serving chat configuration.
+
+The requested source-cluster Super checkpoint was:
+
+```text
+/lustre/fsw/portfolios/nemotron/users/ehosseiniasl/checkpoints/super35-journey-mopd2-identity-upsampling-from-my-step30-yifuw-001_boosted_mtp
+```
+
+Copy or remap it on the destination cluster and verify that every Slurm/Ray
+node sees the same path before launch. Nano 3 Omni is for the fast two-node
+debug only; the final 8-node sync and 16-node async evidence must use this
+Super checkpoint.
+
+Do not cap `grpo.max_num_steps` for the real training launch. The four-task
+validation subset naturally produces four optimizer steps and then exhausts
+the epoch.
+
+## Expected shape and acceptance gates
+
+With four source tasks, four harnesses, and two siblings per prompt group, the
+run must produce:
+
+```text
+4 source tasks x 4 harnesses = 16 prompt groups
+16 prompt groups x 2 siblings = 32 rollouts
+32 rollouts / train batch 8 = 4 optimizer steps
+```
+
+Do not call a run successful from its process exit code alone. Verify all of
+the following:
+
+1. Every source task has two results under each of OpenCode, OpenClaw, Pi, and
+   Hermes.
+2. Every result has non-empty policy output, `mask_sample=false`, no failure
+   kind or reason, and no agent, container, or sandbox timeout.
+3. Every unmasked rollout contains captured generated token IDs and log
+   probabilities, with no incomplete or ambiguous capture chain.
+4. TMPE is finite for every accepted sample and every optimizer step has eight
+   valid samples.
+5. W&B contains four optimizer steps plus the complete Gym result tables.
+6. Reward and advantages are finite and have non-zero variance; loss and
+   gradient norm are finite, and gradient norm is not identically zero.
+7. Policy-to-generation weight synchronization or refit completes initially
+   and after every optimizer step.
+
+## Evidence and known failure
+
+The first real Nano Omni two-node run reached all four harnesses for the first
+Terminal-Bench task and created W&B run
+[`0iisypwg`](https://wandb.ai/adlr/multi-harness-RL/runs/0iisypwg). It is
+diagnostic evidence only, not a passing training run:
+
+- OpenCode rendered a prompt at the old 8,192-token context limit, leaving no
+  generation token; vLLM returned HTTP 400.
+- Hermes consumed the old 4,096-token budget entirely in reasoning.
+- SingleController failed closed before optimizer step 0 when only three of
+  four required prompt groups remained.
+
+Commit `c4f1a073` raises the policy context to 16K, raises generation to 8K,
+reserves OpenCode input/output headroom, and disables debug-only FlashInfer
+autotuning. A second diagnostic run
+([`174bdvd7`](https://wandb.ai/adlr/multi-harness-RL/runs/174bdvd7)) proved
+real two-sibling dispatch through all four harnesses, but showed that an
+OpenCode automatic-compaction prompt could still reach the full advertised
+16K boundary and leave no serving token. Commit `8bf35a99` therefore advertises
+15,872 tokens to OpenCode while retaining vLLM's 16,384-token hard limit.
+
+A subsequent run
+([`ygai6fjs`](https://wandb.ai/adlr/multi-harness-RL/runs/ygai6fjs)) made the
+request owner unambiguous: both OpenClaw siblings rendered 16,384-token prompts,
+received HTTP 400, and finalized with `rollout_failed:no_records`. Commit
+`85c79975` applies the 15,872-token advertised context to OpenClaw in all three
+multi-harness recipes. These runs are diagnostic evidence only, not passing
+training runs.
+
+Nano run `2177783`, with W&B run
+[`z31vasi6`](https://wandb.ai/adlr/multi-harness-RL/runs/z31vasi6). It started
+all four harness groups and confirmed that the OpenClaw 15,872-token guard
+prevents the earlier vLLM HTTP 400. However, both OpenClaw siblings failed
+locally before making a model request. Each stored this response with zero
+input and output usage:
+
+```text
+Context overflow: prompt too large for the model. Try /reset (or /new) to
+start a fresh session, or use a larger-context model.
+```
+
+Their Gym metadata still showed `mask_sample=false`, no agent/container
+timeout, and no sandbox failure, but that does **not** make the samples valid:
+token capture had no records and rejected both as
+`rollout_failed:no_records`. The controller consequently failed before
+optimizer step 0. This is the evidence for reducing OpenClaw's tool profile;
+do not try to solve it by raising the advertised context to vLLM's hard 16K
+limit, because the earlier run already proved that boundary leaves no serving
+token.
+
+Commit `39679a4a7` then replaced the broad tool profile with terminal-only
+`minimal + exec`, and commit `abe512a4` set OpenClaw's output budget to 4,096
+in every RL multi-harness recipe. Slurm job `2178116`, W&B run
+[`9uirholo`](https://wandb.ai/adlr/multi-harness-RL/runs/9uirholo), validated
+both configurations at runtime. Nevertheless, both OpenClaw siblings again
+returned the same local overflow with zero usage and no capture files. The
+controller lost one of four prompt groups and failed before optimizer step 0.
+This isolates the remaining excess to OpenClaw's fixed bootstrap/skill prompt.
+
+An older Qwen3-0.6B plumbing run is available as
+[`zx1q7m3q`](https://wandb.ai/adlr/multi-harness-RL/runs/zx1q7m3q), but its
+reward, advantages, loss, and gradient norm were all zero. It proves neither
+learning nor Super-model behavior.
+
+At the latest handoff update, the Nano job had failed as described above and
+both Super jobs remained queued:
+
+| Job | Topology | State at handoff | Reason |
+|---|---|---|---|
+| `2178116` | Nano sync, 2 nodes | Failed before optimizer step 0 | OpenClaw local bootstrap/skill prompt overflow; zero usage |
+| `2172269` | Super sync, 8 nodes | Pending | `Priority` |
+| `2172270` | Super async, 16 nodes | Pending | `Priority` |
+
+These job IDs are historical cluster evidence. Submit new jobs on a different
+cluster rather than trying to reuse them. The two pending Super jobs read the
+working checkouts at launch time. Verify their resolved config contains the
+pushed terminal-only OpenClaw policy before accepting their results.
+
+## Source-cluster artifact map
+
+These paths are useful if the source filesystem is mounted from the new
+cluster. Otherwise copy only non-secret logs and data that are needed:
+
+| Artifact | Source path |
+|---|---|
+| Nano launch wrapper | `/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/validation/anyterminal-p0/run_nano_omni_sync2_debug_grpo_slurm.sh` |
+| Shared inside launcher | `/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/validation/anyterminal-p0/run_super_async_grpo_inside.sh` |
+| Super sync wrapper | `/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/validation/anyterminal-p0/run_super_sync8_grpo_slurm.sh` |
+| Super async wrapper | `/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/validation/anyterminal-p0/run_super_async_grpo_slurm.sh` |
+| Run auditor | `/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/validation/anyterminal-p0/validate_super_run.py` |
+| Latest Nano run directory | `/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/validation/anyterminal-p0/nano-omni-sync2-debug-grpo/run-nano-omni-sync2-debug-20261008-141858` |
+| Latest Ray driver log | `/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/github_repos/nemorl-multi-harness/2178116-logs/ray-driver.log` |
+
+The two exact failed OpenClaw responses are under the latest run directory at
+`anyterminal-results/openclaw/configure-git-webserver_*/response.json`; their
+corresponding `nemo_gym_metrics.json` files show that this was not a container
+or sandbox timeout.
+
+## Resume checklist
+
+1. Fetch both latest PR branch tips and verify the imported package paths.
+2. Confirm the lean OpenClaw bootstrap/context/startup-memory/skill
+   configuration is present and rerun the focused 57-test suite.
+3. Recreate or locate the Terminal-Bench data, task directories, verifier
+   tests, and Enroot images.
+4. Configure W&B as `adlr/multi-harness-RL` with full result tables.
+5. Resolve the Nano recipe and run its focused tests.
+6. Run the corrected two-node sync debug job and reject it if any harness is
+   masked, empty, or absent.
+7. Confirm all 32 rollouts have complete token IDs/log probabilities and that
+   four optimizer steps, TMPE, refits, and non-zero learning metrics finish.
+8. Run the 8-node synchronous and 16-node asynchronous Super recipes in
+   parallel only after Nano passes.
+9. Record W&B URLs, per-harness/task rewards, TMPE, optimizer metrics, and
+   refit counts in both pull requests.
+10. Re-run current PR checks after the final evidence commit and confirm both
+   worktrees still match their remote branches.
+
+<Warning>
+The routing implementation, terminal-only OpenClaw profile, 4,096-token
+OpenClaw output reserve, lean fixed-prompt configuration, and focused
+configuration checks are implemented. The pre-lean runtime attempt failed on
+OpenClaw's fixed bootstrap/skill prompt; the post-lean Nano and requested
+Super-model Terminal-Bench training proofs are pending. Do not present the two
+pull requests as runtime-validated until the acceptance gates above pass.
+</Warning>

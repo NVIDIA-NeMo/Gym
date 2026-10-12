@@ -38,6 +38,9 @@ sandbox:
       bypass_entrypoint: true
       rw: true
       remap_root: false
+      # Keep PID isolation enabled unless running Enroot inside an outer
+      # container that cannot mount a nested /proc.
+      unshare_pid: true
       import_timeout_s: 1800
       create_timeout_s: 600
       start_timeout_s: 600

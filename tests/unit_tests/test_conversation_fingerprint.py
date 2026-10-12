@@ -61,12 +61,72 @@ def test_argument_reserialization_is_tolerated_but_argument_changes_are_not():
     assert assistant_fingerprint([base]) != assistant_fingerprint([changed])
 
 
+def test_openclaw_vllm_tool_call_id_rewrite_is_tolerated_but_other_ids_are_not():
+    served_call_id = "chatcmpl-tool-863127ed64b40525"
+    echoed_call_id = "chatcmpltool863127ed64b40525"
+    served = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": served_call_id,
+                "type": "function",
+                "function": {"name": "exec", "arguments": '{"command":"whoami"}'},
+            }
+        ],
+    }
+    echoed = {
+        **served,
+        "tool_calls": [{**served["tool_calls"][0], "id": echoed_call_id}],
+    }
+
+    assert assistant_fingerprint([served]) == assistant_fingerprint([echoed])
+    assert conversation_digest([served]) == conversation_digest([echoed])
+    assert conversation_digest(
+        [{"role": "tool", "tool_call_id": served_call_id, "content": "root"}]
+    ) == conversation_digest([{"role": "tool", "tool_call_id": echoed_call_id, "content": "root"}])
+
+    generic_hyphenated = {**served, "tool_calls": [{**served["tool_calls"][0], "id": "call-a"}]}
+    generic_compact = {**served, "tool_calls": [{**served["tool_calls"][0], "id": "calla"}]}
+    assert assistant_fingerprint([generic_hyphenated]) != assistant_fingerprint([generic_compact])
+
+
 def test_reasoning_items_are_excluded():
     # A harness need not echo standalone reasoning items; including them would
     # make the fingerprint depend on dialect and echo behavior.
     message = {"role": "assistant", "content": "answer"}
     reasoning = {"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking"}]}
     assert assistant_fingerprint([reasoning, message]) == assistant_fingerprint([message])
+
+
+def test_wrapped_reasoning_may_be_omitted_but_visible_assistant_text_may_not():
+    served = {
+        "role": "assistant",
+        "content": "<think>private reasoning</think>calling",
+        "tool_calls": [{"id": "c1", "function": {"name": "lookup", "arguments": "{}"}}],
+    }
+    echoed = {
+        "role": "assistant",
+        "content": "calling",
+        "tool_calls": [{"id": "c1", "function": {"name": "lookup", "arguments": "{}"}}],
+    }
+    edited = {**echoed, "content": "different visible text"}
+
+    assert assistant_fingerprint([served]) == assistant_fingerprint([echoed])
+    assert conversation_digest([served]) == conversation_digest([echoed])
+    assert assistant_fingerprint([served]) != assistant_fingerprint([edited])
+    assert conversation_digest([served]) != conversation_digest([edited])
+
+
+def test_only_complete_leading_think_blocks_are_ignored():
+    plain = {"role": "assistant", "content": "answer"}
+    wrapped_twice = {"role": "assistant", "content": "<think>one</think><think>two</think>answer"}
+    embedded = {"role": "assistant", "content": "visible <think>literal</think> answer"}
+    unterminated = {"role": "assistant", "content": "<think>visible because malformed"}
+
+    assert assistant_fingerprint([wrapped_twice]) == assistant_fingerprint([plain])
+    assert assistant_fingerprint([embedded]) != assistant_fingerprint([plain])
+    assert assistant_fingerprint([unterminated]) != assistant_fingerprint([plain])
 
 
 def test_no_model_authored_turn_yields_the_empty_fingerprint():

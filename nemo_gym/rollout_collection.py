@@ -16,6 +16,7 @@ import asyncio
 import bisect
 import functools
 import glob as glob_module
+import hashlib
 import json
 import logging
 import os
@@ -62,6 +63,9 @@ from nemo_gym.episode_types import is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
+    AGENT_POOL_ASSIGNMENT_KEY_NAME,
+    AGENT_POOL_INDEX_KEY_NAME,
+    AGENT_POOL_KEY_NAME,
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
@@ -1486,6 +1490,14 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             "Precedence: agent_map[<row value>] > agent_map._default > row agent_ref > task_source resolution."
         ),
     )
+    agent_pool: Optional[Dict[str, List[str]]] = Field(
+        default=None,
+        description=(
+            "Choose one agent per matching task using deterministic round-robin assignment, keyed by the row's "
+            "agent_ref.name or task_source (e.g. {shared_resources_server: [agent_a, agent_b]}). Selection happens "
+            "before num_repeats, so every repeat of a task uses the same agent."
+        ),
+    )
     fan_out: Optional[Dict[str, List[str]]] = Field(
         default=None,
         description=(
@@ -1506,7 +1518,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         description=(
             "How many times to repeat each example. Either an int (applied to every row) or a "
             "dict keyed by the dispatched agent name or by the row's own routing key (its "
-            "agent_ref.name or task_source as written in the data, before any agent_map/fan_out "
+            "agent_ref.name or task_source as written in the data, before any agent_map/agent_pool/fan_out "
             "re-route); the dispatched agent wins when both have entries. In dict form, every row "
             "must match an entry, unless a special '_default' key is provided as a fallback. "
             "Useful for mean@k."
@@ -1602,6 +1614,28 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
                     f"fan_out[{key!r}] lists the same agent more than once: {duplicates}. Each listed "
                     "agent already runs every matching row; use num_repeats for repetition."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_agent_pool(self) -> "RolloutCollectionConfig":
+        for key, agents in (self.agent_pool or {}).items():
+            if not agents:
+                raise ValueError(
+                    f"agent_pool[{key!r}] is an empty list, which cannot select an agent. "
+                    "Remove the key, or list at least one agent."
+                )
+            duplicates = sorted({agent for agent in agents if list(agents).count(agent) > 1})
+            if duplicates:
+                raise ValueError(
+                    f"agent_pool[{key!r}] lists the same agent more than once: {duplicates}. "
+                    "List each agent once; task assignment is round-robin."
+                )
+        overlap = sorted(set(self.agent_pool or {}) & set(self.fan_out or {}))
+        if overlap:
+            raise ValueError(
+                f"agent_pool and fan_out both configure routing keys {overlap}. agent_pool selects one agent per "
+                "task, while fan_out runs every listed agent; configure only one behavior for each key."
+            )
         return self
 
     @property
@@ -2071,6 +2105,114 @@ class _BoundedCompletionIterator:
 
 
 class RolloutCollectionHelper(BaseModel):
+    @staticmethod
+    def _agent_pool_from_global_config(global_config_dict: DictConfig) -> Optional[Dict[str, List[str]]]:
+        """Read and validate the run-wide pool used by trainer integrations.
+
+        NeMo RL and VeRL call :meth:`run_examples` directly rather than building a
+        ``RolloutCollectionConfig``. Keeping ``agent_pool`` in the merged Gym config
+        gives both integrations the same routing behavior without trainer changes.
+        """
+        raw_pool = global_config_dict.get(AGENT_POOL_KEY_NAME)
+        if raw_pool is None:
+            return None
+        raw_pool = OmegaConf.to_container(raw_pool, resolve=True) if OmegaConf.is_config(raw_pool) else raw_pool
+        validated = RolloutCollectionConfig(
+            input_jsonl_fpath="<in-memory>",
+            output_jsonl_fpath="<in-memory>",
+            agent_pool=raw_pool,
+        )
+        return validated.agent_pool
+
+    @staticmethod
+    def _fallback_agent_pool_index(row: Mapping[str, Any]) -> int:
+        """Derive a stable task identity for older, un-stamped training data.
+
+        Runtime-only fields differ across generations and retries, so omit them.
+        The resulting digest keeps all copies of one prompt on the same harness.
+        Newly collated data uses ``_ng_agent_pool_index`` and does not need this
+        compatibility path.
+        """
+        runtime_keys = {
+            "_rowidx",
+            TASK_INDEX_KEY_NAME,
+            ROLLOUT_INDEX_KEY_NAME,
+            ATTEMPT_INDEX_KEY_NAME,
+            ROLLOUT_ID_KEY_NAME,
+            "_ng_group_id",
+            "_ng_group_attempt",
+        }
+        stable_row = {key: value for key, value in row.items() if key not in runtime_keys}
+        digest = hashlib.sha256(orjson.dumps(stable_row, option=orjson.OPT_SORT_KEYS)).digest()
+        return int.from_bytes(digest[:8], "big")
+
+    @classmethod
+    def _apply_agent_pool(
+        cls,
+        examples: List[Dict],
+        agent_pool: Dict[str, List[str]],
+    ) -> None:
+        """Select and stamp one harness on every row matched by a run-wide pool."""
+        for row in examples:
+            # Explicit Environment Server routing has always taken precedence over
+            # agent routing, including for tasksets and materialized tasks.
+            if NG_ENVIRONMENT_SERVER_KEY in row:
+                continue
+            agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            recorded_assignment = row.get(AGENT_POOL_ASSIGNMENT_KEY_NAME)
+            if recorded_assignment is not None:
+                if not isinstance(recorded_assignment, str) or not recorded_assignment:
+                    raise ValueError(
+                        f"{AGENT_POOL_ASSIGNMENT_KEY_NAME} must be a non-empty agent name; got {recorded_assignment!r}"
+                    )
+                if agent_name != recorded_assignment:
+                    raise ValueError(
+                        f"{AGENT_POOL_ASSIGNMENT_KEY_NAME} records {recorded_assignment!r}, but "
+                        f"agent_ref.name is {agent_name!r}"
+                    )
+                # A materialized or retried row has already made the one-time
+                # selection. Reapplying a reordered pool would change harnesses.
+                continue
+            task_source = row.get(TASK_SOURCE_KEY_NAME)
+            matched_key = next(
+                (key for key in dict.fromkeys((agent_name, task_source)) if key is not None and key in agent_pool),
+                None,
+            )
+            if matched_key is None:
+                continue
+
+            selection_index = row.get(AGENT_POOL_INDEX_KEY_NAME)
+            if selection_index is None:
+                selection_index = row.get(TASK_INDEX_KEY_NAME)
+            if selection_index is None:
+                selection_index = cls._fallback_agent_pool_index(row)
+            if not isinstance(selection_index, int) or isinstance(selection_index, bool) or selection_index < 0:
+                raise ValueError(
+                    f"{AGENT_POOL_INDEX_KEY_NAME} and {TASK_INDEX_KEY_NAME} must be non-negative integers "
+                    f"when used for agent_pool selection; got {selection_index!r}"
+                )
+
+            pool = agent_pool[matched_key]
+            selected = pool[selection_index % len(pool)]
+            if agent_name != selected:
+                row[AGENT_REF_KEY_NAME] = {"name": selected}
+            row[AGENT_POOL_ASSIGNMENT_KEY_NAME] = selected
+
+    @classmethod
+    def _validate_agent_pool_destinations(
+        cls,
+        agent_pool: Dict[str, List[str]],
+        global_config_dict: DictConfig,
+    ) -> None:
+        """Fail before dispatch if any declared pool route can never run."""
+        routes = [
+            {AGENT_REF_KEY_NAME: {"name": agent}, TASK_SOURCE_KEY_NAME: routing_key}
+            for routing_key, agents in agent_pool.items()
+            for agent in agents
+        ]
+        cls._validate_agent_names(routes, global_config_dict)
+        cls._validate_agent_pairings(routes, global_config_dict)
+
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
         if config.limit:
@@ -2109,6 +2251,7 @@ class RolloutCollectionHelper(BaseModel):
         examples: List[Dict],
         *,
         agent_map: Optional[Dict[str, str]] = None,
+        agent_pool: Optional[Dict[str, List[str]]] = None,
         fan_out: Optional[Dict[str, List[str]]] = None,
         num_repeats: Union[int, Dict[str, int]] = 1,
         num_repeats_add_seed: Union[bool, Dict[str, bool]] = False,
@@ -2118,8 +2261,9 @@ class RolloutCollectionHelper(BaseModel):
 
         Public entry point for direct ``run_examples`` callers (e.g. trainer integrations that
         drive dispatch themselves): ``run_examples`` resolves task_sources and validates agent
-        names, but ``agent_map``, ``fan_out`` and ``num_repeats`` are applied only during
-        preprocessing. Call this first, then pass the returned rows to ``run_examples``.
+        names and automatically applies a run-wide ``agent_pool`` from the merged Gym config.
+        Explicit ``agent_map``, ``fan_out`` and ``num_repeats`` arguments are applied only during
+        preprocessing. Call this first when a direct integration needs those expansion knobs.
 
         Pass ``global_config_dict`` (the merged config) to also resolve task_source-only rows to
         their agents here; leave it None to defer that to ``run_examples``, which does it against
@@ -2130,6 +2274,7 @@ class RolloutCollectionHelper(BaseModel):
             input_jsonl_fpath="<in-memory>",
             output_jsonl_fpath="<in-memory>",
             agent_map=agent_map,
+            agent_pool=agent_pool,
             fan_out=fan_out,
             num_repeats=num_repeats,
             num_repeats_add_seed=num_repeats_add_seed,
@@ -2162,6 +2307,8 @@ class RolloutCollectionHelper(BaseModel):
 
         if config.agent_map:
             print(f"Routing rows via agent_map {config.agent_map}")
+        if config.agent_pool:
+            print(f"Selecting one agent per task via agent_pool {config.agent_pool}")
 
         if config.responses_create_params:
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
@@ -2203,6 +2350,12 @@ class RolloutCollectionHelper(BaseModel):
         rows: List[Dict] = []
         overridden_agents: set[Tuple[str, str]] = set()
         for row_idx, row_str, row in tqdm(raw_rows, desc="Preprocessing and repeating rows"):
+            # Resolve task index before agent-pool selection. Honor a caller-provided value
+            # when present so chunked trainer integrations retain globally stable assignments;
+            # otherwise dedupe identical input rows to the same task index as before.
+            if TASK_INDEX_KEY_NAME not in row:
+                row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
+
             task_source = row.get(TASK_SOURCE_KEY_NAME)
             taskset = _materialized_taskset(row)
             environment_server = _environment_server_for_config_row(row, config)
@@ -2210,6 +2363,17 @@ class RolloutCollectionHelper(BaseModel):
             # its task_source (resolved to an agent by resolve_task_sources once the merged config
             # is in hand). agent_map[<basis>] > agent_map._default > row agent_ref > task_source.
             agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            recorded_assignment = row.get(AGENT_POOL_ASSIGNMENT_KEY_NAME)
+            if recorded_assignment is not None:
+                if not isinstance(recorded_assignment, str) or not recorded_assignment:
+                    raise ValueError(
+                        f"{AGENT_POOL_ASSIGNMENT_KEY_NAME} must be a non-empty agent name; got {recorded_assignment!r}"
+                    )
+                if agent_name != recorded_assignment:
+                    raise ValueError(
+                        f"{AGENT_POOL_ASSIGNMENT_KEY_NAME} records {recorded_assignment!r}, but "
+                        f"agent_ref.name is {agent_name!r}"
+                    )
             basis = agent_name if agent_name is not None else task_source
             if environment_server is not None:
                 basis = taskset or task_source or environment_server
@@ -2231,13 +2395,45 @@ class RolloutCollectionHelper(BaseModel):
                         overridden_agents.add((agent_name, mapped))
                     agent_name = mapped
                     row[AGENT_REF_KEY_NAME] = {"name": agent_name}
+                    row.pop(AGENT_POOL_ASSIGNMENT_KEY_NAME, None)
+                    recorded_assignment = None
 
-            # Fan-out: run this row once per listed agent (cross-product). Otherwise a single
-            # target — the row's agent when known, else deferred to task_source resolution.
+            # Agent pool: choose one harness per task before repetition. Fan-out instead runs
+            # every listed harness. Otherwise use the row's known agent or defer task_source
+            # resolution until the merged config is available.
+            matched_pool_key = None
+            if config.agent_pool:
+                matched_pool_key = next(
+                    (
+                        key
+                        for key in dict.fromkeys((basis, task_source))
+                        if key is not None and key in config.agent_pool
+                    ),
+                    None,
+                )
             targets: List[Optional[str]]
             if environment_server is not None:
                 targets = [None]
+            elif matched_pool_key is not None:
+                assert config.agent_pool is not None
+                if recorded_assignment is not None:
+                    targets = [recorded_assignment]
+                else:
+                    pool = config.agent_pool[matched_pool_key]
+                    selection_index = row.get(AGENT_POOL_INDEX_KEY_NAME)
+                    if selection_index is None:
+                        selection_index = row[TASK_INDEX_KEY_NAME]
+                    if (
+                        not isinstance(selection_index, int)
+                        or isinstance(selection_index, bool)
+                        or selection_index < 0
+                    ):
+                        raise ValueError(
+                            f"{AGENT_POOL_INDEX_KEY_NAME} must be a non-negative integer; got {selection_index!r}"
+                        )
+                    targets = [pool[selection_index % len(pool)]]
             elif config.fan_out and basis is not None and basis in config.fan_out:
+                row.pop(AGENT_POOL_ASSIGNMENT_KEY_NAME, None)
                 targets = list(config.fan_out[basis])
             elif agent_name is not None:
                 targets = [agent_name]
@@ -2262,23 +2458,17 @@ class RolloutCollectionHelper(BaseModel):
             if skills_ref_dict is not None and taskset is None:
                 row[SKILLS_REF_KEY_NAME] = skills_ref_dict
 
-            # Resolve task index. Honor a caller-provided value when present (e.g. when an
-            # upstream slicer has stamped a globally-stable index across chunks so that
-            # subsequent /aggregate_metrics groupby unions chunks correctly); otherwise dedupe
-            # identical input rows to the same task index as before.
-            if TASK_INDEX_KEY_NAME not in row:
-                row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
             if environment_server is not None:
                 row[NG_ENVIRONMENT_SERVER_KEY] = environment_server
 
             base_row = row
             for target in targets:
                 # num_repeats keys match either side of a re-route: the dispatched agent (the
-                # fan-out/agent_map target) or the row's original routing key (its agent_ref.name
+                # agent-pool/fan-out/agent-map target) or the row's original routing key (its agent_ref.name
                 # or task_source as written in the data). The dispatched agent wins when both have
                 # entries, so `agent_map={source: agent}` composes with `num_repeats={source: k}`.
                 # Dict-form misses batch into one consolidated raise after the loop.
-                repeat_keys = [k for k in dict.fromkeys((target, basis)) if k is not None]
+                repeat_keys = [k for k in dict.fromkeys((target, matched_pool_key, basis)) if k is not None]
                 agents_seen.update(repeat_keys)
                 if fixed_num_repeats is not None:
                     row_num_repeats = fixed_num_repeats
@@ -2311,6 +2501,8 @@ class RolloutCollectionHelper(BaseModel):
                     # the row's agent_ref dict byte-for-byte (it may carry extra fields like type).
                     if target is not None and (row.get(AGENT_REF_KEY_NAME) or {}).get("name") != target:
                         row[AGENT_REF_KEY_NAME] = {"name": target}
+                    if matched_pool_key is not None and target is not None:
+                        row[AGENT_POOL_ASSIGNMENT_KEY_NAME] = target
 
                     # Resolve rollout index
                     row[ROLLOUT_INDEX_KEY_NAME] = task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]]
@@ -3613,6 +3805,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if environment_server_name is not None:
             for row in examples:
                 row[NG_ENVIRONMENT_SERVER_KEY] = environment_server_name
+        agent_pool = self._agent_pool_from_global_config(server_client.global_config_dict)
+        if agent_pool:
+            self._validate_agent_pool_destinations(agent_pool, server_client.global_config_dict)
+            self._apply_agent_pool(examples, agent_pool)
         self._validate_environment_servers(examples, server_client.global_config_dict)
         self._stamp_environment_server_agent_refs(examples, server_client.global_config_dict)
         direct_agent_examples = [row for row in examples if NG_ENVIRONMENT_SERVER_KEY not in row]
@@ -3749,9 +3945,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         """
         We provide this function as a lower level interface for running rollout collection.
 
-        Rows are dispatched as given: task_sources are resolved and agent names validated here,
-        but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
-        ``preprocess_examples`` first if you need them.
+        Rows are dispatched as given except that a run-wide ``agent_pool`` in the merged Gym
+        config is applied before task-source resolution. This is the policy-training path used by
+        NeMo RL and VeRL. Other run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are
+        not applied here; call ``preprocess_examples`` first if a direct caller needs them.
 
         ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
         that ends every rollout still in flight. It defaults off because those rollouts then leave

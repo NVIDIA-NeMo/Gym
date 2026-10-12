@@ -43,5 +43,23 @@ install_python_packages() {
 install_nemo_gym_deps() {
     # Install NeMo-Gym runtime deps; live source is mounted separately.
     echo "Installing NeMo-Gym deps from $NEMO_GYM_ROOT"
+    # A cancelled pip reinstall can leave the distribution directory behind
+    # without RECORD metadata. A subsequent normal install then fails with
+    # ``uninstall-no-record-file``. Repair only that interrupted state in place;
+    # the dependency set survived the interrupted uninstall.
+    if portable_python_can_run && "$DEPS_DIR/bin/python3" - <<'PY'
+from importlib.metadata import PackageNotFoundError, distribution
+
+try:
+    installed = distribution("nemo-gym")
+except PackageNotFoundError:
+    raise SystemExit(1)
+raise SystemExit(0 if installed.files is None else 1)
+PY
+    then
+        echo "Repairing interrupted NeMo-Gym installation without RECORD metadata"
+        "$DEPS_DIR/bin/python3" -m pip install --ignore-installed --no-deps "$NEMO_GYM_ROOT"
+        return
+    fi
     install_python_packages "$NEMO_GYM_ROOT"
 }

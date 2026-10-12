@@ -100,6 +100,7 @@ enroot:
     sqsh_cache_dir: null      # where imported .sqsh images are cached
     rw: true
     remap_root: false
+    unshare_pid: true         # disable only when an outer runtime blocks nested /proc mounts
     start_timeout_s: 600
   exec:
     default_timeout_s: 180
@@ -109,4 +110,9 @@ enroot:
     stable_count: 2
 ```
 
+When Gym itself runs inside a restricted outer container (for example a Pyxis
+training image), pre-import task images on the host and point
+`sqsh_cache_dir` at that shared cache. If the outer runtime rejects a nested
+`/proc` mount, set `unshare_pid: false`; direct host execution should keep the
+default isolation.
 

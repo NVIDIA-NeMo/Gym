@@ -89,6 +89,8 @@ env:
 | `nemo_gym.is_trajectory_collection` | Set to `true` to collect trajectories without training |
 | `nemo_gym.config_paths` | Gym config files, relative to the Gym checkout: vLLM model config and Workplace Assistant agent/resources config |
 
+To train one policy across several compatible agent harnesses, add an `agent_pool` to a Gym config in `config_paths`. Gym selects one harness from the pool for each source task and keeps every `grpo.num_generations_per_prompt` rollout in that prompt group on the selected harness. See [Training on External Agent Harnesses](/tutorials/training-tutorials/external-agent-harnesses#route-training-tasks-across-multiple-harnesses).
+
 <Info>
 The `vllm_model_for_training.yaml` config is required for NeMo RL training integration.
 
