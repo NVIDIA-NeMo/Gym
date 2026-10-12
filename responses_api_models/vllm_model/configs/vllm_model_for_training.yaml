@@ -7,4 +7,6 @@ policy_model:
       model: ${policy_model_name}
       return_token_id_information: true
       request_prompt_and_generation_token_ids: false
+      # Needs a backend that implements required_prefix_token_ids (NeMo-RL vLLM server or Dynamo wrapper).
+      derive_prefix_token_ids_from_messages: false
       uses_reasoning_parser: true
