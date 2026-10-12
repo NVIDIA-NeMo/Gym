@@ -499,12 +499,27 @@ def _acquire_process_runtime(meter: Any) -> _ProcessRuntime:
         return _PROCESS_RUNTIME
 
 
+def _flush_metrics() -> None:
+    try:
+        from opentelemetry import metrics
+
+        force_flush = getattr(metrics.get_meter_provider(), "force_flush", None)
+        if force_flush is not None:
+            force_flush(timeout_millis=5_000)
+    except Exception:
+        logger.debug("nemo-lens: could not export the final runtime metrics", exc_info=True)
+
+
 def _release_process_runtime() -> None:
     global _PROCESS_RUNTIME, _ACTIVE_LOOPS
     with _PROCESS_LOCK:
         _ACTIVE_LOOPS -= 1
         if _ACTIVE_LOOPS > 0 or _PROCESS_RUNTIME is None:
             return
+        # The observable totals report only while an observer runs.
+        # A short-lived process, such as a driver whose run ends before the first periodic export, would never export them.
+        # Exporting once here, while the totals still exist, sends their final values.
+        _flush_metrics()
         # Remove only this module's callback object, never another library's.
         try:
             gc.callbacks.remove(_PROCESS_RUNTIME.gc)

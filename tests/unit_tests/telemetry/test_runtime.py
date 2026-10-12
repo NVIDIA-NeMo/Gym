@@ -436,3 +436,55 @@ class TestRolloutShape:
         assert exported[runtime.ROLLOUT_TOOL_CALLS_INSTRUMENT][0].sum == 1
         assert runtime.ROLLOUT_TURNS_INSTRUMENT not in exported
         assert runtime.ROLLOUT_INPUT_ITEMS_INSTRUMENT not in exported  # a string prompt has no item list
+
+
+def test_the_last_observer_to_stop_exports_the_final_totals(monkeypatch):
+    """A short run ends before any periodic export, so stopping must export the counts while they still exist."""
+    from opentelemetry import metrics
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import MetricExporter, MetricExportResult, PeriodicExportingMetricReader
+
+    class _CapturingExporter(MetricExporter):
+        def __init__(self):
+            super().__init__()
+            self.batches = []
+
+        def export(self, metrics_data, timeout_millis=10_000, **kwargs):
+            self.batches.append(metrics_data)
+            return MetricExportResult.SUCCESS
+
+        def force_flush(self, timeout_millis=10_000):
+            return True
+
+        def shutdown(self, timeout_millis=30_000, **kwargs):
+            pass
+
+    exporter = _CapturingExporter()
+    # An interval far longer than the run, as with a real short-lived driver.
+    provider = MeterProvider(metric_readers=[PeriodicExportingMetricReader(exporter, export_interval_millis=10**9)])
+
+    class _Handle:
+        is_exporting = True
+        meter = provider.get_meter("test")
+
+    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", True)
+    monkeypatch.setenv("NEMO_GYM_OTEL_RUNTIME_METRICS_ENABLED", "1")
+    monkeypatch.setattr(metrics, "get_meter_provider", lambda: provider)
+
+    async def short_run():
+        async with runtime.observe_event_loop("driver"):
+            runtime.driver_metrics().driver.offered += 7
+
+    asyncio.run(short_run())
+
+    exported = {
+        metric.name: list(metric.data.data_points)
+        for data in exporter.batches
+        for resource_metrics in data.resource_metrics
+        for scope_metrics in resource_metrics.scope_metrics
+        for metric in scope_metrics.metrics
+    }
+    (offered,) = exported[runtime.DRIVER_OFFERED_INSTRUMENT]
+    assert offered.value == 7
+    provider.shutdown()
