@@ -13,11 +13,12 @@ swebench_multilingual_opencode_sandboxed_agent:
       remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
       remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
 
-deepswe_opencode_sandboxed_agent:
+# DeepSWE's agent sandbox has no internet access; copy the pinned runtime from the mounted cache instead.
+deepswe_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
-      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
-      remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
+    opencode_agent:
+      sandbox_runtime_binaries:
+        glibc: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
 
 swebench_pro_opencode_sandboxed_agent:
   responses_api_agents:

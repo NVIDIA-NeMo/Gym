@@ -17,12 +17,12 @@ and apply to local calls too. Subagents (`task`) are intentionally enabled for t
 general-purpose integration; the separate `opencode_sandboxed_agent` benchmark
 profile still disables them. Use explicit tool overrides when comparing scores.
 
-Existing flat-row benchmarks keep the `opencode_sandboxed_agent` entrypoint
-and configuration for their Resources-owned lifecycle.
+DeepSWE (`benchmarks/deepswe/opencode.yaml`) runs this agent through EnvironmentServer
+sessions. Other existing flat-row benchmarks keep the `opencode_sandboxed_agent`
+entrypoint and configuration for their Resources-owned lifecycle.
 
 The old `opencode_sandboxed_agent` package remains separate; only its shell PATH
-quoting is fixed for directories containing spaces. No benchmark recipes or
-Resources allowlists are migrated by this integration.
+quoting is fixed for directories containing spaces.
 
 ## EnvironmentServer sessions
 
@@ -119,8 +119,8 @@ training token-ID/logprob support or benchmark accuracy.
 For local calls, OpenCode is installed on first use in a shared background-thread
 task, without blocking the event loop. Failed installs can be retried. A configured `repo_dir` is
 preserved; otherwise the temporary workspace is removed after the call. A local
-working directory is not filesystem isolation. Existing sandboxed benchmarks keep
-using `opencode_sandboxed_agent` directly; there is no bridge or execution-mode flag.
+working directory is not filesystem isolation. Sandboxed benchmarks other than DeepSWE
+keep using `opencode_sandboxed_agent` directly; there is no bridge or execution-mode flag.
 
 ## Configuration compatibility
 
