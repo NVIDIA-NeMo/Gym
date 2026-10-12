@@ -21,26 +21,47 @@ between the eval model and a reference model's deliverables) and
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
+import logging
 import math
 import os
 import random
+import re
 import shutil
+import stat
 import tempfile
 import time
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
 from openai import APITimeoutError
 
-from resources_servers.gdpval.judge_panel import merge_create_kwargs, sample_judge
+from nemo_gym.deliverables import IGNORE_FILES
+from resources_servers.gdpval.judge_panel import AUDIO_EXTS, VIDEO_EXTS, merge_create_kwargs, sample_judge
+from resources_servers.gdpval.preconvert import (
+    OFFICE_EXTENSIONS,
+    AttachmentBudget,
+    extract_xlsx_structured_text,
+    resolve_pdf_provenance,
+    sidecar_pdf,
+)
+from resources_servers.gdpval.scoring import is_permanent_judge_error
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 JUDGE_PROMPT = (
     "Given a task description and reference files, select which of two submission file(s) "
     "better completed the task. "
     "Explain your reasoning then answer BOXED[A], BOXED[B], or BOXED[TIE].\n"
+)
+FINAL_VERDICT_REMINDER = (
+    "End your response with exactly one verdict token on its own final line: "
+    "BOXED[A], BOXED[B], or BOXED[TIE]. A response without one is invalid.\n"
 )
 
 A_WIN_RESPONSE = "BOXED[A]"
@@ -57,33 +78,72 @@ SUBMISSION_A_CLOSE = "\n<SUBMISSION_A_END>\n\n"
 SUBMISSION_B_OPEN = "<SUBMISSION_B_START>\n"
 SUBMISSION_B_CLOSE = "\n<SUBMISSION_B_END>\n\n"
 
-IGNORE_FILES = {
-    "finish_params.json",
-    "history.json",
-    "history.pkl",
-    "metadata.json",
-    "inprogress_history.json",
-    "log.txt",
-    "reference_files",
-}
-
 REQUEST_MAX_ATTEMPTS = 5
 REQUEST_INITIAL_BACKOFF_SECONDS = 5.0
 REQUEST_BACKOFF_MULTIPLIER = 2.0
 REQUEST_MAX_BACKOFF_SECONDS = 60.0
-# Per-request OpenAI client timeout. Multimodal payloads through a flaky
-# proxy have historically taken hours when this defaulted to 600 s × 5
-# retries (50 min/trial × 4 trials = 200 min/verify worst case). 120 s here,
-# combined with non-retryable ``APITimeoutError`` below, bounds wall-clock
-# damage to ~8 min/verify when the upstream is genuinely down.
-JUDGE_REQUEST_TIMEOUT_SECONDS = 120.0
+# Per-request OpenAI client timeout. A local multimodal VLM judge must prefill
+# the whole payload (dozens of rasterized pages + extracted text per side)
+# before the first token, which for image-dense deliverables can exceed the
+# 120 s originally tuned for a flaky frontier proxy -- silently dropping
+# slow-but-healthy local judgements and biasing the ELO fit. Default 300 s;
+# override with ``GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS``. Kept non-retryable
+# (below) so a genuinely dead upstream still bounds wall-clock rather than
+# retrying N x timeout.
+JUDGE_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS", "300"))
+
+
+def _byte_limit(name: str, default: int) -> int:
+    """Read a positive byte limit while retaining the hardened default."""
+    value = int(os.environ.get(name, str(default)))
+    if value <= 0:
+        raise ValueError(f"{name} must be positive, got {value}")
+    return value
+
+
 # Per-file size cap on multimodal content blocks. Above this the file is
 # replaced with a one-line text marker so the judge still knows what was
 # claimed without us pushing 100s of MB of base64 through the proxy.
 # Set high enough (250 MB) that normal multi-stem audio and reference
 # videos in the GDPVal task set still go through; only catches the truly
 # pathological cases (e.g. ``task_a941b6d8`` 657 MB overlay clip).
-MAX_FILE_BYTES_FOR_JUDGE = 250 * 1024 * 1024
+MAX_FILE_BYTES_FOR_JUDGE = _byte_limit("GDPVAL_MAX_FILE_BYTES_FOR_JUDGE", 250 * 1024 * 1024)
+# Aggregate encoded payload is what the HTTP server sees. Keeping it below
+# 400 MiB leaves roughly 80 MB even if the model server's advertised 500 MB
+# ceiling is decimal, for JSON, prompts, spreadsheet text, and framing. The raw
+# ceiling separately prevents pathological media accumulation before base64.
+MAX_TOTAL_RAW_ATTACHMENT_BYTES_FOR_JUDGE = _byte_limit(
+    "GDPVAL_MAX_TOTAL_RAW_ATTACHMENT_BYTES_FOR_JUDGE", 300 * 1024 * 1024
+)
+MAX_TOTAL_ENCODED_ATTACHMENT_CHARS_FOR_JUDGE = _byte_limit(
+    "GDPVAL_MAX_TOTAL_ENCODED_ATTACHMENT_CHARS_FOR_JUDGE", 400 * 1024 * 1024
+)
+# Each directory is built independently. Keeping every section below an equal,
+# conservative share means references can never consume the bytes needed to
+# show both submissions, and limits peak memory before message assembly.
+MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE = _byte_limit(
+    "GDPVAL_MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE", 96 * 1024 * 1024
+)
+MAX_SECTION_ENCODED_ATTACHMENT_CHARS_FOR_JUDGE = _byte_limit(
+    "GDPVAL_MAX_SECTION_ENCODED_ATTACHMENT_CHARS_FOR_JUDGE", 128 * 1024 * 1024
+)
+MAX_TEXT_FILE_CHARS_FOR_JUDGE = 200_000
+MAX_SECTION_TEXT_CHARS_FOR_JUDGE = 1_000_000
+MAX_XLSX_TEXT_CHARS_FOR_JUDGE = 120_000
+# Includes base64, all text, data-URL prefixes, and conservative JSON framing.
+# This stays below endpoints configured with a 500 MB request-body ceiling.
+MAX_TOTAL_SERIALIZED_REQUEST_BYTES_FOR_JUDGE = _byte_limit(
+    "GDPVAL_MAX_TOTAL_SERIALIZED_REQUEST_BYTES_FOR_JUDGE", 420 * 1024 * 1024
+)
+MAX_TASK_PROMPT_CHARS_FOR_JUDGE = 1_000_000
+# Archives expand before their members enter the normal payload builders, so
+# bound that work independently. Extracting more than one section's raw budget
+# cannot make more binary evidence visible to the judge.
+MAX_ZIP_ARCHIVE_BYTES_FOR_JUDGE = MAX_FILE_BYTES_FOR_JUDGE
+MAX_ZIP_MEMBERS_FOR_JUDGE = 1_000
+MAX_ZIP_MEMBER_BYTES_FOR_JUDGE = MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE
+MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES_FOR_JUDGE = MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE
+ZIP_COPY_CHUNK_BYTES = 1024 * 1024
 RETRYABLE_ERROR_MARKERS = (
     "429",
     "502",
@@ -91,6 +151,8 @@ RETRYABLE_ERROR_MARKERS = (
     "504",
     "rate limit",
     "ratelimit",
+    "rate_limit",
+    "too many requests",
     "resource_exhausted",
     "resource has been exhausted",
     "throttling",
@@ -102,7 +164,6 @@ RETRYABLE_ERROR_MARKERS = (
     "temporarily unavailable",
     "connection error",
 )
-
 # ---------------------------------------------------------------------------
 # File handling
 # ---------------------------------------------------------------------------
@@ -113,9 +174,24 @@ def _data_url(mime_type: str, data: bytes) -> str:
     return f"data:{mime_type};base64,{b64}"
 
 
-def _load_raw_text(path: str | Path) -> str:
+def _bounded_text(text: str, cap: int, marker: str = "\n[...truncated]") -> str:
+    if cap <= 0:
+        return ""
+    if len(text) <= cap:
+        return text
+    if cap <= len(marker):
+        return marker[-cap:]
+    return text[: cap - len(marker)] + marker
+
+
+def _load_raw_text(path: str | Path, max_chars: int = MAX_TEXT_FILE_CHARS_FOR_JUDGE) -> str:
+    """Read only the prefix that can be emitted to the judge."""
+
+    if max_chars <= 0:
+        return ""
     with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+        text = f.read(max_chars + 1)
+    return _bounded_text(text, max_chars)
 
 
 def _load_media(path: str | Path) -> bytes:
@@ -123,34 +199,221 @@ def _load_media(path: str | Path) -> bytes:
         return f.read()
 
 
-def _convert_to_pdf(path: str | Path) -> bytes | None:
-    """Load a pre-converted PDF (same name, .pdf extension). Returns None if missing."""
+def _resolve_office_pdf_path(
+    path: str | Path,
+    *,
+    cached_pdf_path: Path | None = None,
+    provenance_resolved: bool = False,
+) -> Path | None:
+    """Return a provenance-safe Office render without rereading known listings."""
+
     input_path = Path(path).resolve()
-    output_path = input_path.with_suffix(".pdf")
-    if output_path.exists():
-        return _load_media(output_path)
-    return None
+    if provenance_resolved:
+        return cached_pdf_path.resolve() if cached_pdf_path is not None else None
+    try:
+        entries = [entry.resolve() for entry in input_path.parent.iterdir() if entry.is_file()]
+    except OSError:
+        return None
+    output_path = resolve_pdf_provenance(entries).office_pdfs.get(input_path)
+    if output_path is None and input_path.suffix.lower() not in OFFICE_EXTENSIONS:
+        # Preserve the historical fallback for less-common document formats
+        # that are not preconverted by GDPVal but may already have a render.
+        injective = sidecar_pdf(input_path)
+        plain = input_path.with_suffix(".pdf")
+        output_path = injective if injective.is_file() else plain if plain.is_file() else None
+    return output_path
 
 
-def _maybe_unzip(path: str | Path) -> tuple[Path | None, list[Path]]:
-    """Extract a zip into a per-call tempdir; never write into ``path.parent``.
+def _convert_to_pdf(path: str | Path) -> bytes | None:
+    """Load the provenance-safe pre-converted PDF for an Office source."""
+
+    output_path = _resolve_office_pdf_path(path)
+    return _load_media(output_path) if output_path is not None else None
+
+
+def _attachment_omission(file_name: str, size_bytes: int, reason: str) -> dict[str, str]:
+    return {
+        "type": "text",
+        "text": f"[attachment omitted for {file_name}: {_human_attachment_size(size_bytes)} raw; {reason}]",
+    }
+
+
+def _reserve_attachment_path(
+    path: Path,
+    file_name: str,
+    budget: AttachmentBudget | None,
+) -> tuple[int, dict[str, str] | None]:
+    """Stat and reserve an attachment before any read or base64 allocation."""
+
+    try:
+        size_bytes = path.stat().st_size
+    except OSError:
+        return 0, {"type": "text", "text": f"[attachment unavailable for {file_name}]"}
+    if size_bytes > MAX_FILE_BYTES_FOR_JUDGE:
+        return size_bytes, _attachment_omission(file_name, size_bytes, "per-file judge payload limit")
+    if budget is not None and not budget.reserve(size_bytes):
+        return size_bytes, _attachment_omission(file_name, size_bytes, "section judge payload budget")
+    return size_bytes, None
+
+
+def _maybe_unzip(path: str | Path, *, omissions: list[str] | None = None) -> tuple[Path | None, list[Path]]:
+    """Extract a bounded zip into a per-call tempdir.
 
     The reference deliverables tree is mounted read-only in production, so the
     previous behaviour of ``extractall(path.parent)`` raised ``PermissionError``
-    and failed /verify outright. Returns ``(extract_dir, member_paths)`` —
-    callers are responsible for ``shutil.rmtree(extract_dir)`` after they're
-    done reading the members.
+    and failed /verify outright. Member count, individual expanded size, and
+    total expanded size are checked before opening a member; the streaming copy
+    enforces the declared size as a second line of defence. Absolute, parent-
+    traversing, duplicate, and symlink entries are rejected. Callers can collect
+    omissions so partial archives cannot silently become complete evidence.
+
+    Returns ``(extract_dir, member_paths)``. Callers are responsible for
+    ``shutil.rmtree(extract_dir)`` after reading the members.
     """
     path = Path(path)
+
+    def omitted(reason: str) -> None:
+        if omissions is not None:
+            omissions.append(f"[attachment omitted from {path.name}: {reason}]")
+
+    extract_dir: Path | None = None
     try:
+        if path.stat().st_size > MAX_ZIP_ARCHIVE_BYTES_FOR_JUDGE:
+            omitted("compressed archive limit")
+            LOGGER.warning("zip %s exceeds the compressed archive limit; ignoring it", path)
+            return None, []
         with zipfile.ZipFile(path, "r") as zip_ref:
             extract_dir = Path(tempfile.mkdtemp(prefix="gdpval_unzip_"))
-            zip_ref.extractall(extract_dir)
-            members = zip_ref.namelist()
-            extracted_paths = [extract_dir / Path(member) for member in members if member]
+            extract_root = extract_dir.resolve()
+            extracted_paths: list[Path] = []
+            extracted_targets: set[Path] = set()
+            total_uncompressed = 0
+            examined_files = 0
+
+            for info in zip_ref.infolist():
+                if info.is_dir():
+                    continue
+                examined_files += 1
+                if examined_files > MAX_ZIP_MEMBERS_FOR_JUDGE:
+                    omitted("archive member count limit")
+                    LOGGER.warning(
+                        "zip %s exceeds the %d-member extraction limit; ignoring remaining members",
+                        path,
+                        MAX_ZIP_MEMBERS_FOR_JUDGE,
+                    )
+                    break
+
+                # ZIP member names are POSIX paths regardless of host OS. Treat
+                # backslashes as separators too so a Windows consumer cannot turn
+                # a benign-looking name into traversal later.
+                member_path = PurePosixPath(info.filename.replace("\\", "/"))
+                parts = member_path.parts
+                mode = info.external_attr >> 16
+                if (
+                    member_path.is_absolute()
+                    or not parts
+                    or any(part in {"", ".", ".."} for part in parts)
+                    or re.match(r"^[A-Za-z]:", parts[0])
+                    or stat.S_ISLNK(mode)
+                ):
+                    omitted(f"unsafe archive member {info.filename!r}")
+                    LOGGER.warning("ignoring unsafe zip member %r in %s", info.filename, path)
+                    continue
+
+                member_size = max(0, info.file_size)
+                if member_size > MAX_ZIP_MEMBER_BYTES_FOR_JUDGE:
+                    omitted(f"archive member size limit: {info.filename!r}")
+                    LOGGER.warning("ignoring oversize zip member %r in %s", info.filename, path)
+                    continue
+                if total_uncompressed + member_size > MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES_FOR_JUDGE:
+                    omitted(f"archive expansion limit: {info.filename!r}")
+                    LOGGER.warning("ignoring zip member %r after aggregate expansion limit", info.filename)
+                    continue
+
+                target = (extract_root / Path(*parts)).resolve()
+                if not target.is_relative_to(extract_root) or target in extracted_targets or target.exists():
+                    omitted(f"duplicate or escaping archive member {info.filename!r}")
+                    LOGGER.warning("ignoring duplicate or escaping zip member %r in %s", info.filename, path)
+                    continue
+
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    omitted(f"conflicting archive member {info.filename!r}")
+                    LOGGER.warning("ignoring conflicting zip member %r in %s", info.filename, path)
+                    continue
+                written = 0
+                try:
+                    with zip_ref.open(info, "r") as source, target.open("xb") as destination:
+                        while written < member_size:
+                            chunk = source.read(min(ZIP_COPY_CHUNK_BYTES, member_size - written))
+                            if not chunk:
+                                break
+                            destination.write(chunk)
+                            written += len(chunk)
+                        if written != member_size or source.read(1):
+                            raise ValueError("expanded size does not match ZIP metadata")
+                except (OSError, RuntimeError, ValueError, zipfile.BadZipFile):
+                    omitted(f"unreadable archive member {info.filename!r}")
+                    if target.is_file() or target.is_symlink():
+                        target.unlink(missing_ok=True)
+                    LOGGER.warning("failed bounded extraction of zip member %r in %s", info.filename, path)
+                    continue
+
+                total_uncompressed += written
+                extracted_targets.add(target)
+                extracted_paths.append(target)
         return extract_dir, extracted_paths
     except (zipfile.BadZipFile, zipfile.LargeZipFile, FileNotFoundError, OSError):
+        omitted("unreadable archive")
+        if extract_dir is not None:
+            shutil.rmtree(extract_dir, ignore_errors=True)
         return None, []
+
+
+# Keyed by bare (dot-less) extension, mirroring FILE_TYPE_MAP's lookup. Media
+# entries are generated from judge_panel's canonical sets below, so an extension
+# that routing treats as audio/video can never be missing an emitter here. Note
+# these are the mime strings the frontier judges document (e.g. "video/mov",
+# "audio/mp3"), which differ from the IANA names used on the rubric path.
+_AUDIO_MIME_TYPES: dict[str, str] = {
+    "wav": "audio/wav",
+    "mp3": "audio/mp3",
+    "m4a": "audio/mp4",
+    "ogg": "audio/ogg",
+    "oga": "audio/ogg",
+    "opus": "audio/opus",
+    "wma": "audio/x-ms-wma",
+    "aiff": "audio/aiff",
+    "aif": "audio/aiff",
+    "aac": "audio/aac",
+    "flac": "audio/flac",
+}
+_VIDEO_MIME_TYPES: dict[str, str] = {
+    "mp4": "video/mp4",
+    "m4v": "video/x-m4v",
+    "mov": "video/mov",
+    "avi": "video/avi",
+    "mkv": "video/x-matroska",
+    "webm": "video/webm",
+    "wmv": "video/wmv",
+    "flv": "video/x-flv",
+    "mpeg": "video/mpeg",
+    "mpg": "video/mpeg",
+    "3gp": "video/3gpp",
+}
+
+
+def _media_entries(exts: frozenset[str], mime_types: dict[str, str], file_type: str) -> dict[str, dict[str, Any]]:
+    """Build FILE_TYPE_MAP entries for every extension routing can detect."""
+    return {
+        ext.lstrip("."): {
+            "type": file_type,
+            "converter": _load_media,
+            "mime_type": mime_types.get(ext.lstrip("."), "application/octet-stream"),
+        }
+        for ext in exts
+    }
 
 
 FILE_TYPE_MAP: dict[str, dict[str, Any]] = {
@@ -161,19 +424,8 @@ FILE_TYPE_MAP: dict[str, dict[str, Any]] = {
     "webp": {"type": "IMG", "converter": _load_media, "mime_type": "image/webp"},
     "heic": {"type": "IMG", "converter": _load_media, "mime_type": "image/heic"},
     "heif": {"type": "IMG", "converter": _load_media, "mime_type": "image/heif"},
-    "wav": {"type": "AUDIO", "converter": _load_media, "mime_type": "audio/wav"},
-    "mp3": {"type": "AUDIO", "converter": _load_media, "mime_type": "audio/mp3"},
-    "ogg": {"type": "AUDIO", "converter": _load_media, "mime_type": "audio/ogg"},
-    "aiff": {"type": "AUDIO", "converter": _load_media, "mime_type": "audio/aiff"},
-    "aac": {"type": "AUDIO", "converter": _load_media, "mime_type": "audio/aac"},
-    "flac": {"type": "AUDIO", "converter": _load_media, "mime_type": "audio/flac"},
-    "mp4": {"type": "VIDEO", "converter": _load_media, "mime_type": "video/mp4"},
-    "mov": {"type": "VIDEO", "converter": _load_media, "mime_type": "video/mov"},
-    "avi": {"type": "VIDEO", "converter": _load_media, "mime_type": "video/avi"},
-    "x-flv": {"type": "VIDEO", "converter": _load_media, "mime_type": "video/x-flv"},
-    "webm": {"type": "VIDEO", "converter": _load_media, "mime_type": "video/webm"},
-    "wmv": {"type": "VIDEO", "converter": _load_media, "mime_type": "video/wmv"},
-    "3gpp": {"type": "VIDEO", "converter": _load_media, "mime_type": "video/3gpp"},
+    **_media_entries(AUDIO_EXTS, _AUDIO_MIME_TYPES, "AUDIO"),
+    **_media_entries(VIDEO_EXTS, _VIDEO_MIME_TYPES, "VIDEO"),
     "docx": {"type": "DOC", "converter": _convert_to_pdf, "mime_type": "application/pdf"},
     "pptx": {"type": "DOC", "converter": _convert_to_pdf, "mime_type": "application/pdf"},
     "xlsx": {"type": "DOC", "converter": _convert_to_pdf, "mime_type": "application/pdf"},
@@ -198,23 +450,29 @@ FILE_TYPE_MAP: dict[str, dict[str, Any]] = {
 }
 
 
-def get_file_content_block(file_dir: str, file_name: str) -> dict | None:
+def get_file_content_block(
+    file_dir: str,
+    file_name: str,
+    *,
+    attachment_budget: AttachmentBudget | None = None,
+    cached_office_pdf: Path | None = None,
+    provenance_resolved: bool = False,
+    max_text_chars: int = MAX_TEXT_FILE_CHARS_FOR_JUDGE,
+) -> dict | None:
     """Return a single OpenAI content block (dict) for a file, or ``None``."""
     file_extension = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
 
     if file_extension not in FILE_TYPE_MAP:
         file_type = "DOC"
-        file_converter = _convert_to_pdf
         file_mime_type = "application/pdf"
     else:
         file_type = FILE_TYPE_MAP[file_extension]["type"]
-        file_converter = FILE_TYPE_MAP[file_extension]["converter"]
         file_mime_type = FILE_TYPE_MAP[file_extension]["mime_type"]
 
-    full_path = os.path.join(file_dir, file_name)
+    full_path = Path(file_dir) / file_name
 
     try:
-        size_bytes = os.path.getsize(full_path)
+        size_bytes = full_path.stat().st_size
     except OSError:
         return None
     if size_bytes > MAX_FILE_BYTES_FOR_JUDGE:
@@ -226,21 +484,35 @@ def get_file_content_block(file_dir: str, file_name: str) -> dict | None:
 
     try:
         if file_type == "TXT":
-            raw_text = file_converter(full_path)
+            raw_text = _load_raw_text(full_path, max_text_chars)
             return {"type": "text", "text": raw_text}
 
         if file_type == "DOC":
-            doc_bytes = file_converter(full_path)
-            if doc_bytes is None:
+            pdf_path = _resolve_office_pdf_path(
+                full_path,
+                cached_pdf_path=cached_office_pdf,
+                provenance_resolved=provenance_resolved,
+            )
+            if pdf_path is None:
                 return None
-            return {"type": "image_url", "image_url": {"url": _data_url(file_mime_type, doc_bytes)}}
+            _size, omitted = _reserve_attachment_path(pdf_path, file_name, attachment_budget)
+            if omitted is not None:
+                return omitted
+            data = _load_media(pdf_path)
+            return {"type": "image_url", "image_url": {"url": _data_url(file_mime_type, data)}}
 
         if file_type == "PDF":
-            data = Path(full_path).read_bytes()
+            _size, omitted = _reserve_attachment_path(full_path, file_name, attachment_budget)
+            if omitted is not None:
+                return omitted
+            data = _load_media(full_path)
             return {"type": "image_url", "image_url": {"url": _data_url(file_mime_type, data)}}
 
         if file_type in ("IMG", "AUDIO", "VIDEO"):
-            media_bytes = file_converter(full_path)
+            _size, omitted = _reserve_attachment_path(full_path, file_name, attachment_budget)
+            if omitted is not None:
+                return omitted
+            media_bytes = _load_media(full_path)
             return {"type": "image_url", "image_url": {"url": _data_url(file_mime_type, media_bytes)}}
 
     except Exception as e:
@@ -249,53 +521,500 @@ def get_file_content_block(file_dir: str, file_name: str) -> dict | None:
     return None
 
 
-def build_file_section(file_dir: str | None, clean_up_list: list[Path] | None = None) -> list[dict]:
+MAX_RASTER_PAGE_PIXELS_FOR_JUDGE = 40_000_000
+
+
+def _pdf_path_to_image_text_blocks(
+    pdf_path: Path,
+    *,
+    render_dpi: int,
+    max_pages: int,
+    include_text: bool,
+    attachment_budget: AttachmentBudget,
+    max_text_chars: int,
+    file_name: str,
+) -> list[dict]:
+    """Render one PDF page at a time, reserving PNG bytes before base64."""
+
+    try:
+        import fitz
+    except ImportError:
+        LOGGER.warning("PyMuPDF (fitz) not installed; cannot rasterize PDF for image-only judge")
+        return []
+
+    try:
+        document = fitz.open(str(pdf_path))
+    except Exception as exc:
+        LOGGER.warning("failed to open PDF %s for rasterization: %r", file_name, exc)
+        return []
+
+    images: list[dict] = []
+    text_parts: list[str] = []
+    text_remaining = max(0, max_text_chars)
+    text_truncated = False
+    try:
+        total_pages = document.page_count
+        page_limit = min(total_pages, max(0, max_pages))
+        zoom = render_dpi / 72.0
+        matrix = fitz.Matrix(zoom, zoom)
+        for page_index in range(page_limit):
+            try:
+                page = document.load_page(page_index)
+                if include_text and text_remaining > 0:
+                    page_text = (page.get_text("text") or "").strip()
+                    if page_text:
+                        separator = 2 if text_parts else 0
+                        if separator < text_remaining:
+                            take = min(len(page_text), text_remaining - separator)
+                            text_parts.append(page_text[:take])
+                            text_remaining -= separator + take
+                            if take < len(page_text):
+                                text_truncated = True
+                elif include_text and text_parts:
+                    text_truncated = True
+
+                rect = page.rect
+                width = math.ceil(rect.width * zoom)
+                height = math.ceil(rect.height * zoom)
+                if width * height > MAX_RASTER_PAGE_PIXELS_FOR_JUDGE:
+                    images.append(
+                        {
+                            "type": "text",
+                            "text": f"[page {page_index + 1} omitted for {file_name}: raster dimensions too large]",
+                        }
+                    )
+                    continue
+                pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+                png = pixmap.tobytes("png")
+            except Exception as exc:
+                LOGGER.warning("failed to render PDF page %d for %s: %r", page_index, file_name, exc)
+                continue
+            if not attachment_budget.reserve(len(png)):
+                images.append(_attachment_omission(file_name, len(png), "section judge payload budget"))
+                break
+            images.append({"type": "image_url", "image_url": {"url": _data_url("image/png", png)}})
+
+        if total_pages > page_limit:
+            images.append({"type": "text", "text": f"[truncated: rendered {page_limit} of {total_pages} pages]"})
+    finally:
+        document.close()
+
+    blocks: list[dict] = []
+    if text_parts:
+        extracted = "\n\n".join(text_parts)
+        if text_truncated:
+            extracted = _bounded_text(extracted + "x", max_text_chars, "\n[...text truncated]")
+        blocks.append({"type": "text", "text": f"[extracted text]\n{extracted}"})
+    blocks.extend(images)
+    return blocks
+
+
+def get_file_image_text_blocks(
+    file_dir: str,
+    file_name: str,
+    *,
+    render_dpi: int,
+    max_pages: int,
+    include_text: bool,
+    audio_capable: bool = False,
+    video_capable: bool = False,
+    attachment_budget: AttachmentBudget | None = None,
+    cached_office_pdf: Path | None = None,
+    provenance_resolved: bool = False,
+    max_text_chars: int = MAX_TEXT_FILE_CHARS_FOR_JUDGE,
+) -> list[dict]:
+    """``images_and_text`` variant of :func:`get_file_content_block`.
+
+    For image-only local VLM judges (e.g. a gym-spawned Kimi K2.6) PDFs and
+    (preconverted) Office docs are rasterized to per-page PNG image blocks with
+    the extracted text attached, instead of being sent as an ``application/pdf``
+    data URL the judge can't decode. Native images and text files pass through
+    unchanged.
+
+    Audio and video are gated INDEPENDENTLY because judges differ per modality:
+    a video file passes through only when *video_capable*, an audio file only
+    when *audio_capable* — so a MiniMax-M3 judge (video yes, audio no) keeps video
+    but stubs audio. Passed-through media uses the vLLM-standard ``video_url`` /
+    ``input_audio`` content types (not the ``image_url`` wrapper used for frontier
+    judges, which vLLM won't route to the video/audio tower). An unreadable
+    modality is replaced with a one-line marker. Returns a list of 0+ blocks.
+    """
+    from resources_servers.gdpval.media_conversion import audio_video_block
+
+    file_extension = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    info = FILE_TYPE_MAP.get(file_extension)
+    file_type = info["type"] if info else "DOC"
+    full_path = Path(file_dir) / file_name
+    budget = attachment_budget or AttachmentBudget(
+        raw_limit=MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE,
+        encoded_limit=MAX_SECTION_ENCODED_ATTACHMENT_CHARS_FOR_JUDGE,
+    )
+
+    try:
+        size_bytes = full_path.stat().st_size
+    except OSError:
+        return []
+    if size_bytes > MAX_FILE_BYTES_FOR_JUDGE:
+        size_mb = size_bytes / (1024 * 1024)
+        return [{"type": "text", "text": f"[oversize: {file_name} {size_mb:.1f}MB — not included]"}]
+
+    try:
+        # PDFs and Office docs (preconverted to a sibling .pdf) → page images + text.
+        if file_type == "PDF":
+            pdf_path: Path | None = full_path
+        elif file_type == "DOC":
+            pdf_path = _resolve_office_pdf_path(
+                full_path,
+                cached_pdf_path=cached_office_pdf,
+                provenance_resolved=provenance_resolved,
+            )
+            if pdf_path is None:
+                # No sibling .pdf render exists, so this Office deliverable's content
+                # is invisible to an image-only judge (only the filename is shown).
+                # Warn so an incomplete-preconvert reference cache surfaces instead of
+                # silently scoring empty -- run preconvert on the cache to include it.
+                LOGGER.warning(
+                    "office file %r has no sibling .pdf render; its content is invisible "
+                    "to this judge -- preconvert the deliverables cache to include it",
+                    file_name,
+                )
+        else:
+            pdf_path = None
+
+        if pdf_path is not None:
+            try:
+                pdf_size = pdf_path.stat().st_size
+            except OSError:
+                return [{"type": "text", "text": f"[attachment unavailable for {file_name}]"}]
+            if pdf_size > MAX_FILE_BYTES_FOR_JUDGE:
+                return [_attachment_omission(file_name, pdf_size, "per-file judge payload limit")]
+            # The PDF is only an input to rasterization; it is not part of the
+            # request. Its compressed source size says nothing about whether a
+            # rendered PNG page fits the remaining attachment-output budget.
+            if not budget.can_fit(1):
+                return [_attachment_omission(file_name, pdf_size, "section judge payload budget")]
+            blocks = _pdf_path_to_image_text_blocks(
+                pdf_path,
+                render_dpi=render_dpi,
+                max_pages=max_pages,
+                include_text=include_text,
+                attachment_budget=budget,
+                max_text_chars=max_text_chars,
+                file_name=file_name,
+            )
+            if blocks:
+                return blocks
+            # Office doc with no preconverted PDF (or an unrenderable PDF): fall
+            # back to raw text extraction so the judge still sees the content.
+            if file_type == "DOC":
+                return [{"type": "text", "text": f"[no PDF render available for {file_name}]"}]
+            return []
+
+        # Audio/video: forward with the vLLM-standard content type when the judge
+        # can read that specific modality; otherwise advertise the file by name.
+        # This ``images_and_text`` path is only ever a self-hosted vLLM judge, so
+        # AV is emitted as ``video_url`` / ``input_audio`` (not the ``image_url``
+        # wrapper frontier judges use), which is what vLLM routes to the media
+        # tower. Audio and video are gated separately (MiniMax-M3: video yes,
+        # audio no).
+        if file_type in ("AUDIO", "VIDEO"):
+            can_read = video_capable if file_type == "VIDEO" else audio_capable
+            if not can_read:
+                return [
+                    {"type": "text", "text": f"[{file_type.lower()} file not readable by this judge: {file_name}]"}
+                ]
+            info = FILE_TYPE_MAP.get(file_extension) or {}
+            mime = info.get("mime_type") or "application/octet-stream"
+            _size, omitted = _reserve_attachment_path(full_path, file_name, budget)
+            if omitted is not None:
+                return [omitted]
+            data = _load_media(full_path)
+            return [audio_video_block(mime, data, ext=file_extension, file_type=file_type, openai_native=True)]
+
+        # Text and native images pass through exactly as in native mode.
+        block = get_file_content_block(
+            file_dir,
+            file_name,
+            attachment_budget=budget,
+            cached_office_pdf=cached_office_pdf,
+            provenance_resolved=provenance_resolved,
+            max_text_chars=max_text_chars,
+        )
+        return [block] if block is not None else []
+    except Exception as e:
+        raise RuntimeError(f"Error getting file: {file_name} in directory: {file_dir}: {e}") from e
+
+
+def build_file_section(
+    file_dir: str | None,
+    clean_up_list: list[Path] | None = None,
+    *,
+    media_mode: str = "native_pdf",
+    render_dpi: int = 144,
+    max_pages: int = 50,
+    include_text: bool = True,
+    audio_capable: bool = False,
+    video_capable: bool = False,
+    recursive: bool = False,
+) -> list[dict]:
     """Build OpenAI content blocks from all files in a directory.
 
-    Skips files in ``IGNORE_FILES``. Extracts zips into per-call tempdirs
+    Skips run-state files (``nemo_gym.deliverables.IGNORE_FILES``). Extracts zips into per-call tempdirs
     (the dirs are appended to ``clean_up_list`` for the caller to ``rmtree``).
     Returns a list of content block dicts suitable for OpenAI messages.
+
+    *media_mode* selects how PDFs/Office docs are presented: ``"native_pdf"``
+    (default) sends them as ``application/pdf`` data URLs for frontier judges;
+    ``"images_and_text"`` rasterizes each page to a PNG block and attaches the
+    extracted text, for image-only local VLM judges (see
+    :func:`get_file_image_text_blocks`). *render_dpi*, *max_pages*, and
+    *include_text* tune the ``images_and_text`` rendering. *audio_capable* /
+    *video_capable* keep audio / video files (respectively) as native media
+    blocks (vs stubbing them) when the judge reads that modality — they are
+    independent so a video-only judge (MiniMax-M3) keeps video but stubs audio.
+    Recursive reference inputs retain relative labels and per-directory PDF
+    provenance. Submission directories remain shallow unless explicitly opted in.
     """
     if clean_up_list is None:
         clean_up_list = []
 
     section: list[dict] = []
     no_files = True
+    attachment_budget = AttachmentBudget(
+        raw_limit=MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE,
+        encoded_limit=MAX_SECTION_ENCODED_ATTACHMENT_CHARS_FOR_JUDGE,
+    )
+    text_used = 0
+    text_omitted = False
+    text_marker = "\n[...additional text omitted: section judge text budget exhausted]"
+    retained_av_payloads: dict[tuple[int, str], str] = {}
 
-    extracted_dirs: list[Path] = []
-    if file_dir is not None and os.path.exists(file_dir):
-        for file_name in os.listdir(file_dir):
-            if file_name.lower().endswith(".zip"):
-                extract_dir, _ = _maybe_unzip(os.path.join(file_dir, file_name))
-                if extract_dir is not None:
-                    clean_up_list.append(extract_dir)
-                    extracted_dirs.append(extract_dir)
+    def _av_identity(path: Path) -> tuple[int, str]:
+        digest = hashlib.sha256()
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return size, digest.hexdigest()
 
-    def _emit(directory: str, file_name: str) -> None:
-        nonlocal no_files
-        if file_name in IGNORE_FILES:
-            return
-        section.append({"type": "text", "text": f"\n{file_name}:\n"})
-        block = get_file_content_block(directory, file_name)
-        if block is not None:
+    def _append_block(block: dict) -> None:
+        nonlocal text_used, text_omitted
+        if block.get("type") != "text":
             section.append(block)
+            return
+        value = str(block.get("text", ""))
+        remaining = max(0, MAX_SECTION_TEXT_CHARS_FOR_JUDGE - text_used)
+        if not value:
+            return
+        if _is_lossy_transport_marker(value):
+            # Keep rejection evidence intact even when ordinary text fills the budget.
+            section.append(dict(block))
+            text_used += len(value)
+            return
+        if remaining <= 0:
+            text_omitted = True
+            return
+        shown = _bounded_text(value, remaining, text_marker)
+        if len(shown) < len(value):
+            text_omitted = True
+        copied = dict(block)
+        copied["text"] = shown
+        section.append(copied)
+        text_used += len(shown)
+
+    def _append_blocks(blocks: list[dict]) -> None:
+        for block in blocks:
+            _append_block(block)
+
+    source_root = Path(file_dir) if file_dir is not None else None
+    source_files: list[Path] = []
+    if source_root is not None and source_root.is_dir():
+        discovered = source_root.rglob("*") if recursive else source_root.iterdir()
+        for path in sorted(discovered):
+            if path.is_file():
+                source_files.append(path)
+            elif not path.is_dir() or (recursive and path.is_symlink()):
+                raise ValueError(f"unsupported reference entry: {path}")
+    extracted_archives: list[tuple[Path, str, list[Path]]] = []
+    for archive in source_files:
+        if archive.suffix.lower() != ".zip":
+            continue
+        omissions: list[str] = []
+        extract_dir, members = _maybe_unzip(archive, omissions=omissions)
+        for marker in omissions:
+            LOGGER.warning("Skipping unreadable or unsupported ZIP evidence in %s: %s", archive, marker)
+        if extract_dir is not None:
+            clean_up_list.append(extract_dir)
+            extracted_archives.append((extract_dir.resolve(), archive.relative_to(source_root).as_posix(), members))
+
+    ignore_files = IGNORE_FILES
+    provenance_by_dir: dict[Path, Any] = {}
+    fallback_pdfs_by_dir: dict[Path, dict[Path, Path]] = {}
+    fallback_suppressed_by_dir: dict[Path, frozenset[Path]] = {}
+
+    def _provenance(directory: str):
+        parent = Path(directory)
+        if parent not in provenance_by_dir:
+            entries = [entry for entry in parent.iterdir() if entry.is_file() and entry.name not in ignore_files]
+            provenance_by_dir[parent] = resolve_pdf_provenance(entries)
+            entry_set = set(entries)
+            fallback_sources = [
+                entry
+                for entry in entries
+                if entry.suffix.lower() != ".zip" and (entry.suffix.lower().lstrip(".") not in FILE_TYPE_MAP)
+            ]
+            stem_counts: dict[str, int] = {}
+            for source in fallback_sources:
+                stem_counts[source.stem] = stem_counts.get(source.stem, 0) + 1
+            fallback_pdfs: dict[Path, Path] = {}
+            fallback_suppressed: set[Path] = set()
+            for source in fallback_sources:
+                injective = sidecar_pdf(source)
+                plain = source.with_suffix(".pdf")
+                if injective in entry_set:
+                    fallback_pdfs[source] = injective
+                    fallback_suppressed.add(injective)
+                elif plain in entry_set and stem_counts[source.stem] == 1:
+                    fallback_pdfs[source] = plain
+                    fallback_suppressed.add(plain)
+                elif plain in entry_set:
+                    # Same ambiguity rule as recognized Office sources: never
+                    # emit a stale collided render as independent evidence.
+                    fallback_suppressed.add(plain)
+            fallback_pdfs_by_dir[parent] = fallback_pdfs
+            fallback_suppressed_by_dir[parent] = frozenset(fallback_suppressed)
+        return provenance_by_dir[parent]
+
+    def _structured_xlsx_text(full_path: Path) -> str | None:
+        if full_path.suffix.lower() != ".xlsx":
+            return None
+        try:
+            if full_path.stat().st_size > MAX_FILE_BYTES_FOR_JUDGE:
+                return None
+            remaining = max(0, MAX_SECTION_TEXT_CHARS_FOR_JUDGE - text_used)
+            if remaining <= 0:
+                return None
+            return extract_xlsx_structured_text(
+                full_path,
+                max_chars=min(MAX_XLSX_TEXT_CHARS_FOR_JUDGE, remaining),
+            )
+        except Exception as exc:
+            return f"[structured spreadsheet extraction failed: {exc}]"
+
+    def _emit(directory: str, file_name: str, *, label: str | None = None) -> None:
+        nonlocal no_files
+        if file_name in ignore_files:
+            return
+        label = label or file_name
+        full_path = Path(directory) / file_name
+        provenance = _provenance(directory)
+        parent = Path(directory)
+        if full_path in provenance.suppressed_pdfs or full_path in fallback_suppressed_by_dir[parent]:
+            return
+        info = FILE_TYPE_MAP.get(full_path.suffix.lower().lstrip(".")) or {}
+        cached_office_pdf = provenance.office_pdfs.get(full_path) or fallback_pdfs_by_dir[parent].get(full_path)
+        if not info and cached_office_pdf is None:
+            LOGGER.info("Skipping unsupported judge file: %s", full_path)
+            return
+        if info.get("type") == "DOC" and cached_office_pdf is None:
+            LOGGER.info("Skipping unrendered Office judge file: %s", full_path)
+            return
+        _append_block({"type": "text", "text": f"\n{label}:\n"})
+        av_identity: tuple[int, str] | None = None
+        if info.get("type") in {"AUDIO", "VIDEO"}:
+            try:
+                # Identity exists only to deduplicate retained payloads; never
+                # hash a file the per-file cap already excludes from attachment.
+                if full_path.stat().st_size <= MAX_FILE_BYTES_FOR_JUDGE:
+                    av_identity = _av_identity(full_path)
+            except OSError as exc:
+                _append_block(
+                    {"type": "text", "text": f"[attachment unavailable for {file_name}: {exc.__class__.__name__}]"}
+                )
+                no_files = False
+                return
+            retained_as = retained_av_payloads.get(av_identity) if av_identity is not None else None
+            if retained_as is not None:
+                _append_block(
+                    {
+                        "type": "text",
+                        "text": f"[byte-identical duplicate attachment; content retained once as "
+                        f"{retained_as}; sha256={av_identity[1]}]",
+                    }
+                )
+                no_files = False
+                return
+        remaining_text = max(0, MAX_SECTION_TEXT_CHARS_FOR_JUDGE - text_used)
+        if media_mode == "images_and_text":
+            blocks = get_file_image_text_blocks(
+                directory,
+                file_name,
+                render_dpi=render_dpi,
+                max_pages=max_pages,
+                include_text=include_text,
+                audio_capable=audio_capable,
+                video_capable=video_capable,
+                attachment_budget=attachment_budget,
+                cached_office_pdf=cached_office_pdf,
+                provenance_resolved=True,
+                max_text_chars=min(MAX_TEXT_FILE_CHARS_FOR_JUDGE, remaining_text),
+            )
+            if blocks:
+                _append_blocks(blocks)
+                if av_identity is not None and any(_attachment_payload(block)[0] for block in blocks):
+                    retained_av_payloads[av_identity] = label
+                no_files = False
+            sheet_text = _structured_xlsx_text(full_path)
+            if sheet_text:
+                _append_block(
+                    {
+                        "type": "text",
+                        "text": f"\n{label} (structured spreadsheet cells):\n{sheet_text}",
+                    }
+                )
+                no_files = False
+            return
+        block = get_file_content_block(
+            directory,
+            file_name,
+            attachment_budget=attachment_budget,
+            cached_office_pdf=cached_office_pdf,
+            provenance_resolved=True,
+            max_text_chars=min(MAX_TEXT_FILE_CHARS_FOR_JUDGE, remaining_text),
+        )
+        if block is not None:
+            _append_block(block)
+            if av_identity is not None and _attachment_payload(block)[0]:
+                retained_av_payloads[av_identity] = label
+            no_files = False
+        sheet_text = _structured_xlsx_text(full_path)
+        if sheet_text:
+            _append_block({"type": "text", "text": f"\n{label} (structured spreadsheet cells):\n{sheet_text}"})
             no_files = False
 
-    if file_dir is not None and os.path.exists(file_dir):
-        for file_name in sorted(os.listdir(file_dir)):
-            full_path = os.path.join(file_dir, file_name)
-            if os.path.isdir(full_path) or file_name.lower().endswith(".zip"):
-                continue
-            _emit(file_dir, file_name)
+    for source in source_files:
+        if source.suffix.lower() != ".zip":
+            _emit(str(source.parent), source.name, label=source.relative_to(source_root).as_posix())
 
-    for extract_dir in extracted_dirs:
-        for member in sorted(extract_dir.rglob("*")):
-            if not member.is_file():
-                continue
-            _emit(str(member.parent), member.name)
+    for extract_dir, archive_name, members in extracted_archives:
+        for member in sorted(members):
+            _emit(
+                str(member.parent), member.name, label=f"{archive_name}!/{member.relative_to(extract_dir).as_posix()}"
+            )
 
     if no_files:
-        section.append({"type": "text", "text": "None"})
+        _append_block({"type": "text", "text": "None"})
+
+    if text_omitted and text_marker not in "".join(
+        str(block.get("text", "")) for block in section if block.get("type") == "text"
+    ):
+        for block in reversed(section):
+            if block.get("type") == "text":
+                previous = str(block.get("text", ""))
+                if _is_lossy_transport_marker(previous):
+                    continue
+                block["text"] = _bounded_text(previous + "x", len(previous), text_marker)
+                break
 
     return section
 
@@ -305,6 +1024,279 @@ def build_file_section(file_dir: str | None, clean_up_list: list[Path] | None = 
 # ---------------------------------------------------------------------------
 
 
+def _attachment_payload(block: dict) -> tuple[str, int]:
+    """Return the backing string and base64 start offset without copying it."""
+
+    block_type = block.get("type")
+    if block_type in {"image_url", "video_url"}:
+        value = block.get(block_type, {})
+        url = value.get("url", "") if isinstance(value, dict) else ""
+        if isinstance(url, str) and url.startswith("data:"):
+            comma = url.find(",")
+            if comma >= 0:
+                return url, comma + 1
+    elif block_type == "input_audio":
+        value = block.get("input_audio", {})
+        data = value.get("data", "") if isinstance(value, dict) else ""
+        if isinstance(data, str):
+            return data, 0
+    return "", 0
+
+
+def _attachment_cost(block: dict) -> tuple[int, int]:
+    """Return estimated raw bytes and encoded characters for a data attachment."""
+
+    payload, start = _attachment_payload(block)
+    encoded_chars = len(payload) - start
+    if encoded_chars <= 0:
+        return 0, 0
+
+    padding = 0
+    if payload[-1] == "=":
+        padding = 1
+        if encoded_chars > 1 and payload[-2] == "=":
+            padding = 2
+    raw_bytes = (encoded_chars // 4) * 3 - padding
+    return max(0, raw_bytes), encoded_chars
+
+
+def _attachment_fingerprint(block: dict) -> str:
+    """Hash the complete payload in bounded chunks for A/B-stable tie breaks."""
+
+    payload, start = _attachment_payload(block)
+    digest = hashlib.sha256()
+    chunk_size = 1024 * 1024
+    for offset in range(start, len(payload), chunk_size):
+        digest.update(payload[offset : offset + chunk_size].encode("ascii", errors="ignore"))
+    return digest.hexdigest()
+
+
+def _block_serialized_upper_bound(block: dict) -> int:
+    """Conservative JSON byte bound without copying large base64 strings."""
+
+    _raw_bytes, encoded_chars = _attachment_cost(block)
+    if encoded_chars:
+        payload, start = _attachment_payload(block)
+        # Base64 is JSON-safe ASCII. Account exactly for the data URL prefix and
+        # generously for keys, quotes, optional audio format, and punctuation.
+        return encoded_chars + start + 512
+    if block.get("type") == "text":
+        # Six bytes per character covers JSON escaping (including ensure_ascii)
+        # for BMP text; non-BMP can require two \uXXXX escapes, hence twelve.
+        value = str(block.get("text", ""))
+        non_bmp = sum(ord(character) > 0xFFFF for character in value)
+        return len(value) * 6 + non_bmp * 6 + 256
+    return 4096
+
+
+def _content_serialized_upper_bound(content: list[dict]) -> int:
+    """Conservative serialized request size including outer JSON framing."""
+
+    return 4096 + sum(_block_serialized_upper_bound(block) for block in content)
+
+
+def _bound_section_text(section: list[dict], cap: int) -> list[dict]:
+    result: list[dict] = []
+    remaining = max(0, cap)
+    marker = "\n[...additional text omitted: section judge text budget exhausted]"
+    omitted = False
+    last_text: int | None = None
+    for block in section:
+        if block.get("type") != "text":
+            result.append(block)
+            continue
+        value = str(block.get("text", ""))
+        if _is_lossy_transport_marker(value):
+            result.append(block)
+            remaining = max(0, remaining - len(value))
+            continue
+        if remaining <= 0:
+            omitted = omitted or bool(value)
+            continue
+        shown = _bounded_text(value, remaining, marker)
+        omitted = omitted or len(shown) < len(value)
+        copied = dict(block)
+        copied["text"] = shown
+        result.append(copied)
+        last_text = len(result) - 1
+        remaining -= len(shown)
+    if omitted and last_text is not None and marker not in str(result[last_text].get("text", "")):
+        previous = str(result[last_text].get("text", ""))
+        result[last_text]["text"] = _bounded_text(previous + "x", len(previous), marker)
+    return result
+
+
+def _enforce_attachment_budget(
+    sections: list[list[dict]],
+    *,
+    raw_limit: int,
+    encoded_limit: int,
+    serialized_limit: int | None = None,
+) -> list[list[dict]]:
+    """Keep the request's aggregate binary payload below both hard ceilings.
+
+    Attachments are selected smallest-first, maximizing the number of visible
+    artifacts and preventing one huge reference from starving both submissions.
+    Complete payload hashes break equal-size ties independently of A/B position,
+    so swapping the trial does not change which underlying artifact is kept.
+    Omitted blocks are replaced by explicit text evidence.
+    """
+
+    candidates: list[dict[str, Any]] = []
+    costs: dict[tuple[int, int], tuple[int, int]] = {}
+    for section_index, section in enumerate(sections):
+        for block_index, block in enumerate(section):
+            raw_bytes, encoded_chars = _attachment_cost(block)
+            if encoded_chars == 0:
+                continue
+            key = (section_index, block_index)
+            costs[key] = (raw_bytes, encoded_chars)
+            candidates.append(
+                {
+                    "raw": raw_bytes,
+                    "encoded": encoded_chars,
+                    "serialized": _block_serialized_upper_bound(block),
+                    "section": section_index,
+                    "block": block_index,
+                }
+            )
+
+    serialized_ceiling = encoded_limit + 1024 * len(candidates) if serialized_limit is None else serialized_limit
+    if (
+        sum(int(candidate["raw"]) for candidate in candidates) <= raw_limit
+        and sum(int(candidate["encoded"]) for candidate in candidates) <= encoded_limit
+        and sum(int(candidate["serialized"]) for candidate in candidates) <= serialized_ceiling
+    ):
+        # Normal requests are already bounded per section and fit the aggregate
+        # ceilings. Avoid hashing hundreds of MiB of base64 on every repeated
+        # judge trial when no selection decision is required.
+        return [list(section) for section in sections]
+
+    for candidate in candidates:
+        section_index = int(candidate["section"])
+        block_index = int(candidate["block"])
+        candidate["fingerprint"] = _attachment_fingerprint(sections[section_index][block_index])
+
+    def _sort_key(candidate: dict[str, Any]) -> tuple[int, int, int, str]:
+        return (
+            int(candidate["serialized"]),
+            int(candidate["encoded"]),
+            int(candidate["raw"]),
+            str(candidate["fingerprint"]),
+        )
+
+    selected: set[tuple[int, int]] = set()
+    used_raw = 0
+    used_encoded = 0
+    used_serialized = 0
+
+    def _select(candidate: dict[str, Any], local: AttachmentBudget | None = None, local_serialized: int = 0) -> bool:
+        nonlocal used_raw, used_encoded, used_serialized
+        key = (int(candidate["section"]), int(candidate["block"]))
+        if key in selected:
+            return True
+        raw_bytes = int(candidate["raw"])
+        encoded_chars = int(candidate["encoded"])
+        serialized_bytes = int(candidate["serialized"])
+        if (
+            used_raw + raw_bytes > raw_limit
+            or used_encoded + encoded_chars > encoded_limit
+            or used_serialized + serialized_bytes > serialized_ceiling
+        ):
+            return False
+        if local is not None:
+            if local_serialized + serialized_bytes > serialized_ceiling // max(1, len(sections)):
+                return False
+            if not local.reserve(raw_bytes, encoded_chars):
+                return False
+        selected.add(key)
+        used_raw += raw_bytes
+        used_encoded += encoded_chars
+        used_serialized += serialized_bytes
+        return True
+
+    # Reserve equal shares for A and B before references. Both passes use the
+    # same limits and payload-derived ordering, so swapping A/B is invariant.
+    section_raw = raw_limit // max(1, len(sections))
+    section_encoded = encoded_limit // max(1, len(sections))
+    local_budgets = [AttachmentBudget(section_raw, section_encoded) for _ in sections]
+    local_serialized_used = [0 for _ in sections]
+    section_order = list(range(1, len(sections))) + ([0] if sections else [])
+    for section_index in section_order:
+        for candidate in sorted(
+            (item for item in candidates if item["section"] == section_index),
+            key=_sort_key,
+        ):
+            before = used_serialized
+            if _select(candidate, local_budgets[section_index], local_serialized_used[section_index]):
+                local_serialized_used[section_index] += used_serialized - before
+
+    # If an attachment was larger than its equal share, give each nonempty
+    # submission one deterministic chance before references use spare capacity.
+    submission_seeds: list[dict[str, Any]] = []
+    for section_index in range(1, len(sections)):
+        if any(key[0] == section_index for key in selected):
+            continue
+        choices = [item for item in candidates if item["section"] == section_index]
+        if choices:
+            submission_seeds.append(min(choices, key=_sort_key))
+    for candidate in sorted(submission_seeds, key=_sort_key):
+        _select(candidate)
+
+    # Redistribute every unused byte globally, with complete-payload hashes as
+    # the final tie-break rather than section position.
+    for candidate in sorted(candidates, key=_sort_key):
+        _select(candidate)
+
+    bounded: list[list[dict]] = []
+    for section_index, section in enumerate(sections):
+        output: list[dict] = []
+        last_header = "attachment"
+        omitted_count = 0
+        omitted_raw = 0
+        omitted_encoded = 0
+        omitted_names: list[str] = []
+        for block_index, block in enumerate(section):
+            if block.get("type") == "text":
+                candidate_header = str(block.get("text", "")).strip().splitlines()
+                if candidate_header:
+                    last_header = candidate_header[0].rstrip(":")
+            raw_bytes, encoded_chars = costs.get((section_index, block_index), (0, 0))
+            if encoded_chars and (section_index, block_index) not in selected:
+                omitted_count += 1
+                omitted_raw += raw_bytes
+                omitted_encoded += encoded_chars
+                if len(omitted_names) < 10:
+                    omitted_names.append(last_header)
+            else:
+                output.append(block)
+        if omitted_count:
+            names = ", ".join(omitted_names)
+            if omitted_count > len(omitted_names):
+                names += f", and {omitted_count - len(omitted_names)} more"
+            output.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"[attachment omitted: {omitted_count} file(s) ({names}), "
+                        f"{_human_attachment_size(omitted_raw)} raw, "
+                        f"{_human_attachment_size(omitted_encoded)} base64; aggregate judge payload budget]"
+                    ),
+                }
+            )
+        bounded.append(output)
+    return bounded
+
+
+def _human_attachment_size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GiB"
+
+
 def construct_judge_messages(
     task_prompt: str,
     refs: list[dict],
@@ -312,8 +1304,49 @@ def construct_judge_messages(
     submission_b: list[dict],
 ) -> list[dict]:
     """Assemble OpenAI messages for the judge: prompt + task + refs + submissions."""
+    verdict_reminder_block = {"type": "text", "text": FINAL_VERDICT_REMINDER}
+    # Text can require up to twelve JSON bytes per Unicode code point. Give the
+    # task and three sections equal worst-case shares after reserving framing,
+    # including the trailing verdict reminder, so the final serialized bound
+    # cannot exceed the request cap once every share is fully used.
+    framing_reserve = 16 * 1024 + _block_serialized_upper_bound(verdict_reminder_block)
+    available_text_chars = max(0, MAX_TOTAL_SERIALIZED_REQUEST_BYTES_FOR_JUDGE - framing_reserve) // 12
+    fair_text_cap = available_text_chars // 4
+    section_text_cap = min(MAX_SECTION_TEXT_CHARS_FOR_JUDGE, fair_text_cap)
+    refs = _bound_section_text(refs, section_text_cap)
+    submission_a = _bound_section_text(submission_a, section_text_cap)
+    submission_b = _bound_section_text(submission_b, section_text_cap)
+    bounded_task = _bounded_text(task_prompt, min(MAX_TASK_PROMPT_CHARS_FOR_JUDGE, fair_text_cap))
+    prompt_block = {"type": "text", "text": JUDGE_PROMPT + TASK_TEMPLATE.format(task=bounded_task)}
+    framing = [
+        prompt_block,
+        {"type": "text", "text": REFERENCES_OPEN},
+        {"type": "text", "text": REFERENCES_CLOSE},
+        {"type": "text", "text": SUBMISSION_A_OPEN},
+        {"type": "text", "text": SUBMISSION_A_CLOSE},
+        {"type": "text", "text": SUBMISSION_B_OPEN},
+        {"type": "text", "text": SUBMISSION_B_CLOSE},
+        verdict_reminder_block,
+    ]
+    sections = [refs, submission_a, submission_b]
+    fixed_blocks = framing + [block for section in sections for block in section if _attachment_cost(block)[1] == 0]
+    # Reserve one small aggregate omission notice per section. Everything else
+    # is bounded conservatively at the JSON-string level, including escaped text.
+    fixed_serialized = (
+        4096 + 4096 * len(sections) + sum(_block_serialized_upper_bound(block) for block in fixed_blocks)
+    )
+    attachment_serialized_limit = max(
+        0,
+        MAX_TOTAL_SERIALIZED_REQUEST_BYTES_FOR_JUDGE - fixed_serialized,
+    )
+    refs, submission_a, submission_b = _enforce_attachment_budget(
+        sections,
+        raw_limit=MAX_TOTAL_RAW_ATTACHMENT_BYTES_FOR_JUDGE,
+        encoded_limit=MAX_TOTAL_ENCODED_ATTACHMENT_CHARS_FOR_JUDGE,
+        serialized_limit=attachment_serialized_limit,
+    )
     content: list[dict] = []
-    content.append({"type": "text", "text": JUDGE_PROMPT + TASK_TEMPLATE.format(task=task_prompt)})
+    content.append(prompt_block)
     content.append({"type": "text", "text": REFERENCES_OPEN})
     content.extend(refs)
     content.append({"type": "text", "text": REFERENCES_CLOSE})
@@ -323,6 +1356,14 @@ def construct_judge_messages(
     content.append({"type": "text", "text": SUBMISSION_B_OPEN})
     content.extend(submission_b)
     content.append({"type": "text", "text": SUBMISSION_B_CLOSE})
+    content.append(verdict_reminder_block)
+
+    serialized_bound = _content_serialized_upper_bound(content)
+    if serialized_bound > MAX_TOTAL_SERIALIZED_REQUEST_BYTES_FOR_JUDGE:
+        raise ValueError(
+            "GDPVal judge request size budget exhausted before dispatch: "
+            f"{serialized_bound} > {MAX_TOTAL_SERIALIZED_REQUEST_BYTES_FOR_JUDGE} bytes"
+        )
 
     return [{"role": "user", "content": content}]
 
@@ -337,6 +1378,8 @@ def _is_retryable(error: Exception) -> bool:
     # large for the judge endpoint to digest in time, and retrying just burns
     # another full timeout window per attempt. Fail the trial fast instead.
     if isinstance(error, APITimeoutError):
+        return False
+    if is_permanent_judge_error(error):
         return False
     error_text = str(error).lower()
     return any(marker in error_text for marker in RETRYABLE_ERROR_MARKERS)
@@ -391,15 +1434,29 @@ def send_judge_request(
 # ---------------------------------------------------------------------------
 
 
-def parse_judgement(response_text: str) -> str:
-    """Extract ``BOXED[A]``, ``BOXED[B]``, or ``BOXED[TIE]`` from judge response."""
-    if A_WIN_RESPONSE in response_text:
-        return A_WIN_RESPONSE
-    if B_WIN_RESPONSE in response_text:
-        return B_WIN_RESPONSE
-    if TIE_RESPONSE in response_text:
-        return TIE_RESPONSE
-    return TIE_RESPONSE
+_BOXED_RE = re.compile(r"BOXED\[(A|B|TIE)\]")
+
+_BOXED_TO_RESPONSE = {"A": A_WIN_RESPONSE, "B": B_WIN_RESPONSE, "TIE": TIE_RESPONSE}
+
+
+def parse_judgement(response_text: str) -> Optional[str]:
+    """Extract the judge's verdict (``BOXED[A|B|TIE]``) from its response.
+
+    Uses the **last** boxed token so a verbose/reasoning judge that writes e.g.
+    ``"not BOXED[A]; the answer is BOXED[B]"`` is scored on its conclusion rather
+    than the first token mentioned (the old first-substring match scored A here).
+    When no boxed verdict is present the response is mis-formatted; return
+    ``None`` so the caller can exclude it from the ELO calculation. Treating an
+    invalid response as a tie would award the eval model half a win.
+    """
+    matches = _BOXED_RE.findall(response_text or "")
+    if not matches:
+        LOGGER.warning(
+            "judge response has no BOXED[A|B|TIE] verdict; dropping vote. head=%r",
+            (response_text or "")[:200],
+        )
+        return None
+    return _BOXED_TO_RESPONSE[matches[-1]]
 
 
 def tally_result(
@@ -447,7 +1504,407 @@ class Judge:
     model: str
     create_overrides: Optional[dict] = None
     weight: float = 1.0
-    handles_audio_video: bool = False
+    # Per-modality media capability, tracked separately: a MiniMax-M3 judge reads
+    # video but not audio.
+    handles_audio: bool = False
+    handles_video: bool = False
+    media_mode: str = "native_pdf"
+    max_native_pdf_pages: Optional[int] = None
+    max_native_pdf_documents: Optional[int] = None
+    max_native_pdf_bytes: Optional[int] = None
+    max_native_pdf_bytes_per_document: Optional[int] = None
+    max_image_base64_bytes: Optional[int] = None
+    max_total_image_base64_bytes: Optional[int] = None
+    max_video_files: Optional[int] = None
+    raster_dpi_tiers: tuple[int, ...] = ()
+    max_serialized_request_bytes: Optional[int] = None
+
+
+def preview_trial_judges(judges: list[Judge], num_trials: int, rng: random.Random) -> list[Judge]:
+    """Preview the seeded schedule without consuming *rng*."""
+    if not judges:
+        raise ValueError("preview_trial_judges requires a non-empty judge panel")
+    clone = random.Random()
+    clone.setstate(rng.getstate())
+    return [sample_judge(judges, clone) for _ in range(num_trials)]
+
+
+def filter_media_eligible_judges(
+    judges: list[Judge],
+    *,
+    native_stats: dict[str, int],
+    estimated_images: int,
+    image_cap: int,
+    overflow_plan: Optional[dict] = None,
+) -> tuple[list[Judge], list[dict]]:
+    """Capability-gate the complete panel before seeded trial sampling."""
+    eligible: list[Judge] = []
+    exclusions: list[dict] = []
+    for judge in judges:
+        if judge.media_mode == "native_pdf_overflow_images":
+            if overflow_plan is None or not overflow_plan.get("eligible", False):
+                exclusions.append(
+                    {
+                        "mode": judge.media_mode,
+                        "judges": [judge.name],
+                        "overflow_plan": overflow_plan,
+                        "reason": "native_pdf_overflow_unavailable",
+                    }
+                )
+                continue
+            documents_after = overflow_plan.get("native_documents_after")
+            bytes_after = overflow_plan.get("native_bytes_after_bound")
+            over_aggregate = (
+                judge.max_native_pdf_documents is not None
+                and documents_after is not None
+                and documents_after > judge.max_native_pdf_documents
+            ) or (
+                judge.max_native_pdf_bytes is not None
+                and bytes_after is not None
+                and bytes_after > judge.max_native_pdf_bytes
+            )
+            if over_aggregate:
+                exclusions.append(
+                    {
+                        "mode": judge.media_mode,
+                        "judges": [judge.name],
+                        "pdf_stats": dict(native_stats),
+                        "native_documents_after": documents_after,
+                        "native_bytes_after_bound": bytes_after,
+                        "reason": "native_pdf_cap_after_overflow",
+                    }
+                )
+                continue
+            eligible.append(judge)
+            continue
+        if judge.media_mode == "images_and_text" and estimated_images > image_cap:
+            exclusions.append(
+                {
+                    "mode": judge.media_mode,
+                    "judges": [judge.name],
+                    "estimated_image_count": estimated_images,
+                    "pdf_stats": dict(native_stats),
+                    "cap": image_cap,
+                    "reason": "request_image_cap_preflight",
+                }
+            )
+            continue
+        if judge.media_mode == "native_pdf":
+            over = (
+                (judge.max_native_pdf_pages is not None and native_stats["pages"] > judge.max_native_pdf_pages)
+                or (
+                    judge.max_native_pdf_documents is not None
+                    and native_stats["documents"] > judge.max_native_pdf_documents
+                )
+                or (judge.max_native_pdf_bytes is not None and native_stats["bytes"] > judge.max_native_pdf_bytes)
+            )
+            if over:
+                exclusions.append(
+                    {
+                        "mode": judge.media_mode,
+                        "judges": [judge.name],
+                        "pdf_stats": dict(native_stats),
+                        "reason": "native_pdf_cap",
+                    }
+                )
+                continue
+        eligible.append(judge)
+    return eligible, exclusions
+
+
+def plan_native_pdf_overflow(
+    sections: dict[str, list[dict]],
+    *,
+    native_page_cap: int,
+    native_pdf_bytes_per_document: int,
+    image_cap: int,
+    render_page_cap: Optional[int] = None,
+) -> dict:
+    """Rasterize oversize PDFs and exactly enough pages for the page cap.
+
+    Any PDF above the provider's per-file limit is fully rasterized. For an
+    additional page-count overflow, whole small PDFs are rasterized first and
+    only the required prefix of the final document is rasterized. Every source
+    page remains represented while avoiding unnecessary image expansion.
+    """
+    from resources_servers.gdpval.media_conversion import pdf_page_count
+
+    prefix = "data:application/pdf;base64,"
+    documents: list[dict] = []
+    existing_images = 0
+    for section_name, blocks in sections.items():
+        for block_index, block in enumerate(blocks):
+            if block.get("type") != "image_url":
+                continue
+            url = str((block.get("image_url") or {}).get("url", ""))
+            if not url.startswith(prefix):
+                if url.startswith("data:image/"):
+                    existing_images += 1
+                continue
+            payload = base64.b64decode(url[len(prefix) :], validate=True)
+            pages = pdf_page_count(payload)
+            if pages <= 0:
+                raise ValueError(f"native PDF has no pages: {section_name}/{block_index}")
+            documents.append(
+                {
+                    "section": section_name,
+                    "block_index": block_index,
+                    "pages": pages,
+                    "bytes": len(payload),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            )
+    total_pages = sum(item["pages"] for item in documents)
+    excess = max(0, total_pages - native_page_cap)
+    forced = {index for index, item in enumerate(documents) if item["bytes"] > native_pdf_bytes_per_document}
+    selected: list[dict] = [
+        {
+            **documents[index],
+            "raster_page_start": 0,
+            "raster_page_count": int(documents[index]["pages"]),
+            "native_page_count": 0,
+            "reason": "native_pdf_bytes_per_document",
+        }
+        for index in sorted(forced)
+    ]
+    forced_pages = sum(int(documents[index]["pages"]) for index in forced)
+    remaining = max(0, excess - forced_pages)
+    fully_rasterized: set[int] = set(forced)
+    for index in sorted(range(len(documents)), key=lambda value: (documents[value]["pages"], value)):
+        if index in forced:
+            continue
+        if remaining <= 0:
+            break
+        document = documents[index]
+        raster_page_count = min(int(document["pages"]), remaining)
+        selected.append(
+            {
+                **document,
+                "raster_page_start": 0,
+                "raster_page_count": raster_page_count,
+                "native_page_count": int(document["pages"]) - raster_page_count,
+                "reason": "native_pdf_page_cap",
+            }
+        )
+        if raster_page_count == int(document["pages"]):
+            fully_rasterized.add(index)
+        remaining -= raster_page_count
+    raster_pages = sum(int(item["raster_page_count"]) for item in selected)
+    native_pages = total_pages - raster_pages
+    total_images_after = existing_images + raster_pages
+    # A fully rasterized document leaves the native payload entirely; a prefix
+    # split keeps a native suffix whose size is bounded by the original bytes.
+    native_documents_after = sum(1 for index in range(len(documents)) if index not in fully_rasterized)
+    native_bytes_after_bound = sum(
+        int(documents[index]["bytes"]) for index in range(len(documents)) if index not in fully_rasterized
+    )
+    render_ok = render_page_cap is None or all(int(item["raster_page_count"]) <= render_page_cap for item in selected)
+    return {
+        "eligible": (
+            remaining == 0 and native_pages <= native_page_cap and total_images_after <= image_cap and render_ok
+        ),
+        "total_pdf_pages": total_pages,
+        "native_page_cap": native_page_cap,
+        "native_pdf_bytes_per_document": native_pdf_bytes_per_document,
+        "native_pages_after": native_pages,
+        "native_documents_after": native_documents_after,
+        "native_bytes_after_bound": native_bytes_after_bound,
+        "render_page_cap": render_page_cap,
+        "raster_pages": raster_pages,
+        "image_cap": image_cap,
+        "existing_images": existing_images,
+        "total_images_after": total_images_after,
+        "selected": selected,
+    }
+
+
+def _split_pdf_prefix(pdf_bytes: bytes, raster_page_count: int) -> tuple[bytes, bytes]:
+    """Return PDF byte streams for a non-empty prefix and suffix."""
+    try:
+        import fitz  # PyMuPDF
+    except ImportError as exc:
+        raise RuntimeError("PyMuPDF is required for native-PDF overflow splitting") from exc
+
+    source = fitz.open(stream=pdf_bytes, filetype="pdf")
+    prefix = fitz.open()
+    suffix = fitz.open()
+    try:
+        pages = int(source.page_count)
+        if not 0 < raster_page_count < pages:
+            raise ValueError(f"invalid PDF prefix split: {raster_page_count}/{pages}")
+        prefix.insert_pdf(source, from_page=0, to_page=raster_page_count - 1, links=True, annots=True)
+        suffix.insert_pdf(source, from_page=raster_page_count, to_page=pages - 1, links=True, annots=True)
+        return prefix.tobytes(garbage=0, deflate=False), suffix.tobytes(garbage=0, deflate=False)
+    finally:
+        suffix.close()
+        prefix.close()
+        source.close()
+
+
+def apply_native_pdf_overflow(
+    sections: dict[str, list[dict]],
+    plan: dict,
+    *,
+    render_dpi: int,
+    max_pages: int,
+    include_text: bool,
+) -> dict[str, list[dict]]:
+    """Apply a preflighted overflow plan while retaining every PDF page."""
+    from resources_servers.gdpval.media_conversion import pdf_bytes_to_blocks, pdf_page_count
+
+    selected = {(x["section"], int(x["block_index"])): x for x in plan.get("selected", [])}
+    if len(selected) != len(plan.get("selected", [])):
+        raise ValueError("overflow plan selects a PDF block more than once")
+    prefix = "data:application/pdf;base64,"
+    output: dict[str, list[dict]] = {}
+    for section_name, blocks in sections.items():
+        converted: list[dict] = []
+        for block_index, block in enumerate(blocks):
+            item = selected.get((section_name, block_index))
+            if item is None:
+                converted.append(block)
+                continue
+            url = str((block.get("image_url") or {}).get("url", ""))
+            if not url.startswith(prefix):
+                raise ValueError(f"overflow plan block drift: {section_name}/{block_index}")
+            payload = base64.b64decode(url[len(prefix) :], validate=True)
+            if hashlib.sha256(payload).hexdigest() != item["sha256"]:
+                raise ValueError(f"overflow plan hash drift: {section_name}/{block_index}")
+            pages = pdf_page_count(payload)
+            if pages != int(item["pages"]):
+                raise ValueError(f"overflow plan page-count drift: {section_name}/{block_index}")
+            raster_page_start = int(item.get("raster_page_start", 0))
+            raster_page_count = int(item.get("raster_page_count", pages))
+            native_page_count = int(item.get("native_page_count", pages - raster_page_count))
+            if raster_page_start != 0 or raster_page_count <= 0 or raster_page_count > pages:
+                raise ValueError(f"invalid overflow page range: {section_name}/{block_index}")
+            if native_page_count != pages - raster_page_count:
+                raise ValueError(f"overflow plan page partition drift: {section_name}/{block_index}")
+            if native_page_count:
+                raster_payload, native_payload = _split_pdf_prefix(payload, raster_page_count)
+                if pdf_page_count(raster_payload) != raster_page_count:
+                    raise ValueError(f"overflow prefix page-count drift: {section_name}/{block_index}")
+                if pdf_page_count(native_payload) != native_page_count:
+                    raise ValueError(f"overflow suffix page-count drift: {section_name}/{block_index}")
+            else:
+                raster_payload = payload
+                native_payload = b""
+            rendered = pdf_bytes_to_blocks(
+                raster_payload,
+                dpi=render_dpi,
+                max_pages=max_pages,
+                include_text=include_text,
+            )
+            image_count = sum(1 for x in rendered if x.get("type") == "image_url")
+            if image_count != raster_page_count or any(
+                str(x.get("text", "")).startswith("[truncated: rendered") for x in rendered
+            ):
+                raise ValueError(
+                    f"overflow render mismatch {section_name}/{block_index}: "
+                    f"images={image_count} pages={raster_page_count}"
+                )
+            converted.extend(rendered)
+            if native_payload:
+                converted.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": prefix + base64.b64encode(native_payload).decode("ascii")},
+                    }
+                )
+        output[section_name] = converted
+    return output
+
+
+_LOSSY_TRANSPORT_PREFIXES = (
+    "[attachment omitted",
+    "[attachment unavailable",
+    "[oversize:",
+    "[truncated: rendered",
+)
+
+
+def _is_lossy_transport_marker(text: str) -> bool:
+    """Whether a text block records lost attachment content."""
+    if text.startswith(_LOSSY_TRANSPORT_PREFIXES):
+        return True
+    first_line = text.splitlines()[0] if text else ""
+    return first_line.startswith("[page ") and " omitted" in first_line
+
+
+def preflight_judge_transport(
+    judge: Judge,
+    task_prompt: str,
+    sections: dict[str, list[dict]],
+) -> dict[str, Any]:
+    """Project one provider request and reject lossy or oversized transport."""
+    messages = construct_judge_messages(
+        task_prompt=task_prompt,
+        refs=sections["refs"],
+        submission_a=sections["submission_a"],
+        submission_b=sections["submission_b"],
+    )
+    create_kwargs = merge_create_kwargs(
+        {
+            "model": judge.model,
+            "messages": messages,
+            "max_tokens": 65535,
+            "temperature": 1.0,
+        },
+        judge.create_overrides,
+    )
+    markers: list[str] = []
+    image_sizes: list[int] = []
+    unmeasured_images = 0
+    video_count = 0
+    for message in create_kwargs["messages"]:
+        for block in message.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            text = str(block.get("text", ""))
+            if _is_lossy_transport_marker(text):
+                markers.append(text.splitlines()[0][:240])
+            if block.get("type") == "video_url":
+                video_count += 1
+            if block.get("type") == "image_url":
+                payload, start = _attachment_payload(block)
+                if payload.startswith("data:video/"):
+                    video_count += 1
+                elif payload.startswith("data:image/"):
+                    image_sizes.append(len(payload) - start)
+                elif not payload.startswith("data:application/pdf;"):
+                    unmeasured_images += 1
+    serialized_bytes = len(json.dumps(create_kwargs, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    cap = judge.max_serialized_request_bytes
+    reasons: list[str] = []
+    if markers:
+        reasons.append("lossy_attachment_omission")
+    if cap is not None and serialized_bytes >= cap:
+        reasons.append("provider_wire_cap")
+    image_cap = judge.max_image_base64_bytes
+    if unmeasured_images and (image_cap is not None or judge.max_total_image_base64_bytes is not None):
+        reasons.append("provider_image_size_unknown")
+    if image_cap is not None and any(size > image_cap for size in image_sizes):
+        reasons.append("provider_image_byte_cap")
+    total_image_bytes = sum(image_sizes)
+    if judge.max_total_image_base64_bytes is not None and total_image_bytes >= judge.max_total_image_base64_bytes:
+        reasons.append("provider_total_image_byte_cap")
+    if judge.max_video_files is not None and video_count > judge.max_video_files:
+        reasons.append("provider_video_count_cap")
+    return {
+        "eligible": not reasons,
+        "judge": judge.name,
+        "media_mode": judge.media_mode,
+        "serialized_request_bytes": serialized_bytes,
+        "max_serialized_request_bytes": cap,
+        "largest_image_base64_bytes": max(image_sizes, default=0),
+        "total_image_base64_bytes": total_image_bytes,
+        "max_image_base64_bytes": image_cap,
+        "max_total_image_base64_bytes": judge.max_total_image_base64_bytes,
+        "video_file_count": video_count,
+        "max_video_files": judge.max_video_files,
+        "loss_markers": markers,
+        "reasons": reasons,
+    }
 
 
 def run_trials(
@@ -456,6 +1913,7 @@ def run_trials(
     refs: list[dict],
     submission_a: list[dict],
     submission_b: list[dict],
+    sections_by_judge: Optional[dict[str, dict[str, list[dict]]]] = None,
     num_trials: int = 4,
     max_output_tokens: int = 65535,
     return_raw_responses: bool = False,
@@ -469,11 +1927,16 @@ def run_trials(
     historical single-judge loop. Pass *rng* (a seeded ``random.Random``) for
     reproducible judge selection.
 
+    Invalid responses without a boxed verdict are excluded rather than scored
+    as ties. If every response is invalid, the matchup fails so its caller can
+    retry or drop it explicitly.
+
     Returns a dict with ``winner``, ``win_count_a``, ``win_count_b``,
-    ``tie_count``, ``task_count``, ``per_judge`` (per-member a/b/tie/trial
-    counts keyed by judge name), and ``trial_judges`` (the judge name that graded
-    each trial, ordered by trial index — always present so the grader of every
-    match is documented).
+    ``tie_count``, ``task_count`` (valid votes only), ``invalid_count``,
+    ``per_judge`` (per-member a/b/tie/valid/invalid counts keyed by judge name),
+    and ``trial_judges`` (the judge name that graded each attempted trial,
+    ordered by trial index — always present so the grader of every match is
+    documented).
 
     When ``return_raw_responses`` is True, the dict also carries
     ``raw_responses`` (per-trial judge completion strings, same ordering as
@@ -486,6 +1949,7 @@ def run_trials(
     win_count_a = 0
     win_count_b = 0
     tie_count = 0
+    invalid_count = 0
     raw_responses: list[str] = []
     trial_judges: list[str] = []
     per_judge: dict[str, dict] = {}
@@ -493,6 +1957,13 @@ def run_trials(
     for i in range(num_trials):
         judge = sample_judge(judges, rng)
         trial_judges.append(judge.name)
+        if sections_by_judge is not None:
+            if judge.name not in sections_by_judge:
+                raise ValueError(f"missing sections for judge {judge.name!r}")
+            judge_sections = sections_by_judge[judge.name]
+            refs = judge_sections["refs"]
+            submission_a = judge_sections["submission_a"]
+            submission_b = judge_sections["submission_b"]
         swapped = i % 2 != 0
         current_a = submission_b if swapped else submission_a
         current_b = submission_a if swapped else submission_b
@@ -509,15 +1980,27 @@ def run_trials(
         if return_raw_responses:
             raw_responses.append(response_text)
         judgement = parse_judgement(response_text)
-        win_count_a, win_count_b, tie_count = tally_result(judgement, swapped, win_count_a, win_count_b, tie_count)
 
         # Per-judge tally (same A=submission_a / B=submission_b convention as the
         # global counts) so the panel's per-member balance is auditable.
-        jc = per_judge.setdefault(judge.name, {"win_count_a": 0, "win_count_b": 0, "tie_count": 0, "trials": 0})
+        jc = per_judge.setdefault(
+            judge.name,
+            {"win_count_a": 0, "win_count_b": 0, "tie_count": 0, "trials": 0, "invalid_count": 0},
+        )
+        if judgement is None:
+            invalid_count += 1
+            jc["invalid_count"] += 1
+            continue
+
+        win_count_a, win_count_b, tie_count = tally_result(judgement, swapped, win_count_a, win_count_b, tie_count)
         jc["win_count_a"], jc["win_count_b"], jc["tie_count"] = tally_result(
             judgement, swapped, jc["win_count_a"], jc["win_count_b"], jc["tie_count"]
         )
         jc["trials"] += 1
+
+    valid_count = win_count_a + win_count_b + tie_count
+    if valid_count == 0:
+        raise ValueError(f"All {num_trials} pairwise judge responses were invalid")
 
     if win_count_a > win_count_b:
         winner = A_WIN_RESPONSE
@@ -531,7 +2014,8 @@ def run_trials(
         "win_count_a": win_count_a,
         "win_count_b": win_count_b,
         "tie_count": tie_count,
-        "task_count": num_trials,
+        "task_count": valid_count,
+        "invalid_count": invalid_count,
         "per_judge": per_judge,
         # Always recorded (just judge names, ordered by trial) so every match's
         # per-trial grader is documented even when raw responses aren't kept.

@@ -503,6 +503,42 @@ class TestCLISetupCommandRunCommand:
         assert popen.call_args.kwargs["stdout"] == "isolated stdout"
         assert popen.call_args.kwargs["stderr"] == "isolated stderr"
 
+    def test_uv_lock_timeout_is_propagated_to_server_processes(self, monkeypatch: MonkeyPatch) -> None:
+        popen, _ = self._setup(monkeypatch)
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+            global_config_dict={"uv_cache_dir": "shared cache", "uv_lock_timeout_seconds": 1800},
+        )
+
+        assert popen.call_args.kwargs["env"]["UV_LOCK_TIMEOUT"] == "1800"
+
+    def test_uv_lock_timeout_absent_when_unconfigured(self, monkeypatch: MonkeyPatch) -> None:
+        popen, _ = self._setup(monkeypatch)
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+            global_config_dict={"uv_cache_dir": "shared cache"},
+        )
+
+        assert "UV_LOCK_TIMEOUT" not in popen.call_args.kwargs["env"]
+
+    def test_extra_env_passed_to_process_environment(self, monkeypatch: MonkeyPatch) -> None:
+        Popen_mock, _ = self._setup(monkeypatch)
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+            extra_env={"SECRET_KEY": "supersecret", "NEMO_GYM_CONFIG_PATH": "my_path"},
+        )
+
+        env = Popen_mock.call_args.kwargs["env"]
+        assert env["SECRET_KEY"] == "supersecret"
+        assert env["NEMO_GYM_CONFIG_PATH"] == "my_path"
+        assert env["PYTHONPATH"] == "/my path"
+
 
 class TestGetNemoGymInstallFlags:
     """Test _get_nemo_gym_install_flags helper function."""

@@ -24,10 +24,12 @@ from fastapi import Response
 from pydantic import BaseModel, ValidationError
 
 import responses_api_agents.remote_agent.app as remote_agent_app
+from nemo_gym import server_utils
 from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.telemetry import connection_pool
 from responses_api_agents.remote_agent.app import (
     REMOTE_AGENT_FAILURE_CLASS,
     RemoteAgent,
@@ -184,7 +186,8 @@ class FakeServerClientResponse:
 def mock_remote(monkeypatch: pytest.MonkeyPatch, request_mock: AsyncMock) -> MagicMock:
     client = MagicMock()
     client.request = request_mock
-    monkeypatch.setattr(remote_agent_app, "get_global_aiohttp_client", lambda: client)
+    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: client)
+    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
     monkeypatch.setattr(remote_agent_app, "_REMOTE_RETRY_SLEEP_SECS", 0)
     return client
 
@@ -322,8 +325,9 @@ class TestRunHappyPath:
 
         # The remote service receives ONLY create-params: no verifier_metadata, no row keys
         assert service.received[0]["payload"] == row["responses_create_params"]
-        args, request_kwargs = client.request.call_args
-        assert args == ("POST", "http://localhost:9000/v1/responses")
+        request_kwargs = client.request.call_args.kwargs
+        assert request_kwargs["method"] == "POST"
+        assert request_kwargs["url"] == "http://localhost:9000/v1/responses"
         assert request_kwargs["allow_redirects"] is False
         assert request_kwargs["timeout"].total == 1800.0
 
@@ -332,6 +336,25 @@ class TestRunHappyPath:
         assert NG_FAILURE_CLASS_KEY not in dumped
         assert NG_NO_PERSIST_KEY not in dumped
         assert NG_TERMINAL_KEY not in dumped
+
+    async def test_remote_service_calls_use_the_remote_agent_destination_label(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        labels = []
+        service = scripted_service(_MINIMAL_TRAJECTORY)
+
+        async def labelled(*args, **kwargs):
+            labels.append(connection_pool._SERVER_NAME.get())
+            return await service(*args, **kwargs)
+
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=labelled))
+        monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", True)
+
+        result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))
+
+        assert labels == ["remote_agent_service"]
+        assert NG_FAILURE_CLASS_KEY not in result.model_dump()
+        assert connection_pool._SERVER_NAME.get() == "external"
 
     async def test_verify_extras_pass_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
         row = make_row()

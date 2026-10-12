@@ -115,7 +115,7 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
             failure = {
                 "_ng_failure_class": "environment_server_failed",
                 "_ng_failure_terminal": response.failure.terminal,
-                "_ng_failure_message": response.failure.message,
+                "_ng_failure_message": response.failure.failure_reason,
                 "_ng_failure_stage": response.failure.stage,
                 "agent_ref": agent_ref,
             }

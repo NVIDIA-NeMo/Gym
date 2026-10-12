@@ -340,6 +340,23 @@ def _resolve_server_dir(rel_path: Path) -> Path:
     )
 
 
+def _server_launch_command(
+    dir_path: Path,
+    global_config_dict: DictConfig,
+    server_name: str,
+    entrypoint_fpath: Path,
+) -> str:
+    """Shell command that sets up a server's venv and starts its entrypoint with that venv's own interpreter.
+
+    The interpreter is named explicitly instead of relying on the bare `python` that `source bin/activate`
+    puts on PATH: a venv copied or moved after creation still names its original prefix in `bin/activate`,
+    so activating it would silently run a different interpreter than `uv_venv_dir` selected.
+    """
+    venv_python_fpath = get_venv_path(dir_path, global_config_dict) / "bin" / "python"
+    return f"""{setup_env_command(dir_path, global_config_dict, server_name)} \\
+    && {shlex.quote(str(venv_python_fpath))} {shlex.quote(str(entrypoint_fpath))}"""
+
+
 class RunConfig(BaseNeMoGymCLIConfig):
     """
     Start NeMo Gym servers for agents, models, and resources.
@@ -447,7 +464,7 @@ class RunHelper:  # pragma: no cover
         initialize_ray()
 
         # Assume Nemo Gym Run is for a single agent.
-        escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))
+        config_dict_yaml_str = OmegaConf.to_yaml(global_config_dict)
 
         # We always run the head server in this `run` command.
         self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
@@ -483,12 +500,15 @@ class RunHelper:  # pragma: no cover
             # Resolve cwd-first (a local server), else the install location for built-ins.
             dir_path = _resolve_server_dir(Path(first_key, second_key))
 
-            command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
-    && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
-    {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
-    python {str(entrypoint_fpath)}"""
+            # Name the venv in the logs: the server runs that venv's interpreter (see _server_launch_command).
+            print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
+            command = _server_launch_command(dir_path, global_config_dict, top_level_path, entrypoint_fpath)
 
-            process = run_command(command, dir_path, server_name=top_level_path)
+            extra_env = {
+                NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config_dict_yaml_str,
+                NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: top_level_path,
+            }
+            process = run_command(command, dir_path, server_name=top_level_path, extra_env=extra_env)
             self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.
             # This installs uv virtual environments serially, which significantly reduces uv
@@ -1039,6 +1059,14 @@ def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Pop
     return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
 
 
+def _setup_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:
+    """Install one server's venv exactly as `_test_single` does, without running its tests."""
+    prefix = test_config.entrypoint.replace("/", "\\/")
+    resolved_dir = test_config.resolved_dir_path
+    command = setup_env_command(resolved_dir, global_config_dict, prefix)
+    return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
+
+
 def test():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_config = TestConfig.model_validate(global_config_dict)
@@ -1100,6 +1128,11 @@ class TestAllConfig(BaseNeMoGymCLIConfig):
         ge=0,
         description="Which shard (0-based) this invocation runs; must be < num_shards (default: 0).",
     )
+    setup_only: bool = Field(
+        default=False,
+        description="Only install each selected server's venv; run no tests and validate no data (default: False). "
+        "Seeds `uv_cache_dir` so the server suite can later install the same venvs offline.",
+    )
 
 
 def _select_shard(dir_paths: List[Path], shard_index: int, num_shards: int) -> List[Path]:
@@ -1120,6 +1153,29 @@ def _delete_server_venv(dir_path: Path, global_config_dict: DictConfig) -> None:
     venv_path = get_venv_path(dir_path, global_config_dict)
     print(f"Deleting {venv_path} since `delete_venvs_after_each_test=true`")
     rmtree(venv_path, ignore_errors=True)
+
+
+def _setup_all(dir_paths: List[Path], test_all_config: TestAllConfig, global_config_dict: DictConfig) -> None:
+    """Install every selected server's venv the way the suite would, then exit non-zero if any failed.
+
+    The container build runs this to seed its uv cache, so `scripts/ci/server_tests.sh` can create the same
+    per-server venvs offline. Every server is attempted before failing, so one run reports every gap.
+    """
+    setup_failed: List[Path] = []
+    for dir_path in tqdm(dir_paths, desc="Setting up server venvs"):
+        proc = _setup_single(TestConfig(entrypoint=str(dir_path)), global_config_dict)
+        if proc.wait() != 0:
+            setup_failed.append(dir_path)
+        if test_all_config.delete_venvs_after_each_test:
+            _delete_server_venv(_resolve_server_dir(dir_path), global_config_dict)
+
+    set_up = len(dir_paths) - len(setup_failed)
+    print(f"""Server venvs set up {_format_pct(set_up, len(dir_paths))}
+
+Server venv setup failed {_format_pct(len(setup_failed), len(dir_paths))}:{_display_list_of_paths(setup_failed)}
+""")
+    if setup_failed:
+        exit(1)
 
 
 def test_all():  # pragma: no cover
@@ -1156,6 +1212,10 @@ def test_all():  # pragma: no cover
             f"Shard {test_all_config.shard_index + 1}/{test_all_config.num_shards}: "
             f"testing {len(dir_paths)} of {len(full_dir_paths)} modules:{_display_list_of_paths(dir_paths)}\n"
         )
+
+    if test_all_config.setup_only:
+        _setup_all(dir_paths, test_all_config, global_config_dict)
+        return
 
     tests_passed: List[Path] = []
     tests_failed: List[Path] = []
@@ -1239,7 +1299,7 @@ gym env test +entrypoint={data_validation_failed[0]} +should_validate_data=true
 
 Extra candidate paths:{_display_list_of_paths(extra_candidates)}"""
 
-    if tests_missing or tests_failed or data_validation_failed:
+    if tests_missing or tests_failed or tests_unrecognized or data_validation_failed:
         exit(1)
 
 

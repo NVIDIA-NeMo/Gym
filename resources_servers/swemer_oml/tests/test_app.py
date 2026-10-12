@@ -291,6 +291,8 @@ class TestServerWiring:
     def test_seed_session_scrubs_then_seeds_a_committer_identity(self) -> None:
         source = self._source()
         assert source.index("await self._ensure_git_repo(") < source.index("apply_anti_cheat_setup(sandbox")
+        # Blob restore must run before the scrub: its `git reset --hard` deletes files it cannot re-read.
+        assert source.index("await self._restore_missing_blobs(") < source.index("apply_anti_cheat_setup(sandbox")
         assert source.index("apply_anti_cheat_setup(sandbox") < source.index("await prepare_git_for_commits(")
 
     def test_config_defaults(self) -> None:
@@ -313,3 +315,35 @@ class TestServerWiring:
         source = self._source()
         assert "is_nemo_gym_fastapi_entrypoint(__file__)" in source
         assert "app = SwemerOmlResourcesServer.run_webserver()" in source
+
+
+class TestRestoreMissingBlobs:
+    class _Sandbox:
+        def __init__(self, probe_rc: int) -> None:
+            self.probe_rc = probe_rc
+            self.commands: list[str] = []
+
+        async def exec(self, command: str, timeout_s=None, **kwargs):
+            self.commands.append(command)
+            rc = self.probe_rc if "cat-file -e" in command else 0
+            return SimpleNamespace(return_code=rc, stdout="", stderr="")
+
+    @pytest.mark.asyncio
+    async def test_intact_repo_is_left_alone(self) -> None:
+        from resources_servers.swemer_oml.app import SwemerOmlResourcesServer
+
+        sb = self._Sandbox(probe_rc=0)
+        await SwemerOmlResourcesServer._restore_missing_blobs(None, sb, "/workspace/repo")
+        assert len(sb.commands) == 1 and "cat-file -e" in sb.commands[0]
+
+    @pytest.mark.asyncio
+    async def test_blob_stripped_repo_is_re_added_and_committed(self) -> None:
+        from resources_servers.swemer_oml.app import SwemerOmlResourcesServer
+
+        sb = self._Sandbox(probe_rc=3)
+        await SwemerOmlResourcesServer._restore_missing_blobs(None, sb, "/workspace/repo")
+        assert len(sb.commands) == 2
+        cmd = sb.commands[1]
+        assert "git ls-files -z --stage" in cmd and "git hash-object -w --" in cmd
+        assert "100644|100755" in cmd  # gitlinks (160000) and symlinks (120000) are skipped
+        assert "git add -u" in cmd and "git add -A" not in cmd and "commit -q" in cmd

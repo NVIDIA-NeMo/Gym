@@ -19,7 +19,7 @@ from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Simpl
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import AsyncSandbox, create_provider
+from nemo_gym.sandbox import AsyncSandbox, create_provider, process_supervisor
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from responses_api_agents.hermes_sandboxed_agent.runner import classify_stop, split_input
@@ -191,7 +191,6 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                 "base_url": self.resolve_model_base_url(self.config.model_server.name, rollout_id),
                 "input": body.model_dump(mode="json")["input"],
                 "instructions": body.instructions,
-                "sandbox_timeout": self.config.sandbox_timeout,
                 "temperature": body.temperature if body.temperature is not None else self.config.temperature,
                 "max_tokens": body.max_output_tokens if body.max_output_tokens is not None else self.config.max_tokens,
             }
@@ -199,12 +198,15 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             (local / "request.json").write_text(json.dumps(params))
             await sandbox.upload(local / "request.json", f"{remote}/request.json")
             await sandbox.upload(Path(__file__).with_name("runner.py"), f"{remote}/runner.py")
+            await sandbox.upload(Path(process_supervisor.__file__), f"{remote}/process_supervisor.py")
             launched = True
             executed = await sandbox.exec(
+                f"{quote(self.config.runtime_python)} -I {quote(remote + '/process_supervisor.py')} "
+                f"--timeout {self.config.sandbox_timeout} --receipt {quote(remote + '/cleanup.json')} -- "
                 f"{quote(self.config.runtime_python)} -I {quote(remote + '/runner.py')} {quote(remote + '/request.json')}",
                 cwd=remote,
                 # The runner owns the model budget; leave time for process cleanup.
-                timeout_s=self.config.sandbox_timeout + 60,
+                timeout_s=process_supervisor.exec_timeout(timeout=self.config.sandbox_timeout),
             )
             return_code, error_type = executed.return_code, executed.error_type
             stdout, stderr = executed.stdout or "", executed.stderr or ""

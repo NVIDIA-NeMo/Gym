@@ -620,6 +620,12 @@ class TestComputeSubsetMetrics:
         m = compute_subset_metrics(tasks, "nonexistent")
         assert m == {}
 
+    def test_a_first_rollout_without_the_field_keeps_its_task_in_the_subset(self) -> None:
+        """A row counted as zero for a rollout that never ran can come first and lack verifier fields."""
+        tasks = [[{"reward": 0.0}, {"reward": 1.0, "difficulty": "easy"}]]
+        m = compute_subset_metrics(tasks, "difficulty")
+        assert m["easy/pass@1/accuracy"] == 50.0
+
 
 class TestRepeatMetricEligibility:
     def test_statistics_produced_by_gym_benchmarks_are_excluded(self) -> None:

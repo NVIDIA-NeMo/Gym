@@ -12,15 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""NeMo Gym span groups — the knob that decides which spans exist at all.
+"""NeMo Gym span groups, declared into nemo-lens's ``SpanRegistry``.
 
 A span group is checked at every instrumentation site before any work happens, so a
-disabled group costs one frozenset membership test. ``GymSpanGroup`` extends the shared
-``nemo.lens.groups.SpanGroup`` with Gym-shaped groups and replaces its training-oriented
-presets with rollout-oriented ones.
+disabled group costs one frozenset membership test. nemo-lens ships no group names of its
+own: a consuming library registers the groups it emits under its own namespace, and users
+select from them with the ``span_groups`` spec. Importing this module registers Gym's groups
+and presets, so it must be imported before ``setup_telemetry``; ``init_telemetry`` does that.
 
-Span groups live downstream, in the consumer, not in nemo-lens — the same call the
-NeMo-RL integration made (``RLSpanGroup``), and the direction lens itself is heading.
+``GymSpanGroup`` is a bag of ``str`` constants rather than a lens subclass, because
+``managed_span`` and ``is_span_group_enabled`` take the group as a plain string. Call sites
+keep reading ``GymSpanGroup.SANDBOX`` so the spelling lives in one place, and the constants
+stay importable without nemo-lens: the *gate* is conditional, not the name.
 
 Presets
 -------
@@ -30,17 +33,15 @@ Presets
     agent, model, and resources server processes** — the whole point of the integration
     works without tuning.
 ``per_rollout``
-    The spine plus per-request detail (``verify``, ``agent``, ``model_call``,
-    ``tool_call``). Omits ``job`` so each rollout is its own bounded root trace rather
-    than nesting every rollout under one run-long span — the same reasoning behind
-    NeMo-RL's ``per_step``.
+    The spine plus per-request detail (``verify``, ``agent``, ``model_call``). Omits
+    ``job`` so each rollout is its own bounded root trace rather than nesting every
+    rollout under one run-long span — the same reasoning behind NeMo-RL's ``per_step``.
 ``all``
-    Every group, including ``sandbox`` and the groups inherited from nemo-lens.
+    Reserved by nemo-lens: every group registered in the process, including ``sandbox``.
 
-Only groups Gym actually emits under appear in ``default`` and ``per_rollout``. The
-training-oriented groups inherited from ``nemo.lens.groups.SpanGroup`` (``checkpoint``,
-``step``, ``optimizer``, ``evaluate``, ...) remain resolvable, and are reachable through
-``all``, but no Gym call site emits under them.
+Registration is process-global, and presets **union** across namespaces. When Gym runs
+inside a NeMo-RL process, ``default`` selects NeMo-RL's default groups *and* Gym's, and the
+``job`` and ``rollout`` names are shared with NeMo-RL's groups of the same name.
 
 There is deliberately no ``tool_call`` or ``dataset`` group. A resources-server tool call
 is already a SERVER span named after its route (``POST /get_weather``), which answers the
@@ -57,61 +58,16 @@ reason.
 from typing import ClassVar, Final
 
 
-try:
-    from nemo.lens.groups import SpanGroup
-except ImportError:
-    # TODO(ahmadki): SpanGroups are moving from nemo-lens to downstream consumers, at
-    # which point this stub and the try/except disappear and GymSpanGroup stands alone.
-    class SpanGroup:  # type: ignore[no-redef]
-        """Minimal stub used when nemo-lens is not installed.
-
-        Mirrors ``nemo.lens.groups.SpanGroup`` at commit ``b85578fc``. ``resolve()``
-        raises rather than returning a wrong answer: without lens there is nothing to
-        enable, and silently returning an empty set would make a typo in
-        ``telemetry.span_groups`` indistinguishable from a working config.
-        """
-
-        JOB = "job"
-        CHECKPOINT = "checkpoint"
-        EVALUATE = "evaluate"
-        MODEL_INIT = "model_init"
-        LOAD_CHECKPOINT = "load_checkpoint"
-        STEP = "step"
-        FORWARD_BACKWARD = "forward_backward"
-        OPTIMIZER = "optimizer"
-
-        ALL_GROUPS: Final[frozenset] = frozenset(
-            [
-                JOB,
-                CHECKPOINT,
-                EVALUATE,
-                MODEL_INIT,
-                LOAD_CHECKPOINT,
-                STEP,
-                FORWARD_BACKWARD,
-                OPTIMIZER,
-            ]
-        )
-
-        _PRESETS: ClassVar[dict] = {
-            "default": frozenset([JOB, CHECKPOINT, EVALUATE]),
-            "per_step": frozenset(
-                [JOB, CHECKPOINT, EVALUATE, MODEL_INIT, LOAD_CHECKPOINT, STEP, FORWARD_BACKWARD, OPTIMIZER]
-            ),
-            "all": ALL_GROUPS,
-        }
-
-        @classmethod
-        def resolve(cls, spec: str) -> frozenset:
-            raise RuntimeError("SpanGroup.resolve() requires nemo-lens. Install it with: uv sync --extra telemetry")
+#: Registry namespace Gym owns. Also the key for ``SpanRegistry.unregister``.
+NAMESPACE = "nemo_gym"
 
 
-class GymSpanGroup(SpanGroup):
-    """Span groups for NeMo Gym instrumentation."""
+class GymSpanGroup:
+    """Span group names for NeMo Gym instrumentation."""
 
-    # ------------------------------------------------------------------ #
-    # Gym-specific groups
-    # ------------------------------------------------------------------ #
+    JOB = "job"
+    """The whole ``gym eval`` / rollout-collection run, driver side. Shares its name with
+    NeMo-RL's run-level group, so one spec entry selects both."""
 
     SERVER = "server"
     """Inbound FastAPI request spans on every Gym server process. The ingress half of
@@ -137,31 +93,55 @@ class GymSpanGroup(SpanGroup):
     SANDBOX = "sandbox"
     """Sandbox provider create/exec/delete spans."""
 
-    # ------------------------------------------------------------------ #
-    # All groups and presets
-    # ------------------------------------------------------------------ #
-
-    ALL_GROUPS: Final[frozenset] = SpanGroup.ALL_GROUPS | frozenset(
-        [
-            SERVER,
-            HTTP_CLIENT,
-            ROLLOUT,
-            VERIFY,
-            AGENT,
-            MODEL_CALL,
-            SANDBOX,
-        ]
-    )
+    ALL_GROUPS: Final[frozenset] = frozenset([JOB, SERVER, HTTP_CLIENT, ROLLOUT, VERIFY, AGENT, MODEL_CALL, SANDBOX])
 
     #: The groups that make one rollout appear as one trace across Gym's server
     #: processes. Every preset is a superset of this.
     CROSS_PROCESS_SPINE: Final[frozenset] = frozenset([SERVER, HTTP_CLIENT, ROLLOUT])
 
+    #: ``all`` is not here: nemo-lens reserves it as a wildcard over every registered group.
     _PRESETS: ClassVar[dict] = {
-        "default": frozenset([SpanGroup.JOB]) | CROSS_PROCESS_SPINE,
+        "default": frozenset([JOB]) | CROSS_PROCESS_SPINE,
         # NOTE: ``per_rollout`` deliberately omits ``job`` so each rollout is its own root
         # trace with a bounded span count. ``job`` wraps a whole eval run and lives in
         # ``default`` and ``all``.
         "per_rollout": frozenset([VERIFY, AGENT, MODEL_CALL]) | CROSS_PROCESS_SPINE,
-        "all": ALL_GROUPS,
     }
+
+    @classmethod
+    def resolve(cls, spec: str) -> frozenset:
+        """Resolve a ``span_groups`` spec against every group registered in this process.
+
+        Entries that name nothing registered are dropped rather than raised: the library
+        that owns them may not be imported in this process. nemo-lens logs a warning naming
+        them when the spec is applied in ``setup_telemetry``.
+
+        Raises:
+            RuntimeError: nemo-lens is not installed, so there is nothing to resolve.
+        """
+        try:
+            from nemo.lens.groups import SpanRegistry
+        except ImportError as e:
+            raise RuntimeError(
+                "GymSpanGroup.resolve() requires nemo-lens. Install it with: uv sync --extra telemetry"
+            ) from e
+        return SpanRegistry.resolve(spec)[0]
+
+
+def register_span_groups() -> None:
+    """Declare Gym's groups and presets to nemo-lens. A no-op without nemo-lens.
+
+    Called at import. ``allow_override`` makes it idempotent, so a re-import or a test that
+    cleared the registry can call it again, and silences the shared-name warning for the
+    ``job`` and ``rollout`` groups NeMo-RL also registers.
+    """
+    try:
+        from nemo.lens.groups import SpanRegistry
+    except ImportError:
+        return
+    SpanRegistry.register(
+        NAMESPACE, groups=GymSpanGroup.ALL_GROUPS, presets=GymSpanGroup._PRESETS, allow_override=True
+    )
+
+
+register_span_groups()

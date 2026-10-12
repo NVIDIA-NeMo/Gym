@@ -52,9 +52,10 @@ are verified, never ranked: witnesses that agree — or that name calls with
 identical full token sequences — attribute; witnesses that contradict each
 other attribute nothing and persist the disagreement, because a contradiction
 is evidence of a real defect (a stale seal mapping, backend id reuse, a
-transcript-synthesis bug) that outranking would silently bury. A rollout with
-no witness, or with disagreeing witnesses, falls back to the builder's strict
-single-chain policy.
+transcript-synthesis bug) that outranking would silently bury. If no terminal
+response ID is declared, a rollout with no witness or with disagreeing witnesses
+falls back to the builder's strict single-chain policy. If a declared terminal
+response ID cannot be attributed, the consumer masks the rollout instead.
 
 The content witness deliberately uses ``assistant_fingerprint`` alone, without
 a request-context digest. Attribution selects a chain whose tokens the builder

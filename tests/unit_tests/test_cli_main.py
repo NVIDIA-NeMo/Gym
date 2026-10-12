@@ -151,6 +151,7 @@ class TestEvalRunFlags:
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["--limit", "1024"], "+limit=1024"),
             (["--num-repeats", "4"], "+num_repeats=4"),
+            (["--interleave-repeats"], "+interleave_repeats=true"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),
             (["--prompt-config", "p.yaml"], "+prompt_config=p.yaml"),
             (["--split", "benchmark"], "+split=benchmark"),

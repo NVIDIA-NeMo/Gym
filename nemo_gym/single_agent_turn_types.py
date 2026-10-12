@@ -3,8 +3,6 @@
 
 """Wire contracts for the built-in single-agent-turn protocol."""
 
-from typing import Literal
-
 from pydantic import BaseModel, ConfigDict, JsonValue
 
 from nemo_gym.base_resources_server import BaseVerifyResponse
@@ -40,9 +38,8 @@ class SingleAgentTurnResult(BaseVerifyResponse):
 
 
 class SingleAgentTurnFailure(EpisodeFailure):
-    """Add the failing protocol stage and any usable agent response."""
+    """Extend the shared failure with any usable agent response for diagnostics."""
 
-    stage: Literal["seed", "agent", "verification", "cleanup"] | None = None
     partial_response: NeMoGymResponse | None = None
 
 

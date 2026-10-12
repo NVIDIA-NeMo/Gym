@@ -57,6 +57,9 @@ class CheckInput(str, Enum):
     BOUND_CALLS = "bound_calls"
     # Canonical model calls joined to explicit AgentInvocation or TrajectoryTurn references.
     OWNED_MODEL_CALLS = "owned_model_calls"
+    # Canonical model calls as captured, whether or not anything references them.
+    # A call that failed carries no response id, so it can never be bound.
+    OBSERVED_MODEL_CALLS = "observed_model_calls"
     # Runner-derived rollout verdicts grouped by task for task-level reduction.
     REPEAT_VERDICTS = "repeat_verdicts"
     # Runner-derived RolloutDigest objects grouped by task for task-level reduction.
@@ -96,6 +99,8 @@ class Finding(BaseModel):
 class RolloutDigest(BaseModel):
     task_index: int | str
     rollout_index: int | str
+    # Multi-stage drivers (e.g. gdpval) persist one row per (task, rollout) per stage.
+    stage_index: int | str | None = None
     rollout_id: str
     verdict: Verdict
     findings: list[Finding]

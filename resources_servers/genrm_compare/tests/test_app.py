@@ -28,6 +28,7 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -45,6 +46,7 @@ from resources_servers.genrm_compare.app import (
     GenRMCompareResponse,
     GenRMCompareVerifyRequest,
     _input_to_conversation_history,
+    _output_budget_exhausted,
 )
 from resources_servers.genrm_compare.utils import get_prompt_key_from_input
 
@@ -1096,3 +1098,91 @@ class TestRunSingleComparison:
 
         body = self._get_sent_body(mock_client)
         assert "principle" not in body.metadata
+
+    @staticmethod
+    def _http_response(body: dict):
+        response = AsyncMock(ok=True)
+        response.read = AsyncMock(return_value=json.dumps(body).encode())
+        return response
+
+    @staticmethod
+    def _incomplete_response():
+        """A Responses API object cut off by max_output_tokens: reasoning present, no verdict text."""
+        return {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{"type": "reasoning", "summary": [], "content": [{"type": "reasoning_text", "text": "..."}]}],
+        }
+
+    def test_output_budget_exhausted_detection(self):
+        assert _output_budget_exhausted(self._incomplete_response())
+        assert not _output_budget_exhausted({"status": "completed", "output": []})
+        assert not _output_budget_exhausted(
+            {"status": "incomplete", "incomplete_details": {"reason": "content_filter"}}
+        )
+        assert not _output_budget_exhausted({"status": "incomplete"})
+        assert not _output_budget_exhausted(None)
+
+    def test_budget_exhaustion_is_named_in_judge_error(self, caplog):
+        """Every attempt hits max_output_tokens -> JudgeError says so, with the budget, instead of a generic message."""
+        server, mock_client = self._make_server()
+        server.config.genrm_parse_retries = 1
+        server.config.genrm_parse_retry_sleep_s = 0.0
+        mock_client.post = AsyncMock(return_value=self._http_response(self._incomplete_response()))
+
+        with caplog.at_level("WARNING"), pytest.raises(JudgeError) as error:
+            asyncio.run(
+                server._run_single_comparison(
+                    [{"role": "user", "content": "q"}], self._make_response_obj("a"), self._make_response_obj("b")
+                )
+            )
+
+        assert mock_client.post.await_count == 2
+        assert "no completed answer after 2 attempts" in str(error.value)
+        assert "2 of them exhausted max_output_tokens=1024" in str(error.value)
+        assert sum("output budget exhausted" in r.getMessage() for r in caplog.records) == 2
+
+    def test_budget_exhaustion_then_verdict_recovers(self):
+        """One exhausted attempt followed by a completed verdict parses normally."""
+        server, mock_client = self._make_server()
+        server.config.genrm_parse_retries = 1
+        server.config.genrm_parse_retry_sleep_s = 0.0
+        completed = {
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": '{"score_1": 4, "score_2": 2, "ranking": 2}'}],
+                }
+            ],
+        }
+        mock_client.post = AsyncMock(
+            side_effect=[self._http_response(self._incomplete_response()), self._http_response(completed)]
+        )
+
+        result = asyncio.run(
+            server._run_single_comparison(
+                [{"role": "user", "content": "q"}], self._make_response_obj("a"), self._make_response_obj("b")
+            )
+        )
+
+        assert result == (4.0, 2.0, 2.0)
+
+    def test_empty_completed_answer_keeps_generic_judge_error(self):
+        """A completed but empty answer is not budget exhaustion; the message stays generic."""
+        server, mock_client = self._make_server()
+        server.config.genrm_parse_retries = 0
+        empty = {
+            "status": "completed",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": ""}]}],
+        }
+        mock_client.post = AsyncMock(return_value=self._http_response(empty))
+
+        with pytest.raises(JudgeError) as error:
+            asyncio.run(
+                server._run_single_comparison(
+                    [{"role": "user", "content": "q"}], self._make_response_obj("a"), self._make_response_obj("b")
+                )
+            )
+
+        assert str(error.value) == "Judge returned no completed answer after 1 attempts"

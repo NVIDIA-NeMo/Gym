@@ -8,18 +8,19 @@ from __future__ import annotations
 import functools
 import json
 import os
+import signal
 import sys
 import traceback
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from run_agent import AIAgent
-
 
 try:
+    from .model_kwargs import _model_api_kwargs
     from .sandbox_observer import SandboxHermesObserver
 except ImportError:
+    from model_kwargs import _model_api_kwargs
     from sandbox_observer import SandboxHermesObserver
 
 
@@ -38,6 +39,8 @@ def _use_model_server(base_url: str) -> None:
     The root agent and its iteration-limit summary share one client, delegated children inherit the
     parent's base URL, and auxiliary clients such as context compression read ``OPENAI_BASE_URL``.
     """
+    from run_agent import AIAgent
+
     os.environ["OPENAI_BASE_URL"] = base_url
     os.environ["OPENAI_API_KEY"] = _MODEL_API_KEY
 
@@ -65,7 +68,9 @@ def _connect_mcp_servers(required: list[str]) -> None:
         raise RuntimeError("Required MCP servers did not connect: " + ", ".join(missing))
 
 
-def _run(payload: dict[str, Any], session_dir: Path) -> dict[str, Any]:
+def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None = None) -> dict[str, Any]:
+    from run_agent import AIAgent
+
     hermes_home = session_dir / "hermes-home"
     hermes_home.mkdir(parents=True, exist_ok=True)
     (hermes_home / "config.yaml").write_text(payload["config_yaml"])
@@ -97,17 +102,40 @@ def _run(payload: dict[str, Any], session_dir: Path) -> dict[str, Any]:
     original_build_api_kwargs = agent._build_api_kwargs
 
     def build_api_kwargs(api_messages: list[dict[str, Any]]) -> dict[str, Any]:
-        kwargs = original_build_api_kwargs(api_messages)
-        if not payload["chat_template_kwargs_enabled"]:
-            return kwargs
-        chat_template_kwargs = kwargs.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})
-        chat_template_kwargs.setdefault("enable_thinking", True)
-        chat_template_kwargs["truncate_history_thinking"] = False
-        return kwargs
+        return _model_api_kwargs(
+            original_build_api_kwargs(api_messages),
+            preserve_reasoning_history=payload["chat_template_kwargs_enabled"],
+        )
 
     agent._build_api_kwargs = build_api_kwargs
     result = None
     error = None
+    stop_reason = None
+    runtime = {"hostname": os.uname().nodename, "pid": os.getpid(), "python": sys.executable}
+
+    def progress() -> dict[str, Any]:
+        return {
+            "completed": False,
+            "interrupted": True,
+            "stop_reason": stop_reason,
+            "messages": getattr(agent, "_session_messages", [])
+            or [*payload["history"], {"role": "user", "content": payload["user_message"]}],
+        }
+
+    def interrupt(*_: object) -> None:
+        nonlocal stop_reason
+        # Close publishes this marker before signalling the supervisor. A deadline does not.
+        stop_reason = "cancelled" if (session_dir / "runner.stop").exists() else "wall_time"
+        # Save first: a blocked tool or API call may not unwind before the hard cleanup.
+        if output_path is not None:
+            partial = progress()
+            _write_atomic(
+                output_path,
+                {"result": partial, "observations": observer.finish(partial, None), "runtime": runtime},
+            )
+        agent.interrupt("sandbox cancellation" if stop_reason == "cancelled" else "sandbox timeout")
+
+    previous_handler = signal.signal(signal.SIGTERM, interrupt)
     try:
         result = agent.run_conversation(
             payload["user_message"],
@@ -116,30 +144,27 @@ def _run(payload: dict[str, Any], session_dir: Path) -> dict[str, Any]:
             task_id=payload["agent_session_id"],
         )
     except BaseException as exception:
-        error = exception
-        setattr(exception, "_sandbox_observations", observer.finish(result, error))
-        raise
+        if stop_reason is not None:
+            result = progress()
+        else:
+            error = exception
+            setattr(exception, "_sandbox_observations", observer.finish(result, error))
+            raise
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
+    if stop_reason is not None and not result.get("failed"):
+        result = {**result, "completed": False, "interrupted": True, "stop_reason": stop_reason}
     return {
         "observations": observer.finish(result, error),
         "result": result,
-        "runtime": {
-            "hostname": os.uname().nodename,
-            "pid": os.getpid(),
-            "python": sys.executable,
-        },
+        "runtime": runtime,
     }
 
 
-def main() -> int:
-    if len(sys.argv) != 3:
-        print("usage: sandbox_runner.py INPUT_JSON OUTPUT_JSON", file=sys.stderr)
-        return 2
-
-    input_path = Path(sys.argv[1])
-    output_path = Path(sys.argv[2])
-    session_dir = input_path.parent
+def _run_worker(input_path: Path, output_path: Path) -> int:
+    exchange_dir = input_path.parent
     try:
-        output = _run(json.loads(input_path.read_text()), session_dir)
+        output = _run(json.loads(input_path.read_text()), exchange_dir, output_path=output_path)
     except BaseException as error:
         output = {
             "error": str(error),
@@ -157,6 +182,15 @@ def main() -> int:
 
     _write_atomic(output_path, output)
     return 0
+
+
+def main() -> int:
+    """Run the Hermes worker; the uploaded process supervisor owns its lifetime."""
+    if len(sys.argv) != 3:
+        print("usage: sandbox_runner.py INPUT_JSON OUTPUT_JSON", file=sys.stderr)
+        return 2
+    input_path, output_path = map(Path, sys.argv[-2:])
+    return _run_worker(input_path, output_path)
 
 
 if __name__ == "__main__":

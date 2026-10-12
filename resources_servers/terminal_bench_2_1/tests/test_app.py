@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 import pytest
 
 import resources_servers.terminal_bench_2_1.app as terminal_bench_app
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.terminal_bench_2_1.app import (
     _BULLSEYE_SECURITY_SNAPSHOT_SETUP,
     TerminalBench21ResourcesServer,
@@ -52,6 +52,52 @@ class TestApp:
             name="",
         )
         return TerminalBench21ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @pytest.mark.parametrize("replace_destination", [False, True], ids=["in-place", "replace-file"])
+    @pytest.mark.parametrize(
+        "reward_text,expected_reward,evaluation_completed",
+        [("1\n", 1.0, True), ("0\n", 0.0, True), ("", 0.0, False), ("invalid", 0.0, False), (None, 0.0, False)],
+        ids=["pass", "fail", "empty", "invalid", "missing"],
+    )
+    async def test_verify_reads_downloaded_reward(
+        self,
+        server: TerminalBench21ResourcesServer,
+        tmp_path: Path,
+        replace_destination: bool,
+        reward_text: str | None,
+        expected_reward: float,
+        evaluation_completed: bool,
+    ) -> None:
+        def download_reward(remote_path: str, local_path: str) -> None:
+            assert remote_path == "/logs/verifier/reward.txt"
+            if reward_text is None:
+                raise FileNotFoundError(remote_path)
+            destination = Path(local_path)
+            if replace_destination:
+                # Docker cp replaces the file rather than writing to its existing inode.
+                downloaded = tmp_path / "downloaded-reward.txt"
+                downloaded.write_text(reward_text)
+                downloaded.replace(destination)
+            else:
+                destination.write_text(reward_text)
+
+        sandbox = MagicMock()
+        sandbox.exec = AsyncMock(return_value=SimpleNamespace(stdout="verifier output", stderr="", return_code=0))
+        sandbox.download = AsyncMock(side_effect=download_reward)
+        sandbox.stop = AsyncMock()
+        server._upload_folder = AsyncMock()
+        server._session_id_to_sandbox["test-session"] = sandbox
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "test-session"}
+
+        result = await server.verify(request, _verify_request(tmp_path))
+
+        assert result.reward == expected_reward
+        assert result.evaluation_completed is evaluation_completed
+        assert result.test_output == "verifier output"
+        sandbox.download.assert_awaited_once()
+        sandbox.stop.assert_awaited_once()
+        assert "test-session" not in server._session_id_to_sandbox
 
     @pytest.mark.parametrize("timeout", [1800, None])
     async def test_golden_patch_preserves_services_and_runs_verifier_separately(

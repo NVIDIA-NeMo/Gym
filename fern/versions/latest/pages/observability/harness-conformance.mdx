@@ -1,0 +1,121 @@
+---
+title: "Harness Conformance"
+description: "Check P0 trajectory evidence and compare harness artifact coverage."
+position: 3
+---
+
+# Harness Conformance
+
+Check the evidence retained by a harness/benchmark pair after collecting an evaluation:
+
+```bash
+python scripts/inspect_harness_conformance.py \
+    --bundle results/my-harness/rollouts.jsonl \
+    --output results/my-harness/evidence
+```
+
+The `gym-p0/v1` profile checks the currently supported P0 trajectory evidence
+(TE-1–TE-9). Every applicable TE-1–TE-7 must pass, plus **TE-8 or TE-9** on
+every rollout. It replaces the earlier experimental C0–C11 profiles.
+
+| Evidence | Persisted contract |
+| --- | --- |
+| TE-1: model call status | Exact call/model identity, HTTP or transport outcome, response status and termination metadata preserved from the response. Optional call clocks are checked when present. |
+| TE-2: token counts | Supplied prompt, completion, reasoning, total and cached counts preserved on successful and failed attempts. Provider omission remains unknown. Availability is reported separately. |
+| TE-3: steps | Task, repeat, rollout and step identity; timestamp; model-visible prompt; answer/tool or reasoning fields; resolution or explicit unknown. No step is inferred from an HTTP call. |
+| TE-4: history | Ordered saved model inputs and outputs, including tool results and changed context. Missing media, opaque content and unavailable prior-response history fail. |
+| TE-5: tool record | Execution id/name/status, originating request with dispatched arguments, and output/error. Tool clocks are outside P0. A tool request alone does not prove execution. |
+| TE-6: verifier outcome | The current Gym verification surface: finite rollout reward, including for masked results, and correctly scoped terminal resolution when present. `mask_sample=true` excludes the reward from scores. Masked or explicitly incomplete verification requires nonblank `failure_kind` and `failure_reason`. Extended verifier scope/version and judge provenance are not certified by this profile. |
+| TE-7: payloads | Saved request and response/error bodies. Empty returned bodies and explicit no-response transport failures remain distinct. |
+| TE-8: run join | Exactly one explicit invocation owner per captured attempt, including attempts without response ids; consistent parent relationships and exact references. |
+| TE-9: step join | Every retained policy attempt belongs to exactly one identified step. Retries remain attempts on that step. Explicit compaction-helper refs are excluded from policy steps. |
+
+TE-2 distinguishes preservation from availability: an absent provider metric is
+not an available zero or a five-count availability pass. Derived totals follow
+Gym's documented prompt-plus-completion convention. Anthropic prompt totals
+include cache reads and cache creation. Missing usage remains visible to health.
+
+The profile covers retained artifacts. It does not certify live failure/retry
+scenario coverage, closed-run completeness, health, accuracy, or deployment
+readiness. Independent completeness required by some health consumers is separate
+from TE-9's retained reference check. Infra taxonomy (TE-10) and P1 efficiency
+requirements are outside this profile.
+
+## Applicability and delivery
+
+By default the pair has policy steps, tools, and a verifier. Use `--no-tools`,
+`--no-verifier`, or `--no-steps` only when that feature does not apply to the
+pair. Missing evidence never automatically becomes N/A. Contradictory retained
+evidence rejects an exclusion. A step-free pair still needs TE-8.
+
+`--bundle` accepts a JSONL file, or a directory with exactly one `rollouts.jsonl`
+or `evaluator_rollouts.jsonl`, at its root or under `artifacts/`.
+
+The delivery surface is the rollout JSONL, including `ng_trajectory` payloads.
+An optional `--capture-dir /absolute/path/to/model-calls` cross-checks exact
+identity sets, payloads, metadata and incomplete markers. It cannot repair a
+missing JSONL payload for a passing delivery verdict.
+
+Each inspection atomically publishes an immutable directory containing:
+
+- `evidence_summary.json`: gate, per-TE counts, token availability, applicability,
+  source/checker/schema hashes and qualification limits.
+- `evidence_results.jsonl`: per-rollout findings and field locations.
+- `evidence_report.md`: evidence table.
+
+Exit codes are **0** for a met gate, **1** for unmet evidence, and **2** for an
+input/checker error. An empty input is an error. Reports omit payload contents.
+Identical inputs and checker versions reuse the same report directory.
+
+## Compare harnesses
+
+Use the same task and capture settings when comparing harnesses:
+
+```bash
+python scripts/inspect_harness_conformance.py matrix \
+    --harness opencode=results/opencode/rollouts.jsonl \
+    --harness pi=results/pi/rollouts.jsonl \
+    --harness codex=results/codex/rollouts.jsonl \
+    --harness hermes=results/hermes/rollouts.jsonl \
+    --output results/harness-evidence
+```
+
+The command writes per-harness reports plus `harness_evidence.md` and
+`harness_evidence.json`. Applicability flags apply to every input pair in that
+comparison. A matrix FAIL identifies missing or inconsistent evidence; it is not
+a benchmark accuracy result.
+
+Checker unit tests use hand-authored synthetic evidence contracts, independent of
+harness implementations. Mutations verify missing, conflicting, and malformed
+evidence without prescribing which checks a real harness should pass.
+
+The [Trajectory Capability Matrix](/main/reference/trajectory-capabilities) is
+generated separately from fresh scripted harness runs. Its regeneration command
+requires passing runner, harness adapter, and checker unit tests at a specific
+Gym commit before replacing the table.
+
+## Onboard a producer
+
+Enable `observability_enabled: true` and set `model_call_capture_dir` to a shared
+absolute directory. Route requests through Gym's correlated model URL and retain
+all attempts. See [Model-call Capture](/main/model-server/model-call-capture).
+
+Return `ng_agent_observations` with `AgentInvocation` and exact `ModelCallRef`
+keys (`model_call_id`, or unique `model_ref` plus `response_id`). Forward the
+invocation id as `x-session-id` for failed-call joins through the collector.
+A timestamp or shared model name never establishes ownership.
+
+Supply explicit `TrajectoryTurn` records with the actual prompt and decision
+boundaries. Preserve tool request/result pairs and `ToolCallObservation` outcomes,
+including failures and terminal submission. Keep resolution unknown on
+intermediate steps. Retain the resources server's verification response.
+See [Rollout Evidence](/main/observability/rollout-evidence).
+
+Inspect a small collected evaluation, fix producer gaps, and collect again.
+Run [rollout health checks](/main/evaluation/rollout-health) separately. Evidence
+checks neither rewrite `quality_summary.json` nor treat a truthfully recorded
+failed model call as missing evidence.
+
+```bash
+python -m pytest tests/unit_tests/harness_capabilities -q
+```

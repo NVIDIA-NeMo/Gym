@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Shared names for why a rollout failed.
+"""Shared failure names and episode execution stages.
 
 Gym describes failures with free text and component-local labels, so the same failure
 arrives at a collector, a log line and a metric under three different names and cannot be
@@ -36,9 +36,17 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Literal
 
 
 logger = logging.getLogger(__name__)
+
+
+# Where an episode failed, independently of its kind and retry policy.
+# Admission precedes seed. Collector-observed transport failures leave the stage
+# unset: delivery evidence and failure_kind describe the observation without
+# claiming to know where execution stopped inside the Environment Server.
+FailureStage = Literal["admission", "seed", "agent", "verification", "cleanup"]
 
 
 # ``<domain>_<condition>``. The domain says which layer observed the failure, so a reader

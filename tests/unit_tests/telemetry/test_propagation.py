@@ -86,14 +86,12 @@ def traces(monkeypatch):
     config = NemoLensConfig(
         enabled=True,
         service_name="nemo-gym-test",
-        export_strategy="all_ranks",
         span_groups="all",
         # Traces only. Leaving metrics on would stand up a PeriodicExportingMetricReader
         # pointed at the default OTLP endpoint and fill the run with connection errors.
         metrics_enabled=False,
-        _span_group_cls=GymSpanGroup,
     )
-    handle = setup_telemetry(config, rank=0, world_size=1, span_exporter=exporter, _allow_reinit=True)
+    handle = setup_telemetry(config, span_exporter=exporter, _allow_reinit=True)
     set_enabled_span_groups(GymSpanGroup.resolve("all"))
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", handle)
     monkeypatch.setattr(telemetry_setup, "_INITIALISED", True)
@@ -261,6 +259,48 @@ async def test_client_span_records_method_and_status(two_gym_servers, traces):
 
     assert client.attributes["http.request.method"] == "GET"
     assert client.attributes["http.response.status_code"] == 200
+
+
+@pytest.mark.parametrize("tracing_enabled", [False, True])
+async def test_lazy_client_initialization_failure_is_inside_the_client_span(
+    traces, monkeypatch, tracing_enabled: bool
+):
+    from nemo.lens.state import set_enabled_span_groups
+    from opentelemetry.trace import StatusCode
+
+    from nemo_gym.telemetry import connection_pool
+
+    if not tracing_enabled:
+        set_enabled_span_groups(frozenset())
+    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
+    monkeypatch.setattr(server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 4)
+    monkeypatch.setattr(server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
+    monkeypatch.setattr(
+        server_utils,
+        "get_global_config_dict",
+        lambda **_kwargs: {"global_aiohttp_connector_limit": 1, "global_aiohttp_connector_limit_per_host": 1},
+    )
+
+    with pytest.raises(ValueError, match="must remain at least 1"):
+        # Bound the call so a validation regression that reaches the network fails instead of retrying forever.
+        await asyncio.wait_for(
+            server_utils.request(
+                "GET", "http://127.0.0.1/work", _max_connection_retries=1, _server_name="policy_model"
+            ),
+            timeout=5,
+        )
+
+    assert server_utils._GLOBAL_AIOHTTP_CLIENT is None
+    assert connection_pool._SERVER_NAME.get() == "external"
+    client_spans = _by_kind(traces(), "CLIENT")
+    if tracing_enabled:
+        (client,) = client_spans
+        assert client.status.status_code == StatusCode.ERROR
+        assert client.attributes["http.request.method"] == "GET"
+        assert any(event.name == "exception" for event in client.events)
+    else:
+        assert client_spans == []
 
 
 async def test_client_span_url_attribute_drops_the_query_string(traces, loop_local_aiohttp_client, monkeypatch):

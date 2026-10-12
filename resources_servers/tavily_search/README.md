@@ -22,3 +22,11 @@ Data: Apache 2.0
 
 Dependencies
 - nemo_gym: Apache 2.0
+
+## Search policy and runtime limits
+
+The server supports regular Gym agents and native MCP clients, including OpenCode
+and Pi. See [tool-service behavior and compatibility](../../fern/versions/latest/pages/infrastructure/tavily-search.mdx#tool-service-behavior-and-compatibility)
+for the exclusion policy, key pools, bounded retries, and cache limits. These
+policies apply to all Tavily configurations, including removal of the aggregate
+`Search Answer` section. Tool transcripts and Gym observability record tool use.

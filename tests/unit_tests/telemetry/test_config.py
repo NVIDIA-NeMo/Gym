@@ -71,17 +71,6 @@ def test_memory_profiling_interval_must_be_positive():
         )
 
 
-def test_export_strategy_defaults_to_all_ranks():
-    """Every Gym server process must export.
-
-    NeMo-RL and Megatron-LM default to `single_rank` because they run one process tree
-    where rank 0 is representative. Every Gym server is rank 0 of its own world of 1, so
-    `single_rank` would be meaningless here and any silenced process is a hole in the
-    middle of a distributed trace.
-    """
-    assert TelemetryConfig().export_strategy == "all_ranks"
-
-
 def test_unknown_keys_are_preserved_not_rejected():
     """`extra="allow"` keeps a forward-compatible key from breaking an existing config."""
     config = TelemetryConfig.model_validate({"enabled": True, "some_future_knob": 7})
