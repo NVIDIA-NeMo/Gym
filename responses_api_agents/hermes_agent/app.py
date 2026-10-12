@@ -73,7 +73,7 @@ from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.tool_access import MCPToolAccess
-from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs
+from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs, install_summary_compat
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
 from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, HermesSandboxSession
 
@@ -478,6 +478,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                             invocation_id=invocation_id,
                             parent_invocation_id=raw_invocation.get("parent_invocation_id"),
                             status=raw_invocation.get("status", "unknown"),
+                            stop_reason=raw_invocation.get("stop_reason"),
                             # Every call goes to the configured Model Server, so a response ID identifies the call.
                             model_calls=[
                                 ModelCallRef(model_ref=self.config.model_server, response_id=response_id)
@@ -525,6 +526,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             AgentInvocation(
                 invocation_id="root",
                 status=invocation_status,
+                stop_reason=result.get("stop_reason"),
                 conversation=normalize_hermes_messages(messages),
             )
         ]
@@ -677,11 +679,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
         model_name: str,
         interrupted_by_dispatch: bool = False,
         n_input: int = 0,
+        retain_provider_failure: bool = False,
     ) -> NeMoGymResponse:
         # The pinned Hermes marks provider/API failures with `failed`, but model-limit and
         # invalid-tool outcomes with `partial`. Keep those partial patches gradable. Its one
         # model-caused `failed` outcome is first-response truncation (run_agent.py).
-        if result.get("failed") and result.get("error") != "First response truncated due to output length limit":
+        provider_failed = (
+            bool(result.get("failed")) and result.get("error") != "First response truncated due to output length limit"
+        )
+        if provider_failed and not retain_provider_failure:
             raise RuntimeError(f"Hermes agent failed: {result.get('error') or 'unknown provider/API failure'}")
 
         messages = result.get("messages") or []
@@ -735,6 +741,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if harness_error:
             metadata["hermes_error"] = str(harness_error)[:2000]
 
+        if provider_failed:
+            metadata["provider_failed"] = "true"
+            harness_error = harness_error or "unknown provider/API failure"
         response_error = None
         if harness_error:
             from openai.types.responses import ResponseError  # pyright: ignore[reportMissingImports]
@@ -796,10 +805,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
             )
 
         agent._build_api_kwargs = _patched_build_api_kwargs
+        install_summary_compat(agent, preserve_reasoning_history=self.config.chat_template_kwargs_enabled)
         observer = None
         if observation_collector is not None:
             try:
-                observer = HermesAgentObserver(model_ref=self.config.model_server).instrument(agent)
+                observer = HermesAgentObserver(
+                    model_ref=self.config.model_server, capture_correlated=rollout_id is not None
+                ).instrument(agent)
             except Exception:
                 LOG.exception("failed to initialize Hermes observability")
 
@@ -821,6 +833,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 params["history"],
                 task_id=None,
             )
+            if getattr(agent, "_gym_iteration_limit_reached", False):
+                result.setdefault("stop_reason", "max_iterations")
         except BaseException as exc:
             agent_error = exc
             raise
@@ -849,12 +863,22 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 except Exception:
                     LOG.exception("failed to return Hermes observations")
 
+        # Hermes' early error returns omit the aggregates included by its normal
+        # return. Preserve the actual runtime counters, including known zero after
+        # rejection, without inventing counts when a runtime does not expose them.
+        result = dict(result)
+        for field in ("prompt_tokens", "completion_tokens", "cache_read_tokens", "reasoning_tokens"):
+            count = getattr(agent, f"session_{field}", None)
+            if field not in result and type(count) is int and count >= 0:
+                result[field] = count
+
         return self._response_from_result(
             body=body,
             result=result,
             model_name=model_name,
             interrupted_by_dispatch=interrupted_by_dispatch,
             n_input=len(params["history"]) + 1,
+            retain_provider_failure=True,
         )
 
     async def responses(
@@ -991,6 +1015,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
             naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
 
             result = verify_json | {"turns_used": turns, "finished_naturally": naturally}
+            if (gym_resp.metadata or {}).get("provider_failed") == "true":
+                # Keep the verifier result and evidence without admitting an
+                # infrastructure failure into benchmark or training scores.
+                result.update(
+                    mask_sample=True,
+                    failure_kind="agent_request_failed",
+                    failure_reason=gym_resp.error.message if gym_resp.error else "Hermes provider failure",
+                    finished_naturally=False,
+                )
             if observations is not None:
                 result["ng_agent_observations"] = observations.model_dump(mode="json")
             return HermesAgentVerifyResponse.model_validate(result)

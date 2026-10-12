@@ -815,6 +815,7 @@ class TestResultClassification:
             {"partial": True, "error": "Context length exceeded (100 tokens). Cannot compress further."},
             {"partial": True, "error": "Model generated invalid tool call: invalid"},
             {"completed": True},
+            {"completed": False, "stop_reason": "max_iterations"},
         ],
     )
     def test_model_outcomes_remain_gradable_with_partial_trajectory(self, outcome) -> None:
@@ -826,18 +827,33 @@ class TestResultClassification:
         )
         assert response.output[0].content[0].text == "Applied a partial patch"
         assert response.metadata["partial"] == str(bool(outcome.get("partial"))).lower()
+        if outcome.get("stop_reason") == "max_iterations":
+            assert response.status == "incomplete"
+            assert response.error is None
+            assert response.metadata["stop_reason"] == "max_iterations"
 
-    async def test_host_path_also_rejects_provider_failure(self, monkeypatch) -> None:
+    @pytest.mark.parametrize("totals", [None, (0, 0), (20, 10)])
+    async def test_host_path_retains_provider_failure_for_masked_verification(self, monkeypatch, totals) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
         monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
         runner = MagicMock()
         runner.run_conversation.return_value = {"failed": True, "error": "HTTP 500", "messages": []}
+        if totals is not None:
+            runner.session_prompt_tokens, runner.session_completion_tokens = totals
+            runner.session_cache_read_tokens = 0
+            runner.session_reasoning_tokens = 0
         monkeypatch.setattr("run_agent.AIAgent", MagicMock(return_value=runner))
-        with pytest.raises(RuntimeError, match="HTTP 500"):
-            await hermes._create_response(
-                NeMoGymResponseCreateParamsNonStreaming(input="hi"),
-            )
+        response = await hermes._create_response(NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+        assert response.status == "failed"
+        assert response.error.message == "HTTP 500"
+        assert response.metadata["provider_failed"] == "true"
+        if totals is None:
+            assert response.usage is None
+        else:
+            assert response.usage.input_tokens == totals[0]
+            assert response.usage.output_tokens == totals[1]
+            assert response.usage.total_tokens == sum(totals)
 
 
 class TestSandboxHermesInstall:
@@ -1144,7 +1160,8 @@ class TestObservability:
             runtime_gap,
         ]
 
-    def test_run_returns_observations_without_leaking_internal_attachment(self) -> None:
+    @pytest.mark.parametrize("provider_failed", [False, True])
+    def test_run_returns_observations_without_leaking_internal_attachment(self, provider_failed) -> None:
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {"observability_enabled": True}
         agent = HermesAgent(config=_config(), server_client=server_client)
@@ -1160,6 +1177,13 @@ class TestObservability:
                 "tools": [],
             }
         )
+        if provider_failed:
+            response = response.model_copy(
+                update={
+                    "metadata": {"provider_failed": "true"},
+                    "status": "failed",
+                }
+            )
         observed_response = AsyncMock(
             return_value=AgentEpisode(
                 response=response,
@@ -1189,6 +1213,12 @@ class TestObservability:
         with patch.object(HermesAgent, "_create_episode", observed_response):
             result = asyncio.run(agent.run(request, body))
 
+        assert result.reward == 1.0  # Retain the verifier's actual result even when masked.
+        assert result.mask_sample is provider_failed
+        if provider_failed:
+            assert result.failure_kind == "agent_request_failed"
+            assert result.failure_reason
+            assert result.finished_naturally is False
         assert result.ng_agent_observations is not None
         assert result.ng_agent_observations.source == "hermes"
         verify_json = server_client.post.await_args_list[-1].kwargs["json"]

@@ -183,8 +183,16 @@ async def test_timeout_returns_even_when_a_child_escapes_the_process_group(tmp_p
     provider = LocalProvider(workspace_root=str(tmp_path))
     handle = await provider.create(SandboxSpec())
 
-    escaped = "python3 -c 'import os,time;os.setsid();time.sleep(60)' & sleep 30"
-    result = await asyncio.wait_for(provider.exec(handle, escaped, timeout_s=0.5), timeout=15)
+    # The escaped child outlives the provider's kill, so it exits only once the test releases it.
+    release = tmp_path / "release"
+    child = (
+        f"import os, pathlib, time\nos.setsid()\nwhile not pathlib.Path({str(release)!r}).exists(): time.sleep(0.05)"
+    )
+    escaped = join(["python3", "-c", child]) + " & sleep 30"
+    try:
+        result = await asyncio.wait_for(provider.exec(handle, escaped, timeout_s=0.5), timeout=15)
+    finally:
+        release.touch()
 
     assert result.return_code == 125 and result.error_type == "timeout"
 

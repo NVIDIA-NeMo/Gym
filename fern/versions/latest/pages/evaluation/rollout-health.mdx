@@ -142,6 +142,11 @@ including compaction summaries that have no policy turn. A call referenced by bo
 excluded. Missing or ambiguous references, or missing usage, make the comparison unobserved rather than treating unknown tokens
 as zero. Response usage must cover the same invocation tree, including child sessions.
 
+Response usage counts the tokens reported by model responses that finished. A failed call that returned no finished
+response contributes nothing to either side of the comparison, so a rollout whose every call was rejected reports usage of
+zero, not missing usage. Missing usage means a finished response's usage was lost, and only that makes the comparison
+unobserved.
+
 `task_no_successful_model_calls` remains turn-bound: an invocation-only support or compaction call must not establish a
 successful task turn. Structural turn checks are unchanged.
 
@@ -235,7 +240,8 @@ This abridged example omits the other check-coverage entries and zero-valued iss
         "total": 1,
         "by_status": {"408": 1},
         "rollouts_affected": 1,
-        "ended_on_error": 1
+        "ended_on_error": 1,
+        "usage_unknown": 1
       },
       "duplicated_calls": {
         "replayed": 0,
@@ -267,6 +273,9 @@ IDs whose count is zero. `run.artifacts.coverage` reports how often each check w
 `run.artifacts.captures` counts rollout trajectories that contain model-call evidence; health does not count or reopen raw
 capture files. Raw statistics under `run.stats` describe all model calls stored in `ng_trajectory`, including unreferenced
 auxiliary calls. Checks with a policy-model subject evaluate only exactly bound calls.
+`model_call_errors.usage_unknown` counts failed calls that returned no finished response and carry no token counts. The
+token checks skip these calls, so any tokens the server spent on them before a cancellation or timeout are counted only here,
+as a number of calls.
 
 ### `rollout_verdicts.jsonl`
 

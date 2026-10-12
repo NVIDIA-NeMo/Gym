@@ -102,6 +102,13 @@ if [[ "$VLLM_ENGINES_PER_NODE" == 4 && "$ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE" !
 fi
 # Optional whitespace-separated flags, e.g. ROUTER_ARGS="--balance-abs-threshold 32 --balance-rel-threshold 1.1".
 
+# The generated command is parsed by Bash again on the evaluation node.
+# Preserve each argument, including Hydra dictionaries, as literal shell data.
+eval_arguments=""
+if (( should_run_eval )); then
+    printf -v eval_arguments '%q ' "$@"
+fi
+
 eval_command=$(cat <<EOF
 set -euo pipefail
 
@@ -114,7 +121,7 @@ export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
 
 source "$VLLM_CONFIG"
 
-gym eval prepare $@ +use_cached_prepared_benchmarks=true
+gym eval prepare $eval_arguments +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
 # export_to_csv.py derives <base>_aggregate_metrics.json from this, so the
@@ -160,7 +167,7 @@ gym_config_args+=(--config "\$inference_metrics_config")
 # port_range_low, port_range_high: Move into ephemeral ports
 # We add the sandbox_utils and policy_model_override yamls so users don't need to add them on every invocation
 gym eval run \
-    $@ \
+    $eval_arguments \
     "\${gym_config_args[@]}" \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
