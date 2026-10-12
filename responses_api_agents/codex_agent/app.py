@@ -1046,8 +1046,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
         mcp_servers: Optional[dict[str, Any]] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
-    ) -> tuple[str, str]:
-        """Run ``codex exec --json`` and return (stdout, model_name).
+    ) -> tuple[str, str, Optional[AgentObservationBundle], bool]:
+        """Run ``codex exec --json`` and return (stdout, model_name, observations, timed_out).
 
         When ``rollout_id`` is set and a model server is configured, the per-rollout capture prefix
         is applied to the provider base_url so the CLI's streaming /v1/responses calls correlate to
@@ -1115,15 +1115,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 LOG.warning("codex exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
             LOG.debug("codex stdout (%d chars): %s", len(stdout), stdout[:2000].decode(errors="replace"))
-            text = stdout.decode(errors="replace")
+            observations = None
             if rollout_id is not None:
                 observations = read_codex_observations(
                     codex_home, rollout_id, returncode=proc.returncode, timed_out=timed_out
                 )
-                text += "\n" + json.dumps({"type": "_ng_observations", "bundle": observations.model_dump(mode="json")})
-            if timed_out:
-                text += "\n" + json.dumps({"type": "_ng_timed_out"})
-            return text, model
+            return stdout.decode(errors="replace"), model, observations, timed_out
         finally:
             await stack.aclose()
             if codex_home is not None:
@@ -1179,7 +1176,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
 
-        stdout, model_name = await self._run_codex(
+        stdout, model_name, observations, timed_out = await self._run_codex(
             user_message,
             system_prompt=system_prompt,
             mcp_servers=mcp_servers,
@@ -1231,17 +1228,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
             ),
         )
 
-        for line in stdout.splitlines():
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(event, dict):
-                continue
-            if event.get("type") == "_ng_observations":
-                response = response.model_copy(update={"_ng_agent_observations": event["bundle"]})
-            elif event.get("type") == "_ng_timed_out":
-                response = response.model_copy(update={"_ng_agent_timed_out": True})
+        if observations is not None:
+            response = response.model_copy(update={"_ng_agent_observations": observations.model_dump(mode="json")})
+        if timed_out:
+            response = response.model_copy(update={"_ng_agent_timed_out": True})
         return response
 
     async def responses(

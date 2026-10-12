@@ -33,6 +33,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
+from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.codex_agent.app import (
     CodexAgent,
@@ -340,7 +341,7 @@ class TestRunForwardsSkillsPath:
 
     def test_skills_ref_path_forwarded(self) -> None:
         agent = _make_agent()
-        run_codex = AsyncMock(return_value=("", "codex-default"))
+        run_codex = AsyncMock(return_value=("", "codex-default", None, False))
         body = CodexAgentRunRequest.model_validate(
             {
                 "responses_create_params": {"input": []},
@@ -354,7 +355,7 @@ class TestRunForwardsSkillsPath:
 
     def test_no_skills_ref_forwards_none(self) -> None:
         agent = _make_agent()
-        run_codex = AsyncMock(return_value=("", "codex-default"))
+        run_codex = AsyncMock(return_value=("", "codex-default", None, False))
         body = CodexAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
 
         self._run(agent, body, run_codex)
@@ -365,7 +366,7 @@ class TestRunForwardsSkillsPath:
 class TestRunTimeout:
     """A run stopped by `timeout` must not be reported as finished naturally."""
 
-    def _run(self, stdout: str):
+    def _run(self, stdout: str, *, timed_out: bool = False, observations: AgentObservationBundle | None = None):
         agent = _make_agent()
         verify_bodies = []
 
@@ -381,17 +382,26 @@ class TestRunTimeout:
         req = MagicMock()
         req.cookies = {}
         body = CodexAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
-        with patch.object(CodexAgent, "_run_codex", AsyncMock(return_value=(stdout, "codex-default"))):
+        with patch.object(
+            CodexAgent, "_run_codex", AsyncMock(return_value=(stdout, "codex-default", observations, timed_out))
+        ):
             result = asyncio.run(agent.run(req, body))
         return result, verify_bodies[0]
 
     def test_timed_out_run_is_not_finished_naturally(self) -> None:
-        result, verify_body = self._run(json.dumps({"type": "_ng_timed_out"}))
+        result, verify_body = self._run("", timed_out=True)
 
         assert result.finished_naturally is False
         assert result.agent_timed_out is True
         assert result.reward == 0.5
         assert "_ng_agent_timed_out" not in verify_body["response"]
+
+    def test_observations_reach_rollout_without_stdout_events(self) -> None:
+        observations = AgentObservationBundle(source="codex")
+        result, verify_body = self._run("", observations=observations)
+
+        assert result.ng_agent_observations == observations
+        assert "_ng_agent_observations" not in verify_body["response"]
 
     def test_completed_run_is_finished_naturally(self) -> None:
         result, _ = self._run("")
@@ -432,7 +442,7 @@ class TestRunCodex:
             patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
             patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
         ):
-            stdout, model = asyncio.run(agent._run_codex("hello", system_prompt="be terse"))
+            stdout, model, observations, timed_out = asyncio.run(agent._run_codex("hello", system_prompt="be terse"))
 
         assert captured["cmd"][0] == "codex"
         assert captured["cmd"][-1] == "hello"
@@ -446,6 +456,8 @@ class TestRunCodex:
         assert not Path(captured["codex_home"]).exists()
         assert not Path(captured["scratch_cwd"]).exists()
         assert "turn.completed" in stdout
+        assert observations is None
+        assert timed_out is False
         assert model == "codex-default"
 
     def test_explicit_cwd_is_used_and_kept(self, tmp_path: Path) -> None:
@@ -513,9 +525,11 @@ class TestRunCodex:
             patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
             patch("responses_api_agents.codex_agent.app.asyncio.wait_for", fake_wait_for),
         ):
-            stdout, model = asyncio.run(agent._run_codex("hello"))
+            stdout, model, observations, timed_out = asyncio.run(agent._run_codex("hello"))
 
-        assert stdout == "\n" + json.dumps({"type": "_ng_timed_out"})
+        assert stdout == ""
+        assert timed_out is True
+        assert observations is None
         assert killed["called"] is True
         assert model == "codex-default"
 
@@ -585,9 +599,14 @@ class TestRolloutMCPServers:
             captured["instruction"] = instruction
             captured["mcp_servers"] = mcp_servers
             captured["config"] = agent._build_config("http://x/v1", mcp_servers=mcp_servers)
-            return _item_completed(
-                {"id": "item_1", "type": "agent_message", "text": "The weather in Paris is sunny and 72 F."}
-            ), "codex-default"
+            return (
+                _item_completed(
+                    {"id": "item_1", "type": "agent_message", "text": "The weather in Paris is sunny and 72 F."}
+                ),
+                "codex-default",
+                None,
+                False,
+            )
 
         agent.server_client.post.side_effect = fake_post
         object.__setattr__(agent, "_run_codex", fake_run_codex)
@@ -631,7 +650,12 @@ class TestRolloutMCPServers:
 
         async def fake_run_codex(instruction, system_prompt=None, mcp_servers=None, **kwargs):
             captured["mcp_servers"] = mcp_servers
-            return _item_completed({"id": "item_1", "type": "agent_message", "text": "ok"}), "codex-default"
+            return (
+                _item_completed({"id": "item_1", "type": "agent_message", "text": "ok"}),
+                "codex-default",
+                None,
+                False,
+            )
 
         agent.server_client.post.side_effect = fake_post
         object.__setattr__(agent, "_run_codex", fake_run_codex)
