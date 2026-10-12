@@ -2615,7 +2615,8 @@ async def test_generation_smoke_masks_reward_and_never_calls_judge(tmp_path: Pat
         ),
         server_client=MagicMock(spec=ServerClient),
     )
-    source = json.loads(Path("resources_servers/gdpval/data/example.jsonl").read_text().splitlines()[0])
+    example = Path(__file__).parents[1] / "data" / "example.jsonl"
+    source = json.loads(example.read_text().splitlines()[0])
     prepared = prepare_row(source)
     body = GDPValVerifyRequest.model_validate(
         prepared
