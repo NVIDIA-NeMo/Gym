@@ -1017,12 +1017,22 @@ class FileLineageStore(IncrementalLineageStore):
             return None
         with self._locked(rollout_id):
             # Failure rows and fingerprints from incompatible algorithms cannot resolve as parents.
-            records = [
-                record
-                for record in self._read(rollout_id)
-                if record.get("fingerprint") == fingerprint
-                and record.get("fingerprint_version") == FINGERPRINT_VERSION
+            compatible_records = [
+                record for record in self._read(rollout_id) if record.get("fingerprint_version") == FINGERPRINT_VERSION
             ]
+            records = [record for record in compatible_records if record.get("fingerprint") == fingerprint]
+            if not records:
+                # Mirror the index's fallback for token-free custody rows. Persisted IDs let another
+                # worker, or a fresh reader after restore, resolve a harness-rewritten tool call.
+                ids = set(tool_call_ids(trailing_assistant_turn(request_items)))
+                for record in compatible_records:
+                    if not ids.intersection(record.get("response_tool_call_ids") or []):
+                        continue
+                    context_len = int(record["context_len"])
+                    if len(request_items) < context_len:
+                        continue
+                    if conversation_digest(request_items[:context_len]) == record["context_digest"]:
+                        records.append(record)
         if len(records) != 1:
             return None
         record = records[0]
@@ -1053,6 +1063,7 @@ class FileLineageStore(IncrementalLineageStore):
         record = {
             "model_call_id": model_call_id,
             "fingerprint": assistant_fingerprint(request_items + list(commit.response_items)),
+            "response_tool_call_ids": tool_call_ids(list(commit.response_items)),
             "context_len": len(request_items),
             "context_digest": conversation_digest(request_items),
             "digest": commit.record.cumulative_hash,

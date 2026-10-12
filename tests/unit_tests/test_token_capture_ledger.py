@@ -133,6 +133,52 @@ def test_stores_implement_capture_ledger(store):
 
 
 @pytest.mark.asyncio
+async def test_ledger_parent_tool_ids_survive_argument_rewrites(store, tmp_path):
+    served = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "tool-1",
+                "type": "function",
+                "function": {"name": "bash", "arguments": '{"command":"cd /testbed && pytest"}'},
+            }
+        ],
+    }
+    echoed = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "tool-1",
+                "type": "function",
+                "function": {"name": "bash", "arguments": '{"command":"pytest","description":"run tests"}'},
+            }
+        ],
+    }
+    await store.record(_commit(_call_record("c1"), [USER_1], [served]))
+    # Gym resolves from files after a restart, without the writer's index.
+    reader = FileLineageStore(tmp_path) if isinstance(store, FileLineageStore) else store
+    continuation = [USER_1, echoed, {"role": "tool", "tool_call_id": "tool-1", "content": "1 passed"}]
+    result = await reader.resolve("r1", continuation)
+    assert result.status == ParentResolutionStatus.RESOLVED
+    assert result.match is not None and result.match.model_call_id == "c1"
+    assert result.match.staging_chain == ("r1/c1",)
+    assert result.match.cumulative_token_ids == ()
+    if isinstance(store, FileLineageStore):
+        restored = FileLineageStore(tmp_path / "restored")
+        restored.import_rows("r1-a1", store.export_rows("r1"))
+        restored_result = await restored.resolve("r1-a1", continuation)
+        assert restored_result.status == ParentResolutionStatus.RESOLVED
+        assert restored_result.match is not None and restored_result.match.model_call_id == "c1"
+    rewritten_context = [{"role": "user", "content": "a summary of the original task"}, *continuation[1:]]
+    assert (await reader.resolve("r1", rewritten_context)).status == ParentResolutionStatus.UNRESOLVED
+    await store.record(_commit(_call_record("c2"), [USER_1], [served]))
+    # Reused IDs from two recorded calls never choose an arbitrary parent.
+    assert (await reader.resolve("r1", continuation)).status == ParentResolutionStatus.UNRESOLVED
+
+
+@pytest.mark.asyncio
 async def test_ledger_row_round_trips_token_free_manifest(store):
     await _record_call_1(store)
     manifest = RolloutManifest.model_validate(await store.manifest("r1"))
