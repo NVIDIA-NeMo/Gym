@@ -36,6 +36,7 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
+    ENVIRONMENT_SERVER_FAILURE_CLASS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
@@ -49,7 +50,7 @@ from resources_servers.gdpval.multistage_orchestrator import (
     MultiStageRunConfig,
     StageResume,
     _cached_partial_snapshot_is_valid,
-    _is_in_process_retryable,
+    _is_retryable_failure,
     _partial_stage_outcome,
     _prepare_resume,
     _require_final_stage_rows,
@@ -1516,7 +1517,6 @@ class TestPartialStageCompletion:
         min_success_fraction: float = 0.6,
         min_per_reference_success_fraction: float = 0.6,
         min_successful_rows_per_reference: int = 1,
-        waivable_failure_classes: Optional[Sequence[str]] = None,
     ) -> MultiStageRunConfig:
         first_stage: Dict[str, Any] = {"num_tasks": 10}
         if enabled:
@@ -1525,8 +1525,6 @@ class TestPartialStageCompletion:
                 "min_per_reference_success_fraction": min_per_reference_success_fraction,
                 "min_successful_rows_per_reference": min_successful_rows_per_reference,
             }
-            if waivable_failure_classes is not None:
-                first_stage["partial_completion"]["waivable_failure_classes"] = list(waivable_failure_classes)
         return MultiStageRunConfig(
             enabled=True,
             stages=parse_multistage_config(
@@ -1560,7 +1558,7 @@ class TestPartialStageCompletion:
     def _runner(
         failed_indices: set[int],
         *,
-        failure_class: str = "timeout_exceeded",
+        failure_class: str = ENVIRONMENT_SERVER_FAILURE_CLASS,
         no_persist: bool = False,
         terminal: bool = False,
         empty_successes: bool = False,
@@ -1731,7 +1729,7 @@ class TestPartialStageCompletion:
             assert {row["stage_index"] for row in rows_in} == {0}
             pairs = await successful(rows_in)
             return [
-                (row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"})
+                (row, {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS})
                 if row[TASK_INDEX_KEY_NAME] in timeout_indices
                 else (row, result)
                 for row, result in pairs
@@ -1834,7 +1832,7 @@ class TestPartialStageCompletion:
         async def first_attempt(rows_in: List[Dict[str, Any]]):
             pairs = await successful_run(rows_in)
             return [
-                (row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"})
+                (row, {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS})
                 if row["stage_index"] == 0 and row[TASK_INDEX_KEY_NAME] >= 6
                 else (row, result)
                 for row, result in pairs
@@ -1931,7 +1929,9 @@ class TestPartialStageCompletion:
         async def initial_timeout(rows_in: List[Dict[str, Any]]):
             pairs = await successful_run(rows_in)
             return [
-                (row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) if row[TASK_INDEX_KEY_NAME] == 4 else (row, result)
+                (row, {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS})
+                if row[TASK_INDEX_KEY_NAME] == 4
+                else (row, result)
                 for row, result in pairs
             ]
 
@@ -1945,13 +1945,19 @@ class TestPartialStageCompletion:
         )
         assert len(first_summaries) == 1
         timeout = load_latest_failures(output)[0][(4, 0)]
-        assert load_latest_attempt_dispositions(journal)[0][(4, 0)][NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
+        assert (
+            load_latest_attempt_dispositions(journal)[0][(4, 0)][NG_FAILURE_CLASS_KEY]
+            == ENVIRONMENT_SERVER_FAILURE_CLASS
+        )
 
         # Simulate a crash after the newer sidecar row is fsynced but before its
         # disposition is appended to the journal.
-        route_stage_rows(output, [{**timeout, NG_FAILURE_CLASS_KEY: "transient"}])
-        assert load_latest_failures(output)[0][(4, 0)][NG_FAILURE_CLASS_KEY] == "transient"
-        assert load_latest_attempt_dispositions(journal)[0][(4, 0)][NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
+        route_stage_rows(output, [{**timeout, NG_FAILURE_CLASS_KEY: "reference_missing"}])
+        assert load_latest_failures(output)[0][(4, 0)][NG_FAILURE_CLASS_KEY] == "reference_missing"
+        assert (
+            load_latest_attempt_dispositions(journal)[0][(4, 0)][NG_FAILURE_CLASS_KEY]
+            == ENVIRONMENT_SERVER_FAILURE_CLASS
+        )
 
         dispatched: List[Tuple[int, int]] = []
 
@@ -2002,9 +2008,9 @@ class TestPartialStageCompletion:
 
     @pytest.mark.parametrize(
         ("failure_class", "no_persist"),
-        [("transient", False), ("timeout_exceeded", True)],
+        [("reference_missing", False), (ENVIRONMENT_SERVER_FAILURE_CLASS, True)],
     )
-    async def test_policy_rejects_non_timeout_or_unpersisted_omissions(
+    async def test_policy_rejects_non_retryable_or_unpersisted_omissions(
         self, failure_class: str, no_persist: bool
     ) -> None:
         task_ids = [f"t{i}" for i in range(10)]
@@ -2028,62 +2034,6 @@ class TestPartialStageCompletion:
         assert set(dispatched_stages) == {0}
         assert len(summaries) == 1
         assert resume.completed == []
-
-    async def test_transient_omission_advances_when_explicitly_waivable(self) -> None:
-        """A judge-failure `transient` row is waivable only when the policy says so.
-
-        This is the `dc6c776f3af506df` case: one unresolved `transient` rollout
-        (an empty-PDF 400 from the judge panel) held the whole run at stage 1
-        under the timeout-only default, costing 176 of 220 tasks.
-        """
-        task_ids = [f"t{i}" for i in range(10)]
-        resume = self._balanced_resume(task_ids)
-        dispatched_stages: List[int] = []
-
-        _, summaries = await run_multistage_stages(
-            self._config(enabled=True, waivable_failure_classes=["timeout_exceeded", "transient"]),
-            {"a": 1000.0, "b": 1200.0},
-            _distribution(task_ids),
-            _materialized_rows(task_ids),
-            self._runner(
-                {0, 1, 2, 3},
-                failure_class="transient",
-                dispatched_stages=dispatched_stages,
-            ),
-            resume=resume,
-        )
-
-        assert set(dispatched_stages) == {0, 1}
-        assert len(summaries) == 2
-        assert summaries[0]["partial"] is True
-        assert summaries[0]["num_omitted"] == 4
-        outcome = resume.completed[0][1]
-        assert outcome["status"] == "partial_complete"
-        assert outcome["policy"]["newly_waivable_failure_classes"] == ["timeout_exceeded", "transient"]
-
-    async def test_unknown_waivable_failure_class_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="waivable_failure_classes"):
-            parse_multistage_config(
-                {
-                    "enabled": True,
-                    "stages": [
-                        {"num_tasks": 10, "partial_completion": {"waivable_failure_classes": ["skipped"]}},
-                        {"num_tasks": 10},
-                    ],
-                }
-            )
-
-    async def test_empty_waivable_failure_classes_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="waivable_failure_classes"):
-            parse_multistage_config(
-                {
-                    "enabled": True,
-                    "stages": [
-                        {"num_tasks": 10, "partial_completion": {"waivable_failure_classes": []}},
-                        {"num_tasks": 10},
-                    ],
-                }
-            )
 
     async def test_policy_rejects_missing_elo_fit(self) -> None:
         task_ids = [f"t{i}" for i in range(10)]
@@ -2221,7 +2171,7 @@ class TestPartialStageCompletion:
                 if task_index == 0:
                     rewritten.append((row, {NG_FAILURE_CLASS_KEY: "skipped", NG_TERMINAL_KEY: True}))
                 elif task_index in {1, 2, 3}:
-                    rewritten.append((row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"}))
+                    rewritten.append((row, {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS}))
                 else:
                     rewritten.append((row, result))
             return rewritten
@@ -3093,7 +3043,7 @@ class TestFailureRouting:
             json.loads(line).get("status") == "restart_from_stage" for line in journal.read_text().splitlines()
         )
 
-    def test_legacy_terminal_timeout_reopens_stage_and_preserves_timing(self, tmp_path: Path) -> None:
+    def test_retryable_failure_reopens_stage_and_preserves_timing(self, tmp_path: Path) -> None:
         out = tmp_path / "rollouts.jsonl"
         out.write_bytes(b"")
         journal = journal_path_for(out)
@@ -3116,8 +3066,7 @@ class TestFailureRouting:
                     "stage_index": 1,
                     TASK_INDEX_KEY_NAME: 7,
                     ROLLOUT_INDEX_KEY_NAME: 0,
-                    NG_FAILURE_CLASS_KEY: "timeout_exceeded",
-                    NG_TERMINAL_KEY: True,
+                    NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
                     "elapsed_seconds": 123.0,
                     "reuse_cached_deliverable": True,
                 }
@@ -3822,8 +3771,8 @@ class TestFailureContractOptIn:
 
         assert await run_rollout_collection(config, {}) is None
 
-        assert [(c.retry_terminal_timeouts, c.retry_invalid_judge_responses) for c in seen] == [(True, True)]
-        assert (config.retry_terminal_timeouts, config.retry_invalid_judge_responses) == (False, False)
+        assert [c.retry_invalid_judge_responses for c in seen] == [True]
+        assert config.retry_invalid_judge_responses is False
 
     async def test_single_pass_delegate_keeps_an_explicit_false(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3838,13 +3787,13 @@ class TestFailureContractOptIn:
             {
                 "input_jsonl_fpath": str(tmp_path / "input.jsonl"),
                 "output_jsonl_fpath": str(tmp_path / "rollouts.jsonl"),
-                "retry_terminal_timeouts": False,
+                "retry_invalid_judge_responses": False,
             }
         )
 
         assert await run_rollout_collection(config, {}) is None
 
-        assert [(c.retry_terminal_timeouts, c.retry_invalid_judge_responses) for c in seen] == [(False, True)]
+        assert [c.retry_invalid_judge_responses for c in seen] == [False]
 
     @pytest.mark.parametrize("opted_out", sorted(GDPVAL_FAILURE_CONTRACT))
     async def test_multistage_refuses_an_explicit_false(self, tmp_path: Path, opted_out: str) -> None:
@@ -3873,8 +3822,7 @@ class TestFailureContractOptIn:
 class TestReferenceMissingCoverage:
     """How a ``reference_missing`` row is counted by a partial-completion policy.
 
-    Under GDPVal's failure contract (``retry_terminal_timeouts``) the row is not
-    terminal: it is retried across resumes, since the reference tree can be
+    The row is not terminal: it is retried across resumes, since the reference tree can be
     repaired between runs, and it stays unresolved until it reaches
     ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS``. The outcome-level tests below pass
     ``unresolved_keys=set()``, i.e. the state at the max attempt, where the row
@@ -3902,13 +3850,12 @@ class TestReferenceMissingCoverage:
             min_success_fraction=0.9,
             min_per_reference_success_fraction=0.5,
             min_successful_rows_per_reference=1,
-            waivable_failure_classes=("timeout_exceeded", "transient"),
         )
         return _partial_stage_outcome(policy, stage_rows, successful, [], set(), [ref], 1200.0, 1)
 
-    def test_terminal_omission_is_accepted_without_being_waivable(self) -> None:
+    def test_resolved_omission_is_accepted(self) -> None:
         # 19 of 20 judged: the missing one is the reference_missing row. It is
-        # NOT in successful_rows and NOT in unresolved_keys (terminal).
+        # NOT in successful_rows and NOT in unresolved_keys (at the max attempt).
         outcome = self._outcome(judged=19, planned=20)
         assert outcome is not None
         assert outcome["success_fraction"] == pytest.approx(0.95)
@@ -3961,9 +3908,7 @@ class TestReferenceMissingCoverage:
             {"a": 1000.0, "b": 1200.0},
             _distribution(task_ids),
             _materialized_rows(task_ids),
-            TestPartialStageCompletion._runner(
-                {0}, failure_class="reference_missing", terminal=True, dispatched_stages=dispatched
-            ),
+            TestPartialStageCompletion._runner({0}, failure_class="reference_missing", dispatched_stages=dispatched),
         )
 
         if tolerate_unresolved:
@@ -3977,42 +3922,23 @@ class TestReferenceMissingCoverage:
             assert not any(row["stage_index"] == 1 for row in results)
 
 
-class TestReferenceMissingIsTerminal:
-    """A missing reference deliverable can never be fixed by retrying.
+class TestGDPValFailures:
+    """GDPVal's own failures are masked and retried only on resume, when the deliverable tree can be repaired."""
 
-    The verify response stamps the generic ``_ng_failure_terminal`` flag rather
-    than teaching ``is_terminal_failure`` a GDPVal-specific class name -- the
-    harness already honours that flag, so no change to nemo_gym is needed.
-    GDPVal runs the opt-in failure contract (``retry_terminal_timeouts``).
-    """
+    @pytest.mark.parametrize("failure_class", ["reference_missing", "eval_missing", "transport_ineligible"])
+    def test_failures_are_masked_and_not_terminal(self, failure_class: str) -> None:
+        from nemo_gym.rollout_collection import is_terminal_failure
+        from resources_servers.gdpval.app import _gdpval_failure
 
-    def test_generic_terminal_flag_is_honoured(self) -> None:
-        from nemo_gym.rollout_collection import NG_TERMINAL_KEY, is_terminal_failure
+        row = _gdpval_failure(failure_class)
 
-        assert is_terminal_failure({NG_TERMINAL_KEY: True}, retry_terminal_timeouts=True) is True
-
-    def test_environment_faults_are_revalidated_on_resume(self) -> None:
-        # reference_missing/eval_missing are terminal within a run (retrying
-        # cannot make the file appear) but the tree can be repaired between
-        # runs, so resume re-dispatches them for a cheap /verify recheck.
-        from nemo_gym.rollout_collection import (
-            NG_FAILURE_CLASS_KEY,
-            NG_TERMINAL_KEY,
-            is_terminal_failure,
-        )
-        from resources_servers.gdpval.app import (
-            EVAL_MISSING_FAILURE_CLASS,
-            REFERENCE_MISSING_FAILURE_CLASS,
-        )
-
-        for failure_class in (REFERENCE_MISSING_FAILURE_CLASS, EVAL_MISSING_FAILURE_CLASS):
-            row = {NG_FAILURE_CLASS_KEY: failure_class, NG_TERMINAL_KEY: True}
-            assert is_terminal_failure(row, retry_terminal_timeouts=True) is False
-
-    def test_timeout_stays_retryable(self) -> None:
-        from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, is_terminal_failure
-
-        assert is_terminal_failure({NG_FAILURE_CLASS_KEY: "timeout_exceeded"}, retry_terminal_timeouts=True) is False
+        assert row == {
+            NG_FAILURE_CLASS_KEY: failure_class,
+            "failure_kind": f"gdpval:{failure_class}",
+            "mask_sample": True,
+        }
+        assert is_terminal_failure(row) is False
+        assert _is_retryable_failure(row) is False
 
     def test_reference_missing_row_is_not_a_success(self) -> None:
         """The point of the change: it must not reach the success set, where the
@@ -4035,38 +3961,23 @@ class TestReferenceMissingIsTerminal:
 # ---------------------------------------------------------------------------
 
 
-class TestInProcessRetryGate:
-    """``_is_in_process_retryable`` must apply the gate its caller claims."""
+class TestRetryableFailure:
+    """``_is_retryable_failure`` gates both in-process retry and the partial-completion waiver."""
 
-    def test_accepts_persisted_retryable_classes(self) -> None:
-        assert _is_in_process_retryable({NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) is True
-        assert _is_in_process_retryable({NG_FAILURE_CLASS_KEY: "transient"}) is True
+    def test_accepts_a_non_terminal_environment_server_failure(self) -> None:
+        assert _is_retryable_failure({NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS}) is True
 
-    def test_rejects_success_and_drained_rows(self) -> None:
-        assert _is_in_process_retryable({}) is False
-        assert _is_in_process_retryable({"per_reference": {}, "reward": 1.0}) is False
-        assert _is_in_process_retryable({NG_FAILURE_CLASS_KEY: "transient", NG_NO_PERSIST_KEY: True}) is False
+    def test_rejects_success_drained_and_terminal_rows(self) -> None:
+        assert _is_retryable_failure({}) is False
+        assert _is_retryable_failure({"per_reference": {}, "reward": 1.0}) is False
+        drained = {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS, NG_NO_PERSIST_KEY: True}
+        assert _is_retryable_failure(drained) is False
+        terminal = {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS, NG_TERMINAL_KEY: True}
+        assert _is_retryable_failure(terminal) is False
 
-    def test_rejects_terminal_rows(self) -> None:
-        # A resume gates a terminal row; an in-process retry must gate it too.
-        assert _is_in_process_retryable({NG_FAILURE_CLASS_KEY: "transient", NG_TERMINAL_KEY: True}) is False
-        # A timeout is never terminal, even when an old build stamped the flag.
-        assert _is_in_process_retryable({NG_FAILURE_CLASS_KEY: "timeout_exceeded", NG_TERMINAL_KEY: True}) is True
-
-    @pytest.mark.parametrize(
-        "failure_class",
-        [
-            "reference_missing",
-            "eval_missing",
-            "transport_ineligible",
-            "skipped",
-            "incomplete",
-            "judge_invalid",
-            "legitimate",
-        ],
-    )
-    def test_rejects_classes_nothing_repairs_mid_process(self, failure_class: str) -> None:
-        assert _is_in_process_retryable({NG_FAILURE_CLASS_KEY: failure_class}) is False
+    @pytest.mark.parametrize("failure_class", ["reference_missing", "judge_failed", "agent_request_failed"])
+    def test_rejects_other_classes(self, failure_class: str) -> None:
+        assert _is_retryable_failure({NG_FAILURE_CLASS_KEY: failure_class}) is False
 
 
 class TestTolerateUnresolved:
@@ -4091,7 +4002,6 @@ class TestTolerateUnresolved:
             min_success_fraction=0.7,
             min_per_reference_success_fraction=0.7,
             min_successful_rows_per_reference=1,
-            waivable_failure_classes=("timeout_exceeded",),
             tolerate_unresolved=tolerate,
         )
         new_results: List[Dict[str, Any]] = []
@@ -4108,12 +4018,12 @@ class TestTolerateUnresolved:
             1,
         )
 
-    def test_waivable_class_is_accepted_either_way(self) -> None:
-        result = {NG_FAILURE_CLASS_KEY: "timeout_exceeded"}
+    def test_retryable_failure_is_accepted_either_way(self) -> None:
+        result = {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS}
         assert self._outcome(result, tolerate=False) is not None
         assert self._outcome(result, tolerate=True) is not None
 
-    def test_non_waivable_class_is_accepted_only_when_tolerating(self) -> None:
+    def test_other_failure_is_accepted_only_when_tolerating(self) -> None:
         result = {NG_FAILURE_CLASS_KEY: "agent_run_error"}
         assert self._outcome(result, tolerate=False) is None
         accepted = self._outcome(result, tolerate=True)
@@ -4127,7 +4037,7 @@ class TestTolerateUnresolved:
         assert self._outcome({"reward": 0.0}, tolerate=True) is None
 
     def test_drained_and_missing_rows_still_hold_the_stage_open(self) -> None:
-        drained = {NG_FAILURE_CLASS_KEY: "timeout_exceeded", NG_NO_PERSIST_KEY: True}
+        drained = {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS, NG_NO_PERSIST_KEY: True}
         assert self._outcome(drained, tolerate=True) is None
         assert self._outcome(None, tolerate=True) is None
 
@@ -4179,7 +4089,6 @@ class TestCachedPartialSnapshotPolicyRecord:
             min_success_fraction=policy.min_success_fraction,
             min_per_reference_success_fraction=policy.min_per_reference_success_fraction,
             min_successful_rows_per_reference=policy.min_successful_rows_per_reference,
-            waivable_failure_classes=policy.waivable_failure_classes,
             tolerate_unresolved=True,
         )
         assert self._is_valid(outcome, flipped) is True
@@ -4211,9 +4120,6 @@ class TestRetryInProcess:
                             "min_success_fraction": 0.7,
                             "min_per_reference_success_fraction": 0.7,
                             "min_successful_rows_per_reference": 1,
-                            # Deliberately excludes the class the rows come back
-                            # with, so only `tolerate_unresolved` can accept them.
-                            "waivable_failure_classes": ["transient"],
                             "tolerate_unresolved": True,
                         },
                     },
@@ -4240,10 +4146,10 @@ class TestRetryInProcess:
                     rewritten.append((row, result))
                 elif row.get(ATTEMPT_INDEX_KEY_NAME):
                     rewritten.append(
-                        (row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded", NG_NO_PERSIST_KEY: True}),
+                        (row, {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS, NG_NO_PERSIST_KEY: True}),
                     )
                 else:
-                    rewritten.append((row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"}))
+                    rewritten.append((row, {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS}))
             return rewritten
 
         return run
@@ -4318,7 +4224,7 @@ class TestRetryInProcess:
 
         async def run(rows_in: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
             dispatched.extend(dict(row) for row in rows_in)
-            return [(row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) for row in rows_in]
+            return [(row, {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS}) for row in rows_in]
 
         await run_multistage_stages(
             self._single_stage_cfg(),
@@ -4347,10 +4253,13 @@ class TestRetryInProcess:
             for row in rows_in:
                 dispatched.append(dict(row))
                 if row.get(ATTEMPT_INDEX_KEY_NAME):
-                    pairs.append((row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"}))
+                    pairs.append((row, {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS}))
                 else:
                     pairs.append(
-                        (row, {NG_FAILURE_CLASS_KEY: "transient", "reuse_cached_deliverable": True}),
+                        (
+                            row,
+                            {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS, "reuse_cached_deliverable": True},
+                        ),
                     )
             return pairs
 
@@ -4380,9 +4289,11 @@ class TestRetryInProcess:
             pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
             for row in rows_in:
                 if row.get(ATTEMPT_INDEX_KEY_NAME):
-                    pairs.append((row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded", NG_NO_PERSIST_KEY: True}))
+                    pairs.append(
+                        (row, {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS, NG_NO_PERSIST_KEY: True})
+                    )
                 else:
-                    pairs.append((row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"}))
+                    pairs.append((row, {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS}))
             return pairs
 
         await run_multistage_stages(

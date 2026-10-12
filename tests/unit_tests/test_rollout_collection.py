@@ -6604,9 +6604,6 @@ class TestIsTerminalFailure:
         [
             ("timeout_exceeded", True, True, False),
             ("timeout_exceeded", False, False, False),
-            ("reference_missing", True, True, False),
-            ("eval_missing", True, True, False),
-            ("transport_ineligible", True, True, False),
             ("skipped", False, False, True),
             ("skipped", True, True, True),
             ("agent_run_error", True, True, True),
