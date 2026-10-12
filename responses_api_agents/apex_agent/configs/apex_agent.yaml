@@ -59,6 +59,7 @@ apex_agent:
       # bind-mounted into the sandbox and a rollout killed mid-flight continues
       # from its last turn boundary when Gym re-dispatches it. Null disables it.
       resume_checkpoint_dir: ${oc.select:apex_agent_resume_checkpoint_dir,null}
+      prebuilt_resume_enabled: ${oc.select:apex_prebuilt_resume_enabled,false}
       resume_checkpoint_mount: ${oc.select:apex_agent_resume_checkpoint_mount,/checkpoint}
       resume_checkpoint_interval_seconds: ${oc.select:apex_agent_resume_checkpoint_interval_seconds,60}
       resume_min_remaining_seconds: ${oc.select:apex_agent_resume_min_remaining_seconds,300}
