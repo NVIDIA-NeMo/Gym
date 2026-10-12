@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/vision2code/configs/vision2code.yaml
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      base_url: https://inference-api.nvidia.com/v1
+      api_key: ${oc.env:NVIDIA_API_KEY,EMPTY}
+      model: nvidia/qwen/qwen3.8-27b
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+
+judge_model:
+  responses_api_models:
+    vllm_model:
+      base_url: ${policy_model.responses_api_models.vllm_model.base_url}
+      api_key: ${policy_model.responses_api_models.vllm_model.api_key}
+      model: ${policy_model.responses_api_models.vllm_model.model}
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true

@@ -1,0 +1,22 @@
+Vision2Code rubric and generation prompt port
+Source: https://github.com/image2code/vision2code
+Source base commit (checkout has local rubric changes): 000f2e162dd62fac5637c718e018d7123b3aff1e
+Copyright 2026 Vision2Code Authors
+License: Apache-2.0 (see LICENSE.upstream)
+Rubric version: recreation_rubric_v5_whitespace_diagnostic
+Files: vision2code/evaluation/dataset_rubrics.py; vision2code/generation/prompts.py
+
+Only ChartQA, ChemVQA-2K, DocVQA, and EEE-Bench definitions and their required
+scoring, image inspection, parsing, and prompt helpers are retained. Spacing
+variants, custom prompts, repair prompts, and orchestration are excluded.
+Formatting/import cleanup is applied; retained scoring semantics are unchanged.
+Gym requires explicit rubric names; unused filename-based rubric inference,
+the duplicate prompt wrapper, and the no-op whitespace compatibility option
+have been removed. Runtime orchestration uses Gym APIs rather than the upstream package.
+Judge image MIME types are detected from content to match Gym preparation,
+including references without a filename extension. Scoring and prompt text are unchanged.
+Golden fixtures were generated from this source checkout, not from the port.
+
+The source checkout was modified. Exact source SHA-256 hashes are recorded in
+tests/fixtures/provenance.json, including the existing EEE background revision
+and whitespace-diagnostic behavior. The base commit alone does not identify it.
