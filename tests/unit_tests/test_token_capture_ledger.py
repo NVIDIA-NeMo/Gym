@@ -540,3 +540,70 @@ async def test_unversioned_legacy_token_carrying_row_cannot_resolve_or_anchor_a_
     assert sorted(failure.reason for failure in manifest.failures) == sorted(
         ["ledger_row_missing_response_id", UNRESOLVED_PARENT_REASON]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing_fingerprint", "changed_context", "ambiguous"])
+async def test_unresolved_parent_logs_bounded_metadata_without_admitting(store, caplog, failure):
+    import json
+
+    from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
+
+    await _record_call_1(store)
+    messages = [USER_1, ASSISTANT_1, USER_2]
+    expected_reason = "no_match"
+    if failure == "missing_fingerprint":
+        messages = [USER_1, {"role": "assistant", "content": "PRIVATE_OUTPUT_" + "x" * 100000}, USER_2]
+    elif failure == "changed_context":
+        messages = [{"role": "user", "content": "PRIVATE_REWRITTEN_CONTEXT"}, ASSISTANT_1, USER_2]
+    else:
+        await store.record(
+            _commit(
+                _call_record("other", cumulative_hash=hash_token_ids(TOKENS_1 + [1])),
+                [USER_1],
+                [ASSISTANT_1],
+            )
+        )
+        expected_reason = "ambiguous"
+    context = CaptureContext("r1", "rejected", None, lineage_store=store, external_staging=True)
+    token = set_token_sink(context)
+    try:
+        await resolve_parent(messages)
+    finally:
+        reset_token_sink(token)
+    assert context.capture_admission is None
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert [(f.model_call_id, f.reason) for f in manifest.failures] == [("rejected", UNRESOLVED_PARENT_REASON)]
+    logs = [r.getMessage() for r in caplog.records if "capture_parent_unresolved" in r.getMessage()]
+    assert len(logs) == 1 and len(logs[0]) < 800
+    metadata = json.loads(logs[0][logs[0].index("{") :])
+    assert metadata["reason"] == expected_reason
+    assert metadata["request_fingerprint"] == assistant_fingerprint(messages)
+    assert metadata["request_digest"] == conversation_digest(messages)
+    assert metadata["request_item_count"] == 3
+    assert metadata["model_call_id"] == "rejected" and metadata["rollout_id"] == "r1"
+    assert "PRIVATE_" not in logs[0]
+    assert "solve the task" not in logs[0] and "first answer" not in logs[0]
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_hash_failure_does_not_skip_poisoning(store, caplog, monkeypatch):
+    import nemo_gym.token_id_capture.sink as sink
+
+    await _record_call_1(store)
+
+    def broken_digest(messages):
+        raise ValueError("PRIVATE_REQUEST_CONTENT")
+
+    monkeypatch.setattr(sink, "conversation_digest", broken_digest)
+    context = CaptureContext("r1", "rejected", None, lineage_store=store, external_staging=True)
+    token = set_token_sink(context)
+    try:
+        await resolve_parent([USER_1, ASSISTANT_SEEDED, USER_2])
+    finally:
+        reset_token_sink(token)
+    assert context.capture_admission is None
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert [(f.model_call_id, f.reason) for f in manifest.failures] == [("rejected", UNRESOLVED_PARENT_REASON)]
+    assert "diagnostic_error_type" in caplog.text and "ValueError" in caplog.text
+    assert "PRIVATE_REQUEST_CONTENT" not in caplog.text

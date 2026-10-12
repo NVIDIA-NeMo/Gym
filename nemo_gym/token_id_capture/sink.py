@@ -26,6 +26,7 @@ Untagged traffic has no capture context.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -33,7 +34,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
+from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint, conversation_digest
 from nemo_gym.token_id_capture.lineage import stamp_continuation
 from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolution, LineageResolver, TokenSink
 from nemo_gym.token_id_capture.records import (
@@ -287,11 +288,24 @@ async def resolve_parent(request_messages: list | None) -> None:
             mode="text",
         )
         return
-    logger.warning(
-        "Unresolved parent for model call %s of rollout %s; poisoning the call.",
-        context.model_call_id,
-        context.rollout_id,
-    )
+    # Keep rejected-request evidence bounded and content-free. Diagnostic hashing
+    # must never prevent the durable failure row from being recorded.
+    reason = context.parent_resolution.reason if context.parent_resolution is not None else ""
+    diagnostic = {
+        "event": "capture_parent_unresolved",
+        "rollout_id": context.rollout_id,
+        "model_call_id": context.model_call_id,
+        "reason": reason if reason in {"no_match", "ambiguous", "resolver_unavailable", "lookup_error"} else "other",
+        "request_item_count": len(request_messages),
+        "fingerprint_version": FINGERPRINT_VERSION,
+    }
+    try:
+        diagnostic["request_fingerprint"] = assistant_fingerprint(request_messages)
+        diagnostic["request_digest"] = conversation_digest(request_messages)
+    except Exception as error:
+        # Only the exception class is safe; its message can contain request text.
+        diagnostic["diagnostic_error_type"] = type(error).__name__
+    logger.warning("Unresolved parent; poisoning the call. %s", json.dumps(diagnostic, sort_keys=True))
     await ledger.record_failure(
         context.rollout_id,
         context.model_call_id,

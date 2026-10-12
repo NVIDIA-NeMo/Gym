@@ -865,15 +865,15 @@ class FileLineageStore(IncrementalLineageStore):
         resolution = super()._resolve(rollout_id, request_items)
         if resolution.status != ParentResolutionStatus.UNRESOLVED:
             return resolution
-        match = self._resolve_row(rollout_id, request_items)
-        if match is not None:
-            return LineageResolution(ParentResolutionStatus.RESOLVED, match=match)
+        row_resolution = self._resolve_row(rollout_id, request_items)
+        if row_resolution.status == ParentResolutionStatus.RESOLVED or row_resolution.reason == "ambiguous":
+            return row_resolution
         return resolution
 
-    def _resolve_row(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None:
+    def _resolve_row(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
         fingerprint = assistant_fingerprint(request_items)
         if not fingerprint:
-            return None
+            return LineageResolution(ParentResolutionStatus.UNRESOLVED, reason="no_match")
         with self._locked(rollout_id):
             # Failure rows and fingerprints from incompatible algorithms cannot resolve as parents.
             records = [
@@ -892,16 +892,24 @@ class FileLineageStore(IncrementalLineageStore):
             and conversation_digest(request_items[: int(record["context_len"])]) == record["context_digest"]
         ]
         if len(records) != 1:
-            return None
+            # Preserve the custody resolver's existing fail-closed decision,
+            # while exposing its reason instead of the token index's no_match.
+            return LineageResolution(
+                ParentResolutionStatus.UNRESOLVED,
+                reason="ambiguous" if records else "no_match",
+            )
         record = records[0]
-        return LineageMatch(
-            model_call_id=str(record["model_call_id"]),
-            # Token-free custody rows omit the column; legacy rows keep it.
-            cumulative_token_ids=tuple(int(token) for token in record.get("cumulative_token_ids") or ()),
-            digest=str(record["digest"]),
-            staging_chain=tuple(record.get("staging_chain") or []),
-            prev_len=int(record.get("cum_len") or 0),
-            chain_hash=str(record.get("chain_hash") or ""),
+        return LineageResolution(
+            ParentResolutionStatus.RESOLVED,
+            match=LineageMatch(
+                model_call_id=str(record["model_call_id"]),
+                # Token-free custody rows omit the column; legacy rows keep it.
+                cumulative_token_ids=tuple(int(token) for token in record.get("cumulative_token_ids") or ()),
+                digest=str(record["digest"]),
+                staging_chain=tuple(record.get("staging_chain") or []),
+                prev_len=int(record.get("cum_len") or 0),
+                chain_hash=str(record.get("chain_hash") or ""),
+            ),
         )
 
     async def record(self, commit: CaptureLedgerCommit) -> None:
