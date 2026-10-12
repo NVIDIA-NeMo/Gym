@@ -39,6 +39,8 @@ class FormatVerificationVerifyResponse(BaseVerifyResponse):
 
 
 class FormatVerificationResourcesServer(SimpleResourcesServer):
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = False
     config: FormatVerificationResourcesServerConfig
 

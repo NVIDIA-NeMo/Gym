@@ -44,6 +44,8 @@ class ReasoningGymVerifyResponse(BaseVerifyResponse):
 
 
 class ReasoningGymResourcesServer(SimpleResourcesServer):
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = False
     config: ReasoningGymResourcesServerConfig
 

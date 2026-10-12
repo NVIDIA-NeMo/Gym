@@ -21,6 +21,21 @@ DECLARED = {
     "equivalence_llm_judge": "LLMJudgeResourcesServer",
     "math_with_judge": "LibraryJudgeMathResourcesServer",
     "genrm_compare": "GenRMCompareResourcesServer",
+    "abstention": "AbstentionServer",
+    "calendar": "CalendarResourcesServer",
+    "equivalence_rule": "EquivalenceRuleResourcesServer",
+    "ether0": "Ether0ResourcesServer",
+    "format_verification": "FormatVerificationResourcesServer",
+    "instruction_following": "InstructionFollowingResourcesServer",
+    "inverse_if": "InverseIFServer",
+    "jailbreak_detection": "JailbreakDetectionResourcesServer",
+    "mcqa": "MCQAResourcesServer",
+    "multichallenge": "MultiChallengeServer",
+    "nvarc": "NVARCResourcesServer",
+    "reasoning_gym": "ReasoningGymResourcesServer",
+    "structured_outputs": "StructuredOutputsResourcesServer",
+    "terminus_judge": "TerminusJudgeResourcesServer",
+    "string_match": "StringMatchResourcesServer",
 }
 
 

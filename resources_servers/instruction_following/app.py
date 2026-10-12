@@ -81,6 +81,8 @@ class InstructionFollowingVerifyResponse(BaseVerifyResponse):
 
 
 class InstructionFollowingResourcesServer(SimpleResourcesServer):
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = False
     config: InstructionFollowingResourcesServerConfig
 

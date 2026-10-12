@@ -350,6 +350,8 @@ def _soft_numeric_grade(gt_answer: str, pred_answer: str) -> float:
 
 
 class StringMatchResourcesServer(SimpleResourcesServer):
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = False
     config: StringMatchResourcesServerConfig
 

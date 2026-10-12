@@ -241,6 +241,8 @@ class TerminusJudgeVerifyResponse(BaseVerifyResponse):
 
 
 class TerminusJudgeResourcesServer(SimpleResourcesServer):
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = False
     config: TerminusJudgeResourcesServerConfig
 

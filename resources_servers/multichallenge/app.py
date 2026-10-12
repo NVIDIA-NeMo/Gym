@@ -239,6 +239,8 @@ def _extract_verdict(response_text: str, yes_label: str, no_label: str) -> str:
 class MultiChallengeServer(SimpleResourcesServer):
     """MultiChallenge evaluation server."""
 
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = False
 
     config: MultiChallengeConfig

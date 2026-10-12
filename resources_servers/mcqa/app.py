@@ -343,6 +343,8 @@ def _parse_answer_with_custom_regexes(
 
 
 class MCQAResourcesServer(SimpleResourcesServer):
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = False
     config: MCQAResourcesServerConfig
 

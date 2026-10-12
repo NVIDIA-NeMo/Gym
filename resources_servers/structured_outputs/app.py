@@ -101,6 +101,8 @@ class StructuredOutputsVerifyResponse(BaseVerifyResponse):
 
 
 class StructuredOutputsResourcesServer(SimpleResourcesServer):
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = False
     config: StructuredOutputsResourcesServerConfig
 
