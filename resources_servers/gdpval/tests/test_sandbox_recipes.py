@@ -33,7 +33,7 @@ from resources_servers.gdpval.tests.test_app import sandbox_server as sandbox_se
 
 @pytest.mark.parametrize("harness", ["pi", "hermes", "opencode", "openclaw"])
 def test_sandbox_recipe_runs_prepared_task_through_verification(tmp_path, monkeypatch, sandbox_server, harness):
-    recipe = Path(__file__).parents[1] / "configs" / f"gdpval_{harness}_sandbox.yaml"
+    recipe = Path(__file__).parents[1] / "configs" / f"gdpval_{harness}.yaml"
     _, configs = GlobalConfigDictParser().load_extra_config_paths([str(recipe)])
     config = OmegaConf.merge(*configs)
     routing = SharedRolloutCollectionConfig(

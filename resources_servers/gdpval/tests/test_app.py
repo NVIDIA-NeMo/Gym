@@ -2548,7 +2548,7 @@ def test_sandbox_config_requires_complete_runtime_settings(sandbox_server, missi
 @pytest.mark.parametrize("harness", ["hermes", "pi"])
 def test_pairing_config_uses_shared_gdp_lifecycle(harness: str) -> None:
     _, layers = GlobalConfigDictParser().load_extra_config_paths(
-        [f"resources_servers/gdpval/configs/gdpval_{harness}_sandbox.yaml"]
+        [f"resources_servers/gdpval/configs/gdpval_{harness}.yaml"]
     )
     config = OmegaConf.merge(*layers, {"policy_model_name": "test-policy"})
     resources = config.gdpval_resources_server.resources_servers.gdpval
