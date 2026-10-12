@@ -125,7 +125,8 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     def interrupt(*_: object) -> None:
         nonlocal stop_reason
         # Close publishes this marker before signalling the supervisor. A deadline does not.
-        stop_reason = "cancelled" if (session_dir / "runner.stop").exists() else "wall_time"
+        stop_request_path = payload.get("stop_request_path")
+        stop_reason = "cancelled" if stop_request_path and Path(stop_request_path).exists() else "wall_time"
         # Save first: a blocked tool or API call may not unwind before the hard cleanup.
         if output_path is not None:
             partial = progress()

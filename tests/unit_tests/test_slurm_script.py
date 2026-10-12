@@ -404,8 +404,13 @@ def test_build_vllm_ray_serve_command_single_node_model_with_space_survives_quot
     service = VllmServiceConfig(type="vllm", container="vllm:latest", model="org/my model")
     cmd = _build_vllm_ray_serve_command(service, total_nodes=1, gpus_per_node_values=[])
 
-    inner = cmd.replace("pip install --quiet aiohttp", "true").replace("python3 ray_serve_gateway.py", "fake_gateway")
-    script = 'fake_gateway() { for a in "$@"; do echo "ARG:$a"; done; }\nexport -f fake_gateway\n' + inner + "\n"
+    # Stub pip so the aiohttp install and the ray fallback (taken when ray isn't on PATH) never install for real.
+    inner = cmd.replace("python3 ray_serve_gateway.py", "fake_gateway")
+    script = (
+        'pip() { :; }\nfake_gateway() { for a in "$@"; do echo "ARG:$a"; done; }\nexport -f pip fake_gateway\n'
+        + inner
+        + "\n"
+    )
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10, cwd=tmp_path)
 
     assert result.returncode == 0, result.stderr

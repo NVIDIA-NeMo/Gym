@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 
-SUPERVISOR = Path(__file__).parents[2] / "nemo_gym/sandbox/process_supervisor.py"
+SUPERVISOR = Path(__file__).parents[2] / "nemo_gym/agent_utils/process_supervisor.py"
 
 
 @pytest.mark.parametrize("timeout, cleanup", [(1, 0.1), (2700, 10), (21600, 100)])

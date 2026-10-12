@@ -29,12 +29,13 @@ from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
+from requests.exceptions import ProxyError
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from yarl import URL
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
-from nemo_gym.config_types import BaseRunServerInstanceConfig
+from nemo_gym.config_types import BaseRunServerInstanceConfig, ConfigError, HeadServerUnreachableError
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
@@ -307,6 +308,66 @@ class TestServerUtils:
 
         with raises(ValueError):
             ServerClient.load_from_global_config()
+
+    def _nothing_listening_on_the_head_server(self, monkeypatch: MonkeyPatch, host: str, port: int) -> ConnectionError:
+        """Make `load_from_global_config` take the fetch path and have the head server refuse the connection."""
+        global_config_dict = DictConfig({"head_server": {"host": host, "port": port}})
+        monkeypatch.setattr(
+            nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=global_config_dict)
+        )
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+
+        refused = ConnectionError("[Errno 61] Connection refused")
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", MagicMock(side_effect=refused))
+        return refused
+
+    def test_ServerClient_load_from_global_config_unreachable_head_server_is_a_ConfigError(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # An unreachable head server is a user mistake (nothing started, or the wrong port), not a bug:
+        # it must be a ConfigError so `exit_cleanly_on_config_error` prints the message instead of a
+        # traceback (#2687), and still a ValueError for callers that already catch that.
+        refused = self._nothing_listening_on_the_head_server(monkeypatch, host="127.0.0.1", port=11000)
+
+        with raises(HeadServerUnreachableError) as exc_info:
+            ServerClient.load_from_global_config()
+
+        assert isinstance(exc_info.value, ConfigError)
+        assert isinstance(exc_info.value, ValueError)
+        # The low-level cause is not lost, just kept off the user-facing message.
+        assert exc_info.value.__cause__ is refused
+
+    def test_ServerClient_load_from_global_config_unreachable_head_server_message_is_actionable(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # Same wording as `gym env status`: name the address that was tried, then the fix for each of
+        # the two likely causes (nothing running -> `gym env start`; running elsewhere -> override).
+        self._nothing_listening_on_the_head_server(monkeypatch, host="10.0.0.5", port=9500)
+
+        with raises(HeadServerUnreachableError) as exc_info:
+            ServerClient.load_from_global_config()
+
+        message = str(exc_info.value)
+        assert message.startswith("Could not connect to the head server at http://10.0.0.5:9500.")
+        assert "Is the head server running? Start it with: `gym env start`." in message
+        assert "`++head_server.host=<host>` / `++head_server.port=<port>`" in message
+
+    def test_ServerClient_load_from_global_config_unreachable_head_server_logs_the_cause_at_debug(
+        self, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+    ) -> None:
+        # A proxy or name-resolution failure is also a requests ConnectionError, and the CLI prints the
+        # ConfigError without its cause, so the real reason must still reach `--verbose` (DEBUG) output.
+        self._nothing_listening_on_the_head_server(monkeypatch, host="127.0.0.1", port=11000)
+        proxy_error = ProxyError("Tunnel connection failed: 407 Proxy Authentication Required")
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", MagicMock(side_effect=proxy_error))
+
+        with caplog.at_level(logging.DEBUG, logger="nemo_gym.server_utils"), raises(HeadServerUnreachableError):
+            ServerClient.load_from_global_config()
+
+        (record,) = [record for record in caplog.records if record.name == "nemo_gym.server_utils"]
+        assert record.levelno == logging.DEBUG
+        assert "http://127.0.0.1:11000" in record.getMessage()
+        assert record.exc_info[1] is proxy_error
 
     async def test_ServerClient_get_post_sanity(self, monkeypatch: MonkeyPatch) -> None:
         server_client = ServerClient(
@@ -1864,7 +1925,8 @@ class TestRunWebserverProxyKwargs:
     def test_proxy_headers_disabled_by_default_single_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
 
-        self.ray_loader_mock.assert_called_once()
+        # An undeclared server with no Ray cluster to join runs without Ray.
+        self.ray_loader_mock.assert_not_called()
         assert kwargs["proxy_headers"] is False
         assert [] == kwargs["forwarded_allow_ips"]
         # A single worker passes the app object itself rather than an import string.
@@ -1874,13 +1936,19 @@ class TestRunWebserverProxyKwargs:
     def test_proxy_headers_disabled_by_default_multi_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=4)
 
-        self.ray_loader_mock.assert_called_once()
+        self.ray_loader_mock.assert_not_called()
         # Multi-worker launches re-import the app, so uvicorn receives an import string.
         assert isinstance(kwargs["app"], str)
         assert kwargs["app"].endswith(":app")
         assert 4 == kwargs["workers"]
         assert kwargs["proxy_headers"] is False
         assert [] == kwargs["forwarded_allow_ips"]
+
+    def test_undeclared_server_joins_a_configured_cluster(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "ray_is_installed", lambda: True)
+        self._capture_uvicorn_kwargs(monkeypatch, {"ray_head_node_address": "10.0.0.1:6379"}, num_workers=1)
+
+        self.ray_loader_mock.assert_called_once()
 
     def test_ray_disabled_skips_initialization(self, monkeypatch: MonkeyPatch) -> None:
         self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1, ray_enabled=False)

@@ -116,6 +116,7 @@ from nemo_gym.server_utils import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
+from nemo_gym.task_materialization import TASK_ID_FIELDS
 from nemo_gym.token_id_capture import (
     TokenCaptureStore,
     TokenIdCaptureConfig,
@@ -442,7 +443,7 @@ def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
 
 def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
     task_id = next(
-        (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
+        (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
         str(row[TASK_INDEX_KEY_NAME]),
     )
     rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
@@ -503,10 +504,10 @@ def _turns_from_model_calls(
     turn_counts: Counter = Counter()
     tool_counts: Counter = Counter()
     for call in model_calls:
-        if call.response is None:
-            # A call that returned nothing is not a model decision.
-            continue
         metadata = call.response_metadata
+        if call.response is None or (metadata.status_code is not None and metadata.status_code >= 400):
+            # HTTP error payloads are retained attempts, not model decisions.
+            continue
         invocation_id = invocation_by_call_id.get(call.model_call_id or "") or invocation_by_response_id.get(
             metadata.response_id or ""
         )

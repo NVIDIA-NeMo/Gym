@@ -25,7 +25,8 @@ from shlex import join
 
 import pytest
 
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, SandboxStatus, create_provider, process_supervisor
+from nemo_gym.agent_utils import process_supervisor
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, SandboxStatus, create_provider
 from nemo_gym.sandbox.providers.local import LocalProvider
 
 

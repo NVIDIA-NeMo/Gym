@@ -28,8 +28,8 @@ from pathlib import Path
 
 import nemo_gym
 from nemo_gym.harness_capabilities import checker
-from nemo_gym.harness_capabilities.checker import NAMES
-from nemo_gym.harness_capabilities.reader import digest_file
+from nemo_gym.harness_capabilities.cli import digest_file
+from nemo_gym.harness_capabilities.results import render_matrices
 
 from . import episode, runner
 from .episode import HARNESSES
@@ -104,25 +104,13 @@ def render_table(report: dict, *, asset: str) -> str:
         f"Gym commit: [`{commit}`](https://github.com/NVIDIA-NeMo/Gym/commit/{commit}).",
         f"Suite: `{report['suite']}`. [Generation report](../../../../assets/trajectory-capabilities/{asset}).",
         "",
-        "Cells show **passing / exercised / required** scenarios. PASS requires every required scenario;",
-        "FAIL includes missing exercise or missing evidence. **Not run** makes no capability claim.",
-        "",
-        "| Harness | " + " | ".join(NAMES) + " | P0 |",
-        "| --- |" + " --- |" * (len(NAMES) + 1),
     ]
-    for harness in HARNESSES:
-        row = report["harnesses"].get(harness)
-        if row is None:
-            cells = ["Not run"] * (len(NAMES) + 1)
-        else:
-            cells = []
-            for key in NAMES:
-                count = row["evidence"][key]
-                label = "PASS" if count["passed"] == count["required"] and count["required"] else "FAIL"
-                cells.append(f"{label} {count['passed']}/{count['observed']}/{count['required']}")
-            cells.append("PASS" if row["verdict"] == "fulfilled" else "FAIL")
-        lines.append("| " + " | ".join([f"`{harness}`", *cells]) + " |")
-    lines += ["", "P0 requires TE-1–TE-7 and either TE-8 or TE-9 **per scenario**.", "", "### Tested dependencies", ""]
+    displayed = {
+        name: report["harnesses"].get(name, {"scenarios": [{"scenario": s.name, "checks": []} for s in SCENARIOS]})
+        for name in HARNESSES
+    }
+    lines.append(render_matrices(displayed).replace("# Harness checks by scenario\n", "", 1))
+    lines += ["", "### Tested dependencies", ""]
     for harness, runtime in report["runtimes"].items():
         identity = runtime.get("version") or ("source SHA-256 " + runtime["sha256"])
         lines.append(f"- `{harness}`: `{identity.replace('`', '').replace(chr(10), ' ')}`")

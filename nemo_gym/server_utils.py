@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import ast
 import asyncio
 import atexit
 import json
@@ -20,11 +21,13 @@ import resource
 import socket
 import sys
 import time
+import warnings
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
 from functools import partial
 from importlib import import_module
+from importlib.util import find_spec
 from ipaddress import ip_network
 from os import environ, getenv
 from pathlib import Path
@@ -65,6 +68,7 @@ from nemo_gym.config_types import (
     TOKEN_CAPTURE_PATH_SEGMENT,
     BaseRunServerInstanceConfig,
     BaseServerConfig,
+    HeadServerUnreachableError,
 )
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
@@ -779,8 +783,16 @@ class ServerClient(BaseModel):
                 f"{head_server_url}/global_config_dict_yaml",
             )
         except ConnectionError as e:
-            raise ValueError(
-                f"Could not connect to the head server at {head_server_url}. Perhaps you are not running a server or your head server is on a different port?"
+            # requests' ConnectionError also covers proxy and name-resolution failures; keep the real reason
+            # (with its traceback) for --verbose, since the ConfigError below is printed without its cause.
+            logger.debug(
+                "Could not fetch the global config from the head server at %s", head_server_url, exc_info=True
+            )
+            # A ConfigError so the CLI prints just this message (no traceback); the cause stays chained.
+            raise HeadServerUnreachableError(
+                f"Could not connect to the head server at {head_server_url}. Is the head server running? "
+                "Start it with: `gym env start`. If it is already running on a different host or port, pass "
+                "`++head_server.host=<host>` / `++head_server.port=<port>` so this command can find it."
             ) from e
 
         global_config_dict_yaml = response.content.decode()
@@ -1003,9 +1015,19 @@ class UvicornProxyHeadersConfig(BaseModel):
 _NEMO_GYM_STARTED_RAY_CLUSTER: bool = False
 
 
+def ray_is_installed() -> bool:
+    """Whether Ray can be imported in this process, checked without importing it."""
+    return find_spec("ray") is not None
+
+
 def _get_ray():
     """Import Ray only for processes configured to use it."""
-    import ray
+    try:
+        import ray
+    except ImportError as e:
+        raise ImportError(
+            "This process needs Ray, but Ray isn't installed in its environment. Install the `nemo-gym[ray]` extra."
+        ) from e
 
     return ray
 
@@ -1180,18 +1202,93 @@ class ClientDisconnectCancellationMiddleware:
 _WARNED_IMPLICIT_RAY_SERVERS: set[type] = set()
 
 
-def _server_uses_ray(server_class: type) -> bool:
+def _server_uses_ray(server_class: type, global_config_dict: DictConfig) -> bool:
     ray_enabled = server_class.ray_enabled
     if ray_enabled is not None:
         return ray_enabled
+
+    # An undeclared server joins Ray only when it can import Ray and a cluster is configured to join. Starting
+    # a cluster here would give every server process and worker its own private cluster.
+    uses_ray = ray_is_installed() and bool(global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME))
     if server_class not in _WARNED_IMPLICIT_RAY_SERVERS:
-        logger.warning(
-            f"{server_class.__module__}.{server_class.__name__} does not declare ray_enabled; "
-            "Ray remains enabled for backward compatibility. Set ray_enabled explicitly because "
-            "a future release will default it to false."
-        )
+        name = f"{server_class.__module__}.{server_class.__name__}"
+        if uses_ray:
+            logger.warning(
+                f"{name} does not declare ray_enabled; Ray remains enabled for backward compatibility. "
+                "Set ray_enabled explicitly because a future release will default it to false."
+            )
+        else:
+            logger.warning(
+                f"{name} does not declare ray_enabled and this run has no Ray cluster to join, so it runs "
+                "without Ray. Set ray_enabled = True if it uses Ray, or ray_enabled = False if it doesn't."
+            )
         _WARNED_IMPLICIT_RAY_SERVERS.add(server_class)
-    return True
+    return uses_ray
+
+
+def _connect_server_to_ray(server_class: type, global_config_dict: DictConfig) -> None:
+    """Join the run's Ray cluster if this server uses Ray."""
+    if not _server_uses_ray(server_class, global_config_dict):
+        return
+    if _has_injected_global_config_env() and not global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME):
+        # Gym only launches servers without a cluster address when it decided no server needs Ray. Fail instead
+        # of letting initialize_ray start a private cluster in this process and in each of its workers.
+        raise RuntimeError(
+            f"{server_class.__module__}.{server_class.__name__} uses Ray, but this run has no Ray cluster. "
+            f"Declare `ray_enabled = True` on {server_class.__name__} itself so `gym` starts Ray for it, and "
+            "install the `nemo-gym[ray]` extra where `gym` runs."
+        )
+    initialize_ray()
+
+
+def _declared_ray_enabled(class_node: ast.ClassDef) -> bool | None:
+    """The literal `ray_enabled` assigned in a class body, or None when there is none."""
+    for item in class_node.body:
+        if not isinstance(item, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "ray_enabled" for target in item.targets):
+            continue
+        if isinstance(item.value, ast.Constant) and isinstance(item.value.value, bool):
+            return item.value.value
+    return None
+
+
+def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
+    """The `ray_enabled` declaration of the server an entrypoint starts, read from source.
+
+    The supervisor must decide whether to start Ray before any server exists, and each server runs in its own
+    venv, so this reads the source instead of importing it. It finds the classes the entrypoint calls
+    `run_webserver()` on and checks their literal `ray_enabled` declarations.
+
+    Returns True when any of them declares True, False when all of them declare False, and None when that can't
+    be settled from the source alone, such as an inherited declaration, a class imported from another module, or
+    an unreadable entrypoint.
+    """
+    try:
+        source = entrypoint_fpath.read_text()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(source)
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return None
+
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    invoked_class_names = {
+        node.func.value.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "run_webserver"
+        and isinstance(node.func.value, ast.Name)
+    }
+    if not invoked_class_names:
+        return None
+    declarations = [_declared_ray_enabled(classes[name]) if name in classes else None for name in invoked_class_names]
+    if True in declarations:
+        return True
+    if all(declaration is False for declaration in declarations):
+        return False
+    return None
 
 
 class SimpleServer(BaseServer):
@@ -1383,8 +1480,7 @@ repr(e): {repr(e)}"""
         is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
 
         server_config = cls.load_config_from_global_config()
-        if _server_uses_ray(cls):
-            initialize_ray()
+        _connect_server_to_ray(cls, global_config_dict)
 
         server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),

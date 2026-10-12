@@ -66,6 +66,7 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
 class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequest, SingleAgentTurnResponse]):
     """Run one agent turn followed by Resources verification and cleanup."""
 
+    ray_enabled = False
     config: SingleAgentTurnEnvironmentServerConfig
     request_model = SingleAgentTurnRequest
     response_model = SingleAgentTurnResponse
