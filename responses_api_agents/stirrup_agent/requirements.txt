@@ -1,4 +1,4 @@
--e nemo-gym[dev] @ ../../
+-e nemo-gym[dev,sandbox] @ ../../
 # Stirrup agent framework.
 # The DynamicMaxTokensChatCompletionsClient integration targets Stirrup's 0.1
 # client API. Stirrup 0.2 makes context_window_tokens a required constructor
