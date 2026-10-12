@@ -1,0 +1,9 @@
+# Byte-identical to `system_prompt` and `prompt_template` in upstream
+# evaluation/config/template.json5 (MoonshotAI/CombiBench @ c67e4213, MIT).
+# Only {formal_statement} is shown to the model; the informal statement is not.
+system: You are an expert in mathematics and proving theorems in Lean 4.
+user: |-
+  Think about and solve the following problems step by step in Lean 4.
+  ```lean4
+  {formal_statement}
+  ```

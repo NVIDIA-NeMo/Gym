@@ -1,0 +1,42 @@
+[
+  {
+    "theorem_name": "synthetic_choose_1",
+    "natural_language": "How many ways are there to choose 2 objects from 5?",
+    "answer": ["10"],
+    "source": null,
+    "tag": "hackmath",
+    "formal_statement": "import Mathlib\n\nabbrev synthetic_choose_1_solution : ℕ := sorry\n\ntheorem synthetic_choose_1 : Nat.choose 5 2 = synthetic_choose_1_solution := by sorry\n"
+  },
+  {
+    "theorem_name": "synthetic_perm_2",
+    "natural_language": "How many permutations of three distinct objects are there?",
+    "answer": ["6"],
+    "source": null,
+    "tag": "brualdi",
+    "formal_statement": "import Mathlib\n\nabbrev synthetic_perm_2_solution : ℕ := sorry\n\ntheorem synthetic_perm_2 : Fintype.card (Equiv.Perm (Fin 3)) = synthetic_perm_2_solution := by sorry\n"
+  },
+  {
+    "theorem_name": "synthetic_pigeonhole_3",
+    "natural_language": "Show that any function from a three-element set to a two-element set sends two distinct elements to the same value.",
+    "answer": null,
+    "source": null,
+    "tag": "imo",
+    "formal_statement": "import Mathlib\n\ndef synthetic_pigeonhole_3_collides (f : Fin 3 → Fin 2) : Prop :=\n  ∃ a b, a ≠ b ∧\n  \n  f a = f b\n\ntheorem synthetic_pigeonhole_3 (f : Fin 3 → Fin 2) : synthetic_pigeonhole_3_collides f := by sorry\n"
+  },
+  {
+    "theorem_name": "synthetic_gauss_4",
+    "natural_language": "Find a closed form for the sum of the integers from 0 to n.",
+    "answer": ["fun n => n * (n + 1) / 2"],
+    "source": null,
+    "tag": "brualdi",
+    "formal_statement": "import Mathlib\n\nabbrev synthetic_gauss_4_solution : ℕ → ℕ := sorry\n\ntheorem synthetic_gauss_4 (n : ℕ) : ∑ i ∈ Finset.range (n + 1), i = synthetic_gauss_4_solution n := by sorry\n"
+  },
+  {
+    "theorem_name": "synthetic_ratio_5",
+    "natural_language": "Three of twelve equally likely outcomes are favourable. What is the probability of a favourable outcome?",
+    "answer": ["1 / 4"],
+    "source": null,
+    "tag": "math_competitions",
+    "formal_statement": "import Mathlib\n\nabbrev synthetic_ratio_5_solution : ℚ := sorry\n\ntheorem synthetic_ratio_5 : (3 : ℚ) / 12 = synthetic_ratio_5_solution := by sorry\n"
+  }
+]

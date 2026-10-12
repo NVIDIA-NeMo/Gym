@@ -1,0 +1,7 @@
+{
+  "synthetic_choose_1": "The number of 2-subsets of a 5-set is 10.\n\n```lean4\nimport Mathlib\n\nabbrev synthetic_choose_1_solution : ℕ := 10\n\ntheorem synthetic_choose_1 : Nat.choose 5 2 = synthetic_choose_1_solution := by decide\n```",
+  "synthetic_perm_2": "```lean4\nimport Mathlib\n\nabbrev synthetic_perm_2_solution : ℕ := 6\n\ntheorem synthetic_perm_2 : Fintype.card (Equiv.Perm (Fin 3)) = synthetic_perm_2_solution := by\n  rw [Fintype.card_perm, Fintype.card_fin]\n  rfl\n```",
+  "synthetic_pigeonhole_3": "```lean4\nimport Mathlib\n\ndef synthetic_pigeonhole_3_collides (f : Fin 3 → Fin 2) : Prop :=\n  ∃ a b, a ≠ b ∧\n\n  f a = f b\n\ntheorem synthetic_pigeonhole_3 (f : Fin 3 → Fin 2) : synthetic_pigeonhole_3_collides f := by\n  obtain ⟨a, b, hab, h⟩ := Fintype.exists_ne_map_eq_of_card_lt f (by simp)\n  exact ⟨a, b, hab, h⟩\n```",
+  "synthetic_gauss_4": "```lean4\nimport Mathlib\n\nabbrev synthetic_gauss_4_solution : ℕ → ℕ := fun n => n * (n + 1) / 2\n\ntheorem synthetic_gauss_4 (n : ℕ) : ∑ i ∈ Finset.range (n + 1), i = synthetic_gauss_4_solution n := by\n  rw [Finset.sum_range_id, Nat.add_sub_cancel, Nat.mul_comm]\n```",
+  "synthetic_ratio_5": "The answer written as 3/12 rather than 1/4, so the equality check has to do the work.\n\n```lean4\nimport Mathlib\n\nabbrev synthetic_ratio_5_solution : ℚ := 3 / 12\n\ntheorem synthetic_ratio_5 : (3 : ℚ) / 12 = synthetic_ratio_5_solution := by rfl\n```"
+}

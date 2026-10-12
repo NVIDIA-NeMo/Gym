@@ -1,0 +1,40 @@
+name: combibench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: 'CombiBench: 100 combinatorics problems formalized in Lean 4 (45 fill-in-the-blank,
+  55 proof-only), in the paper''s "without solution" setting by default (the model supplies the
+  answers and the proof) or "with solution" (published answers substituted, proof only), chosen at
+  prepare time. The model completes every sorry; a Lean 4.24 /
+  Mathlib v4.24.0 Kimina server compiles the result and the verifier reproduces upstream one-stage
+  Fine-Eval: statement-tamper check, no axiom/sorry, answers compared to ground truth by rfl/norm_num.'
+modality: text
+licensing: Apache-2.0 AND MIT
+authors:
+- rshahbazyan
+- lilithgrigoryan
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: combibench
+agent_server: simple_agent
+datasets:
+- name: combibench
+  type: benchmark
+  jsonl_fpath: benchmarks/combibench/data/combibench.jsonl
+  prepare_script: benchmarks/combibench/prepare.py
+  prompt_config: benchmarks/combibench/prompt.yaml
+  num_repeats: 16
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/combibench/prompt.yaml
+adopted_from:
+  source: https://github.com/MoonshotAI/CombiBench
+  ref: c67e4213597b1477351d9ef5ca37fb622084cc78  # pragma: allowlist secret
+  reconciled: 2026-09-16
+lifecycle: active

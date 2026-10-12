@@ -30,6 +30,11 @@ STATUS_EMPTY_GENERATION = "empty_generation"
 STATUS_BANNED_TOKENS = "banned_tokens"
 STATUS_STATEMENT_MODIFIED = "statement_modified"
 STATUS_COMPILE_ERROR = "compile_error"
+# Lean accepted the file but a declaration is still a hole. It is not a compile error --
+# nothing was rejected -- and telling the two apart is what shows whether a model is
+# writing wrong proofs or no proofs. Scoring is unaffected either way: only
+# STATUS_COMPLETED earns reward.
+STATUS_HAS_SORRY = "has_sorry"
 STATUS_TIMEOUT = "timeout"
 STATUS_SANDBOX_ERROR = "sandbox_error"
 
@@ -67,6 +72,6 @@ def determine_proof_status(compiler_output: Dict[str, Any]) -> Tuple[str, Option
     if "error:" in combined:
         return STATUS_COMPILE_ERROR, "Lean reported compilation errors."
     if re.search(r"\bsorry\b", combined) is not None:
-        return STATUS_COMPILE_ERROR, "Lean reported a declaration that uses 'sorry'."
+        return STATUS_HAS_SORRY, "Lean reported a declaration that uses 'sorry'."
 
     return STATUS_COMPLETED, None
