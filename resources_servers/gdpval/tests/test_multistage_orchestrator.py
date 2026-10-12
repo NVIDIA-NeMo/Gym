@@ -33,6 +33,7 @@ from nemo_gym.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
@@ -3567,11 +3568,19 @@ class TestCachedDeliverableReuse:
         verified: List[Dict[str, Any]] = []
         test = self
 
-        class FakeHelper:
+        class FakeHelper(rollout_collection_module.RolloutCollectionHelper):
             def _preprocess_rows_from_config(self, config):
-                return _materialized_rows(["t0"])
+                # Dataset rows name the instance that declared them; dispatch resolves their agent.
+                return [
+                    {
+                        **{k: v for k, v in row.items() if k != AGENT_REF_KEY_NAME},
+                        TASK_SOURCE_KEY_NAME: "gdpval_stirrup_agent",
+                    }
+                    for row in _materialized_rows(["t0"])
+                ]
 
             def _run_examples_with_metadata(self, rows, **kwargs):
+                self.resolve_task_sources(rows, OmegaConf.create(_ROUTING_CONFIG))
                 dispatched.extend(rows)
 
                 async def done(row):

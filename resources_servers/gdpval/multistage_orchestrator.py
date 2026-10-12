@@ -2504,6 +2504,12 @@ async def run_e2e_multistage(
         # A row whose deliverable an earlier stage produced is judged from disk; the rest run the policy.
         reused = [row for row in rows if row.get("reuse_cached_deliverable")]
         server_client = helper.setup_server_client() if reused else None
+        if reused:
+            # Dispatch resolves a row's agent in place; reused rows skip dispatch, so resolve theirs the same way.
+            helper._stamp_environment_server_agent_refs(reused, server_client.global_config_dict)
+            helper.resolve_task_sources(
+                [row for row in reused if NG_ENVIRONMENT_SERVER_KEY not in row], server_client.global_config_dict
+            )
         judging = asyncio.gather(*(verify_cached(row, semaphore, server_client) for row in reused))
         try:
             results = await dispatch([row for row in rows if not row.get("reuse_cached_deliverable")], semaphore)
