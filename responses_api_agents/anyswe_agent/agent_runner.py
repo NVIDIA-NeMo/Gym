@@ -65,10 +65,27 @@ def _agent_bin_dir(deps_dir: str, agent_module: str) -> str:
     return str(shim)
 
 
+_TESTBED_VENV_BIN = "/testbed/.venv/bin"
+
+
+def _agent_path(agent_bin_dir: str, inherited_path: str, testbed_venv_bin: str = _TESTBED_VENV_BIN) -> str:
+    """PATH for the coding agent: the harness executable, then the task's own virtualenv, then the image PATH.
+
+    Task images that ship ``/testbed/.venv`` expect ``python``, ``pip`` and ``pytest`` to come from it. Without
+    it first, the agent falls through to whatever the image's PATH resolves, which is often a different
+    interpreter than the one the task's tests run under.
+    """
+    parts = [agent_bin_dir]
+    if Path(testbed_venv_bin).is_dir():
+        parts.append(testbed_venv_bin)
+    parts.append(inherited_path)
+    return ":".join(part for part in parts if part)
+
+
 sys.path.insert(0, "/nemo_gym_mount")
 agent_deps_dir = os.environ.get("NGSWE_AGENT_DEPS_DIR", "/agent_deps_mount")
 agent_bin_dir = _agent_bin_dir(agent_deps_dir, os.environ.get("NGSWE_AGENT_MODULE", ""))
-os.environ["PATH"] = f"{agent_bin_dir}:" + os.environ.get("PATH", "")
+os.environ["PATH"] = _agent_path(agent_bin_dir, os.environ.get("PATH", ""))
 
 _REPO_CANDIDATES = ("/testbed", "/workspace/repo", "/app", "/root/repo")
 

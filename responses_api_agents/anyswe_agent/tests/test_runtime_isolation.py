@@ -86,3 +86,17 @@ class TestRuntimeIsolation:
         assert runner == [
             "HOME=/sandbox/home TMPDIR=/sandbox/tmp /agent_deps_mount/bin/python -I /trajectories_mount/agent_runner.py"
         ]
+
+
+class TestTestbedVenvOnPath:
+    def test_task_virtualenv_follows_the_harness_executable(self, tmp_path: Path) -> None:
+        from responses_api_agents.anyswe_agent.agent_runner import _agent_path
+
+        venv_bin = tmp_path / "testbed" / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        assert _agent_path("/shim", "/usr/bin:/bin", str(venv_bin)) == f"/shim:{venv_bin}:/usr/bin:/bin"
+
+    def test_image_without_a_task_virtualenv_keeps_the_previous_path(self, tmp_path: Path) -> None:
+        from responses_api_agents.anyswe_agent.agent_runner import _agent_path
+
+        assert _agent_path("/shim", "/usr/bin:/bin", str(tmp_path / "missing")) == "/shim:/usr/bin:/bin"
