@@ -16,6 +16,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
@@ -123,9 +124,20 @@ def test_benchmark_panel_reaches_intended_upstream_models_and_credentials(monkey
     for judge in panel:
         proxy = proxies[judge.base_url]
         with TestClient(proxy.setup_webserver()) as transport:
-            with OpenAI(
-                base_url=judge.base_url, api_key=judge.api_key, http_client=transport, max_retries=0
-            ) as client:
+
+            def forward_request(request: httpx.Request) -> httpx.Response:
+                response = transport.request(
+                    request.method, str(request.url), headers=request.headers.raw, content=request.content
+                )
+                return httpx.Response(response.status_code, headers=response.headers.raw, content=response.content)
+
+            # The SDK requires httpx.Client; Starlette may use httpx2 for its TestClient.
+            with (
+                httpx.Client(transport=httpx.MockTransport(forward_request)) as http_client,
+                OpenAI(
+                    base_url=judge.base_url, api_key=judge.api_key, http_client=http_client, max_retries=0
+                ) as client,
+            ):
                 assert (
                     send_judge_request(
                         client,

@@ -827,6 +827,24 @@ class TestBuildVerifyPayload:
             "response": {"output": "hello"},
         }
 
+    def test_generic_task_input_preserves_verifier_fields(self) -> None:
+        fields = {"responses_create_params": {"input": "q1"}, "instance_id": "a", "verifier_metadata": {"answer": 42}}
+        pair = InputRolloutPair(
+            input={"task_id": {"taskset": "t", "task_id": "a"}, "task_input": fields, "_ng_task_index": 0},
+            rollout={"response": {"output": "hello"}},
+        )
+        assert _build_verify_payload(pair) == {"_ng_task_index": 0, **fields, "response": {"output": "hello"}}
+
+    def test_mixed_input_preserves_fields_and_rejects_conflicts(self) -> None:
+        pair = InputRolloutPair(
+            input={"task_input": {"task_data": {"answer": 42}, "instance_id": "a"}},
+            rollout={"response": {}},
+        )
+        assert _build_verify_payload(pair) == {"answer": 42, "instance_id": "a", "response": {}}
+        pair.input["task_input"]["answer"] = 43
+        with pytest.raises(ConfigError, match="conflicting task field 'answer'"):
+            _build_verify_payload(pair)
+
     def test_rows_stamped_with_an_environment_server_route_to_its_resources_server(self) -> None:
         config = {
             "environment": {
@@ -877,9 +895,17 @@ class TestBuildVerifyPayload:
 
         assert set(result.keys()) == {"task", "response"}
 
-    def test_preserves_file_and_reference_context_required_by_verifier(self) -> None:
+    @pytest.mark.parametrize("shape", ["legacy", "flat_task_input", "canonical_task_input"])
+    def test_preserves_file_and_reference_context_required_by_verifier(self, shape: str) -> None:
+        fields = {"task": "q1", "deliverables_dir": "/stale"}
+        input_row = fields
+        if shape != "legacy":
+            input_row = {
+                "task_id": {"taskset": "t", "task_id": "a"},
+                "task_input": {"task_data": fields} if shape == "canonical_task_input" else fields,
+            }
         pair = InputRolloutPair(
-            input={"task": "q1", "deliverables_dir": "/stale"},
+            input=input_row,
             rollout={
                 "response": {"output": "x"},
                 "deliverables_dir": "/artifacts/task-1/repeat_0",
@@ -893,6 +919,7 @@ class TestBuildVerifyPayload:
 
         assert result["deliverables_dir"] == "/artifacts/task-1/repeat_0"
         assert result["reference_ids"] == ["ref-b"]
+        assert result["task"] == "q1"
         assert "reward" not in result and NG_FAILURE_CLASS_KEY not in result
 
 

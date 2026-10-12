@@ -110,3 +110,20 @@ gym eval run --no-serve \
 ## Metrics
 
 `pass@1/judge_accuracy` is the headline metric.
+
+## Sandboxed agents
+
+Use `--benchmark hle/opencode` or `hle/pi` for Python tools without search, or
+`hle/opencode_search` or `hle/pi_search` to enable Tavily search as well.
+These text-only presets preserve standard preparation and grading, with the
+Explanation/Answer/Confidence instructions in a single user message and one repeat.
+Keep collection repeats at one.
+
+See the shared [OpenCode and Pi setup guide](../../responses_api_agents/opencode_sandboxed_agent/README.md#offline-scientific-evaluation-with-opencode-or-pi)
+for images, credentials, network policies, token limits, and failure handling.
+
+The search presets supply the public HLE [exclusion list](search_exclusions.json).
+Deployments requiring an additional policy must supply their combined policy file
+through the Tavily resource's `exclude_domains_file_path`; keep private policies
+outside the public repository. This list reduces answer exposure but cannot
+guarantee that every answer-bearing page is excluded.

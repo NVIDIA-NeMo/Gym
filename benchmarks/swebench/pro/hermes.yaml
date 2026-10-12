@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 config_paths:
   - resources_servers/swebench_pro/configs/swebench_pro.yaml
   - responses_api_agents/hermes_agent/configs/hermes_agent.yaml
@@ -7,6 +10,7 @@ swebench_pro_hermes_resources_server:
   _inherit_from: swebench_pro_resources_server
   resources_servers:
     swebench_pro:
+      allowed_agents: [hermes_agent]
       datasets:
         - name: swebench_pro
           type: benchmark
@@ -21,6 +25,7 @@ swebench_pro_hermes_agent:
       resources_server:
         type: resources_servers
         name: swebench_pro_hermes_resources_server
+      model: ${policy_model_name}
       enabled_toolsets: [terminal]
 
 swebench_pro_hermes:

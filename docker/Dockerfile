@@ -31,7 +31,6 @@ ENV NEMO_GYM_CONTAINER=1
 USER root
 
 ARG ENROOT_VERSION=3.5.0
-ARG NSYS_VERSION=2026.5.1.161-265138896106v0
 RUN <<"EOF" bash -exu -o pipefail
 export DEBIAN_FRONTEND=noninteractive
 export TZ=America/Los_Angeles
@@ -60,7 +59,13 @@ apt-get purge -y \
     libmp3lame* \
     2>/dev/null || true
 
+# Gym never imports dbus or GObject; drop the base image's Python bindings.
+apt-get purge -y python3-dbus python3-gi
+
 apt-get autoremove -y
+
+# CVE-2026-45447: PKCS#7/S-MIME use-after-free in OpenSSL's PKCS7_verify().
+apt-get install -y --only-upgrade openssl libssl3t64
 
 # Install enroot for the EnrootProvider sandbox backend.
 # GitHub releases provide signed .debs for amd64 and arm64.
@@ -89,26 +94,11 @@ apt-get update
 apt-get install -y nvidia-container-toolkit
 rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 
-# Replace the CUDA base image's bundled Nsight Systems, which is built
-# against an outdated Go toolchain flagged by CVE scans, with a current
-# release from NVIDIA's devtools apt repo.
+# Remove the CUDA base image's bundled Nsight Systems. Gym does not profile
+# with nsys, and the bundled copy ships prebuilt Go binaries flagged by scans.
 rm -rf /usr/local/cuda*/NsightSystems-cli-* /opt/nvidia/nsight-systems*
 apt-get remove --purge -y --allow-change-held-packages 'nsight-systems*' || true
-
-nsys_release=$(echo "${NSYS_VERSION}" | cut -d. -f1-3)
-nsys_repo="https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${arch}"
-curl -fsSL "${nsys_repo}/nvidia.pub" -o /usr/share/keyrings/nvidia-devtools.asc
-echo "deb [signed-by=/usr/share/keyrings/nvidia-devtools.asc] ${nsys_repo}/ /" \
-    > /etc/apt/sources.list.d/nvidia-devtools.list
-apt-get update
-apt-get install -y --no-install-recommends "nsight-systems-cli-${nsys_release}=${NSYS_VERSION}"
-rm -f /etc/apt/sources.list.d/nvidia-devtools.list /usr/share/keyrings/nvidia-devtools.asc
-
-# The base image's cuda/bin dir can precede /usr/local/bin on PATH; if it
-# already symlinks nsys (pointing at the old bundled copy), repoint it.
-if [ -L /usr/local/cuda/bin/nsys ]; then
-    ln -sf /usr/local/bin/nsys /usr/local/cuda/bin/nsys
-fi
+rm -f /usr/local/cuda/bin/nsys /usr/local/bin/nsys
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -237,6 +227,27 @@ RUN uv venv /opt/nemo-gym/cache/seed-venv && \
     rm -rf /opt/nemo-gym/cache/seed-venv && \
     chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
 
+# Optional: seed the same cache with every server module's venv so that
+# scripts/ci/server_tests.sh can run offline too. Pass
+# --build-arg NEMO_GYM_SEED_SERVER_ENVS=1 for an image that runs the server
+# suite without a package index. Each server installs its own unlocked
+# requirements.txt or pyproject.toml (including git sources) outside the root
+# lock, so the seed above does not cover them, and together they are large
+# (about 25 GB more cache for all 212 servers in October 2026), hence opt-in.
+# `ng_test_all +setup_only=true` installs each venv exactly as the server suite
+# does (same discovery, requirements, and head-server pins), outside the source
+# tree, and deletes it; only the downloaded and built distributions stay.
+ARG NEMO_GYM_SEED_SERVER_ENVS=""
+RUN <<"EOF" bash -exu
+if [[ -n "${NEMO_GYM_SEED_SERVER_ENVS:-}" ]]; then
+    seed_venv_root="$(mktemp -d)"
+    ng_test_all +setup_only=true +delete_venvs_after_each_test=true \
+        "+uv_cache_dir=${UV_CACHE_DIR}" "+uv_venv_dir=${seed_venv_root}"
+    rm -rf "${seed_venv_root}"
+    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
+fi
+EOF
+
 # Seed the pre-commit hook cache (PRE_COMMIT_HOME) so the image's offline lint
 # path needs no network: lint.sh reuses the baked pre-commit executable, but a
 # bare `pre-commit run` still clones the hook repositories declared in
@@ -266,10 +277,12 @@ fi
 # ray's bundled Java worker jar ships an outdated httpcore5 with a known CVE
 # (GHSA-hf6x-8p5f-cgmf). Gym never uses Ray's Java cross-language worker, and
 # removing the jar doesn't affect ray.init(), remote tasks, actors, or
-# ray.serve (verified locally). Scoped to installed venvs (site-packages)
-# only, not uv's raw cache: deleting a file uv's cache expects to still be
-# there could break hardlinking a fresh venv for a server not prefetched here.
-find /opt -path "*/site-packages/ray/jars/ray_dist.jar" -delete
+# ray.serve (verified locally). Covers both installed venvs (site-packages)
+# and uv's own cache (archive-v0): confirmed uv silently skips a missing
+# cached file and installs everything else fine, even fully offline, so
+# purging it from the cache too doesn't break installing a fresh venv later
+# for a server not prefetched here.
+find /opt -name ray_dist.jar -delete
 
 # Keep ownership changes for generated caches and server venvs in the layer
 # that creates them so later layers do not duplicate their contents.

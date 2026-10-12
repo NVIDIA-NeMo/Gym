@@ -231,11 +231,17 @@ class HotpotQAQAResourcesServer(SimpleResourcesServer):
 def _task_should_remove(rollouts: List[Dict[str, Any]]) -> bool:
     """A task is filtered out iff its GT was flagged as unreliable.
 
-    Reads the flag off the first rollout's verify response; all rollouts for
-    a task share the same expected_answer so the flag is identical across
-    them.
+    Reads the flag off the verify responses; all rollouts for a task share the
+    same expected_answer so the flag is identical across them. A row counted as
+    zero for a rollout that never ran carries no flag, so any verified rollout is
+    read, and when none ran the flag is recomputed from the expected_answer the
+    row carries, as verify() would have.
     """
-    return bool(rollouts[0].get("gt_should_remove", False))
+    flags = [rollout["gt_should_remove"] for rollout in rollouts if "gt_should_remove" in rollout]
+    if flags:
+        return any(flags)
+    expected_answer = next((r["expected_answer"] for r in rollouts if r.get("expected_answer")), None)
+    return expected_answer is not None and normalize_gt(expected_answer)["should_remove"]
 
 
 if __name__ == "__main__":

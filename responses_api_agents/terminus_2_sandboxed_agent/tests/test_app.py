@@ -23,6 +23,7 @@ from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
 from responses_api_agents.terminus_2_sandboxed_agent.app import (
     NeMoGymLLM,
     NeMoGymSandboxEnvironment,
+    NeMoGymTerminus2,
     Terminus2Agent,
     Terminus2AgentConfig,
     _instruction,
@@ -31,6 +32,52 @@ from responses_api_agents.terminus_2_sandboxed_agent.app import (
 
 def test_instruction_joins_text_content():
     assert _instruction([{"content": [{"text": "first"}]}, {"content": "second"}]) == "first\n\nsecond"
+
+
+def test_missing_usage_falls_back_to_counting_current_chat(monkeypatch):
+    import litellm.utils
+
+    counted = []
+
+    def count_tokens(*, model, messages):
+        counted.append((model, messages))
+        return 42
+
+    monkeypatch.setattr(litellm.utils, "token_counter", count_tokens)
+    agent = object.__new__(NeMoGymTerminus2)
+    agent._model_name = "policy_model"
+    agent._is_check_proactive_summarization = True
+    agent._nemo_gym_llm = SimpleNamespace(usages=[SimpleNamespace(total_tokens=1000), None])
+    chat = SimpleNamespace(messages=[{"role": "user", "content": "current prompt"}])
+    assert agent._count_total_tokens(chat) == 42
+    assert counted == [("policy_model", chat.messages)]
+    assert agent._nemo_gym_llm.usages[-1] is None
+
+
+@pytest.mark.asyncio
+async def test_shell_recovery_skips_remaining_commands_and_resets_completion():
+    from responses_api_agents.terminus_2_sandboxed_agent.terminal import ShellExitedError
+
+    sent = []
+
+    async def send_keys(keys, **kwargs):
+        sent.append(keys)
+        if keys == "second":
+            raise ShellExitedError("shell exited after first command")
+
+    async def recover_shell():
+        return "The shell exited. Its state has reset; remaining commands were skipped."
+
+    agent = object.__new__(NeMoGymTerminus2)
+    agent._pending_completion = True
+    agent._completed_command_batches = 0
+    agent._times_spent = []
+    commands = [SimpleNamespace(keystrokes=key, duration_sec=0) for key in ("first", "second", "third")]
+    result = await agent._execute_commands(commands, SimpleNamespace(send_keys=send_keys, recover_shell=recover_shell))
+    assert sent == ["first", "second"]
+    assert result == (False, "The shell exited. Its state has reset; remaining commands were skipped.")
+    assert agent._pending_completion is False
+    assert agent._completed_command_batches == 1
 
 
 @pytest.mark.asyncio

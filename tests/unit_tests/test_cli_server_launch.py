@@ -51,13 +51,11 @@ class TestServerLaunchCommand:
             else server_dir / ".venv"
         )
 
-        command = _server_launch_command(
-            server_dir, global_config_dict, "my_server", Path("app.py"), shlex.quote("config: yaml")
-        )
+        command = _server_launch_command(server_dir, global_config_dict, "my_server", Path("app.py"))
 
         *setup_lines, launch_line = command.splitlines()
-        assert shlex.split(launch_line) == [str(expected_venv / "bin" / "python"), "app.py"]
+        assert shlex.split(launch_line) == ["&&", str(expected_venv / "bin" / "python"), "app.py"]
         # The interpreter comes from the same venv that the setup step builds and activates.
         assert f"source {shlex.quote(str(expected_venv / 'bin' / 'activate'))}" in setup_lines[0]
-        assert f"{NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}='config: yaml'" in command
-        assert f"{NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}=my_server" in command
+        assert NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME not in command
+        assert NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME not in command

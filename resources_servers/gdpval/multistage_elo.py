@@ -61,7 +61,7 @@ PerReferenceTotals = Dict[str, Dict[str, float]]
 
 @dataclass
 class PartialStagePolicy:
-    """Opt-in policy for accepting incomplete non-final calibration stages.
+    """Opt-in policy for accepting incomplete stages.
 
     ``min_success_fraction`` gates successful rollout coverage across the whole
     stage. ``min_per_reference_success_fraction`` and
@@ -109,9 +109,10 @@ class StageSpec:
     available references" (used for the first, broad stage). Each task is judged
     against **one** reference sampled uniformly from the included set. ``seed``
     makes this stage's task sampling and per-task reference assignment
-    reproducible. ``partial_completion`` is an explicit, non-final-stage-only
-    escape hatch for accepting a calibrated ELO with bounded missing evidence;
-    it is disabled by default.
+    reproducible. ``partial_completion`` is an explicit escape hatch for
+    accepting a stage ELO with bounded missing evidence; it is disabled by
+    default. On the final stage it also sets the coverage floor below which
+    aggregation reports the headline as degraded.
     """
 
     num_tasks: Optional[int] = None
