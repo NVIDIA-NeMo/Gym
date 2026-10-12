@@ -81,3 +81,22 @@ async def test_sigterm_hook_installs_and_restores():
     loop.add_signal_handler(signal.SIGTERM, lambda: None)
     _restore_sigterm(previous)
     assert signal.getsignal(signal.SIGTERM) == before
+
+
+def test_waiting_ratio_row_micro_averages_over_servers():
+    from nemo_gym.rollout_collection import _sum_vllm_queue
+
+    text = 'vllm:num_requests_running{engine="0",model_name="m"} 40.0\nvllm:num_requests_waiting{engine="0",model_name="m"} 2.0\n# HELP x\n'
+    assert _sum_vllm_queue(text) == (2.0, 40.0)
+    r = _report(1, max_waiting_ratio=0.1)
+    r.record_start(r._t0)
+    r.record_queue(2, 40)
+    r.record_queue(30, 40)
+    row = _row(r.table(), "waiting / running")
+    assert "0.40 (peak 0.75)" in row and "WARNING" in row
+
+
+def test_no_waiting_row_without_samples():
+    r = _report(1, max_waiting_ratio=0.1)
+    r.record_start(r._t0)
+    assert "waiting / running" not in r.table()

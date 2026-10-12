@@ -19,6 +19,7 @@ import glob as glob_module
 import json
 import logging
 import os
+import re
 import signal
 import tempfile
 import time
@@ -34,6 +35,7 @@ from itertools import repeat
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
+import aiohttp
 import orjson
 from aiohttp import ClientError
 from omegaconf import DictConfig, OmegaConf
@@ -1223,8 +1225,14 @@ class RunTimingReport:
         long_rollout_s: Optional[float],
         long_rollout_max_fraction: float,
         timed_out_max_fraction: float,
+        max_waiting_ratio: Optional[float] = None,
     ) -> None:
         self._total = total
+        self._max_waiting_ratio = max_waiting_ratio
+        self._waiting_sum = 0.0
+        self._running_sum = 0.0
+        self._peak_ratio = 0.0
+        self._queue_samples = 0
         self._start_within_s = start_within_s
         self._start_min_fraction = start_min_fraction
         self._all_started_within_s = all_started_within_s if all_started_within_s is not None else start_within_s
@@ -1238,6 +1246,14 @@ class RunTimingReport:
 
     def record_start(self, now: float) -> None:
         self._start_offsets.append(now - self._t0)
+
+    def record_queue(self, waiting: float, running: float) -> None:
+        """One sample of requests waiting and running, summed over every server."""
+        self._queue_samples += 1
+        self._waiting_sum += waiting
+        self._running_sum += running
+        if running > 0:
+            self._peak_ratio = max(self._peak_ratio, waiting / running)
 
     def record_result(self, result: Mapping[str, Any], seconds: float) -> None:
         self._durations.append(seconds)
@@ -1301,6 +1317,16 @@ class RunTimingReport:
                         long <= self._long_rollout_max_fraction,
                     )
                 )
+        if self._queue_samples and self._max_waiting_ratio is not None:
+            ratio = self._waiting_sum / self._running_sum if self._running_sum else 0.0
+            rows.append(
+                (
+                    "waiting / running requests",
+                    f"{ratio:.2f} (peak {self._peak_ratio:.2f})",
+                    f"<= {self._max_waiting_ratio:.2f}",
+                    ratio <= self._max_waiting_ratio,
+                )
+            )
         width = max(len(r[0]) for r in rows)
         lines = ["Run timing summary (this run | healthy):"]
         for label, value, healthy, ok in rows:
@@ -1309,6 +1335,35 @@ class RunTimingReport:
 
 
 _NO_SIGTERM_HOOK = object()
+
+
+def _sum_vllm_queue(metrics_text: str) -> Tuple[float, float]:
+    waiting = running = 0.0
+    for line in metrics_text.splitlines():
+        if line.startswith("vllm:num_requests_waiting"):
+            waiting += float(line.rsplit(" ", 1)[1])
+        elif line.startswith("vllm:num_requests_running"):
+            running += float(line.rsplit(" ", 1)[1])
+    return waiting, running
+
+
+async def _sample_server_queues(report: "RunTimingReport", base_urls: List[str], interval_s: float) -> None:
+    """Poll every vLLM server's /metrics and record requests waiting and running, summed over servers."""
+    metrics_urls = [re.sub(r"/v1/?$", "", u.rstrip("/")) + "/metrics" for u in base_urls]
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+        while True:
+            waiting = running = 0.0
+            reached = 0
+            for url in metrics_urls:
+                try:
+                    async with session.get(url) as resp:
+                        w, r = _sum_vllm_queue(await resp.text())
+                    waiting, running, reached = waiting + w, running + r, reached + 1
+                except Exception:
+                    continue
+            if reached:
+                report.record_queue(waiting, running)
+            await asyncio.sleep(interval_s)
 
 
 def _print_on_sigterm(render: Callable[[], str]) -> Any:
@@ -1827,6 +1882,18 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             "summary warns when the last start is later. Defaults to dispatch_start_report_within_s."
         ),
     )
+    server_queue_metrics_urls: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "vLLM base URLs (the policy model's base_url list) whose /metrics the run timing summary polls "
+            "for requests waiting and running, summed over servers."
+        ),
+    )
+    server_queue_max_waiting_ratio: float = Field(
+        default=0.1,
+        description="Healthy ceiling for summed waiting / summed running requests over the run.",
+    )
+    server_queue_sample_interval_s: float = Field(default=30.0, gt=0, description="Seconds between /metrics polls.")
     long_rollout_s: Optional[float] = Field(
         default=None,
         ge=0,
@@ -2979,8 +3046,10 @@ class RolloutCollectionHelper(BaseModel):
                 long_rollout_s=config.long_rollout_s,
                 long_rollout_max_fraction=config.long_rollout_max_fraction,
                 timed_out_max_fraction=config.timed_out_max_fraction,
+                max_waiting_ratio=config.server_queue_max_waiting_ratio if config.server_queue_metrics_urls else None,
             )
         timing_heartbeat: Optional[asyncio.Task] = None
+        queue_sampler: Optional[asyncio.Task] = None
         sigterm_previous: Any = _NO_SIGTERM_HOOK
         if config.dispatch_budget_s is not None:
             print(
@@ -3022,6 +3091,12 @@ class RolloutCollectionHelper(BaseModel):
 
                 if config.timing_summary_interval_s:
                     timing_heartbeat = asyncio.create_task(_timing_heartbeat())
+                if config.server_queue_metrics_urls:
+                    queue_sampler = asyncio.create_task(
+                        _sample_server_queues(
+                            run_timing, config.server_queue_metrics_urls, config.server_queue_sample_interval_s
+                        )
+                    )
                 sigterm_previous = _print_on_sigterm(run_timing.table)
 
             completion_iterator = self._run_examples_with_metadata(
@@ -3306,6 +3381,8 @@ class RolloutCollectionHelper(BaseModel):
             try:
                 if timing_heartbeat is not None:
                     timing_heartbeat.cancel()
+                if queue_sampler is not None:
+                    queue_sampler.cancel()
                 _restore_sigterm(sigterm_previous)
                 if run_timing is not None:
                     print(run_timing.table(), flush=True)
