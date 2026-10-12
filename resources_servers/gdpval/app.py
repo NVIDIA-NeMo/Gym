@@ -62,7 +62,8 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.deliverables import is_deliverable
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
+from nemo_gym.failure_kinds import JUDGE_FAILED
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_utils import SESSION_ID_KEY, get_server_url
@@ -516,6 +517,10 @@ def _gdpval_failure(failure_class: str) -> Dict[str, Any]:
     return {NG_FAILURE_CLASS_KEY: failure_class, "failure_kind": f"gdpval:{failure_class}", "mask_sample": True}
 
 
+# Recovered by `gym eval reverify --judge-failed-only`, which judges the persisted deliverable again.
+_JUDGE_FAILED = {NG_FAILURE_CLASS_KEY: JUDGE_FAILED, "failure_kind": JUDGE_FAILED, "mask_sample": True}
+
+
 class TransportIneligibleError(ValueError):
     """Every judge was excluded by deterministic media/transport eligibility."""
 
@@ -529,8 +534,6 @@ class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
 
     verify_mode: Literal["rubric", "comparison"] = "rubric"
     judge_response: Optional[Dict[str, Any]] = None
-    invalid_judge_response: Optional[bool] = None
-    invalid_judge_retryable: Optional[bool] = None
     # Majority-decision flags across all (ref_repeat × trial) judge votes —
     # kept for back-compat with older verify responses (still bool-valued).
     win: Optional[bool] = None
@@ -939,8 +942,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 verify_mode="rubric",
                 judge_response={"scoring_error": "missing_rubric"},
-                invalid_judge_response=True,
-                invalid_judge_retryable=False,
+                **{**_gdpval_failure("missing_rubric"), NG_TERMINAL_KEY: True},
             )
 
         judges = self._resolve_judges()
@@ -1040,7 +1042,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             reward=float(reward),
             verify_mode="rubric",
             judge_response=judge_result,
-            invalid_judge_response=_is_invalid_judge_result(judge_result),
+            **(_JUDGE_FAILED if _is_invalid_judge_result(judge_result) else {}),
         )
 
     async def _preconvert_and_log(self, target_dir: Path, *, label: str) -> None:
@@ -1658,33 +1660,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         if self.config.reward_mode != "comparison":
-            # A scorer-side failure still carries reward=0.0 for schema
-            # compatibility. Do not let those sentinel zeros lower the model's
-            # reward: profile only rows backed by a usable judge response and
-            # expose coverage explicitly so an all-invalid run cannot resemble
-            # a genuinely low-scoring run.
-            valid_responses = [vr for vr in body.verify_responses if not bool(vr.get("invalid_judge_response"))]
-            valid_count = len(valid_responses)
-            invalid_count = len(body.verify_responses) - valid_count
-            total_count = len(body.verify_responses)
-            if valid_responses:
-                base = await super().aggregate_metrics(AggregateMetricsRequest(verify_responses=valid_responses))
-            else:
-                base = AggregateMetrics()
-            # These describe only the rows supplied to aggregation. Runtime
-            # judge failures live in the collection sidecar and are intentionally
-            # not presented as run-level coverage here.
-            coverage: Dict[str, Any] = {
-                "rubric/aggregate_rows_total": total_count,
-                "rubric/aggregate_rows_included": valid_count,
-                "rubric/legacy_invalid_rows_excluded": invalid_count,
-                "rubric/aggregate_rows_included_fraction": valid_count / total_count if total_count else 0.0,
-            }
-            return AggregateMetrics(
-                group_level_metrics=base.group_level_metrics,
-                agent_metrics={**base.agent_metrics, **coverage},
-                key_metrics={**base.key_metrics, **coverage},
-            )
+            return await super().aggregate_metrics(body)
 
         from resources_servers.gdpval.comparison import (
             calculate_elo,
