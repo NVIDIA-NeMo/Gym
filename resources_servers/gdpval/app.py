@@ -60,6 +60,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.deliverables import is_deliverable
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.sandbox import AsyncSandbox
@@ -490,6 +491,9 @@ class GDPValVerifyRequest(BaseVerifyRequest):
     # reference. Used by the multi-stage ELO driver to select a different set of
     # reference models per judgementstage without reconfiguring the server.
     reference_ids: Optional[List[str]] = None
+    # Without a session or ``deliverables_dir``: score the deliverable an earlier rollout of this task repeat
+    # persisted, or answer 404 when there is none.
+    reuse_cached_deliverable: bool = False
     # Preserve multistage identity through /verify so Stirrup's namespace-keyed
     # cache and the incrementally tagged output remain auditable.
     verify_cache_namespace: Optional[str] = None
@@ -707,6 +711,14 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 LOGGER.exception("Failed to stop the sandbox of GDPVal session %s", session_id)
         self._sessions.clear()
 
+    def _cached_deliverables_dir(self, body: GDPValVerifyRequest) -> str:
+        directory = persisted_layout.repeat_dir(
+            self.config.persist_deliverables_dir, body.task_id, body.ng_rollout_index or 0
+        )
+        if not directory.is_dir() or not any(is_deliverable(path) for path in directory.iterdir()):
+            raise HTTPException(status_code=404, detail=f"No cached deliverable at {directory}")
+        return str(directory)
+
     def _get_session(self, request: Request) -> _TaskSession:
         session = self._sessions.get(request.session.get(SESSION_ID_KEY))
         if session is None:
@@ -911,6 +923,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
         session = self._sessions.get(request.session.get(SESSION_ID_KEY))
         if session is not None:
             body = body.model_copy(update={"deliverables_dir": await self._collect_deliverables(session)})
+        elif body.reuse_cached_deliverable and body.deliverables_dir is None:
+            body = body.model_copy(update={"deliverables_dir": self._cached_deliverables_dir(body)})
         if self.config.reward_mode == "comparison":
             return await self._verify_comparison(body)
 
