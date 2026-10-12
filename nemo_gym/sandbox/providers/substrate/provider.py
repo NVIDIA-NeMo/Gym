@@ -198,6 +198,9 @@ class SubstrateConnectionConfig:
     token: str | None = None
 
     grpc_timeout_s: float = 120.0
+    # Connections to the router at once; None is unlimited. httpx's default
+    # pool of 100 would cap in-flight execs at 100 per process.
+    http_max_connections: int | None = None
 
     def __post_init__(self) -> None:
         if not self.atespace:
@@ -482,7 +485,11 @@ class SubstrateProvider:
         the router's whole parking budget.
         """
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient(base_url=f"http://{self._connection.atenet_addr}")
+            limits = httpx.Limits(
+                max_connections=self._connection.http_max_connections,
+                max_keepalive_connections=self._connection.http_max_connections or 1024,
+            )
+            self._http_client = httpx.AsyncClient(base_url=f"http://{self._connection.atenet_addr}", limits=limits)
 
         headers = {TARGET_ACTOR_HEADER: actor.target}
         # Join the caller's trace (W3C traceparent) so the router's resume and
