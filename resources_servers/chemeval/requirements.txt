@@ -1,0 +1,3 @@
+-e nemo-gym[dev] @ ../..
+rdkit==2026.3.6
+selfies==2.2.0

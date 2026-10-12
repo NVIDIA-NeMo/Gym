@@ -335,7 +335,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # How long a missing endpoint file allows for the use of the last-known-good clients.
     endpoint_stale_grace_s: float = 300.0
 
-    # Connection-error retry bound applied to clients when endpoint_file is set.
+    # Connection-error retry bound applied to the clients when endpoint_file or
+    # route_around_failing_endpoints is set. Unbounded (None), a client retries a refused
+    # connection forever, so a dead endpoint never reaches the failure count that moves
+    # sessions off it.
     endpoint_connection_retries: Optional[int] = 8
 
     # Expose the Gym session (one per rollout) as the backend's conversation id.
@@ -464,7 +467,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 api_key=self.config.api_key,
                 default_headers=self.config.default_headers,
                 max_connection_retries=(
-                    self.config.endpoint_connection_retries if self.config.endpoint_file else None
+                    self.config.endpoint_connection_retries
+                    if (self.config.endpoint_file or self.config.route_around_failing_endpoints)
+                    else None
                 ),
             )
             for base_url in self.config.base_url
@@ -1768,7 +1773,10 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
-        session_id = request.session[SESSION_ID_KEY]
+        # Route by rollout when the call carries one: agents that drop cookies get a new
+        # session per call, which scatters a rollout's turns and lets the slowest endpoint
+        # collect them. Keying on the rollout keeps its turns on one endpoint.
+        session_id = current_rollout_id() or request.session[SESSION_ID_KEY]
         client = self._session_id_to_client.get(session_id)
         if self.config.route_around_failing_endpoints:
             hashed = self._hashed_client(session_id)

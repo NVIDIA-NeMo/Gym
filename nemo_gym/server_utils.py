@@ -95,6 +95,7 @@ from nemo_gym.telemetry.connection_pool import (
     set_server_name,
 )
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.telemetry.startup import ServerStartupTimeline
 
 
 logger = logging.getLogger(__name__)
@@ -1199,36 +1200,9 @@ class ClientDisconnectCancellationMiddleware:
             task_group.start_soon(listen_for_disconnect)
 
 
-_WARNED_IMPLICIT_RAY_SERVERS: set[type] = set()
-
-
-def _server_uses_ray(server_class: type, global_config_dict: DictConfig) -> bool:
-    ray_enabled = server_class.ray_enabled
-    if ray_enabled is not None:
-        return ray_enabled
-
-    # An undeclared server joins Ray only when it can import Ray and a cluster is configured to join. Starting
-    # a cluster here would give every server process and worker its own private cluster.
-    uses_ray = ray_is_installed() and bool(global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME))
-    if server_class not in _WARNED_IMPLICIT_RAY_SERVERS:
-        name = f"{server_class.__module__}.{server_class.__name__}"
-        if uses_ray:
-            logger.warning(
-                f"{name} does not declare ray_enabled; Ray remains enabled for backward compatibility. "
-                "Set ray_enabled explicitly because a future release will default it to false."
-            )
-        else:
-            logger.warning(
-                f"{name} does not declare ray_enabled and this run has no Ray cluster to join, so it runs "
-                "without Ray. Set ray_enabled = True if it uses Ray, or ray_enabled = False if it doesn't."
-            )
-        _WARNED_IMPLICIT_RAY_SERVERS.add(server_class)
-    return uses_ray
-
-
 def _connect_server_to_ray(server_class: type, global_config_dict: DictConfig) -> None:
-    """Join the run's Ray cluster if this server uses Ray."""
-    if not _server_uses_ray(server_class, global_config_dict):
+    """Join the run's Ray cluster if this server declares that it uses Ray."""
+    if not server_class.ray_enabled:
         return
     if _has_injected_global_config_env() and not global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME):
         # Gym only launches servers without a cluster address when it decided no server needs Ray. Fail instead
@@ -1293,7 +1267,9 @@ def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
 
 class SimpleServer(BaseServer):
     server_client: ServerClient
-    ray_enabled: ClassVar[bool | None] = None
+    # Servers that use Ray must declare `ray_enabled = True` on the class their entrypoint runs. Gym reads it
+    # before launch to decide whether to start Ray, and connects only those servers to it.
+    ray_enabled: ClassVar[bool] = False
 
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
@@ -1303,7 +1279,7 @@ class SimpleServer(BaseServer):
         """Initialise this process's nemo-lens telemetry. Idempotent, once per process.
 
         Every Gym server is its own process with its own providers — there is no parent
-        handle to inherit, only the `NEMO_GYM_OTEL_*` environment the orchestrator
+        handle to inherit, only the `NEMO_GYM_OTEL_*` environment the supervisor
         exported before spawning it. A failure here is logged and swallowed: telemetry
         must never stop a server from serving.
         """
@@ -1475,18 +1451,27 @@ repr(e): {repr(e)}"""
 
     @classmethod
     def run_webserver(cls) -> Optional[FastAPI]:  # pragma: no cover
+        startup = ServerStartupTimeline(
+            getenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, cls.__name__),
+            _telemetry_server_type(cls),
+            worker=is_nemo_gym_fastapi_worker(),
+        )
         global_config_dict = get_global_config_dict()
 
         is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
 
         server_config = cls.load_config_from_global_config()
+        startup.mark("load_config")
         _connect_server_to_ray(cls, global_config_dict)
+        if cls.ray_enabled:
+            startup.mark("init_ray")
 
         server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
             global_config_dict=global_config_dict,
         )
         server = cls(config=server_config, server_client=server_client)
+        startup.mark("init_server")
 
         if global_config_dict[DRY_RUN_KEY_NAME]:
             return
@@ -1497,14 +1482,17 @@ repr(e): {repr(e)}"""
         # Once per process — uvicorn's multi-worker path re-enters run_webserver in each
         # worker via the module import, and init_telemetry is idempotent.
         server.setup_telemetry()
+        startup.mark("init_telemetry")
 
         app = server.setup_webserver()
+        startup.mark("setup_webserver")
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
             from nemo_gym.mcp_auto_exposure import maybe_auto_expose
 
             maybe_auto_expose(server, app)
+            startup.mark("expose_tools_over_mcp")
         server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()
@@ -1529,6 +1517,7 @@ repr(e): {repr(e)}"""
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
         if profiling_config.profiling_enabled:
             server.setup_profiling(app, profiling_config)
+        startup.mark("configure_app")
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
         uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
@@ -1582,7 +1571,15 @@ repr(e): {repr(e)}"""
         else:
             uvicorn_kwargs["app"] = app
 
+        # The main process of a multi-worker server hands the app to Uvicorn workers and never serves it, so it reports now.
+        # Every process that serves the app reports when the app's lifespan startup finishes.
+        if is_main_fastapi_proc and uvicorn_kwargs.get("workers"):
+            startup.report()
+        else:
+            startup.report_when_serving(app)
+
         if is_main_fastapi_proc:
+            startup.announce_serve()
             try:
                 uvicorn.run(**uvicorn_kwargs)
             finally:

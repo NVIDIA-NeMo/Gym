@@ -57,9 +57,6 @@ def driver_telemetry_env(gym_job_id: str, span_groups: str, *, logs: bool = True
         "NEMO_GYM_OTEL_LOGS_ENABLED": "1" if logs else "0",
         "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://localhost:{OTLP_HTTP_PORT}",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
-        # No per-signal logs endpoint: logs follow the protocol above to the collector's HTTP
-        # port. Gym installs nemo-lens[sdk] and never the gRPC exporter, so the log exporter is
-        # the HTTP one; pointing it at the gRPC port made every batch time out.
     }
 
 
