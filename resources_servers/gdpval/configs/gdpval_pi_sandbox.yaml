@@ -5,7 +5,7 @@ config_paths:
 - resources_servers/gdpval/configs/gdpval.yaml
 - responses_api_agents/pi_agent/configs/pi_agent.yaml
 - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
-# Prepare native rows with task_data.py --taskset gdpval; flat source rows stay unchanged.
+# Prepare taskset rows with task_data.py --taskset gdpval; flat source rows stay unchanged.
 environment_routing_mode: taskset
 environment_server_routes:
   gdpval: single_agent_turn

@@ -156,7 +156,7 @@ def prepare_row(row: dict[str, JsonValue]) -> dict[str, JsonValue]:
 
 
 def prepare_task(row: dict[str, JsonValue], *, taskset: str) -> MaterializedTask[SingleAgentTurnTaskInput]:
-    """Prepare a native task while keeping verifier metadata outside the model prompt."""
+    """Prepare a single_agent_turn task while keeping verifier metadata outside the model prompt."""
     prepared = prepare_row(row)
     params = prepared.pop("responses_create_params")
     return MaterializedTask[SingleAgentTurnTaskInput](
@@ -170,7 +170,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--taskset", help="Emit native tasks for this taskset; use 'gdpval' with the sandbox recipes")
+    parser.add_argument("--taskset", help="Emit tasks for this taskset; use 'gdpval' with the sandbox recipes")
     args = parser.parse_args()
     source = [json.loads(line) for line in args.input.read_text().splitlines() if line.strip()]
     rows = [

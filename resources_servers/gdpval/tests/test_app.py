@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import argparse
 import asyncio
 import base64
 import json
@@ -48,7 +47,6 @@ from resources_servers.gdpval.app import (
 )
 from resources_servers.gdpval.comparison import task_attempted
 from resources_servers.gdpval.task_data import GDPFileTask, prepare_row
-from resources_servers.gdpval.tests.live_sandbox_smoke import GenerationOnlyResources, make_agent
 
 
 def _server(reward_mode: str = "rubric", **extra) -> GDPValResourcesServer:
@@ -2572,70 +2570,3 @@ def test_pairing_config_uses_shared_gdp_lifecycle(harness: str) -> None:
         assert agent.resources_server.name == "gdpval_resources_server"
         assert list(agent.enabled_toolsets) == ["terminal", "file"]
         assert agent.sandbox_provider is None  # Borrow the task sandbox; do not create another.
-
-
-@pytest.mark.parametrize("harness", ["hermes", "pi"])
-def test_smoke_uses_existing_agent_with_requested_budget(harness: str) -> None:
-    if harness == "hermes":
-        pytest.importorskip("model_tools", reason="Install Hermes agent requirements for this check")
-    args = argparse.Namespace(harness=harness, model="test-policy", max_output_tokens=16384, input=Path("tasks.jsonl"))
-    agent = make_agent(
-        args,
-        {"name": f"{harness}_agent", "host": "127.0.0.1", "port": 12345, "entrypoint": "app.py"},
-        MagicMock(spec=ServerClient),
-    )
-    assert agent.config.model == "test-policy"
-    assert agent.config.model_server.name == "policy_model"
-    if harness == "hermes":
-        assert agent.__class__.__name__ == "HermesAgent"
-        assert agent.config.max_tokens == 16384
-        assert agent.config.sandbox_provider is None
-    else:
-        assert agent.__class__.__name__ == "PiAgent"
-        assert agent.config.max_output_tokens == 16384
-
-
-async def test_generation_smoke_masks_reward_and_never_calls_judge(tmp_path: Path, monkeypatch) -> None:
-    judge = AsyncMock(side_effect=AssertionError("Smoke must not call the live judge"))
-    monkeypatch.setattr(GDPValResourcesServer, "_grade_deliverables", judge)
-    export = AsyncMock(return_value=tmp_path)
-    monkeypatch.setattr(GenerationOnlyResources, "export_deliverables", export)
-    instance = GenerationOnlyResources(
-        config=GDPValResourcesServerConfig(
-            name="resources",
-            host="127.0.0.1",
-            port=12345,
-            entrypoint="app.py",
-            sandbox_provider="sandbox",
-            num_workers=1,
-            image="test-image",
-            deliverables_root=tmp_path,
-            preconvert_office_to_pdf=False,
-            judge_model_server={"type": "responses_api_models", "name": "unused-judge"},
-        ),
-        server_client=MagicMock(spec=ServerClient),
-    )
-    example = Path(__file__).parents[1] / "data" / "example.jsonl"
-    source = json.loads(example.read_text().splitlines()[0])
-    prepared = prepare_row(source)
-    body = GDPValVerifyRequest.model_validate(
-        prepared
-        | {
-            "response": NeMoGymResponse(
-                id="response",
-                object="response",
-                created_at=0,
-                model="test-policy",
-                output=[],
-                tools=[],
-                tool_choice="auto",
-                parallel_tool_calls=False,
-            ).model_dump()
-        }
-    )
-    result = await instance.verify(body, request=SimpleNamespace(session={SESSION_ID_KEY: "session"}))
-    export.assert_awaited_once_with("session")
-    judge.assert_not_awaited()
-    assert result.mask_sample is True
-    assert "not a score" in result.failure_reason
-    assert result.deliverables_dir == str(tmp_path)

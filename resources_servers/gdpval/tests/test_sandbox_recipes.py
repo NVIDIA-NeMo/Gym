@@ -32,7 +32,7 @@ from resources_servers.gdpval.tests.test_app import sandbox_server as sandbox_se
 
 
 @pytest.mark.parametrize("harness", ["pi", "hermes", "opencode", "openclaw"])
-def test_native_recipe_runs_prepared_task_through_verification(tmp_path, monkeypatch, sandbox_server, harness):
+def test_sandbox_recipe_runs_prepared_task_through_verification(tmp_path, monkeypatch, sandbox_server, harness):
     recipe = Path(__file__).parents[1] / "configs" / f"gdpval_{harness}_sandbox.yaml"
     _, configs = GlobalConfigDictParser().load_extra_config_paths([str(recipe)])
     config = OmegaConf.merge(*configs)
@@ -42,7 +42,7 @@ def test_native_recipe_runs_prepared_task_through_verification(tmp_path, monkeyp
         environment_server_routes=OmegaConf.to_container(config.environment_server_routes),
     )
     source = tmp_path / "source.jsonl"
-    output = tmp_path / "native.jsonl"
+    output = tmp_path / "prepared.jsonl"
     original = json.dumps(row()) + "\n"
     source.write_text(original)
     monkeypatch.setattr(
@@ -114,7 +114,7 @@ def test_native_recipe_runs_prepared_task_through_verification(tmp_path, monkeyp
         ),
         server_client=client,
     )
-    body = SingleAgentTurnRequest(episode_id={"rollout_id": "native-recipe"}, task=prepared).model_dump(mode="json")
+    body = SingleAgentTurnRequest(episode_id={"rollout_id": "sandbox-recipe"}, task=prepared).model_dump(mode="json")
     with TestClient(environment.setup_webserver()) as http:
         reply = http.post("/run", json=body)
     assert reply.status_code == 200, reply.text
