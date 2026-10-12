@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from shlex import quote
 from tempfile import TemporaryDirectory
 from time import perf_counter
@@ -20,6 +20,38 @@ from responses_api_agents.kilocode_agent.observability import read_kilo_observat
 
 
 LOG = logging.getLogger(__name__)
+
+
+def _sandbox_prepare_command(workdir: str, directory: str) -> str:
+    # Bootstrap with POSIX sh; the runtime installer itself requires Bash.
+    bootstrap = """set -eu
+set --
+command -v python3 >/dev/null 2>&1 || set -- "$@" python3
+command -v bash >/dev/null 2>&1 || set -- "$@" bash
+if [ "$#" -gt 0 ]; then
+    [ "$(id -u)" = 0 ] || { echo "Kilo sandbox sessions require $*: preinstall these tools or use a root image." >&2; exit 1; }
+    if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache "$@"
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
+    else
+        echo "Kilo sandbox sessions require $*: preinstall these tools (automatic installation requires apt-get or apk)." >&2
+        exit 1
+    fi
+fi
+"""
+    validate_paths = (
+        "from pathlib import Path; import sys; "
+        "workdir,*roots=[Path(p).resolve() for p in sys.argv[1:]]; "
+        "assert workdir.is_dir(), 'Kilo task workdir is missing'; "
+        "assert all(workdir != root and workdir not in root.parents and root not in workdir.parents "
+        "for root in roots), 'Kilo session storage overlaps the task workdir'"
+    )
+    return (
+        bootstrap + f"python3 -I -c {quote(validate_paths)} {quote(workdir)} "
+        f"{quote(str(PurePosixPath(directory).parent))} && mkdir -p -- {quote(directory)}"
+    )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -54,9 +86,12 @@ class KiloSandboxSession(AgentSessionState):
         """Install pinned Node and Kilo into the session directory with the bundled installer."""
         directory = self.session.session_dir
         sandbox = self.session.sandbox
-        prepared = await sandbox.exec(f"mkdir -p -- {quote(directory)}", cwd="/", timeout_s=30)
+        prepared = await sandbox.exec(
+            _sandbox_prepare_command(self.session.workdir, directory), cwd="/", timeout_s=timeout
+        )
         if prepared.return_code != 0 or prepared.error_type:
-            raise RuntimeError(f"Cannot create Kilo session directory: {prepared.stderr or prepared.stdout}")
+            details = "\n".join(part for part in (prepared.stderr, prepared.stdout) if part)
+            raise RuntimeError(f"Cannot prepare the Kilo session (exit {prepared.return_code}): {details[-16000:]}")
         installer = f"{directory}/install_kilo_runtime.sh"
         await sandbox.upload(Path(__file__).with_name("install_kilo_runtime.sh"), installer)
         installed = await sandbox.exec(
@@ -105,6 +140,8 @@ class KiloSandboxSession(AgentSessionState):
         exit_code = raw if type(raw) is int else None
         observations, usage = None, None
         try:
+            if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
+                raise RuntimeError("Kilo database capture requires confirmed cleanup")
             snapshot = await self.session.sandbox.exec(
                 f"python3 -I {quote(directory + '/sandbox_runner.py')} --snapshot {quote(directory)}",
                 cwd=self.session.workdir,

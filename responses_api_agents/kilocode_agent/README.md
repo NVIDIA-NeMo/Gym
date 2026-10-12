@@ -176,9 +176,10 @@ unchanged. Check task-image support and the benchmark's `allowed_agents` before 
 
 ### Runtime and ownership
 
-The task image must be Linux (x86_64 or aarch64, glibc or musl) with Python 3.8+, and the sandbox
-needs network access to nodejs.org, the npm registry, and the Gym Model Server. Task images need not
-ship Node: session setup runs [install_kilo_runtime.sh](install_kilo_runtime.sh), which downloads a
+The task image must be Linux (x86_64 or aarch64, glibc or musl), and the sandbox needs network
+access to nodejs.org, the npm registry, and the Gym Model Server. Python 3.8+ and Bash must be
+present or, on a root image, are installed with apk or apt-get. Task images need not ship Node:
+session setup runs [install_kilo_runtime.sh](install_kilo_runtime.sh), which downloads a
 checksum-verified Node 22 and installs the pinned `kilo_version` into a private directory under
 `/tmp/nemo-gym-kilo-sessions/<id>/`. Missing download tools (`curl`, CA certificates) are installed
 with apt-get or apk when running as root; otherwise they must be in the image. Kilo runs through

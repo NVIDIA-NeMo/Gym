@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
@@ -28,8 +29,8 @@ from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, join_model_call_observations
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from responses_api_agents.kilocode_agent.app import KiloCodeAgent
-from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession
+from responses_api_agents.kilocode_agent.app import KiloCodeAgent, KiloCodeAgentRunRequest
+from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession, _sandbox_prepare_command
 from responses_api_agents.kilocode_agent.tests.test_app import _make_model_server_agent
 
 
@@ -72,8 +73,12 @@ def persisted(root: str, *, status: str = "completed") -> AgentObservationBundle
     )
 
 
+def receipt(*, return_code: int | None = 0, timed_out: bool = False, error: str | None = None) -> dict:
+    return {"cleanup_confirmed": True, "return_code": return_code, "error": error, "timed_out": timed_out}
+
+
 def state() -> KiloSandboxSession:
-    return KiloSandboxSession(
+    session = KiloSandboxSession(
         request=seed(),
         provider_name="docker",
         session=SandboxSession(
@@ -83,6 +88,8 @@ def state() -> KiloSandboxSession:
             harness="KiloCode",
         ),
     )
+    session.session.cleanup = receipt()
+    return session
 
 
 @pytest.mark.parametrize("completion_tokens,verdict", [(2, "healthy"), (0, "unhealthy")])
@@ -169,6 +176,7 @@ async def test_base_seed_and_close_retry_contract_preserves_partial_output() -> 
     partial = persisted("ses-native")
     partial.records[0].conversation = [NeMoGymEasyInputMessage(role="assistant", content="partial answer")]
     session.session.artifacts = KiloArtifacts(stdout="", stderr="", exit_code=None, observations=partial)
+    session.session.cleanup = receipt(return_code=-15, timed_out=True)
     with patch.object(agent, "_seed_agent_session_state", return_value=session) as setup:
         seeded_request = request(marker=None)
         await agent.seed_agent_session(seeded_request, seed())
@@ -183,7 +191,7 @@ async def test_base_seed_and_close_retry_contract_preserves_partial_output() -> 
     root, _, sandbox = first.agent_observations.records
     assert root.conversation[0].content == "partial answer"
     assert root.status == "incomplete"
-    assert sandbox.exit_code is None and sandbox.outcome == "unknown"
+    assert sandbox.exit_code is None and sandbox.outcome == "timeout"
     with pytest.raises(HTTPException):
         await agent.responses(seeded_request, NeMoGymResponseCreateParamsNonStreaming(input="hi"))
 
@@ -249,6 +257,9 @@ async def test_install_failure_reports_installer_output() -> None:
     assert "Kilo version mismatch: 7.4.16" in str(error.value) and "node: v22.19.0" in str(error.value)
     installer = sandbox.upload.await_args_list[0].args[1]
     assert installer == "/tmp/nemo-gym-kilo-sessions/test/install_kilo_runtime.sh"
+    assert sandbox.exec.await_args_list[0].args[0] == _sandbox_prepare_command(
+        "/repo", "/tmp/nemo-gym-kilo-sessions/test"
+    )
     assert sandbox.exec.await_args_list[1].args[0].startswith(f"bash {installer} ")
     assert len(sandbox.upload.await_args_list) == 1  # the runner is uploaded only after a successful install
 
@@ -339,19 +350,29 @@ def test_unsupported_request_semantics_are_rejected(params: dict) -> None:
     assert error.value.status_code == 422
 
 
+TEXT = '{"type":"text","part":{"text":"partial"}}'
+
+
 @pytest.mark.parametrize(
-    "exit_code,stdout,expected",
+    "exit_code,cleanup,stdout,expected",
     [
-        (0, '{"type":"text","part":{"text":"55"}}', "completed"),
-        (None, '{"type":"text","part":{"text":"partial"}}', "incomplete"),
-        (1, "", "error"),
-        (0, '{"type":"error","error":{"name":"APIError"}}', "error"),
-        (0, "", "error"),
+        (0, receipt(), '{"type":"text","part":{"text":"55"}}', "completed"),
+        (None, receipt(return_code=-15, timed_out=True), TEXT, "incomplete"),
+        (None, receipt(return_code=1), "", "error"),
+        (None, receipt(return_code=1), TEXT, "error"),
+        (None, receipt(error="cleanup: lost"), TEXT, "error"),
+        (None, None, TEXT, "error"),
+        (1, receipt(return_code=1), "", "error"),
+        (0, receipt(), '{"type":"error","error":{"name":"APIError"}}', "error"),
+        (0, receipt(), "", "error"),
     ],
 )
-async def test_sandbox_output_and_failures(exit_code: int | None, stdout: str, expected: str) -> None:
+async def test_sandbox_output_and_failures(
+    exit_code: int | None, cleanup: dict | None, stdout: str, expected: str
+) -> None:
     agent = _make_model_server_agent(model="m", system_prompt="configured")
     session = state()
+    session.session.cleanup = cleanup
     artifacts = KiloArtifacts(stdout=stdout, stderr="diagnostic", exit_code=exit_code)
     session.session.execute = AsyncMock(return_value=artifacts)
     body = NeMoGymResponseCreateParamsNonStreaming(input="hi", instructions="requested")
@@ -432,3 +453,63 @@ def test_timeout_and_cli_errors_have_explicit_sandbox_outcomes() -> None:
     assert observations.records[-1].outcome == "failed"
     assert observations.records[-1].error_type == "APIError"
     assert observations.records[0].status == "failed"
+
+
+@pytest.mark.parametrize("option", ["no-sandbox", "required-tool", "no-model", "unpinned"])
+def test_unsupported_seed_rejected_before_connection(option: str) -> None:
+    agent = _make_model_server_agent(kilo_version="7.4.15")
+    agent.config.resources_server = None
+    body = seed().model_dump(mode="json")
+    if option == "no-sandbox":
+        body["sandbox_access"] = None
+    elif option == "no-model":
+        agent.config.model_server = None
+    elif option == "unpinned":
+        agent.config.kilo_version = None
+    else:
+        body["tool_accesses"] = [
+            {"kind": "direct_http", "name": "tools", "base_url": "http://resources", "required": True}
+        ]
+    with patch(f"{APP}.create_provider") as create, TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=body).status_code == 422
+    create.assert_not_called()
+
+
+async def test_indirect_sandbox_access_is_rejected() -> None:
+    agent = _make_model_server_agent(kilo_version="7.4.15")
+    body = seed()
+    body.sandbox_access = SandboxAccess.model_construct(connection=object(), workdir="/repo")
+    with patch(f"{APP}.create_provider") as create, pytest.raises(HTTPException) as error:
+        await agent._seed_agent_session_state(body)
+    assert error.value.status_code == 422
+    create.assert_not_called()
+
+
+async def test_closing_session_rejects_activation_and_sessions_reject_agent_run() -> None:
+    agent = _make_model_server_agent()
+    session = state()
+    session.session._close_task = asyncio.get_running_loop().create_future()
+    with patch.object(agent, "_require_agent_session", return_value=session), pytest.raises(HTTPException) as error:
+        await agent.responses(request(), NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+    assert error.value.status_code == 409 and session.task is None
+    with pytest.raises(HTTPException) as error:
+        await agent.run(request(), KiloCodeAgentRunRequest(responses_create_params={"input": "hi"}))
+    assert error.value.status_code == 409
+
+
+async def test_snapshot_requires_confirmed_cleanup_before_any_io() -> None:
+    session = state()
+    session.started_at = 0.0
+    session.session.cleanup = {**receipt(), "cleanup_confirmed": False}
+    with patch(f"{TRANSPORT}.read_text", side_effect=["partial", "diagnostic", "0"]):
+        artifacts = await session.collect_artifacts()
+    assert artifacts.stdout == "partial" and artifacts.observations is None
+    session.session.sandbox.exec.assert_not_awaited()
+
+
+def test_missing_worker_exit_code_is_a_coverage_gap() -> None:
+    session = state()
+    session.session.cleanup = receipt(return_code=None, timed_out=True)
+    session.session.artifacts = KiloArtifacts(stdout="", stderr="", exit_code=None, observations=persisted("ses"))
+    observations = _make_model_server_agent()._sandbox_observations(session)
+    assert "worker_exit_code_unavailable" in {gap.code for gap in observations.gaps}

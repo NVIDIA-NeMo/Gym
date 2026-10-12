@@ -30,6 +30,7 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr
 
+from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -58,6 +59,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
+from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.server_utils import get_response_json, raise_for_status
@@ -212,18 +214,35 @@ def _error_name(error: Any) -> str:
     return name if isinstance(name, str) and name else "kilo_api_error"
 
 
-def _run_outcome(artifacts: KiloArtifacts, *, timed_out: bool, cancelled: bool) -> tuple[str, str | None]:
+def _runtime_failure(artifacts: KiloArtifacts, cleanup: CleanupReceipt | None) -> str | None:
+    """Return why a run failed at runtime, from the supervisor receipt; a timeout stays a gradable partial."""
+    if cleanup is None:
+        return "Kilo activation ended without a cleanup receipt"
+    if cleanup["error"]:
+        return f"Kilo supervision failed: {cleanup['error']}"
+    if cleanup["timed_out"]:
+        return None
+    if cleanup["return_code"] not in (0, None):
+        return f"Kilo runner exited {cleanup['return_code']}"
+    if artifacts.exit_code not in (0, None):
+        return f"Kilo exited {artifacts.exit_code}"
+    if artifacts.exit_code is None:
+        return "Kilo exit status is unavailable"
+    return None
+
+
+def _run_outcome(
+    artifacts: KiloArtifacts, cleanup: CleanupReceipt | None, *, cancelled: bool
+) -> tuple[str, str | None]:
     """Classify one sandbox run as a SandboxObservation (outcome, error_type) pair."""
     error, _ = _scan_run_events(artifacts.stdout)
     if error is not None:
         return "failed", _error_name(error)
-    if timed_out:
+    if cleanup is not None and cleanup["timed_out"]:
         return "timeout", "agent_timeout"
     if cancelled:
         return "cancelled", "cancelled"
-    if artifacts.exit_code is None:
-        return "unknown", None
-    if artifacts.exit_code != 0:
+    if _runtime_failure(artifacts, cleanup):
         return "failed", "agent_run_error"
     return "completed", None
 
@@ -346,29 +365,33 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> KiloSandboxSession:
         if any(access.required for access in self.effective_tool_accesses(body)):
-            raise ValueError("Kilo sandbox sessions do not support required external tool grants")
+            raise HTTPException(422, "Kilo sandbox sessions do not support required external tool grants")
         if self.config.model_server is None:
-            raise ValueError("Kilo sandbox sessions require a Gym model_server")
+            raise HTTPException(422, "Kilo sandbox sessions require a Gym model_server")
         if not self.config.kilo_version or self.config.command != "kilo":
-            raise ValueError("Kilo sandbox sessions require kilo_version and the default kilo command")
+            raise HTTPException(422, "Kilo sandbox sessions require kilo_version and the default kilo command")
         if self.config.repo_dir or self.config.extra_args or self.config.env:
-            raise ValueError("Kilo sandbox sessions do not support repo_dir, extra_args, or custom env overrides")
+            raise HTTPException(
+                422, "Kilo sandbox sessions do not support repo_dir, extra_args, or custom env overrides"
+            )
         if self.config.timeout <= 0 or self.config.setup_timeout <= 0:
-            raise ValueError("Kilo sandbox installation and execution timeouts must be positive")
+            raise HTTPException(422, "Kilo sandbox installation and execution timeouts must be positive")
         owns_sandbox = body.sandbox_access is None
         if owns_sandbox:
             if not self.config.sandbox_provider:
-                raise ValueError("Kilo requires sandbox_access or a configured sandbox_provider")
+                raise HTTPException(422, "Kilo requires sandbox_access or a configured sandbox_provider")
             provider_ref = self.config.sandbox_provider
             workdir = self.config.sandbox_config.get("workdir") or "/app"
         else:
+            if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
+                raise HTTPException(422, "Kilo requires direct SandboxAccess")
             provider_ref = body.sandbox_access.connection.provider_config_ref
             workdir = body.sandbox_access.workdir
         if not isinstance(workdir, str) or not workdir.startswith("/") or ".." in workdir.split("/"):
-            raise ValueError("Kilo sandbox workdir must be an absolute path without '..'")
+            raise HTTPException(422, "Kilo sandbox workdir must be an absolute path without '..'")
         session_dir = f"/tmp/nemo-gym-kilo-sessions/{uuid4().hex}"
         if session_dir.startswith(workdir.rstrip("/") + "/") or workdir.startswith("/tmp/nemo-gym-kilo-sessions"):
-            raise ValueError("Kilo task workdir must be disjoint from its session directory")
+            raise HTTPException(422, "Kilo task workdir must be disjoint from its session directory")
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         try:
             if owns_sandbox:
@@ -428,9 +451,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 source="kilocode", records=[sandbox], gaps=[ObservationGap(code="observation_capture_failed")]
             )
         outcome, error_type = _run_outcome(
-            artifacts,
-            timed_out=bool(state.session.cleanup and state.session.cleanup["timed_out"]),
-            cancelled=state.task is not None and state.task.cancelled(),
+            artifacts, state.session.cleanup, cancelled=state.task is not None and state.task.cancelled()
         )
         sandbox.outcome, sandbox.error_type = outcome, error_type
         sandbox.exit_code, sandbox.wall_time_s = artifacts.exit_code, artifacts.wall_time_s
@@ -450,6 +471,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                     record.status = "incomplete"
                 record.error_type = record.error_type or error_type
                 record.duration_ms = artifacts.wall_time_s * 1000 if artifacts.wall_time_s is not None else None
+        if state.session.cleanup is not None and state.session.cleanup["return_code"] is None:
+            observations.gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
         observations.records.append(sandbox)
         return observations
 
@@ -692,9 +715,10 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         error, length_stop = _scan_run_events(artifacts.stdout)
         if error is not None:
             raise RuntimeError(f"Kilo reported an execution error: {error}; {artifacts.stderr[-4096:]}")
-        incomplete = artifacts.exit_code is None or length_stop
-        if artifacts.exit_code not in (None, 0):
-            raise RuntimeError(f"Kilo exited {artifacts.exit_code}: {artifacts.stderr}")
+        failure = _runtime_failure(artifacts, state.session.cleanup)
+        if failure is not None:
+            raise RuntimeError(f"{failure}: {artifacts.stderr[-4096:]}")
+        incomplete = state.session.cleanup["timed_out"] or length_stop
         output_items, usage = parse_kilo_events(artifacts.stdout)
         if not output_items and not incomplete:
             raise RuntimeError("Kilo completed without any trajectory events")
@@ -722,6 +746,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             rollout_id = request.path_params.get("rollout_id")
             if rollout_id != state.request.episode_id.capture_key:
                 raise HTTPException(409, "Kilo agent session requires its attempt-qualified rollout route")
+            if state.session.closing:
+                raise HTTPException(409, "Kilo session is closing")
             if state.task is None:
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(
@@ -792,8 +818,12 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         )
 
     async def run(self, request: Request, body: KiloCodeAgentRunRequest) -> KiloCodeAgentVerifyResponse:
+        if self._agent_session_id_from_request(request) is not None:
+            raise HTTPException(409, "Kilo sessions require EnvironmentServer /run")
         if self.config.resources_server is None:
-            raise ValueError("Use EnvironmentServer /run for independently composed Kilo sandbox sessions")
+            raise HTTPException(
+                422, "Kilo /run requires resources_server; use EnvironmentServer /run for sandbox sessions"
+            )
         async with self.sem:
             cookies = request.cookies
 
