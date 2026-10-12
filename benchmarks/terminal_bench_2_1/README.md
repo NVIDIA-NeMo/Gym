@@ -34,14 +34,15 @@ example as `run.yaml`:
 config_paths:
   - resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml
   - responses_api_agents/codex_agent/configs/codex_agent.yaml
-  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
 
-environment_routing_mode: legacy
-environment_server_name: single_agent_turn_legacy
+environment_routing_mode: taskset
+environment_server_routes:
+  terminal_bench_2_1: single_agent_turn
 
-single_agent_turn_legacy:
+single_agent_turn:
   environment_servers:
-    single_agent_turn_legacy:
+    single_agent_turn:
       resources_server:
         name: terminal_bench_2_1_resources_server
       agent_server:
@@ -61,18 +62,19 @@ terminal_bench_2_1_resources_server:
       evaluation_timeout: 300
 ```
 
-The prepared flat JSONL uses `single_agent_turn_legacy` to adapt its input/output
-format to the shared session lifecycle. Environment Server seeds Resources and
-the agent, runs the agent, closes it before verification, then closes Resources.
-Resources owns the sandbox throughout. Keep one worker for both Resources and
-the agent because their sessions are process-local.
+The smoke input below wraps the prepared row in `task_id` and `task_input`.
+Its `terminal_bench_2_1` taskset routes directly to `single_agent_turn`.
+Environment Server seeds Resources and the agent, runs the agent, closes it before
+verification, then closes Resources. Resources owns the sandbox throughout.
+Keep one worker for both Resources and the agent because their sessions are
+process-local.
 
 ### Choose a harness
 
 To use another harness, replace its config import, the entire `codex_agent`
-settings block, `agent_server.name`, and the `--agent` argument below. The settings
-in the last column belong under `<name>.responses_api_agents.<name>`.
-`--agent` selects an already configured harness; it does not perform this rebinding.
+settings block, and `agent_server.name`. The settings in the last column belong
+under `<name>.responses_api_agents.<name>`. The Environment Server's binding selects
+the harness for this taskset.
 
 | Harness requirements | Config import | Name | Example settings |
 | --- | --- | --- | --- |
@@ -124,11 +126,14 @@ python - <<'PY'
 import json
 from pathlib import Path
 
+from nemo_gym.task_materialization import materialize_task
+
 rows = [json.loads(line) for line in Path("benchmarks/terminal_bench_2_1/data/benchmark.jsonl").read_text().splitlines()]
 rows = [row for row in rows if row["task_name"] == "terminal-bench/regex-log"]
 assert len(rows) == 1
 assert (Path(rows[0]["task_folder"]) / "tests/test.sh").is_file()
-Path("results/tb21-input.jsonl").write_text(json.dumps(rows[0]) + "\n")
+task = materialize_task(rows[0], taskset="terminal_bench_2_1")
+Path("results/tb21-input.jsonl").write_text(json.dumps(task) + "\n")
 PY
 
 gym env start --config run.yaml --config model-provider.yaml ++use_absolute_ip=true
@@ -138,7 +143,7 @@ In a second terminal, use the same checkout, Python environment, and configs:
 
 ```bash
 gym eval run --no-serve --config run.yaml --config model-provider.yaml ++use_absolute_ip=true \
-  --agent codex_agent --input results/tb21-input.jsonl \
+  --input results/tb21-input.jsonl \
   --output results/tb21-rollouts.jsonl --limit 1 --num-repeats 1 --concurrency 1
 ```
 
