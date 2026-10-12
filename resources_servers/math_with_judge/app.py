@@ -138,10 +138,13 @@ _OUTER_MATH_DELIMITERS = ((r"\(", r"\)"), (r"\[", r"\]"), ("$$", "$$"), ("$", "$
 def _clean_answer_candidate(candidate: str) -> Optional[str]:
     """Remove presentation-only wrappers from one final-answer line."""
     candidate = candidate.strip()
+    # Bound cleanup before running regexes, including for explicitly labelled answers.
+    if len(candidate) > 512:
+        return None
     candidate = re.sub(r"^(?:\*\*|__|`)+", "", candidate)
     candidate = re.sub(r"(?:\*\*|__|`)+$", "", candidate).strip()
     candidate = re.sub(r"^[ \t]*(?:[:：=]|-[ \t]+)[ \t]*", "", candidate)
-    candidate = re.sub(r"[ \t]*(?:\*\*|__)+$", "", candidate).strip()
+    candidate = re.sub(r"(?:\*\*|__)+$", "", candidate.rstrip()).strip()
 
     for opening, closing in _OUTER_MATH_DELIMITERS:
         if (
@@ -366,6 +369,9 @@ Example output: "My final verdict is different [[A!=B]]"."""
         answer_candidate = _extract_last_boxed_answer(verification_response)
         if answer_candidate is None and self.config.format_tolerant_answer_extraction:
             answer_candidate = _extract_unboxed_answer_candidate(verification_response)
+            # Grade only the selected final answer. Parsing the full response can
+            # award credit for a conflicting intermediate number or earlier label.
+            verification_response = "\\boxed{" + answer_candidate + "}" if answer_candidate else ""
         if answer_candidate is None or not answer_candidate.strip():
             return 0.0, None, 0.0, None
 

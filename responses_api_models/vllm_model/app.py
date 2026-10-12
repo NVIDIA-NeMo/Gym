@@ -25,7 +25,7 @@ from time import monotonic, time, time_ns
 from typing import Any, Awaitable, ClassVar, Dict, List, Literal, Optional, Union, get_args
 
 from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.base_responses_api_model import (
@@ -1124,12 +1124,19 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         choice_dict = chat_completion_dict["choices"][0]
-        # vLLM uses ``abort`` when an in-flight request is cancelled during a
-        # server restart. OpenAI's Choice schema does not accept that provider
-        # value. Preserve the rollout as incomplete so a single cancelled
-        # generation cannot abort the whole evaluation job.
+        # An aborted request is an infrastructure failure, not a token-limit
+        # completion. Failing before conversion prevents grading partial text;
+        # the rollout collector can retain the failure for retry on resume.
         if choice_dict.get("finish_reason") == "abort":
-            choice_dict["finish_reason"] = "length"
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "type": "provider_cancelled",
+                    "finish_reason": "abort",
+                    "request_id": chat_completion_dict.get("id"),
+                    "message": "vLLM cancelled the generation; retry the rollout.",
+                },
+            )
         self._verify_generation_prefix(body_dict, chat_completion_dict)
         if self.config.uses_reasoning_parser:
             # See the TODO wrt reasoning_content above

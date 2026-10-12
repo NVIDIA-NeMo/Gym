@@ -88,6 +88,16 @@ def _sleeping_library_verifier_process(result_connection: Any) -> None:
         result_connection.close()
 
 
+def _extract_long_whitespace_answers(result_connection: Any) -> None:
+    try:
+        response = "x" + " " * 64_000 + "y"
+        result_connection.send(
+            [_extract_unboxed_answer_candidate(prefix + response) for prefix in ("", "Answer: ", "उत्तर: ")]
+        )
+    finally:
+        result_connection.close()
+
+
 class TestApp:
     @fixture
     def config(self) -> LibraryJudgeMathResourcesServerConfig:
@@ -189,6 +199,63 @@ class TestApp:
             "Final answer\n$$\n\\boxed{\\dfrac{9}{256}}$$"
         )
         assert _prepare_format_tolerant_response(r"\boxed{\frac{1}{2}}") == r"\boxed{\frac{1}{2}}"
+
+    def test_long_whitespace_answer_extraction_is_bounded(self) -> None:
+        if "fork" not in mp.get_all_start_methods():
+            skip("This regression test requires fork.")
+        ctx = mp.get_context("fork")
+        parent, child = ctx.Pipe(duplex=False)
+        process = ctx.Process(target=_extract_long_whitespace_answers, args=(child,))
+        process.start()
+        child.close()
+        try:
+            # A process deadline catches event-loop-blocking regex regressions
+            # without hanging the test worker. The old cleanup takes tens of seconds.
+            assert parent.poll(3.0), "Answer extraction blocked on a long whitespace run"
+            assert parent.recv() == [None, None, None]
+        finally:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=1.0)
+            parent.close()
+
+    @mark.parametrize(
+        ("generated", "expected", "reward", "extracted"),
+        [
+            ("Answer: 18\nCorrection.\nउत्तर: 19", "18", 0.0, "19"),
+            ("Answer: 18\nCorrection.\nउत्तर: 19", "19", 1.0, "19"),
+            ("Intermediate $18$\nFinal answer: no solution", "18", 0.0, None),
+            ("Intermediate $18$\nFinal answer: $19$", "19", 1.0, "19"),
+            ("Intermediate $18$\n19", "18", 0.0, "19"),
+            ("Intermediate $18$\n19", "19", 1.0, "19"),
+        ],
+    )
+    async def test_tolerant_verifier_grades_only_selected_unboxed_answer(
+        self,
+        config: LibraryJudgeMathResourcesServerConfig,
+        generated: str,
+        expected: str,
+        reward: float,
+        extracted: str | None,
+    ) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False, "format_tolerant_answer_extraction": True}),
+            server_client=server_client,
+        )
+        # Exercise the production symbolic verifier, not a mocked reward.
+        actual_reward, actual_extracted, library_reward, judge = await server._verify_answer(
+            "question", expected, generated
+        )
+        assert actual_reward == library_reward == reward
+        if extracted is not None:
+            assert actual_extracted == extracted
+        else:
+            # math-verify can interpret prose as a symbolic product; it must
+            # never recover the discarded intermediate value.
+            assert actual_extracted != "18"
+        assert judge is None
+        server_client.post.assert_not_called()
 
     async def test_unboxed_answer_fallback_is_opt_in(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         strict_server = LibraryJudgeMathResourcesServer(

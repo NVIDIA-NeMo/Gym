@@ -19,12 +19,20 @@ using the shared math agent, prompt, and symbolic verifier used by English
   verification and `should_use_judge: false`. The original answers are unchanged.
   Indic enables `format_tolerant_answer_extraction` to accept explicit final-answer
   formats beyond `\boxed{}`; this setting is isolated from the English verifier.
+  For an unboxed response, only the selected final-answer candidate is graded;
+  earlier intermediate answers cannot earn credit. Unboxed candidate lines longer
+  than 512 characters after trimming whitespace are rejected before cleanup.
 - Metric: accuracy (pass@1), with one response per problem by default. Report
   results by language; pooled accuracy averages across the selected languages.
   For combined runs, join rollouts to prepared rows using `_ng_task_index` to
   recover language metadata. The shared verifier does not retain extra row fields.
 - Generation: inherits the shared math configuration. Use the same model, sampling,
   token budget, and thinking settings for both languages in a comparison.
+  A provider `abort` is reported as a retryable HTTP 503 `provider_cancelled` error,
+  not a token-limit completion, and its partial text is not scored. To retain
+  failed attempts while continuing other tasks, pass `+route_failures_to_sidecar=true`
+  to `gym eval run`, then resume the same output file to retry those tasks. Check
+  that all requested rows completed before reporting full-benchmark accuracy.
 
 ## Example usage
 
