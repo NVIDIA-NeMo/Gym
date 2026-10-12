@@ -1,0 +1,272 @@
+{
+  "ChemVQA-2K": {
+    "dataset": "ChemVQA-2K",
+    "guidance": "Focus on chemistry semantics: molecular structure, chemical symbols, bond lines, and important colored difference markers. Missing a non-core red difference marker should hurt moderately, not collapse the score.",
+    "prompt_notes": [
+      "Atom symbols such as O, OH, Cl, charges, and bond identities are critical.",
+      "Preserve important colored markers or difference lines when they are semantically meaningful.",
+      "Small orientation changes matter less than structure and symbol correctness."
+    ],
+    "categories": [
+      {
+        "id": "molecular_structure_fidelity",
+        "label": "Molecular Structure Fidelity",
+        "weight": 0.4,
+        "description": "Connectivity, overall structure, and core arrangement of the molecule are correct."
+      },
+      {
+        "id": "chemical_symbol_accuracy",
+        "label": "Chemical Symbol Accuracy",
+        "weight": 0.3,
+        "description": "Atom labels, charges, and bond notation remain accurate and readable."
+      },
+      {
+        "id": "bond_line_marker_fidelity",
+        "label": "Bond Line and Marker Fidelity",
+        "weight": 0.2,
+        "description": "Bond lines, highlighting, color-coded difference markers, and related visual indicators are preserved."
+      },
+      {
+        "id": "readability_completeness",
+        "label": "Readability and Completeness",
+        "weight": 0.1,
+        "description": "The structure is readable, unclipped, and not missing major visible content."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.8,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 4.0,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.4,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "structure_or_symbol_failure",
+        "cap_to": 2.5,
+        "reason": "Wrong molecular structure or wrong chemical symbols cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "molecular_structure_fidelity",
+            "max": 2.4
+          },
+          {
+            "id": "chemical_symbol_accuracy",
+            "max": 2.4
+          }
+        ]
+      }
+    ]
+  },
+  "DocVQA": {
+    "dataset": "DocVQA",
+    "guidance": "Judge text and structure first. Be strict, but stay fair on hard infographics: if the source itself is visually dense or difficult, do not over-penalize ambiguity that is already present in the reference.",
+    "prompt_notes": [
+      "Visible text should be accurate and legible if the source is legible.",
+      "Layout should stay close to the reference, but exact decorative styling matters less than information and structure.",
+      "Visible layout drift should lower the layout score even when the text is exact.",
+      "Match background, text, and graphic colors to the reference; visible color mismatches should lower the key_visual_elements score."
+    ],
+    "categories": [
+      {
+        "id": "text_information_fidelity",
+        "label": "Text Information Fidelity",
+        "weight": 0.35,
+        "description": "Visible text, numbers, and key document information remain accurate."
+      },
+      {
+        "id": "document_structure_layout",
+        "label": "Document Structure and Layout",
+        "weight": 0.3,
+        "description": "Reading order, section placement, tables, blocks, and layout structure stay faithful."
+      },
+      {
+        "id": "legibility_noncrowding",
+        "label": "Legibility and Non-Crowding",
+        "weight": 0.2,
+        "description": "Content remains readable, not overly crowded, and reasonably well spaced."
+      },
+      {
+        "id": "key_visual_elements",
+        "label": "Key Visual Elements",
+        "weight": 0.15,
+        "description": "Important icons, tables, charts, callouts, or emphasis boxes remain present when they matter."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.8,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 4.0,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.4,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "material_key_text_error",
+        "cap_to": 2.5,
+        "reason": "Materially wrong key text or numbers cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "text_information_fidelity",
+            "max": 2.4
+          }
+        ]
+      }
+    ]
+  },
+  "ChartQA": {
+    "dataset": "ChartQA",
+    "guidance": "This is an easy chart recreation dataset. Be strict about preserving both the information and the chart structure. Wrong chart orientation, wrong chart type, crowded labels, illegible text, bad title placement, or legend overlap should all be penalized.",
+    "prompt_notes": [
+      "Preserve recreation structure, not just semantic content.",
+      "If a horizontal chart becomes vertical, preserve some credit for correct data but do not award a perfect score.",
+      "Color scheme matters less than readable text, correct numbers, and faithful structure."
+    ],
+    "categories": [
+      {
+        "id": "numeric_information_fidelity",
+        "label": "Numeric Information Fidelity",
+        "weight": 0.3,
+        "description": "Values, trends, ordering, and answer-relevant chart information are correct."
+      },
+      {
+        "id": "structure_layout_fidelity",
+        "label": "Structure and Layout Fidelity",
+        "weight": 0.3,
+        "description": "Chart type, orientation, title placement, legend placement, and overall chart structure match the reference."
+      },
+      {
+        "id": "text_label_legibility_accuracy",
+        "label": "Text, Label, and Legibility Accuracy",
+        "weight": 0.25,
+        "description": "Labels, numbers, headings, and text remain accurate, legible, and not crowded."
+      },
+      {
+        "id": "cleanliness_completeness",
+        "label": "Cleanliness and Completeness",
+        "weight": 0.15,
+        "description": "The chart is unclipped, readable, and not missing major visible content."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.5,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 3.5,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.6,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "chart_orientation_or_type_mismatch",
+        "cap_to": 3.5,
+        "reason": "A wrong chart orientation or chart type cannot receive full credit even when the core numbers are preserved.",
+        "all_of": [
+          {
+            "id": "numeric_information_fidelity",
+            "min": 3.0
+          },
+          {
+            "id": "structure_layout_fidelity",
+            "max": 2.9
+          }
+        ],
+        "any_of": []
+      },
+      {
+        "type": "material_text_or_numeric_error",
+        "cap_to": 2.5,
+        "reason": "Material numeric or text errors cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "numeric_information_fidelity",
+            "max": 2.4
+          },
+          {
+            "id": "text_label_legibility_accuracy",
+            "max": 2.4
+          }
+        ]
+      }
+    ]
+  },
+  "EEE-Bench": {
+    "dataset": "EEE-Bench",
+    "revision": "eee_background_v1",
+    "guidance": "Focus on circuit topology, component identity, labels, values, signs, and current or voltage direction. Be lenient on stylistic drawing differences such as zig-zag versus curved resistor style when the component identity is still clearly correct. Background color is a separate fidelity requirement; don't ignore it.",
+    "prompt_notes": [
+      "Wrong direction, sign, label, or connectivity matters more than cosmetic symbol style.",
+      "Component identity must be preserved even if the drawn shape style varies slightly.",
+      "Treat small labels and values as potentially important.",
+      "Compare the background across the canvas, margins, and any distinct panel regions. Preserve the reference hue, brightness, and tint; do not assume the background should be white.",
+      "For background_color_fidelity, award 5 only when no background color mismatch is visible. A visible white-versus-gray, cream, tinted, or dark background mismatch must score below 5, even if the circuit and labels are otherwise perfect. Ignore only imperceptible compression noise."
+    ],
+    "categories": [
+      {
+        "id": "circuit_topology_connectivity",
+        "label": "Circuit Topology and Connectivity",
+        "weight": 0.3,
+        "description": "Wiring relationships, placement relationships, and the overall circuit topology are correct."
+      },
+      {
+        "id": "component_identity_symbols",
+        "label": "Component Identity and Symbols",
+        "weight": 0.25,
+        "description": "Resistors, capacitors, sources, and other component identities remain correct."
+      },
+      {
+        "id": "labels_values_directions",
+        "label": "Labels, Values, and Directions",
+        "weight": 0.25,
+        "description": "Current directions, voltage labels, signs, and numeric values remain accurate."
+      },
+      {
+        "id": "readability_completeness",
+        "label": "Readability and Completeness",
+        "weight": 0.1,
+        "description": "The circuit is readable, uncluttered, and not missing major visible content."
+      },
+      {
+        "id": "background_color_fidelity",
+        "label": "Background Color Fidelity",
+        "weight": 0.1,
+        "description": "The canvas and panel backgrounds match the reference hue, brightness, tint, and any visible regional variation."
+      }
+    ],
+    "cap_profile": {
+      "critical_any_threshold": 1.5,
+      "critical_any_cap": 2.8,
+      "critical_pair_threshold": 2.5,
+      "critical_pair_cap": 4.0,
+      "top_score_trigger": 4.8,
+      "top_score_min_critical": 4.4,
+      "top_score_cap": 4.5
+    },
+    "extra_caps": [
+      {
+        "type": "circuit_semantic_error",
+        "cap_to": 2.5,
+        "reason": "Wrong topology, wrong labels or values, or wrong current or voltage direction cap the score on this dataset.",
+        "all_of": [],
+        "any_of": [
+          {
+            "id": "circuit_topology_connectivity",
+            "max": 2.4
+          },
+          {
+            "id": "labels_values_directions",
+            "max": 2.4
+          }
+        ]
+      }
+    ]
+  }
+}

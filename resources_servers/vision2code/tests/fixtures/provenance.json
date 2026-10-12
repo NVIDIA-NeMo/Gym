@@ -1,0 +1,9 @@
+{
+  "source_repository": "https://github.com/image2code/vision2code",
+  "base_commit": "000f2e162dd62fac5637c718e018d7123b3aff1e",
+  "working_tree_modified": true,
+  "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+  "source_sha256": "b81999419c92ef403fce7905f01ccd2a7a47eebbc6960b67c0f8cfab1e2595b8",
+  "prompt_source_sha256": "e90b11d4d738d79ec03aa6a4a63681a30d3e6e0215ab765ecb631a878f6bc95c",
+  "note": "Golden outputs generated from the existing modified source checkout; EEE background and whitespace changes are included. No sibling repository is needed at runtime or test time."
+}

@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: vision2code
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-verifier
+domain: coding
+description: Recreate reference images with Python in Enroot and score them with four Vision2Code rubrics.
+modality: multimodal
+licensing: Apache-2.0
+authors:
+  - slikhite-1
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: stochastic
+resources_server: vision2code
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+  - name: example
+    type: example
+    jsonl_fpath: resources_servers/vision2code/data/example.jsonl
+    num_repeats: 1
+state: none
+sandbox: enroot
+prompt_source: prepared
+lifecycle: active

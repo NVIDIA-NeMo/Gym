@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+vision2code:
+  resources_servers:
+    vision2code:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Single-turn image recreation with isolated Python rendering and dataset rubric rewards
+      value: Evaluate visual reconstruction for ChemVQA-2K, DocVQA, ChartQA, and EEE-Bench
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        temperature: 0.0
+        max_output_tokens: 4096
+      sandbox_provider:
+        enroot: {}
+      sandbox_image: ${oc.env:VISION2CODE_SQSH}
+      execution_timeout: 60
+      render_concurrency: 4
+      artifact_dir: ${oc.env:VISION2CODE_ARTIFACTS,artifacts/vision2code}
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/vision2code/data/example.jsonl
+
+vision2code_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: vision2code
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+# Both adapters connect to existing services; no inference job is launched.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:VISION2CODE_POLICY_URL}
+      api_key: ${oc.env:VISION2CODE_POLICY_KEY,EMPTY}
+      model: ${oc.env:VISION2CODE_POLICY_MODEL}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:VISION2CODE_JUDGE_URL}
+      api_key: ${oc.env:VISION2CODE_JUDGE_KEY,EMPTY}
+      model: ${oc.env:VISION2CODE_JUDGE_MODEL}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+
+vision2code_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: vision2code_simple_agent
