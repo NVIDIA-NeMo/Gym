@@ -17,7 +17,7 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
-from resources_servers.gdpval import task_sandbox
+from resources_servers.gdpval import persisted_layout, task_sandbox
 from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig, GDPValVerifyRequest
 
 
@@ -330,3 +330,38 @@ def test_shutdown_stops_the_sandboxes_of_open_sessions(server, root, tmp_path, s
 def test_sessions_require_a_single_worker(tmp_path):
     with pytest.raises(ValueError, match="num_workers=1"):
         _server(tmp_path, num_workers=2)
+
+
+def test_a_reuse_request_without_a_session_scores_the_persisted_deliverable(server, tmp_path):
+    repeat_dir = persisted_layout.repeat_dir(tmp_path / "persist", "task-1", 2)
+    repeat_dir.mkdir(parents=True)
+    (repeat_dir / "report.docx").write_text("deliverable")
+
+    verified = _verify(TestClient(server.setup_webserver()), reuse_cached_deliverable=True, ng_rollout_index=2)
+
+    assert verified["deliverables_dir"] == str(repeat_dir)
+
+
+def test_a_reuse_request_without_a_persisted_deliverable_is_not_found(server, tmp_path):
+    repeat_dir = persisted_layout.repeat_dir(tmp_path / "persist", "task-1", 0)
+    repeat_dir.mkdir(parents=True)
+    (repeat_dir / persisted_layout.FINISH_PARAMS_FILE).write_text("null")
+    body = GDPValVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=NeMoGymResponse(
+            id="r",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        ),
+        task_id="task-1",
+        reuse_cached_deliverable=True,
+    )
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=body.model_dump(mode="json"))
+
+    assert response.status_code == 404

@@ -69,6 +69,7 @@ from resources_servers.gdpval.multistage_orchestrator import (
     load_reuse_cached_keys,
     parse_multistage_config,
     read_journal,
+    resources_server_for_row,
     route_stage_rows,
     row_task_id,
     run_e2e_multistage,
@@ -3527,7 +3528,8 @@ class TestIntegrationWiring:
             check_completion=lambda **kwargs: None,
         )
         global_config = {
-            "multistage": {"enabled": True, "stages": ["1", "1"], "seed": 0},
+            # Both stages dispatch: reuse would judge stage 2 from the cache instead.
+            "multistage": {"enabled": True, "stages": ["1", "1"], "seed": 0, "reuse_cached_deliverables": False},
             "gdpval": {
                 "resources_servers": {
                     "gdpval": {"reference_models": {key: {"elo": elo} for key, elo in REF_ELOS.items()}}
@@ -3615,7 +3617,8 @@ class TestIntegrationWiring:
             check_completion=lambda **kwargs: None,
         )
         global_config = {
-            "multistage": {"enabled": True, "stages": ["1", "1"], "seed": 0},
+            # Both stages dispatch: reuse would judge stage 2 from the cache instead.
+            "multistage": {"enabled": True, "stages": ["1", "1"], "seed": 0, "reuse_cached_deliverables": False},
             "gdpval": {
                 "resources_servers": {
                     "gdpval": {"reference_models": {key: {"elo": elo} for key, elo in REF_ELOS.items()}}
@@ -3629,6 +3632,176 @@ class TestIntegrationWiring:
         assert exc_info.value is original_error
         written = json.loads((tmp_path / "rollouts_aggregate_metrics.json").read_text())
         assert written[0]["aggregation_error"]["http_status"] == 500
+
+
+_ROUTING_CONFIG = {
+    "gdpval_stirrup_agent": {"responses_api_agents": {"stirrup_agent": {}}},
+    "gdpval_environment_server": {
+        "environment_servers": {
+            "single_agent_turn_legacy": {
+                "agent_server": {"type": "responses_api_agents", "name": "gdpval_stirrup_agent"},
+                "resources_server": {"type": "resources_servers", "name": "gdpval_resources_server"},
+            }
+        }
+    },
+}
+
+
+class TestCachedDeliverableReuse:
+    """A later stage judges the deliverable an earlier stage produced, without running the policy again."""
+
+    def _per_reference(self, row: Mapping[str, Any]) -> Dict[str, Any]:
+        reference_id = row["reference_ids"][0]
+        return {
+            "task_id": row["task_id"],
+            "per_reference": {
+                reference_id: {"wins": 1, "losses": 0, "ties": 0, "reference_elo": REF_ELOS[reference_id]}
+            },
+        }
+
+    async def _run_two_stages(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, cached: bool):
+        dispatched: List[Dict[str, Any]] = []
+        verified: List[Dict[str, Any]] = []
+        test = self
+
+        class FakeHelper:
+            def _preprocess_rows_from_config(self, config):
+                return _materialized_rows(["t0"])
+
+            def _run_examples_with_metadata(self, rows, **kwargs):
+                dispatched.extend(rows)
+
+                async def done(row):
+                    return rollout_collection_module._CompletedRollout(
+                        row=row, result=test._per_reference(row), rollout_latency_ms=None
+                    )
+
+                return [done(row) for row in rows]
+
+            def setup_server_client(self):
+                async def post(*, server_name, url_path, json):
+                    verified.append({"server_name": server_name, "url_path": url_path, "json": json})
+                    return json
+
+                return SimpleNamespace(post=post, global_config_dict=OmegaConf.create(_ROUTING_CONFIG))
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return tmp_path / "aggregate.json"
+
+        async def raise_for_status(response):
+            if not cached:
+                raise ClientResponseError(request_info=None, history=(), status=404, message="Not Found")
+
+        async def get_response_json(body):
+            return test._per_reference(body)
+
+        monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", FakeHelper)
+        monkeypatch.setattr(multistage_module, "raise_for_status", raise_for_status)
+        monkeypatch.setattr(multistage_module, "get_response_json", get_response_json)
+        monkeypatch.setattr(
+            "resources_servers.gdpval.multistage_orchestrator.ensure_distribution",
+            lambda *args, **kwargs: (_distribution(["t0"]), None),
+        )
+        config = SimpleNamespace(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            num_samples_in_parallel=2,
+            dispatch_budget_s=None,
+            drain_margin_s=None,
+            dispatch_longest_first=False,
+            resume_from_cache=False,
+            route_failures_to_sidecar=True,
+            check_completion=lambda **kwargs: None,
+        )
+        global_config = {
+            "multistage": {"enabled": True, "stages": ["1", "1"], "seed": 0},
+            "gdpval_resources_server": {
+                "resources_servers": {
+                    "gdpval": {"reference_models": {key: {"elo": elo} for key, elo in REF_ELOS.items()}}
+                }
+            },
+        }
+        await run_e2e_multistage(config, global_config)
+        persisted = [json.loads(line) for line in (tmp_path / "rollouts.jsonl").read_text().splitlines()]
+        return dispatched, verified, persisted
+
+    async def test_a_later_stage_judges_the_cached_deliverable_through_verify(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dispatched, verified, persisted = await self._run_two_stages(tmp_path, monkeypatch, cached=True)
+
+        assert [row["stage_index"] for row in dispatched] == [0]
+        (call,) = verified
+        assert (call["server_name"], call["url_path"]) == ("gdpval_resources_server", "/verify")
+        assert call["json"]["reuse_cached_deliverable"] is True
+        assert call["json"]["stage_index"] == 1
+        assert "deliverables_dir" not in call["json"]
+        (message,) = call["json"]["response"]["output"]
+        assert message["content"][0]["text"] == "Judge-only mode: scoring pre-existing cached deliverables."
+        assert sorted(row["stage_index"] for row in persisted) == [0, 1]
+
+    async def test_without_a_cached_deliverable_the_policy_runs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dispatched, verified, persisted = await self._run_two_stages(tmp_path, monkeypatch, cached=False)
+
+        assert [row["stage_index"] for row in dispatched] == [0, 1]
+        assert [call["json"]["stage_index"] for call in verified] == [1]
+        assert sorted(row["stage_index"] for row in persisted) == [0, 1]
+
+    async def test_agent_observations_are_joined_into_a_trajectory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        test = self
+
+        class FakeHelper:
+            def _preprocess_rows_from_config(self, config):
+                return _materialized_rows(["t0"])
+
+            def _run_examples_with_metadata(self, rows, **kwargs):
+                async def done(row):
+                    result = {**test._per_reference(row), "ng_agent_observations": {"source": "stirrup"}}
+                    return rollout_collection_module._CompletedRollout(row=row, result=result, rollout_latency_ms=1.0)
+
+                return [done(row) for row in rows]
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return tmp_path / "aggregate.json"
+
+        monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", FakeHelper)
+        monkeypatch.setattr(
+            "resources_servers.gdpval.multistage_orchestrator.ensure_distribution",
+            lambda *args, **kwargs: (_distribution(["t0"]), None),
+        )
+        config = SimpleNamespace(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            num_samples_in_parallel=1,
+            dispatch_budget_s=None,
+            drain_margin_s=None,
+            dispatch_longest_first=False,
+            resume_from_cache=False,
+            route_failures_to_sidecar=True,
+            check_completion=lambda **kwargs: None,
+        )
+        global_config = {
+            "multistage": {"enabled": True, "stages": ["1"], "seed": 0},
+            "gdpval_resources_server": {
+                "resources_servers": {
+                    "gdpval": {"reference_models": {key: {"elo": elo} for key, elo in REF_ELOS.items()}}
+                }
+            },
+        }
+
+        await run_e2e_multistage(config, global_config)
+
+        (row,) = [json.loads(line) for line in (tmp_path / "rollouts.jsonl").read_text().splitlines()]
+        assert row["ng_trajectory"]["task_id"] == "t0"
+
+    def test_a_row_is_verified_by_the_resources_server_its_environment_server_binds(self) -> None:
+        row = {AGENT_REF_KEY_NAME: {"name": "gdpval_stirrup_agent"}}
+
+        assert resources_server_for_row(row, OmegaConf.create(_ROUTING_CONFIG)) == "gdpval_resources_server"
 
 
 class TestFailureContractOptIn:

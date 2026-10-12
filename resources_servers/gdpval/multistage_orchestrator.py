@@ -54,6 +54,7 @@ orchestration is unit-testable without any servers.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import os
@@ -69,22 +70,35 @@ from typing import AbstractSet, Any, Awaitable, Callable, Dict, List, Mapping, O
 
 import orjson
 
+from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record, model_call_capture_dirs_from_config
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
+    _NO_RESULT_FAILURE_CLASSES,
+    _RUN_FAILURE_ERRORS,
+    NG_DISPATCH_DRAINED_KEY,
+    NG_ENVIRONMENT_SERVER_KEY,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_TRAJECTORY_KEY,
     DispatchLatencyTracker,
+    _agent_request_failure_row,
+    _attach_trajectory_record,
+    _environment_server_for_agent,
+    _environment_servers_by_agent,
+    _has_observation_gap,
     get_max_rollout_attempts,
     is_terminal_failure,
     migrate_invalid_judge_main_rows,
     observed_elapsed,
 )
+from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.gdpval.multistage_elo import (
     PartialStagePolicy,
     PerReferenceTotals,
@@ -829,6 +843,51 @@ def find_gdpval_reference_elos(global_config_dict: Mapping[str, Any]) -> Dict[st
         if elos:
             return elos
     return {}
+
+
+def resources_server_for_row(row: Mapping[str, Any], global_config_dict: Any) -> str:
+    """Name the resources server that verifies a row: the one bound by the environment server fronting its agent."""
+    environment_server = row.get(NG_ENVIRONMENT_SERVER_KEY) or _environment_server_for_agent(
+        row[AGENT_REF_KEY_NAME]["name"], _environment_servers_by_agent(global_config_dict)
+    )
+    environment_config = next(iter(global_config_dict[environment_server]["environment_servers"].values()))
+    reference = environment_config.get("resources_server")
+    if not reference or not reference.get("name"):
+        raise ValueError(f"Environment server {environment_server!r} binds no resources server")
+    return str(reference["name"])
+
+
+def cached_deliverable_verify_body(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Build the session-less ``/verify`` body that judges a cached deliverable without running the policy."""
+    # The placeholder old Stirrup sent for a judge-only or reused rollout; its text is the judge's fallback when a
+    # task has no deliverable files.
+    response_id = f"gdpval-{row_task_id(row)}"
+    response = NeMoGymResponse(
+        id=response_id,
+        created_at=int(time.time()),
+        model=(row.get("responses_create_params") or {}).get("model") or "judge_only",
+        object="response",
+        output=[
+            NeMoGymResponseOutputMessage(
+                id=f"msg-{response_id}-empty",
+                content=[
+                    NeMoGymResponseOutputText(
+                        type="output_text",
+                        text="Judge-only mode: scoring pre-existing cached deliverables.",
+                        annotations=[],
+                    )
+                ],
+                role="assistant",
+                status="completed",
+                type="message",
+            )
+        ],
+        parallel_tool_calls=False,
+        tool_choice="none",
+        tools=[],
+        metadata=None,
+    )
+    return {**row, "response": response.model_dump(mode="json")}
 
 
 # ---------------------------------------------------------------------------
@@ -2445,6 +2504,69 @@ async def run_e2e_multistage(
 
     latency_tracker = DispatchLatencyTracker()
     dispatch_started_at = time.monotonic()
+    capture_dirs = model_call_capture_dirs_from_config(global_config_dict)
+
+    def attach_rollout_evidence(
+        row: Dict[str, Any], result: Dict[str, Any], rollout_latency_ms: Optional[float]
+    ) -> None:
+        """Join the rollout's evidence and attach ``ng_perf``, as ``run_from_config`` does."""
+        no_result = result.get(NG_FAILURE_CLASS_KEY) in _NO_RESULT_FAILURE_CLASSES or bool(
+            result.get(NG_DISPATCH_DRAINED_KEY)
+        )
+        if capture_dirs and not no_result:
+            merge_model_call_capture_into_record(
+                result,
+                capture_dirs,
+                include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
+            )
+        if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
+            _attach_trajectory_record(row, result)
+        _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
+
+    async def verify_cached(row: Dict[str, Any], semaphore: Any, server_client: Any) -> Tuple[Dict, Optional[Dict]]:
+        """Score a deliverable an earlier stage produced, without running the policy again.
+
+        The result is None when the resources server holds no deliverable for the row.
+        """
+        async with semaphore:
+            started_at = time.time()
+            try:
+                response = await server_client.post(
+                    server_name=resources_server_for_row(row, server_client.global_config_dict),
+                    url_path="/verify",
+                    json=cached_deliverable_verify_body(row),
+                )
+                await raise_for_status(response)
+                result = await get_response_json(response)
+            except _RUN_FAILURE_ERRORS as error:
+                if getattr(error, "status", None) == 404:
+                    return row, None
+                if not route_failures_to_sidecar:
+                    raise
+                result = _agent_request_failure_row(error, getattr(error, "status", None))
+                result["reuse_cached_deliverable"] = True
+        attach_rollout_evidence(row, result, (time.time() - started_at) * 1000)
+        return row, result
+
+    async def dispatch(rows: List[Dict[str, Any]], semaphore: Any) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        results: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+        if not rows:
+            return results
+        remaining_budget_s = None
+        if dispatch_budget_s is not None:
+            remaining_budget_s = max(0.0, dispatch_budget_s - (time.monotonic() - dispatch_started_at))
+        for future in helper._run_examples_with_metadata(
+            rows,
+            semaphore=semaphore,
+            dispatch_budget_s=remaining_budget_s,
+            drain_margin_s=drain_margin_s,
+            latency_tracker=latency_tracker,
+            route_failures_to_sidecar=route_failures_to_sidecar,
+        ):
+            completed = await future
+            attach_rollout_evidence(completed.row, completed.result, completed.rollout_latency_ms)
+            results.append((completed.row, completed.result))
+        return results
 
     async def run_rollouts(rows: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
         semaphore = None
@@ -2452,25 +2574,20 @@ async def run_e2e_multistage(
             from asyncio import Semaphore
 
             semaphore = Semaphore(semaphore_size)
-        results: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
-        remaining_budget_s = None
-        if dispatch_budget_s is not None:
-            remaining_budget_s = max(0.0, dispatch_budget_s - (time.monotonic() - dispatch_started_at))
-        for future in helper._run_examples_with_metadata(
-            rows,
-            semaphore=semaphore or nullcontext(),
-            dispatch_budget_s=remaining_budget_s,
-            drain_margin_s=drain_margin_s,
-            latency_tracker=latency_tracker,
-            route_failures_to_sidecar=route_failures_to_sidecar,
-        ):
-            completed = await future
-            _attach_ng_perf(
-                completed.result,
-                observability_enabled=observability_enabled,
-                rollout_latency_ms=completed.rollout_latency_ms,
-            )
-            results.append((completed.row, completed.result))
+        semaphore = semaphore or nullcontext()
+        # A row whose deliverable an earlier stage produced is judged from disk; the rest run the policy.
+        reused = [row for row in rows if row.get("reuse_cached_deliverable")]
+        server_client = helper.setup_server_client() if reused else None
+        judging = asyncio.gather(*(verify_cached(row, semaphore, server_client) for row in reused))
+        try:
+            results = await dispatch([row for row in rows if not row.get("reuse_cached_deliverable")], semaphore)
+        except BaseException:
+            judging.cancel()
+            raise
+        judged = await judging
+        results.extend((row, result) for row, result in judged if result is not None)
+        # No deliverable was persisted for these rows, so the policy runs, as old Stirrup did.
+        results.extend(await dispatch([row for row, result in judged if result is None], semaphore))
         return results
 
     output_fpath = Path(rollout_collection_config.output_jsonl_fpath)
