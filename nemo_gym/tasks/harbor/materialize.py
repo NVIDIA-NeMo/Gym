@@ -23,7 +23,7 @@ ENVIRONMENT_SERVER_IMPL = "single_agent_turn"
 def _instance_taskset(taskset: str) -> str:
     # Hydra keys cannot contain arbitrary folder-name characters. Escape UTF-8 bytes, including
     # the escape marker itself, so e.g. "2.0" and "2_2e0" cannot produce the same instance name.
-    safe = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+    safe = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"  # pragma: allowlist secret
     return "".join(chr(byte) if byte in safe else f"_{byte:02x}" for byte in taskset.encode("utf-8"))
 
 
