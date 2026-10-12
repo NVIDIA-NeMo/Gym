@@ -286,13 +286,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 {"baseURL": self._resolve_model_base_url(rollout_id), "apiKey": "EMPTY"}  # pragma: allowlist secret
             )
             model = nemo.setdefault("models", {}).get(self.config.model, {})
+            model.setdefault("interleaved", {"field": "reasoning_content"})
             self._deep_merge(
                 model,
                 {
                     "name": self.config.model,
-                    # Gym model servers emit and accept `reasoning_content`; OpenCode replays assistant
-                    # history under this field, and Gym rejects an unknown `reasoning` key with a 422.
-                    "interleaved": {"field": "reasoning_content"},
                     "limit": {"context": self.config.context_window, "output": self.config.max_output_tokens},
                 },
             )

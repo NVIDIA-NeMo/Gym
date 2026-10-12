@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Instrumentation attached to Gym's own code: sandbox, servers, CLI orchestrator."""
+"""Instrumentation attached to Gym's own code: sandbox, servers, CLI supervisor."""
 
 import pytest
 
@@ -235,11 +235,11 @@ def test_client_span_sets_attributes(recorded_spans):
 
 
 # --------------------------------------------------------------------------- #
-# Orchestrator
+# Supervisor
 # --------------------------------------------------------------------------- #
 
 
-def test_orchestrator_is_the_only_writer_of_the_active_servers_gauge():
+def test_supervisor_is_the_only_writer_of_the_active_servers_gauge():
     """`gym.servers.active` is a gauge; more than one writer makes it meaningless.
 
     Pins that the call lives in the CLI and nowhere else, so a later change that starts
@@ -262,7 +262,7 @@ def test_orchestrator_is_the_only_writer_of_the_active_servers_gauge():
 
     callers = {line.split(":")[0].rsplit("/", 1)[-1] for line in hits}
     assert callers == {"env.py", "metrics.py"}, (
-        f"gym.servers.active must only be written by the CLI orchestrator, found: {sorted(callers)}"
+        f"gym.servers.active must only be written by the CLI supervisor, found: {sorted(callers)}"
     )
 
 
