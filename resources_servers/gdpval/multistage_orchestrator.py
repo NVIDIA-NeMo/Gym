@@ -74,6 +74,7 @@ from nemo_gym.base_responses_api_model import merge_model_call_capture_into_reco
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
@@ -2508,6 +2509,10 @@ async def run_e2e_multistage(
         row: Dict[str, Any], result: Dict[str, Any], rollout_latency_ms: Optional[float]
     ) -> None:
         """Join the rollout's evidence and attach ``ng_perf``, as ``run_from_config`` does."""
+        # The capture is keyed by the rollout identity, which the result only gets from its row.
+        for key in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, ATTEMPT_INDEX_KEY_NAME, ROLLOUT_ID_KEY_NAME):
+            if key in row:
+                result[key] = row[key]
         no_result = result.get(NG_FAILURE_CLASS_KEY) in _NO_RESULT_FAILURE_CLASSES or bool(
             result.get(NG_DISPATCH_DRAINED_KEY)
         )

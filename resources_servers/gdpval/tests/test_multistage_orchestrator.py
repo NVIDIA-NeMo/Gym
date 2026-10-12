@@ -41,6 +41,7 @@ from nemo_gym.rollout_collection import (
     NG_TERMINAL_KEY,
     SharedRolloutCollectionConfig,
 )
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from resources_servers.gdpval.multistage_elo import PartialStagePolicy
 from resources_servers.gdpval.multistage_orchestrator import (
     ACCEPTED_STAGE_ROW_COUNT_KEY,
@@ -3781,6 +3782,8 @@ class TestCachedDeliverableReuse:
             check_completion=lambda **kwargs: None,
         )
         global_config = {
+            "observability_enabled": True,
+            "model_call_capture_dir": str(tmp_path / "capture"),
             "multistage": {"enabled": True, "stages": ["1"], "seed": 0},
             "gdpval_resources_server": {
                 "resources_servers": {
@@ -3793,6 +3796,7 @@ class TestCachedDeliverableReuse:
 
         (row,) = [json.loads(line) for line in (tmp_path / "rollouts.jsonl").read_text().splitlines()]
         assert row["ng_trajectory"]["task_id"] == "t0"
+        assert row["ng_model_call_capture"]["rollout_id"] == maybe_rollout_id_from_run_body(row)
 
     def test_a_row_is_verified_by_the_resources_server_its_environment_server_binds(self) -> None:
         row = {AGENT_REF_KEY_NAME: {"name": "gdpval_stirrup_agent"}}
