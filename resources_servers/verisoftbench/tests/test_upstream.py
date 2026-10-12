@@ -128,27 +128,24 @@ class TestLoader:
         with pytest.raises(UpstreamError, match="already taken"):
             upstream.load_upstream(UPSTREAM_DIR)
 
-    def test_failed_upstream_import_restores_sys_path_and_sys_modules(self, harness, monkeypatch, tmp_path) -> None:
-        # A load that fails mid-import must leave the interpreter exactly as it found
-        # it: no checkout left on sys.path, no stub or half-imported package published.
+    def test_failed_upstream_import_rolls_back_and_never_stubs_an_installed_sdk(
+        self, harness, monkeypatch, tmp_path
+    ) -> None:
+        # One triggering state, two protected behaviors: ``find_spec`` proves anthropic
+        # is installed, so its own import failure must surface to the caller instead of
+        # a stub standing in for a real SDK — and the failed load must leave the
+        # interpreter exactly as it found it: no checkout left on sys.path, no stub or
+        # half-imported package published.
         _shadow_installed_anthropic_with_broken_sdk(monkeypatch, tmp_path)
         monkeypatch.setattr(sys, "path", [p for p in sys.path if Path(p) != UPSTREAM_DIR.resolve()])
         path_before = list(sys.path)
         modules_before = dict(sys.modules)
         with pytest.raises(ModuleNotFoundError, match="verisoftbench_test_missing_dependency"):
             upstream.load_upstream(UPSTREAM_DIR)
+        assert "anthropic" not in sys.modules  # the installed-but-broken SDK was not replaced
         assert sys.path == path_before
         assert set(sys.modules) == set(modules_before)
         assert all(sys.modules[name] is module for name, module in modules_before.items())
-
-    def test_installed_but_broken_sdk_is_not_replaced_by_a_stub(self, harness, monkeypatch, tmp_path) -> None:
-        # ``find_spec`` proves anthropic is installed, so its own import failure must
-        # surface to the caller; a stub standing in for a real SDK would silently
-        # weaken every later host import of it.
-        _shadow_installed_anthropic_with_broken_sdk(monkeypatch, tmp_path)
-        with pytest.raises(ModuleNotFoundError, match="verisoftbench_test_missing_dependency"):
-            upstream.load_upstream(UPSTREAM_DIR)
-        assert "anthropic" not in sys.modules
 
     def test_stubs_for_absent_sdks_carry_module_metadata(self, monkeypatch) -> None:
         # Spec-based discovery of a published stub must return its spec, not crash the
@@ -210,6 +207,7 @@ class TestRepoIndex:
         monkeypatch.setattr(harness.modules.utils, "REPO_INDEX_DIR", tmp_path)
         with pytest.raises(UpstreamError, match="does not cover the benchmark"):
             Harness(UPSTREAM_DIR, docker_container="verisoftbench-lean-test")
+
     def test_wrong_index_with_valid_shape_fails_closed(self, harness, monkeypatch, tmp_path) -> None:
         # A present, well-formed index can still be the wrong index: upstream's anti-leak
         # pass silently no-ops when a task's target theorem is absent from its file's
