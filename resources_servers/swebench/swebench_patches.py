@@ -16,10 +16,13 @@
 This file contains patches copied from https://github.com/SWE-bench/SWE-bench/pull/630
 """
 
+from dataclasses import replace
 from typing import Any, Dict, Optional
 
 # @bxyu-nvidia: We import wildcard because there are a million imports otherwise...
 from swebench.harness.constants import END_TEST_OUTPUT, MAP_REPO_TO_EXT, START_TEST_OUTPUT
+from swebench.harness.constants.python import TEST_SPHINX
+from swebench.harness.grading import get_logs_eval
 from swebench.harness.run_evaluation import *
 
 from nemo_gym import PARENT_DIR
@@ -64,7 +67,7 @@ async def run_instance(
         if not test_output_path.exists():
             raise ValueError(f"Test output file {test_output_path} does not exist")
         report = get_eval_report(
-            test_spec=test_spec,
+            test_spec=patch_swebench_verified_grading_spec(test_spec, test_output_path),
             prediction=pred,
             test_log_path=test_output_path,
             include_tests_status=True,
@@ -171,7 +174,7 @@ async def run_instance(
         logger.info(f"Git diff before:\n{git_diff_output_before}")
 
         eval_file = Path(log_dir / "eval.sh")
-        eval_file.write_text(test_spec.eval_script)
+        eval_file.write_text(patch_swebench_verified_eval_script(test_spec))
         logger.info(f"Eval script for {instance_id} written to {eval_file}; copying to container...")
         # Original code:
         # copy_to_container(container, eval_file, PurePosixPath("/eval.sh"))
@@ -217,7 +220,7 @@ async def run_instance(
         # Get report from test output
         logger.info(f"Grading answer for {instance_id}...")
         report = get_eval_report(
-            test_spec=test_spec,
+            test_spec=patch_swebench_verified_grading_spec(test_spec, test_output_path),
             prediction=pred,
             test_log_path=test_output_path,
             include_tests_status=True,
@@ -259,6 +262,36 @@ async def run_instance(
 ########################################
 # START SWE Bench Verified instance patches
 ########################################
+
+
+def patch_swebench_verified_eval_script(test_spec: TestSpec) -> str:
+    """Request per-test results even when the Sphinx image's tox.ini lacks -rA."""
+    if test_spec.repo != "sphinx-doc/sphinx":
+        return test_spec.eval_script
+    # The -v in TEST_SPHINX belongs to tox, not pytest. Pass pytest's reporting
+    # flag through tox's positional arguments; do not depend on image-time edits.
+    prefix = TEST_SPHINX + " "
+    commands = [
+        command.replace(prefix, prefix + "-rA ", 1)
+        if command.startswith(prefix) and not command.startswith(prefix + "-rA ")
+        else command
+        for command in test_spec.eval_script_list
+    ]
+    return replace(test_spec, eval_script_list=commands).eval_script
+
+
+def patch_swebench_verified_grading_spec(test_spec: TestSpec, test_output_path: Path) -> TestSpec:
+    """Match one known pytest parameter-ID change without changing test outcomes."""
+    if test_spec.instance_id != "astropy__astropy-7606" or test_spec.repo != "astropy/astropy":
+        return test_spec
+    original = "astropy/units/tests/test_units.py::test_compose_roundtrip[]"
+    current = "astropy/units/tests/test_units.py::test_compose_roundtrip[unit0]"
+    statuses, _ = get_logs_eval(test_spec, str(test_output_path))
+    if original in statuses or current not in statuses:
+        return test_spec
+    # Keep the raw log and caller's spec intact. Upstream grading still checks
+    # the actual status, including failures; missing tests are never credited.
+    return replace(test_spec, PASS_TO_PASS=[current if test == original else test for test in test_spec.PASS_TO_PASS])
 
 
 def patch_swebench_verified_env_vars(repo: str, env: Dict[str, Any]) -> None:
