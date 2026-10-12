@@ -428,10 +428,11 @@ class VLLMModel(SimpleResponsesAPIModel):
     ray_enabled = False
     config: VLLMModelConfig
 
-    _DYNAMO_ENGINE_DATA_FIELD_MAPPING: ClassVar[Dict[str, str]] = {
+    # Gym token-bundle field -> Dynamo ``nvext.engine_data`` field.
+    _DYNAMO_ENGINE_DATA_FIELDS: ClassVar[Dict[str, str]] = {
         "prompt_token_ids": "prompt_token_ids",
-        "completion_token_ids": "generation_token_ids",
-        "completion_logprobs": "generation_log_probs",
+        "generation_token_ids": "completion_token_ids",
+        "generation_log_probs": "completion_logprobs",
     }
     _TOKENIZE_CHAT_FIELDS: ClassVar[tuple[str, ...]] = (
         "model",
@@ -1263,22 +1264,16 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     @staticmethod
     def _require_token_id_list(value: Any, field_name: str) -> List[Any]:
-        """Validate a JSON token-ID list without copying it."""
+        """Check the container without scanning or copying token IDs."""
         if not isinstance(value, list):
             raise RuntimeError(f"`{field_name}` must be a list of integer token IDs.")
-        for index, token_id in enumerate(value):
-            if not isinstance(token_id, int) or isinstance(token_id, bool):
-                raise RuntimeError(f"`{field_name}[{index}]` must be an integer token ID.")
         return value
 
     @staticmethod
     def _require_log_prob_list(value: Any, field_name: str) -> List[Any]:
-        """Validate a JSON log-probability list without copying it."""
+        """Check the container without scanning or copying log probabilities."""
         if not isinstance(value, list):
             raise RuntimeError(f"`{field_name}` must be a list of numeric log probabilities.")
-        for index, log_prob in enumerate(value):
-            if not isinstance(log_prob, (int, float)) or isinstance(log_prob, bool):
-                raise RuntimeError(f"`{field_name}[{index}]` must be a numeric log probability.")
         return value
 
     @classmethod
@@ -1339,6 +1334,12 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     @classmethod
     def _extract_dynamo_engine_data(cls, chat_completion_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Read Dynamo's native token bundle from ``nvext.engine_data``.
+
+        Gym does not ask for engine data itself. A caller that fronts Dynamo opts in by adding
+        ``"engine_data"`` to ``extra_body.nvext.extra_fields``, as NeMo-RL's Dynamo integration does.
+        Without that request Dynamo omits the field and the other token sources apply.
+        """
         nvext = chat_completion_dict.get("nvext")
         if nvext is None:
             return None
@@ -1352,14 +1353,24 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise RuntimeError("`nvext.engine_data` must be an object when present.")
 
         bundle = {
-            destination: engine_data[source]
-            for source, destination in cls._DYNAMO_ENGINE_DATA_FIELD_MAPPING.items()
-            if source in engine_data
+            field: engine_data[source_field]
+            for field, source_field in cls._DYNAMO_ENGINE_DATA_FIELDS.items()
+            if source_field in engine_data
         }
-        source_field_names = {
-            destination: source for source, destination in cls._DYNAMO_ENGINE_DATA_FIELD_MAPPING.items()
-        }
-        return cls._validate_token_bundle(bundle, "nvext.engine_data", source_field_names)
+        normalized = cls._validate_token_bundle(bundle, "nvext.engine_data", cls._DYNAMO_ENGINE_DATA_FIELDS)
+
+        # Engine data has no Gym-side schema, so check element types here and name the Dynamo field.
+        # The other sources keep the container-only check on the hot path.
+        for field, element_type, description in (
+            ("prompt_token_ids", int, "an integer token ID"),
+            ("generation_token_ids", int, "an integer token ID"),
+            ("generation_log_probs", (int, float), "a numeric log probability"),
+        ):
+            for index, value in enumerate(normalized[field]):
+                if isinstance(value, bool) or not isinstance(value, element_type):
+                    source_field = cls._DYNAMO_ENGINE_DATA_FIELDS[field]
+                    raise RuntimeError(f"`nvext.engine_data.{source_field}[{index}]` must be {description}.")
+        return normalized
 
     @classmethod
     def _extract_vllm_response_token_ids(

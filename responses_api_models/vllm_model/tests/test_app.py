@@ -6208,6 +6208,30 @@ class TestTopLogprobsHandling:
                 },
                 r"completion_logprobs\[0\].*numeric",
             ),
+            (
+                {
+                    "prompt_token_ids": [10, True],
+                    "completion_token_ids": [123],
+                    "completion_logprobs": [-0.1],
+                },
+                r"nvext\.engine_data\.prompt_token_ids\[1\].*integer",
+            ),
+            (
+                {
+                    "prompt_token_ids": [10, 20],
+                    "completion_token_ids": ["123"],
+                    "completion_logprobs": [-0.1],
+                },
+                r"nvext\.engine_data\.completion_token_ids\[0\].*integer",
+            ),
+            (
+                {
+                    "prompt_token_ids": {"ids": [10]},
+                    "completion_token_ids": [123],
+                    "completion_logprobs": [-0.1],
+                },
+                r"nvext\.engine_data\.prompt_token_ids.*must be a list",
+            ),
         ],
     )
     def test_capture_path_rejects_malformed_dynamo_engine_data(self, engine_data: Any, error: str) -> None:
@@ -6409,6 +6433,71 @@ class TestTopLogprobsHandling:
                 "/v1/chat/completions",
                 json={"messages": [{"role": "user", "content": "hi"}]},
             )
+
+    def test_capture_path_rejects_dynamo_bundle_disagreeing_with_vllm_token_ids(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                choice_extra={"token_ids": [999]},
+                response_extra={
+                    "prompt_token_ids": [10, 20],
+                    "nvext": {
+                        "engine_data": {
+                            "prompt_token_ids": [10, 20],
+                            "completion_token_ids": [123],
+                            "completion_logprobs": [-0.1],
+                        }
+                    },
+                },
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        model._clients = [mock_client]
+
+        with raises(RuntimeError, match="Native token metadata disagrees with vLLM response token IDs"):
+            TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+
+    def test_capture_path_strips_pseudo_token_logprobs_with_message_bundle(self) -> None:
+        """`token_id:<int>` entries exist only because capture forces them; callers never see them."""
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                    ]
+                },
+                message_extra={
+                    "prompt_token_ids": [10, 20],
+                    "generation_token_ids": [123],
+                    "generation_log_probs": [-0.1],
+                },
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock()
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        choice = response.json()["choices"][0]
+        assert choice["logprobs"] is None
+        assert choice["message"]["generation_token_ids"] == [123]
+        mock_client.create_tokenize.assert_not_awaited()
 
     def test_capture_path_rejects_disagreeing_duplicate_ids(self) -> None:
         model = _make_top_logprobs_model(return_token_id_information=True)
