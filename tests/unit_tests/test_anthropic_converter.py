@@ -384,6 +384,19 @@ class TestResponsesToAnthropicResponse:
         out = conv.responses_to_anthropic_response(resp, model="m")
         assert out["content"][0] == {"type": "thinking", "thinking": "step", "signature": ""}
 
+    def test_reasoning_without_signature_uses_placeholder(self, monkeypatch) -> None:
+        # A placeholder keeps clients from replaying unsigned thinking as text.
+        monkeypatch.setattr("nemo_gym.anthropic_converter._PLACEHOLDER_SIGNATURE", "gym-unsigned")
+        conv, resp = self._response_from_anthropic(
+            {
+                "content": [{"type": "thinking", "thinking": "step"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+        out = conv.responses_to_anthropic_response(resp, model="m")
+        assert out["content"][0] == {"type": "thinking", "thinking": "step", "signature": "gym-unsigned"}
+
     def test_output_validates_as_anthropic_message(self) -> None:
         # Regression guard: the builder must emit an object the Anthropic SDK accepts as a Message
         # (this is what the internal Message.model_validate enforces on every response).
@@ -484,6 +497,39 @@ class TestAnthropicResponseToSSE:
         )
         delta_events = [d for t, d in events if t == "content_block_delta"]
         assert delta_events[0]["delta"] == {"type": "thinking_delta", "thinking": "ponder"}
+
+    def test_thinking_block_streams_signature(self) -> None:
+        events = self._events(
+            {
+                "id": "msg_1",
+                "role": "assistant",
+                "model": "m",
+                "content": [{"type": "thinking", "thinking": "ponder", "signature": "s"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+        start = next(d for t, d in events if t == "content_block_start")
+        assert start["content_block"] == {"type": "thinking", "thinking": "", "signature": ""}
+        deltas = [d["delta"] for t, d in events if t == "content_block_delta"]
+        assert deltas == [
+            {"type": "thinking_delta", "thinking": "ponder"},
+            {"type": "signature_delta", "signature": "s"},
+        ]
+
+    def test_unsigned_thinking_block_streams_no_signature_delta(self) -> None:
+        events = self._events(
+            {
+                "id": "msg_1",
+                "role": "assistant",
+                "model": "m",
+                "content": [{"type": "thinking", "thinking": "ponder", "signature": ""}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+        deltas = [d["delta"] for t, d in events if t == "content_block_delta"]
+        assert deltas == [{"type": "thinking_delta", "thinking": "ponder"}]
 
     def test_unsupported_block_for_sse_raises(self) -> None:
         import pytest
