@@ -32,9 +32,11 @@ pre-training likelihood evaluation is outside this integration's scope.
   boxed payload, or the last `Answer:`/`answer is` payload, or a standalone answer.
   Reuse Gym's Unicode/letter/payload helpers to accept lowercase/fullwidth letters,
   Markdown and parentheses, and supported letter labels. A unique exact option-text
-  match is also accepted after case/whitespace normalization. Do not match an option
-  as a substring of unrelated prose. Ambiguous alternatives are rejected, and an
-  invalid explicit final payload does not fall back to an earlier answer.
+  match is checked after case/whitespace normalization and before letter substitutions,
+  so letters inside option words are not treated as competing choices. A validated
+  leading label is preserved when an explanation mentions other labels. Do not match
+  an option as a substring of unrelated prose. Ambiguous alternatives are rejected,
+  and an invalid explicit final payload does not fall back to an earlier answer.
 - Both extractors operate independently of the gold label. A valid wrong boxed
   answer stays wrong in both scores. Correct letters score 1; wrong or unparseable
   answers score 0. Both metrics use the same questions and denominator.

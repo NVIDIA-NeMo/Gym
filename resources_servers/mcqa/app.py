@@ -558,14 +558,9 @@ def extract_boxed_and_normalized_answers(
         payload = payloads[-1] if payloads else canonical
         explicit = bool(payloads)
 
-    candidate = _normalize_extracted_answer(payload)
-    if _contains_ambiguous_choice_list(candidate, allowed):
-        return None, None
-    bare = candidate.strip("*_`[]() \t\n\r.,;:!").upper()
-    if len(bare) == 1 and bare in allowed:
-        return None, bare
-
     # Exact equality avoids awarding credit for a short option inside unrelated prose.
+    # Match before label normalization, which can turn letters inside Indic words
+    # into apparent choice labels.
     normalized_payload = _normalize_for_match(payload.strip().strip("*_`"))
     matches = {
         label.upper()
@@ -575,11 +570,20 @@ def extract_boxed_and_normalized_answers(
     }
     if matches:
         return None, next(iter(matches)) if len(matches) == 1 else None
+
+    candidate = _normalize_extracted_answer(payload)
+    if _contains_ambiguous_choice_list(candidate, allowed):
+        return None, None
+    bare = candidate.strip("*_`[]() \t\n\r.,;:!").upper()
+    if len(bare) == 1 and bare in allowed:
+        return None, bare
+
     # Only a leading choice label may precede an explanation. Do not search prose
     # for incidental letters (including letters inside Indic words after normalization).
     leading_label = re.match(r"^[A-Z](?=$|[\s).:\-])", bare)
-    letter = _extract_choice_letter(candidate, allowed) if explicit and leading_label else None
-    return None, letter
+    if explicit and leading_label and leading_label.group(0) in allowed:
+        return None, leading_label.group(0)
+    return None, None
 
 
 if __name__ == "__main__":

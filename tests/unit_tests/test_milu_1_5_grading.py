@@ -4,6 +4,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
@@ -70,6 +71,9 @@ def request(text, gold="B"):
         ("Answer: B", None, "B"),
         ("**Answer:** **B**", None, "B"),
         ("The answer is (B).", None, "B"),
+        ("Answer: (B) because D is incorrect.", None, "B"),
+        ("Answer: (b) because D is incorrect.", None, "B"),
+        ("Answer: (E) because D is incorrect.", None, None),
         ("Answer: A\nAnswer: B", None, "B"),
         ("Answer: A\nAnswer: B or C", None, None),
         ("B or C", None, None),
@@ -96,9 +100,20 @@ async def test_dual_scores_reuse_boxed_parser_and_normalize_final_answer(text, s
     assert result.reward_components == {"strict_boxed": float(strict == "B"), "normalized": float(normalized == "B")}
 
 
+@pytest.mark.parametrize("text", ["বড় নদী", "Answer: বড় নদী", r"\boxed{বড় নদী}"])
+async def test_normalization_matches_exact_bengali_option_before_replacing_labels(text):
+    body = request(text).model_copy(update={"options": [{"A": "first"}, {"B": "বড় নদী"}, {"C": "third"}]})
+    result = await server().verify(body)
+    assert result.strict_boxed_answer is None
+    assert result.normalized_answer == "B"
+    assert result.reward == result.strict_boxed_reward == 0
+    assert result.normalized_reward == 1
+
+
 def test_normalization_does_not_guess_option_substrings_or_duplicate_text():
     assert extract_boxed_and_normalized_answers(r"\boxed{12}", options=[{"A": "2"}, {"B": "3"}]) == (None, None)
     assert extract_boxed_and_normalized_answers("same", options=[{"A": "same"}, {"B": "same"}]) == (None, None)
+    assert extract_boxed_and_normalized_answers("বড় নদী", options=[{"A": "বড় নদী"}, {"B": "বড় নদী"}]) == (None, None)
     assert extract_boxed_and_normalized_answers("Answer: বাংলা", options=[{"A": "first"}, {"B": "বাংলা"}]) == (None, "B")
     assert extract_boxed_and_normalized_answers("Answer: বাংলা", options=OPTIONS) == (None, None)
     assert extract_boxed_and_normalized_answers("Answer: A priori", options=[{"A": "first"}, {"B": "A priori"}]) == (
@@ -134,8 +149,14 @@ async def test_aggregation_uses_each_metrics_own_extracted_answers():
         instance.compute_metrics([[rows[0], {"reward": 1.0, "extracted_answer": "B"}]])
 
 
-async def test_verify_response_serializes_both_reward_components():
-    data = (await server().verify(request("B"))).model_dump(mode="json")
-    assert data["strict_boxed_reward"] == data["reward"] == 0
+@pytest.mark.parametrize("text, strict", [("B", None), (r"\boxed{B}", "B")])
+def test_verify_endpoint_returns_both_reward_components(text, strict):
+    with TestClient(server().setup_webserver()) as client:
+        response = client.post("/verify", json=request(text).model_dump(mode="json"))
+    assert response.status_code == 200
+    data = response.json()
+    assert data["strict_boxed_answer"] == data["extracted_answer"] == strict
+    assert data["normalized_answer"] == "B"
+    assert data["strict_boxed_reward"] == data["reward"] == float(strict == "B")
     assert data["normalized_reward"] == 1
-    assert data["reward_components"] == {"strict_boxed": 0, "normalized": 1}
+    assert data["reward_components"] == {"strict_boxed": float(strict == "B"), "normalized": 1}
