@@ -40,7 +40,7 @@ def recorded_spans(monkeypatch):
 
     import nemo.lens.helpers as lens_helpers
 
-    monkeypatch.setattr(lens_helpers.trace, "get_tracer", lambda *a, **k: tracer)
+    monkeypatch.setattr(lens_helpers, "get_tracer", lambda *a, **k: tracer)
     monkeypatch.setattr("opentelemetry.trace.get_tracer", lambda *a, **k: tracer)
     set_enabled_span_groups(GymSpanGroup.resolve("all"))
     yield exporter.get_finished_spans
