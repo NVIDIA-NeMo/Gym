@@ -34,6 +34,13 @@ session protocol defines the Resources/Agent boundary. Harness process execution
 Gym's shared `SandboxSession` and `supervisor_client` in `nemo_gym.agent_utils`;
 Resources request/verdict bookkeeping remains benchmark-owned. These are separate responsibilities.
 
+Task services must also outlive the harness's own shell tool. `nohup ... &` alone
+is not portable across these tools: a shell deadline or process-group cleanup can
+stop the service before the shared supervisor finishes. Detach long-running services
+from the tool's process group and standard streams (for example, `subprocess.Popen`
+with `start_new_session=True`, stdin from `DEVNULL`, and stdout/stderr in task-owned
+log files), then check that the service is reachable before finishing.
+
 Choose a [Pi](#pi-in-a-task-sandbox), [Codex](#codex-in-a-task-sandbox),
 [OpenCode](#opencode-in-a-task-sandbox), or [OpenClaw](#openclaw-in-a-task-sandbox)
 recipe below. Each recipe provides its own `run.yaml` and `model-provider.yaml`.
