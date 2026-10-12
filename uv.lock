@@ -2817,7 +2817,7 @@ requires-dist = [
     { name = "mlflow-skinny", marker = "extra == 'mlflow'", specifier = ">=3.16.1" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "nemo-gym", extras = ["dev", "mlflow", "ray", "sandbox", "wandb"], marker = "extra == 'all'" },
-    { name = "nemo-lens", extras = ["sdk"], marker = "extra == 'telemetry'", git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=b0f977d414b2f89938604a0b7eaa78ee08bc8700" },
+    { name = "nemo-lens", extras = ["sdk"], marker = "extra == 'telemetry'", git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=7bcc03ce3565d2be6858b819b049bcc4c3ec05b4" },
     { name = "omegaconf" },
     { name = "openai", specifier = "==2.44.0" },
     { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.15" },
@@ -2868,8 +2868,8 @@ codec = [
 
 [[package]]
 name = "nemo-lens"
-version = "0.2.0+b0f977d"
-source = { git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=b0f977d414b2f89938604a0b7eaa78ee08bc8700#b0f977d414b2f89938604a0b7eaa78ee08bc8700" }
+version = "0.2.0+7bcc03c"
+source = { git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=7bcc03ce3565d2be6858b819b049bcc4c3ec05b4#7bcc03ce3565d2be6858b819b049bcc4c3ec05b4" }
 dependencies = [
     { name = "opentelemetry-api" },
 ]

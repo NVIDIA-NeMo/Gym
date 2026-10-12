@@ -28,11 +28,8 @@ This differs from NeMo-RL, whose ``_fallbacks.py`` re-exports the *no-op*
 Gym's call sites to a single import and removes the chance of a site binding the no-op
 while lens is present.
 
-The no-op branch below is one of the four places named in
-``kb/knowledge/conventions/fallback-sync.md``. It mirrors ``nemo/lens/fallbacks.py`` at
-commit ``b0f977d4``; when a signature changes there, change it here in the same PR.
-``tests/unit_tests/telemetry/test_fallbacks.py`` asserts the two agree parameter-for-
-parameter whenever lens is importable.
+The no-op branch below provides only what Gym calls, and must accept every call Gym
+makes. ``tests/unit_tests/telemetry/test_fallbacks.py`` exercises it with lens blocked.
 """
 
 try:

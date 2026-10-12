@@ -68,13 +68,12 @@ Gym serves at 16k+ concurrency, so per-request sites are hot paths. Attribute di
 f-strings go *inside* the gate too, never in the arguments of a call above it.
 `tests/unit_tests/telemetry/test_overhead.py` guards the disabled-path cost.
 
-**2. `_fallbacks.py` is one of four synchronised copies.**
+**2. `_fallbacks.py` stands in for nemo-lens when it is absent.**
 
-`kb/knowledge/conventions/fallback-sync.md`: nemo-lens's no-op surface exists in
-`nemo/lens/fallbacks.py` plus one `_fallbacks.py` per consumer. When a signature changes
-in lens, change it here in the same PR — a drift only breaks the configuration where lens
-is *absent*, which is the one nobody runs by accident.
-`tests/unit_tests/telemetry/test_fallbacks.py` compares the two parameter-for-parameter.
+Its no-op branch provides only the primitives Gym calls, and must accept every call Gym
+makes. A mismatch breaks only the configuration where lens is *absent*, which is the one
+nobody runs by accident, so `tests/unit_tests/telemetry/test_fallbacks.py` exercises it
+with lens blocked.
 
 Note this file differs from NeMo-RL's: it resolves to the **real** `nemo.lens.helpers`
 implementations when lens is installed, so a call site needs one import rather than its
