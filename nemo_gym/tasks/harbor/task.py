@@ -61,7 +61,10 @@ def is_task_folder(path: Path) -> bool:
 
 def load_task(path: Path) -> HarborTask:
     """Read ``path`` as one task. Raises :class:`HarborTaskError` when it is not one."""
-    path = Path(path).resolve()
+    path = Path(path)
+    if path.is_symlink():
+        raise HarborTaskError(f"Task folder must not be a symlink: {path}")
+    path = path.resolve()
     if not is_task_folder(path):
         raise HarborTaskError(f"{path} has no {TASK_FILE}")
     try:

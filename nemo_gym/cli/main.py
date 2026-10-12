@@ -1449,6 +1449,21 @@ def _extra_roots_from_search_dir(search_dirs: list[str] | None):
             logger.debug(f"Restored {NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME}={original}")
 
 
+def _is_positional_hydra_override(token: str) -> bool:
+    if "=" in token:
+        return True
+    if not token.startswith("~"):
+        return False
+    # Deletions need no '='. Parse them so home-relative paths such as ~/tasks remain targets.
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+    from hydra.errors import HydraException
+
+    try:
+        return OverridesParser.create().parse_override(token).is_delete()
+    except HydraException:
+        return False
+
+
 def main() -> None:
     parser = build_parser()
     args, overrides = parser.parse_known_args()
@@ -1493,7 +1508,7 @@ def main() -> None:
 
         # argparse can capture a bare Hydra override in eval run's optional TARGET slot.
         # Restore it before coalescing, keeping translated flags before raw overrides.
-        if command.target is _eval_run and args.target and "=" in args.target:
+        if command.target is _eval_run and args.target and _is_positional_hydra_override(args.target):
             overrides = [args.target, *overrides]
             args.target = None
 

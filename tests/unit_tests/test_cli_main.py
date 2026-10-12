@@ -1827,3 +1827,24 @@ def test_eval_run_restores_positional_override_before_config_merge(monkeypatch, 
     )
     assert target.endswith("collect_rollouts" if extra else "e2e_rollout_collection")
     assert overrides == ["+config_paths=[b.yaml,a.yaml]"]
+
+
+@pytest.mark.parametrize("serve", [False, True])
+@pytest.mark.parametrize("deletion", ["~unused_server", "~unused_server@pkg"])
+def test_eval_run_restores_equals_free_hydra_deletions(monkeypatch, serve, deletion):
+    target, overrides = _dispatch_for(
+        monkeypatch,
+        ["eval", "run", *([] if serve else ["--no-serve"]), deletion, "+limit=3", "~second_server"],
+    )
+    assert target.endswith("e2e_rollout_collection" if serve else "collect_rollouts")
+    assert overrides == [deletion, "+limit=3", "~second_server"]
+
+
+def test_eval_run_keeps_home_relative_target(monkeypatch):
+    import nemo_gym.tasks.harbor.cli as harbor_cli
+
+    captured = []
+    monkeypatch.setattr(harbor_cli, "run_target", lambda args, overrides: captured.append(args.target))
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "~/tasks", "--agent", "hermes"])
+    cli_main.main()
+    assert captured == ["~/tasks"]

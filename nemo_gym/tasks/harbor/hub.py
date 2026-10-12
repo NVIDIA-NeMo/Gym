@@ -322,13 +322,16 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
             raise HubError(
                 f"Recorded source pin for {destination} is invalid or differs from the registry; move the folder aside and retry"
             )
+        if pin is not None:
+            # A missing folder is a repair of these pinned bytes. Keep its validated pin in every
+            # publication, even before copying it, so an interrupted repair cannot follow new HEAD.
+            pins[task.name] = pin
         if destination.exists():
             if not (destination / "task.toml").is_file() or pin is None:
                 raise HubError(
                     f"Existing task folder {destination} has no trustworthy source pin; move it aside and retry"
                 )
             _validate_task_tree(destination)
-            pins[task.name] = pin
             continue
         commit = pin[1] if pin else resolve_commit(task.git_url, task.git_commit_id, resolved)
         by_repo.setdefault((task.git_url, commit), []).append(task)

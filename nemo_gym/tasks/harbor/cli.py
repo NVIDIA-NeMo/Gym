@@ -23,7 +23,7 @@ from typing import Any
 import yaml
 
 from nemo_gym import component_search_roots
-from nemo_gym.tasks.harbor.hub import datasets_dir, fetch_ref, is_hub_ref
+from nemo_gym.tasks.harbor.hub import HubError, datasets_dir, fetch_ref, is_hub_ref
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
 from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError, discover_tasks
 
@@ -187,17 +187,30 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
     from nemo_gym.cli.main import _merge_config_paths, dispatch
 
     if getattr(args, "no_serve", False):
-        raise ValueError("A Harbor target starts its own servers; drop --no-serve")
+        args._parser.error("A Harbor target starts its own servers; drop --no-serve")
     agent_name = getattr(args, "agent", None)
     if not agent_name:
-        raise ValueError("A Harbor target needs `--agent <harness>` (for example `--agent hermes`)")
-    prepared = prepare_target(args.target)
+        args._parser.error("A Harbor target needs `--agent <harness>` (for example `--agent hermes`)")
+    sandbox = getattr(args, "sandbox", None)
+    # Resolve selectors before preparation can download a registry dataset.
+    try:
+        agent = resolve_agent(agent_name)
+        if sandbox is not None:
+            resolve_sandbox_config(sandbox)
+    except (ValueError, OSError, yaml.YAMLError) as exc:
+        args._parser.error(str(exc))
+    try:
+        prepared = prepare_target(args.target)
+    except (HarborTaskError, HubError, OSError) as exc:
+        args._parser.error(str(exc))
     if prepared.skipped and not getattr(args, "skip_unloadable", False):
         args._parser.error(
             f"{len(prepared.skipped)} task(s) could not load; see {prepared.output_dir / 'skipped.json'}. "
             "Use --skip-unloadable to explicitly run only the loadable subset."
         )
-    agent = resolve_agent(agent_name)
-    config_path, tokens = build_run(prepared, agent, sandbox=getattr(args, "sandbox", None), overrides=overrides)
+    try:
+        config_path, tokens = build_run(prepared, agent, sandbox=sandbox, overrides=overrides)
+    except (HarborTaskError, OSError) as exc:
+        args._parser.error(str(exc))
     print(f"Run config written to {config_path} (datasets folder: {datasets_dir()})")
     dispatch("nemo_gym.cli.eval:e2e_rollout_collection", _merge_config_paths(tokens))

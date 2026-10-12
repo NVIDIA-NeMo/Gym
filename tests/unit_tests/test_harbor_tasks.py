@@ -935,3 +935,212 @@ def test_all_unloadable_tasks_still_record_reasons(tmp_path):
     skipped = json.loads((tmp_path / "out" / "ds" / "skipped.json").read_text())
     assert list(skipped) == ["bad"]
     assert "task.toml" in skipped["bad"]
+
+
+@pytest.mark.parametrize("taskset", ["ds", "terminal-bench-2.0"])
+def test_generated_run_passes_full_config_validation(tmp_path, monkeypatch, taskset):
+    import sys
+
+    import nemo_gym.global_config as global_config
+    from nemo_gym import PARENT_DIR
+    from nemo_gym.cli.main import _merge_config_paths
+    from nemo_gym.global_config import GlobalConfigDictParser, get_global_config_dict
+    from nemo_gym.rollout_collection import E2ERolloutCollectionConfig
+    from nemo_gym.tasks.harbor.materialize import resources_server_instance
+
+    write_task(tmp_path / taskset / "a")
+    prepared = prepare_target(str(tmp_path / taskset), output_root=tmp_path / "out")
+    _, tokens = build_run(
+        prepared,
+        resolve_agent("hermes"),
+        sandbox="opensandbox",
+        overrides=[
+            f"+config_paths=[{PARENT_DIR / 'responses_api_models/openai_model/configs/openai_model.yaml'}]",
+            "+policy_model_name=test-model",
+            "+policy_base_url=http://127.0.0.1:1/v1",
+            "+policy_api_key=unused",
+        ],
+    )
+    monkeypatch.setattr(sys, "argv", ["e2e", *_merge_config_paths(tokens)])
+    monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+    config = get_global_config_dict()
+    servers = GlobalConfigDictParser().filter_for_server_instance_configs(config)
+    resources = next(server for server in servers if server.name == resources_server_instance(taskset))
+    assert resources.get_inner_run_server_config().domain is not None
+    assert resources.datasets[0].name == taskset
+    run = E2ERolloutCollectionConfig.model_validate(config)
+    assert run.environment_routing_mode == "taskset"
+    assert taskset in run.environment_server_routes
+
+
+def test_interrupted_cache_repair_preserves_pending_pins(tmp_path, registry_repo, monkeypatch):
+    import shutil
+
+    write_task(registry_repo / "tasks" / "c")
+    old_head = commit_repo(registry_repo)
+    dataset = RegistryDataset(
+        "ds",
+        "1.0",
+        "",
+        tuple(RegistryTask(name, registry_repo.as_uri(), "HEAD", f"tasks/{name}") for name in ("a", "b", "c")),
+    )
+    folder = fetch_dataset(dataset, tmp_path / "datasets")
+    for name in ("b", "c"):
+        shutil.rmtree(folder / name)
+        (registry_repo / "tasks" / name / "instruction.md").write_text("new upstream instruction")
+    assert commit_repo(registry_repo) != old_head
+    original = hub_module.shutil.copytree
+
+    def interrupt_last(source, *args, **kwargs):
+        if source.name == "c":
+            raise OSError("interrupted cache repair")
+        return original(source, *args, **kwargs)
+
+    monkeypatch.setattr(hub_module.shutil, "copytree", interrupt_last)
+    with pytest.raises(OSError, match="interrupted cache repair"):
+        fetch_dataset(dataset, tmp_path / "datasets")
+    pins = tomllib.loads((folder / "manifest.toml").read_text())["tasks"]
+    assert pins["c"]["git_commit_id"] == old_head
+    monkeypatch.setattr(hub_module.shutil, "copytree", original)
+    fetch_dataset(dataset, tmp_path / "datasets")
+    pins = tomllib.loads((folder / "manifest.toml").read_text())["tasks"]
+    assert {pin["git_commit_id"] for pin in pins.values()} == {old_head}
+    assert (folder / "c" / "instruction.md").read_text().startswith("Create a file")
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_symlinked_child_tasks_are_reported_without_duplicate_rows(tmp_path, external):
+    folder = tmp_path / "ds"
+    task = write_task(folder / "a")
+    target = write_task(tmp_path / "elsewhere" / "renamed") if external else task
+    (folder / "b").symlink_to(target, target_is_directory=True)
+    with pytest.raises(HarborTaskError, match="symlink"):
+        discover_tasks(folder)
+    with pytest.raises(HarborTaskError, match="symlink"):
+        load_task(folder / "b")
+    prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+    assert [row["task_id"]["task_id"] for row in map(json.loads, prepared.rows_path.read_text().splitlines())] == ["a"]
+    assert "symlink" in prepared.skipped["b"]
+    assert "symlink" in json.loads((prepared.output_dir / "skipped.json").read_text())["b"]
+
+
+def test_duplicate_task_ids_are_rejected_before_rows_or_mapping_are_written(tmp_path):
+    from nemo_gym.tasks.harbor.materialize import taskset_mapping
+
+    task = load_task(write_task(tmp_path / "ds" / "a"))
+    rows = tmp_path / "tasks.jsonl"
+    rows.write_text("previous valid rows\n")
+    with pytest.raises(HarborTaskError, match="Duplicate.*a"):
+        write_rows([task, task], "ds", rows)
+    assert rows.read_text() == "previous valid rows\n"
+    with pytest.raises(HarborTaskError, match="Duplicate.*a"):
+        taskset_mapping([task, task], task.path.parent)
+
+
+def test_generated_instance_names_are_override_safe_and_collision_free():
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+
+    from nemo_gym.tasks.harbor.materialize import (
+        agent_instance,
+        environment_server_instance,
+        resources_server_instance,
+    )
+
+    tasksets = ["terminal-bench-2.0", "terminal-bench-2_0", "terminal-bench-2_2e0", "ds-1.0", "ds-2.0", "中文", "a b"]
+    parser = OverridesParser.create()
+    for instance in (agent_instance, environment_server_instance, resources_server_instance):
+        names = [instance(taskset) for taskset in tasksets]
+        assert len(set(names)) == len(tasksets)
+        for name in names:
+            assert "." not in name
+            override = parser.parse_override(f"++{name}.setting=true")
+            assert override.key_or_group == f"{name}.setting"
+
+
+def test_generated_agent_can_be_overridden_for_versioned_taskset(tmp_path, monkeypatch):
+    import sys
+
+    import nemo_gym.global_config as global_config
+    from nemo_gym import PARENT_DIR
+    from nemo_gym.cli.main import _merge_config_paths
+    from nemo_gym.global_config import get_global_config_dict
+    from nemo_gym.tasks.harbor.materialize import agent_instance
+
+    folder = tmp_path / "ds-2.0"
+    write_task(folder / "a")
+    prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+    name = agent_instance(prepared.taskset)
+    _, tokens = build_run(
+        prepared,
+        resolve_agent("hermes"),
+        sandbox=None,
+        overrides=[
+            f"+config_paths=[{PARENT_DIR / 'responses_api_models/openai_model/configs/openai_model.yaml'}]",
+            "+policy_model_name=test-model",
+            "+policy_base_url=http://127.0.0.1:1/v1",
+            "+policy_api_key=unused",
+            f"++{name}.responses_api_agents.hermes_agent.chat_template_kwargs_enabled=true",
+        ],
+    )
+    monkeypatch.setattr(sys, "argv", ["e2e", *_merge_config_paths(tokens)])
+    monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+    config = get_global_config_dict()
+    assert config[name].responses_api_agents.hermes_agent.chat_template_kwargs_enabled is True
+    assert list(config.environment_server_routes) == ["ds-2.0"]
+
+
+@pytest.mark.parametrize(
+    ("target", "flags", "message"),
+    [
+        ("missing-folder", ["--agent", "hermes"], "is not a directory"),
+        ("harbor:not-present", ["--agent", "hermes"], "not in the Harbor registry"),
+        ("harbor:hello-world", [], "needs `--agent"),
+        ("harbor:hello-world", ["--no-serve", "--agent", "hermes"], "drop --no-serve"),
+    ],
+)
+def test_expected_harbor_cli_errors_are_concise(tmp_path, monkeypatch, capsys, target, flags, message):
+    import sys
+
+    from nemo_gym.cli.main import main
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hub_module, "load_registry", lambda *args, **kwargs: [])
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", target, *flags])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
+    error = capsys.readouterr().err
+    assert message in error and "Traceback" not in error
+
+
+@pytest.mark.parametrize("flags", [["--agent", "not-an-agent"], ["--agent", "hermes", "--sandbox", "not-a-sandbox"]])
+def test_harbor_selectors_fail_before_any_preparation(monkeypatch, capsys, flags):
+    import sys
+
+    import nemo_gym.tasks.harbor.cli as harbor_cli
+    from nemo_gym.cli.main import main
+
+    def unexpected_preparation(*args, **kwargs):
+        pytest.fail("Invalid selectors must be rejected before preparing or fetching tasks")
+
+    monkeypatch.setattr(harbor_cli, "prepare_target", unexpected_preparation)
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "harbor:hello-world", *flags])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
+    assert "No " in capsys.readouterr().err
+
+
+def test_unexpected_harbor_programming_errors_remain_visible(monkeypatch):
+    import sys
+
+    import nemo_gym.tasks.harbor.cli as harbor_cli
+    from nemo_gym.cli.main import main
+
+    def bug(*args, **kwargs):
+        raise TypeError("unexpected implementation bug")
+
+    monkeypatch.setattr(harbor_cli, "prepare_target", bug)
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "harbor:hello-world", "--agent", "hermes"])
+    with pytest.raises(TypeError, match="unexpected implementation bug"):
+        main()

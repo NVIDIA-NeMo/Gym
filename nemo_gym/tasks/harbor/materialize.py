@@ -10,7 +10,7 @@ from typing import Any
 from nemo_gym.episode_types import MaterializedTask, TaskId
 from nemo_gym.single_agent_turn_types import SingleAgentTurnTaskInput
 from nemo_gym.tasks.harbor.digest import DIGEST_KEY
-from nemo_gym.tasks.harbor.task import HarborTask
+from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError
 
 
 AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
@@ -20,16 +20,26 @@ RESOURCES_SERVER_IMPL = "harbor"
 ENVIRONMENT_SERVER_IMPL = "single_agent_turn"
 
 
+def _instance_taskset(taskset: str) -> str:
+    # Hydra keys cannot contain arbitrary folder-name characters. Escape UTF-8 bytes, including
+    # the escape marker itself, so e.g. "2.0" and "2_2e0" cannot produce the same instance name.
+    safe = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+    return "".join(chr(byte) if byte in safe else f"_{byte:02x}" for byte in taskset.encode("utf-8"))
+
+
 def resources_server_instance(taskset: str) -> str:
-    return f"harbor_{taskset}_resources_server"
+    """Return an override-compatible resources instance name without changing the taskset ID."""
+    return f"harbor_{_instance_taskset(taskset)}_resources_server"
 
 
 def agent_instance(taskset: str) -> str:
-    return f"harbor_{taskset}_agent"
+    """Return an override-compatible agent instance name for the taskset."""
+    return f"harbor_{_instance_taskset(taskset)}_agent"
 
 
 def environment_server_instance(taskset: str) -> str:
-    return f"harbor_{taskset}_environment"
+    """Return an override-compatible environment instance name for the taskset."""
+    return f"harbor_{_instance_taskset(taskset)}_environment"
 
 
 def materialize_task(task: HarborTask, taskset: str) -> MaterializedTask[SingleAgentTurnTaskInput]:
@@ -46,8 +56,17 @@ def materialize_task(task: HarborTask, taskset: str) -> MaterializedTask[SingleA
     )
 
 
+def _validate_task_ids(tasks: list[HarborTask]) -> None:
+    seen: set[str] = set()
+    for task in tasks:
+        if task.task_id in seen:
+            raise HarborTaskError(f"Duplicate Harbor task ID {task.task_id!r} in one taskset")
+        seen.add(task.task_id)
+
+
 def write_rows(tasks: list[HarborTask], taskset: str, path: Path) -> list[dict[str, Any]]:
     """Write one materialized row per task as JSONL and return the rows."""
+    _validate_task_ids(tasks)
     rows = [materialize_task(task, taskset).model_dump(mode="json", exclude_unset=True) for task in tasks]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as stream:
@@ -63,6 +82,7 @@ def taskset_mapping(tasks: list[HarborTask], folder: Path) -> dict[str, Any]:
     the folder itself; for a single task folder it is the task's parent, so ``folder`` is
     always the tasks' common parent directory.
     """
+    _validate_task_ids(tasks)
     parents = {task.path.parent for task in tasks}
     if len(parents) != 1:
         raise ValueError(f"Tasks of one taskset must share a parent folder, got {sorted(map(str, parents))}")
@@ -96,6 +116,7 @@ def run_config(
             "resources_servers": {
                 RESOURCES_SERVER_IMPL: {
                     "entrypoint": "app.py",
+                    "domain": "other",
                     "sandbox_provider": sandbox_provider,
                     # Verifier logs sit beside the run's rollouts, as an absolute path: the server
                     # process runs from its own folder, so a relative default would land there.
