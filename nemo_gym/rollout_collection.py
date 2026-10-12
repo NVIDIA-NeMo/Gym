@@ -1319,8 +1319,6 @@ def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: b
 
     - ``timeout_exceeded`` (Stirrup, pinchbench): the per-task timeout; ``agent_timeout``
       in the shared vocabulary.
-    - ``reference_missing``, ``eval_missing``, ``transport_ineligible`` (GDPVal): environment
-      faults with no shared name (namespaced, they would be ``gdpval:<kind>``).
     - ``skipped`` (Stirrup): the sample cannot be run; no shared name.
 
     As ``failure_kinds`` requires, this function decides retryability for the
@@ -1330,12 +1328,6 @@ def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: b
         return bool(record.get(NG_TERMINAL_KEY))
     failure_class = record.get(NG_FAILURE_CLASS_KEY)
     if failure_class == "timeout_exceeded":
-        return False
-    if failure_class in ("reference_missing", "eval_missing", "transport_ineligible"):
-        # Environment faults: the deliverable tree can be repaired after the
-        # run (remounted reference view, restored eval dir). Terminal within a
-        # run, but re-validated on resume; the /verify recheck is cheap and the
-        # normal max-attempt cap still bounds re-dispatch.
         return False
     if failure_class == "skipped":
         return True
@@ -1647,9 +1639,8 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description=(
             "On resume, retry failures-sidecar rows of class `timeout_exceeded` even when they are stamped "
-            "`_ng_failure_terminal`, up to NEMO_GYM_MAX_ROLLOUT_ATTEMPTS. The environment faults "
-            "`reference_missing`, `eval_missing` and `transport_ineligible`, which can be repaired between "
-            "runs, are retried the same way, and `skipped` rows are never retried, stamped or not. For sidecars "
+            "`_ng_failure_terminal`, up to NEMO_GYM_MAX_ROLLOUT_ATTEMPTS, and `skipped` rows are never "
+            "retried, stamped or not. For sidecars "
             "whose per-attempt timeouts were stamped terminal but should be retried. Off (default): a sidecar row "
             "is terminal iff it is stamped `_ng_failure_terminal`, so an agent that marks its timeouts terminal "
             "on purpose keeps them gated."

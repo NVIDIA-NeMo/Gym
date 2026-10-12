@@ -48,7 +48,7 @@ import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from resources_servers.gdpval.comparison import calculate_mle_elo
 
@@ -67,8 +67,8 @@ class PartialStagePolicy:
     stage. ``min_per_reference_success_fraction`` and
     ``min_successful_rows_per_reference`` apply independently to every selected
     reference model, so an anchor cannot disappear entirely from a partial fit.
-    ``waivable_failure_classes`` lists the persisted failure classes that may be
-    newly waived; it defaults to task timeouts only. Rows already resolved by the standard terminal/max-attempt rules
+    Retryable environment-server failures (timeouts, dependency outages) may be
+    newly waived. Rows already resolved by the standard terminal/max-attempt rules
     remain eligible, but every omission still counts against the configured
     coverage floors. Drained/no-persist and missing rows keep the stage open.
 
@@ -94,7 +94,6 @@ class PartialStagePolicy:
     min_success_fraction: float = 1.0
     min_per_reference_success_fraction: float = 1.0
     min_successful_rows_per_reference: int = 1
-    waivable_failure_classes: Tuple[str, ...] = ("timeout_exceeded",)
     tolerate_unresolved: bool = False
 
 

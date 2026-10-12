@@ -188,8 +188,8 @@ finite. Until then the next stage is not planned:
 - If a row is still retryable or was never dispatched, the run writes its
   rollouts and aggregate metrics (degraded, with no `comparison/eval_elo`), logs
   that it stopped, and exits 0. Continue with `--resume`, or set
-  `++multistage.retry_inprocess=true` to retry `timeout_exceeded` and
-  `transient` rows in the same process, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`
+  `++multistage.retry_inprocess=true` to retry rows the environment server
+  reports as retryable in the same process, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`
   (default 3) attempts per row.
 - If no row is left to retry (the rest are terminal or out of attempts), the run
   writes its rollouts and then fails, without aggregate metrics. That needs a
@@ -213,8 +213,8 @@ This example requires at least 90% of all planned calibration rows, at least 50%
 of each selected reference's assigned rows, and at least one judged row for every
 selected reference. The ELO fit must be finite and include every selected
 reference. A row that could still be retried is waived only when its latest
-persisted failure class is in `waivable_failure_classes`, which defaults to
-`[timeout_exceeded]`; `transient` is the only other allowed class.
+persisted failure is one the environment server reports as retryable, such as a
+task timeout or a dependency outage.
 `tolerate_unresolved: true` waives any persisted failure class, including
 agent-server outages (`agent_request_failed`), so set the coverage floors tight.
 It also accepts a missing reference deliverable (`reference_missing`) straight
@@ -291,14 +291,14 @@ full run:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `stages` | *(required)* | List of `{num_tasks?, num_models?, seed?, partial_completion?}` (or `"[num_tasks]:[num_models]:seed"` strings). `num_tasks` omitted ⇒ full task set; `num_models` omitted ⇒ all references. `partial_completion` is an opt-in policy with overall/per-reference success floors (see [above](#accepting-partial-calibration-after-timeouts)); on the final stage it sets the floor below which the headline is reported as degraded. Keys: `min_success_fraction` (default `1.0`), `min_per_reference_success_fraction` (`1.0`), `min_successful_rows_per_reference` (`1`), `waivable_failure_classes` (`[timeout_exceeded]`) and `tolerate_unresolved` (`false`). |
+| `stages` | *(required)* | List of `{num_tasks?, num_models?, seed?, partial_completion?}` (or `"[num_tasks]:[num_models]:seed"` strings). `num_tasks` omitted ⇒ full task set; `num_models` omitted ⇒ all references. `partial_completion` is an opt-in policy with overall/per-reference success floors (see [above](#accepting-partial-calibration-after-timeouts)); on the final stage it sets the floor below which the headline is reported as degraded. Keys: `min_success_fraction` (default `1.0`), `min_per_reference_success_fraction` (`1.0`), `min_successful_rows_per_reference` (`1`) and `tolerate_unresolved` (`false`). |
 | `column` | `[occupation]` | Dataset column(s) the task sample is drawn proportionally over. |
 | `distribution_path` | *(auto)* | Reuse/write the task-distribution JSON here; built from the dataset when absent. |
 | `dataset_path` | *(prepared dataset)* | Dataset the distribution is built from. |
 | `nested_tasks` | `false` | `true` makes each stage's task sample a superset of the previous; default samples each stage independently. |
 | `seed` | *(none)* | Seed for reproducible task sampling, per-task reference assignment, and reference selection. |
 | `reuse_cached_deliverables` | `true` | Judge a task's cached deliverable in later stages instead of re-running the policy. |
-| `retry_inprocess` | `false` | Retry `timeout_exceeded` and `transient` rows in the same process, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`; other retryable rows wait for `--resume`. |
+| `retry_inprocess` | `false` | Retry rows the environment server reports as retryable in the same process, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`; other retryable rows wait for `--resume`. |
 | `replace_transport_ineligible_tasks` | `false` | In strict, sampled non-final stages, replace a task rejected by every judge's deterministic transport preflight with an unused task from the same distribution bucket. The replacement keeps the same reference assignment. Full/final stages are unchanged. |
 | `transport_assignment_repair` | unset | Reassign tasks between a stage's references before dispatch; see [Transport-aware reference assignment](#transport-aware-reference-assignment). |
 

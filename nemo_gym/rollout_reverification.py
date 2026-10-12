@@ -175,8 +175,7 @@ class RolloutReverificationConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfi
     retry_terminal_timeouts: bool = Field(
         default=False,
         description=(
-            "With resume_from_cache, retry failures-sidecar rows of class `timeout_exceeded` (and the "
-            "repairable environment faults) even when they are stamped `_ng_failure_terminal`, as rollout "
+            "With resume_from_cache, retry failures-sidecar rows of class `timeout_exceeded` even when they are stamped `_ng_failure_terminal`, as rollout "
             "collection's option of the same name does. Off (default): a sidecar row is terminal iff it is "
             "stamped `_ng_failure_terminal`."
         ),

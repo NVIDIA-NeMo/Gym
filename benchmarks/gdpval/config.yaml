@@ -37,12 +37,10 @@ config_paths:
 rollout_collection_driver: resources_servers.gdpval.multistage_orchestrator:run_rollout_collection
 
 # GDPVal's failure contract, off by default in shared rollout collection and
-# reverification: on resume, retry timeouts that older Stirrup builds stamped
-# terminal, and retry rows whose judge response was invalid instead of scoring
-# them as zero. The driver above applies it when these keys are unset, and a
-# multistage run refuses an explicit false. These keys also apply it where the
-# driver does not run (`gym eval run --no-serve`, `gym eval reverify`).
-retry_terminal_timeouts: true
+# reverification: on resume, retry rows whose judge response was invalid
+# instead of scoring them as zero. The driver above applies it when this key is
+# unset, and a multistage run refuses an explicit false. This key also applies it
+# where the driver does not run (`gym eval run --no-serve`, `gym eval reverify`).
 retry_invalid_judge_responses: true
 
 # Judge endpoints throttle in bursts (429/502/503). Retries and timeouts stack:
