@@ -58,6 +58,7 @@ from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import (
     get_first_server_config_dict,
 )
+from nemo_gym.token_id_capture.completion import completion_items
 from responses_api_agents.osworld_agent.agent_contract import (
     ResolvedAgentContract,
     assert_train_eval_parity,
@@ -537,6 +538,8 @@ class OSWorldAgentResponse(NeMoGymResponse):
 class OSWorldVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     response: OSWorldAgentResponse
+    terminal_response_id: Optional[str] = None
+    ng_trajectory: Optional[Dict[str, Any]] = None
     horizon_reached: bool = False
     evaluation_completed: bool = True
     runtime_eligible: bool = True
@@ -792,6 +795,11 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                _attach_served_generation_evidence(
+                    normalized,
+                    response=resp,
+                    choice=choice,
+                )
             return normalized
 
         normalization_error = None
@@ -804,6 +812,11 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                _attach_served_generation_evidence(
+                    normalized,
+                    response=resp,
+                    choice=choice,
+                )
         except Exception as exc:  # noqa: BLE001 - log raw output before preserving the original error.
             normalization_exc = exc
             normalization_error = {"type": type(exc).__name__, "message": repr(exc)}
@@ -1057,6 +1070,53 @@ def _normalize_chat_message(message: Any, *, structured: bool = False) -> Any:
                 normalized[field] = value
         return normalized
     return content
+
+
+def _attach_served_generation_evidence(
+    normalized: Dict[str, Any],
+    *,
+    response: Any,
+    choice: Any,
+) -> None:
+    """Preserve the exact visible model output and its served envelope ID.
+
+    External token capture intentionally keeps token arrays out of the agent
+    response. The agent must still return the same ordinary output that the
+    model gateway fingerprinted, otherwise the training consumer cannot join
+    the semantic rollout to its captured generations.
+    """
+
+    response_id = getattr(response, "id", None)
+    if isinstance(response_id, str) and response_id:
+        normalized["response_id"] = response_id
+
+    message = choice.message
+    message_payload = _jsonable(message)
+    if not isinstance(message_payload, dict):
+        message_payload = {
+            "role": getattr(message, "role", None) or "assistant",
+            "content": getattr(message, "content", None),
+        }
+        for field in ("tool_calls", "function_call", "refusal", "reasoning_content"):
+            value = getattr(message, field, None)
+            if value is not None:
+                message_payload[field] = _jsonable(value)
+    served_payload = {
+        "id": response_id,
+        "choices": [
+            {
+                "message": message_payload,
+                "finish_reason": getattr(choice, "finish_reason", None),
+            }
+        ],
+    }
+    try:
+        items = completion_items(served_payload)
+    except (TypeError, ValueError) as exc:
+        LOG.warning("Could not preserve served model output evidence: %s", exc)
+        return
+    if items:
+        normalized["served_output_items"] = items
 
 
 def _format_observation(obs: Dict[str, Any], instruction: str, *, is_current: bool) -> List[Dict[str, Any]]:
@@ -1668,6 +1728,55 @@ def _runtime_admission_fields(result: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _captured_generation_transport(
+    model_calls: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Project exact served output plus response-ID references for capture joins."""
+
+    if not model_calls:
+        return None
+    output: List[Dict[str, Any]] = []
+    turns: List[Dict[str, Any]] = []
+    terminal_response_id: Optional[str] = None
+    for call_index, model_call in enumerate(model_calls):
+        model_response = model_call.get("response")
+        if not isinstance(model_response, Mapping):
+            return None
+        response_id = model_response.get("response_id")
+        served_items = model_response.get("served_output_items")
+        if (
+            not isinstance(response_id, str)
+            or not response_id
+            or not isinstance(served_items, list)
+            or not served_items
+        ):
+            return None
+        projected_items: List[Dict[str, Any]] = []
+        for item_index, item in enumerate(served_items):
+            if not isinstance(item, Mapping):
+                return None
+            projected = copy.deepcopy(dict(item))
+            if projected.get("type") in {"message", "reasoning"} and not projected.get("id"):
+                projected["id"] = f"{response_id}-item-{item_index}"
+            projected_items.append(projected)
+        output.extend(projected_items)
+        turns.append(
+            {
+                "turn_id": model_call.get("turn_id", call_index + 1),
+                "model_calls": [{"response_id": response_id}],
+            }
+        )
+        terminal_response_id = response_id
+    return {
+        "output": output,
+        "ng_trajectory": {
+            "schema_version": 1,
+            "turns": turns,
+        },
+        "terminal_response_id": terminal_response_id,
+    }
+
+
 def _build_response(
     body: OSWorldRunRequest,
     result: Dict[str, Any],
@@ -1711,6 +1820,13 @@ def _build_response(
         }
         for step in steps
     ]
+    captured_transport = _captured_generation_transport(model_calls)
+    if captured_transport is not None:
+        # Token arrays remain in the external capture ledger. Return the exact
+        # visible generations and stable provider response IDs so NeMo RL can
+        # select those records without comparing against parser-normalized
+        # action text.
+        output = captured_transport["output"]
 
     exact_fields: Dict[str, Any] = {}
     agent_contract = result.get("agent_contract")
@@ -1817,6 +1933,9 @@ def _build_response(
         "verifier_metadata": metadata,
         **runtime_admission,
     }
+    if captured_transport is not None:
+        response_fields["ng_trajectory"] = captured_transport["ng_trajectory"]
+        response_fields["terminal_response_id"] = captured_transport["terminal_response_id"]
     return OSWorldVerifyResponse(**response_fields)
 
 
