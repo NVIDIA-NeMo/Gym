@@ -31,7 +31,7 @@ It reports, by ``operation`` and ``executor``:
 * ``gym.resources.operation.queued`` and ``gym.resources.operation.active``: how many operations wait and run right now.
 
 ``operation`` is one of ``verify``, ``tool``, ``judge``, or ``other``, and ``executor`` is one of ``inline``, ``thread``, ``process``, ``subprocess``, or ``other``, so the attributes stay bounded.
-Everything is recorded only while runtime metrics run; otherwise the wrapper only enters the limit.
+Everything is recorded only while metrics are exporting; otherwise the wrapper only enters the limit.
 """
 
 import weakref
@@ -109,7 +109,7 @@ _METRICS: "weakref.WeakKeyDictionary[Any, _OperationMetrics]" = weakref.WeakKeyD
 
 
 def _metrics() -> Optional[_OperationMetrics]:
-    from nemo_gym.telemetry.runtime import driver_metrics
+    from nemo_gym.telemetry.observer import driver_metrics
     from nemo_gym.telemetry.setup import get_telemetry
 
     if driver_metrics() is None:

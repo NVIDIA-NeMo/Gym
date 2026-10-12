@@ -18,9 +18,9 @@ import asyncio
 
 import pytest
 
+from nemo_gym.telemetry import observer  # noqa: E402
 from nemo_gym.telemetry import resources_operations as ops
-from nemo_gym.telemetry import runtime
-from tests.unit_tests.telemetry.test_runtime import collected  # noqa: F401 - fixture
+from tests.unit_tests.telemetry.test_observer import collected  # noqa: F401 - fixture
 
 
 pytest.importorskip("opentelemetry.sdk.metrics")
@@ -28,7 +28,7 @@ pytest.importorskip("opentelemetry.sdk.metrics")
 
 def _run(collected, body):  # noqa: F811
     async def run():
-        async with runtime.observe_event_loop("server"):
+        async with observer.observe_event_loop("server"):
             await body()
             return collected()
 
@@ -93,7 +93,7 @@ def test_unknown_labels_are_folded_into_other(collected):  # noqa: F811
     assert (duration.attributes["operation"], duration.attributes["executor"]) == ("other", "other")
 
 
-def test_without_runtime_metrics_it_only_enters_the_limit():
+def test_without_metrics_it_only_enters_the_limit():
     semaphore = asyncio.Semaphore(1)
 
     async def body():

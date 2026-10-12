@@ -12,19 +12,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Runtime metrics that show what is slowing a Gym process down.
+"""Event-loop, process, request, and rollout-driver metrics that show what is slowing a Gym process down.
 
 A Gym server answers every request on one asyncio event loop.
 When synchronous work such as validation, serialization, or garbage collection holds that loop, every other request waits, even though no single request looks slow.
 These metrics make that pressure visible without inspecting private asyncio internals:
 
-* ``gym.runtime.event_loop.lag`` (histogram, seconds): how late a sleeping coroutine wakes up.
+* ``gym.event_loop.lag`` (histogram, seconds): how late a sleeping coroutine wakes up.
   A coroutine asks to wake after a fixed interval, and the lag is how much later than that it actually runs.
   This is the scheduler-pressure signal.
-* ``gym.runtime.event_loop.tasks`` (gauge): how many asyncio tasks exist on the loop.
+* ``gym.event_loop.tasks`` (gauge, opt-in): how many asyncio tasks exist on the loop.
   This is resident work, not a queue depth: an idle task waiting on the network counts as much as a runnable one.
-* ``gym.runtime.gc.pause`` (histogram, seconds), and the ``gym.runtime.gc.collections``, ``gym.runtime.gc.collected``, and ``gym.runtime.gc.uncollectable`` counters, all by ``generation``.
-  ``gym.runtime.gc.count`` (gauge, by ``generation``) is the allocation count from ``gc.get_count()``.
+* ``gym.gc.pause`` (histogram, seconds), and the ``gym.gc.collections``, ``gym.gc.collected``, and ``gym.gc.uncollectable`` counters, all by ``generation``.
+  ``gym.gc.count`` (gauge, by ``generation``) is the allocation count from ``gc.get_count()``.
 * ``process.cpu.time`` (counter, seconds, by ``cpu.mode``), ``process.memory.usage``, ``process.thread.count``, and ``process.open_file_descriptor.count``.
 * ``gym.server.requests.in_flight``, ``gym.server.requests.cancelled``, and ``gym.server.requests.failed``.
   The outermost server middleware keeps them as plain integers, and the exporter thread reads them.
@@ -34,7 +34,7 @@ These metrics make that pressure visible without inspecting private asyncio inte
 
 Each kind of work runs where it costs the least:
 
-* The event loop runs one sampler coroutine per interval, which measures lag and counts tasks.
+* The event loop runs one sampler coroutine per interval, which measures lag, and counts tasks when that is on.
 * The exporter's background thread reads process CPU, memory, threads, file descriptors, and GC totals when it exports, through observable instruments.
 * The garbage collector's callback only stores timestamps and totals.
   It never calls OpenTelemetry, because it runs inside a collection.
@@ -42,7 +42,9 @@ Each kind of work runs where it costs the least:
 
 Process-wide state, which is the GC callback and the observable instruments, is set up once per process.
 The last event loop to stop removes it.
-Everything is opt-in through ``telemetry.runtime_metrics.enabled``, and every failure is logged and swallowed, because telemetry must never stop a server.
+These metrics are on whenever telemetry metrics are, because each costs at most a few microseconds per request or rollout.
+The one exception is the event-loop task count, which walks every task on the loop and is opt-in through ``telemetry.event_loop_task_count``.
+Every failure is logged and swallowed, because telemetry must never stop a server.
 """
 
 import asyncio
@@ -57,13 +59,13 @@ from typing import Any, AsyncIterator, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-EVENT_LOOP_LAG_INSTRUMENT = "gym.runtime.event_loop.lag"
-EVENT_LOOP_TASKS_INSTRUMENT = "gym.runtime.event_loop.tasks"
-GC_PAUSE_INSTRUMENT = "gym.runtime.gc.pause"
-GC_COLLECTIONS_INSTRUMENT = "gym.runtime.gc.collections"
-GC_COLLECTED_INSTRUMENT = "gym.runtime.gc.collected"
-GC_UNCOLLECTABLE_INSTRUMENT = "gym.runtime.gc.uncollectable"
-GC_COUNT_INSTRUMENT = "gym.runtime.gc.count"
+EVENT_LOOP_LAG_INSTRUMENT = "gym.event_loop.lag"
+EVENT_LOOP_TASKS_INSTRUMENT = "gym.event_loop.tasks"
+GC_PAUSE_INSTRUMENT = "gym.gc.pause"
+GC_COLLECTIONS_INSTRUMENT = "gym.gc.collections"
+GC_COLLECTED_INSTRUMENT = "gym.gc.collected"
+GC_UNCOLLECTABLE_INSTRUMENT = "gym.gc.uncollectable"
+GC_COUNT_INSTRUMENT = "gym.gc.count"
 PROCESS_CPU_TIME_INSTRUMENT = "process.cpu.time"
 PROCESS_MEMORY_USAGE_INSTRUMENT = "process.memory.usage"
 PROCESS_THREAD_COUNT_INSTRUMENT = "process.thread.count"
@@ -122,7 +124,7 @@ GC_PAUSE_BOUNDARIES_S: tuple[float, ...] = (
 )
 
 #: Upper bound on GC pauses held between two samples.
-#: Pauses beyond it are still counted in ``gym.runtime.gc.collections`` but are not recorded in the pause histogram.
+#: Pauses beyond it are still counted in ``gym.gc.collections`` but are not recorded in the pause histogram.
 _MAX_BUFFERED_GC_PAUSES = 10_000
 
 
@@ -182,36 +184,36 @@ def _observation(value: float, attributes: Optional[dict[str, Any]] = None) -> A
     return Observation(value, attributes or {})
 
 
-def _observe(read: Callable[["_ProcessRuntime"], list]) -> Callable[[Any], list]:
+def _observe(read: Callable[["_ProcessObserver"], list]) -> Callable[[Any], list]:
     """Wrap a reading of the running observer as an observable-instrument callback.
 
     It reports nothing while no observer runs, and one unavailable measurement never stops the others from exporting.
     """
 
     def observe(_options: Any) -> list:
-        runtime = _PROCESS_RUNTIME
-        if runtime is None:
+        state = _PROCESS_OBSERVER
+        if state is None:
             return []
         try:
-            return read(runtime)
+            return read(state)
         except Exception:
-            logger.debug("nemo-lens: a runtime measurement is unavailable", exc_info=True)
+            logger.debug("nemo-lens: an observer measurement is unavailable", exc_info=True)
             return []
 
     return observe
 
 
-def _by_generation(values: Callable[["_ProcessRuntime"], list[int]]) -> Callable[[Any], list]:
+def _by_generation(values: Callable[["_ProcessObserver"], list[int]]) -> Callable[[Any], list]:
     return _observe(
-        lambda runtime: [
+        lambda state: [
             _observation(value, {GC_GENERATION_ATTRIBUTE: generation})
-            for generation, value in enumerate(values(runtime))
+            for generation, value in enumerate(values(state))
         ]
     )
 
 
-def _cpu_times(runtime: "_ProcessRuntime") -> list:
-    times = runtime.process.cpu_times()
+def _cpu_times(state: "_ProcessObserver") -> list:
+    times = state.process.cpu_times()
     return [
         _observation(times.user, {CPU_MODE_ATTRIBUTE: "user"}),
         _observation(times.system, {CPU_MODE_ATTRIBUTE: "system"}),
@@ -219,7 +221,7 @@ def _cpu_times(runtime: "_ProcessRuntime") -> list:
 
 
 class _Instruments:
-    """The runtime instruments of one meter, created once so a restarted observer never registers them twice."""
+    """The observer's instruments for one meter, created once so a restarted observer never registers them twice."""
 
     def __init__(self, meter: Any) -> None:
         self.lag = meter.create_histogram(
@@ -241,43 +243,43 @@ class _Instruments:
         )
         meter.create_observable_up_down_counter(
             REQUESTS_IN_FLIGHT_INSTRUMENT,
-            callbacks=[_observe(lambda runtime: [_observation(runtime.requests.in_flight)])],
+            callbacks=[_observe(lambda state: [_observation(state.requests.in_flight)])],
             unit="{request}",
             description="HTTP requests this server is handling.",
         )
         meter.create_observable_counter(
             REQUESTS_CANCELLED_INSTRUMENT,
-            callbacks=[_observe(lambda runtime: [_observation(runtime.requests.cancelled)])],
+            callbacks=[_observe(lambda state: [_observation(state.requests.cancelled)])],
             unit="{request}",
             description="HTTP requests cancelled because the client disconnected before the response finished.",
         )
         meter.create_observable_counter(
             REQUESTS_FAILED_INSTRUMENT,
-            callbacks=[_observe(lambda runtime: [_observation(runtime.requests.failed)])],
+            callbacks=[_observe(lambda state: [_observation(state.requests.failed)])],
             unit="{request}",
             description="HTTP requests whose handler raised past every middleware.",
         )
         meter.create_observable_up_down_counter(
             OUTBOUND_IN_FLIGHT_INSTRUMENT,
-            callbacks=[_observe(lambda runtime: [_observation(runtime.requests.outbound_in_flight)])],
+            callbacks=[_observe(lambda state: [_observation(state.requests.outbound_in_flight)])],
             unit="{request}",
             description="Outbound calls through server_utils.request that are still waiting for their response headers.",
         )
         meter.create_observable_counter(
             DRIVER_OFFERED_INSTRUMENT,
-            callbacks=[_observe(lambda runtime: [_observation(runtime.driver.offered)])],
+            callbacks=[_observe(lambda state: [_observation(state.driver.offered)])],
             unit="{rollout}",
             description="Rollouts the driver handed to dispatch.",
         )
         meter.create_observable_up_down_counter(
             DRIVER_RESIDENT_INSTRUMENT,
-            callbacks=[_observe(lambda runtime: [_observation(runtime.driver.resident)])],
+            callbacks=[_observe(lambda state: [_observation(state.driver.resident)])],
             unit="{rollout}",
             description="Rollout tasks that exist and have not finished, whether waiting for admission or running.",
         )
         meter.create_observable_up_down_counter(
             DRIVER_ACTIVE_INSTRUMENT,
-            callbacks=[_observe(lambda runtime: [_observation(runtime.driver.active)])],
+            callbacks=[_observe(lambda state: [_observation(state.driver.active)])],
             unit="{rollout}",
             description="Rollouts admitted past the driver's concurrency limit and running.",
         )
@@ -327,25 +329,25 @@ class _Instruments:
             )
         meter.create_observable_counter(
             GC_COLLECTIONS_INSTRUMENT,
-            callbacks=[_by_generation(lambda runtime: runtime.gc.collections)],
+            callbacks=[_by_generation(lambda state: state.gc.collections)],
             unit="{collection}",
             description="Garbage collections, by generation.",
         )
         meter.create_observable_counter(
             GC_COLLECTED_INSTRUMENT,
-            callbacks=[_by_generation(lambda runtime: runtime.gc.collected)],
+            callbacks=[_by_generation(lambda state: state.gc.collected)],
             unit="{object}",
             description="Objects the garbage collector freed, by generation.",
         )
         meter.create_observable_counter(
             GC_UNCOLLECTABLE_INSTRUMENT,
-            callbacks=[_by_generation(lambda runtime: runtime.gc.uncollectable)],
+            callbacks=[_by_generation(lambda state: state.gc.uncollectable)],
             unit="{object}",
             description="Objects the garbage collector found but could not free, by generation.",
         )
         meter.create_observable_gauge(
             GC_COUNT_INSTRUMENT,
-            callbacks=[_by_generation(lambda _runtime: list(gc.get_count()))],
+            callbacks=[_by_generation(lambda _state: list(gc.get_count()))],
             unit="{object}",
             description="Allocations counted toward the next collection of each generation, from gc.get_count().",
         )
@@ -354,20 +356,20 @@ class _Instruments:
         )
         meter.create_observable_gauge(
             PROCESS_MEMORY_USAGE_INSTRUMENT,
-            callbacks=[_observe(lambda runtime: [_observation(runtime.process.memory_info().rss)])],
+            callbacks=[_observe(lambda state: [_observation(state.process.memory_info().rss)])],
             unit="By",
             description="Resident memory of this process.",
         )
         meter.create_observable_gauge(
             PROCESS_THREAD_COUNT_INSTRUMENT,
-            callbacks=[_observe(lambda runtime: [_observation(runtime.process.num_threads())])],
+            callbacks=[_observe(lambda state: [_observation(state.process.num_threads())])],
             unit="{thread}",
             description="Threads in this process.",
         )
         meter.create_observable_gauge(
             PROCESS_OPEN_FDS_INSTRUMENT,
             # psutil has no descriptor count on Windows, where this reports nothing.
-            callbacks=[_observe(lambda runtime: [_observation(runtime.process.num_fds())])],
+            callbacks=[_observe(lambda state: [_observation(state.process.num_fds())])],
             unit="{file_descriptor}",
             description="Open file descriptors in this process.",
         )
@@ -412,8 +414,8 @@ ROLLOUT_COUNT_BOUNDARIES: tuple[float, ...] = (1, 2, 4, 8, 16, 32, 64, 128, 256,
 DRIVER_WRITE_BYTES_BOUNDARIES: tuple[float, ...] = (1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000)
 
 
-class _ProcessRuntime:
-    """The per-process state of the runtime metrics: the GC recorder, the request totals, and this process's handle."""
+class _ProcessObserver:
+    """The per-process state of the observer: the GC recorder, the request totals, and this process's handle."""
 
     def __init__(self, meter: Any) -> None:
         import psutil
@@ -443,7 +445,7 @@ class _ProcessRuntime:
 
 
 _PROCESS_LOCK = threading.Lock()
-_PROCESS_RUNTIME: Optional[_ProcessRuntime] = None
+_PROCESS_OBSERVER: Optional[_ProcessObserver] = None
 _ACTIVE_LOOPS = 0
 
 
@@ -452,51 +454,51 @@ def request_counts() -> Optional[RequestCounts]:
 
     Server middleware calls this once per request, so it is a plain global read.
     """
-    runtime = _PROCESS_RUNTIME
-    return runtime.requests if runtime is not None else None
+    state = _PROCESS_OBSERVER
+    return state.requests if state is not None else None
 
 
-def driver_metrics() -> Optional[_ProcessRuntime]:
-    """Return the process's runtime metrics while an observer is running, for the rollout driver, else None."""
-    return _PROCESS_RUNTIME
+def driver_metrics() -> Optional[_ProcessObserver]:
+    """Return the process's observer state while an observer is running, for the rollout driver, else None."""
+    return _PROCESS_OBSERVER
 
 
 class MeteredAdmission:
     """Wraps the driver's concurrency limit to record each rollout's wait and count the rollouts running inside it."""
 
-    def __init__(self, semaphore: Any, runtime: _ProcessRuntime) -> None:
+    def __init__(self, semaphore: Any, observer: _ProcessObserver) -> None:
         self._semaphore = semaphore
-        self._runtime = runtime
+        self._observer = observer
 
     async def __aenter__(self) -> None:
         queued_at = time.perf_counter()
         await self._semaphore.__aenter__()
-        self._runtime.admission.record(time.perf_counter() - queued_at)
-        self._runtime.driver.active += 1
+        self._observer.admission.record(time.perf_counter() - queued_at)
+        self._observer.driver.active += 1
 
     async def __aexit__(self, *exc_info: Any) -> Any:
-        self._runtime.driver.active -= 1
+        self._observer.driver.active -= 1
         return await self._semaphore.__aexit__(*exc_info)
 
 
-async def count_resident(awaitable: Any, runtime: _ProcessRuntime) -> Any:
+async def count_resident(awaitable: Any, observer: _ProcessObserver) -> Any:
     """Await one rollout, counting it as resident until it finishes."""
-    runtime.driver.resident += 1
+    observer.driver.resident += 1
     try:
         return await awaitable
     finally:
-        runtime.driver.resident -= 1
+        observer.driver.resident -= 1
 
 
-def _acquire_process_runtime(meter: Any) -> _ProcessRuntime:
-    global _PROCESS_RUNTIME, _ACTIVE_LOOPS
+def _acquire_process_observer(meter: Any) -> _ProcessObserver:
+    global _PROCESS_OBSERVER, _ACTIVE_LOOPS
     with _PROCESS_LOCK:
-        if _PROCESS_RUNTIME is None:
-            runtime = _ProcessRuntime(meter)
-            gc.callbacks.append(runtime.gc)
-            _PROCESS_RUNTIME = runtime
+        if _PROCESS_OBSERVER is None:
+            state = _ProcessObserver(meter)
+            gc.callbacks.append(state.gc)
+            _PROCESS_OBSERVER = state
         _ACTIVE_LOOPS += 1
-        return _PROCESS_RUNTIME
+        return _PROCESS_OBSERVER
 
 
 def _flush_metrics() -> None:
@@ -507,14 +509,14 @@ def _flush_metrics() -> None:
         if force_flush is not None:
             force_flush(timeout_millis=5_000)
     except Exception:
-        logger.debug("nemo-lens: could not export the final runtime metrics", exc_info=True)
+        logger.debug("nemo-lens: could not export the final observer metrics", exc_info=True)
 
 
-def _release_process_runtime() -> None:
-    global _PROCESS_RUNTIME, _ACTIVE_LOOPS
+def _release_process_observer() -> None:
+    global _PROCESS_OBSERVER, _ACTIVE_LOOPS
     with _PROCESS_LOCK:
         _ACTIVE_LOOPS -= 1
-        if _ACTIVE_LOOPS > 0 or _PROCESS_RUNTIME is None:
+        if _ACTIVE_LOOPS > 0 or _PROCESS_OBSERVER is None:
             return
         # The observable totals report only while an observer runs.
         # A short-lived process, such as a driver whose run ends before the first periodic export, would never export them.
@@ -522,58 +524,59 @@ def _release_process_runtime() -> None:
         _flush_metrics()
         # Remove only this module's callback object, never another library's.
         try:
-            gc.callbacks.remove(_PROCESS_RUNTIME.gc)
+            gc.callbacks.remove(_PROCESS_OBSERVER.gc)
         except ValueError:
             pass
-        _PROCESS_RUNTIME = None
+        _PROCESS_OBSERVER = None
 
 
-async def _sample(runtime: _ProcessRuntime, interval_seconds: float, loop_name: str) -> None:
+async def _sample(state: _ProcessObserver, interval_seconds: float, loop_name: str, count_tasks: bool) -> None:
     loop = asyncio.get_running_loop()
     attributes = {EVENT_LOOP_ATTRIBUTE: loop_name}
     while True:
         deadline = time.monotonic() + interval_seconds
         await asyncio.sleep(interval_seconds)
         try:
-            runtime.lag.record(max(0.0, time.monotonic() - deadline), attributes=attributes)
-            runtime.tasks.set(len(asyncio.all_tasks(loop)), attributes=attributes)
-            runtime.record_gc_pauses()
+            state.lag.record(max(0.0, time.monotonic() - deadline), attributes=attributes)
+            if count_tasks:
+                # Walks every task on the loop, so it is opt-in: see `TelemetryConfig.event_loop_task_count`.
+                state.tasks.set(len(asyncio.all_tasks(loop)), attributes=attributes)
+            state.record_gc_pauses()
         except Exception:
-            logger.debug("nemo-lens: runtime sample failed", exc_info=True)
+            logger.debug("nemo-lens: event-loop sample failed", exc_info=True)
 
 
-def runtime_metrics_settings() -> Optional[float]:
-    """Return the sampling interval when runtime metrics should run in this process, else None."""
-    from nemo_gym.telemetry.setup import get_telemetry, is_metrics_exporter_active, runtime_metrics_config_from_env
+def observer_settings() -> Optional[tuple[float, bool]]:
+    """Return the sample interval and whether to count tasks when metrics are exporting in this process, else None."""
+    from nemo_gym.telemetry.setup import event_loop_settings_from_env, get_telemetry, is_metrics_exporter_active
 
-    config = runtime_metrics_config_from_env()
-    telemetry = get_telemetry()
-    if not config.enabled or telemetry is None or not is_metrics_exporter_active():
+    if get_telemetry() is None or not is_metrics_exporter_active():
         return None
-    return config.interval_seconds
+    return event_loop_settings_from_env()
 
 
 @asynccontextmanager
 async def observe_event_loop(loop_name: str) -> AsyncIterator[None]:
-    """Sample the running event loop, and this process's runtime, for as long as the context is open.
+    """Sample the running event loop, and observe this process, for as long as the context is open.
 
     ``loop_name`` is a bounded label for the loop, such as ``server``, ``head_server``, or ``driver``.
-    Does nothing when runtime metrics are off or telemetry is not exporting.
+    Does nothing unless telemetry metrics are exporting.
     """
     sampler: Optional[asyncio.Task] = None
     acquired = False
     try:
-        interval_seconds = runtime_metrics_settings()
-        if interval_seconds is not None:
+        settings = observer_settings()
+        if settings is not None:
             from nemo_gym.telemetry.setup import get_telemetry
 
-            runtime = _acquire_process_runtime(get_telemetry().meter)
+            interval_seconds, count_tasks = settings
+            state = _acquire_process_observer(get_telemetry().meter)
             acquired = True
             sampler = asyncio.create_task(
-                _sample(runtime, interval_seconds, loop_name), name="nemo-gym-runtime-sampler"
+                _sample(state, interval_seconds, loop_name, count_tasks), name="nemo-gym-event-loop-sampler"
             )
     except Exception:
-        logger.warning("nemo-lens: runtime metrics could not start; continuing without them", exc_info=True)
+        logger.warning("nemo-lens: the process observer could not start; continuing without it", exc_info=True)
     try:
         yield
     finally:
@@ -584,7 +587,7 @@ async def observe_event_loop(loop_name: str) -> AsyncIterator[None]:
             except (asyncio.CancelledError, Exception):
                 pass
         if acquired:
-            _release_process_runtime()
+            _release_process_observer()
 
 
 def observe_app_event_loop(app: Any, loop_name: str) -> None:

@@ -49,7 +49,7 @@ from uuid import uuid4
 
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.telemetry.config import MemoryProfilingConfig, RuntimeMetricsConfig, TelemetryConfig
+from nemo_gym.telemetry.config import MemoryProfilingConfig, TelemetryConfig
 
 
 if TYPE_CHECKING:
@@ -108,9 +108,9 @@ _ENV_FIELD_MAP = {
 #: Exporting one of them as ``NEMO_GYM_OTEL_<KEY>`` would shadow that fallback.
 _LENS_FIELDS = frozenset({"span_groups", "traces_enabled", "metrics_enabled", "logs_enabled", "exporter", "run_id"})
 
-_RUNTIME_METRICS_ENV_FIELD_MAP = {
-    "enabled": f"{_OTEL_PREFIX}_RUNTIME_METRICS_ENABLED",
-    "interval_seconds": f"{_OTEL_PREFIX}_RUNTIME_METRICS_INTERVAL_SECONDS",
+_EVENT_LOOP_ENV_FIELD_MAP = {
+    "event_loop_sample_interval_seconds": f"{_OTEL_PREFIX}_EVENT_LOOP_SAMPLE_INTERVAL_SECONDS",
+    "event_loop_task_count": f"{_OTEL_PREFIX}_EVENT_LOOP_TASK_COUNT",
 }
 
 _MEMORY_PROFILING_ENV_FIELD_MAP = {
@@ -184,17 +184,18 @@ def memory_profiling_config_from_env(defaults: MemoryProfilingConfig) -> MemoryP
     )
 
 
-def runtime_metrics_config_from_env() -> RuntimeMetricsConfig:
-    """Resolve runtime metrics from the environment the supervisor exported, falling back to the defaults."""
-    defaults = RuntimeMetricsConfig()
-    return RuntimeMetricsConfig.model_validate(
-        {
-            "enabled": _env_flag(_RUNTIME_METRICS_ENV_FIELD_MAP["enabled"], defaults.enabled),
-            "interval_seconds": os.environ.get(
-                _RUNTIME_METRICS_ENV_FIELD_MAP["interval_seconds"], defaults.interval_seconds
-            ),
-        }
+def event_loop_settings_from_env() -> tuple[float, bool]:
+    """Return the event-loop sample interval and whether to count tasks, from the environment the supervisor exported."""
+    defaults = TelemetryConfig()
+    interval = float(
+        os.environ.get(
+            _EVENT_LOOP_ENV_FIELD_MAP["event_loop_sample_interval_seconds"], defaults.event_loop_sample_interval_seconds
+        )
     )
+    if interval <= 0:
+        interval = defaults.event_loop_sample_interval_seconds
+    task_count = _env_flag(_EVENT_LOOP_ENV_FIELD_MAP["event_loop_task_count"], defaults.event_loop_task_count)
+    return interval, task_count
 
 
 def telemetry_config_from_global_config(global_config_dict: Any) -> TelemetryConfig:
@@ -272,8 +273,8 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
         value = getattr(telemetry_config.memory_profiling, field)
         os.environ.setdefault(env_name, "1" if value is True else "0" if value is False else str(value))
 
-    for field, env_name in _RUNTIME_METRICS_ENV_FIELD_MAP.items():
-        value = getattr(telemetry_config.runtime_metrics, field)
+    for field, env_name in _EVENT_LOOP_ENV_FIELD_MAP.items():
+        value = getattr(telemetry_config, field)
         os.environ.setdefault(env_name, "1" if value is True else "0" if value is False else str(value))
 
     for field, env_name in _OTLP_ENV_FIELD_MAP.items():

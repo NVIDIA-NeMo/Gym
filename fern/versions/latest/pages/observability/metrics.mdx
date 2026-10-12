@@ -89,21 +89,21 @@ A server with `num_workers` above 1 runs `run_webserver` again in every Uvicorn 
 
 There is no supervisor-side total. The supervisor learns that a server is ready from a health poll every few seconds, so its total would be the stages above plus polling delay. The total for each server is the `gym.startup.server` span in the startup trace.
 
-### Runtime Metrics
+### Event Loop and Process Metrics
 
-These metrics are reported only when `telemetry.runtime_metrics.enabled` is true. Every server process reports them, and the `process.pid` resource attribute tells apart the Uvicorn workers of one server.
+These metrics are reported whenever metrics are exported. Every server process reports them, and the `process.pid` resource attribute tells apart the Uvicorn workers of one server.
 
 A Gym server answers every request on one asyncio event loop. When synchronous work holds that loop, every other request waits, even though no single request looks slow. Requests that arrive in bursts make this worse, because each one waits for the synchronous work of the requests ahead of it.
 
 | Metric | Type | Unit | Meaning |
 | --- | --- | --- | --- |
-| `gym.runtime.event_loop.lag` | Histogram | s | How late a sleeping coroutine wakes up, sampled once per interval. This is the signal that the event loop is busy. |
-| `gym.runtime.event_loop.tasks` | Gauge | count | Asyncio tasks that exist on the loop. This counts resident work, not a queue: a task waiting on the network counts as much as a runnable one. |
-| `gym.runtime.gc.pause` | Histogram | s | Duration of one garbage collection, by `generation`. |
-| `gym.runtime.gc.collections` | Counter | count | Garbage collections, by `generation`. |
-| `gym.runtime.gc.collected` | Counter | count | Objects freed, by `generation`. |
-| `gym.runtime.gc.uncollectable` | Counter | count | Objects found but not freed, by `generation`. |
-| `gym.runtime.gc.count` | Gauge | count | Allocations counted toward the next collection, by `generation`. |
+| `gym.event_loop.lag` | Histogram | s | How late a sleeping coroutine wakes up, sampled once per interval. This is the signal that the event loop is busy. |
+| `gym.event_loop.tasks` | Gauge | count | Asyncio tasks that exist on the loop, reported only when `telemetry.event_loop_task_count` is true. This counts resident work, not a queue: a task waiting on the network counts as much as a runnable one. |
+| `gym.gc.pause` | Histogram | s | Duration of one garbage collection, by `generation`. |
+| `gym.gc.collections` | Counter | count | Garbage collections, by `generation`. |
+| `gym.gc.collected` | Counter | count | Objects freed, by `generation`. |
+| `gym.gc.uncollectable` | Counter | count | Objects found but not freed, by `generation`. |
+| `gym.gc.count` | Gauge | count | Allocations counted toward the next collection, by `generation`. |
 | `process.cpu.time` | Counter | s | Process CPU time, by `cpu.mode` (`user` or `system`). |
 | `process.memory.usage` | Gauge | bytes | Resident memory of the process. |
 | `process.thread.count` | Gauge | count | Threads in the process. |
@@ -131,7 +131,7 @@ The rollout driver, which is `gym eval run`, reports how much work it holds and 
 
 Resident minus active is the number of rollouts waiting for admission. A standalone `gym eval run --no-serve` driver sets up its own telemetry from the `telemetry:` block, so it reports these metrics and the `gym.job` span too.
 
-`gym.runtime.event_loop.lag` and `gym.runtime.event_loop.tasks` carry `nemo.gym.event_loop`, which is `server` for a server's own loop, `head_server` for the head server's loop inside the supervisor, and `driver` for the rollout driver's loop.
+`gym.event_loop.lag` and `gym.event_loop.tasks` carry `nemo.gym.event_loop`, which is `server` for a server's own loop, `head_server` for the head server's loop inside the supervisor, and `driver` for the rollout driver's loop.
 
 The work stays off the request path. The event loop runs one sampling coroutine per interval. Process, garbage-collection, and request totals are plain counters that the exporter's background thread reads when it exports, so a request costs a few integer updates and no OpenTelemetry call.
 
@@ -153,7 +153,7 @@ async with resources_operation(self._semaphore, operation="verify", executor="su
 | `gym.resources.operation.queued` | Up/down counter | count | Operations waiting for their limit. |
 | `gym.resources.operation.active` | Up/down counter | count | Operations running inside their limit. |
 
-Every metric carries `operation` (`verify`, `tool`, `judge`, or `other`) and `executor` (`inline`, `thread`, `process`, `subprocess`, or `other`). They are recorded only while runtime metrics run. `math_with_judge` uses this contract for its SymPy verifier subprocesses.
+Every metric carries `operation` (`verify`, `tool`, `judge`, or `other`) and `executor` (`inline`, `thread`, `process`, `subprocess`, or `other`). They are recorded only while metrics are exported. `math_with_judge` uses this contract for its SymPy verifier subprocesses.
 
 ### Memory Metrics
 

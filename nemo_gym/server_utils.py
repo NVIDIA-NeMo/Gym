@@ -96,7 +96,7 @@ from nemo_gym.telemetry.connection_pool import (
     reset_server_name,
     set_server_name,
 )
-from nemo_gym.telemetry.runtime import observe_app_event_loop, request_counts
+from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
 
@@ -542,7 +542,7 @@ async def request(
             _resend_after_disconnect=_resend_after_disconnect,
             **kwargs,
         )
-    # While runtime metrics run, count calls still waiting for their response, which ends when the headers arrive.
+    # While metrics are exporting, count calls still waiting for their response, which ends when the headers arrive.
     counts.outbound_in_flight += 1
     try:
         return await send(

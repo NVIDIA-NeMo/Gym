@@ -27,13 +27,13 @@ import pytest
 
 pytest.importorskip("opentelemetry.sdk.metrics")
 
-from nemo_gym.telemetry import runtime  # noqa: E402
+from nemo_gym.telemetry import observer  # noqa: E402
 from nemo_gym.telemetry import setup as telemetry_setup  # noqa: E402
 
 
 @pytest.fixture
 def collected(monkeypatch):
-    """A live meter installed as the process handle, with metrics exporting and runtime metrics on."""
+    """A live meter installed as the process handle, with metrics exporting."""
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
@@ -46,8 +46,8 @@ def collected(monkeypatch):
 
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
     monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", True)
-    monkeypatch.setenv("NEMO_GYM_OTEL_RUNTIME_METRICS_ENABLED", "1")
-    monkeypatch.setenv("NEMO_GYM_OTEL_RUNTIME_METRICS_INTERVAL_SECONDS", "0.01")
+    monkeypatch.setenv("NEMO_GYM_OTEL_EVENT_LOOP_SAMPLE_INTERVAL_SECONDS", "0.01")
+    monkeypatch.delenv("NEMO_GYM_OTEL_EVENT_LOOP_TASK_COUNT", raising=False)
 
     def collect():
         data = reader.get_metrics_data()
@@ -59,13 +59,13 @@ def collected(monkeypatch):
         return out
 
     yield collect
-    assert runtime._PROCESS_RUNTIME is None, "an observer outlived its event loop"
-    assert runtime._ACTIVE_LOOPS == 0
+    assert observer._PROCESS_OBSERVER is None, "an observer outlived its event loop"
+    assert observer._ACTIVE_LOOPS == 0
 
 
 class TestGcRecorder:
     def test_a_paired_collection_records_one_pause_and_its_totals(self):
-        recorder = runtime._GcRecorder()
+        recorder = observer._GcRecorder()
         recorder("start", {"generation": 1})
         recorder("stop", {"generation": 1, "collected": 5, "uncollectable": 1})
 
@@ -77,15 +77,15 @@ class TestGcRecorder:
         assert recorder.drain_pauses() == []
 
     def test_a_stop_without_a_start_counts_the_collection_but_records_no_pause(self):
-        recorder = runtime._GcRecorder()
+        recorder = observer._GcRecorder()
         recorder("stop", {"generation": 0, "collected": 2, "uncollectable": 0})
 
         assert recorder.collections == [1, 0, 0]
         assert recorder.drain_pauses() == []
 
     def test_buffered_pauses_are_bounded(self, monkeypatch):
-        monkeypatch.setattr(runtime, "_MAX_BUFFERED_GC_PAUSES", 3)
-        recorder = runtime._GcRecorder()
+        monkeypatch.setattr(observer, "_MAX_BUFFERED_GC_PAUSES", 3)
+        recorder = observer._GcRecorder()
         for _ in range(10):
             recorder("start", {"generation": 0})
             recorder("stop", {"generation": 0, "collected": 0, "uncollectable": 0})
@@ -96,7 +96,7 @@ class TestGcRecorder:
 
 async def _observe_for(seconds, collected):
     """Run the observer for a while and read the metrics before it stops, since observable ones stop with it."""
-    async with runtime.observe_event_loop("server"):
+    async with observer.observe_event_loop("server"):
         gc.collect(0)
         await asyncio.sleep(seconds)
         return collected()
@@ -105,41 +105,40 @@ async def _observe_for(seconds, collected):
 def test_the_observer_reports_loop_gc_and_process_metrics(collected):
     metrics = asyncio.run(_observe_for(0.1, collected))
 
-    (lag,) = metrics[runtime.EVENT_LOOP_LAG_INSTRUMENT]
+    (lag,) = metrics[observer.EVENT_LOOP_LAG_INSTRUMENT]
     assert lag.count >= 1 and lag.attributes == {"nemo.gym.event_loop": "server"}
-    (tasks,) = metrics[runtime.EVENT_LOOP_TASKS_INSTRUMENT]
-    assert tasks.value >= 2  # the sampler and the coroutine under test
-    assert any(point.attributes == {"generation": 0} for point in metrics[runtime.GC_PAUSE_INSTRUMENT])
-    assert {p.attributes["cpu.mode"] for p in metrics[runtime.PROCESS_CPU_TIME_INSTRUMENT]} == {"user", "system"}
-    assert metrics[runtime.PROCESS_MEMORY_USAGE_INSTRUMENT][0].value > 0
-    assert metrics[runtime.PROCESS_THREAD_COUNT_INSTRUMENT][0].value >= 1
-    assert {p.attributes["generation"] for p in metrics[runtime.GC_COUNT_INSTRUMENT]} == {0, 1, 2}
+    assert observer.EVENT_LOOP_TASKS_INSTRUMENT not in metrics, "counting tasks is opt-in"
+    assert any(point.attributes == {"generation": 0} for point in metrics[observer.GC_PAUSE_INSTRUMENT])
+    assert {p.attributes["cpu.mode"] for p in metrics[observer.PROCESS_CPU_TIME_INSTRUMENT]} == {"user", "system"}
+    assert metrics[observer.PROCESS_MEMORY_USAGE_INSTRUMENT][0].value > 0
+    assert metrics[observer.PROCESS_THREAD_COUNT_INSTRUMENT][0].value >= 1
+    assert {p.attributes["generation"] for p in metrics[observer.GC_COUNT_INSTRUMENT]} == {0, 1, 2}
     if sys.platform.startswith("linux"):
-        assert metrics[runtime.PROCESS_OPEN_FDS_INSTRUMENT][0].value > 0
+        assert metrics[observer.PROCESS_OPEN_FDS_INSTRUMENT][0].value > 0
 
 
 def test_a_blocked_event_loop_shows_up_as_lag(collected):
     import time
 
     async def block():
-        async with runtime.observe_event_loop("server"):
+        async with observer.observe_event_loop("server"):
             await asyncio.sleep(0.02)
             time.sleep(0.2)  # synchronous work holding the event loop
             await asyncio.sleep(0.05)
 
     asyncio.run(block())
 
-    (lag,) = collected()[runtime.EVENT_LOOP_LAG_INSTRUMENT]
+    (lag,) = collected()[observer.EVENT_LOOP_LAG_INSTRUMENT]
     assert lag.max >= 0.1
 
 
 def test_the_gc_callback_is_installed_once_and_removed_with_the_last_loop(collected):
     async def nested():
-        async with runtime.observe_event_loop("server"):
-            async with runtime.observe_event_loop("driver"):
-                assert sum(callback is runtime._PROCESS_RUNTIME.gc for callback in gc.callbacks) == 1
-            assert runtime._PROCESS_RUNTIME is not None
-        assert runtime._PROCESS_RUNTIME is None
+        async with observer.observe_event_loop("server"):
+            async with observer.observe_event_loop("driver"):
+                assert sum(callback is observer._PROCESS_OBSERVER.gc for callback in gc.callbacks) == 1
+            assert observer._PROCESS_OBSERVER is not None
+        assert observer._PROCESS_OBSERVER is None
 
     before = list(gc.callbacks)
     asyncio.run(nested())
@@ -147,28 +146,36 @@ def test_the_gc_callback_is_installed_once_and_removed_with_the_last_loop(collec
     assert gc.callbacks == before
 
 
-def test_nothing_starts_while_runtime_metrics_are_off(collected, monkeypatch):
-    monkeypatch.setenv("NEMO_GYM_OTEL_RUNTIME_METRICS_ENABLED", "0")
+def test_the_task_count_is_reported_when_opted_in(collected, monkeypatch):
+    monkeypatch.setenv("NEMO_GYM_OTEL_EVENT_LOOP_TASK_COUNT", "1")
+    metrics = asyncio.run(_observe_for(0.1, collected))
+
+    (tasks,) = metrics[observer.EVENT_LOOP_TASKS_INSTRUMENT]
+    assert tasks.value >= 2  # the sampler and the coroutine under test
+
+
+def test_nothing_starts_while_metrics_are_off(collected, monkeypatch):
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", False)
     before = list(gc.callbacks)
 
     async def check():
-        async with runtime.observe_event_loop("server"):
-            assert runtime.request_counts() is None
+        async with observer.observe_event_loop("server"):
+            assert observer.request_counts() is None
             assert gc.callbacks == before
 
     asyncio.run(check())
-    assert runtime.EVENT_LOOP_LAG_INSTRUMENT not in collected()
+    assert observer.EVENT_LOOP_LAG_INSTRUMENT not in collected()
 
 
 def test_a_failed_start_never_stops_the_server(collected, monkeypatch):
     def broken(_meter):
         raise RuntimeError("meter is gone")
 
-    monkeypatch.setattr(runtime, "_ProcessRuntime", broken)
+    monkeypatch.setattr(observer, "_ProcessObserver", broken)
     ran = []
 
     async def serve():
-        async with runtime.observe_event_loop("server"):
+        async with observer.observe_event_loop("server"):
             ran.append(True)
 
     asyncio.run(serve())
@@ -186,12 +193,12 @@ def test_the_app_lifespan_keeps_running_inside_the_observer(collected):
     @asynccontextmanager
     async def app_lifespan(_app):
         events.append("start")
-        assert runtime.request_counts() is not None
+        assert observer.request_counts() is not None
         yield
         events.append("stop")
 
     app = FastAPI(lifespan=app_lifespan)
-    runtime.observe_app_event_loop(app, "server")
+    observer.observe_app_event_loop(app, "server")
     with TestClient(app):
         pass
 
@@ -208,14 +215,14 @@ class TestRequestCounters:
             pass
 
         async def run():
-            async with runtime.observe_event_loop("server"):
+            async with observer.observe_event_loop("server"):
                 try:
                     await ClientDisconnectCancellationMiddleware(app)(
                         {"type": "http", "method": "POST", "path": "/x"}, receive, send
                     )
                 except Exception:
                     pass
-                counts = runtime.request_counts()
+                counts = observer.request_counts()
                 exported = collected() if collected is not None else None
                 return {
                     "in_flight": counts.in_flight,
@@ -251,7 +258,7 @@ class TestRequestCounters:
         totals, exported = self._serve(app, self._request_then(disconnect_after_the_response), collected)
 
         assert totals == {"in_flight": 0, "cancelled": 0, "failed": 0}
-        (in_flight,) = exported[runtime.REQUESTS_IN_FLIGHT_INSTRUMENT]
+        (in_flight,) = exported[observer.REQUESTS_IN_FLIGHT_INSTRUMENT]
         assert in_flight.value == 0
 
     def test_a_raising_handler_counts_as_failed(self, collected):
@@ -265,7 +272,7 @@ class TestRequestCounters:
         totals, exported = self._serve(app, self._request_then(wait_forever), collected)
 
         assert totals == {"in_flight": 0, "cancelled": 0, "failed": 1}
-        (failed,) = exported[runtime.REQUESTS_FAILED_INSTRUMENT]
+        (failed,) = exported[observer.REQUESTS_FAILED_INSTRUMENT]
         assert failed.value == 1
 
     def test_a_client_disconnect_counts_as_cancelled(self, collected):
@@ -292,20 +299,25 @@ class TestRequestCounters:
 
         self._serve(app, self._request_then(disconnect))
 
-        assert runtime.REQUESTS_IN_FLIGHT_INSTRUMENT not in collected()
+        assert observer.REQUESTS_IN_FLIGHT_INSTRUMENT not in collected()
 
 
-def test_the_supervisor_hands_runtime_settings_to_every_server(monkeypatch):
+def test_the_supervisor_hands_event_loop_settings_to_every_server(monkeypatch):
     from nemo_gym.telemetry.config import TelemetryConfig
 
-    for name in ("NEMO_GYM_OTEL_RUNTIME_METRICS_ENABLED", "NEMO_GYM_OTEL_RUNTIME_METRICS_INTERVAL_SECONDS"):
+    for name in ("NEMO_GYM_OTEL_EVENT_LOOP_SAMPLE_INTERVAL_SECONDS", "NEMO_GYM_OTEL_EVENT_LOOP_TASK_COUNT"):
         monkeypatch.delenv(name, raising=False)
     telemetry_setup.configure_telemetry_env(
-        TelemetryConfig(enabled=True, runtime_metrics={"enabled": True, "interval_seconds": 0.5})
+        TelemetryConfig(enabled=True, event_loop_sample_interval_seconds=0.5, event_loop_task_count=True)
     )
 
-    resolved = telemetry_setup.runtime_metrics_config_from_env()
-    assert resolved.enabled is True and resolved.interval_seconds == 0.5
+    assert telemetry_setup.event_loop_settings_from_env() == (0.5, True)
+
+
+def test_event_loop_settings_default_to_one_second_without_task_counts(monkeypatch):
+    for name in ("NEMO_GYM_OTEL_EVENT_LOOP_SAMPLE_INTERVAL_SECONDS", "NEMO_GYM_OTEL_EVENT_LOOP_TASK_COUNT"):
+        monkeypatch.delenv(name, raising=False)
+    assert telemetry_setup.event_loop_settings_from_env() == (1.0, False)
 
 
 def test_every_process_reports_its_pid_as_a_resource_attribute():
@@ -318,16 +330,16 @@ def test_outbound_calls_are_counted_while_they_wait_for_a_response(collected, mo
     seen = []
 
     async def fake_send(*_args, **_kwargs):
-        seen.append(runtime.request_counts().outbound_in_flight)
+        seen.append(observer.request_counts().outbound_in_flight)
         return "response"
 
     monkeypatch.setattr(server_utils, "_request_with_retries", fake_send)
     monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _group: False)
 
     async def call():
-        async with runtime.observe_event_loop("server"):
+        async with observer.observe_event_loop("server"):
             assert await server_utils.request("GET", "http://example.invalid/x") == "response"
-            return runtime.request_counts().outbound_in_flight
+            return observer.request_counts().outbound_in_flight
 
     assert asyncio.run(call()) == 0
     assert seen == [1]
@@ -336,9 +348,9 @@ def test_outbound_calls_are_counted_while_they_wait_for_a_response(collected, mo
 class TestDriverMetrics:
     def test_admission_records_the_wait_and_counts_active_rollouts(self, collected):
         async def run():
-            async with runtime.observe_event_loop("driver"):
-                metrics = runtime.driver_metrics()
-                admission = runtime.MeteredAdmission(asyncio.Semaphore(1), metrics)
+            async with observer.observe_event_loop("driver"):
+                metrics = observer.driver_metrics()
+                admission = observer.MeteredAdmission(asyncio.Semaphore(1), metrics)
                 active_seen = []
 
                 async def rollout():
@@ -346,29 +358,29 @@ class TestDriverMetrics:
                         active_seen.append(metrics.driver.active)
                         await asyncio.sleep(0.05)
 
-                await asyncio.gather(*(runtime.count_resident(rollout(), metrics) for _ in range(3)))
+                await asyncio.gather(*(observer.count_resident(rollout(), metrics) for _ in range(3)))
                 return active_seen, metrics.driver.active, metrics.driver.resident, collected()
 
         active_seen, active_after, resident_after, exported = asyncio.run(run())
 
         assert active_seen == [1, 1, 1], "the limit of one admits one rollout at a time"
         assert active_after == 0 and resident_after == 0
-        (admission,) = exported[runtime.DRIVER_ADMISSION_INSTRUMENT]
+        (admission,) = exported[observer.DRIVER_ADMISSION_INSTRUMENT]
         assert admission.count == 3
         assert admission.max >= 0.09, "the third rollout waited for the two ahead of it"
 
     def test_resident_counts_rollouts_waiting_for_admission(self, collected):
         async def run():
-            async with runtime.observe_event_loop("driver"):
-                metrics = runtime.driver_metrics()
-                admission = runtime.MeteredAdmission(asyncio.Semaphore(1), metrics)
+            async with observer.observe_event_loop("driver"):
+                metrics = observer.driver_metrics()
+                admission = observer.MeteredAdmission(asyncio.Semaphore(1), metrics)
                 release = asyncio.Event()
 
                 async def rollout():
                     async with admission:
                         await release.wait()
 
-                tasks = [asyncio.ensure_future(runtime.count_resident(rollout(), metrics)) for _ in range(4)]
+                tasks = [asyncio.ensure_future(observer.count_resident(rollout(), metrics)) for _ in range(4)]
                 await asyncio.sleep(0.01)
                 snapshot = (metrics.driver.resident, metrics.driver.active)
                 release.set()
@@ -383,21 +395,21 @@ class TestDriverMetrics:
         from nemo_gym.rollout_collection import _record_output_write
 
         async def run():
-            async with runtime.observe_event_loop("driver"):
+            async with observer.observe_event_loop("driver"):
                 _record_output_write(time.perf_counter(), b"x" * 999)
                 return collected()
 
         exported = asyncio.run(run())
-        (size,) = exported[runtime.DRIVER_WRITE_BYTES_INSTRUMENT]
+        (size,) = exported[observer.DRIVER_WRITE_BYTES_INSTRUMENT]
         assert size.sum == 1000  # the row plus its newline
-        assert exported[runtime.DRIVER_WRITE_DURATION_INSTRUMENT][0].count == 1
+        assert exported[observer.DRIVER_WRITE_DURATION_INSTRUMENT][0].count == 1
 
     def test_nothing_is_recorded_without_an_observer(self):
         import time
 
         from nemo_gym.rollout_collection import _record_output_write
 
-        assert runtime.driver_metrics() is None
+        assert observer.driver_metrics() is None
         _record_output_write(time.perf_counter(), b"row")
 
 
@@ -406,7 +418,7 @@ class TestRolloutShape:
         from nemo_gym.rollout_collection import _record_rollout_shape
 
         async def run():
-            async with runtime.observe_event_loop("driver"):
+            async with observer.observe_event_loop("driver"):
                 _record_rollout_shape(row, result)
                 return collected()
 
@@ -418,10 +430,10 @@ class TestRolloutShape:
             {"responses_create_params": {"input": [{"role": "user", "content": "hi"}] * 3}},
             {"response": {"output": [{"type": "message"}] * 5}, "ng_perf": {"num_turns": 4, "num_tool_calls": 3}},
         )
-        assert exported[runtime.ROLLOUT_INPUT_ITEMS_INSTRUMENT][0].sum == 3
-        assert exported[runtime.ROLLOUT_OUTPUT_ITEMS_INSTRUMENT][0].sum == 5
-        assert exported[runtime.ROLLOUT_TURNS_INSTRUMENT][0].sum == 4
-        assert exported[runtime.ROLLOUT_TOOL_CALLS_INSTRUMENT][0].sum == 3
+        assert exported[observer.ROLLOUT_INPUT_ITEMS_INSTRUMENT][0].sum == 3
+        assert exported[observer.ROLLOUT_OUTPUT_ITEMS_INSTRUMENT][0].sum == 5
+        assert exported[observer.ROLLOUT_TURNS_INSTRUMENT][0].sum == 4
+        assert exported[observer.ROLLOUT_TOOL_CALLS_INSTRUMENT][0].sum == 3
 
     def test_without_ng_perf_tool_calls_are_counted_from_the_output(self, collected):
         exported = self._record(
@@ -433,9 +445,9 @@ class TestRolloutShape:
                 }
             },
         )
-        assert exported[runtime.ROLLOUT_TOOL_CALLS_INSTRUMENT][0].sum == 1
-        assert runtime.ROLLOUT_TURNS_INSTRUMENT not in exported
-        assert runtime.ROLLOUT_INPUT_ITEMS_INSTRUMENT not in exported  # a string prompt has no item list
+        assert exported[observer.ROLLOUT_TOOL_CALLS_INSTRUMENT][0].sum == 1
+        assert observer.ROLLOUT_TURNS_INSTRUMENT not in exported
+        assert observer.ROLLOUT_INPUT_ITEMS_INSTRUMENT not in exported  # a string prompt has no item list
 
 
 def test_the_last_observer_to_stop_exports_the_final_totals(monkeypatch):
@@ -469,12 +481,11 @@ def test_the_last_observer_to_stop_exports_the_final_totals(monkeypatch):
 
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
     monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", True)
-    monkeypatch.setenv("NEMO_GYM_OTEL_RUNTIME_METRICS_ENABLED", "1")
     monkeypatch.setattr(metrics, "get_meter_provider", lambda: provider)
 
     async def short_run():
-        async with runtime.observe_event_loop("driver"):
-            runtime.driver_metrics().driver.offered += 7
+        async with observer.observe_event_loop("driver"):
+            observer.driver_metrics().driver.offered += 7
 
     asyncio.run(short_run())
 
@@ -485,6 +496,6 @@ def test_the_last_observer_to_stop_exports_the_final_totals(monkeypatch):
         for scope_metrics in resource_metrics.scope_metrics
         for metric in scope_metrics.metrics
     }
-    (offered,) = exported[runtime.DRIVER_OFFERED_INSTRUMENT]
+    (offered,) = exported[observer.DRIVER_OFFERED_INSTRUMENT]
     assert offered.value == 7
     provider.shutdown()

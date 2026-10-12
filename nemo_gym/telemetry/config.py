@@ -39,20 +39,6 @@ class MemoryProfilingConfig(BaseModel):
     """Seconds between samples."""
 
 
-class RuntimeMetricsConfig(BaseModel):
-    """Event-loop, garbage-collection, process, and in-flight request metrics from every Gym server process.
-
-    Off by default.
-    Turn it on to find what is slowing a server down, such as a blocked event loop or long garbage-collection pauses.
-    """
-
-    enabled: bool = False
-    """Run the runtime observer in every server process."""
-
-    interval_seconds: float = Field(default=1.0, gt=0)
-    """Seconds between event-loop samples."""
-
-
 class TelemetryConfig(BaseModel, extra="allow"):
     """OpenTelemetry / nemo-lens configuration for NeMo Gym.
 
@@ -101,8 +87,15 @@ class TelemetryConfig(BaseModel, extra="allow"):
     memory_profiling: MemoryProfilingConfig = Field(default_factory=MemoryProfilingConfig)
     """Sample each Gym-managed server process tree and emit memory metrics."""
 
-    runtime_metrics: RuntimeMetricsConfig = Field(default_factory=RuntimeMetricsConfig)
-    """Report event-loop lag, garbage collection, process resources, and in-flight requests from every server process."""
+    event_loop_sample_interval_seconds: float = Field(default=1.0, gt=0)
+    """Seconds between samples of each process's event-loop lag, when metrics are on."""
+
+    event_loop_task_count: bool = False
+    """Also report how many asyncio tasks exist on each event loop, at every sample.
+
+    Off by default because counting tasks walks every task on the loop while holding it.
+    That takes about a millisecond per sample at 16,000 tasks, which a driver at high concurrency can reach.
+    """
 
     logs_enabled: bool = False
     """Bridge Python logging to OTel logs, exported with trace correlation."""
