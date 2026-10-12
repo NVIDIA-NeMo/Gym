@@ -57,8 +57,6 @@ does not call the agent's compatibility `/run`. No additional materializer is ne
 Pass the same configuration to startup and `--no-serve` collection; collection does not
 inherit routing settings from the running servers.
 
-For Terminal-Bench 2.1, use the [task-sandbox recipe](../../benchmarks/terminal_bench_2_1/README.md#codex-in-a-task-sandbox).
-
 ### Switch harness or benchmark
 
 To change a compatible harness, replace its config import, harness-specific settings,

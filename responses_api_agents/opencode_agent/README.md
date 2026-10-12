@@ -139,12 +139,3 @@ stricter, single-activation contract described above. The intentional difference
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
 Different prompt placement can affect results; this integration does not establish
 local/session score parity or migrate existing benchmark defaults.
-
-## Terminal-Bench 2.1
-
-Use the [single-task recipe](../../benchmarks/terminal_bench_2_1/README.md#opencode-in-a-task-sandbox)
-to compose the independent TB Resources, OpenCode, EnvironmentServer and model
-configs. Resources owns the task sandbox and verifier; OpenCode borrows it through
-the same session contract as SWE-Pro. `single_agent_turn_legacy` adapts prepared
-flat rows to that lifecycle; it does not invoke the agent's legacy `/run` path.
-The EnvironmentServer closes the agent before grading, then closes Resources.
