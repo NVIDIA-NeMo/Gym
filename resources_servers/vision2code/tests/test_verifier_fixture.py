@@ -6,4 +6,4 @@ from resources_servers.vision2code.app import VERIFIER_FIXTURE
 
 async def test_verifier_fixture():
     results = await exercise_verifier_fixture(VERIFIER_FIXTURE, reward_range=(0.0, 1.0), determinism="stochastic")
-    assert len(results) == 12
+    assert len(results) == 51

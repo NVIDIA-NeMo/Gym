@@ -1,4 +1,82 @@
 {
+  "ChartQA": [
+    {
+      "type": "text",
+      "text": "Reference image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Candidate rendered image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nRubric dataset: ChartQA\nScoring guidance: This is an easy chart recreation dataset. Be strict about preserving both the information and the chart structure. Wrong chart orientation, wrong chart type, crowded labels, illegible text, bad title placement, or legend overlap should all be penalized.\n\nDataset-specific notes:\n- Preserve recreation structure, not just semantic content.\n- If a horizontal chart becomes vertical, preserve some credit for correct data but do not award a perfect score.\n- Color scheme matters less than readable text, correct numbers, and faithful structure.\n\nCategories:\nDataset: ChartQA\n- numeric_information_fidelity (weight 0.30): Values, trends, ordering, and answer-relevant chart information are correct.\n- structure_layout_fidelity (weight 0.30): Chart type, orientation, title placement, legend placement, and overall chart structure match the reference.\n- text_label_legibility_accuracy (weight 0.25): Labels, numbers, headings, and text remain accurate, legible, and not crowded.\n- cleanliness_completeness (weight 0.15): The chart is unclipped, readable, and not missing major visible content.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+    }
+  ],
+  "dvqa": [
+    {
+      "type": "text",
+      "text": "Reference image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Candidate rendered image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nRubric dataset: dvqa\nScoring guidance: This is an easy chart recreation dataset. Be strict about exact plotted information, faithful structure, and readable labels. Preserve the same chart structure rather than only approximate semantics.\n\nDataset-specific notes:\n- Wrong orientation, wrong chart structure, or poor label legibility should clearly lower the score.\n- Legend placement or labels crowding the plot should be penalized.\n- Colors matter less than correct information, structure, and readable text.\n\nCategories:\nDataset: dvqa\n- numeric_information_fidelity (weight 0.30): Values, trends, grouping, and answer-relevant chart information are correct.\n- structure_layout_fidelity (weight 0.30): Chart type, grouping or stacking structure, orientation, title placement, and legend placement match the reference.\n- text_label_legibility_accuracy (weight 0.25): Axis labels, category labels, numbers, and titles remain accurate, legible, and not crowded.\n- cleanliness_completeness (weight 0.15): The chart is unclipped, readable, and not missing major visible content.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+    }
+  ],
+  "figureqa": [
+    {
+      "type": "text",
+      "text": "Reference image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Candidate rendered image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nRubric dataset: figureqa\nScoring guidance: This is an easy chart recreation dataset. Be strict about preserving the same structure, readable labels, and correct plotted information. Semantic preservation alone is not enough for a top score.\n\nDataset-specific notes:\n- If the data are right but the plot structure changes meaningfully, keep partial credit but not full credit.\n- Crowded or illegible labels should be penalized.\n- Minor color differences matter less than correct structure and readable information.\n\nCategories:\nDataset: figureqa\n- numeric_information_fidelity (weight 0.30): Values, trends, series relationships, and answer-relevant information are correct.\n- structure_layout_fidelity (weight 0.30): Plot type, orientation, legend placement, series structure, and overall chart layout match the reference.\n- text_label_legibility_accuracy (weight 0.25): Legends, labels, headings, and textual chart content remain accurate and readable.\n- cleanliness_completeness (weight 0.15): The chart is unclipped, readable, and not missing major visible content.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+    }
+  ],
   "ChemVQA-2K": [
     {
       "type": "text",
@@ -51,32 +129,6 @@
       "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nRubric dataset: DocVQA\nScoring guidance: Judge text and structure first. Be strict, but stay fair on hard infographics: if the source itself is visually dense or difficult, do not over-penalize ambiguity that is already present in the reference.\n\nDataset-specific notes:\n- Visible text should be accurate and legible if the source is legible.\n- Layout should stay close to the reference, but exact decorative styling matters less than information and structure.\n- Visible layout drift should lower the layout score even when the text is exact.\n- Match background, text, and graphic colors to the reference; visible color mismatches should lower the key_visual_elements score.\n\nCategories:\nDataset: DocVQA\n- text_information_fidelity (weight 0.35): Visible text, numbers, and key document information remain accurate.\n- document_structure_layout (weight 0.30): Reading order, section placement, tables, blocks, and layout structure stay faithful.\n- legibility_noncrowding (weight 0.20): Content remains readable, not overly crowded, and reasonably well spaced.\n- key_visual_elements (weight 0.15): Important icons, tables, charts, callouts, or emphasis boxes remain present when they matter.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
     }
   ],
-  "ChartQA": [
-    {
-      "type": "text",
-      "text": "Reference image:"
-    },
-    {
-      "type": "image_url",
-      "image_url": {
-        "url": "IMAGE_DATA_URL"
-      }
-    },
-    {
-      "type": "text",
-      "text": "Candidate rendered image:"
-    },
-    {
-      "type": "image_url",
-      "image_url": {
-        "url": "IMAGE_DATA_URL"
-      }
-    },
-    {
-      "type": "text",
-      "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nRubric dataset: ChartQA\nScoring guidance: This is an easy chart recreation dataset. Be strict about preserving both the information and the chart structure. Wrong chart orientation, wrong chart type, crowded labels, illegible text, bad title placement, or legend overlap should all be penalized.\n\nDataset-specific notes:\n- Preserve recreation structure, not just semantic content.\n- If a horizontal chart becomes vertical, preserve some credit for correct data but do not award a perfect score.\n- Color scheme matters less than readable text, correct numbers, and faithful structure.\n\nCategories:\nDataset: ChartQA\n- numeric_information_fidelity (weight 0.30): Values, trends, ordering, and answer-relevant chart information are correct.\n- structure_layout_fidelity (weight 0.30): Chart type, orientation, title placement, legend placement, and overall chart structure match the reference.\n- text_label_legibility_accuracy (weight 0.25): Labels, numbers, headings, and text remain accurate, legible, and not crowded.\n- cleanliness_completeness (weight 0.15): The chart is unclipped, readable, and not missing major visible content.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
-    }
-  ],
   "EEE-Bench": [
     {
       "type": "text",
@@ -101,6 +153,292 @@
     {
       "type": "text",
       "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nDataset rubric revision: eee_background_v1\nRubric dataset: EEE-Bench\nScoring guidance: Focus on circuit topology, component identity, labels, values, signs, and current or voltage direction. Be lenient on stylistic drawing differences such as zig-zag versus curved resistor style when the component identity is still clearly correct. Background color is a separate fidelity requirement; don't ignore it.\n\nDataset-specific notes:\n- Wrong direction, sign, label, or connectivity matters more than cosmetic symbol style.\n- Component identity must be preserved even if the drawn shape style varies slightly.\n- Treat small labels and values as potentially important.\n- Compare the background across the canvas, margins, and any distinct panel regions. Preserve the reference hue, brightness, and tint; do not assume the background should be white.\n- For background_color_fidelity, award 5 only when no background color mismatch is visible. A visible white-versus-gray, cream, tinted, or dark background mismatch must score below 5, even if the circuit and labels are otherwise perfect. Ignore only imperceptible compression noise.\n\nCategories:\nDataset: EEE-Bench\n- circuit_topology_connectivity (weight 0.30): Wiring relationships, placement relationships, and the overall circuit topology are correct.\n- component_identity_symbols (weight 0.25): Resistors, capacitors, sources, and other component identities remain correct.\n- labels_values_directions (weight 0.25): Current directions, voltage labels, signs, and numeric values remain accurate.\n- readability_completeness (weight 0.10): The circuit is readable, uncluttered, and not missing major visible content.\n- background_color_fidelity (weight 0.10): The canvas and panel backgrounds match the reference hue, brightness, tint, and any visible regional variation.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+    }
+  ],
+  "GEOQA_8K_R1V": [
+    {
+      "type": "text",
+      "text": "Reference image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Candidate rendered image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nRubric dataset: GEOQA_8K_R1V\nScoring guidance: These are geometry-heavy figures. Be strict about structural precision, labels, markers, numbers, and whether each annotation clearly belongs to the right object.\n\nDataset-specific notes:\n- Slight label shifts are acceptable if the association is still unambiguous.\n- Ambiguous or wrong label association should be penalized strongly.\n- Precise geometry matters more than decorative drawing style.\n\nCategories:\nDataset: GEOQA_8K_R1V\n- geometric_structure_precision (weight 0.35): Shapes, relations, and the core geometric construction remain precise and faithful.\n- numbers_labels_markers (weight 0.30): Lengths, angles, labels, givens, and geometric markers remain accurate and readable.\n- association_placement_precision (weight 0.20): Annotations are placed clearly enough that their target edge, angle, or point is unambiguous.\n- readability_completeness (weight 0.15): The figure is legible, unclipped, and not missing major visible content.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+    }
+  ],
+  "Geoperception": [
+    {
+      "type": "text",
+      "text": "Reference image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Candidate rendered image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nRubric dataset: Geoperception\nScoring guidance: These are geometry-heavy figures. Be strict about structure, labels, markers, and whether annotations clearly belong to the correct object or angle.\n\nDataset-specific notes:\n- Small label shifts are acceptable only if the target remains unambiguous.\n- Wrong or ambiguous geometric association should be penalized strongly.\n- Precise relation fidelity matters more than decorative style.\n\nCategories:\nDataset: Geoperception\n- geometric_structure_precision (weight 0.35): Shapes, intersections, and the core geometric relations remain precise and faithful.\n- numbers_labels_markers (weight 0.30): Point labels, givens, numeric annotations, and geometric markers remain accurate and readable.\n- association_placement_precision (weight 0.20): Annotations are positioned clearly enough that their intended target is unambiguous.\n- readability_completeness (weight 0.15): The figure is legible, unclipped, and not missing major visible content.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+    }
+  ],
+  "geometry3k": [
+    {
+      "type": "text",
+      "text": "Reference image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Candidate rendered image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nRubric dataset: geometry3k\nScoring guidance: These are geometry problem diagrams. Be strict about shape, relation fidelity, markers, labels, and whether annotations clearly belong to the correct geometric object.\n\nDataset-specific notes:\n- Do not give high scores to diagrams that are only approximately correct.\n- Angle or length text can move slightly, but only if the association remains obvious.\n- Missing or ambiguous markers should be penalized strongly.\n\nCategories:\nDataset: geometry3k\n- geometric_structure_precision (weight 0.35): Shapes, relations, and the core geometric construction remain precise and faithful.\n- numbers_labels_markers (weight 0.30): Lengths, angles, point labels, and geometric markers remain accurate and readable.\n- association_placement_precision (weight 0.20): Annotations are placed clearly enough that their target edge, angle, or point is unambiguous.\n- readability_completeness (weight 0.15): The figure is legible, unclipped, and not missing major visible content.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+    }
+  ],
+  "Graph-Algorithms": [
+    {
+      "type": "text",
+      "text": "Reference image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Candidate rendered image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nRubric dataset: Graph-Algorithms\nScoring guidance: Be strict about graph topology, directions, ordering, and labels. These diagrams can be dense, so stay fair when the source itself is messy, but do not forgive wrong graph structure.\n\nDataset-specific notes:\n- Exact topology and direction semantics matter more than cosmetic layout differences.\n- Treat wrong ordering, weights, or labels as important errors.\n- If the source graph is itself very cluttered, avoid over-penalizing ambiguity that already exists in the reference.\n\nCategories:\nDataset: Graph-Algorithms\n- graph_structure_fidelity (weight 0.40): Nodes, edges, and overall graph topology remain correct.\n- ordering_direction_semantics (weight 0.25): Directions, ordering, and weights or edge semantics remain faithful.\n- label_number_precision (weight 0.20): Node ids, edge labels, and numeric annotations remain accurate and readable.\n- readability_completeness (weight 0.15): The graph remains readable and is not missing major visible content.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+    }
+  ],
+  "GraphVQA-Swift": [
+    {
+      "type": "text",
+      "text": "Reference image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Candidate rendered image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nRubric dataset: GraphVQA-Swift\nScoring guidance: Be strict about graph structure, label precision, and correct attribute-to-node or attribute-to-edge binding. Treat wrong label ordering or wrong attribute attachment as important errors.\n\nDataset-specific notes:\n- Topology and label precision matter more than cosmetic layout differences.\n- Attributes such as colors or other markers must remain attached to the correct graph elements.\n- If the source is visually messy, be fair about ambiguity already present in the reference.\n\nCategories:\nDataset: GraphVQA-Swift\n- graph_structure_fidelity (weight 0.35): Node-edge structure and the overall graph topology remain faithful.\n- label_number_precision (weight 0.30): Labels, counts, and numeric annotations remain accurate and attached to the correct elements.\n- attribute_mapping_fidelity (weight 0.20): Colors or other attributes remain attached to the correct nodes or edges.\n- readability_completeness (weight 0.15): The graph remains readable and is not missing major visible content.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+    }
+  ],
+  "matplotlib": [
+    {
+      "type": "text",
+      "text": "Reference image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Candidate rendered image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nRubric dataset: matplotlib\nScoring guidance: This is a coding-heavy recreation dataset with ground-truth code behind the reference. Be strict about layout, plot elements, ticks, annotations, and rendering fidelity. Unknown library-specific styling should not cause over-penalization when the core figure is otherwise correct.\n\nDataset-specific notes:\n- This dataset should generally score high only when the recreation is genuinely close.\n- Wrong layout or missing major plot elements are important errors.\n- Pure style misses from unknown libraries matter less than missing structure or annotations.\n\nCategories:\nDataset: matplotlib\n- layout_composition_fidelity (weight 0.30): Axes, subplot layout, framing, and composition match the reference.\n- plot_element_fidelity (weight 0.25): Lines, bars, markers, patches, and other major plotted elements are faithful.\n- text_ticks_annotations (weight 0.25): Titles, labels, tick text, legends, and annotations are present, accurate, and well placed.\n- style_rendering_fidelity (weight 0.20): Line styles, fonts, colors, and overall rendering feel resemble the reference.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+    }
+  ],
+  "OlympiadBench": [
+    {
+      "type": "text",
+      "text": "Reference image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Candidate rendered image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nRubric dataset: OlympiadBench\nScoring guidance: These figures are harder and often denser than basic geometry. Be strict about the problem-relevant structure, labels, givens, and symbols, but stay fair when the source itself is complex or visually noisy.\n\nDataset-specific notes:\n- Judge whether the recreated figure would support the same downstream reasoning problem.\n- Wrong core problem structure matters more than decorative style.\n- Because these are harder figures, do not over-penalize small cosmetic differences that do not change meaning.\n\nCategories:\nDataset: OlympiadBench\n- problem_structure_semantics (weight 0.35): The core problem diagram and its essential relations remain faithful.\n- labels_numbers_symbols (weight 0.25): Given values, labels, and symbols remain accurate and readable.\n- spatial_precision (weight 0.20): Placement and construction remain faithful enough for the same reasoning task.\n- readability_completeness (weight 0.20): The diagram remains readable, unclipped, and complete enough to use.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+    }
+  ],
+  "Physics": [
+    {
+      "type": "text",
+      "text": "Reference image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Candidate rendered image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nRubric dataset: Physics\nScoring guidance: Focus on physical setup, object placement, vectors, labels, and numerical givens. Wrong force direction or physically inconsistent placement should be penalized strongly.\n\nDataset-specific notes:\n- Check vector direction, labels, and scene consistency carefully.\n- The object should sit correctly in the depicted setup, for example on a slope rather than floating away from it.\n- Minor cosmetic style differences matter less than physical correctness.\n\nCategories:\nDataset: Physics\n- physical_setup_fidelity (weight 0.35): The overall scene and essential physical setup remain faithful.\n- vectors_labels_numbers (weight 0.30): Force arrows, directions, angles, labels, and values remain accurate and readable.\n- object_geometry_consistency (weight 0.20): Object placement and geometry remain physically consistent with the reference.\n- readability_completeness (weight 0.15): The diagram is readable, unclipped, and not missing major visible content.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+    }
+  ],
+  "spatialvlm_qa": [
+    {
+      "type": "text",
+      "text": "Reference image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Candidate rendered image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nRubric dataset: spatialvlm_qa\nScoring guidance: This is a hard 3D spatial reconstruction dataset. Judge object identity, spatial relations, depth, and scene completion carefully. Stay fair on difficulty, but do not ignore wrong core spatial relations.\n\nDataset-specific notes:\n- Correct objects but a flattened 2D recreation should land around the low-to-mid range rather than score highly.\n- Wrong core spatial relation such as front versus behind is a major error.\n- Depth, volume, and 3D cues matter more here than on flat diagram datasets.\n\nCategories:\nDataset: spatialvlm_qa\n- object_shape_identity_fidelity (weight 0.25): The right objects, basic shapes, and counts are present.\n- spatial_relation_correctness (weight 0.35): Relative positions such as left or right, above or below, and front or behind are correct.\n- three_d_depth_rendering (weight 0.25): Depth, volume, shadows, and 3D reconstruction cues are preserved.\n- color_scene_completeness (weight 0.15): The scene remains reasonably complete, with major colors and scene elements preserved.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+    }
+  ],
+  "ChemVQA-2K-spacing-v1": [
+    {
+      "type": "text",
+      "text": "Reference image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Candidate rendered image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v5_whitespace_diagnostic\nRubric dataset: ChemVQA-2K-spacing-v1\nScoring guidance: Focus on chemistry semantics: molecular structure, chemical symbols, bond lines, and important colored difference markers. Missing a non-core red difference marker should hurt moderately, not collapse the score. Correct chemistry alone is insufficient for 5: local label and bond clearance must also match the reference.\n\nDataset-specific notes:\n- Atom symbols such as O, OH, Cl, charges, and bond identities are critical.\n- Preserve important colored markers or difference lines when they are semantically meaningful.\n- Small orientation changes matter less than structure and symbol correctness.\n- Inspect the tightest atom-symbol/bond junction, atom-index placement, and charge/subscript group. In the readability rationale, name the tightest location and compare its clearance with the reference.\n- New crowding includes bonds touching or crossing glyphs, indices touching bonds or atom symbols, and charges/subscripts merging with neighboring labels. Penalize added crowding even if the chemistry is inferable.\n- Readability anchors: 5 = no added crowding; 4.5-4.9 = slightly reduced but clear separation; at most 4 = clear new crowding or contact; at most 3 = overlap obscures a symbol, charge, index, or bond order.\n- Do not penalize density already present in the reference, harmless font/scale changes, or intended bond junctions. Lower symbol or bond scores too only when their own accuracy or legibility is affected.\n- Any reported spacing defect must lower readability below 5. Clear new crowding caps the final score at 4.5; obscuring overlap caps it at 4.0. Any category below 5 prevents a rounded perfect score.\n\nCategories:\nDataset: ChemVQA-2K-spacing-v1\n- molecular_structure_fidelity (weight 0.40): Connectivity, overall structure, and core arrangement of the molecule are correct.\n- chemical_symbol_accuracy (weight 0.30): Atom labels, charges, and bond notation remain accurate and readable.\n- bond_line_marker_fidelity (weight 0.20): Bond lines, highlighting, color-coded difference markers, and related visual indicators are preserved.\n- readability_completeness (weight 0.10): The structure is complete and unclipped; atom symbols, indices, charges, subscripts, and adjacent bonds retain clear separation relative to the reference.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+    }
+  ],
+  "generic": [
+    {
+      "type": "text",
+      "text": "Reference image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Candidate rendered image:"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "IMAGE_DATA_URL"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Evaluate the candidate recreation against the reference image using this rubric.\n\nRubric version: generic_recreation_rubric_v1_equal_weight\nRubric dataset: generic\nSource dataset name, if known: generic\n\nCategories:\nRubric: generic image recreation baseline\n- core_information_fidelity (weight 0.25): Preserves important visible information, values, objects, relations, or semantics.\n- structure_layout_fidelity (weight 0.25): Preserves overall layout, geometry, chart or diagram structure, document structure, and spatial arrangement.\n- text_annotation_accuracy (weight 0.25): Preserves readable labels, numbers, symbols, legends, annotations, and text.\n- visual_completeness_cleanliness (weight 0.25): The output is complete, unclipped, readable, nonblank, and visually clean.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Use the same four generic categories for every dataset.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
     }
   ]
 }

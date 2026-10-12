@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from PIL import Image, ImageDraw
 
-from resources_servers.vision2code import rubrics
+from resources_servers.vision2code import evaluation, generic_rubric, rubrics
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -15,23 +16,34 @@ CASES = json.loads((FIXTURES / "golden.json").read_text())
 
 @pytest.mark.parametrize("case", CASES, ids=[f"{c['dataset']}-{i}" for i, c in enumerate(CASES)])
 def test_upstream_golden(case):
-    actual = rubrics.aggregate_rating_v2(
+    actual = evaluation.aggregate_rating(
         case["parsed"], dataset_name=case["dataset"], candidate_inspection=case["inspection"]
     )
     assert {key: actual[key] for key in case["expected"]} == case["expected"]
 
 
 def test_definitions_and_system_prompt():
-    assert rubrics.DATASET_RUBRICS == json.loads((FIXTURES / "definitions.json").read_text())
+    definitions = json.loads((FIXTURES / "definitions.json").read_text())
+    assert {**rubrics.DATASET_RUBRICS, "generic": generic_rubric.GENERIC_RUBRIC} == definitions
     assert rubrics.RATER_SYSTEM_PROMPT == (FIXTURES / "system-prompt.txt").read_text()
-    assert set(rubrics.DATASET_RUBRICS) == {"ChemVQA-2K", "DocVQA", "ChartQA", "EEE-Bench"}
+    assert set(definitions) == set(get_args(evaluation.RubricName))
+    assert len(definitions) == 17
+    assert generic_rubric.GENERIC_RATER_SYSTEM_PROMPT == (FIXTURES / "generic-system-prompt.txt").read_text()
+
+
+@pytest.mark.parametrize("name", get_args(evaluation.RubricName))
+def test_failure_matches_upstream(name):
+    expected = json.loads((FIXTURES / "failure-golden.json").read_text())[name]
+    assert evaluation.build_render_failure_rating("code_error", dataset_name=name) == expected
 
 
 def test_user_prompts(tmp_path):
     path = tmp_path / "ref.png"
     Image.new("RGB", (40, 40), "white").save(path)
     for name, expected in json.loads((FIXTURES / "user-prompts.json").read_text()).items():
-        actual = rubrics.build_rater_user_content(source_image_path=path, rendered_image_path=path, dataset_name=name)
+        actual = evaluation.build_rater_user_content(
+            source_image_path=path, rendered_image_path=path, dataset_name=name
+        )
         for part in actual:
             if part["type"] == "image_url":
                 assert part["image_url"]["url"].startswith("data:image/png;base64,")
@@ -69,15 +81,16 @@ def test_sparse_is_diagnostic_and_blank_is_capped(tmp_path):
         )
 
 
+@pytest.mark.parametrize("name", get_args(evaluation.RubricName))
 @pytest.mark.parametrize("score", [True, "NaN", "Infinity", -1, 5.1, None])
-def test_invalid_scores(score):
-    name = "ChartQA"
+def test_invalid_scores(name, score):
+    definition = generic_rubric.GENERIC_RUBRIC if name == "generic" else rubrics.DATASET_RUBRICS[name]
     parsed = {
-        "category_scores": {c["id"]: score for c in rubrics.DATASET_RUBRICS[name]["categories"]},
+        "category_scores": {c["id"]: score for c in definition["categories"]},
         "rationales": {},
     }
     with pytest.raises(ValueError):
-        rubrics.aggregate_rating_v2(parsed, dataset_name=name)
+        evaluation.aggregate_rating(parsed, dataset_name=name, candidate_inspection={})
 
 
 @pytest.mark.parametrize("wrapper", ["{}", "```json\n{}\n```", "<think>reasoning</think>{}", "Here is the result: {}"])

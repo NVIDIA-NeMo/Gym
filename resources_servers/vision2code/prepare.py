@@ -7,11 +7,11 @@ import base64
 import hashlib
 import json
 from pathlib import Path
-from typing import Literal
 
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
+from resources_servers.vision2code.evaluation import RubricName
 from resources_servers.vision2code.prompts import SYSTEM_PROMPT, USER_PROMPT
 
 
@@ -19,7 +19,7 @@ class Reference(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
     image_path: str
-    rubric: Literal["ChemVQA-2K", "DocVQA", "ChartQA", "EEE-Bench"]
+    rubric: RubricName
     width: int = Field(gt=0)
     height: int = Field(gt=0)
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")

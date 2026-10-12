@@ -6,8 +6,8 @@ vision2code:
       entrypoint: app.py
       domain: coding
       verified: false
-      description: Single-turn image recreation with isolated Python rendering and dataset rubric rewards
-      value: Evaluate visual reconstruction for ChemVQA-2K, DocVQA, ChartQA, and EEE-Bench
+      description: Single-turn image recreation with isolated Python rendering and dataset or generic rubric rewards
+      value: Evaluate charts, chemistry, documents, circuits, geometry, graphs, physics, and spatial scenes with 17 rubrics
       judge_model_server:
         type: responses_api_models
         name: judge_model

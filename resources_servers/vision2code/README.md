@@ -1,6 +1,6 @@
 # Vision2Code
 
-A single-turn Gym environment for **ChemVQA-2K, DocVQA, ChartQA, and EEE-Bench**:
+A single-turn Gym environment supporting **all 16 upstream dataset rubrics and the generic rubric**:
 reference image → `simple_agent` Python submission → fresh Enroot render → vision rubric judge → reward.
 It produces rollouts and rewards. RL trainer configuration is separate.
 
@@ -13,7 +13,7 @@ upstream package. Gym owns model calls, orchestration, sandboxing, and artifacts
 exact hashes, and local rubric modifications. The base upstream commit alone
 does not reproduce the modified EEE background and whitespace scoring behavior.
 
-This is a configurable environment using four Vision2Code rubrics, not a claim
+This is a configurable environment using Vision2Code rubrics, not a claim
 to reproduce the complete upstream benchmark or its published results. Input
 datasets retain their own licenses; the Apache-2.0 code license does not grant
 rights to redistribute reference images. The committed example is synthetic.
@@ -32,10 +32,32 @@ Run commands from the Gym repository root, using Gym's Python environment with
 {"id":"doc-001","image_path":"images/doc-001.png","rubric":"DocVQA"}
 {"id":"chart-001","image_path":"images/chart-001.png","rubric":"ChartQA"}
 {"id":"eee-001","image_path":"images/eee-001.png","rubric":"EEE-Bench"}
+{"id":"geometry-001","image_path":"images/triangle.png","rubric":"geometry3k"}
+{"id":"graph-001","image_path":"images/graph.png","rubric":"Graph-Algorithms"}
+{"id":"other-001","image_path":"images/other.png","rubric":"generic"}
 ```
 
-Relative image paths resolve against the manifest directory. Use the exact rubric
-names shown above; no aliases or other datasets are accepted.
+Relative image paths resolve against the manifest directory. Choose an exact rubric
+name for each image; the filename does not select the rubric.
+
+| Image category | Accepted `rubric` values |
+| --- | --- |
+| Charts and plots | `ChartQA`, `dvqa`, `figureqa`, `matplotlib` |
+| Chemistry | `ChemVQA-2K`, `ChemVQA-2K-spacing-v1` |
+| Documents | `DocVQA` |
+| Electrical/electronics diagrams | `EEE-Bench` |
+| Geometry | `geometry3k`, `GEOQA_8K_R1V`, `Geoperception` |
+| Graphs | `Graph-Algorithms`, `GraphVQA-Swift` |
+| Olympiad/problem diagrams | `OlympiadBench` |
+| Physics | `Physics` |
+| Spatial/3D scenes | `spatialvlm_qa` |
+| General image recreation | `generic` |
+
+The spacing variant adds the upstream chemistry legibility and spacing criteria.
+`generic` uses the upstream general-purpose prompt and four equally weighted
+categories: information, layout, text/annotations, and visual completeness.
+Strict-category geometry/graph modes and the custom strict-ceiling mode are excluded.
+Unknown names are rejected during preparation. Existing four-rubric task files remain valid.
 
 ```bash
 python -m resources_servers.vision2code.prepare /data/manifest.jsonl /data/tasks.jsonl
@@ -151,11 +173,14 @@ evaluation should cover each rubric with independently selected policy and judge
 the normal Gym fields. Reward is `final_rating_0_to_5 / 5.0`; the upstream category
 weights, decimal rounding, critical-category caps, EEE background treatment, and
 blank-image inspection are preserved. Sparse whitespace is diagnostic only.
+Generic scoring preserves upstream behavior: an equal-weight mean, with no
+critical-category or automatic blank-image caps. Image inspection is still
+recorded; failed renders receive zero under every rubric.
 
 | Outcome | Reward | Masked | Judge called |
 | --- | --- | --- | --- |
 | Valid PNG | rubric rating / 5 | no | yes |
-| Valid blank PNG | existing rubric blank cap applies | no | yes |
+| Valid blank PNG | dataset blank cap applies; generic uses judge scores | no | yes |
 | Code error, timeout, missing/invalid PNG | 0 | no | no |
 | Sandbox/transfer/isolation failure | 0 placeholder | yes | no |
 | Judge transport or malformed/invalid score | 0 placeholder | yes | attempted |
@@ -202,13 +227,13 @@ pre-commit run --files $(git ls-files --cached --others --exclude-standard resou
 ```
 
 The committed golden fixtures were produced from the existing upstream checkout,
-not from the port, and require no external repository. They cover all four rubric
+not from the port, and require no external repository. They cover all 17 rubric
 definitions and prompts, scores/rounding/caps, sparse/blank handling, and invalid
 scores. Tests also cover preparation, Gym image schemas, failure masking,
 concurrency, transfers, limits, dimensions, and cancellation during startup and exec.
 
 The exported verifier fixture exercises production rubric aggregation and reward
-normalization for full, zero, and malformed scores across all four rubrics. It
+normalization for full, zero, and malformed scores across all 17 rubrics (51 cases). It
 does not attest live judge quality or sandbox behavior; those have separate server,
 Enroot, and model rollout checks. The current legacy CI data validator still asks
 for five example rollouts even for manifest workloads; this environment follows

@@ -20,16 +20,15 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from resources_servers.vision2code.prepare import Reference, read_reference
-from resources_servers.vision2code.render import RenderResult, render
-from resources_servers.vision2code.rubrics import (
-    RATER_SYSTEM_PROMPT,
-    aggregate_rating_v2,
+from resources_servers.vision2code.evaluation import (
+    aggregate_rating,
     build_rater_user_content,
     build_render_failure_rating,
-    inspect_candidate_image,
-    parse_json_object,
+    system_prompt,
 )
+from resources_servers.vision2code.prepare import Reference, read_reference
+from resources_servers.vision2code.render import RenderResult, render
+from resources_servers.vision2code.rubrics import inspect_candidate_image, parse_json_object
 from resources_servers.vision2code.tests.verifier_fixture import VERIFIER_FIXTURE as VERIFIER_FIXTURE
 
 
@@ -182,7 +181,7 @@ class Vision2CodeServer(SimpleResourcesServer):
             params = self.config.judge_responses_create_params.model_dump(exclude_none=True)
             params.update(
                 input=[
-                    {"role": "system", "content": RATER_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt(dataset_name=ref.rubric)},
                     {"role": "user", "content": response_content},
                 ],
                 tools=[],
@@ -202,7 +201,7 @@ class Vision2CodeServer(SimpleResourcesServer):
             result.judge_diagnostics = {"response": judge.model_dump(mode="json"), "candidate_inspection": inspection}
             stage = "judge_parse"
             parsed = parse_json_object(response_text(judge))
-            result.rubric_result = aggregate_rating_v2(
+            result.rubric_result = aggregate_rating(
                 parsed,
                 dataset_name=ref.rubric,
                 candidate_inspection=inspection,

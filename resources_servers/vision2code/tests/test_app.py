@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+from typing import get_args
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -14,6 +15,8 @@ from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from resources_servers.vision2code import app
+from resources_servers.vision2code.evaluation import RubricName, system_prompt
+from resources_servers.vision2code.generic_rubric import GENERIC_RUBRIC, GENERIC_RUBRIC_VERSION
 from resources_servers.vision2code.render import RenderResult
 from resources_servers.vision2code.rubrics import DATASET_RUBRICS
 
@@ -86,15 +89,14 @@ def setup(tmp_path, monkeypatch):
 
 
 def judge_result(name, score=4):
+    definition = GENERIC_RUBRIC if name == "generic" else DATASET_RUBRICS[name]
     return response(
-        json.dumps(
-            {"category_scores": {c["id"]: score for c in DATASET_RUBRICS[name]["categories"]}, "rationales": {}}
-        )
+        json.dumps({"category_scores": {c["id"]: score for c in definition["categories"]}, "rationales": {}})
     )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", list(DATASET_RUBRICS))
+@pytest.mark.parametrize("name", get_args(RubricName))
 async def test_same_environment_all_rubrics(setup, name):
     server, body, renderer, judge = setup
     body.verifier_metadata.rubric = name
@@ -109,6 +111,10 @@ async def test_same_environment_all_rubrics(setup, name):
     request = kwargs["json"].model_dump()
     assert request["temperature"] == 0
     assert request["tools"] == []
+    assert request["input"][0]["content"] == system_prompt(dataset_name=name)
+    if name == "generic":
+        assert result.rubric_result["rubric_version"] == GENERIC_RUBRIC_VERSION
+        assert result.rubric_result["applied_caps"] == []
     assert sum(c["type"] == "input_image" for c in request["input"][1]["content"]) == 2
     assert name in request["input"][1]["content"][-1]["text"]
     assert "print('policy code')" == renderer.call_args.kwargs["code"]
@@ -117,14 +123,17 @@ async def test_same_environment_all_rubrics(setup, name):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", get_args(RubricName))
 @pytest.mark.parametrize("status", ["code_error", "timeout", "missing_output", "invalid_output"])
-async def test_policy_failure_is_unmasked_zero(setup, status):
+async def test_policy_failure_is_unmasked_zero(setup, status, name):
     server, body, renderer, judge = setup
+    body.verifier_metadata.rubric = name
     renderer.side_effect = None
     renderer.return_value = RenderResult(status=status)
     result = await server.verify(body)
     assert result.reward == 0 and not result.mask_sample
     assert result.rubric_result["final_rating_0_to_5"] == 0
+    assert result.rubric_result["rubric_dataset"] == name
     judge.assert_not_awaited()
 
 
