@@ -81,7 +81,7 @@ class TestTaskConfig:
         config = HarborTaskConfig.model_validate(
             {
                 "version": "1.2",
-                "environment": {"image": "img:2", "memory": "2G", "storage": "512M", "allow_internet": False},
+                "environment": {"docker_image": "img:2", "memory": "2G", "storage": "512M", "allow_internet": False},
             }
         )
         assert config.schema_version == "1.2"
@@ -115,11 +115,12 @@ class TestTaskConfig:
             "verifier": {"environment": {"docker_image": "v", "nope": 1}},
         }
         config = HarborTaskConfig.model_validate(data)
-        assert config.environment.docker_image == "img"
+        assert config.environment.docker_image is None
         assert "dockerfile" not in config.environment.model_dump()
         assert HarborTaskConfig.unknown_keys(data) == [
             "allowlist",
             "environment.dockerfile",
+            "environment.image",
             "environment.mcp_servers[0].extra",
             "environment.healthcheck.retries_sec",
             "verifier.environment.nope",
@@ -602,3 +603,335 @@ class TestCli:
         assert "single_agent_turn/configs/single_agent_turn.yaml" in config_paths
         assert "opensandbox/configs/opensandbox.yaml" in config_paths
         assert f"+output_jsonl_fpath={tmp_path / 'out' / 'rollouts.jsonl'}" in tokens
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "ENV PATH=/opt/bin:$PATH",
+        "ENV ROOT=/app\nWORKDIR $ROOT",
+        "USER $RUNNER",
+        "WORKDIR /app\nWORKDIR child",
+        'ENV A "x y"',
+        "ENV A=ok broken",
+        'ENV A="unterminated',
+        'WORKDIR "/quoted"',
+        "USER",
+        "ENV",
+        "ENV A=foo\\ bar",
+        "ENV A=<<EOF\nx\nEOF",
+    ],
+)
+def test_dockerfile_shortcut_refuses_uninterpreted_syntax(suffix):
+    assert base_image_only(f"FROM ubuntu\n{suffix}\n") is None
+
+
+def test_prebuilt_image_ignores_all_dockerfile_settings(tmp_path):
+    toml = HELLO_TOML.replace("cpus = 1", 'docker_image = "prebuilt:1"\ncpus = 1')
+    task = load_task(write_task(tmp_path / "t", toml=toml, dockerfile="FROM other\nENV A=1\nWORKDIR /x\nUSER ghost"))
+    assert (task.image, task.workdir, task.env, task.user) == ("prebuilt:1", None, {}, None)
+
+
+@pytest.mark.parametrize("failure", ["encoding", "escape", "io"])
+def test_discovery_keeps_file_errors_inside_task_boundary(tmp_path, monkeypatch, failure):
+    write_task(tmp_path / "ds" / "good")
+    bad = write_task(tmp_path / "ds" / "bad")
+    if failure == "encoding":
+        (bad / "environment" / "Dockerfile").write_bytes(b"\xff")
+    elif failure == "escape":
+        marker = tmp_path / "marker"
+        marker.write_text("private marker")
+        (bad / "tests" / "leak").symlink_to(marker)
+    else:
+        original = Path.open
+
+        def fail_open(path, *args, **kwargs):
+            if path == bad / "tests" / "test.sh":
+                raise PermissionError("test read denied")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", fail_open)
+    skipped = {}
+    assert [task.task_id for task in discover_tasks(tmp_path / "ds", skipped=skipped)] == ["good"]
+    assert list(skipped) == ["bad"]
+    assert isinstance(skipped["bad"], HarborTaskError)
+
+
+@pytest.mark.parametrize("section", ["environment", "agent", "verifier", "verifier.environment"])
+@pytest.mark.parametrize(
+    "policy", ['network_mode = "no-network"', 'network_mode = "allowlist"', 'allowed_hosts = ["example.org"]']
+)
+def test_loader_rejects_unenforced_network_policies(tmp_path, section, policy):
+    with pytest.raises(HarborTaskError, match="network.*not supported"):
+        load_task(write_task(tmp_path / "t", toml=f"[{section}]\n{policy}\n"))
+
+
+@pytest.mark.parametrize(
+    "toml",
+    [
+        "[environment]\nallow_internet = false",
+        '[environment]\nos = "Windows"',
+        '[environment.tpu]\ntype = "v6e"\ntopology = "1x1"',
+    ],
+)
+def test_loader_rejects_unsupported_execution_requirements(tmp_path, toml):
+    with pytest.raises(HarborTaskError, match="not supported"):
+        load_task(write_task(tmp_path / "t", toml=toml))
+
+
+def test_schema_matches_harbor_legacy_and_resource_fields(tmp_path):
+    config = HarborTaskConfig.model_validate(
+        {"environment": {"memory": 4096, "storage": 2048, "cpus": 0, "os": "Linux", "image": "stale"}}
+    )
+    assert config.environment.memory_mb is None and config.environment.storage_mb is None
+    assert config.environment.cpus == 0 and config.environment.os == "linux"
+    assert config.environment.docker_image is None
+    task = load_task(write_task(tmp_path / "t", toml='[environment]\nimage = "stale"'))
+    assert task.image == "ubuntu:24.04"
+
+
+@pytest.fixture
+def registry_repo(tmp_path):
+    repo = tmp_path / "repo"
+    write_task(repo / "tasks" / "a")
+    write_task(repo / "tasks" / "b")
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    commit_repo(repo)
+    return repo
+
+
+def commit_repo(repo: Path) -> str:
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "fixture"], check=True
+    )
+    return subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
+
+def registry_dataset(repo: Path, *, name: str = "a", path: str = "tasks/a") -> RegistryDataset:
+    return RegistryDataset("ds", "1.0", "", (RegistryTask(name, repo.as_uri(), "HEAD", path),))
+
+
+@pytest.mark.parametrize("name", ["../../escaped", "/absolute", ".", "..", "a/b", "a\\b", "manifest.toml"])
+def test_fetch_rejects_unsafe_destination_names(tmp_path, name):
+    with pytest.raises(HubError, match="Unsafe"):
+        fetch_dataset(registry_dataset(tmp_path / "unused", name=name), tmp_path / "datasets")
+    assert not (tmp_path / "escaped").exists()
+
+
+@pytest.mark.parametrize("path", ["../outside", "/absolute", "tasks/../../outside", "--skip-checks"])
+def test_fetch_rejects_unsafe_source_paths(tmp_path, path):
+    with pytest.raises(HubError, match="Unsafe"):
+        fetch_dataset(registry_dataset(tmp_path / "unused", path=path), tmp_path / "datasets")
+
+
+@pytest.mark.parametrize("link_kind", ["absolute", "relative_escape", "source_root", "directory"])
+def test_fetch_rejects_source_symlinks_before_copying(tmp_path, registry_repo, monkeypatch, link_kind):
+    marker = tmp_path / "marker"
+    marker.write_text("private marker")
+    task = registry_repo / "tasks" / "a"
+    source_path = "tasks/a"
+    if link_kind == "source_root":
+        (registry_repo / "alias").symlink_to("tasks/a", target_is_directory=True)
+        source_path = "alias"
+    elif link_kind == "relative_escape":
+        (registry_repo / "private").write_text("private marker")
+        (task / "tests" / "leak").symlink_to("../../../private")
+    elif link_kind == "directory":
+        (tmp_path / "private-dir").mkdir()
+        (tmp_path / "private-dir" / "marker").write_text("private marker")
+        (task / "tests" / "leak").symlink_to(tmp_path / "private-dir", target_is_directory=True)
+    else:
+        (task / "tests" / "leak").symlink_to(marker)
+    commit_repo(registry_repo)
+    copied = []
+    original = hub_module.shutil.copytree
+
+    def record_copy(*args, **kwargs):
+        copied.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(hub_module.shutil, "copytree", record_copy)
+    with pytest.raises(HubError, match="symlink"):
+        fetch_dataset(registry_dataset(registry_repo, path=source_path), tmp_path / "datasets")
+    assert copied == []
+    assert marker.read_text() == "private marker"
+
+
+def test_fetch_preserves_internal_relative_symlinks(tmp_path, registry_repo):
+    (registry_repo / "tasks" / "a" / "tests" / "link").symlink_to("test.sh")
+    commit_repo(registry_repo)
+    folder = fetch_dataset(registry_dataset(registry_repo), tmp_path / "datasets")
+    assert (folder / "a" / "tests" / "link").is_symlink()
+    assert (folder / "a" / "tests" / "link").read_bytes() == (folder / "a" / "tests" / "test.sh").read_bytes()
+
+
+@pytest.mark.parametrize("location", ["dataset", "task", "manifest"])
+def test_fetch_refuses_symlinked_destination(tmp_path, registry_repo, location):
+    root = tmp_path / "datasets"
+    root.mkdir()
+    outside = write_task(tmp_path / "outside")
+    folder = root / "ds-1.0"
+    if location == "dataset":
+        folder.symlink_to(outside, target_is_directory=True)
+    else:
+        folder.mkdir()
+        if location == "task":
+            (folder / "a").symlink_to(outside, target_is_directory=True)
+        else:
+            (folder / "manifest.toml").symlink_to(outside / "task.toml")
+    before = (outside / "task.toml").read_bytes()
+    with pytest.raises(HubError):
+        fetch_dataset(registry_dataset(registry_repo), root)
+    assert (outside / "task.toml").read_bytes() == before
+    assert not (outside / "a").exists()
+
+
+def test_interrupted_fetch_preserves_pins_when_head_moves(tmp_path, registry_repo, monkeypatch):
+    old_head = subprocess.check_output(["git", "-C", str(registry_repo), "rev-parse", "HEAD"], text=True).strip()
+    dataset = RegistryDataset(
+        "ds",
+        "1.0",
+        "",
+        tuple(RegistryTask(name, registry_repo.as_uri(), "HEAD", f"tasks/{name}") for name in ("a", "b")),
+    )
+    original = hub_module.shutil.copytree
+
+    def interrupt_second(source, *args, **kwargs):
+        if source.name == "b":
+            raise OSError("interrupted download")
+        return original(source, *args, **kwargs)
+
+    monkeypatch.setattr(hub_module.shutil, "copytree", interrupt_second)
+    with pytest.raises(OSError, match="interrupted"):
+        fetch_dataset(dataset, tmp_path / "datasets")
+    monkeypatch.setattr(hub_module.shutil, "copytree", original)
+    for name in ("a", "b"):
+        (registry_repo / "tasks" / name / "instruction.md").write_text("new contents")
+    new_head = commit_repo(registry_repo)
+    folder = fetch_dataset(dataset, tmp_path / "datasets")
+    pins = tomllib.loads((folder / "manifest.toml").read_text())["tasks"]
+    assert pins["a"]["git_commit_id"] == old_head
+    assert pins["b"]["git_commit_id"] == new_head
+    assert (folder / "a" / "instruction.md").read_text().startswith("Create a file")
+    assert (folder / "b" / "instruction.md").read_text() == "new contents"
+
+
+def test_existing_unpinned_task_is_never_relabeled(tmp_path, registry_repo):
+    existing = write_task(tmp_path / "datasets" / "ds-1.0" / "a")
+    (existing / "instruction.md").write_text("local contents")
+    with pytest.raises(HubError, match="pin"):
+        fetch_dataset(registry_dataset(registry_repo), tmp_path / "datasets")
+    assert (existing / "instruction.md").read_text() == "local contents"
+    assert not (existing.parent / "manifest.toml").exists()
+
+
+def test_registry_versions_keep_distinct_rows_routes_and_outputs(tmp_path, monkeypatch):
+    import nemo_gym.tasks.harbor.cli as harbor_cli
+
+    for version in ("1.0", "2.0"):
+        write_task(tmp_path / f"ds-{version}" / "a")
+    monkeypatch.setattr(harbor_cli, "fetch_ref", lambda target, **kw: tmp_path / f"ds-{target.split('@')[1]}")
+    first = prepare_target("harbor:ds@1.0", output_root=tmp_path / "out")
+    first_rows = first.rows_path.read_bytes()
+    second = prepare_target("harbor:ds@2.0", output_root=tmp_path / "out")
+    assert first.rows_path != second.rows_path and first.taskset != second.taskset
+    assert first.rows_path.read_bytes() == first_rows
+    agent = resolve_agent("hermes")
+    configs = [build_run(prepared, agent, sandbox=None, overrides=[]) for prepared in (first, second)]
+    assert configs[0][0] != configs[1][0]
+    for prepared, (path, tokens) in zip((first, second), configs):
+        assert json.loads(prepared.rows_path.read_text())["task_id"]["taskset"] == prepared.taskset
+        assert list(yaml.safe_load(path.read_text())["environment_server_routes"]) == [prepared.taskset]
+        assert f"+output_jsonl_fpath={prepared.output_dir / 'rollouts.jsonl'}" in tokens
+
+
+def test_config_overlays_win_after_real_loading_and_inheritance(tmp_path):
+    from omegaconf import OmegaConf
+
+    from nemo_gym.cli.main import _merge_config_paths
+    from nemo_gym.global_config import GlobalConfigDictParser
+
+    task = write_task(tmp_path / "ds" / "a")
+    prepared = prepare_target(str(task.parent), output_root=tmp_path / "out")
+    overlay = tmp_path / "overlay.yaml"
+    overlay.write_text(
+        "hermes_agent:\n  responses_api_agents:\n    hermes_agent:\n      max_turns: 71\nsingle_agent_turn:\n  environment_servers:\n    single_agent_turn:\n      default_episode_timeout_seconds: 1234\n"
+    )
+    _, tokens = build_run(prepared, resolve_agent("hermes"), sandbox=None, overrides=[f"+config_paths=[{overlay}]"])
+    paths_token = next(t for t in _merge_config_paths(tokens) if t.startswith("+config_paths="))
+    paths = paths_token[len("+config_paths=[") : -1].split(",")
+    parser = GlobalConfigDictParser()
+    _, configs = parser.load_extra_config_paths(paths)
+    config = OmegaConf.merge(*configs)
+    parser._recursively_swap_keys(config)
+    assert config.harbor_ds_agent.responses_api_agents.hermes_agent.max_turns == 71
+    assert config.harbor_ds_environment.environment_servers.single_agent_turn.default_episode_timeout_seconds == 1234
+
+
+@pytest.mark.parametrize("skip", [False, True])
+def test_partial_eval_requires_explicit_opt_in_and_records_reasons(tmp_path, monkeypatch, skip):
+    import sys
+
+    import nemo_gym.cli.main as main_module
+
+    write_task(tmp_path / "ds" / "good")
+    write_task(tmp_path / "ds" / "bad", toml="bad toml")
+    monkeypatch.chdir(tmp_path)
+    dispatched = []
+    monkeypatch.setattr(main_module, "dispatch", lambda *args: dispatched.append(args))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gym", "eval", "run", str(tmp_path / "ds"), "--agent", "hermes", *(["--skip-unloadable"] if skip else [])],
+    )
+    if skip:
+        main_module.main()
+        assert len(dispatched) == 1
+    else:
+        with pytest.raises(SystemExit) as exc:
+            main_module.main()
+        assert exc.value.code != 0
+        assert not dispatched
+    skipped = json.loads((tmp_path / "results" / "harbor" / "ds" / "skipped.json").read_text())
+    assert list(skipped) == ["bad"] and "task.toml" in skipped["bad"]
+
+
+def test_manifest_publication_failure_keeps_previous_pins(tmp_path, registry_repo, monkeypatch):
+    folder = fetch_dataset(registry_dataset(registry_repo), tmp_path / "datasets")
+    before = (folder / "manifest.toml").read_bytes()
+    dataset = RegistryDataset(
+        "ds",
+        "1.0",
+        "",
+        tuple(RegistryTask(name, registry_repo.as_uri(), "HEAD", f"tasks/{name}") for name in ("a", "b")),
+    )
+    original = Path.replace
+
+    def fail_publication(path, target):
+        if Path(target) == folder / "manifest.toml":
+            raise OSError("interrupted manifest publication")
+        return original(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_publication)
+    with pytest.raises(OSError, match="interrupted manifest"):
+        fetch_dataset(dataset, tmp_path / "datasets")
+    assert (folder / "manifest.toml").read_bytes() == before
+    assert (folder / "b" / "task.toml").is_file()
+    assert not list(folder.glob(".manifest-*"))
+    monkeypatch.setattr(Path, "replace", original)
+    (registry_repo / "tasks" / "b" / "instruction.md").write_text("new contents")
+    commit_repo(registry_repo)
+    with pytest.raises(HubError, match="no trustworthy source pin"):
+        fetch_dataset(dataset, tmp_path / "datasets")
+    assert (folder / "manifest.toml").read_bytes() == before
+    assert (folder / "b" / "instruction.md").read_text().startswith("Create a file")
+
+
+def test_all_unloadable_tasks_still_record_reasons(tmp_path):
+    write_task(tmp_path / "ds" / "bad", toml="bad toml")
+    with pytest.raises(HarborTaskError, match="No task under"):
+        prepare_target(str(tmp_path / "ds"), output_root=tmp_path / "out")
+    skipped = json.loads((tmp_path / "out" / "ds" / "skipped.json").read_text())
+    assert list(skipped) == ["bad"]
+    assert "task.toml" in skipped["bad"]

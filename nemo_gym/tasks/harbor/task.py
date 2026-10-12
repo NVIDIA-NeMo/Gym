@@ -30,8 +30,9 @@ class HarborTask:
     ``task_id`` is the folder name: ``[task].name`` is an ``org/name`` label that is
     not unique across a dataset. ``image`` is the prebuilt image when the task
     declares one, else the base image of a base-image-only Dockerfile, else ``None``
-    (a build is required). ``workdir``, ``env`` and ``user`` merge ``task.toml``
-    with what the Dockerfile recorded; ``task.toml`` wins.
+    (a build is required). Without a prebuilt image, ``workdir``, ``env`` and ``user``
+    merge ``task.toml`` with what the Dockerfile recorded; ``task.toml`` wins.
+    With a prebuilt image, the Dockerfile contributes no settings.
     """
 
     path: Path
@@ -68,8 +69,21 @@ def load_task(path: Path) -> HarborTask:
         for key in HarborTaskConfig.unknown_keys(data):
             logger.warning("%s: ignoring unknown key `%s`", path / TASK_FILE, key)
         config = HarborTaskConfig.model_validate(data)
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
         raise HarborTaskError(f"{path / TASK_FILE}: {exc}") from exc
+    phases = {"environment": config.environment, "agent": config.agent, "verifier": config.verifier}
+    if config.verifier.environment is not None:
+        phases["verifier.environment"] = config.verifier.environment
+    for name, phase in phases.items():
+        if phase.network_mode not in (None, "public") or phase.allowed_hosts:
+            raise HarborTaskError(f"{path}: {name} network restrictions are not supported yet")
+    for name, environment in (
+        ("environment", config.environment),
+        ("verifier.environment", config.verifier.environment),
+    ):
+        if environment is not None and environment.os != "linux":
+            raise HarborTaskError(f"{path}: {name} Windows tasks are not supported yet")
+
     instruction_path = path / INSTRUCTION_FILE
     if not instruction_path.is_file():
         raise HarborTaskError(f"{path} has no {INSTRUCTION_FILE}")
@@ -77,7 +91,7 @@ def load_task(path: Path) -> HarborTask:
         raise HarborTaskError(f"{path} has no tests/ folder")
     try:
         instruction = instruction_path.read_text().strip()
-    except UnicodeDecodeError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise HarborTaskError(f"{instruction_path}: {exc}") from exc
 
     environment = config.environment
@@ -86,29 +100,35 @@ def load_task(path: Path) -> HarborTask:
     env = dict(environment.env)
     user: str | None = None
     dockerfile = path / "environment" / "Dockerfile"
-    if dockerfile.is_file():
-        base = base_image_only(dockerfile.read_text())
+    if image is None and dockerfile.is_file():
+        try:
+            base = base_image_only(dockerfile.read_text())
+        except (OSError, ValueError) as exc:
+            raise HarborTaskError(f"{dockerfile}: {exc}") from exc
         if base is None:
-            if image is None:
-                raise HarborTaskError(
-                    f"{dockerfile} needs a build (RUN/COPY/ADD or a multi-stage FROM); "
-                    "building Dockerfiles is not supported yet. Declare [environment].docker_image "
-                    "with a prebuilt image to run this task."
-                )
-        else:
-            image = image or base.image
-            workdir = workdir or base.workdir
-            env = base.env | env
-            user = base.user
+            raise HarborTaskError(
+                f"{dockerfile} needs a build (unsupported instructions or settings); "
+                "building Dockerfiles is not supported yet. Declare [environment].docker_image "
+                "with a prebuilt image to run this task."
+            )
+        image = base.image
+        workdir = workdir or base.workdir
+        env = base.env | env
+        user = base.user
     if config.agent.user is not None:
         user = str(config.agent.user)
+
+    try:
+        digest = content_hash(path)
+    except (OSError, ValueError) as exc:
+        raise HarborTaskError(f"{path}: {exc}") from exc
 
     return HarborTask(
         path=path,
         task_id=path.name,
         config=config,
         instruction=instruction,
-        digest=content_hash(path),
+        digest=digest,
         image=image,
         workdir=workdir,
         env=env,

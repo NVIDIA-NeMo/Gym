@@ -651,10 +651,6 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
 
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = getattr(args, "target", None)
-    if target and "=" in target:
-        # A bare Hydra override (`+key=value`) landed in the positional slot; hand it back.
-        overrides = [target, *overrides]
-        target = None
     if target:
         # A task folder or `harbor:<dataset>` reference: prepare it, then run end to end.
         from nemo_gym.tasks.harbor.cli import run_target
@@ -1056,6 +1052,13 @@ COMMANDS = {
         flags=(
             TASK_TARGET,
             SANDBOX,
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--skip-unloadable",
+                    action="store_true",
+                    help="Run the loadable subset of a Harbor TARGET; record omitted tasks in skipped.json.",
+                )
+            ),
             CONFIG,
             BENCHMARK,
             ENVIRONMENT,
@@ -1487,6 +1490,12 @@ def main() -> None:
             translated = [token for flag in command.flags for token in flag.translate_to_hydra(args)]
         except ValueError as exc:
             getattr(args, "_parser", parser).error(str(exc))
+
+        # argparse can capture a bare Hydra override in eval run's optional TARGET slot.
+        # Restore it before coalescing, keeping translated flags before raw overrides.
+        if command.target is _eval_run and args.target and "=" in args.target:
+            overrides = [args.target, *overrides]
+            args.target = None
 
         # --config and the asset selectors all emit +config_paths; coalesce them into one token.
         overrides = _merge_config_paths(translated + overrides)

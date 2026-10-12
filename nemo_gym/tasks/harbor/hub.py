@@ -19,7 +19,7 @@ import tempfile
 import tomllib
 import urllib.request
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 logger = logging.getLogger(__name__)
@@ -102,6 +102,40 @@ def _version_key(version: str) -> tuple:
     return (0, numeric, "") if numeric is not None else (1, (), version)
 
 
+def validate_task_name(name: str) -> str:
+    """Require one folder component, reserving the dataset manifest's name."""
+    if not name or ".." in name or name in (".", MANIFEST_FILE) or any(char in name for char in ("/", "\\", "\0")):
+        raise HubError(f"Unsafe Harbor task name {name!r}: expected a single folder name")
+    return name
+
+
+def _validate_task_path(path: str) -> None:
+    source = PurePosixPath(path)
+    if (
+        not path
+        or source.is_absolute()
+        or ".." in source.parts
+        or path.startswith("-")
+        or "\\" in path
+        or "\0" in path
+    ):
+        raise HubError(f"Unsafe Harbor task path {path!r}: expected a relative path inside the repository")
+
+
+def _validate_task_tree(source: Path) -> None:
+    """Refuse links that could import host files, before any task bytes are copied."""
+    for link in source.rglob("*"):
+        if not link.is_symlink():
+            continue
+        target = link.readlink()
+        try:
+            resolved = link.resolve(strict=True)
+        except (OSError, ValueError) as exc:
+            raise HubError(f"Invalid task symlink {link}: {exc}") from exc
+        if target.is_absolute() or not resolved.is_relative_to(source.resolve()):
+            raise HubError(f"Task symlink {link} leaves the task folder")
+
+
 def validate_git_url(git_url: str) -> str:
     """Return ``git_url`` if it is an https, ssh or git URL (or ``user@host:path``); else raise."""
     if _GIT_URL_SCHEME.match(git_url) or _GIT_URL_SCP.fullmatch(git_url):
@@ -126,7 +160,7 @@ def load_registry(cache_dir: Path, *, refresh: bool = False) -> list[RegistryDat
     for entry in json.loads(cache.read_text()):
         tasks = tuple(
             RegistryTask(
-                name=task["name"],
+                name=validate_task_name(task["name"]),
                 git_url=validate_git_url(task["git_url"]),
                 git_commit_id=task["git_commit_id"],
                 path=task["path"],
@@ -242,46 +276,88 @@ def _write_manifest(folder: Path, dataset: RegistryDataset, pins: dict[str, tupl
             f"path = {quote(path)}",
             "",
         ]
-    (folder / MANIFEST_FILE).write_text("\n".join(lines))
+    # A failed write must leave the previous, truthful manifest intact.
+    with tempfile.NamedTemporaryFile(mode="w", dir=folder, prefix=".manifest-", delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write("\n".join(lines))
+            stream.close()
+            temporary.replace(folder / MANIFEST_FILE)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
-    """Copy every task of ``dataset`` into ``root/<dataset>-<version>/<task name>/``.
+    """Fetch tasks, retaining the recorded source pins of existing folders.
 
-    Task folders that already exist are kept with the pins the manifest recorded for
-    them; only missing ones are resolved and fetched, so a rerun after a partial fetch
-    completes it without moving a ``HEAD`` pin. Returns the dataset folder.
+    Publish a pin after each task, so a later failure leaves completed tasks reusable.
+    A folder without a trustworthy pin (including interruption before pin publication)
+    is refused; the user can move it aside and retry without losing local edits.
     """
-    folder = Path(root) / dataset.folder_name
+    if not _NAME.fullmatch(dataset.name):
+        raise HubError(f"Unsafe Harbor dataset name {dataset.name!r}")
+    names: set[str] = set()
+    for task in dataset.tasks:
+        validate_task_name(task.name)
+        _validate_task_path(task.path)
+        if task.name in names:
+            raise HubError(f"Duplicate Harbor task name {task.name!r}")
+        names.add(task.name)
+    folder = Path(root).resolve() / dataset.folder_name
+    if folder.is_symlink():
+        raise HubError(f"Dataset folder must not be a symlink: {folder}")
     folder.mkdir(parents=True, exist_ok=True)
+    if (folder / MANIFEST_FILE).is_symlink():
+        raise HubError(f"Dataset manifest must not be a symlink: {folder / MANIFEST_FILE}")
     previous = _read_manifest_pins(folder)
     resolved: dict[tuple[str, str], str] = {}
     pins: dict[str, tuple[str, str, str]] = {}
     by_repo: dict[tuple[str, str], list[RegistryTask]] = {}
     for task in dataset.tasks:
-        present = (folder / task.name / "task.toml").is_file()
-        if present and task.name in previous:
-            pins[task.name] = previous[task.name]
+        destination = folder / task.name
+        if destination.is_symlink():
+            raise HubError(f"Task destination must not be a symlink: {destination}")
+        pin = previous.get(task.name)
+        if pin is not None and (pin[0] != task.git_url or pin[2] != task.path or not _SHA.fullmatch(pin[1])):
+            raise HubError(
+                f"Recorded source pin for {destination} is invalid or differs from the registry; move the folder aside and retry"
+            )
+        if destination.exists():
+            if not (destination / "task.toml").is_file() or pin is None:
+                raise HubError(
+                    f"Existing task folder {destination} has no trustworthy source pin; move it aside and retry"
+                )
+            _validate_task_tree(destination)
+            pins[task.name] = pin
             continue
-        commit = resolve_commit(task.git_url, task.git_commit_id, resolved)
-        pins[task.name] = (task.git_url, commit, task.path)
-        if not present:
-            by_repo.setdefault((task.git_url, commit), []).append(task)
+        commit = pin[1] if pin else resolve_commit(task.git_url, task.git_commit_id, resolved)
+        by_repo.setdefault((task.git_url, commit), []).append(task)
 
     for (git_url, commit), tasks in by_repo.items():
         with tempfile.TemporaryDirectory(prefix="nemo-gym-harbor-", dir=folder) as tmp:
             clone = Path(tmp) / "repo"
             _git("clone", "--quiet", "--filter=blob:none", "--no-checkout", "--", git_url, str(clone))
-            _git("sparse-checkout", "set", "--no-cone", *(task.path for task in tasks), cwd=clone)
+            _git("sparse-checkout", "set", "--no-cone", "--", *(task.path for task in tasks), cwd=clone)
             _git("checkout", "--quiet", commit, cwd=clone)
             for task in tasks:
-                source = clone / task.path
+                source = clone
+                for part in PurePosixPath(task.path).parts:
+                    source /= part
+                    if source.is_symlink():
+                        raise HubError(f"Task source path contains a symlink: {source}")
+                _validate_task_tree(source)
                 if not (source / "task.toml").is_file():
                     raise HubError(f"{git_url}@{commit[:12]}:{task.path} has no task.toml")
-                staged = Path(tmp) / task.name
-                shutil.copytree(source, staged, symlinks=False)
-                shutil.move(str(staged), str(folder / task.name))
-    _write_manifest(folder, dataset, pins)
+                staged = Path(tmp) / "staged"
+                shutil.copytree(source, staged, symlinks=True)
+                destination = folder / task.name
+                if destination.exists() or destination.is_symlink():
+                    raise HubError(f"Task destination appeared during fetch: {destination}; retry preparation")
+                staged.rename(destination)
+                pins[task.name] = (git_url, commit, task.path)
+                _write_manifest(folder, dataset, pins)
+    if not dataset.tasks:
+        _write_manifest(folder, dataset, pins)
     return folder
 
 

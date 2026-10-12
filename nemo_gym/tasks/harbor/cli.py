@@ -5,7 +5,8 @@
 
 Preparation writes, under ``results/harbor/<taskset>/``:
 
-- ``tasks.jsonl``: one materialized row per task;
+- ``tasks.jsonl``: one materialized row per loadable task;
+- ``skipped.json``: omitted task IDs and reasons (empty when all tasks load);
 - ``run_config.yaml``: the resources server, agent and environment server blocks.
 
 Then the ordinary end-to-end rollout collection runs with that config plus the
@@ -13,6 +14,7 @@ selected agent, environment server and model configs.
 """
 
 import argparse
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,7 +23,7 @@ from typing import Any
 import yaml
 
 from nemo_gym import component_search_roots
-from nemo_gym.tasks.harbor.hub import HubRef, datasets_dir, fetch_ref, is_hub_ref
+from nemo_gym.tasks.harbor.hub import datasets_dir, fetch_ref, is_hub_ref
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
 from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError, discover_tasks
 
@@ -73,17 +75,23 @@ def prepare_target(
     ``PreparedTaskset.skipped``) so the rest of the dataset still prepares.
     """
     if is_hub_ref(target):
-        taskset = HubRef.parse(target).name
         folder = fetch_ref(target, refresh_registry=refresh_registry)
         print(f"Fetched {target} into {folder}")
     else:
         folder = Path(target).expanduser().resolve()
-        taskset = folder.name
+    taskset = folder.name
+    output_dir = Path(output_root) / taskset
+    output_dir.mkdir(parents=True, exist_ok=True)
     errors: dict[str, HarborTaskError] = {}
-    tasks = discover_tasks(folder, skipped=errors)
+    try:
+        tasks = discover_tasks(folder, skipped=errors)
+    finally:
+        # Keep the omitted IDs and reasons even when no task in the dataset loads.
+        (output_dir / "skipped.json").write_text(
+            json.dumps({task_id: str(error) for task_id, error in errors.items()}, indent=2) + "\n"
+        )
     for task_id, error in errors.items():
         logger.warning("Skipping task %s: %s", task_id, error)
-    output_dir = Path(output_root) / taskset
     rows_path = output_dir / "tasks.jsonl"
     write_rows(tasks, taskset, rows_path)
     skipped_note = f", skipped {len(errors)}" if errors else ""
@@ -164,8 +172,9 @@ def build_run(
     config_paths = [config_path.resolve(), agent.config_path, _config_path(ENVIRONMENT_SERVER_CONFIG)]
     if sandbox is not None:
         config_paths.append(resolve_sandbox_config(sandbox))
-    tokens = [token for token in overrides if not token.startswith("+agent_name=")]
-    tokens.append(f"+config_paths=[{','.join(str(path) for path in config_paths)}]")
+    # Later config files win: explicit user overlays must follow component/provider defaults.
+    tokens = [f"+config_paths=[{','.join(str(path) for path in config_paths)}]"]
+    tokens += [token for token in overrides if not token.startswith("+agent_name=")]
     if not _has_override(tokens, "split"):
         tokens.append("+split=validation")
     if not _has_override(tokens, "output_jsonl_fpath"):
@@ -183,6 +192,11 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
     if not agent_name:
         raise ValueError("A Harbor target needs `--agent <harness>` (for example `--agent hermes`)")
     prepared = prepare_target(args.target)
+    if prepared.skipped and not getattr(args, "skip_unloadable", False):
+        args._parser.error(
+            f"{len(prepared.skipped)} task(s) could not load; see {prepared.output_dir / 'skipped.json'}. "
+            "Use --skip-unloadable to explicitly run only the loadable subset."
+        )
     agent = resolve_agent(agent_name)
     config_path, tokens = build_run(prepared, agent, sandbox=getattr(args, "sandbox", None), overrides=overrides)
     print(f"Run config written to {config_path} (datasets folder: {datasets_dir()})")

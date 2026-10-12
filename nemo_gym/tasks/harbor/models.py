@@ -4,7 +4,7 @@
 """Pydantic mirror of Harbor's ``task.toml`` (schema 1.4).
 
 Field names are Harbor's. Deprecated spellings (``version``, ``memory``, ``storage``,
-``allow_internet``, ``image``) are read and normalized but never written back. Keys
+``allow_internet``) are read and normalized but never written back. Keys
 this mirror does not know are ignored, as Harbor ignores them; :meth:`HarborSettings.unknown_keys`
 lists them so the loader can say so.
 """
@@ -84,7 +84,7 @@ class HarborMCPServer(HarborSettings):
 
 
 class HarborPhaseSettings(HarborSettings):
-    network_mode: Literal["public", "no-network"] | None = None
+    network_mode: Literal["public", "no-network", "allowlist"] | None = None
     allowed_hosts: list[str] | None = None
 
 
@@ -104,22 +104,22 @@ class HarborEnvironment(HarborPhaseSettings):
     base image directly.
     """
 
-    deprecated_keys: ClassVar[frozenset[str]] = frozenset({"image", "allow_internet", "memory", "storage"})
+    deprecated_keys: ClassVar[frozenset[str]] = frozenset({"allow_internet", "memory", "storage"})
 
     docker_image: str | None = None
     build_timeout_sec: float = Field(default=600, gt=0)
     os: Literal["linux", "windows"] = "linux"
-    cpus: int | None = Field(default=None, gt=0)
-    memory_mb: int | None = Field(default=None, gt=0)
-    storage_mb: int | None = Field(default=None, gt=0)
-    gpus: int | None = Field(default=None, ge=0)
+    cpus: int | None = None
+    memory_mb: int | None = None
+    storage_mb: int | None = None
+    gpus: int | None = None
     gpu_types: list[str] | None = None
     env: dict[str, str] = Field(default_factory=dict)
     mcp_servers: list[HarborMCPServer] = Field(default_factory=list)
     skills_dir: str | None = None
     healthcheck: HarborHealthcheck | None = None
     workdir: str | None = None
-    network_mode: Literal["public", "no-network"] = "public"
+    network_mode: Literal["public", "no-network", "allowlist"] = "public"
 
     @model_validator(mode="before")
     @classmethod
@@ -127,17 +127,20 @@ class HarborEnvironment(HarborPhaseSettings):
         if not isinstance(data, dict):
             return data
         data = dict(data)
-        if "image" in data:
-            image = data.pop("image")
-            if data.get("docker_image") not in (None, image):
-                raise ValueError("Conflicting `image` and `docker_image`")
-            data["docker_image"] = image
+        if isinstance(data.get("os"), str):
+            data["os"] = data["os"].lower()
+        if data.get("tpu") is not None:
+            raise ValueError("TPU environments are not supported yet")
         allow = data.pop("allow_internet", None)
-        if allow is not None:
+        if allow is not None and data.get("allowed_hosts") is None:
             data.setdefault("network_mode", "public" if allow else "no-network")
         for old, new in (("memory", "memory_mb"), ("storage", "storage_mb")):
             if old in data:
-                size = _size_to_mb(str(data.pop(old)))
+                raw = data.pop(old)
+                # Harbor drops non-string legacy sizes rather than treating them as MB.
+                if not isinstance(raw, str):
+                    continue
+                size = _size_to_mb(raw)
                 if new in data and data[new] != size:
                     raise ValueError(f"Conflicting `{old}` and `{new}`")
                 data[new] = size

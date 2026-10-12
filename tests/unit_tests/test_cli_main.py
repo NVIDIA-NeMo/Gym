@@ -1818,3 +1818,12 @@ class TestListEnvironmentsRouting:
         target, overrides = _dispatch_for(monkeypatch, ["list", "environments", "calendar"])
         assert target == "nemo_gym.cli.env:list_environments"
         assert overrides == ["+component_name=calendar"]
+
+
+@pytest.mark.parametrize("extra", [[], ["--no-serve"]])
+def test_eval_run_restores_positional_override_before_config_merge(monkeypatch, extra):
+    target, overrides = _dispatch_for(
+        monkeypatch, ["eval", "run", "+config_paths=[a.yaml]", "--config", "b.yaml", *extra]
+    )
+    assert target.endswith("collect_rollouts" if extra else "e2e_rollout_collection")
+    assert overrides == ["+config_paths=[b.yaml,a.yaml]"]
