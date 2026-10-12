@@ -58,6 +58,8 @@ from nemo_gym.telemetry.span_groups import GymSpanGroup
 logger = logging.getLogger(__name__)
 
 PROCESS_PID_ATTRIBUTE = "process.pid"
+#: How a startup or one server's startup ended: ``ready``, ``timeout``, ``failed``, or ``interrupted``.
+OUTCOME_ATTRIBUTE = "nemo.gym.startup.outcome"
 
 #: Wall-clock nanoseconds at which the supervisor spawned this server's launch shell.
 STARTUP_SPAWN_NS_ENV = "NEMO_GYM_STARTUP_SPAWN_NS"
@@ -77,7 +79,7 @@ INTERPRETER_START_STAGE = "interpreter_start"
 #: It runs from the main process handing off to Uvicorn to the worker entering ``run_webserver``.
 #: It covers spawning the worker process and importing the server module.
 WORKER_START_STAGE = "worker_start"
-#: From the end of app configuration to Uvicorn running the app's startup, just before it accepts connections.
+#: From the end of app configuration until the app's own lifespan startup finishes, just before Uvicorn accepts connections.
 UVICORN_STARTUP_STAGE = "uvicorn_startup"
 
 
@@ -141,6 +143,13 @@ def _start_span(telemetry: Any, name: str, start_ns: int, parent_context: Any, a
     return span
 
 
+def _set_error(span: Any, error: BaseException) -> None:
+    from opentelemetry.trace import Status, StatusCode
+
+    span.set_attribute("error.type", type(error).__name__)
+    span.set_status(Status(StatusCode.ERROR, str(error)[:200]))
+
+
 def _stage_spans(
     telemetry: Any, timeline: StageTimeline, parent_context: Any, prefix: str, attributes: Dict[str, Any]
 ) -> None:
@@ -162,7 +171,7 @@ class ServerStartupTimeline(StageTimeline):
     The main process times the stages up to the hand-off to Uvicorn.
     Each worker times its own spawn, import, and setup.
     Each process reports its own spans and metrics, with ``worker`` telling them apart.
-    A process that serves requests reports when Uvicorn runs the app's startup.
+    A process that serves requests reports when the app's lifespan startup finishes.
     Its last stage, ``uvicorn_startup``, therefore ends when it starts accepting connections.
     """
 
@@ -203,9 +212,10 @@ class ServerStartupTimeline(StageTimeline):
             os.environ[STARTUP_SERVE_NS_ENV] = str(time_ns())
 
     def report_when_serving(self, app: Any) -> None:
-        """Report when ``app``'s startup runs, adding the ``uvicorn_startup`` stage.
+        """Report when ``app``'s startup finishes, adding the ``uvicorn_startup`` stage.
 
         This wraps the app's lifespan, so a lifespan the server already set keeps running inside it.
+        The stage ends after that lifespan's startup, so work the app does there is part of the stage.
         """
         if not self.enabled:
             return
@@ -215,9 +225,10 @@ class ServerStartupTimeline(StageTimeline):
 
         @asynccontextmanager
         async def lifespan(application: Any):
-            self.mark(UVICORN_STARTUP_STAGE)
-            self.report()
             async with original_lifespan(application) as state:
+                # The app's own startup, such as loading data in its lifespan, has finished, so Uvicorn accepts connections next.
+                self.mark(UVICORN_STARTUP_STAGE)
+                self.report()
                 yield state
 
         app.router.lifespan_context = lifespan
@@ -337,19 +348,49 @@ class SupervisorStartup(StageTimeline):
         record.ready_ns = time_ns()
         if record.span is not None:
             try:
+                record.span.set_attribute(OUTCOME_ATTRIBUTE, "ready")
                 record.span.end(end_time=record.ready_ns)
             except Exception:
                 logger.debug("nemo-lens: could not close a server startup span", exc_info=True)
 
     def finish(self) -> None:
-        """Close the ``gym.startup`` span with the supervisor's own stages beneath it."""
+        """Close the ``gym.startup`` span with the supervisor's own stages beneath it, after every server is ready."""
+        self._close("ready", None)
+
+    def abort(self, outcome: str, error: BaseException) -> None:
+        """Close every open startup span after a startup that did not finish, so the failed run is still exported.
+
+        OpenTelemetry exports only spans that have ended.
+        Without this, a startup that times out or fails would export no ``gym.startup`` span, and the spans servers already reported would point at a parent that was never exported.
+        Each server that was not ready yet gets ``outcome`` too, and every closed span gets an error status.
+        The supervisor stage that was running when startup ended is recorded as ``unfinished``, so the stages still cover the whole startup.
+        """
+        if self._root_span is not None:
+            self.mark("unfinished")
+        now = self.end_ns
+        for record in self._servers.values():
+            if record.ready_ns is not None or record.span is None:
+                continue
+            try:
+                record.span.set_attribute(OUTCOME_ATTRIBUTE, outcome)
+                _set_error(record.span, error)
+                record.span.end(end_time=now)
+            except Exception:
+                logger.debug("nemo-lens: could not close a server startup span", exc_info=True)
+            record.span = None
+        self._close(outcome, error, end_ns=now)
+
+    def _close(self, outcome: str, error: Optional[BaseException], *, end_ns: Optional[int] = None) -> None:
         if self._root_span is None:
             return
         try:
             from opentelemetry import trace as otel_trace
 
             _stage_spans(self._telemetry, self, otel_trace.set_span_in_context(self._root_span), "gym.startup", {})
-            self._root_span.end(end_time=self.end_ns)
+            self._root_span.set_attribute(OUTCOME_ATTRIBUTE, outcome)
+            if error is not None:
+                _set_error(self._root_span, error)
+            self._root_span.end(end_time=end_ns if end_ns is not None else self.end_ns)
         except Exception:
             logger.debug("nemo-lens: could not close the startup span", exc_info=True)
         self._root_span = None

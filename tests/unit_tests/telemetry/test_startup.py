@@ -363,3 +363,89 @@ def test_report_when_serving_on_a_disabled_timeline_leaves_the_app_alone(otel):
     ServerStartupTimeline("srv", None, enabled=False).report_when_serving(app)
 
     assert app.router.lifespan_context is lifespan
+
+
+class TestFailedStartup:
+    def test_a_timed_out_startup_still_exports_one_complete_trace(self, otel, monkeypatch):
+        supervisor = SupervisorStartup()
+        supervisor.begin_trace()
+        supervisor.mark("spawn_servers")
+        for name in ("fast_server", "slow_server"):
+            env = supervisor.server_env(name, "resources_servers")
+            monkeypatch.setenv(STARTUP_TRACEPARENT_ENV, env[STARTUP_TRACEPARENT_ENV])
+            timeline = ServerStartupTimeline(name, "resources_servers")
+            timeline.mark("load_config")
+            timeline.report()
+        supervisor.server_ready("fast_server")
+
+        supervisor.abort("timeout", RuntimeError("Timed out after 1s waiting for Gym servers to become ready"))
+
+        spans = otel.spans()
+        exported_ids = {span.context.span_id for span in spans}
+        assert all(span.parent is None or span.parent.span_id in exported_ids for span in spans), "no span is orphaned"
+        (root,) = [span for span in spans if span.name == "gym.startup"]
+        assert root.attributes["nemo.gym.startup.outcome"] == "timeout"
+        assert root.status.status_code.name == "ERROR"
+        per_server = {
+            span.attributes["nemo.gym.server.name"]: span for span in spans if span.name == "gym.startup.server"
+        }
+        assert per_server["fast_server"].attributes["nemo.gym.startup.outcome"] == "ready"
+        assert per_server["fast_server"].status.status_code.name == "UNSET"
+        assert per_server["slow_server"].attributes["nemo.gym.startup.outcome"] == "timeout"
+        assert per_server["slow_server"].attributes["error.type"] == "RuntimeError"
+        # The stage running at the time is recorded, so the stages still reach the end of the root span.
+        unfinished = next(span for span in spans if span.name == "gym.startup.unfinished")
+        assert unfinished.end_time == root.end_time
+
+    def test_a_successful_startup_reports_ready(self, otel):
+        supervisor = SupervisorStartup()
+        supervisor.begin_trace()
+        supervisor.mark("spawn_servers")
+        supervisor.finish()
+
+        (root,) = [span for span in otel.spans() if span.name == "gym.startup"]
+        assert root.attributes["nemo.gym.startup.outcome"] == "ready"
+        assert root.status.status_code.name == "UNSET"
+
+    def test_closing_twice_exports_once(self, otel):
+        supervisor = SupervisorStartup()
+        supervisor.begin_trace()
+        supervisor.finish()
+        supervisor.abort("failed", RuntimeError("late"))
+
+        assert [span.name for span in otel.spans()].count("gym.startup") == 1
+
+
+def test_lifespan_work_is_part_of_the_uvicorn_startup_stage(otel):
+    from contextlib import asynccontextmanager
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    @asynccontextmanager
+    async def app_lifespan(_app):
+        import asyncio
+
+        await asyncio.sleep(0.2)  # e.g. loading a dataset
+        yield
+
+    app = FastAPI(lifespan=app_lifespan)
+    timeline = ServerStartupTimeline("srv", "resources_servers")
+    timeline.mark("configure_app")
+    timeline.report_when_serving(app)
+    with TestClient(app):
+        pass
+
+    (stage,) = [stage for stage in timeline.stages if stage.name == "uvicorn_startup"]
+    assert stage.duration_ms >= 200
+
+
+@pytest.mark.parametrize(
+    ("error", "outcome"),
+    [("timeout", "timeout"), ("interrupt", "interrupted"), ("other", "failed")],
+)
+def test_the_outcome_names_how_startup_ended(error, outcome):
+    from nemo_gym.cli.env import ServerSpinupTimeoutError, _startup_outcome
+
+    errors = {"timeout": ServerSpinupTimeoutError("t"), "interrupt": KeyboardInterrupt(), "other": ValueError("v")}
+    assert _startup_outcome(errors[error]) == outcome

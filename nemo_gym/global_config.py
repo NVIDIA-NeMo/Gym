@@ -1603,7 +1603,7 @@ Found global config dict yaml:
                     "different openai versions across the HTTP boundary)."
                 )
             # Telemetry, when enabled. Server venvs install nemo-gym[dev], not
-            # nemo-gym[telemetry], so without this the orchestrator would export spans and
+            # nemo-gym[telemetry], so without this the supervisor would export spans and
             # every server process would silently have no telemetry at all — a trace with a
             # hole in the middle. Translating the config into the environment first is what
             # lets server_venv_requirements() see that telemetry is on.

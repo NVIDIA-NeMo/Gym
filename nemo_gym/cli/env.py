@@ -502,6 +502,19 @@ class TestConfig(RunConfig):
         return _resolve_server_dir(self._dir_path)
 
 
+class ServerSpinupTimeoutError(RuntimeError):
+    """Gym servers did not become ready within `server_spinup_timeout_seconds`."""
+
+
+def _startup_outcome(error: BaseException) -> str:
+    """How a startup that raised `error` ended, as the startup telemetry reports it."""
+    if isinstance(error, ServerSpinupTimeoutError):
+        return "timeout"
+    if isinstance(error, KeyboardInterrupt):
+        return "interrupted"
+    return "failed"
+
+
 class RunHelper:  # pragma: no cover
     _head_server: uvicorn.Server
     _head_server_thread: Thread
@@ -514,10 +527,8 @@ class RunHelper:  # pragma: no cover
     _memory_profiling_config: MemoryProfilingConfig
     _telemetry_metrics_enabled: bool
     _h2_ping_sidecar: H2PingSidecarManager | None
-    _startup: SupervisorStartup
-
-    def __init__(self) -> None:
-        self._startup = SupervisorStartup()
+    # Created by `_start`, so its clock starts with the startup it measures.
+    _startup: Optional[SupervisorStartup] = None
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         """Start the head server and every configured server, and wait until all of them are ready.
@@ -529,10 +540,12 @@ class RunHelper:  # pragma: no cover
         self._processes = dict()
         self._head_server = None
         self._h2_ping_sidecar = None
-        self._startup = SupervisorStartup()
         try:
             self._start(global_config_dict_parser_config)
-        except BaseException:
+        except BaseException as error:
+            # Before shutdown, which flushes telemetry, so the failed startup's spans are exported.
+            if self._startup is not None:
+                self._startup.abort(_startup_outcome(error), error)
             self.shutdown()
             raise
 
@@ -677,12 +690,15 @@ class RunHelper:  # pragma: no cover
     def wait_for_server_readiness(self, global_config_dict: DictConfig) -> None:
         """Mark the head ready only after every managed server and model endpoint is reachable."""
         self.wait_for_spinup()
-        self._startup.mark("wait_for_servers")
+        if self._startup is not None:
+            self._startup.mark("wait_for_servers")
         self._start_memory_profiler()
         self.wait_for_model_endpoints(global_config_dict)
-        self._startup.mark("wait_for_model_endpoints")
+        if self._startup is not None:
+            self._startup.mark("wait_for_model_endpoints")
         self._head_server_instance.mark_ready()
-        self._startup.finish()
+        if self._startup is not None:
+            self._startup.finish()
 
     def display_server_instance_info(self) -> None:
         if not self._server_instance_display_configs:
@@ -774,9 +790,10 @@ Process `{process_name}` stderr:
         while True:
             self.poll()
             statuses = self.check_http_server_statuses(successful_servers, deadline=deadline)
-            for name, status in statuses:
-                if status == "success":
-                    self._startup.server_ready(name)
+            if self._startup is not None:
+                for name, status in statuses:
+                    if status == "success":
+                        self._startup.server_ready(name)
             successful_servers.extend(s for s, status in statuses if status == "success")
 
             waiting = []
@@ -786,7 +803,7 @@ Process `{process_name}` stderr:
 
             if len(successful_servers) != total_servers:
                 if deadline is not None and monotonic() >= deadline:
-                    raise RuntimeError(
+                    raise ServerSpinupTimeoutError(
                         f"Timed out after {timeout_seconds:g}s waiting for Gym servers to become ready: "
                         f"{', '.join(waiting)}\n"
                         "This wait covers dependency installation and any local model download or loading "

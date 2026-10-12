@@ -80,7 +80,7 @@ The stage histogram carries `nemo.gym.server.name`, `nemo.gym.server.type`, `nem
 | `setup_webserver` | The server's `setup_webserver`, which registers its routes. |
 | `expose_tools_over_mcp` | Auto-exposing tools over MCP, for resources servers that enable it. |
 | `configure_app` | Liveness routes, middleware, instrumentation, and profiling. |
-| `uvicorn_startup` | From the end of app configuration to Uvicorn running the app's startup, just before it accepts connections. Not recorded by the main process of a multi-worker server, which does not serve requests. |
+| `uvicorn_startup` | From the end of app configuration until the app's own lifespan startup finishes, just before Uvicorn accepts connections. Work a server does in its lifespan, such as loading data, is part of this stage. Not recorded by the main process of a multi-worker server, which does not serve requests. |
 
 A server with `num_workers` above 1 runs `run_webserver` again in every Uvicorn worker. Each worker reports its own stages, starting at `worker_start`, with `nemo.gym.server.worker` set to true. The main process of that server reports the stages up to the hand-off to Uvicorn, with the attribute set to false. Filter or group by this attribute, so that a worker's `init_server` is not averaged with the main process's.
 

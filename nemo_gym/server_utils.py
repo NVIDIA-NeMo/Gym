@@ -1572,7 +1572,7 @@ repr(e): {repr(e)}"""
             uvicorn_kwargs["app"] = app
 
         # The main process of a multi-worker server hands the app to Uvicorn workers and never serves it, so it reports now.
-        # Every process that serves the app reports when Uvicorn runs the app's startup.
+        # Every process that serves the app reports when the app's lifespan startup finishes.
         if is_main_fastapi_proc and uvicorn_kwargs.get("workers"):
             startup.report()
         else:
