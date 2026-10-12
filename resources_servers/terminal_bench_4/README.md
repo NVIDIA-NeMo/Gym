@@ -47,6 +47,23 @@ artifacts, including collected remote `/logs/agent` files, remain under the tria
 directory. The seed's connection configuration is used only for the internal
 agent/resource exchange and is not persisted in session records.
 
+## Test counts
+
+Rollout output includes `num_tests_passed`, `num_tests_total`, `num_tests_failed`,
+and `num_tests_skipped` alongside the official `reward`. These top-level numeric
+fields also participate in Gym's generic aggregate metrics. Counts are retained
+under `verifier_result` in the trial's `result.json`; full reports remain in
+`verifier/`.
+
+Counts come from the canonical `verifier/ctrf.json` summary, or from
+`passed_cases`/`total_cases` in `verifier/trace_results.json`. They describe the
+tests or cases in that report, which may omit checks performed outside the test
+runner. Numbered CTRF reports are not added together. CTRF totals can include
+pending or other outcomes in addition to passed, failed, and skipped tests.
+Missing, malformed, or unsupported reports yield null counts. Verifier timeouts
+also yield null counts. Report parsing diagnostics identify the source file.
+The official reward and evaluation-completion rules remain unchanged.
+
 ## Non-root Compose services
 
 When loading agent Compose YAML, two task-specific adaptations use the

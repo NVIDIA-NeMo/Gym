@@ -55,26 +55,18 @@ SCENARIOS = (
         "retry_429",
         "Two identical requests receive 429 before recovery.",
         http_errors=(429, 429),
-        health_expectations={
-            "model_call_missing_token_counts": "unhealthy",
-            # Injected HTTP errors have no usage; retained attempts stay unknown.
-            "rollout_token_count_mismatch": "unobserved",
-        },
+        # A failed attempt has no tokens to account for, and the retry recovers: healthy.
     ),
     Scenario(
         "retry_500",
         "A model HTTP 500 is followed by recovery.",
         http_errors=(500,),
-        health_expectations={
-            "model_call_missing_token_counts": "unhealthy",
-            # Injected HTTP errors have no usage; retained attempts stay unknown.
-            "rollout_token_count_mismatch": "unobserved",
-        },
+        # A failed attempt has no tokens to account for, and the retry recovers: healthy.
     ),
     Scenario(
         "model_error",
-        "A terminal model HTTP 400 with an error body and no response ID.",
-        evidence=("TE-1", "TE-2", "TE-4", "TE-7", "TE-8"),
+        "A terminal model HTTP 400 still reaches verification and retains an unmasked zero grade.",
+        evidence=("TE-1", "TE-2", "TE-4", "TE-6", "TE-7", "TE-8"),
         tool_steps=0,
         http_errors=(400,),
         terminal_error=True,
@@ -82,9 +74,9 @@ SCENARIOS = (
         steps=False,  # The first request fails permanently; no model decision is returned.
         health_expectations={
             "rollout_ended_on_failed_model_call": "unhealthy",
-            "model_call_missing_token_counts": "unhealthy",
-            # No successful decision or provider usage exists to reconcile.
-            "rollout_token_count_mismatch": "unobserved",
+            # Aggregate usage counts finished responses: an initial rejection must
+            # retain a known zero total, even though the failed attempt has no usage.
+            "rollout_token_count_mismatch": "healthy",
         },
     ),
     Scenario("verifier_failure", "A completed trajectory receives a known zero reward.", expected_reward=0.0),

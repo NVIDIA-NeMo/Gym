@@ -1853,6 +1853,15 @@ def test_downconverting_present_responses_only_fields_fails_explicitly(
         converter.responses_to_chat_completion_create_params(params)
 
 
+def test_downconverting_treats_empty_include_as_absent(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", include=[])
+
+    chat_params = converter.responses_to_chat_completion_create_params(params)
+
+    assert "include" not in chat_params.model_dump(exclude_unset=True)
+    assert chat_params.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
+
+
 def test_downconverting_null_responses_only_fields_treats_them_as_absent(converter: ResponsesConverter):
     params = NeMoGymResponseCreateParamsNonStreaming(
         input="hi",
@@ -1879,6 +1888,35 @@ def test_downconverting_empty_include_requests_no_additional_fields(converter: R
     assert converted == converter.responses_to_chat_completion_create_params(
         NeMoGymResponseCreateParamsNonStreaming(input="hi")
     )
+
+
+def test_downconverting_replayed_turn_merges_text_and_tool_call(converter: ResponsesConverter):
+    # A harness replays a prior model turn as separate items: the assistant message (possibly
+    # without annotations, as the Codex CLI sends it) and the function call. They must fold back
+    # into one assistant chat message with the text kept and the tool-call id unchanged.
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+            {
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Let me inspect the workload first."}],
+            },
+            {"type": "function_call", "call_id": "chatcmpl-tool-KNOWN0000", "name": "exec_command", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "chatcmpl-tool-KNOWN0000", "output": "ok"},
+        ]
+    )
+
+    converted = converter.responses_to_chat_completion_create_params(params)
+
+    assert [m["role"] for m in converted.messages] == ["user", "assistant", "tool"]
+    assistant = converted.messages[1]
+    assert assistant["content"] == "Let me inspect the workload first."
+    assert [(c["id"], c["function"]["name"]) for c in assistant["tool_calls"]] == [
+        ("chatcmpl-tool-KNOWN0000", "exec_command")
+    ]
+    assert converted.messages[2]["tool_call_id"] == "chatcmpl-tool-KNOWN0000"
 
 
 def test_downconverting_json_object_text_format(converter: ResponsesConverter):
