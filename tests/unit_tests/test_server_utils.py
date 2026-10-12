@@ -20,6 +20,7 @@ import socket
 from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import uvicorn
 from aiohttp import ClientOSError, ClientResponseError, RequestInfo, TCPConnector
 from fastapi import Request
@@ -41,6 +42,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import (
     NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,
     NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME,
@@ -613,6 +615,32 @@ class TestServerUtils:
         assert httpx_client_request_mock.call_count == 3
         for call in httpx_client_request_mock.call_args_list:
             assert call.kwargs["url"].startswith("http://xyz:54321")
+
+    async def test_ServerClient_post_encodes_replayed_output_logprobs(self, monkeypatch: MonkeyPatch) -> None:
+        """A request body that replays assistant output with logprobs is sent as JSON with the logprobs intact."""
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=11000),
+            global_config_dict=DictConfig({"my_server": {"a": {"b": {"host": "xyz", "port": 54321}}}}),
+        )
+        aiohttp_client_mock = MagicMock()
+        aiohttp_client_request_mock = AsyncMock(return_value="ok")
+        aiohttp_client_mock.return_value.request = aiohttp_client_request_mock
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", aiohttp_client_mock)
+
+        logprobs = [{"token": "a", "bytes": [97], "logprob": -0.5, "top_logprobs": []}]
+        assistant_message = {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "a", "annotations": [], "logprobs": logprobs}],
+        }
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": [assistant_message]})
+
+        await server_client.post(server_name="my_server", url_path="/v1/responses", json=body)
+
+        sent = orjson.loads(aiohttp_client_request_mock.call_args.kwargs["data"])
+        assert sent["input"][0]["content"][0]["logprobs"] == logprobs
 
     def _mock_ray_return_value(self, monkeypatch: MonkeyPatch, return_value: bool) -> MagicMock:
         ray_mock = MagicMock()
@@ -1615,22 +1643,8 @@ class TestServerUtils:
     async def test_exception_middleware_logs_upstream_error_without_debug(
         self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
     ) -> None:
-        callbacks = []
-        app = MagicMock()
-
-        def register_middleware(middleware_type):
-            assert middleware_type == "http"
-
-            def register(callback):
-                callbacks.append(callback)
-                return callback
-
-            return register
-
-        app.middleware.side_effect = register_middleware
         server = MagicMock()
         server.get_session_middleware_key.return_value = "TestSimpleServer___my_server"
-        SimpleServer.setup_exception_middleware(server, app)
 
         request_info = RequestInfo(
             url=URL("http://policy.test/v1/responses"),
@@ -1641,13 +1655,23 @@ class TestServerUtils:
         error = ClientResponseError(request_info=request_info, history=(), status=500, message="policy failed")
         error.response_content = b"ValueError: actionable inner failure"
 
-        async def fail(_request):
+        async def fail(_scope, _receive, _send):
             raise error
 
-        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
-        response = await callbacks[0](MagicMock(), fail)
+        sent = []
 
-        assert response.status_code == 500
+        async def send(message):
+            sent.append(message)
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+        await nemo_gym.server_utils.ExceptionHandlingMiddleware(fail, server=server)(
+            {"type": "http", "method": "POST", "path": "/v1/responses", "headers": []}, receive, send
+        )
+
+        assert sent[0]["type"] == "http.response.start" and sent[0]["status"] == 500
         captured = capsys.readouterr().out
         assert "[upstream_request_failed]" in captured
         assert "ValueError: actionable inner failure" in captured
@@ -1925,7 +1949,8 @@ class TestRunWebserverProxyKwargs:
     def test_proxy_headers_disabled_by_default_single_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
 
-        self.ray_loader_mock.assert_called_once()
+        # Servers that don't declare ray_enabled = True run without Ray.
+        self.ray_loader_mock.assert_not_called()
         assert kwargs["proxy_headers"] is False
         assert [] == kwargs["forwarded_allow_ips"]
         # A single worker passes the app object itself rather than an import string.
@@ -1935,13 +1960,18 @@ class TestRunWebserverProxyKwargs:
     def test_proxy_headers_disabled_by_default_multi_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=4)
 
-        self.ray_loader_mock.assert_called_once()
+        self.ray_loader_mock.assert_not_called()
         # Multi-worker launches re-import the app, so uvicorn receives an import string.
         assert isinstance(kwargs["app"], str)
         assert kwargs["app"].endswith(":app")
         assert 4 == kwargs["workers"]
         assert kwargs["proxy_headers"] is False
         assert [] == kwargs["forwarded_allow_ips"]
+
+    def test_undeclared_server_does_not_join_a_configured_cluster(self, monkeypatch: MonkeyPatch) -> None:
+        self._capture_uvicorn_kwargs(monkeypatch, {"ray_head_node_address": "10.0.0.1:6379"}, num_workers=1)
+
+        self.ray_loader_mock.assert_not_called()
 
     def test_ray_disabled_skips_initialization(self, monkeypatch: MonkeyPatch) -> None:
         self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1, ray_enabled=False)

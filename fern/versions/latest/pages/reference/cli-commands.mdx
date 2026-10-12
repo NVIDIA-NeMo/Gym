@@ -42,12 +42,16 @@ gym env validate              # validate a manifest-backed workload or legacy co
 gym env packages              # list packages in a server's virtual environment
 gym env test                  # run resources-server tests
 gym env publish               # finalize readiness and confirm registry discovery
+gym env prefetch              # pre-warm per-server venvs without starting servers
 gym env start                 # start the servers
 gym env status                # show running servers
+gym env schema                # print a resources server's task-data schema as JSON Schema
 
 # Evaluation
 gym eval prepare              # prepare benchmark data and dump it to disk
+gym eval plan                 # write one benchmark's task list (stable ids, digests) to a plan file
 gym eval run                  # collate data, start servers, and collect rollouts
+gym eval submit               # submit a benchmark job to Slurm
 gym eval aggregate            # merge sharded rollout results
 gym eval export               # export supported Gym trajectories as ATIF
 gym eval health-check         # verify rollout artifact quality for an existing run
@@ -91,6 +95,9 @@ Commands that need a model (`gym env start`, `gym eval run`) configure it throug
 | `--model-url` | Base URL of an existing model server endpoint. Maps to `policy_base_url`. |
 | `--model-api-key` | API key for the model server. Maps to `policy_api_key`. |
 
+<Warning>
+`--model-api-key` passed on the command line appears in shell history. Prefer setting `policy_api_key` in your `env.yaml` instead.
+</Warning>
 
 ### Swapping the agent
 
@@ -324,6 +331,10 @@ gym search models vllm --json
 
 Commands for preparing, previewing, and managing datasets. By default dataset transfer commands use HuggingFace; pass `--storage gitlab` to target the GitLab Registry.
 
+<Note>
+HuggingFace commands require an `HF_TOKEN` environment variable (or `huggingface-cli login`). GitLab commands authenticate via `mlflow_tracking_token` in your YAML config (or the `MLFLOW_TRACKING_TOKEN` environment variable). See [Downloading from HuggingFace](/data/download-huggingface) for HF authentication details.
+</Note>
+
 ### `gym dataset upload`
 
 Upload a prepared local JSONL dataset to HuggingFace (default) or GitLab.
@@ -421,6 +432,7 @@ Validate and collate a dataset, generating metrics and statistics.
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--resources-server NAME` | Load the named resources server config. |
+| `--model-type NAME` | Load the named model-type config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--mode {train_preparation,example_validation}` | Use `train_preparation` to prepare train/validation datasets, or `example_validation` to validate example data. |
 | `--output-dir` | Output directory for the prepared data. |
@@ -528,7 +540,7 @@ By default, values a run needs but the config leaves undefined (such as `policy_
 | `--model-type NAME` | Also load a named model config (otherwise a dummy `policy_model` is used). |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Refer to [Swapping the agent](#swapping-the-agent). |
-| `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent. |
+| `--allow-unsupported-pairing` | Run even if the environment's resources server does not declare support for the selected agent or model type. |
 | `--model` / `--model-url` / `--model-api-key` | Override model name, base URL, and API key. |
 
 ```bash
@@ -598,6 +610,7 @@ Run the local publication check for a manifest-backed workload. The command runs
 | `NAME` | Manifest-backed catalog entry to publish. |
 | `--kind environment\|benchmark` | Resolve an ambiguous catalog name. |
 | `--json` | Output the publication result as JSON. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
 gym env publish my_eval
@@ -606,17 +619,18 @@ gym env publish my_benchmark --kind benchmark --json
 
 ### `gym env start`
 
-Start the NeMo Gym servers (agents, models, resources) defined by the provided configs. Reads configuration from YAML files and runs each configured server in its own environment.
+Start the NeMo Gym servers (agents, models, resources, and environment servers) defined by the provided configs. Reads configuration from YAML files and runs each configured server in its own environment. Rollout collection dispatches `/run` through environment servers.
 
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--benchmark NAME` | Load the named benchmark config (start its servers). |
+| `--environment NAME` | Load the named environment config. Repeatable. |
 | `--resources-server NAME` | Load the named resources server config. |
-| `--model-type NAME` | Load the named model server type config. |
+| `--model-type NAME` | Load the named model-type config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Refer to [Swapping the agent](#swapping-the-agent). |
-| `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent. |
+| `--allow-unsupported-pairing` | Run even if the environment's resources server does not declare support for the selected agent or model type. |
 | `--model`, `-m` | Served model identifier. See [Selecting the model server](#selecting-the-model-server). |
 | `--model-url` | Model server base URL. |
 | `--model-api-key` | Model server API key. |
@@ -660,6 +674,40 @@ NeMo Gym Server Status:
 3 servers found (3 healthy, 0 unhealthy)
 ```
 
+### `gym env prefetch`
+
+Pre-warm per-server venvs without starting any servers. Accepts the same config flags as `gym env start`. For each server in the config, creates its isolated venv and installs dependencies serially. Intended for use in Dockerfile builds so venvs are ready at runtime without network access.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config file to load. Repeatable. |
+| `--benchmark NAME` | Load the named benchmark config. Repeatable. |
+| `--environment NAME` | Load the named environment config. Repeatable. |
+| `--resources-server NAME` | Load the named resources server config. Repeatable. |
+| `--model-type NAME` | Load the named model-type config. |
+| `--agent-type NAME[/FLAVOR]` | Compose with the named agent harness. |
+| `--allow-unsupported-pairing` | Run even if the environment's resources server does not declare support for the selected agent or model type. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
+
+```bash
+config_paths="responses_api_models/local_vllm_model/configs/local_vllm_model.yaml,\
+resources_servers/math/configs/math.yaml"
+gym env prefetch "+config_paths=[${config_paths}]"
+```
+
+### `gym env schema`
+
+Print a resources server's `TaskData` schema as JSON Schema. Exits non-zero if the server does not export a `task_data.py` schema.
+
+| Option | Description |
+| --- | --- |
+| `--resources-server NAME` | Resources server to inspect. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
+
+```bash
+gym env schema --resources-server example_multi_step
+```
+
 ---
 
 ## Evaluation
@@ -681,6 +729,27 @@ Prepare a benchmark's data by running its `prepare.py` script and dump the resul
 gym eval prepare --benchmark aime24
 ```
 
+### `gym eval plan`
+
+Prepare one benchmark and write its plan: every task once, sorted by task id, with a digest of the exact input a run receives. The plan stores ids and digests, not the inputs themselves. The format is versioned (`"schema": "nemo-gym.eval-plan.v1"`), only changes additively within a version, and is printed as JSON Schema by `--schema`.
+
+Each task's id comes from its row's `task_id`, `problem_id` or `instance_id`, and its taskset is the dataset's declared `taskset` (the benchmark name when none is declared). Unlike `gym eval run`, there is no fallback to the row's position, so benchmarks without such a field are refused. Benchmarks with a prompt template (`prompt_config`) are not supported yet.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config file to load. Repeatable. |
+| `--benchmark NAME` | Load the named benchmark config. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
+| `--out PATH` | Plan file to write. Required unless `--schema` is given. |
+| `--task-ids ID[,ID...]` | Only plan these task ids. |
+| `--schema` | Print the plan file's JSON Schema and exit. |
+
+```bash
+gym eval plan --benchmark swebench/verified/opencode --out plan.json
+gym eval plan --benchmark swebench/verified/opencode --task-ids astropy__astropy-12907 --out plan.json
+gym eval plan --schema
+```
+
 ### `gym eval run`
 
 Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
@@ -689,14 +758,15 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--benchmark NAME` | Load the named benchmark config. |
+| `--environment NAME` | Load the named environment config. Repeatable. |
 | `--resources-server NAME` | Load the named resources server config. |
-| `--model-type NAME` | Load the named model server type config. |
+| `--model-type NAME` | Load the named model-type config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--no-serve` | Collect against already-running servers instead of starting them. |
 | `--resume` | Resume from cached rollouts instead of recollecting. Maps to legacy `+resume_from_cache=true`. Refer to [Resume interrupted runs](#resume-interrupted-runs). |
 | `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Rejected with `--no-serve`. Refer to [Swapping the agent](#swapping-the-agent). |
 | `--agent`, `-a` | Agent instance to collect rollouts with. |
-| `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent. |
+| `--allow-unsupported-pairing` | Run even if the environment's resources server does not declare support for the selected agent or model type. |
 | `--input`, `-i` | Input tasks JSONL file. |
 | `--output`, `-o` | Output rollouts JSONL file. |
 | `--limit` | Maximum number of tasks to run. |
@@ -724,21 +794,28 @@ gym eval run --benchmark aime24 \
     --split validation \
     --concurrency 10
 
-# Against an already-running server, with a remote vLLM endpoint
-gym eval run --no-serve \
+# Two-terminal sequence for --no-serve: model settings go to env start, not eval run.
+# Model URL and credentials configure servers at start time; passing them during
+# collection has no effect on already-running servers.
+
+# Terminal 1 — start servers with the model endpoint configured:
+gym env start \
+    --resources-server math_with_judge \
     --model-type openai_model \
+    --model openai/gpt-oss-120b \
+    --model-url http://127.0.0.1:10240/v1 \
+    --model-api-key dummy_key
+
+# Terminal 2 — collect rollouts against the running servers:
+gym eval run --no-serve \
     --resources-server math_with_judge \
     --output results/test_001.jsonl \
     --split validation \
-    --model openai/gpt-oss-120b \
-    --model-url http://0.0.0.0:10240/v1 \
-    --model-api-key dummy_key \
     --temperature 1.0 \
     --top-p 1.0
 
 # Per-agent repeats: one input file pins different agents per row via agent_ref.name
 gym eval run --no-serve \
-    --model-type openai_model \
     --input mixed_agents.jsonl \
     --output results/mixed_rollouts.jsonl \
     --num-repeats '{agent_alpha: 4, agent_beta: 1, _default: 1}'
@@ -779,13 +856,30 @@ How it works:
 - **Matching.** On resume, completed work is matched by `(task_index, rollout_index)` against the materialized inputs, and already-completed rows are skipped. The run prints a summary such as the number of original input rows, rows already done, and rows that still need to be run.
 - **Terminal failures.** A sidecar row stamped `_ng_failure_terminal` is never retried. `+retry_terminal_timeouts=true` retries rows of class `timeout_exceeded` even when they are stamped terminal, and does the same for the repairable environment faults `reference_missing`, `eval_missing` and `transport_ineligible`; `skipped` rows are never retried. Retries still stop at `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. Off by default, because some agents stamp their timeouts terminal on purpose.
 - **Invalid judge responses.** `+retry_invalid_judge_responses=true` moves rows flagged `invalid_judge_response` out of the output JSONL on resume and into the sidecar as retryable `judge_invalid` attempts, so they leave the score and are judged again. A row whose deliverable is still on disk is marked `reuse_cached_deliverable`, so the agent can judge it again without rerunning the policy. Off by default, because some verifiers score an invalid judge response as zero on purpose.
-- **Dispatch budget.** `+dispatch_budget_s=<seconds>` stops starting new rollouts that many seconds after collection starts; set it to the usable walltime of the allocation. It requires `--concurrency`. Rows that are not started write nothing, so the next `--resume` runs them. `+drain_margin_s=<seconds>` also stops starting rows when less than that much time is left; unset, the margin is the run's own p75 rollout duration once 5 rollouts have finished. Every run ends with a per-rollout latency summary (median, p90, p99, max) and the number of rows not started.
+- **Dispatch budget.** `+dispatch_budget_s=<seconds>` stops starting new rollouts that many seconds after collection starts; set it to the usable walltime of the allocation. It requires `--concurrency` or `+max_resident_rollout_tasks`; without either limit, the whole queue could be sent before the budget is checked. Rows that are not started write nothing, so the next `--resume` runs them. `+drain_margin_s=<seconds>` also stops starting rows when less than that much time is left; unset, the margin is the p75 duration of the run's recorded attempts once there are at least 5. Completed rollouts are always recorded; a failed or timed-out attempt is recorded only if it ran at least as long as the median so far, so long timeouts raise the margin and early failures do not shrink it. Every run ends with a latency summary over the same attempts (median, p90, p99, max) and the number of rows not started.
 - **Longest first.** `+dispatch_longest_first=true` starts the rows whose earlier failed attempts ran longest first on resume, using the `elapsed_seconds` those attempts recorded. Rows with no recorded timing keep their input order and start after them. Without it, rows start in input order.
 - **Fallback.** If either the materialized inputs or the output file is missing, resume is skipped and the run starts fresh. Without `--resume`, the existing output, its `<stem>_failures.jsonl` sidecar and its `<stem>_aggregate_metrics.json` are deleted before the run.
 
 <Warning>
 If you change the config, schema, or data between runs, the materialized inputs become stale and resume will diff against the old expansion. Delete the `*_materialized_inputs.jsonl` file (and the output file) to start fresh.
 </Warning>
+
+### `gym eval submit`
+
+Submit a benchmark evaluation job to Slurm via a submit config YAML file. Renders job scripts and calls `sbatch` for each benchmark defined in the config. Use `--dry-run` to preview the generated scripts without submitting.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH`, `-c PATH` | Submit config YAML file. Required. |
+| `--dry-run` | Print generated job scripts without submitting. |
+| `--resolve-only` | Resolve and validate the config, print it, and stop before rendering job scripts or submitting anything. |
+| `--json` | Emit the submission record (or, with `--resolve-only`, the resolved config) as JSON. |
+
+```bash
+gym eval submit --config submit.yaml
+gym eval submit --config submit.yaml --dry-run
+gym eval submit --config submit.yaml --resolve-only --json
+```
 
 ### `gym eval aggregate`
 
@@ -817,7 +911,7 @@ omitting data. All invalid JSONL rows are reported together, and no destination 
 model attempts not selected by a turn, such as failed retries, remain in `extra.nemo_gym.surplus_model_calls`; they do not
 become canonical ATIF steps or contribute to final usage totals. The destination directory must not already exist.
 
-This command does not parse ATOF and does not load NeMo Relay. Each ATIF trajectory takes its agent name from the source
+This command does not parse ATIF and does not load NeMo Relay. Each ATIF trajectory takes its agent name from the source
 row's `agent_ref.name`; `--agent-version` records the version of that agent implementation.
 
 | Option | Description |
@@ -850,6 +944,7 @@ Verify rollout quality for an existing run directory. The command reads `<run-di
 | `--rollouts-file PATH` | Rollout JSONL path. Relative paths resolve under `RUN_DIR`; absolute paths are used as written. Defaults to `rollouts.jsonl`. |
 | `--workers` | Number of worker processes. Defaults to the smaller of the CPU count and 8. |
 | `--ignore-checks`, `--ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
+| `--json` | Output health-check results as JSON. |
 
 ```bash
 gym eval health-check results/my-run
@@ -939,13 +1034,17 @@ Servers that report `unsupported` or `unknown` cause the command to abort unless
 | --- | --- |
 | `--config PATH` | Config file for the resources server. Repeatable. |
 | `--benchmark NAME` | Load the named benchmark config. |
+| `--environment NAME` | Load the named environment config. Repeatable. |
 | `--resources-server NAME` | Load the named resources server config. |
+| `--model-type NAME` | Load the named model-type config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--input-format gym\|atif` | Select native Gym rollout input or the bounded Relay ATIF v1.7 profile. Defaults to `gym`. |
 | `--inputs PATH` | `*_materialized_inputs.jsonl` from `gym eval run`. |
 | `--rollouts PATH` | Native Gym `rollouts.jsonl`. Required when `--input-format gym`. |
 | `--atif-manifest PATH` | JSONL manifest mapping each Relay ATIF trajectory to `_ng_task_index` and `_ng_rollout_index`, with an optional source SHA-256. Missing hashes produce a warning. Required when `--input-format atif`. |
 | `--output PATH`, `-o` | Output JSONL for recomputed rollouts. |
+| `--concurrency` | Maximum number of concurrent samples. |
+| `--limit` | Maximum number of examples to re-verify. |
 | `--force` | Override the `UNSUPPORTED` or `UNKNOWN` reverify mode guard; output is prefixed with `unsafe_`. |
 | `--overwrite` | Delete an existing output file instead of raising an error. |
 | `--resume` | Resume a partial run: skip rows already in the output and re-verify only the rest. |

@@ -1,1 +1,1 @@
--e nemo-gym[dev,sandbox] @ ../../
+-e nemo-gym[dev,ray,sandbox] @ ../../

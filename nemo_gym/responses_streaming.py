@@ -27,8 +27,8 @@ this module provides:
   way, and drops the fields the params model does not know;
 - the response-side synthesizer that re-emits a complete ``NeMoGymResponse`` as the minimal
   Responses SSE event sequence streaming clients require (``response.created`` ->
-  ``response.output_item.done`` per output item -> ``response.completed``), splitting flattened
-  function-call names back into ``namespace`` + ``name`` on the way out.
+  ``response.output_item.done`` per output item -> the matching completed/incomplete/failed
+  terminal event), splitting flattened function-call names back into ``namespace`` + ``name``.
 """
 
 import json
@@ -178,6 +178,33 @@ def sanitize_streaming_responses_body(
         kept_items = []
         carrier_tools: list[Any] = []
         for item in input_items:
+            if isinstance(item, dict) and item.get("type") == "message":
+                content = item.get("content")
+                if (
+                    item.get("role") == "assistant"
+                    and isinstance(content, list)
+                    and content
+                    and isinstance(content[0], dict)
+                    and content[0].get("type") in ("output_text", "refusal")
+                ):
+                    # Codex compaction replays output messages without these
+                    # response-only fields. Fill absent defaults without changing
+                    # text, supplied values, or malformed values such as null.
+                    item.setdefault("id", f"msg_{uuid4().hex}")
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "output_text":
+                            part.setdefault("annotations", [])
+                # Known messages must reach strict validation: silently dropping
+                # malformed history would let the model answer a different task.
+                kept_items.append(item)
+                continue
+            if isinstance(item, dict) and item.get("type") == "reasoning":
+                # Codex 0.144.4 replays complete reasoning content without its ID.
+                # Supply only that missing identifier; retain malformed reasoning
+                # for strict request validation instead of losing model history.
+                item.setdefault("id", f"rs_{uuid4().hex}")
+                kept_items.append(item)
+                continue
             if isinstance(item, dict) and item.get("type") == "function_call" and item.get("namespace"):
                 item["name"] = f"{item.pop('namespace')}{NAMESPACE_TOOL_DELIMITER}{item.get('name')}"
             # Codex's code mode ships tools inside an `additional_tools` input item instead of the
@@ -222,6 +249,12 @@ def sanitize_streaming_responses_body(
         # strict chat backends require.
         leading_parts = [body.get("instructions") or ""]
         while kept_items and _is_system_like_message(kept_items[0]):
+            try:
+                _INPUT_ITEM_ADAPTER.validate_python(kept_items[0])
+            except ValidationError:
+                # Keep malformed leading messages for the strict request error,
+                # rather than losing their invalid content while hoisting text.
+                break
             leading_parts.append(_input_message_text(kept_items.pop(0)))
         hoisted = "\n\n".join(part for part in leading_parts if part)
         if hoisted:
@@ -319,21 +352,23 @@ def _wire_usage(usage: Any) -> Any:
 def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[NamespaceMap] = None) -> Iterator[str]:
     """Re-emit a complete Responses API response object as an SSE event stream.
 
-    Streaming clients build their view of the turn from ``response.output_item.done`` events and
-    treat ``response.completed`` (which carries the response id and usage) as the terminal event,
-    so those two are the required minimum; ``response.created`` is included for clients that wait
-    for an acknowledgement before reading items.
+    Streaming clients build their view of the turn from ``response.output_item.done`` events.
+    The terminal event reflects the response status, retaining partial output, usage and failure
+    details; ``response.created`` is included for clients waiting for an acknowledgement.
     """
     if "usage" in response_json:
         response_json = {**response_json, "usage": _wire_usage(response_json["usage"])}
     output_items = restore_namespace_tool_calls(response_json.get("output") or [], ns_map or {})
-
     yield _sse_event(
         {"type": "response.created", "response": {**response_json, "status": "in_progress", "output": []}}
     )
     for index, item in enumerate(output_items):
         yield _sse_event({"type": "response.output_item.done", "output_index": index, "item": item})
-    yield _sse_event({"type": "response.completed", "response": {**response_json, "output": output_items}})
+    terminal_event = {
+        "incomplete": "response.incomplete",
+        "failed": "response.failed",
+    }.get(response_json.get("status"), "response.completed")
+    yield _sse_event({"type": terminal_event, "response": {**response_json, "output": output_items}})
 
 
 def synthesize_responses_failure_sse(message: str, *, code: str = "server_error") -> Iterator[str]:

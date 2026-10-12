@@ -90,6 +90,29 @@ def test_failure_artifact_is_not_silently_used_as_a_normal_rollout():
     assert result["calls.outcome"]["status"] == "fail"
 
 
+@pytest.mark.parametrize("status", [400, 429, 500])
+def test_http_error_attempt_keeps_ownership_without_requiring_a_model_turn(status):
+    record = evidence_record()
+    trajectory = record["ng_trajectory"]
+    attempt = deepcopy(trajectory["model_calls"][0])
+    attempt["model_call_id"] = "http-error"
+    attempt["response_metadata"].update(status_code=status, response_id=None, error_category="http_error")
+    attempt["response"] = {"error": {"message": "provider failure"}}
+    trajectory["model_calls"].insert(0, attempt)
+    invocation = trajectory["invocations"][0]
+    invocation["model_calls"].append({"model_call_id": "http-error"})
+
+    assert checks(record)["steps.attempt_accounting"]["status"] == "pass"
+    assert checks(record)["ownership.call_owner"]["status"] == "pass"
+    # Producers with an explicit retry-to-message ID may also retain that link.
+    trajectory["turns"][0]["model_calls"].append({"model_call_id": "http-error"})
+    assert checks(record)["steps.attempt_accounting"]["status"] == "pass"
+    trajectory["turns"][1]["model_calls"].append({"model_call_id": "http-error"})
+    assert checks(record)["steps.attempt_accounting"]["status"] == "fail"
+    invocation["model_calls"].pop()
+    assert checks(record)["ownership.call_owner"]["status"] == "fail"
+
+
 def test_retry_attempt_and_compaction_helper_accounting():
     record = evidence_record()
     trajectory = record["ng_trajectory"]

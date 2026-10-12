@@ -592,6 +592,56 @@ class TestApp:
         assert [call.kwargs["server_name"] for call in server_client.post.await_args_list] == ["model"]
         direct_request.assert_not_awaited()
 
+    async def test_agent_session_without_a_grant_closes_without_a_resources_cookie_jar(self) -> None:
+        # The session never held the Resources cookie, so close must not report an empty jar.
+        # An empty jar would replace the seed's cookie that the Environment Server sends to verify.
+        server, server_client = _make_agent(False)
+        server_client.post = AsyncMock(
+            return_value=_mock_response(
+                {
+                    "id": "resp-final",
+                    "created_at": 1.0,
+                    "model": "model",
+                    "object": "response",
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                    "output": [
+                        {
+                            "id": "msg-1",
+                            "content": [{"annotations": [], "text": "42", "type": "output_text"}],
+                            "role": "assistant",
+                            "status": "completed",
+                            "type": "message",
+                        }
+                    ],
+                }
+            )
+        )
+        client = TestClient(server.setup_webserver())
+        episode_id = EpisodeId(rollout_id="rollout", attempt=0)
+        seed = client.post(
+            "/v1/agent_sessions",
+            json=AgentSeedSessionRequest(
+                agent_session_id="agent-session",
+                episode_id=episode_id,
+                task_id=TaskId(taskset="example", task_id="0"),
+            ).model_dump(mode="json"),
+        )
+        assert seed.status_code == 200
+
+        result = client.post("/v1/responses", json={"input": [{"role": "user", "content": "answer?"}]})
+        assert result.status_code == 200
+
+        close = client.post(
+            "/v1/agent_sessions/close",
+            json=AgentCloseSessionRequest(agent_session_id="agent-session", episode_id=episode_id).model_dump(
+                mode="json"
+            ),
+        )
+        assert close.status_code == 200
+        assert close.json()["resources_cookies"] is None
+
     async def test_agent_session_seed_and_close_are_idempotent(self) -> None:
         server, _ = _make_agent(False)
         request = MagicMock(session={})

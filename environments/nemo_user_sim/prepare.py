@@ -22,9 +22,8 @@ NEMOTRON_PERSONAS_VERSION = "0.0.2"
 NEMOTRON_PERSONAS_SHA256 = (
     "0341192b00a376cf5643d98cb244e596529030fb3011694ca6ab381f149d3ae8"  # pragma: allowlist secret
 )
-NEMOTRON_PERSONAS_DOWNLOAD_COMMAND = (
-    'ngc registry resource download-version "nvidia/nemotron-personas/nemotron-personas-dataset-en_us:0.0.2"'
-)
+NEMOTRON_PERSONAS_RESOURCE = "nvidia/nemotron-personas/nemotron-personas-dataset-en_us:0.0.2"
+NEMOTRON_PERSONAS_DOWNLOAD_COMMAND = f'ngc registry resource download-version "{NEMOTRON_PERSONAS_RESOURCE}"'
 _MATERIALIZE_SCRIPT = """
 import json
 import sys
@@ -32,11 +31,35 @@ from pathlib import Path
 
 repository_root = sys.argv[1]
 sys.path.insert(0, repository_root)
-from environments.nemo_user_sim.prepare import _probe_seed
+from environments.nemo_user_sim.prepare import _download_persona_asset, _probe_seed
+from usersim.cli._ngc import ensure_ngc_cli, ensure_ngc_org, has_ngc_key
 from usersim.engine.core.probes import known_probes
 from usersim.engine.external import materialize_episode_inputs
 
-locale, seed, models_path, destination = sys.argv[2], int(sys.argv[3]), Path(sys.argv[4]), Path(sys.argv[5])
+locale = sys.argv[2]
+seed = int(sys.argv[3])
+managed_assets_path = Path(sys.argv[4])
+models_path = Path(sys.argv[5])
+destination = Path(sys.argv[6])
+persona_asset_path = managed_assets_path / "datasets" / f"{locale}.parquet"
+
+if not persona_asset_path.is_file():
+    if not has_ngc_key():
+        raise RuntimeError(
+            f"{persona_asset_path} is not cached. Set NGC_CLI_API_KEY and rerun "
+            "`gym eval prepare --config environments/nemo_user_sim/config.yaml`."
+        )
+    ngc_executable = ensure_ngc_cli()
+    if ensure_ngc_org() is None:
+        raise RuntimeError(
+            "Could not determine an NGC organization. Set NGC_CLI_ORG or run `ngc config set`, then rerun."
+        )
+    _download_persona_asset(
+        ngc_executable=ngc_executable,
+        locale=locale,
+        managed_assets_path=managed_assets_path,
+    )
+
 rows = []
 for probe in known_probes():
     [row] = materialize_episode_inputs(
@@ -49,6 +72,10 @@ for probe in known_probes():
     rows.append(row)
 destination.write_text("".join(json.dumps(row, ensure_ascii=False, default=str) + "\\n" for row in rows))
 """
+
+
+class _PersonaAssetMissingError(RuntimeError):
+    """Raised when the pinned persona asset has not been downloaded yet."""
 
 
 def _probe_seed(seed: int, probe: str) -> int:
@@ -101,26 +128,75 @@ def _managed_assets_path() -> Path:
     return Path.home() / ".data-designer" / "managed-assets"
 
 
+def _download_persona_asset(*, ngc_executable: Path, locale: str, managed_assets_path: Path) -> Path:
+    if locale != "en_US":
+        raise ValueError("NeMo UserSim validation preparation currently supports only locale='en_US'")
+    destination = managed_assets_path / "datasets" / f"{locale}.parquet"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="nemotron-personas-") as download_dir:
+        command = [
+            str(ngc_executable),
+            "registry",
+            "resource",
+            "download-version",
+            NEMOTRON_PERSONAS_RESOURCE,
+            "--dest",
+            download_dir,
+        ]
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True, errors="replace")
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr or ""
+            raise RuntimeError(f"Failed to download Nemotron-Personas: {stderr.strip() or exc}") from exc
+        downloaded_assets = list(Path(download_dir).rglob(f"{locale}.parquet"))
+        if len(downloaded_assets) != 1:
+            raise RuntimeError(
+                f"Expected one {locale}.parquet in the downloaded Nemotron-Personas resource, "
+                f"found {len(downloaded_assets)}."
+            )
+        downloaded_asset = downloaded_assets[0]
+        digest = hashlib.sha256()
+        with downloaded_asset.open("rb") as asset:
+            for chunk in iter(lambda: asset.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != NEMOTRON_PERSONAS_SHA256:
+            raise RuntimeError(
+                f"Downloaded Nemotron-Personas {NEMOTRON_PERSONAS_VERSION} asset has SHA-256 "
+                f"{digest.hexdigest()}, expected {NEMOTRON_PERSONAS_SHA256}."
+            )
+        temporary_destination = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+        try:
+            shutil.copyfile(downloaded_asset, temporary_destination)
+            os.replace(temporary_destination, destination)
+        finally:
+            temporary_destination.unlink(missing_ok=True)
+    return destination
+
+
 def _validate_persona_asset(locale: str) -> Path:
     if locale != "en_US":
         raise ValueError("NeMo UserSim validation preparation currently supports only locale='en_US'")
     managed_assets_path = _managed_assets_path()
     asset_path = managed_assets_path / "datasets" / f"{locale}.parquet"
-    if asset_path.is_file():
-        digest = hashlib.sha256()
-        with asset_path.open("rb") as asset:
-            for chunk in iter(lambda: asset.read(1024 * 1024), b""):
-                digest.update(chunk)
-        if digest.hexdigest() == NEMOTRON_PERSONAS_SHA256:
-            return managed_assets_path
-        problem = f"has SHA-256 {digest.hexdigest()}, expected {NEMOTRON_PERSONAS_SHA256}"
-    else:
-        problem = "is missing"
-    raise RuntimeError(
-        f"Pinned Nemotron-Personas {NEMOTRON_PERSONAS_VERSION} asset {asset_path} {problem}. "
-        f"Download the pinned resource with `{NEMOTRON_PERSONAS_DOWNLOAD_COMMAND}`, then place its "
-        f"`en_US.parquet` at {asset_path}."
-    )
+    if not asset_path.is_file():
+        raise _PersonaAssetMissingError(
+            f"Pinned Nemotron-Personas {NEMOTRON_PERSONAS_VERSION} asset {asset_path} is missing. "
+            "Set NGC_CLI_API_KEY and rerun preparation. "
+            f"To download it manually, run `{NEMOTRON_PERSONAS_DOWNLOAD_COMMAND}`, then place its "
+            f"`en_US.parquet` at {asset_path}."
+        )
+    digest = hashlib.sha256()
+    with asset_path.open("rb") as asset:
+        for chunk in iter(lambda: asset.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != NEMOTRON_PERSONAS_SHA256:
+        raise RuntimeError(
+            f"Pinned Nemotron-Personas {NEMOTRON_PERSONAS_VERSION} asset {asset_path} "
+            f"has SHA-256 {digest.hexdigest()}, expected {NEMOTRON_PERSONAS_SHA256}. "
+            f"Download the pinned resource with `{NEMOTRON_PERSONAS_DOWNLOAD_COMMAND}`, then place its "
+            f"`en_US.parquet` at {asset_path}."
+        )
+    return managed_assets_path
 
 
 def _json_safe(value: object) -> object:
@@ -162,7 +238,10 @@ def prepare(
     executable = shutil.which(uv_executable)
     if executable is None:
         raise RuntimeError(f"{uv_executable!r} is not on PATH; it is required to prepare UserSim inputs.")
-    managed_assets_path = _validate_persona_asset(locale)
+    try:
+        managed_assets_path = _validate_persona_asset(locale)
+    except _PersonaAssetMissingError:
+        managed_assets_path = _managed_assets_path()
     TASKS_FPATH.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="usersim-materialize-") as working_dir:
         resolved_path = Path(working_dir) / "resolved.jsonl"
@@ -182,6 +261,7 @@ def prepare(
             str(ENVIRONMENT_DIR.parents[1]),
             locale,
             str(random_seed),
+            str(managed_assets_path),
             str(models_path),
             str(resolved_path),
         ]
@@ -204,6 +284,7 @@ def prepare(
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             stderr = getattr(exc, "stderr", "") or ""
             raise RuntimeError(f"Failed to materialize NeMo UserSim inputs: {stderr.strip() or exc}") from exc
+        _validate_persona_asset(locale)
         resolved_rows = [json.loads(line) for line in resolved_path.read_text().splitlines() if line.strip()]
 
     tasks = []

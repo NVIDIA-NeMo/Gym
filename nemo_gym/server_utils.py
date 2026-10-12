@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import ast
 import asyncio
 import atexit
 import json
@@ -20,11 +21,13 @@ import resource
 import socket
 import sys
 import time
+import warnings
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
 from functools import partial
 from importlib import import_module
+from importlib.util import find_spec
 from ipaddress import ip_network
 from os import environ, getenv
 from pathlib import Path
@@ -922,6 +925,95 @@ def _has_injected_global_config_env() -> bool:
 SESSION_ID_KEY = "session_id"
 
 
+class SessionIDMiddleware:
+    """Add a stable Gym session ID to each HTTP request.
+
+    ``SessionMiddleware`` must wrap this middleware so ``scope["session"]`` is available.
+    Non-HTTP scopes pass through unchanged.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        session = scope["session"]
+        session_id = session.get(SESSION_ID_KEY)
+        if session_id is None:
+            session_id = str(uuid4())
+        # Assignment marks the session as modified.
+        # SessionMiddleware therefore persists the ID on every response.
+        session[SESSION_ID_KEY] = session_id
+
+        await self.app(scope, receive, send)
+
+
+class ExceptionHandlingMiddleware:
+    """Convert pre-response exceptions into Gym's JSON 500 responses.
+
+    Exceptions propagate after ``http.response.start`` because the status and headers are committed.
+    Non-HTTP scopes pass through unchanged.
+    """
+
+    def __init__(self, app: ASGIApp, server: "SimpleServer") -> None:
+        self.app = app
+        self.server = server
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        response_started = False
+
+        async def send_wrapper(message: Message) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+            return
+        except ClientResponseError as e:
+            if response_started:
+                raise
+            assert hasattr(e, "response_content"), (
+                "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
+            )
+
+            response_content = f"Hit an exception in {self.server.get_session_middleware_key()} calling an inner server: {e.response_content}"
+            print(_format_upstream_error_log(self.server.get_session_middleware_key(), e), flush=True)
+
+            response = JSONResponse(content=response_content, status_code=500)
+        except CancelledError:
+            if response_started:
+                raise
+            response = JSONResponse(content="Request was cancelled", status_code=500)
+        except Exception as e:
+            if response_started:
+                raise
+            print(
+                f"""🚨 Caught an exception printed above in {self.server.config.name} ({self.server.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
+Formatted exception: {format_exc()}
+repr(e): {repr(e)}"""
+            )
+            response = JSONResponse(content=repr(e), status_code=500)
+        except:  # noqa: E722
+            if response_started:
+                raise
+            print_exc()
+            print(
+                f"""🚨 Caught an unknown exception printed above in {self.server.config.name} ({self.server.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
+            )
+            response = JSONResponse(content="An unknown error occurred", status_code=500)
+
+        await response(scope, receive, send)
+
+
 class BaseServer(BaseModel):
     """
     All instances of BaseServer are queryable using ServerClient.
@@ -1012,9 +1104,19 @@ class UvicornProxyHeadersConfig(BaseModel):
 _NEMO_GYM_STARTED_RAY_CLUSTER: bool = False
 
 
+def ray_is_installed() -> bool:
+    """Whether Ray can be imported in this process, checked without importing it."""
+    return find_spec("ray") is not None
+
+
 def _get_ray():
     """Import Ray only for processes configured to use it."""
-    import ray
+    try:
+        import ray
+    except ImportError as e:
+        raise ImportError(
+            "This process needs Ray, but Ray isn't installed in its environment. Install the `nemo-gym[ray]` extra."
+        ) from e
 
     return ray
 
@@ -1186,26 +1288,76 @@ class ClientDisconnectCancellationMiddleware:
             task_group.start_soon(listen_for_disconnect)
 
 
-_WARNED_IMPLICIT_RAY_SERVERS: set[type] = set()
-
-
-def _server_uses_ray(server_class: type) -> bool:
-    ray_enabled = server_class.ray_enabled
-    if ray_enabled is not None:
-        return ray_enabled
-    if server_class not in _WARNED_IMPLICIT_RAY_SERVERS:
-        logger.warning(
-            f"{server_class.__module__}.{server_class.__name__} does not declare ray_enabled; "
-            "Ray remains enabled for backward compatibility. Set ray_enabled explicitly because "
-            "a future release will default it to false."
+def _connect_server_to_ray(server_class: type, global_config_dict: DictConfig) -> None:
+    """Join the run's Ray cluster if this server declares that it uses Ray."""
+    if not server_class.ray_enabled:
+        return
+    if _has_injected_global_config_env() and not global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME):
+        # Gym only launches servers without a cluster address when it decided no server needs Ray. Fail instead
+        # of letting initialize_ray start a private cluster in this process and in each of its workers.
+        raise RuntimeError(
+            f"{server_class.__module__}.{server_class.__name__} uses Ray, but this run has no Ray cluster. "
+            f"Declare `ray_enabled = True` on {server_class.__name__} itself so `gym` starts Ray for it, and "
+            "install the `nemo-gym[ray]` extra where `gym` runs."
         )
-        _WARNED_IMPLICIT_RAY_SERVERS.add(server_class)
-    return True
+    initialize_ray()
+
+
+def _declared_ray_enabled(class_node: ast.ClassDef) -> bool | None:
+    """The literal `ray_enabled` assigned in a class body, or None when there is none."""
+    for item in class_node.body:
+        if not isinstance(item, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "ray_enabled" for target in item.targets):
+            continue
+        if isinstance(item.value, ast.Constant) and isinstance(item.value.value, bool):
+            return item.value.value
+    return None
+
+
+def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
+    """The `ray_enabled` declaration of the server an entrypoint starts, read from source.
+
+    The supervisor must decide whether to start Ray before any server exists, and each server runs in its own
+    venv, so this reads the source instead of importing it. It finds the classes the entrypoint calls
+    `run_webserver()` on and checks their literal `ray_enabled` declarations.
+
+    Returns True when any of them declares True, False when all of them declare False, and None when that can't
+    be settled from the source alone, such as an inherited declaration, a class imported from another module, or
+    an unreadable entrypoint.
+    """
+    try:
+        source = entrypoint_fpath.read_text()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(source)
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return None
+
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    invoked_class_names = {
+        node.func.value.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "run_webserver"
+        and isinstance(node.func.value, ast.Name)
+    }
+    if not invoked_class_names:
+        return None
+    declarations = [_declared_ray_enabled(classes[name]) if name in classes else None for name in invoked_class_names]
+    if True in declarations:
+        return True
+    if all(declaration is False for declaration in declarations):
+        return False
+    return None
 
 
 class SimpleServer(BaseServer):
     server_client: ServerClient
-    ray_enabled: ClassVar[bool | None] = None
+    # Servers that use Ray must declare `ray_enabled = True` on the class their entrypoint runs. Gym reads it
+    # before launch to decide whether to start Ray, and connects only those servers to it.
+    ray_enabled: ClassVar[bool] = False
 
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
@@ -1259,52 +1411,17 @@ class SimpleServer(BaseServer):
             return
         app.state.nemo_gym_session_middleware_installed = True
 
-        # The multiple middleware execution order described in https://fastapi.tiangolo.com/tutorial/middleware/#multiple-middleware-execution-order
-        # Says that if you register middlewares A and then B,
-        # - at request time: They execute B first then A
-        # - at response time: They return to A first and then B
-        # So for adding session IDs, that middleware must run after SessionMiddleware, so it must be registered before it.
-
-        @app.middleware("http")
-        async def add_session_id(request: Request, call_next):  # pragma: no cover
-            # Always assign so Starlette 1.0+ marks session.modified=True and re-sends Set-Cookie.
-            request.session[SESSION_ID_KEY] = request.session.get(SESSION_ID_KEY, str(uuid4()))
-
-            response: Response = await call_next(request)
-            return response
+        # Middleware added later runs first.
+        # SessionMiddleware must populate the session before SessionIDMiddleware reads it.
+        app.add_middleware(SessionIDMiddleware)
 
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
-    def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
-        @app.middleware("http")
-        async def exception_handling_middleware(request: Request, call_next):
-            try:
-                return await call_next(request)
-            except ClientResponseError as e:
-                assert hasattr(e, "response_content"), (
-                    "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
-                )
-
-                response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
-                print(_format_upstream_error_log(self.get_session_middleware_key(), e), flush=True)
-
-                return JSONResponse(content=response_content, status_code=500)
-            except CancelledError:
-                return JSONResponse(content="Request was cancelled", status_code=500)
-            except Exception as e:
-                print(
-                    f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
-Formatted exception: {format_exc()}
-repr(e): {repr(e)}"""
-                )
-                return JSONResponse(content=repr(e), status_code=500)
-            except:
-                print_exc()
-                print(
-                    f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
-                )
-                return JSONResponse(content="An unknown error occurred", status_code=500)
+    def setup_exception_middleware(self, app: FastAPI) -> None:
+        # Registered after the server's own middleware, so it handles failures from them and from the routes.
+        # Only the cancellation middleware is registered after it.
+        app.add_middleware(ExceptionHandlingMiddleware, server=self)
 
     def setup_cancellation_middleware(self, app: FastAPI) -> None:
         app.add_middleware(ClientDisconnectCancellationMiddleware)
@@ -1392,8 +1509,7 @@ repr(e): {repr(e)}"""
         is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
 
         server_config = cls.load_config_from_global_config()
-        if _server_uses_ray(cls):
-            initialize_ray()
+        _connect_server_to_ray(cls, global_config_dict)
 
         server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
