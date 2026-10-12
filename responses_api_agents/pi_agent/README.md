@@ -134,10 +134,10 @@ configuration must not replace the agent's cap with a larger value. Enforcement 
 7. Environment Server asks Resources to verify and close the task session. The benchmark
    owns its verification procedure and sandbox teardown.
 
-After a successful harness exit in a borrowed sandbox, task processes remain alive
-for verification; Resources stops them when it destroys the sandbox. Services must
-not depend on the agent's temporary session files. Timeout, cancellation, failed exits,
-and agent-owned sandboxes retain full descendant cleanup.
+The supervisor bounds harness termination and leaves task descendants for the sandbox
+owner to stop: Resources after verification or episode failure, or the agent when
+closing its own sandbox. Ownership does not change process supervision. Services must
+not depend on the agent's temporary session files.
 
 Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, shared with Hermes.
 The adapter stages its worker input and collects its own output. The shared session

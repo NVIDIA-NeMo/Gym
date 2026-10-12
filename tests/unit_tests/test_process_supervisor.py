@@ -6,7 +6,6 @@
 import json
 import os
 import runpy
-import shutil
 import signal
 import subprocess
 import sys
@@ -19,10 +18,54 @@ import pytest
 SUPERVISOR = Path(__file__).parents[2] / "nemo_gym/agent_utils/process_supervisor.py"
 
 
+@pytest.mark.parametrize("harness", ["pi", "codex", "opencode", "openclaw"])
+def test_capture_error_stops_direct_cli_before_wrapper_exits(tmp_path: Path, harness: str) -> None:
+    runner = SUPERVISOR.parents[2] / f"responses_api_agents/{harness}_agent/sandbox_runner.py"
+    driver = """
+import json, os, pathlib, runpy, subprocess, sys
+module = runpy.run_path(sys.argv[1])
+children = []
+class InterruptedWait(subprocess.Popen):
+    interrupted = False
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        children.append(self)
+    def wait(self, *args, **kwargs):
+        if not self.interrupted:
+            self.interrupted = True
+            raise OSError('capture interrupted')
+        return super().wait(*args, **kwargs)
+subprocess.Popen = InterruptedWait
+root = sys.argv[2]
+try:
+    try:
+        module['run']({'directory': root, 'cwd': root, 'env': {}, 'prompt': 'task',
+                       'command': [sys.executable, '-c', 'import os,time; os.close(1); time.sleep(60)']})
+    except OSError as error:
+        assert str(error) == 'capture interrupted', error
+    else:
+        raise AssertionError('capture failure did not propagate')
+    assert children and all(child.poll() is not None for child in children), 'CLI is still running'
+finally:
+    for child in children:
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+"""
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", driver, str(runner), str(tmp_path)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 @pytest.mark.parametrize("timeout, cleanup", [(1, 0.1), (2700, 10), (21600, 100)])
 def test_exec_timeout_reserves_all_cleanup_phases(timeout: float, cleanup: float) -> None:
     supervisor = runpy.run_path(str(SUPERVISOR))
-    assert supervisor["exec_timeout"](timeout=timeout, cleanup_timeout=cleanup) > timeout + 3 * cleanup
+    assert supervisor["exec_timeout"](timeout=timeout, cleanup_timeout=cleanup) > timeout + 2 * cleanup
 
 
 @pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf"])
@@ -38,113 +81,16 @@ def test_supervisor_rejects_invalid_deadlines(tmp_path: Path, timeout: str) -> N
     assert not (tmp_path / "cleanup.json").exists()
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper and /proc are required")
-@pytest.mark.parametrize(
-    "ending,preserve",
-    [
-        (ending, preserve)
-        for ending in ("normal", "crash", "timeout", "cancel", "grace")
-        for preserve in (False, True)
-        if not (ending == "normal" and preserve)
-    ],
-)
-def test_supervisor_reaps_detached_tools_and_preserves_term_grace(tmp_path: Path, ending: str, preserve: bool) -> None:
-    uploaded = tmp_path / "process_supervisor.py"
-    shutil.copyfile(SUPERVISOR, uploaded)
-    worker = tmp_path / "worker.py"
-    worker.write_text(
-        "import json, os, pathlib, signal, subprocess, sys, time\n"
-        "def checkpoint(*_):\n"
-        "    time.sleep(0.1)\n"
-        "    pathlib.Path('checkpoint').write_text('saved before kill')\n"
-        "    raise SystemExit(0)\n"
-        "signal.signal(signal.SIGTERM, checkpoint if sys.argv[1] == 'grace' else signal.SIG_IGN)\n"
-        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
-        "pathlib.Path('pids.json').write_text(json.dumps([os.getpid(), child.pid]))\n"
-        # Take the deadline's SIGTERM only now, after the handler and the detached child exist.
-        "signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})\n"
-        "if sys.argv[1] == 'crash':\n"
-        "    raise SystemExit(7)\n"
-        "if sys.argv[1] != 'normal':\n"
-        "    time.sleep(60)\n"
-    )
-    timeout = 0.8 if ending in ("timeout", "grace") else 10
-    launcher = [sys.executable, "-I"]
-    if ending in ("timeout", "grace"):
-        # The deadline can fire before a slow worker has started.
-        # Blocking SIGTERM across exec keeps that signal pending until the worker unblocks it.
-        # The test never signals the supervisor in these cases, so the block does not change its own handling.
-        launcher += [
-            "-c",
-            "import os, signal, sys; signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM});"
-            " os.execv(sys.executable, [sys.executable, '-I', *sys.argv[1:]])",
-        ]
-    # The grace bound only stops a hung checkpoint.
-    # The worker exits as soon as it has saved.
-    cleanup_timeout = 10 if ending == "grace" else 0.5
-    process = subprocess.Popen(
-        [
-            *launcher,
-            str(uploaded),
-            "--timeout",
-            str(timeout),
-            "--cleanup-timeout",
-            str(cleanup_timeout),
-            "--receipt",
-            str(tmp_path / "cleanup.json"),
-            *(["--preserve-descendants-on-success"] if preserve else []),
-            "--",
-            sys.executable,
-            "-I",
-            str(worker),
-            ending,
-        ],
-        cwd=tmp_path,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-    )
-    try:
-        if ending == "cancel":
-            deadline = time.monotonic() + 5
-            while not (tmp_path / "pids.json").exists() and process.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.01)
-            assert (tmp_path / "pids.json").exists()
-            process.send_signal(signal.SIGTERM)
-        stdout, stderr = process.communicate(timeout=15)
-        assert process.returncode == 0, (stdout, stderr)
-        receipt = json.loads((tmp_path / "cleanup.json").read_text())
-        assert receipt["cleanup_confirmed"] is True
-        assert receipt["error"] is None
-        assert receipt["timed_out"] is (ending in ("timeout", "grace"))
-        assert receipt["return_code"] == {"normal": 0, "crash": 7, "grace": 0}.get(ending, -signal.SIGKILL)
-        if ending == "grace":
-            assert (tmp_path / "checkpoint").read_text() == "saved before kill"
-        for pid in json.loads((tmp_path / "pids.json").read_text()):
-            with pytest.raises(ProcessLookupError):
-                os.kill(pid, 0)
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait(timeout=5)
-        # Clean up only this test's children if the regression fails.
-        if (tmp_path / "pids.json").exists():
-            for pid in json.loads((tmp_path / "pids.json").read_text()):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-
-
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper and /proc are required")
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux owner subreaper and /proc are required")
+@pytest.mark.parametrize("ending", ["normal", "crash", "timeout", "cancel", "grace", "stubborn", "killed"])
 @pytest.mark.parametrize("detached", [False, True])
-def test_borrowed_sandbox_preserves_service_for_verification(tmp_path: Path, detached: bool) -> None:
-    # Use a parent subreaper to emulate Resources ownership without leaving orphans
-    # on the test host. Both ordinary background jobs and setsid services must survive.
+def test_sandbox_owner_tears_down_services_after_harness_exit(tmp_path: Path, ending: str, detached: bool) -> None:
+    # The isolated parent emulates the sandbox owner and reaps every test process.
+    # Service descendants must survive both normal and interrupted harness exits.
     driver = r"""
 import ctypes, json, os, pathlib, signal, subprocess, sys, time, urllib.request
 assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
-supervisor, root, detached = sys.argv[1], pathlib.Path(sys.argv[2]), sys.argv[3] == 'True'
+supervisor, root, ending, detached = sys.argv[1], pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4] == 'True'
 service = root / 'service.py'
 service.write_text("from http.server import HTTPServer, BaseHTTPRequestHandler\n"
                   "from pathlib import Path\n"
@@ -155,26 +101,66 @@ service.write_text("from http.server import HTTPServer, BaseHTTPRequestHandler\n
                   "Path('port').write_text(str(server.server_port))\n"
                   "server.serve_forever()\n")
 worker = root / 'worker.py'
-worker.write_text("import pathlib, subprocess, sys, time\n"
-                 "child = subprocess.Popen([sys.executable, 'service.py'], "
-                 "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=" + str(detached) + ")\n"
+worker.write_text("import os, pathlib, signal, subprocess, sys, time\n"
+                 "def checkpoint(*_):\n"
+                 "    pathlib.Path('checkpoint').write_text('saved before exit')\n"
+                 "    raise SystemExit(0)\n"
+                 "ending = sys.argv[1]\n"
+                 "if ending in ('timeout', 'cancel', 'grace'): signal.signal(signal.SIGTERM, checkpoint)\n"
+                 "if ending == 'stubborn': signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                 "pathlib.Path('worker.pid').write_text(str(os.getpid()))\n"
+                 "child = subprocess.Popen([sys.executable, 'service.py'], stdout=subprocess.DEVNULL, "
+                 "stderr=subprocess.DEVNULL, start_new_session=" + str(detached) + ")\n"
                  "pathlib.Path('service.pid').write_text(str(child.pid))\n"
                  "deadline = time.monotonic() + 5\n"
                  "while not pathlib.Path('port').exists():\n"
                  "    assert child.poll() is None and time.monotonic() < deadline\n"
-                 "    time.sleep(0.01)\n")
+                 "    time.sleep(0.01)\n"
+                 "signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})\n"
+                 "if ending == 'crash': raise SystemExit(7)\n"
+                 "if ending == 'killed': os.kill(os.getpid(), signal.SIGKILL)\n"
+                 "if ending != 'normal': time.sleep(60)\n")
+launcher = [sys.executable, '-I']
+timed_out = ending in ('timeout', 'grace', 'stubborn')
+if timed_out:
+    launcher += ['-c', "import os, signal, sys; signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM});"
+                 " os.execv(sys.executable, [sys.executable, '-I', *sys.argv[1:]])"]
+process = None
 try:
-    result = subprocess.run([sys.executable, '-I', supervisor, '--timeout', '10',
-        '--cleanup-timeout', '1', '--preserve-descendants-on-success',
-        '--receipt', str(root / 'cleanup.json'), '--', sys.executable, str(worker)],
-        cwd=root, capture_output=True, timeout=15)
-    assert result.returncode == 0, result.stderr
+    process = subprocess.Popen([*launcher, supervisor, '--timeout', '0.8' if timed_out else '10',
+        '--cleanup-timeout', '0.5', '--receipt', str(root / 'cleanup.json'), '--',
+        sys.executable, str(worker), ending], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if ending == 'cancel':
+        deadline = time.monotonic() + 5
+        while not (root / 'port').exists():
+            assert process.poll() is None and time.monotonic() < deadline
+            time.sleep(0.01)
+        process.send_signal(signal.SIGTERM)
+    stdout, stderr = process.communicate(timeout=15)
+    assert process.returncode == (1 if ending in ('stubborn', 'killed') else 0), (stdout, stderr)
     receipt = json.loads((root / 'cleanup.json').read_text())
-    assert receipt == {'cleanup_confirmed': True, 'return_code': 0, 'error': None, 'timed_out': False}
+    assert receipt['cleanup_confirmed'] is (ending not in ('stubborn', 'killed')), receipt
+    assert receipt['timed_out'] is timed_out, receipt
+    expected = {'normal': 0, 'crash': 7, 'grace': 0, 'stubborn': -signal.SIGKILL, 'killed': -signal.SIGKILL}.get(ending, 0)
+    assert receipt['return_code'] == expected, receipt
+    if ending in ('stubborn', 'killed'):
+        assert 'sandbox teardown required' in receipt['error'], receipt
+    else:
+        assert receipt['error'] is None, receipt
+    if ending == 'grace':
+        assert (root / 'checkpoint').read_text() == 'saved before exit'
+    try:
+        os.kill(int((root / 'worker.pid').read_text()), 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError('supervised worker still running')
     port = int((root / 'port').read_text())
     with urllib.request.urlopen('http://127.0.0.1:%d/' % port, timeout=2) as response:
         assert response.read() == b'task solved'
 finally:
+    if process is not None and process.poll() is None:
+        process.kill(); process.wait(timeout=5)
     children = pathlib.Path('/proc/self/task/%d/children' % os.getpid())
     for pid in children.read_text().split():
         try:
@@ -192,10 +178,10 @@ if (root / 'service.pid').exists():
     except ProcessLookupError:
         pass
     else:
-        raise AssertionError('Resources teardown left the task service alive')
+        raise AssertionError('Sandbox teardown left the task service alive')
 """
     result = subprocess.run(
-        [sys.executable, "-I", "-c", driver, str(SUPERVISOR), str(tmp_path), str(detached)],
+        [sys.executable, "-I", "-c", driver, str(SUPERVISOR), str(tmp_path), ending, str(detached)],
         capture_output=True,
         text=True,
         errors="replace",
@@ -204,31 +190,7 @@ if (root / 'service.pid').exists():
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper contract")
-def test_failed_descendant_cleanup_cannot_write_success_receipt(tmp_path: Path) -> None:
-    probe = """
-import runpy, sys
-supervisor = runpy.run_path(sys.argv[1])
-def fail(timeout):
-    raise TimeoutError('descendant still running')
-supervisor['_supervise'].__globals__['_drain_children'] = fail
-sys.argv = [sys.argv[1], '--timeout', '1', '--receipt', sys.argv[2], '--', sys.executable, '-c', 'pass']
-raise SystemExit(supervisor['main']())
-"""
-    receipt_path = tmp_path / "cleanup.json"
-    result = subprocess.run(
-        [sys.executable, "-I", "-c", probe, str(SUPERVISOR), str(receipt_path)],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert result.returncode == 1
-    receipt = json.loads(receipt_path.read_text())
-    assert receipt["cleanup_confirmed"] is False
-    assert receipt["error"] == "cleanup: descendant still running"
-
-
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
 def test_provider_group_kill_leaves_supervisor_alive_to_reap_worker(tmp_path: Path) -> None:
     # Keep the shell as the provider group leader; the supervisor must leave that group.
     process = subprocess.Popen(
@@ -275,8 +237,8 @@ def test_provider_group_kill_leaves_supervisor_alive_to_reap_worker(tmp_path: Pa
         process.communicate(timeout=10)
         receipt = json.loads((tmp_path / "cleanup.json").read_text())
         assert receipt["timed_out"] is False
-        assert receipt["cleanup_confirmed"] is True
-        assert receipt["error"] is None
+        assert receipt["cleanup_confirmed"] is False
+        assert "terminated by a signal" in receipt["error"]
         with pytest.raises(ProcessLookupError):
             os.kill(worker_pid, 0)
     finally:
@@ -290,10 +252,10 @@ def test_provider_group_kill_leaves_supervisor_alive_to_reap_worker(tmp_path: Pa
                 pass
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
 def test_sigterm_during_spawn_does_not_lose_child_handle(tmp_path):
     # Deliver SIGTERM after the real child exists but before Popen returns to _supervise().
-    # Isolate signal handlers/subreaper state from pytest, and always reap the test child.
+    # Isolate signal handlers from pytest, and always reap the test child.
     driver = """
 import json, os, runpy, signal, subprocess, sys
 runner = runpy.run_path(sys.argv[1])
@@ -327,13 +289,14 @@ finally:
     )
     summary = json.loads(completed.stdout)
     assert summary["timed_out"] is False
-    assert summary["cleanup_confirmed"] is True
+    assert summary["cleanup_confirmed"] is False
+    assert "terminated by a signal" in summary["error"]
     assert summary["child_alive"] is False
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper contract")
-def test_spawned_child_is_reaped_when_popen_loses_handle(tmp_path):
-    # A constructor failure after process creation must still drain the subreaper's children.
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
+def test_lost_spawn_handle_requires_sandbox_teardown(tmp_path):
+    # A lost handle cannot confirm termination; the owner must destroy the sandbox.
     driver = """
 import json, os, runpy, subprocess, sys
 runner = runpy.run_path(sys.argv[1])
@@ -369,7 +332,7 @@ finally:
         check=True,
     )
     summary = json.loads(completed.stdout)
-    assert summary["return_code"] != 0
+    assert summary["return_code"] is None
     assert summary["error"] == "launch handle lost after process creation"
-    assert summary["cleanup_confirmed"] is True
-    assert summary["child_alive"] is False
+    assert summary["cleanup_confirmed"] is False
+    assert summary["child_alive"] is True

@@ -19,7 +19,7 @@ from responses_api_agents.openclaw_agent.sandbox import OpenClawSandboxSession
 from responses_api_agents.openclaw_agent.tests.test_sandbox import seed
 
 
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux child-subreaper and /proc required")
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux process supervision required")
 
 
 class ExecOnlySandbox:
@@ -97,7 +97,7 @@ def payload(state, code, timeout=0.5):
 
 
 @pytest.mark.parametrize("ending", ["natural", "crash", "timeout", "cancel", "close"])
-async def test_exec_only_supervision_preserves_task_child_only_after_success(tmp_path, ending):
+async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_path, ending):
     state, provider, workdir = make_session(tmp_path)
     code = (
         "import subprocess,sys,time,pathlib; "
@@ -126,11 +126,7 @@ async def test_exec_only_supervision_preserves_task_child_only_after_success(tmp
         if ending == "timeout":
             assert state.session.cleanup["timed_out"] is True
         child_pid = int((workdir / "child.pid").read_text())
-        if ending == "natural":
-            os.kill(child_pid, 0)
-        else:
-            with pytest.raises(ProcessLookupError):
-                os.kill(child_pid, 0)
+        os.kill(child_pid, 0)
         assert provider.cancelled_launch is False
         assert provider.deadline > deadline + 3 * 1
         await state.close(3)
@@ -175,7 +171,7 @@ async def test_failed_receipt_keeps_files_and_can_retry(tmp_path):
         "return_code": 1,
         "timed_out": False,
         "cleanup_confirmed": False,
-        "error": "descendants remain",
+        "error": "harness termination unconfirmed",
     }
     path = Path(state.session.session_dir) / "cleanup.json"
     path.write_text(json.dumps(receipt))

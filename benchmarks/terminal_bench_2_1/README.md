@@ -151,10 +151,11 @@ a successful smoke, and one task does not establish a benchmark baseline.
 
 ## Tasks that start services
 
-After a successful harness exit, task processes in the Resources-owned sandbox
-remain available to the verifier. Resources stops the sandbox after verification.
-Timeout, cancellation, and failed harness exits still stop descendants. Services
-must use task-owned files, since agent close removes its temporary session directory.
+Task processes in the Resources-owned sandbox remain available to the verifier.
+The supervisor bounds harness termination; Resources stops all remaining processes
+by closing the sandbox after verification or episode failure. Unknown harness
+termination blocks verification and requires sandbox teardown. Services must use
+task-owned files, since agent close removes its temporary session directory.
 
 Services must also outlive the harness's shell tool. `nohup ... &` alone is not
 portable across tools: a shell deadline or process-group cleanup can stop the

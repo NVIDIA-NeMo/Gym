@@ -4,15 +4,14 @@
 """Standalone Linux process supervisor to upload beside a sandboxed harness.
 
 Uses only the standard library; Gym need not be installed in the task sandbox.
-The receipt confirms harness termination independently of its result. Borrowed
-sandboxes may retain descendants after success for Resources-owned verification;
-otherwise cleanup includes all descendants.
+The receipt confirms harness termination independently of its result. Task
+descendants belong to the sandbox owner, which destroys them with the sandbox
+after verification or an episode failure.
 """
 
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import math
 import os
@@ -25,14 +24,15 @@ from typing import TypedDict
 
 
 DEFAULT_CLEANUP_TIMEOUT = 10.0
-CLEANUP_PHASE_COUNT = 3
+CLEANUP_PHASE_COUNT = 2
 
 
 class CleanupReceipt(TypedDict):
-    """Outcome after harness termination and the requested descendant policy finish.
+    """Outcome after bounded harness termination.
 
-    ``cleanup_confirmed`` does not mean the task sandbox is empty: successful
-    borrowed executions can leave task processes for the owner's verifier.
+    ``cleanup_confirmed`` does not mean the task sandbox is empty. Descendants
+    remain until the owner closes the sandbox. Forced wrapper termination cannot
+    confirm that its CLI stopped; that outcome requires sandbox teardown.
     """
 
     cleanup_confirmed: bool
@@ -42,32 +42,12 @@ class CleanupReceipt(TypedDict):
 
 
 def exec_timeout(*, timeout: float, cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT) -> float:
-    """Reserve TERM grace, harness process reaping, and descendant draining.
+    """Reserve TERM grace and harness process reaping.
 
     The extra 30 seconds cover startup, polling, and receipt I/O beyond those
     bounded cleanup phases. Keep their count shared with the controller budget.
     """
     return timeout + CLEANUP_PHASE_COUNT * cleanup_timeout + 30
-
-
-def _drain_children(timeout: float) -> None:
-    """Reap tool descendants, including processes that detached with setsid()."""
-    children = Path(f"/proc/self/task/{os.getpid()}/children")
-    deadline = time.monotonic() + timeout
-    while True:
-        for child in children.read_text().split():
-            try:
-                os.kill(int(child), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        try:
-            while os.waitpid(-1, os.WNOHANG)[0]:
-                pass
-        except ChildProcessError:
-            return
-        if time.monotonic() >= deadline:
-            raise TimeoutError("Sandbox tool processes remain alive")
-        time.sleep(0.01)
 
 
 def _supervise(
@@ -76,16 +56,10 @@ def _supervise(
     timeout: float,
     cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT,
     stop_path: Path | None = None,
-    preserve_descendants_on_success: bool = False,
 ) -> CleanupReceipt:
-    """Enforce a harness deadline and clean up according to sandbox ownership.
-
-    A Resources-owned sandbox can retain task services after a successful harness
-    exit. Failure, timeout, and cancellation always drain descendants. The sandbox
-    owner must tear down retained processes after verification.
-    """
+    """Stop the harness within its deadline; leave descendants to sandbox teardown."""
     process = None
-    subreaping = False
+    launch_attempted = False
     stopping = False
     receipt: CleanupReceipt = {"cleanup_confirmed": False, "return_code": None, "error": None, "timed_out": False}
 
@@ -107,9 +81,7 @@ def _supervise(
         # Callers must confirm cleanup before cancelling provider exec, in either case.
         if os.getpgrp() != os.getpid():
             os.setsid()
-        if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-            raise OSError(ctypes.get_errno(), "Cannot supervise sandbox tool processes")
-        subreaping = True
+        launch_attempted = True
         process = subprocess.Popen(command, start_new_session=True)
         deadline = time.monotonic() + timeout
         while process.poll() is None and not stopping and time.monotonic() < deadline:
@@ -127,26 +99,22 @@ def _supervise(
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
-            preserve_descendants = (
-                preserve_descendants_on_success
-                and process is not None
-                and process.poll() == 0
-                and receipt["error"] is None
-                and not receipt["timed_out"]
-                and not stopping
-                and not (stop_path is not None and stop_path.exists())
-            )
             if process is not None:
-                if not preserve_descendants:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                forced = process.poll() is None
+                if forced:
+                    process.kill()
                 receipt["return_code"] = process.wait(timeout=cleanup_timeout)
-            if subreaping and not preserve_descendants:
-                # Popen can fail after creating a child, before returning its handle.
-                _drain_children(cleanup_timeout)
-            receipt["cleanup_confirmed"] = True
+                if forced:
+                    # The capture wrapper may have left its CLI running. Do not
+                    # collect or verify a task whose harness termination is unknown.
+                    receipt["error"] = "Harness did not stop within its grace period; sandbox teardown required"
+                elif receipt["return_code"] < 0:
+                    receipt["error"] = "Harness wrapper was terminated by a signal; sandbox teardown required"
+                else:
+                    receipt["cleanup_confirmed"] = True
+            else:
+                # Popen can fail after spawning but before returning a handle.
+                receipt["cleanup_confirmed"] = not launch_attempted
         except Exception as exc:
             receipt["error"] = f"cleanup: {exc}"
     return receipt
@@ -166,7 +134,6 @@ def main() -> int:
     parser.add_argument("--cleanup-timeout", type=_positive_seconds, default=DEFAULT_CLEANUP_TIMEOUT)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--stop-file", type=Path)
-    parser.add_argument("--preserve-descendants-on-success", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -177,7 +144,6 @@ def main() -> int:
         timeout=args.timeout,
         cleanup_timeout=args.cleanup_timeout,
         stop_path=args.stop_file,
-        preserve_descendants_on_success=args.preserve_descendants_on_success,
     )
     temporary = args.receipt.with_suffix(".tmp")
     temporary.write_text(json.dumps(receipt))

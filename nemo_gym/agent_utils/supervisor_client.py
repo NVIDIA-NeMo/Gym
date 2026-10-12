@@ -61,8 +61,8 @@ def parse_cleanup_receipt(payload: object) -> CleanupReceipt:
 def supervision_timeouts(*, timeout: float, close_timeout: float) -> tuple[float, float]:
     """Return the per-cleanup-phase and provider execution deadlines.
 
-    Divide the close budget across TERM grace, harness process reaping, and
-    descendant draining. The provider deadline reserves all three phases after
+    Divide the close budget across TERM grace and harness process reaping.
+    The provider deadline reserves both phases after
     the harness timeout, plus 30 seconds for startup, polling, and receipt I/O.
     """
     cleanup_timeout = close_timeout / CLEANUP_PHASE_COUNT
@@ -76,19 +76,16 @@ def supervised_launch_command(
     timeout: float,
     cleanup_timeout: float,
     python: str,
-    preserve_descendants_on_success: bool = False,
 ) -> str:
     """Fence delayed launches and run a harness command under the shared supervisor.
 
     The adapter must install or select the interpreter explicitly. Check that it
     can load the supervisor before claiming a launch: a failed bootstrap cannot
     write a cleanup receipt. Supervisor and harness diagnostics share output.log.
-    Enable descendant preservation only when Resources retains the task sandbox
-    through verification; timeout, cancellation and failure still clean up.
+    The supervisor stops the harness; the sandbox owner tears down descendants.
     """
     supervisor = quote(f"{session_dir}/{SUPERVISOR_FILE}")
     claim_path = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
-    descendant_policy = "--preserve-descendants-on-success " if preserve_descendants_on_success else ""
     return (
         f"[ -d {quote(session_dir)} ] && [ ! -L {claim_path} ] || exit 0; "
         f"{quote(python)} -I {supervisor} --help >/dev/null || exit $?; "
@@ -97,7 +94,6 @@ def supervised_launch_command(
         f"exec {quote(python)} -I {supervisor} "
         f"--timeout {timeout} --cleanup-timeout {cleanup_timeout} "
         f"--stop-file {quote(f'{session_dir}/{STOP_REQUEST_FILE}')} "
-        f"{descendant_policy}"
         f"--receipt {quote(f'{session_dir}/{CLEANUP_RECEIPT_FILE}')} -- {join(command)} "
         f">{quote(f'{session_dir}/{OUTPUT_LOG_FILE}')} 2>&1"
     )

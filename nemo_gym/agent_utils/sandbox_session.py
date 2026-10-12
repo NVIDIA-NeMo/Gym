@@ -58,9 +58,9 @@ class SandboxSession[Artifacts]:
     releases it. A failed borrowed cleanup remains closing and can be retried;
     an owned sandbox can fall back to provider stop. Closed means release succeeded.
 
-    After successful execution in a borrowed sandbox, task descendants remain for
-    the Resources verifier. Resources owns their eventual teardown with the sandbox.
-    Owned sandboxes and interrupted/failed executions still drain all descendants.
+    Task descendants remain until the sandbox owner destroys the sandbox. Borrowed
+    sandboxes stay available for Resources verification; owned sandboxes are stopped
+    on close. Unconfirmed harness termination prevents capture and verification.
 
     Each stop, collection and release phase is bounded by ``close_timeout`` (or
     the timeout passed to ``close``). Failed cleanup/release retains the handle
@@ -144,7 +144,6 @@ class SandboxSession[Artifacts]:
                 timeout=timeout,
                 cleanup_timeout=cleanup_timeout,
                 python=command.python,
-                preserve_descendants_on_success=not self.owns_sandbox,
             )
             self.launch_started = True
             self._exec_task = asyncio.create_task(
@@ -177,7 +176,7 @@ class SandboxSession[Artifacts]:
         return cast(Artifacts, self.artifacts)
 
     async def stop_harness(self, *, timeout: float) -> None:
-        """Confirm harness termination and the ownership-specific descendant policy."""
+        """Confirm harness termination before capture and transport release."""
         if self.sandbox_stopped or not self.launch_started or self.cleanup is not None:
             return
         try:

@@ -83,11 +83,13 @@ class CleanupContext:
 
     Callbacks:
     - are process-local Python objects, although they may issue remote close requests;
-    - run sequentially in LIFO order within one total cleanup timeout;
+    - run sequentially in LIFO order, each with its own cleanup timeout;
     - must be idempotent because a timed-out remote request may have succeeded;
     - are lost on process or host failure, so remote owners need expiry or reaping.
 
-    Callback failures are logged and do not stop later callbacks. Cleanup has no
+    Callback failures or timeouts do not prevent later owners from tearing down
+    their resources. Total cleanup is bounded by the number of registered callbacks
+    times the per-callback timeout. Cleanup has no
     durable retry after this context is discarded.
     """
 
@@ -101,18 +103,12 @@ class CleanupContext:
         return CleanupHandle(entry, self.cleanup_timeout_seconds)
 
     async def aclose(self) -> None:
-        async def unwind() -> None:
-            for entry in reversed(self._cleanups):
-                try:
+        for entry in reversed(self._cleanups):
+            try:
+                async with asyncio.timeout(self.cleanup_timeout_seconds):
                     await entry.close()
-                except Exception:
-                    LOGGER.exception(f"Episode cleanup failed: {entry.name}")
-
-        try:
-            async with asyncio.timeout(self.cleanup_timeout_seconds):
-                await unwind()
-        except TimeoutError:
-            LOGGER.error(f"Episode cleanup timed out: episode_id={self.episode_id}")
+            except Exception:
+                LOGGER.exception(f"Episode cleanup failed: {entry.name}")
 
 
 class HandledEpisodeError(Exception):

@@ -171,7 +171,7 @@ the failed command, exit status, provider error, stdout, and stderr. Supporting 
 validation on every task image; record the actual image digest and runtime versions with each run.
 
 The runner uses ordinary sandbox `exec`; no PTY/session API is required. Its internal deadline
-leaves time for descendant cleanup before the provider deadline. Session close requests a stop and
+leaves time for harness termination before the provider deadline. Session close requests a stop and
 waits for a cleanup receipt before detaching. A disconnected HTTP waiter leaves the shared invocation running. A missing or failed receipt blocks verification.
 For old musl images, a checksum-pinned C++ runtime is extracted privately and used only by the
 private Node binary; task Node/Python and the global library search path are not replaced.
@@ -225,9 +225,9 @@ An explicit wall or model-output limit returns partial output as `incomplete`; u
 raise HTTP 502 even when a useful patch exists. Do not infer rollout success from reward alone. Close returns the captured observations,
 including salvaged transcript evidence after cancellation.
 
-A Linux child subreaper supervises each activation. Successful borrowed executions preserve
-task services through verification; Resources then destroys the sandbox. Failed, timed-out,
-cancelled, and agent-owned executions still reap descendants before writing a cleanup receipt.
+A Linux supervisor bounds harness termination for each activation. Task descendants
+remain until the sandbox owner tears down the sandbox, after verification or episode
+failure. This policy is the same for borrowed and agent-owned sandboxes.
 Services must use task-owned files rather than the temporary agent session directory. Close is serialized and checks the receipt, process handle,
 adapter-owned file removal, and disconnect before succeeding. Unknown launch outcomes and missing
 or negative cleanup evidence fail closed and block verification. Successful close receipts remain

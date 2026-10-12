@@ -907,9 +907,9 @@ async def test_session_prompt_and_limits_reach_runner(agent, state, overrides, t
     assert any(arg.endswith("/process_supervisor.py") for arg in launch_args)
     assert float(launch_args[launch_args.index("--timeout") + 1]) == agent.config.sandbox_runner_timeout_seconds
     cleanup_timeout = float(launch_args[launch_args.index("--cleanup-timeout") + 1])
-    assert cleanup_timeout == agent.config.session_close_timeout_seconds / 3
+    assert cleanup_timeout == agent.config.session_close_timeout_seconds / 2
     assert state.session.sandbox.exec.await_args_list[0].kwargs["timeout_s"] > (
-        agent.config.sandbox_runner_timeout_seconds + 3 * cleanup_timeout
+        agent.config.sandbox_runner_timeout_seconds + 2 * cleanup_timeout
     )
     # Execute the real launch prefix: cleanup must receive the shell's PID, not a literal "$".
     launch_prefix, separator, _ = launch_command.partition(" && exec ")

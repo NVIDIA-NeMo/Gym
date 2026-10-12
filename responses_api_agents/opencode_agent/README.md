@@ -87,9 +87,9 @@ correlation plugin. The plugin is uploaded into each sandbox when model-call
 observability is enabled. Sessions disable automatic updates and models.dev fetches.
 
 The runner uses ordinary sandbox `exec`, with an internal deadline and a Linux
-subreaper to supervise detached tool processes. Successful borrowed executions preserve
-task services through verification; Resources then destroys the sandbox. Failed, timed-out,
-cancelled, and agent-owned executions still stop descendants. The CLI must exit before
+supervisor that bounds harness termination. Task descendants remain until the sandbox
+owner tears down the sandbox, after verification or episode failure. This policy is
+the same for borrowed and agent-owned sandboxes. The CLI must exit before
 SQLite observations are captured; services must use task-owned files rather than the
 agent session directory, which close removes. Close succeeds only after confirmed
 cleanup; uncertain cleanup remains retryable and blocks verification. Successful

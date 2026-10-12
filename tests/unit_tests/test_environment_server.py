@@ -149,7 +149,7 @@ def test_cleanup_is_lifo() -> None:
     assert calls == ["second", "first"]
 
 
-def test_cleanup_is_bounded() -> None:
+def test_hung_cleanup_does_not_skip_later_resource_owner() -> None:
     calls: list[str] = []
     context = CleanupContext(
         episode_id=_request().episode_id,
@@ -166,7 +166,7 @@ def test_cleanup_is_bounded() -> None:
     context.register_cleanup("first", first)
     context.register_cleanup("hung", hung)
     asyncio.run(context.aclose())
-    assert calls == ["hung"]
+    assert calls == ["hung", "first"]
 
 
 def test_explicit_cleanup_is_bounded_and_final_unwind_retries() -> None:
