@@ -832,17 +832,28 @@ class TestResultClassification:
             assert response.error is None
             assert response.metadata["stop_reason"] == "max_iterations"
 
-    async def test_host_path_retains_provider_failure_for_masked_verification(self, monkeypatch) -> None:
+    @pytest.mark.parametrize("totals", [None, (0, 0), (20, 10)])
+    async def test_host_path_retains_provider_failure_for_masked_verification(self, monkeypatch, totals) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
         monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
         runner = MagicMock()
         runner.run_conversation.return_value = {"failed": True, "error": "HTTP 500", "messages": []}
+        if totals is not None:
+            runner.session_prompt_tokens, runner.session_completion_tokens = totals
+            runner.session_cache_read_tokens = 0
+            runner.session_reasoning_tokens = 0
         monkeypatch.setattr("run_agent.AIAgent", MagicMock(return_value=runner))
         response = await hermes._create_response(NeMoGymResponseCreateParamsNonStreaming(input="hi"))
         assert response.status == "failed"
         assert response.error.message == "HTTP 500"
         assert response.metadata["provider_failed"] == "true"
+        if totals is None:
+            assert response.usage is None
+        else:
+            assert response.usage.input_tokens == totals[0]
+            assert response.usage.output_tokens == totals[1]
+            assert response.usage.total_tokens == sum(totals)
 
 
 class TestSandboxHermesInstall:
