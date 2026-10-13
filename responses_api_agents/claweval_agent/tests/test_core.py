@@ -141,3 +141,15 @@ def test_media_mcp_lists_tools_and_returns_image(tmp_path: Path, monkeypatch: py
     assert called["result"]["isError"] is False
     assert called["result"]["content"][1]["type"] == "image"
     assert json.loads((mcp_server.STATE_DIR / "metrics.json").read_text())["media_frames"] == 1
+
+
+def test_copy_or_link_copies_foreign_owned_fixture(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    destination = tmp_path / "staged" / "video.mp4"
+    source.write_bytes(b"video")
+    monkeypatch.setattr(core.os, "geteuid", lambda: source.stat().st_uid + 1)
+
+    core._copy_or_link(source, destination)
+
+    assert destination.read_bytes() == b"video"
+    assert destination.stat().st_ino != source.stat().st_ino

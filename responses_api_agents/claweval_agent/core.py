@@ -222,6 +222,15 @@ find /workspace -maxdepth 2 -type f -not -path '/workspace/fixtures/*' -exec cp 
 def _copy_or_link(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     source = source.resolve(strict=True)
+    # Docker Compose preserves a hard link's numeric ownership while uploading
+    # a Harbor workdir.  Shared media caches can be owned by an unmapped service
+    # uid (commonly 65534), which makes rootless Docker reject the upload at
+    # lchown time.  Copy foreign-owned fixtures so the staged inode is owned by
+    # the launching user; retain hard links for user-owned media to avoid
+    # needlessly duplicating large videos.
+    if source.stat().st_uid != os.geteuid():
+        shutil.copy2(source, destination)
+        return
     try:
         os.link(source, destination)
     except OSError:
