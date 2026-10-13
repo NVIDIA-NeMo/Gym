@@ -110,8 +110,10 @@ Completed parser reports follow Pro's required-pass rule, including empty report
 execution failures or unusable parser output remain inconclusive.
 The agent inherits Gym's standard aggregation; Slurm reporting includes coverage.
 
-The runner confirms that its worker and detached tool descendants have stopped
-before verification. Missing cleanup confirmation skips verification and stops
+The runner confirms that its worker process group has stopped before verification.
+Processes that leave that group, including detached services, remain until the
+sandbox owner tears it down; group termination cannot guarantee that those processes
+have stopped changing task files. Missing termination confirmation skips verification and stops
 the task sandbox. Resources cleanup retains failed handles for retry; final agent
 cleanup is bounded by `cleanup_timeout` (default 120 seconds per attempt) and does
 not replace a received verifier result. Cleanup is cooperative, not a security

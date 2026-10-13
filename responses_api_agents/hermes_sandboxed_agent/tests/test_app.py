@@ -191,6 +191,9 @@ async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypat
     )
 
     async def download(remote, local):
+        if remote.endswith("/output.log"):
+            local.write_bytes(b"worker diagnostics\xff\n")
+            return
         if remote.endswith("/cleanup.json"):
             local.write_text(json.dumps({"cleanup_confirmed": True, "return_code": 0}))
             return
@@ -217,6 +220,7 @@ async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypat
     assert "patch" not in params and "test_patch" not in params and "api_key" not in params
     command = sandbox.exec.call_args.args[0]
     assert " -I " in command
+    assert "/output.log" in command and "2>&1" in command
     assert {call.args[0].name for call in sandbox.upload.await_args_list} == {
         "request.json",
         "runner.py",
@@ -229,7 +233,7 @@ async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypat
     assert sandbox.exec.call_args.kwargs["cwd"].startswith("/tmp/nemo-hermes-")
     assert metrics["hermes_finished"] and response.status == "completed"
     persisted = json.loads(uploaded.with_name("agent_result.json").read_text())
-    assert persisted["stdout"] == "ran"
+    assert persisted["stdout"] == "ranworker diagnostics\ufffd\n"
     assert persisted["stderr"] == "INFO:run_agent:Starting turn\n"
 
 
@@ -246,7 +250,7 @@ async def test_missing_result_preserves_process_failure(agent, monkeypatch):
         download=AsyncMock(side_effect=FileNotFoundError("result.json")),
     )
     monkeypatch.setattr(HermesSandboxedAgent, "resolve_model_base_url", lambda *args: "http://proxy/v1")
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
         await agent._run_in_sandbox(sandbox, NeMoGymResponseCreateParamsNonStreaming(input="fix"), None)
     from pathlib import Path
 
@@ -502,5 +506,5 @@ async def test_missing_or_uncertain_cleanup_never_returns_a_verifier_eligible_re
 
     sandbox.download = download
     monkeypatch.setattr(HermesSandboxedAgent, "resolve_model_base_url", lambda *args: "http://proxy/v1")
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
         await agent._run_in_sandbox(sandbox, NeMoGymResponseCreateParamsNonStreaming(input="fix"), None)

@@ -93,7 +93,8 @@ The provider must support sandbox exec and file upload/download.
 Installation needs network access to nodejs.org and npm; musl also uses unofficial-builds.nodejs.org
 and, for the older C++ runtime fallback, dl-cdn.alpinelinux.org.
 
-The Node runtime, Pi package, and isolated HOME are outside the task repository. Pi's
+The Node runtime, Pi package, and private `PI_CODING_AGENT_DIR` are outside the task repository.
+Task HOME and XDG directories are preserved for tools and verification. Pi's
 Node is addressed by absolute path; it does not replace the task's Python or Node on PATH.
 Sandbox sessions bound each bash command and advise the agent to search repository/local
 dependency directories rather than shared mounts. This returns control after a stalled tool;
@@ -130,12 +131,13 @@ configuration must not replace the agent's cap with a larger value. Enforcement 
 5. Pi runs in the sandbox, uses its built-in tools, and sends Chat Completions to
    the rollout-prefixed Gym model-server URL. The sandbox must be able to reach that URL.
 6. Agent close confirms harness termination, returns observations,
-   removes session files, and disconnects. A failed or missing cleanup receipt blocks close.
+   removes session files, and disconnects. Missing termination evidence keeps close retryable;
+   a final negative receipt fails the activation but releases the borrowed connection.
 7. Environment Server asks Resources to verify and close the task session. The benchmark
    owns its verification procedure and sandbox teardown.
 
-The supervisor bounds harness termination and leaves task descendants for the sandbox
-owner to stop: Resources after verification or episode failure, or the agent when
+The supervisor stops and reaps the harness process group, including foreground tool
+children. Explicitly detached task services remain for the sandbox owner to stop: Resources after verification or episode failure, or the agent when
 closing its own sandbox. Ownership does not change process supervision. Services must
 not depend on the agent's temporary session files.
 
@@ -143,7 +145,7 @@ Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, sh
 The adapter stages its worker input and collects its own output. The shared session
 uploads the supervisor at activation and owns its control files and log access; the common lifecycle
 confirms process cleanup, captures artifacts, then releases the provider connection or
-owned sandbox. Concurrent closes share that work, failed cleanup remains retryable,
+owned sandbox. Concurrent closes share that work; missing evidence or failed release remains retryable,
 and interrupted activations keep captured observations after session files are removed.
 `supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.py`
 runs inside the sandbox. Benchmark Resources session identity/verdict state stays separate.
@@ -200,8 +202,9 @@ is explicitly marked as gaps.
 
 Session and close retries use Gym's shared agent-session implementation. Session state is
 process-local. The Environment Server owns normal cleanup and the sandbox provider owns
-expiry; Pi does not run a separate session-expiry timer. Failed cleanup remains retryable
-and blocks verification. Cleanup is cooperative, not a security boundary against sandbox code.
+expiry; Pi does not run a separate session-expiry timer. Unconfirmed termination blocks
+verification. A final negative receipt releases the session for owner teardown; missing
+evidence or failed release retains the handle for retry. Cleanup is cooperative, not a security boundary against sandbox code.
 
 ## Local CLI compatibility
 

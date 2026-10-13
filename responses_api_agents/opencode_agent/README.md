@@ -87,15 +87,21 @@ correlation plugin. The plugin is uploaded into each sandbox when model-call
 observability is enabled. Sessions disable automatic updates and models.dev fetches.
 
 The runner uses ordinary sandbox `exec`, with an internal deadline and a Linux
-supervisor that bounds harness termination. Task descendants remain until the sandbox
-owner tears down the sandbox, after verification or episode failure. This policy is
+supervisor that stops and reaps the harness process group. Explicitly detached task services
+remain until the sandbox owner tears it down, after verification or episode failure. This policy is
 the same for borrowed and agent-owned sandboxes. The CLI must exit before
 SQLite observations are captured; services must use task-owned files rather than the
-agent session directory, which close removes. Close succeeds only after confirmed
-cleanup; uncertain cleanup remains retryable and blocks verification. Successful
-close receipts are retained for `session_close_retry_window_seconds` (default 300).
+agent session directory, which close removes. Capture requires confirmed termination.
+Missing evidence remains retryable; a final negative receipt skips capture and verification
+but permits connection release. Successful close receipts are retained for `session_close_retry_window_seconds` (default 300).
 Session state is process-local; use one worker. Provider TTL and the episode owner
 handle abandoned sessions. Process cleanup is not a hostile-code security boundary.
+
+Tool shells retain the task HOME and XDG directories through the shell environment hook,
+so home-directory deliverables survive agent close. The CLI keeps private HOME and XDG
+directories for configuration and SQLite state, including its separate `~/.opencode` lookup.
+Use absolute paths for native file tools and shell `workdir`; CLI-side tilde resolution uses
+its private HOME.
 
 The session path accepts one text task, optional system/developer text and
 `instructions`. Unsupported controls, images, history replay and required external

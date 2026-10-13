@@ -29,6 +29,17 @@ def run(params: RunnerInput) -> int:
     """Run the CLI with isolated files and wait for it before returning captured output."""
     directory = Path(params["directory"])
     (directory / "runtime.json").write_text(json.dumps({"hostname": os.uname().nodename, "pid": os.getpid()}))
+    # Save only task-directory variables for the shell.env hook, before CLI overrides.
+    task_home = os.environ.get("HOME") or str(Path.home())
+    task_env = {"HOME": task_home}
+    for key, suffix in (
+        ("XDG_DATA_HOME", ".local/share"),
+        ("XDG_CONFIG_HOME", ".config"),
+        ("XDG_CACHE_HOME", ".cache"),
+        ("XDG_STATE_HOME", ".local/state"),
+    ):
+        task_env[key] = os.environ.get(key) or str(Path(task_home) / suffix)
+    (directory / "task-env.json").write_text(json.dumps(task_env))
     for key in ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
         if key in params["env"]:
             Path(params["env"][key]).mkdir(parents=True, exist_ok=True)

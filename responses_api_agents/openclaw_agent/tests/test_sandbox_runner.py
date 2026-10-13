@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -113,7 +114,8 @@ def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
         assert summary["cleanup_confirmed"] is True
         assert summary["timed_out"] is (ending == "timeout")
         assert set(summary) == {"return_code", "timed_out", "cleanup_confirmed", "error"}
-        os.kill(int((tmp_path / "child.pid").read_text()), 0)
+        pid = int((tmp_path / "child.pid").read_text())
+        assert Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
     finally:
         if (tmp_path / "child.pid").exists():
             try:

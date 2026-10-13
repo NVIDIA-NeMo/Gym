@@ -184,9 +184,10 @@ waits for a cleanup receipt before detaching. A disconnected HTTP waiter leaves 
 For old musl images, a checksum-pinned C++ runtime is extracted privately and used only by the
 private Node binary; task Node/Python and the global library search path are not replaced.
 
-Per-session HOME, config, caches, prompt, transcript, and supervisor output are isolated under
+Per-session OpenClaw state/config, prompt, transcript, and supervisor output are isolated under
 `/tmp/nemo-gym-openclaw-sessions/`. OpenClaw reads the generated config directly without onboarding
-or creating bootstrap files in the task repository. The task's PATH and dependencies are preserved.
+or creating bootstrap files in the task repository. Task HOME, XDG directories, PATH and
+dependencies are preserved for tools and verification.
 The sandbox adapter enables `read`, `write`, `edit`, `exec`, and `process`; subagent/channel/plugin
 execution and required external HTTP/MCP tools are unsupported. OpenClaw's internal `gateway`
 exec host refers to the embedded CLI process inside the borrowed sandbox.
@@ -236,12 +237,14 @@ An explicit wall or model-output limit returns partial output as `incomplete`; u
 raise HTTP 502 even when a useful patch exists. Do not infer rollout success from reward alone. Close returns the captured observations,
 including salvaged transcript evidence after cancellation.
 
-A Linux supervisor bounds harness termination for each activation. Task descendants
-remain until the sandbox owner tears down the sandbox, after verification or episode
+A Linux supervisor stops and reaps the harness process group for each activation.
+Explicitly detached task services remain until sandbox teardown, after verification or episode
 failure. This policy is the same for borrowed and agent-owned sandboxes.
 Services must use task-owned files rather than the temporary agent session directory. Close is serialized and checks the receipt, process handle,
 adapter-owned file removal, and disconnect before succeeding. Unknown launch outcomes and missing
-or negative cleanup evidence fail closed and block verification. Successful close receipts remain
+or negative termination evidence block verification. Missing evidence remains retryable;
+a final negative receipt permits borrowed connection release while the activation stays failed.
+Successful close receipts remain
 retryable for `session_close_retry_window_seconds` after cleanup (300 seconds by default); traffic
 and retries do not shorten or extend the window. Stale cookies continue to reject activations after
 receipt expiry and never enter the host CLI path.
@@ -253,10 +256,11 @@ whose cleanup fails retain cleanup-only state through `AgentSessionSetupError`.
 `timeout`, `model_timeout_seconds`, `sandbox_install_timeout_seconds`, and `session_close_timeout_seconds` must be positive
 and finite. The shared `session_close_retry_window_seconds` bounds close receipts and tombstones.
 
-Session state is process-local. Keep requests on one worker. Failed cleanup sessions are retained
-until owner/provider recovery and agent restart; they are never relabeled as successfully closed.
-Cached runtime files remain until Resources destroys the sandbox. Supervisor cleanup prevents
-verification races; it is not a security boundary against hostile task code.
+Session state is process-local. Keep requests on one worker. Missing evidence or failed release
+retains the session for retry. Releasing a final failed activation does not make it gradable.
+Cached runtime files remain until Resources destroys the sandbox. The supervisor stops
+foreground group members; processes that deliberately escape the group remain the sandbox
+owner's responsibility. This is not a security boundary against hostile task code.
 
 This path is eval-only. Working inference does not establish training token-ID/logprob support.
 A tool-and-verifier smoke is required for the actual image/model configuration before review;

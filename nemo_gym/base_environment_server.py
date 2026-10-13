@@ -12,7 +12,7 @@ from typing import Any, ClassVar, Generic, TypeVar
 
 from anyio import CancelScope
 from fastapi import Body, FastAPI
-from pydantic import ConfigDict, PositiveFloat, PositiveInt, model_validator
+from pydantic import ConfigDict, Field, PositiveFloat, PositiveInt, model_validator
 from typing_extensions import Self
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
@@ -36,7 +36,9 @@ class BaseEnvironmentServerConfig(BaseRunServerInstanceConfig):
     max_concurrent_episodes: PositiveInt | None = None
     queue_timeout_seconds: PositiveFloat | None = None
     default_episode_timeout_seconds: PositiveFloat | None = None
-    cleanup_timeout_seconds: PositiveFloat
+    cleanup_timeout_seconds: PositiveFloat = Field(
+        description="Timeout for each cleanup callback; total final cleanup may take this limit per registered owner."
+    )
 
     @model_validator(mode="after")
     def validate_queue_timeout(self) -> Self:

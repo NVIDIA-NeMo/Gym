@@ -4,14 +4,16 @@
 """Standalone Linux process supervisor to upload beside a sandboxed harness.
 
 Uses only the standard library; Gym need not be installed in the task sandbox.
-The receipt confirms harness termination independently of its result. Task
-descendants belong to the sandbox owner, which destroys them with the sandbox
-after verification or an episode failure.
+The receipt confirms termination of the harness process group independently of
+its result. Processes that leave that group, including detached task services,
+belong to the sandbox owner and survive until sandbox teardown. Process groups
+cannot distinguish an escaped tool command from an intentional task service.
 """
 
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import math
 import os
@@ -24,15 +26,15 @@ from typing import TypedDict
 
 
 DEFAULT_CLEANUP_TIMEOUT = 10.0
-CLEANUP_PHASE_COUNT = 2
+CLEANUP_PHASE_COUNT = 3
 
 
 class CleanupReceipt(TypedDict):
     """Outcome after bounded harness termination.
 
-    ``cleanup_confirmed`` does not mean the task sandbox is empty. Descendants
-    remain until the owner closes the sandbox. Forced wrapper termination cannot
-    confirm that its CLI stopped; that outcome requires sandbox teardown.
+    ``cleanup_confirmed`` means the harness group has stopped and been reaped,
+    not that the task sandbox is empty. Detached services remain until the owner
+    closes the sandbox, including after a forced harness stop.
     """
 
     cleanup_confirmed: bool
@@ -42,12 +44,36 @@ class CleanupReceipt(TypedDict):
 
 
 def exec_timeout(*, timeout: float, cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT) -> float:
-    """Reserve TERM grace and harness process reaping.
+    """Reserve TERM grace, direct-process reaping, and process-group reaping.
 
     The extra 30 seconds cover startup, polling, and receipt I/O beyond those
     bounded cleanup phases. Keep their count shared with the controller budget.
     """
     return timeout + CLEANUP_PHASE_COUNT * cleanup_timeout + 30
+
+
+def _reap_process_group(pgid: int, timeout: float) -> None:
+    """Stop and reap this group without signalling detached task services."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        # As a subreaper we adopt the wrapper's orphaned children. Reap only
+        # this group: a detached service may still have useful work to do.
+        try:
+            while os.waitpid(-pgid, os.WNOHANG)[0]:
+                pass
+        except ChildProcessError:
+            pass
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Harness process group has not terminated")
+        time.sleep(0.01)
 
 
 def _supervise(
@@ -57,7 +83,7 @@ def _supervise(
     cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT,
     stop_path: Path | None = None,
 ) -> CleanupReceipt:
-    """Stop the harness within its deadline; leave descendants to sandbox teardown."""
+    """Stop the harness group within its deadline; preserve escaped task services."""
     process = None
     launch_attempted = False
     stopping = False
@@ -81,6 +107,10 @@ def _supervise(
         # Callers must confirm cleanup before cancelling provider exec, in either case.
         if os.getpgrp() != os.getpid():
             os.setsid()
+        # Reap killed group members ourselves instead of depending on the
+        # container's PID 1. Otherwise zombies keep killpg(..., 0) succeeding.
+        if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+            raise OSError(ctypes.get_errno(), "Cannot supervise harness process group")
         launch_attempted = True
         process = subprocess.Popen(command, start_new_session=True)
         deadline = time.monotonic() + timeout
@@ -95,28 +125,25 @@ def _supervise(
             except subprocess.TimeoutExpired:
                 pass
     except Exception as exc:
-        receipt["error"] = str(exc)
+        receipt["error"] = f"Harness launch failed: {exc}" if process is None and launch_attempted else str(exc)
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
             if process is not None:
-                forced = process.poll() is None
-                if forced:
-                    process.kill()
+                # Natural wrapper exit can also leave foreground tool children
+                # running. Stop the whole group before capture or verification.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 receipt["return_code"] = process.wait(timeout=cleanup_timeout)
-                if forced:
-                    # The capture wrapper may have left its CLI running. Do not
-                    # collect or verify a task whose harness termination is unknown.
-                    receipt["error"] = "Harness did not stop within its grace period; sandbox teardown required"
-                elif receipt["return_code"] < 0:
-                    receipt["error"] = "Harness wrapper was terminated by a signal; sandbox teardown required"
-                else:
-                    receipt["cleanup_confirmed"] = True
+                _reap_process_group(process.pid, cleanup_timeout)
+                receipt["cleanup_confirmed"] = True
             else:
                 # Popen can fail after spawning but before returning a handle.
                 receipt["cleanup_confirmed"] = not launch_attempted
         except Exception as exc:
-            receipt["error"] = f"cleanup: {exc}"
+            receipt["error"] = f"Harness termination was not confirmed: {exc}"
     return receipt
 
 

@@ -161,12 +161,21 @@ def test_hung_cleanup_does_not_skip_later_resource_owner() -> None:
 
     async def hung() -> None:
         calls.append("hung")
-        await asyncio.sleep(60)
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            calls.append("cancelled")
+            raise
 
     context.register_cleanup("first", first)
     context.register_cleanup("hung", hung)
-    asyncio.run(context.aclose())
-    assert calls == ["hung", "first"]
+
+    async def run() -> None:
+        # A missing per-callback deadline must fail promptly instead of passing after 60 seconds.
+        await asyncio.wait_for(context.aclose(), timeout=1)
+
+    asyncio.run(run())
+    assert calls == ["hung", "cancelled", "first"]
 
 
 def test_explicit_cleanup_is_bounded_and_final_unwind_retries() -> None:

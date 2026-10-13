@@ -268,7 +268,7 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
         payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
         assert payload["prompt"] == "Fix the code"
         assert payload["command"][0].endswith("nemo-gym-opencode-runtime-1.17.11/opencode")
-        assert payload["env"]["HOME"].startswith("/tmp/")
+        assert payload["env"]["HOME"] == f"{sandbox.directory}/home"
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"] == {
             "context": 32000,
@@ -396,17 +396,17 @@ async def test_close_cancels_active_opencode_before_detaching(setup, tmp_path):
     assert invocation.conversation[-1].content[0].text == "Fixed"
 
 
-async def test_failed_cleanup_keeps_handles_and_prevents_close(setup):
+async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
         await task
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
-        await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert session_id in active_sessions(agent)
-    sandbox.disconnect.assert_not_awaited()
-    assert not any("rm -rf" in call.args[0] for call in sandbox.exec.await_args_list)
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert session_id not in active_sessions(agent)
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+    assert any("rm -rf" in call.args[0] for call in sandbox.exec.await_args_list)
 
 
 async def test_disconnect_failure_retains_session_for_retry(setup):

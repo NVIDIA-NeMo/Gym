@@ -83,8 +83,9 @@ POSIX sh installs missing Python and Bash using apt-get or apk when running as r
 before invoking the Bash runtime installer; otherwise the image must provide them.
 The pinned Node 22.19.0 build has no arm64 musl binary.
 Older Alpine images use a checksum-verified private C++ library for Node. Runtime files live
-under `/tmp/nemo-gym-codex-node-*`, and session HOME/cache/config live under
-`/tmp/nemo-gym-codex-sessions/*`. Task Python, Node, libraries, and PATH are preserved.
+under `/tmp/nemo-gym-codex-node-*`, and private `CODEX_HOME` configuration lives under
+`/tmp/nemo-gym-codex-sessions/*`. Task HOME, XDG directories, Python, Node, libraries,
+and PATH are preserved.
 Installation errors retain the command, exit status, stdout, and stderr. Runtime compatibility
 must still be checked on actual task images; a mocked installer test is not image validation.
 
@@ -129,7 +130,7 @@ Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, sh
 The adapter stages its worker input and collects its own output. The shared session
 uploads the supervisor at activation and owns its control files and log access; the common lifecycle
 confirms process cleanup, captures artifacts, then releases the provider connection or
-owned sandbox. Concurrent closes share that work, failed cleanup remains retryable,
+owned sandbox. Concurrent closes share that work; missing evidence or failed release remains retryable,
 and interrupted activations keep captured observations after session files are removed.
 `supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.py`
 runs inside the sandbox. Benchmark Resources session identity/verdict state stays separate.
@@ -138,12 +139,15 @@ Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
 required; the adapter validates the captured terminal events without inventing an exit code.
 
 One shared Linux supervisor per activation fences delayed launches and bounds harness
-termination. It leaves task descendants for the sandbox owner to stop: Resources after
+termination and reaps its process group, including foreground tool children. Explicitly
+detached task services remain for the sandbox owner to stop: Resources after
 verification or episode failure, or the agent when closing its own sandbox. Ownership
 does not change process supervision. Services must not depend on the agent's temporary
 session files. Close confirms the receipt before cancelling provider execution,
-then removes adapter-owned files and disconnects. Missing/negative cleanup evidence blocks
-verification and retains state for retry. The borrowing agent never destroys the sandbox.
+then removes adapter-owned files and disconnects. Missing/negative termination evidence
+blocks verification. Missing evidence stays retryable; a final negative receipt releases
+the borrowed connection without making the failed activation gradable. The borrowing
+agent never destroys the sandbox.
 Cleanup coordinates lifecycle; it is not a security boundary against hostile task code.
 
 Responses and close observations preserve text, reasoning, tool events, partial output,

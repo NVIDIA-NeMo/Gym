@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -87,7 +88,7 @@ def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
             "pathlib.Path('child.pid').write_text(str(p.pid)); "
             + ("time.sleep(60)" if ending != "natural" else "pass")
         )
-        process = launch(tmp_path, code, timeout=0.3 if ending == "timeout" else 3)
+        process = launch(tmp_path, code, timeout=1 if ending == "timeout" else 3)
         if ending == "cancel":
             for _ in range(200):
                 if (tmp_path / "child.pid").exists():
@@ -98,7 +99,7 @@ def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
         assert summary["cleanup_confirmed"] is True
         assert summary["timed_out"] is (ending == "timeout")
         pid = int((tmp_path / "child.pid").read_text())
-        os.kill(pid, 0)
+        assert Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
     finally:
         if (tmp_path / "child.pid").exists():
             try:
@@ -157,19 +158,24 @@ finally:
     )
     summary = json.loads(completed.stdout)
     assert summary["timed_out"] is False
-    assert summary["cleanup_confirmed"] is False
-    assert "terminated by a signal" in summary["error"]
+    assert summary["cleanup_confirmed"] is True
+    assert summary["error"] is None
     assert summary["child_alive"] is False
 
 
 def test_runtime_environment_does_not_inherit_provider_credentials(tmp_path, monkeypatch):
     monkeypatch.setenv("SANDBOX_PROVIDER_API_KEY", "must-not-inherit")
+    task_environment = {"HOME": str(tmp_path / "task-home"), "XDG_DATA_HOME": str(tmp_path / "task-data")}
+    for key, value in task_environment.items():
+        monkeypatch.setenv(key, value)
     process = launch(
-        tmp_path, "import os,json; print(json.dumps({'credential':os.environ.get('SANDBOX_PROVIDER_API_KEY')}))"
+        tmp_path,
+        "import os,json; print(json.dumps({key:os.environ.get(key) "
+        "for key in ('SANDBOX_PROVIDER_API_KEY', 'HOME', 'XDG_DATA_HOME')}))",
     )
     assert result(tmp_path, process)["cleanup_confirmed"]
     _, event = json.loads((tmp_path / "events.jsonl").read_text())
-    assert event["credential"] is None
+    assert event == {"SANDBOX_PROVIDER_API_KEY": None, **task_environment}
 
 
 def test_lost_spawn_handle_requires_sandbox_teardown(tmp_path):
@@ -208,7 +214,7 @@ finally:
     )
     summary = json.loads(completed.stdout)
     assert summary["return_code"] != 0
-    assert summary["error"] == "launch handle lost after process creation"
+    assert summary["error"] == "Harness launch failed: launch handle lost after process creation"
     assert summary["cleanup_confirmed"] is False
     assert summary["child_alive"] is True
 
@@ -228,7 +234,8 @@ def test_python38_worker_captures_output_and_preserves_task_children(tmp_path):
         assert receipt["return_code"] == 0
         _, event = json.loads((tmp_path / "events.jsonl").read_text())
         assert event["prompt"] == "task input"
-        os.kill(int((tmp_path / "child.pid").read_text()), 0)
+        pid = int((tmp_path / "child.pid").read_text())
+        assert Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
     finally:
         if (tmp_path / "child.pid").exists():
             try:

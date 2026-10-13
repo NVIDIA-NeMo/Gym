@@ -65,7 +65,9 @@ finally:
 @pytest.mark.parametrize("timeout, cleanup", [(1, 0.1), (2700, 10), (21600, 100)])
 def test_exec_timeout_reserves_all_cleanup_phases(timeout: float, cleanup: float) -> None:
     supervisor = runpy.run_path(str(SUPERVISOR))
-    assert supervisor["exec_timeout"](timeout=timeout, cleanup_timeout=cleanup) > timeout + 2 * cleanup
+    assert supervisor["exec_timeout"](timeout=timeout, cleanup_timeout=cleanup) == (
+        timeout + supervisor["CLEANUP_PHASE_COUNT"] * cleanup + 30
+    )
 
 
 @pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf"])
@@ -84,9 +86,9 @@ def test_supervisor_rejects_invalid_deadlines(tmp_path: Path, timeout: str) -> N
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux owner subreaper and /proc are required")
 @pytest.mark.parametrize("ending", ["normal", "crash", "timeout", "cancel", "grace", "stubborn", "killed"])
 @pytest.mark.parametrize("detached", [False, True])
-def test_sandbox_owner_tears_down_services_after_harness_exit(tmp_path: Path, ending: str, detached: bool) -> None:
+def test_only_detached_services_survive_harness_group_termination(tmp_path: Path, ending: str, detached: bool) -> None:
     # The isolated parent emulates the sandbox owner and reaps every test process.
-    # Service descendants must survive both normal and interrupted harness exits.
+    # Only explicitly detached services survive normal and interrupted exits.
     driver = r"""
 import ctypes, json, os, pathlib, signal, subprocess, sys, time, urllib.request
 assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
@@ -137,27 +139,33 @@ try:
             time.sleep(0.01)
         process.send_signal(signal.SIGTERM)
     stdout, stderr = process.communicate(timeout=15)
-    assert process.returncode == (1 if ending in ('stubborn', 'killed') else 0), (stdout, stderr)
+    assert process.returncode == 0, (stdout, stderr)
     receipt = json.loads((root / 'cleanup.json').read_text())
-    assert receipt['cleanup_confirmed'] is (ending not in ('stubborn', 'killed')), receipt
+    assert receipt['cleanup_confirmed'] is True, receipt
     assert receipt['timed_out'] is timed_out, receipt
     expected = {'normal': 0, 'crash': 7, 'grace': 0, 'stubborn': -signal.SIGKILL, 'killed': -signal.SIGKILL}.get(ending, 0)
     assert receipt['return_code'] == expected, receipt
-    if ending in ('stubborn', 'killed'):
-        assert 'sandbox teardown required' in receipt['error'], receipt
-    else:
-        assert receipt['error'] is None, receipt
+    assert receipt['error'] is None, receipt
     if ending == 'grace':
         assert (root / 'checkpoint').read_text() == 'saved before exit'
     try:
-        os.kill(int((root / 'worker.pid').read_text()), 0)
+        os.killpg(int((root / 'worker.pid').read_text()), 0)
     except ProcessLookupError:
         pass
     else:
-        raise AssertionError('supervised worker still running')
+        raise AssertionError('supervised process group still present, including zombies')
     port = int((root / 'port').read_text())
-    with urllib.request.urlopen('http://127.0.0.1:%d/' % port, timeout=2) as response:
-        assert response.read() == b'task solved'
+    if detached:
+        with urllib.request.urlopen('http://127.0.0.1:%d/' % port, timeout=2) as response:
+            assert response.read() == b'task solved'
+    else:
+        assert not pathlib.Path('/proc/' + (root / 'service.pid').read_text()).exists()
+        try:
+            urllib.request.urlopen('http://127.0.0.1:%d/' % port, timeout=0.2)
+        except OSError:
+            pass
+        else:
+            raise AssertionError('same-group service survived')
 finally:
     if process is not None and process.poll() is None:
         process.kill(); process.wait(timeout=5)
@@ -188,6 +196,83 @@ if (root / 'service.pid').exists():
         timeout=25,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
+@pytest.mark.parametrize("cooperative", [True, False])
+def test_foreground_tool_cannot_mutate_task_after_confirmed_receipt(tmp_path: Path, cooperative: bool) -> None:
+    runner = SUPERVISOR.parents[2] / "responses_api_agents/pi_agent/sandbox_runner.py"
+    # A separate owner reaps any escaped process even when this regression fails.
+    driver = r"""
+import ctypes, json, os, pathlib, signal, subprocess, sys, time
+assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
+supervisor, runner, root, cooperative = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3]), sys.argv[4] == 'True'
+tool = "import pathlib,time\nwhile not pathlib.Path('release').exists(): time.sleep(.01)\npathlib.Path('mutated').touch()"
+cli = ("import pathlib,signal,subprocess,sys\n"
+       + ("" if cooperative else "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n")
+       + "child=subprocess.Popen([sys.executable,'-c'," + repr(tool) + "])\n"
+       + "pathlib.Path('tool.pid').write_text(str(child.pid))\nchild.wait()\n")
+params = {'directory': str(root), 'cwd': str(root), 'env': {}, 'prompt': 'task',
+          'command': [sys.executable, '-c', cli]}
+(root / 'input.json').write_text(json.dumps(params))
+process = None
+try:
+    process = subprocess.Popen([sys.executable, '-I', supervisor, '--timeout', '1', '--cleanup-timeout', '.3',
+        '--receipt', str(root / 'cleanup.json'), '--', sys.executable, '-I', runner, str(root / 'input.json')],
+        cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate(timeout=10)
+    assert process.returncode == 0, (stdout, stderr)
+    receipt = json.loads((root / 'cleanup.json').read_text())
+    assert receipt['cleanup_confirmed'] and receipt['timed_out'], receipt
+    assert (root / 'tool.pid').exists(), 'foreground tool never started'
+    (root / 'release').touch()
+    time.sleep(.2)
+    assert not (root / 'mutated').exists(), 'foreground tool wrote after termination receipt'
+    assert not pathlib.Path('/proc/' + (root / 'tool.pid').read_text()).exists(), 'tool was not reaped'
+finally:
+    if process is not None and process.poll() is None:
+        process.kill(); process.wait(timeout=5)
+    for pid in pathlib.Path('/proc/self/task/%d/children' % os.getpid()).read_text().split():
+        try: os.kill(int(pid), signal.SIGKILL)
+        except ProcessLookupError: pass
+    try:
+        while True: os.waitpid(-1, 0)
+    except ChildProcessError: pass
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", driver, str(SUPERVISOR), str(runner), str(tmp_path), str(cooperative)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
+def test_missing_binary_preserves_launch_error(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(SUPERVISOR),
+            "--timeout",
+            "1",
+            "--receipt",
+            str(tmp_path / "cleanup.json"),
+            "--",
+            str(tmp_path / "missing-worker"),
+        ],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=5,
+    )
+    receipt = json.loads((tmp_path / "cleanup.json").read_text())
+    assert result.returncode == 1
+    assert receipt["cleanup_confirmed"] is False
+    assert receipt["return_code"] is None
+    assert "Harness launch failed" in receipt["error"] and "missing-worker" in receipt["error"]
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
@@ -237,8 +322,8 @@ def test_provider_group_kill_leaves_supervisor_alive_to_reap_worker(tmp_path: Pa
         process.communicate(timeout=10)
         receipt = json.loads((tmp_path / "cleanup.json").read_text())
         assert receipt["timed_out"] is False
-        assert receipt["cleanup_confirmed"] is False
-        assert "terminated by a signal" in receipt["error"]
+        assert receipt["cleanup_confirmed"] is True
+        assert receipt["error"] is None
         with pytest.raises(ProcessLookupError):
             os.kill(worker_pid, 0)
     finally:
@@ -289,8 +374,8 @@ finally:
     )
     summary = json.loads(completed.stdout)
     assert summary["timed_out"] is False
-    assert summary["cleanup_confirmed"] is False
-    assert "terminated by a signal" in summary["error"]
+    assert summary["cleanup_confirmed"] is True
+    assert summary["error"] is None
     assert summary["child_alive"] is False
 
 
@@ -333,6 +418,6 @@ finally:
     )
     summary = json.loads(completed.stdout)
     assert summary["return_code"] is None
-    assert summary["error"] == "launch handle lost after process creation"
+    assert summary["error"] == "Harness launch failed: launch handle lost after process creation"
     assert summary["cleanup_confirmed"] is False
     assert summary["child_alive"] is True

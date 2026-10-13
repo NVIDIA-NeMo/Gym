@@ -202,18 +202,26 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             executed = await sandbox.exec(
                 f"{quote(self.config.runtime_python)} -I {quote(remote + '/process_supervisor.py')} "
                 f"--timeout {self.config.sandbox_timeout} --receipt {quote(remote + '/cleanup.json')} -- "
-                f"{quote(self.config.runtime_python)} -I {quote(remote + '/runner.py')} {quote(remote + '/request.json')}",
+                f"{quote(self.config.runtime_python)} -I {quote(remote + '/runner.py')} {quote(remote + '/request.json')} "
+                f">{quote(remote + '/output.log')} 2>&1",
                 cwd=remote,
                 # The runner owns the model budget; leave time for process cleanup.
                 timeout_s=process_supervisor.exec_timeout(timeout=self.config.sandbox_timeout),
             )
             return_code, error_type = executed.return_code, executed.error_type
             stdout, stderr = executed.stdout or "", executed.stderr or ""
+            # Detached services can inherit worker output. A file prevents them
+            # from keeping the provider's response pipe open after termination.
+            try:
+                await sandbox.download(f"{remote}/output.log", local / "output.log")
+                stdout += (local / "output.log").read_text(errors="replace")
+            except Exception:
+                LOG.warning("Could not retrieve Hermes supervisor output; artifacts: %s", local, exc_info=True)
             await sandbox.download(f"{remote}/cleanup.json", local / "cleanup.json")
             receipt = json.loads((local / "cleanup.json").read_text())
             cleanup_confirmed = receipt.get("cleanup_confirmed") is True and receipt.get("error") is None
             if not cleanup_confirmed:
-                raise RuntimeError(f"Hermes cleanup was not confirmed: {receipt.get('error')}")
+                raise RuntimeError(f"Hermes harness termination was not confirmed: {receipt.get('error')}")
             if not return_code and receipt.get("return_code"):
                 return_code = receipt["return_code"]
             if receipt.get("timed_out"):
@@ -248,8 +256,9 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             )
         if launched and not cleanup_confirmed:
             # The resources owner will tear down the sandbox in run()'s finally.
-            # Do not extract a patch that a detached tool might still be changing.
-            raise RuntimeError(f"Hermes cleanup was not confirmed; artifacts: {local}")
+            # Do not extract a patch while the harness process group may still be writing.
+            # Processes that escaped that group remain the sandbox owner's responsibility.
+            raise RuntimeError(f"Hermes harness termination was not confirmed; artifacts: {local}")
         budget_timeout = error_type == "timeout" and result.get("stop_reason") == "wall_time"
         response = trajectory_response(result, body, self.config.model, None if budget_timeout else error_type)
         return response, {

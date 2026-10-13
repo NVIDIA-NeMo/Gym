@@ -222,6 +222,8 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             assert payload["prompt"] == "Fix the code"
             assert payload["command"][0].endswith("/node/bin/node")
             assert "PATH" not in payload["env"]
+            assert "HOME" not in payload["env"]
+            assert not any(key.startswith("XDG_") for key in payload["env"])
             extension = f"{sandbox.directory}/output-limit.mjs"
             assert sandbox.files[extension] == Path(__file__).parents[1].joinpath("output-limit.mjs").read_text()
             assert payload["command"][payload["command"].index("--extension") + 1] == extension
@@ -498,16 +500,16 @@ async def test_close_cancels_active_pi_before_detaching(setup):
     sandbox.stop.assert_not_awaited()
 
 
-async def test_failed_cleanup_keeps_handles_and_prevents_close(setup):
+async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
         await task
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
-        await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert agent._session_records[session_id].state is not None
-    sandbox.disconnect.assert_not_awaited()
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert agent._session_records[session_id].state is None
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
 
 
 async def test_disconnect_failure_retains_session_for_retry(setup):

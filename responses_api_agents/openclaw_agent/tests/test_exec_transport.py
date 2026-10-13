@@ -126,16 +126,15 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
         if ending == "timeout":
             assert state.session.cleanup["timed_out"] is True
         child_pid = int((workdir / "child.pid").read_text())
-        os.kill(child_pid, 0)
+        assert Path(f"/proc/{child_pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
         assert provider.cancelled_launch is False
-        assert provider.deadline > deadline + 3 * 1
+        assert provider.deadline == pytest.approx(deadline + 3 + 30)
         await state.close(3)
         await state.close(3)
         assert provider.disconnected
         assert not Path(state.session.session_dir).exists()
-        if ending == "natural":
-            # Resources still owns the task process while the verifier inspects it.
-            os.kill(child_pid, 0)
+        # Resources still owns the detached service after every ending.
+        assert Path(f"/proc/{child_pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
     finally:
         try:
             if not state.session.closed:
@@ -164,7 +163,7 @@ async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
     assert not Path(state.session.session_dir).exists()
 
 
-async def test_failed_receipt_keeps_files_and_can_retry(tmp_path):
+async def test_terminal_failed_receipt_releases_borrowed_session(tmp_path):
     state, provider, _ = make_session(tmp_path)
     state.session.launch_started = True
     receipt = {
@@ -175,14 +174,13 @@ async def test_failed_receipt_keeps_files_and_can_retry(tmp_path):
     }
     path = Path(state.session.session_dir) / "cleanup.json"
     path.write_text(json.dumps(receipt))
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
-        await state.close(3)
-    assert not provider.disconnected
-    assert path.exists()
-    receipt.update(cleanup_confirmed=True, error=None)
-    path.write_text(json.dumps(receipt))
     await state.close(3)
     assert provider.disconnected
+    assert state.session.closed
+    assert state.session.cleanup is None
+    assert state.session.termination_error.receipt == receipt
+    assert state.session.capture_error is state.session.termination_error
+    assert not path.exists()
 
 
 async def test_confirmed_cleanup_cancels_stuck_transport(tmp_path):

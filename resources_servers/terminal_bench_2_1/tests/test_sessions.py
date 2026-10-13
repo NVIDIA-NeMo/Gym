@@ -174,7 +174,7 @@ async def test_failed_close_retains_owner_for_retry(setup) -> None:
     with pytest.raises(RuntimeError, match="provider unavailable"):
         await server.close_resources_session(close_body(seed))
     assert server._session_id_to_sandbox[seed.resources_session_id] is sandbox
-    assert seed.resources_session_id not in server._closed_sessions
+    assert seed.resources_session_id not in server._closed_session_records
     await server.close_resources_session(close_body(seed))
     await server.close_resources_session(close_body(seed))
     assert sandbox.stop.await_count == 2
@@ -229,7 +229,7 @@ async def test_initial_setup_failure_retains_sandbox_for_cleanup_retry(
         provider.close.assert_awaited_once()
         provider.aclose.assert_not_awaited()
         assert server._session_id_to_sandbox[seed.resources_session_id] is sandbox
-        assert seed.resources_session_id not in server._closed_sessions
+        assert seed.resources_session_id not in server._closed_session_records
         if recovery == "close":
             await server.close_resources_session(close_body(seed))
             await server.close_resources_session(close_body(seed))
@@ -334,7 +334,9 @@ async def test_interrupted_verification_requires_retrying_episode(
     assert error.value.status_code == 503
     server._verify.assert_awaited_once()
     await server.close_resources_session(close_body(seed))
-    assert not server._session_id_to_state
+    record = server._session_id_to_state[seed.resources_session_id]
+    assert record.closing and record.request is None
+    assert record.verification_request is None
 
 
 @pytest.mark.parametrize("invalid", ["missing_tests", "golden_mode", "relative_workdir", "failed_pwd"])
@@ -385,7 +387,9 @@ async def test_close_waits_for_inflight_seed(setup) -> None:
     await asyncio.sleep(0)
     sandbox.stop.assert_not_awaited()
     release.set()
-    await asyncio.gather(seeding, closing)
+    with pytest.raises(HTTPException, match="closed during setup"):
+        await seeding
+    await closing
     sandbox.stop.assert_awaited_once()
     assert not server._session_id_to_sandbox
 
@@ -478,4 +482,249 @@ async def test_verification_cancellation_propagates_and_preserves_cleanup(setup,
         sandbox.stop.assert_not_awaited()
         await server.close_resources_session(close_body(seed))
     sandbox.stop.assert_awaited_once()
+    assert not server._session_id_to_sandbox
+
+
+async def test_completed_close_records_expire_without_retry_renewal(setup, monkeypatch: pytest.MonkeyPatch) -> None:
+    server, sandbox, seed, request = setup
+    now = 100.0
+    monkeypatch.setattr(terminal_bench_app, "monotonic", lambda: now)
+    await server.seed_session(request, seed)
+    await server.close_resources_session(close_body(seed))
+    record = server._session_id_to_state[seed.resources_session_id]
+    assert record.expires_at == 400
+    assert record.request is None and record.response is None
+    now = 200
+    await server.close_resources_session(close_body(seed))
+    assert record.expires_at == 400
+    with pytest.raises(HTTPException, match="already closed"):
+        await server.seed_session(request, seed)
+    now = 401
+    other = close_body(seed).model_copy(update={"resources_session_id": "other"})
+    await server.close_resources_session(other)
+    assert seed.resources_session_id not in server._session_id_to_state
+    assert seed.resources_session_id not in server._closed_session_records
+    with pytest.raises(HTTPException, match="unknown or closed"):
+        await server.verify(request, verify_body(seed))
+    sandbox.stop.assert_awaited_once()
+
+
+async def test_expired_record_waiter_joins_replacement_lock(setup, monkeypatch: pytest.MonkeyPatch) -> None:
+    server, _, seed, request = setup
+    now = 0.0
+    monkeypatch.setattr(terminal_bench_app, "monotonic", lambda: now)
+    await server.close_resources_session(close_body(seed))
+    old = server._session_id_to_state[seed.resources_session_id]
+    await old.lock.acquire()
+    waiting = asyncio.create_task(server.seed_session(request, seed))
+    try:
+        await asyncio.sleep(0)
+        assert not waiting.done()
+        now = 301
+        current = await server.seed_session(request, seed)
+    finally:
+        old.lock.release()
+    assert await waiting == current
+    assert server._session_id_to_state[seed.resources_session_id] is not old
+    server._create_sandbox.assert_awaited_once()
+    await server.close_resources_session(close_body(seed))
+
+
+async def test_failed_close_keeps_fence_and_owner_past_retry_window(setup, monkeypatch: pytest.MonkeyPatch) -> None:
+    server, sandbox, seed, request = setup
+    now = 0.0
+    monkeypatch.setattr(terminal_bench_app, "monotonic", lambda: now)
+    await server.seed_session(request, seed)
+    sandbox.stop.side_effect = [RuntimeError("provider unavailable"), None]
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        await server.close_resources_session(close_body(seed))
+    record = server._session_id_to_state[seed.resources_session_id]
+    now = 1000
+    await server.close_resources_session(close_body(seed).model_copy(update={"resources_session_id": "other"}))
+    assert server._session_id_to_state[seed.resources_session_id] is record
+    assert record.expires_at == float("inf")
+    with pytest.raises(HTTPException, match="already closed"):
+        await server.seed_session(request, seed)
+    with pytest.raises(HTTPException, match="not available"):
+        await server.verify(request, verify_body(seed))
+    await server.close_resources_session(close_body(seed))
+    assert record.expires_at == 1300
+    assert not server._session_id_to_sandbox
+
+
+@pytest.mark.parametrize("phase", ["create", "serialize"])
+async def test_cancelled_close_fences_slow_seed_until_its_cleanup(
+    setup, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    server, sandbox, seed, request = setup
+    now = 0.0
+    monkeypatch.setattr(terminal_bench_app, "monotonic", lambda: now)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        if phase == "create":
+            server._session_id_to_sandbox[seed.resources_session_id] = sandbox
+            return sandbox
+        return {"sandbox_id": "task-sandbox"}
+
+    if phase == "create":
+        server._create_sandbox.side_effect = delayed
+    else:
+        sandbox.serialize.side_effect = delayed
+    seeding = asyncio.create_task(server.seed_session(request, seed))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    wrong = close_body(seed).model_copy(update={"episode_id": seed.episode_id.model_copy(update={"attempt": 1})})
+    with pytest.raises(HTTPException, match="episode_id"):
+        await server.close_resources_session(wrong)
+    assert not server._session_id_to_state[seed.resources_session_id].closing
+    closing = asyncio.create_task(server.close_resources_session(close_body(seed)))
+    await asyncio.sleep(0)
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    now = 1000  # A pending allocation cannot lose its fence after the normal retry window.
+    await server.close_resources_session(close_body(seed).model_copy(update={"resources_session_id": "other"}))
+    record = server._session_id_to_state[seed.resources_session_id]
+    assert record.closing and record.expires_at == float("inf")
+    release.set()
+    with pytest.raises(HTTPException, match="closed during setup"):
+        await seeding
+    assert record.expires_at == 1300
+    assert record.request is None and record.response is None
+    sandbox.stop.assert_awaited_once()
+    assert not server._session_id_to_sandbox
+
+
+async def test_shutdown_stops_sessions_concurrently_under_their_locks(setup) -> None:
+    server, sandbox, seed, request = setup
+    app = server.setup_webserver()
+    lifespan = app.router.lifespan_context(app)
+    await lifespan.__aenter__()
+    await server.seed_session(request, seed)
+    entered, release, other_entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def stop():
+        entered.set()
+        await release.wait()
+
+    async def stop_other():
+        other_entered.set()
+
+    sandbox.stop.side_effect = stop
+    other = SimpleNamespace(stop=AsyncMock(side_effect=stop_other))
+    server._session_id_to_sandbox["other"] = other
+    closing = asyncio.create_task(server.close_resources_session(close_body(seed)))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
+    try:
+        await asyncio.wait_for(other_entered.wait(), timeout=5)
+        assert not shutdown.done()
+        sandbox.stop.assert_awaited_once()  # Shutdown cannot duplicate the in-flight stop.
+        with pytest.raises(HTTPException, match="shutting down"):
+            await server.seed_session(request, seed)
+    finally:
+        release.set()
+        await asyncio.gather(closing, shutdown)
+    other.stop.assert_awaited_once()
+    assert not server._session_id_to_sandbox
+    assert not server._session_id_to_state
+    assert not server._closed_session_records
+
+
+@pytest.mark.parametrize("seeded", [False, True])
+async def test_golden_verification_closes_its_sandbox_and_any_legacy_seed(setup, seeded: bool) -> None:
+    server, seeded_sandbox, seed, request = setup
+    server.config.is_verifying_golden_patch = True
+    if seeded:
+        await server.seed_session(request, TerminalBench21SeedSessionRequest.model_validate(seed.task_data))
+    golden_sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=seeded_sandbox.exec.return_value),
+        download=AsyncMock(side_effect=lambda remote, local: Path(local).write_text("1")),
+        stop=AsyncMock(),
+    )
+    server._create_sandbox = AsyncMock(return_value=golden_sandbox)
+
+    result = await server.verify(request, verify_body(seed))
+
+    assert result.evaluation_completed and result.reward == 1
+    server._create_sandbox.assert_awaited_once_with(verify_body(seed))
+    golden_sandbox.stop.assert_awaited_once()
+    if seeded:
+        seeded_sandbox.stop.assert_awaited_once()
+    else:
+        seeded_sandbox.stop.assert_not_awaited()
+    assert not server._session_id_to_sandbox
+
+
+@pytest.mark.parametrize("failure", [None, RuntimeError, asyncio.CancelledError])
+@pytest.mark.parametrize("stop_failure", ["error", "timeout"])
+async def test_golden_cleanup_is_bounded_and_preserves_primary_result(
+    setup, failure: type[BaseException] | None, stop_failure: str
+) -> None:
+    server, sandbox, seed, request = setup
+    server.config.is_verifying_golden_patch = True
+    server.config.session_close_timeout_seconds = 0.01
+    original = failure("golden interrupted") if failure is not None else None
+    if original is not None:
+        server._upload_folder.side_effect = original
+
+    async def stop():
+        if stop_failure == "error":
+            raise RuntimeError("provider unavailable")
+        await asyncio.Event().wait()
+
+    sandbox.stop.side_effect = stop
+    if original is None:
+        result = await asyncio.wait_for(server.verify(request, verify_body(seed)), timeout=1)
+        assert result.reward == 1
+    else:
+        with pytest.raises(failure) as error:
+            await asyncio.wait_for(server.verify(request, verify_body(seed)), timeout=1)
+        assert error.value is original
+    sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "outcome,stop_fails", [("success", False), ("incomplete", False), ("cancel", False), ("cancel", True)]
+)
+async def test_cancelled_close_is_honored_when_verification_unwinds(setup, outcome: str, stop_fails: bool) -> None:
+    server, sandbox, seed, request = setup
+    await server.seed_session(request, seed)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def upload(*args):
+        entered.set()
+        await release.wait()
+        if outcome == "incomplete":
+            raise RuntimeError("verifier upload failed")
+
+    server._upload_folder.side_effect = upload
+    if stop_fails:
+        sandbox.stop.side_effect = [RuntimeError("provider unavailable"), None]
+    verifying = asyncio.create_task(server.verify(request, verify_body(seed)))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    closing = asyncio.create_task(server.close_resources_session(close_body(seed)))
+    await asyncio.sleep(0)
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    if outcome == "cancel":
+        verifying.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await verifying
+    else:
+        release.set()
+        result = await verifying
+        assert result.evaluation_completed is (outcome == "success")
+    sandbox.stop.assert_awaited_once()
+    record = server._session_id_to_state[seed.resources_session_id]
+    assert record.closing
+    if stop_fails:
+        assert server._session_id_to_sandbox[seed.resources_session_id] is sandbox
+        assert seed.resources_session_id not in server._closed_session_records
+        await server.close_resources_session(close_body(seed))
+        assert sandbox.stop.await_count == 2
+    assert record.request is None and record.verification_response is None
     assert not server._session_id_to_sandbox

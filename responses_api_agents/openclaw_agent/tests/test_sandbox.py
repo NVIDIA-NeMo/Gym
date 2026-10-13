@@ -271,6 +271,8 @@ def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeou
             assert "--timeout 900" in sandbox.launch.await_args.kwargs["command"]
             assert "timeout" not in payload
             assert "PATH" not in payload["env"]
+            assert "HOME" not in payload["env"]
+            assert not any(key.startswith("XDG_") for key in payload["env"])
             models = json.loads(sandbox.files[f"{sandbox.directory}/home/.openclaw/openclaw.json"])
             assert models["agents"]["defaults"]["workspace"] == "/app"
             assert models["models"]["providers"]["nemo"]["timeoutSeconds"] == model_timeout_seconds
@@ -636,17 +638,16 @@ async def test_obsolete_sandbox_cookie_never_falls_back_to_host(setup, marker):
     sandbox.exec.assert_not_awaited()
 
 
-async def test_failed_cleanup_keeps_handles_and_prevents_close(setup):
+async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
         await task
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
-        await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert agent._session_records[session_id].state is not None
-    sandbox.disconnect.assert_not_awaited()
-    assert not any("rm -rf" in call.args[0] for call in sandbox.exec.await_args_list)
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert agent._session_records[session_id].state is None
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
 
 
 async def test_disconnect_failure_retains_session_for_retry(setup):

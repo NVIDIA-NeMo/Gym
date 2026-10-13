@@ -156,11 +156,15 @@ a successful smoke, and one task does not establish a benchmark baseline.
 
 ## Tasks that start services
 
-Task processes in the Resources-owned sandbox remain available to the verifier.
-The supervisor bounds harness termination; Resources stops all remaining processes
-by closing the sandbox after verification or episode failure. Unknown harness
-termination blocks verification and requires sandbox teardown. Services must use
-task-owned files, since agent close removes its temporary session directory.
+The supervisor stops the harness process group before capture or verification, including
+foreground tools left behind after CLI exit or timeout. Explicitly detached task services
+remain available to the verifier. Resources stops them by closing the sandbox after
+verification or episode failure. Unconfirmed harness termination blocks verification;
+a final failure receipt still lets agent close release its connection for owner teardown.
+
+Tool shells retain the task HOME and XDG directories, so home-directory deliverables
+remain available to verification. Harness configuration and transcripts stay in a private
+session directory that agent close removes; services must not depend on those files.
 
 Services must also outlive the harness's shell tool. `nohup ... &` alone is not
 portable across tools: a shell deadline or process-group cleanup can stop the
@@ -168,3 +172,10 @@ service. Detach its process group and standard streams, for example with
 `subprocess.Popen(start_new_session=True)`, stdin from `DEVNULL`, and stdout/stderr
 in task-owned log files. Check that the service is reachable before finishing.
 A file-producing smoke does not validate this service-dependent behavior.
+
+Resources retains completed close receipts for `session_close_retry_window_seconds`
+(default 300 seconds); retries do not extend the window. Pending setup or failed stops
+retain their handles. Close fences an in-progress setup before waiting for its lock,
+so setup finishing after a close timeout tears its sandbox down. Shutdown attempts
+session stops concurrently, but process termination can interrupt them; the configured
+provider TTL remains the backstop for abandoned sandboxes.
