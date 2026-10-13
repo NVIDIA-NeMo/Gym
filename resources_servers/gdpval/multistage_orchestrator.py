@@ -79,7 +79,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
 )
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
-from nemo_gym.path_utils import failures_path_for
+from nemo_gym.path_utils import failures_path_for, materialized_path_for
 from nemo_gym.rollout_collection import (
     _NO_RESULT_FAILURE_CLASSES,
     _RUN_FAILURE_ERRORS,
@@ -860,6 +860,11 @@ def _same_bucket_replacement(
     return None
 
 
+def task_index_stride(rows_by_task: Mapping[str, Sequence[Mapping[str, Any]]]) -> int:
+    """One more than the highest base task index: stage ``i`` numbers its rows from ``i * stride``."""
+    return 1 + max((int(row[TASK_INDEX_KEY_NAME]) for rows in rows_by_task.values() for row in rows), default=-1)
+
+
 def build_stage_rows(
     rows_by_task: Mapping[str, Sequence[Mapping[str, Any]]],
     task_reference_ids: Mapping[str, str],
@@ -872,18 +877,21 @@ def build_stage_rows(
     is judged against this stage (see ``assign_task_references``). Each row copies
     a base materialized row for that task and sets ``reference_ids=[ref]`` (the
     GDPVal verifier judges only against this one reference) plus ``stage_index``.
-    Task/rollout indices are kept at their original values: the same rollout
-    judged in two stages is distinguished by ``stage_index``, and the rollout
-    index must match the on-disk deliverable dir (``repeat_<index>/``).
+    The task index is offset by ``stage_index * task_index_stride`` so a rollout
+    judged in two stages has a distinct identity in each; the rollout index is
+    kept because it names the on-disk deliverable dir (``repeat_<index>/``).
 
     ``produced`` lists ``(task_id, rollout_index)`` deliverables already created by
     earlier stages; matching rows are tagged ``reuse_cached_deliverable=True`` so
     the agent judges the cached deliverable instead of re-running the policy.
     """
+    stride = task_index_stride(rows_by_task)
     stage_rows: List[Dict[str, Any]] = []
     for task_id, reference_id in task_reference_ids.items():
         for base_row in rows_by_task.get(task_id, []):
             row = deepcopy(dict(base_row))
+            # The row keeps its task_id, so the base index is not lost by offsetting it.
+            row[TASK_INDEX_KEY_NAME] = stage_index * stride + int(row[TASK_INDEX_KEY_NAME])
             row["reference_ids"] = [reference_id]
             row["stage_index"] = stage_index
             if produced is not None:
@@ -978,6 +986,7 @@ async def run_multistage_stages(
         random.Random(multistage_config.seed) if multistage_config.seed is not None else random.Random()
     )
     rows_by_task = index_rows_by_task(materialized_rows)
+    stride = task_index_stride(rows_by_task)
 
     # Sample each stage's ``T`` tasks up front (``num_tasks=None`` ⇒ the full task
     # set). Within a stage each task is then assigned one reference (see
@@ -1014,7 +1023,7 @@ async def run_multistage_stages(
                 task_id_by_key[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = task_id
         for stage_index, keys in resume.reuse_cached_keys.items():
             for key in keys:
-                task_id = task_id_by_key.get(key)
+                task_id = task_id_by_key.get((key[0] - stage_index * stride, key[1]))
                 if task_id is not None:
                     sidecar_produced_by_stage.setdefault(stage_index, set()).add((task_id, int(key[1] or 0)))
 
@@ -1029,7 +1038,10 @@ async def run_multistage_stages(
             outcome = resume.outcomes[index]
             plan = resume.plans.get(index, {})
             expected_rows = [row for task_id in plan.get("task_ids", []) for row in rows_by_task.get(str(task_id), [])]
-            expected_keys = {(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)) for row in expected_rows}
+            expected_keys = {
+                (index * stride + int(row[TASK_INDEX_KEY_NAME]), row.get(ROLLOUT_INDEX_KEY_NAME))
+                for row in expected_rows
+            }
             resolved_keys = set(resume.gated_keys.get(index, set()))
             completion_is_covered = len(expected_keys) == len(expected_rows) and expected_keys <= resolved_keys
             task_reference_ids = {
@@ -1769,6 +1781,34 @@ def _resume_complete_stage(
         )
     stage_summaries.append(summary)
     return stage_elo
+
+
+def write_materialized_inputs(
+    output_fpath: str | Path,
+    journal_fpath: str | Path,
+    materialized_rows: Sequence[Mapping[str, Any]],
+    total_stages: int,
+) -> Path:
+    """Write every planned stage's rows as the run's materialized inputs, which ``gym eval reverify`` pairs with rollouts.
+
+    Each row carries what ``/verify`` echoes for the stage-aware aggregation: ``stage_index``, ``reference_ids``, the
+    expected stage sizes and, for a stage accepted as partial, the accepted row count.
+    """
+    plans, outcomes, _ = read_journal(journal_fpath)
+    rows_by_task = index_rows_by_task(materialized_rows)
+    rows: List[Dict[str, Any]] = []
+    for index in sorted(plans):
+        stage_rows = build_stage_rows(rows_by_task, plans[index].get("task_reference_ids") or {}, index)
+        outcome = outcomes.get(index) or {}
+        for row in stage_rows:
+            row["expected_final_stage_index"] = total_stages - 1
+            row["expected_stage_row_count"] = len(stage_rows)
+            if outcome.get("status") == "partial_complete":
+                row[ACCEPTED_STAGE_ROW_COUNT_KEY] = len(outcome["included_keys"])
+        rows.extend(stage_rows)
+    path = materialized_path_for(Path(output_fpath))
+    path.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    return path
 
 
 def write_rollouts(all_results: Sequence[Mapping[str, Any]], output_fpath: str | Path) -> Path:
@@ -2542,6 +2582,24 @@ async def run_e2e_multistage(
         assignment_repair = make_assignment_repair(global_config_dict, transport_config)
 
     resume = _prepare_resume(rollout_collection_config, output_fpath, journal_fpath, fingerprint)
+
+    # Rewrite the materialized inputs from the journal on every plan and outcome: a stage's
+    # references come from the previous stage's ELO, and its accepted row count from its outcome.
+    def write_inputs() -> None:
+        write_materialized_inputs(output_fpath, journal_fpath, materialized_rows, len(multistage_config.stages))
+
+    _on_plan, _on_outcome = resume.on_plan, resume.on_outcome
+
+    def on_plan(*args, **kwargs) -> None:
+        _on_plan(*args, **kwargs)
+        write_inputs()
+
+    def on_outcome(*args, **kwargs) -> None:
+        _on_outcome(*args, **kwargs)
+        write_inputs()
+
+    resume.on_plan, resume.on_outcome = on_plan, on_outcome
+    write_inputs()
 
     all_results, stage_summaries = await run_multistage_stages(
         multistage_config,

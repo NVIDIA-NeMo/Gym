@@ -58,6 +58,7 @@ from resources_servers.gdpval.multistage_orchestrator import (
     append_journal_record,
     build_file_resume,
     build_stage_rows,
+    cached_deliverable_verify_body,
     compute_fingerprint,
     find_gdpval_reference_elos,
     index_rows_by_task,
@@ -77,6 +78,7 @@ from resources_servers.gdpval.multistage_orchestrator import (
     run_e2e_multistage,
     run_multistage_stages,
     tag_results,
+    write_materialized_inputs,
     write_rollouts,
 )
 
@@ -281,7 +283,7 @@ class TestRowHelpers:
         assert set(by_task) == {"t0", "t1"}
         assert len(by_task["t0"]) == 2
 
-    def test_build_stage_rows_tags_and_preserves_indices(self) -> None:
+    def test_build_stage_rows_tags_and_offsets_task_indices(self) -> None:
         by_task = index_rows_by_task(_materialized_rows(["t0", "t1"], repeats=2))
         # Each task is judged against a single assigned reference.
         rows = build_stage_rows(by_task, {"t0": "b", "t1": "c"}, stage_index=2)
@@ -291,14 +293,13 @@ class TestRowHelpers:
         assert ref_by_task["t1"] == ["c"]
         for row in rows:
             assert row["stage_index"] == 2
-        # Indices are preserved (no per-stage offset) so the rollout index keeps
-        # matching the on-disk deliverable repeat dir; stage_index is the
-        # disambiguator across stages.
+        # The task index is offset by stage_index * stride (2 base tasks); the rollout
+        # index keeps matching the on-disk deliverable repeat dir.
         assert {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in rows} == {
-            (0, 0),
-            (0, 1),
-            (1, 0),
-            (1, 1),
+            (4, 0),
+            (4, 1),
+            (5, 0),
+            (5, 1),
         }
 
     def test_build_stage_rows_skips_unknown_tasks(self) -> None:
@@ -812,6 +813,46 @@ class TestWriteRollouts:
 # ---------------------------------------------------------------------------
 
 
+class TestMaterializedInputs:
+    """A multistage run's stage rows pair with its rollouts for ``gym eval reverify``."""
+
+    def test_reverify_pairs_every_stage_and_forwards_its_identity(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_reverification import _build_verify_payload, _yield_inputs_and_rollouts_paired
+        from resources_servers.gdpval.app import GDPValVerifyRequest
+
+        rows = _materialized_rows(["t0", "t1"])
+        assignment = {"t0": "a", "t1": "a"}
+        out = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(out)
+        for index in range(2):
+            plan = {"stage_index": index, "status": "planned", "reference_ids": ["a"], "task_ids": ["t0", "t1"]}
+            append_journal_record(journal, {**plan, "task_reference_ids": assignment}, "FP")
+        append_journal_record(
+            journal, {"stage_index": 1, "status": "partial_complete", "included_keys": [[2, 0]]}, "FP"
+        )
+        stage_rows = [
+            row for index in range(2) for row in build_stage_rows(index_rows_by_task(rows), assignment, index)
+        ]
+        write_rollouts([{**row, **cached_deliverable_verify_body(row), "reward": 0.5} for row in stage_rows], out)
+
+        inputs = write_materialized_inputs(out, journal, rows, total_stages=2)
+        requests = [
+            GDPValVerifyRequest.model_validate(_build_verify_payload(pair))
+            for pair in _yield_inputs_and_rollouts_paired(inputs, out)
+        ]
+
+        assert sorted((request.stage_index, request.ng_task_index) for request in requests) == [
+            (0, 0),
+            (0, 1),
+            (1, 2),
+            (1, 3),
+        ]
+        assert {request.expected_final_stage_index for request in requests} == {1}
+        assert {request.expected_stage_row_count for request in requests} == {2}
+        accepted = {(request.stage_index, request.accepted_stage_row_count) for request in requests}
+        assert accepted == {(0, None), (1, 1)}
+
+
 class RecordingResume(StageResume):
     """In-memory StageResume that records callback invocations.
 
@@ -1289,7 +1330,7 @@ class TestResumeSeam:
             # Isolate sidecar propagation from normal cross-stage reuse.
             reuse_cached_deliverables=False,
         )
-        resume = RecordingResume(reuse_cached_keys={1: {(0, 0)}})
+        resume = RecordingResume(reuse_cached_keys={1: {(1, 0)}})
         seen: List[Tuple[int, bool]] = []
         run = _fake_run_rollouts_factory()
 
@@ -1358,7 +1399,7 @@ class TestResumeSeam:
 
         await run_multistage_stages(cfg, REF_ELOS, _distribution(task_ids), rows, capturing_run, resume=resume)
 
-        assert sorted(seen) == [(1, 0, True), (1, 1, True)]
+        assert sorted(seen) == [(1, 2, True), (1, 3, True)]
 
     async def test_new_terminal_judge_failure_reuses_artifact_in_next_stage(self) -> None:
         task_ids = ["t0", "t1"]
@@ -1416,8 +1457,8 @@ class TestResumeSeam:
         assert sorted(seen) == [
             (0, 0, False),
             (0, 1, False),
-            (1, 0, True),
-            (1, 1, True),
+            (1, 2, True),
+            (1, 3, True),
         ]
 
     async def test_third_failure_stops_adaptive_stage_without_fourth_invocation(self) -> None:
@@ -3564,6 +3605,7 @@ class TestCachedDeliverableReuse:
         }
 
     async def _run_two_stages(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, cached: bool):
+        self.inputs_at_dispatch: List[List[int]] = []
         dispatched: List[Dict[str, Any]] = []
         verified: List[Dict[str, Any]] = []
         test = self
@@ -3582,6 +3624,8 @@ class TestCachedDeliverableReuse:
             def _run_examples_with_metadata(self, rows, **kwargs):
                 self.resolve_task_sources(rows, OmegaConf.create(_ROUTING_CONFIG))
                 dispatched.extend(rows)
+                inputs = (tmp_path / "rollouts_materialized_inputs.jsonl").read_text().splitlines()
+                test.inputs_at_dispatch.append([json.loads(line)["stage_index"] for line in inputs])
 
                 async def done(row):
                     return rollout_collection_module._CompletedRollout(
@@ -3651,6 +3695,10 @@ class TestCachedDeliverableReuse:
         (message,) = call["json"]["response"]["output"]
         assert message["content"][0]["text"] == "Judge-only mode: scoring pre-existing cached deliverables."
         assert sorted(row["stage_index"] for row in persisted) == [0, 1]
+        inputs = [
+            json.loads(line) for line in (tmp_path / "rollouts_materialized_inputs.jsonl").read_text().splitlines()
+        ]
+        assert [(row["stage_index"], row[TASK_INDEX_KEY_NAME]) for row in inputs] == [(0, 0), (1, 1)]
 
     async def test_without_a_cached_deliverable_the_policy_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3660,6 +3708,8 @@ class TestCachedDeliverableReuse:
         assert [row["stage_index"] for row in dispatched] == [0, 1]
         assert [call["json"]["stage_index"] for call in verified] == [1]
         assert sorted(row["stage_index"] for row in persisted) == [0, 1]
+        # Each stage's rows are in the materialized inputs before the stage is dispatched.
+        assert self.inputs_at_dispatch == [[0], [0, 1]]
 
     async def test_agent_observations_are_joined_into_a_trajectory(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
