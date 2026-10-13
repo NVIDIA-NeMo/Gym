@@ -72,7 +72,7 @@ def test_readme_launch_defines_the_judge_server(monkeypatch: MonkeyPatch, judge_
 
     resources = config.terminus_judge_resources_server.resources_servers.terminus_judge
     assert resources.judge_model_server.name == "judge_model"
-    assert resources.judge_responses_create_params.max_output_tokens == 512
+    assert resources.judge_responses_create_params.max_output_tokens == 4096
     judge = config.judge_model.responses_api_models.openai_model
     expected = judge_values or POLICY
     assert (judge.openai_base_url, judge.openai_api_key, judge.openai_model) == (
