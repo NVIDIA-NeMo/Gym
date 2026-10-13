@@ -19,8 +19,16 @@ This benchmark contributes:
 
 Emitted by `competitive_coding_challenges`:
 
+The benchmark sets `ioi_scoring: true`, so every rollout is graded on every
+subtask of its problem with partial credit, as IOI and NeMo Skills score it, and
+the totals are comparable with NeMo Skills' CCC numbers. Both are on the 0–600
+IOI'24 scale:
+
 - `total_score` — sum across problems of max per-subtask score pooled
-  across rollouts. On the 0–600 IOI'24 scale.
+  across rollouts (Skills' `pass@k` total).
+- `pass@1[avg-of-k]/total_score` — per prompt row and subtask, the mean score
+  over that row's rollouts; per subtask, the best row; summed (Skills'
+  `pass@1[avg-of-k]` total).
 - `per_problem_subtask_scores` — per-problem breakdown, each with
   `total.{score,max_score}` plus per-subtask `{score, max_score}`.
 - Plus the standard pass@k/accuracy stats from `compute_pass_majority_metrics`.

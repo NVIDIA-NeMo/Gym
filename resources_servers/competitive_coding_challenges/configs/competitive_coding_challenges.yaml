@@ -12,6 +12,28 @@ competitive_coding_challenges_resources_server:
       shared_dir: ${oc.env:SHARED_TEMP_DIR,/tmp}
       local_compile_dir: ${oc.env:LOCAL_COMPILE_DIR,/tmp/nemo-gym-compile}
       reward_mode: binary
+      # Benchmarks set this to grade every subtask with partial credit, as IOI and NeMo Skills do.
+      ioi_scoring: false
+      # Set to `sandbox` (with a provider config such as
+      # nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml) to compile and run each
+      # submission in a fresh sandbox instead of the NeMo Skills sandbox. num_parallel_requests then
+      # caps concurrent sandboxes, and test_batch_size must not exceed sandbox_config.resources.cpu.
+      sandbox_provider: null
+      sandbox_config:
+        image: ${oc.env:CCC_SANDBOX_IMAGE,null}
+        # Read-only problem data from split_problem_metadata.py, mounted or baked into the image.
+        problem_data_dir: /data/ccc
+        resources:
+          cpu: 8
+          memory_mib: 16384
+        metadata:
+          benchmark: competitive-coding
+        provider_options:
+          # Submissions need no network, and must not fetch answers. OpenSandbox enforces this;
+          # the Docker provider ignores it (set its `network: none` instead).
+          network_policy:
+            defaultAction: deny
+            egress: []
       verified: false
 competitive_coding_challenges_simple_agent:
   responses_api_agents:

@@ -10,11 +10,10 @@ import shutil
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, is_dataclass
 from uuid import uuid4
-
-import httpx
 
 
 def nested_dataclass(*args, **kwargs):
@@ -97,6 +96,8 @@ class LocalSandbox:
         host: str = os.getenv("NEMO_SKILLS_SANDBOX_HOST", "127.0.0.1"),
         port: str = os.getenv("NEMO_SKILLS_SANDBOX_PORT", "6000"),
     ):
+        import httpx
+
         self.host = host
         self.port = port
         self.http_session = httpx.AsyncClient(
@@ -116,6 +117,8 @@ class LocalSandbox:
         session_id=None,
         traceback_verbosity="plain",
     ):
+        import httpx
+
         if session_id is not None:
             raise RuntimeError("Stateful execution is not supported by this sandbox client.")
 
@@ -155,6 +158,8 @@ class CCCEvaluatorConfig(BaseEvaluatorConfig):
     shared_dir: str = "/tmp"
     local_compile_dir: str | None = "/tmp/nemo-gym-compile"
     run_all_tests: bool = False
+    # Grade every subtask and keep partial credit, as NeMo Skills' CCC evaluator does.
+    ioi_scoring: bool = False
 
 
 _precompile_loop_tls = threading.local()
@@ -170,11 +175,16 @@ def _exec_sync(tls: threading.local, sandbox: LocalSandbox, cmd: str, *, languag
     return loop.run_until_complete(sandbox.execute_code(cmd, language=language, timeout=timeout))[0]
 
 
-def _get_thread_test_sandbox() -> LocalSandbox:
+# Anything with LocalSandbox's async execute_code(); sandbox_runner.py supplies a local-process one.
+SandboxFactory = Callable[[], LocalSandbox]
+
+
+def _get_thread_test_sandbox(sandbox_factory: SandboxFactory = LocalSandbox) -> LocalSandbox:
     sandbox = getattr(_test_sandbox_tls, "sandbox", None)
-    if sandbox is None:
-        sandbox = LocalSandbox()
+    if sandbox is None or getattr(_test_sandbox_tls, "factory", None) is not sandbox_factory:
+        sandbox = sandbox_factory()
         _test_sandbox_tls.sandbox = sandbox
+        _test_sandbox_tls.factory = sandbox_factory
     return sandbox
 
 
@@ -394,9 +404,11 @@ def _precompile_problem(
     sandbox: LocalSandbox,
     shared_dir: str,
     local_compile_dir: str | None,
+    *,
+    sandbox_factory: SandboxFactory = LocalSandbox,
 ) -> str:
     if getattr(sandbox, "_owner_tid", None) != threading.get_ident():
-        sandbox = LocalSandbox()
+        sandbox = sandbox_factory()
         wait_for_sandbox(sandbox)
         sandbox._owner_tid = threading.get_ident()
 
@@ -447,6 +459,8 @@ def _compile_solution_once(
     precompiled_dir: str,
     shared_dir: str,
     local_compile_dir: str | None,
+    *,
+    sandbox_factory: SandboxFactory = LocalSandbox,
 ) -> tuple[str, dict]:
     """Compile one generated solution and publish a reusable shared artifact."""
     solution_dir = f"{shared_dir}/ccc_solution_{uuid4().hex}"
@@ -461,7 +475,7 @@ def _compile_solution_once(
             with open(os.path.join(solution_dir, "graders", f"{problem_id}.cpp"), "w", encoding="utf-8") as f:
                 f.write(generated_code)
 
-        sandbox = _get_thread_test_sandbox()
+        sandbox = _get_thread_test_sandbox(sandbox_factory)
         compile_result = _compile_in_sandbox(
             _test_loop_tls,
             sandbox,
@@ -490,7 +504,7 @@ def run_test_case(task_args: dict, worker_id: int) -> dict:
         with open(os.path.join(unique_dir, "correct_output.txt"), "w", encoding="latin1") as f:
             f.write(task_args["test_output"])
 
-        sandbox = _get_thread_test_sandbox()
+        sandbox = _get_thread_test_sandbox(task_args.get("sandbox_factory", LocalSandbox))
         run_timeout = max(30, int(30 * float(task_args.get("time_scale", 1.0))))
         run_start = time.monotonic()
         run_result = _exec_sync(
@@ -555,9 +569,12 @@ def add_includes(code: str, problem_header_include: str | None = None, problem_i
 
 
 class CCCEvaluator(BaseEvaluator):
-    def __init__(self, config: dict, num_parallel_requests: int = 20):
+    def __init__(
+        self, config: dict, num_parallel_requests: int = 20, *, sandbox_factory: SandboxFactory = LocalSandbox
+    ):
         super().__init__(config, num_parallel_requests)
         self.eval_cfg = CCCEvaluatorConfig(_init_nested=True, **config)
+        self.sandbox_factory = sandbox_factory
         self.sandbox = None
         self.metadata = None
         self.metadata_by_competition = None
@@ -575,16 +592,24 @@ class CCCEvaluator(BaseEvaluator):
                 return
 
             def _setup():
-                sbox = LocalSandbox()
+                sbox = self.sandbox_factory()
                 wait_for_sandbox(sbox)
                 sbox._owner_tid = threading.get_ident()
-                if not os.path.exists(self.eval_cfg.test_file):
-                    raise FileNotFoundError(f"Metadata file {self.eval_cfg.test_file} does not exist.")
-                metadata_by_competition_local, problem_index_local = _load_metadata_file(self.eval_cfg.test_file)
                 pool_local = ThreadPoolExecutor(max_workers=self.eval_cfg.test_batch_size)
-                return sbox, metadata_by_competition_local, problem_index_local, pool_local
+                return sbox, pool_local
 
-            self.sandbox, self.metadata_by_competition, self.problem_index, self.pool = await asyncio.to_thread(_setup)
+            await self.load_metadata()
+            self.sandbox, self.pool = await asyncio.to_thread(_setup)
+
+    async def load_metadata(self) -> None:
+        """Load problem metadata only; enough for scoring when execution happens elsewhere."""
+        if self.problem_index is not None:
+            return
+        if not os.path.exists(self.eval_cfg.test_file):
+            raise FileNotFoundError(f"Metadata file {self.eval_cfg.test_file} does not exist.")
+        self.metadata_by_competition, self.problem_index = await asyncio.to_thread(
+            _load_metadata_file, self.eval_cfg.test_file
+        )
         # Keep a flat fast-path for legacy callers when problem ids are globally unique.
         self.metadata = {
             problem_id: next(iter(problem_metadata_by_comp.values()))
@@ -640,6 +665,7 @@ class CCCEvaluator(BaseEvaluator):
             self.sandbox,
             self.eval_cfg.shared_dir,
             self.eval_cfg.local_compile_dir,
+            sandbox_factory=self.sandbox_factory,
         )
         self.precompiled_cache[cache_key] = {"grader": grader_dir}
         return grader_dir
@@ -652,6 +678,7 @@ class CCCEvaluator(BaseEvaluator):
             "test_output": test_data["output"],
             "time_scale": self.eval_cfg.time_scale,
             "shared_dir": self.eval_cfg.shared_dir,
+            "sandbox_factory": self.sandbox_factory,
         }
 
     def _aggregate_subtask_score(self, subtask_meta: dict, outputs: list[dict], failed: bool = False) -> float:
@@ -692,7 +719,8 @@ class CCCEvaluator(BaseEvaluator):
 
         all_test_items = list(problem_metadata["all_tests"].items())
         target_subtask = entry.get("subtask")
-        if target_subtask and target_subtask in problem_metadata["subtasks"]:
+        # Without IOI scoring only the row's own subtask matters, so its tests are the only ones run.
+        if not self.eval_cfg.ioi_scoring and target_subtask and target_subtask in problem_metadata["subtasks"]:
             target_tests = set(problem_metadata["subtasks"][target_subtask]["test_names"])
             all_test_items = [(name, data) for name, data in all_test_items if name in target_tests]
         batch_size = self.eval_cfg.test_batch_size
@@ -733,7 +761,10 @@ class CCCEvaluator(BaseEvaluator):
                     if not self.eval_cfg.run_all_tests and state["aggregation"] == "min" and state["failed"]:
                         continue
                     state["outputs"].append(dict(result))
-                    if state["aggregation"] == "min" and float(result.get("score", 0.0)) < 1.0:
+                    # A min subtask stops at the first test that settles it: any test below full marks
+                    # when only a full solve counts, or a zero under IOI scoring, which keeps partial credit.
+                    score = float(result.get("score", 0.0))
+                    if state["aggregation"] == "min" and (score == 0.0 if self.eval_cfg.ioi_scoring else score < 1.0):
                         state["failed"] = True
 
         test_case_results = {}
@@ -786,6 +817,7 @@ class CCCEvaluator(BaseEvaluator):
             pre_dir,
             self.eval_cfg.shared_dir,
             self.eval_cfg.local_compile_dir,
+            sandbox_factory=self.sandbox_factory,
         )
         try:
             return await self._evaluate_compiled_solution(

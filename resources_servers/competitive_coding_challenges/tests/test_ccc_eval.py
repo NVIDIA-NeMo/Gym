@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import shutil
 import subprocess
 from pathlib import Path
@@ -186,3 +187,56 @@ def test_compile_failure_skips_test_staging_and_sandbox_execution(monkeypatch, t
     assert result["compile_success"] is False
     assert result["compile_stderr"] == "compile failed"
     assert list(shared_dir.glob("ccc_run_*")) == []
+
+
+def _score_from_input(task_args, worker_id):
+    """Stand-in for run_test_case: each toy test's input is the score the submission earns on it."""
+    return {"compile_success": True, "score": float(task_args["test_input"]), "run_time_s": 0.0}
+
+
+def _evaluate_toy(monkeypatch, *, ioi_scoring: bool) -> dict:
+    # Subtask a: one full and one partial test; b: all full; c: a zero, then a test that would pass.
+    problem = {
+        "subtasks": {
+            "a": {"aggregation": "min", "score": 10.0, "score_precision": 2, "test_names": ["a1", "a2"]},
+            "b": {"aggregation": "min", "score": 20.0, "score_precision": 2, "test_names": ["b1", "b2"]},
+            "c": {"aggregation": "min", "score": 30.0, "score_precision": 2, "test_names": ["c1", "c2"]},
+        },
+        "all_tests": {
+            name: {"input": score, "output": ""}
+            for name, score in [("a1", "1"), ("a2", "0.5"), ("b1", "1"), ("b2", "1"), ("c1", "0"), ("c2", "1")]
+        },
+    }
+    monkeypatch.setattr(ccc_eval, "run_test_case", _score_from_input)
+    evaluator = ccc_eval.CCCEvaluator({"test_batch_size": 1, "ioi_scoring": ioi_scoring})
+    evaluator.pool = ccc_eval.ThreadPoolExecutor(max_workers=1)
+    try:
+        result = asyncio.run(
+            evaluator._evaluate_compiled_solution(
+                {"name": "toy", "subtask": "a"}, problem, "compiled", {"process_status": "completed"}, 1.0
+            )
+        )
+    finally:
+        evaluator.pool.shutdown()
+    return {
+        name: (subtask["score"], [output["test_name"] for output in subtask["outputs"]])
+        for name, subtask in result["test_case_results"].items()
+    }
+
+
+def test_default_scoring_grades_only_the_rows_subtask_and_stops_below_full_marks(monkeypatch):
+    assert _evaluate_toy(monkeypatch, ioi_scoring=False) == {
+        "a": (0.0, ["a1", "a2"]),
+        "b": (0.0, []),
+        "c": (0.0, []),
+    }
+
+
+def test_ioi_scoring_grades_every_subtask_with_partial_credit(monkeypatch):
+    # As in NeMo Skills: a partial test keeps the subtask alive (min 0.5 x 10 points); only a zero
+    # stops it, so c2 never runs.
+    assert _evaluate_toy(monkeypatch, ioi_scoring=True) == {
+        "a": (5.0, ["a1", "a2"]),
+        "b": (20.0, ["b1", "b2"]),
+        "c": (0.0, ["c1"]),
+    }
