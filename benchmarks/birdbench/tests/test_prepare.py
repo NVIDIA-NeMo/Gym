@@ -46,9 +46,7 @@ def prepared(tmp_path, monkeypatch):
     sqlite3.connect(str(db_dir / "db1.sqlite")).close()
 
     data_dir = tmp_path / "data"
-    output_fpath = data_dir / "birdbench_benchmark.jsonl"
     monkeypatch.setattr(birdbench_prepare, "DATA_DIR", data_dir)
-    monkeypatch.setattr(birdbench_prepare, "OUTPUT_FPATH", output_fpath)
     monkeypatch.setattr(birdbench_prepare, "ensure_bird_sql", lambda: dev_databases_dir)
     monkeypatch.setattr(birdbench_prepare, "DbHandle", _FakeDbHandle)
     _FakeDbHandle.instances.clear()
@@ -104,10 +102,14 @@ class TestPrepareDialect:
         with pytest.raises(ValueError, match="Unsupported dialect"):
             prepared([_entry()], dialect="postgres")
 
-    def test_spark_output_does_not_overwrite_the_sqlite_file(self, prepared, tmp_path):
+    def test_each_dialect_writes_its_own_file_named_by_dialect(self, prepared, tmp_path):
         prepared([_entry()])
         prepared([_entry()], dialect="spark")
         assert sorted(p.name for p in (tmp_path / "data").iterdir()) == [
-            "birdbench_benchmark.jsonl",
             "birdbench_spark_benchmark.jsonl",
+            "birdbench_sqlite_benchmark.jsonl",
         ]
+
+    def test_output_has_one_row_per_task_never_repeated(self, prepared):
+        rows = prepared([_entry(question="q1"), _entry(question="q2")])
+        assert [r["id"] for r in rows] == [0, 1]
