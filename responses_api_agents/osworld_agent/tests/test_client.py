@@ -1457,6 +1457,19 @@ def test_stage_setup_cache_links_task_artifacts_without_patching_osworld(monkeyp
     assert destination.read_bytes() == b"pdf"
 
 
+def test_sanitize_setup_task_config_avoids_pkill_self_match_without_mutation() -> None:
+    command = "pkill -f 'http.server 8539'; rm -rf /home/user/crosstown && mkdir -p /home/user/crosstown"
+    task_config = {"config": [{"parameters": {"command": command}}]}
+
+    sanitized = osworld_client._sanitize_setup_task_config(task_config)
+
+    assert task_config["config"][0]["parameters"]["command"] == command
+    assert sanitized["config"][0]["parameters"]["command"] == (
+        "pkill -f '[h]ttp.server 8539' 2>/dev/null || true; "
+        "rm -rf /home/user/crosstown && mkdir -p /home/user/crosstown"
+    )
+
+
 def test_stage_setup_cache_does_not_link_evaluator_outputs(monkeypatch, tmp_path: Path) -> None:
     task_id = "task-with-archive-evaluator"
     url = "https://example.test/input.zip"
