@@ -42,7 +42,16 @@ ROOT_EVENTS = [
     {
         "type": "assistant",
         "parent_tool_use_id": None,
-        "message": {"content": [{"type": "tool_use", "id": "call-1", "name": "agent", "input": {"prompt": "x"}}]},
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call-1",
+                    "name": "tool_call",
+                    "input": {"name": "agent", "arguments": {"prompt": "x"}},
+                }
+            ]
+        },
     },
     # Child events stay out of the root trajectory.
     {

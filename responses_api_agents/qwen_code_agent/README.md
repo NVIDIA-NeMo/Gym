@@ -107,7 +107,9 @@ modes require OpenSandbox and sandbox-reachable server addresses (`use_absolute_
 
 ## Outputs
 
-`response.output` holds the root session only: reasoning, messages, tool calls and results. Reasoning that
+`response.output` holds the root session only: reasoning, messages, tool calls and results. Qwen Code defers
+MCP tools and the `agent` tool behind its `tool_search` + `tool_call` bridge; a `tool_call` is recorded as the
+underlying call (for example `mcp__tools__extract_synonym_values`) so verifiers see the real tool name. Reasoning that
 the model server inlines as `<think>` tags is split into reasoning items. `response.usage` is Qwen Code's
 run total, which includes subagent calls. The verify response adds:
 
