@@ -421,6 +421,16 @@ class AsyncSandbox:
         return self._handle
 
     @property
+    def provider(self) -> SandboxProvider:
+        """The provider this sandbox runs on."""
+        return self._provider
+
+    @property
+    def owns_provider(self) -> bool:
+        """Whether ``stop()`` also closes the provider; false for a sandbox on a provider shared with others."""
+        return self._owns_provider
+
+    @property
     def handle(self) -> SandboxHandle | None:
         """The provider handle of a started sandbox, or ``None`` before start and after stop."""
         if self._handle is None or self._stopped:

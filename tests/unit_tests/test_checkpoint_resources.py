@@ -14,6 +14,7 @@ from omegaconf import DictConfig
 from pydantic import JsonValue
 
 from nemo_gym._checkpoint.control import CheckpointRequest
+from nemo_gym._checkpoint.resources import ResourcesParticipant, ResourcesSessionRecord
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -1160,3 +1161,56 @@ async def test_live_sessions_outside_the_commit_scope_are_not_exported(tmp_path:
         await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
 
     assert commit.json()["episode_ids"] == ["r"]
+
+
+class PlainHooks:
+    """A server that implements only the required hooks: parking is optional."""
+
+    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+        return {}
+
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+        pass
+
+    async def retire_session_state(self, session_id: str) -> None:
+        pass
+
+
+async def test_a_server_without_the_park_hook_parks_nothing() -> None:
+    participant = ResourcesParticipant(PlainHooks(), "exported")  # type: ignore[arg-type]
+    episode = EpisodeId(rollout_id="r")
+    participant.seeded("sess", episode)
+    await participant.park_exported([ResourcesSessionRecord(episode_id=episode, session_id="sess", state={})])
+
+
+class RecordingHooks:
+    def __init__(self) -> None:
+        self.parked: list[list[str]] = []
+
+    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+        return {}
+
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+        pass
+
+    async def retire_session_state(self, session_id: str) -> None:
+        pass
+
+    async def park_session_states(self, session_ids: list[str]) -> None:
+        self.parked.append(session_ids)
+
+
+@pytest.mark.parametrize("mode", ["exported", "restart_only"])
+async def test_park_exported_parks_the_exported_sessions_of_an_exported_server_only(mode: str) -> None:
+    hooks = RecordingHooks()
+    participant = ResourcesParticipant(hooks, mode)  # type: ignore[arg-type]
+    episode = EpisodeId(rollout_id="r")
+    participant.seeded("sess", episode)
+    records = [
+        ResourcesSessionRecord(episode_id=episode, session_id="sess", state={}),
+        ResourcesSessionRecord(episode_id=EpisodeId(rollout_id="x"), session_id="unknown", state={}),
+    ]
+
+    await participant.park_exported(records)
+
+    assert hooks.parked == ([["sess"]] if mode == "exported" else [])

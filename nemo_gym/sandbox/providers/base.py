@@ -348,7 +348,11 @@ class SupportsSandboxSnapshot(Protocol):
     """
 
     async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:
-        """Snapshot the sandbox and return the snapshot's id once it is ready to create sandboxes from."""
+        """Start a snapshot of the sandbox and return its id at once; it may not be usable yet."""
+        ...
+
+    async def wait_snapshot_ready(self, snapshot_id: str) -> None:
+        """Return once the snapshot can create sandboxes; raise if it failed or is not ready in time."""
         ...
 
     async def delete_snapshot(self, snapshot_id: str) -> None:

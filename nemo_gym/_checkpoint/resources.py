@@ -251,9 +251,10 @@ class ResourcesParticipant(CheckpointParticipant):
         self._open.set()
 
     async def park_exported(self, records: list[CheckpointRecord]) -> None:
-        if self.mode == "exported":
+        park = getattr(self.hooks, "park_session_states", None)
+        if self.mode == "exported" and park is not None:  # optional: a server whose sessions hold no sandbox
             sessions = [record.session_id for record in records if isinstance(record, ResourcesSessionRecord)]
-            await self.hooks.park_session_states([s for s in sessions if s in self._sessions])
+            await park([s for s in sessions if s in self._sessions])
 
     def readiness(self) -> PrepareReport:
         # A seed in flight is a restart too: its reply always says so, and prepare does not wait for it.

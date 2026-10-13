@@ -1000,3 +1000,36 @@ async def test_live_sessions_outside_the_commit_scope_are_not_exported() -> None
     records = await participant.export([EpisodeId(rollout_id="r")])
 
     assert [record.session_key for record in records] == ["s"]
+
+
+class ParkingHooks(Hooks):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parked: list[list[str]] = []
+
+    async def park_agent_sessions(self, session_keys: list[str]) -> None:
+        self.parked.append(session_keys)
+
+
+async def test_park_exported_parks_only_the_exported_sessions_the_agent_still_holds() -> None:
+    hooks = ParkingHooks()
+    participant = AgentSessionParticipant(hooks)
+    episode = EpisodeId(rollout_id="r")
+    participant.open_session("s", episode)
+    records = [
+        AgentSessionRecord(episode_id=episode, session_key="s", session={}),
+        AgentSessionRecord(episode_id=EpisodeId(rollout_id="gone"), session_key="gone", session={}),
+    ]
+
+    await participant.park_exported(records)
+
+    assert hooks.parked == [["s"]]
+
+
+async def test_hooks_without_the_park_method_park_nothing() -> None:
+    """The hook is optional: parking is for agents whose sessions hold state outside the process."""
+    participant = AgentSessionParticipant(Hooks())
+    participant.open_session("s", EpisodeId(rollout_id="r"))
+    await participant.park_exported(
+        [AgentSessionRecord(episode_id=EpisodeId(rollout_id="r"), session_key="s", session={})]
+    )
