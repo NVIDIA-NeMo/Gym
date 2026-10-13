@@ -50,7 +50,6 @@ class TALESSessionState:
 
 
 class TALESResourcesServer(GymnasiumServer):
-    ray_enabled = False
     config: TALESResourcesServerConfig
     session_id_to_state: Dict[str, TALESSessionState] = Field(default_factory=dict)
 

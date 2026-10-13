@@ -257,6 +257,7 @@ full run:
 | `seed` | *(none)* | Seed for reproducible task sampling, per-task reference assignment, and reference selection. |
 | `reuse_cached_deliverables` | `true` | Judge a task's cached deliverable in later stages instead of re-running the policy. |
 | `retry_inprocess` | `false` | Retry `timeout_exceeded` and `transient` rows in the same process, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`; other retryable rows wait for `--resume`. |
+| `replace_transport_ineligible_tasks` | `false` | In strict, sampled non-final stages, replace a task rejected by every judge's deterministic transport preflight with an unused task from the same distribution bucket. The replacement keeps the same reference assignment. Full/final stages are unchanged. |
 | `transport_assignment_repair` | unset | Reassign tasks between a stage's references before dispatch; see [Transport-aware reference assignment](#transport-aware-reference-assignment). |
 
 ### Transport-aware reference assignment

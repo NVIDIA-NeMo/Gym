@@ -201,7 +201,6 @@ def _is_infrastructure_failure(exc: BaseException) -> bool:
 
 
 class BrowsecompAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: BrowsecompAgentConfig
     _policy_model_openai_client: Optional[NeMoGymAsyncOpenAI] = None
 

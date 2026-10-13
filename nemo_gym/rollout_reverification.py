@@ -627,13 +627,16 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
     if not isinstance(task_input, dict):
         payload = pair.input | {"response": response}
     else:
-        # A materialized task: rebuild the verify body its Resources Server accepts from the task input.
+        # Accept generic flat task input and the historical single-agent task_data container.
         row_keys = {k: v for k, v in pair.input.items() if k not in ("task_id", "task_input")}
-        payload = (
-            row_keys
-            | (task_input.get("task_data") or {})
-            | {"responses_create_params": task_input.get("responses_create_params"), "response": response}
-        )
+        fields = dict(task_input)
+        task_data = fields.pop("task_data", {})
+        if not isinstance(task_data, dict):
+            raise ConfigError("reverify: task_input.task_data must be an object")
+        for key in fields.keys() & task_data.keys():
+            if fields[key] != task_data[key]:
+                raise ConfigError(f"reverify: conflicting task field {key!r} inside and outside task_data")
+        payload = row_keys | task_data | fields | {"response": response}
     # File-backed verifiers need the artifact path produced by the rollout, and
     # adaptive comparison needs the exact reference subset used for that row.
     # Preserve only verifier inputs, not rewards or failure bookkeeping.

@@ -294,7 +294,6 @@ class ClaudeCodeAgentVerifyResponse(BaseVerifyResponse):
 
 
 class ClaudeCodeAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: ClaudeCodeAgentConfig
     sem: Semaphore = None
     _static_mcp_config: Optional[dict[str, Any]] = PrivateAttr(default=None)

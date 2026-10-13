@@ -49,13 +49,59 @@ from nemo_gym.token_id_capture.terminal import resolve_terminal
 # --- helpers ------------------------------------------------------------------
 
 
-def _assistant_item(text: str) -> dict:
-    return {
+def _assistant_item(text: str, item_id: str | None = None) -> dict:
+    item = {
         "type": "message",
         "role": "assistant",
         "status": "completed",
         "content": [{"type": "output_text", "text": text, "annotations": []}],
     }
+    if item_id:
+        item["id"] = item_id
+    return item
+
+
+def _tool_call_item(call_id: str) -> dict:
+    return {
+        "type": "function_call",
+        "id": call_id,
+        "call_id": call_id,
+        "name": "exec_command",
+        "arguments": '{"cmd": "ls"}',
+        "status": "completed",
+    }
+
+
+def _tool_call_entry(
+    call_id: str, prompt: list[int], gen: list[int], tool_call_id: str, *, chat: bool = False
+) -> TokenEntry:
+    """An entry whose recorded output is one tool call: a Responses ``function_call`` item, or with
+    ``chat`` the chat form, where the call is nested in the assistant message's ``tool_calls``."""
+    if chat:
+        item = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {"name": "exec_command", "arguments": '{"cmd": "ls"}'},
+                }
+            ],
+        }
+    else:
+        item = _tool_call_item(tool_call_id)
+    entry = TokenEntry(
+        rollout_id="r",
+        model_call_id=call_id,
+        prompt_token_ids=prompt,
+        generation_token_ids=gen,
+        generation_log_probs=[-0.1] * len(gen),
+        output_items=[item],
+        token_item_index=0,
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    return entry
 
 
 def _entry(
@@ -285,6 +331,169 @@ def _aux_entries() -> list[TokenEntry]:
         # A title-generator call: unrelated prompt, finished first.
         _entry("aux", [90, 91], [92], text="A Title", response_id="resp_aux", created_at=1.0),
     ]
+
+
+def test_item_id_witness_attributes_a_transcript_ending_in_a_tool_result():
+    """A session killed while a tool ran ends its transcript on that tool's output. The last
+    model-authored item is the tool call before that output, and its served call id names the
+    entry. The response id cannot, because the agent server assigned it. The content readings
+    cannot either, because they skip a transcript that ends in a tool result."""
+    a = _entry("a", [1, 2], [3], text="plan")
+    a.output_items[0]["id"] = "msg_a"
+    b = _tool_call_entry("b", [1, 2, 3, 4], [5], "chatcmpl-tool-b")
+    response = {
+        "id": "resp_minted_by_the_agent_server",
+        "output": [
+            _assistant_item("plan", item_id="msg_a"),
+            _tool_call_item("chatcmpl-tool-b"),
+            {"type": "function_call_output", "call_id": "chatcmpl-tool-b", "output": "ok"},
+        ],
+    }
+    verdict = resolve_terminal([a, b], response)
+    assert (verdict.model_call_id, verdict.method) == ("b", "item_id")
+    assert "response_id_no_match" in verdict.reason
+
+
+def test_item_id_witness_uses_a_served_message_id_and_content_corroborates():
+    a = _entry("a", [1, 2], [3], text="plan")
+    b = _entry("b", [1, 2, 3, 4], [5], text="done")
+    b.output_items[0]["id"] = "msg_b"
+    response = {
+        "output": [
+            _assistant_item("plan"),
+            {"type": "function_call_output", "call_id": "x", "output": "ok"},
+            _assistant_item("done", item_id="msg_b"),
+        ]
+    }
+    verdict = resolve_terminal([a, b], response)
+    assert (verdict.model_call_id, verdict.method) == ("b", "item_id")
+    assert "corroborated_by=content_output" in verdict.reason
+
+
+def test_a_message_the_harness_composed_does_not_attribute_by_item_id():
+    """A closing message written by the agent server carries no served id, so the witness
+    abstains instead of naming an earlier call."""
+    a = _entry("a", [1, 2], [3], text="plan", response_id="resp_a")
+    response = {
+        "output": [_assistant_item("plan"), _assistant_item("Submitting ./kernel.py", item_id="msg-submit-1234")]
+    }
+    verdict = resolve_terminal([a], response)
+    assert not verdict.attributed
+    assert "item_id_no_match" in verdict.reason
+
+
+def test_item_id_disagreeing_with_the_response_id_fails_closed():
+    a = _entry("a", [1, 2], [3], text="plan", response_id="resp_a")
+    b = _entry("b", [1, 2, 3, 4], [5], text="done")
+    b.output_items[0]["id"] = "msg_b"
+    response = {"id": "resp_a", "output": [_assistant_item("plan"), _assistant_item("done", item_id="msg_b")]}
+    verdict = resolve_terminal([a, b], response)
+    assert not verdict.attributed
+    assert "witness_disagreement" in verdict.reason
+
+
+def test_item_id_witness_reads_tool_calls_nested_in_a_chat_message():
+    a = _entry("a", [1, 2], [3], text="plan")
+    b = _tool_call_entry("b", [1, 2, 3, 4], [5], "chatcmpl-tool-b", chat=True)
+    response = {
+        "output": [
+            _assistant_item("plan"),
+            _tool_call_item("chatcmpl-tool-b"),
+            {"type": "function_call_output", "call_id": "chatcmpl-tool-b", "output": "ok"},
+        ]
+    }
+    verdict = resolve_terminal([a, b], response)
+    assert (verdict.model_call_id, verdict.method) == ("b", "item_id")
+
+
+def test_item_id_witness_ignores_the_namespace_prefix_on_a_flattened_tool_name():
+    """A namespaced Responses tool reaches the chat backend as ``<namespace>__<name>`` and is
+    recorded that way; codex's rollout file keeps the bare name, so a transcript ending on such a
+    call must still match the entry by served id and content."""
+    a = _entry("a", [1, 2], [3], text="plan")
+    b = TokenEntry(
+        rollout_id="r",
+        model_call_id="b",
+        prompt_token_ids=[1, 2, 3, 4],
+        generation_token_ids=[5],
+        generation_log_probs=[-0.1],
+        output_items=[
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "chatcmpl-tool-ns",
+                        "type": "function",
+                        "function": {"name": "multi_agent_v1__send_input", "arguments": '{"id": "agent-1"}'},
+                    }
+                ],
+            }
+        ],
+        token_item_index=0,
+    )
+    stamp_lineage(b, None, parent_resolution=ParentResolutionStatus.ROOT)
+    response = {
+        "output": [
+            _assistant_item("plan"),
+            {
+                "type": "function_call",
+                "id": "chatcmpl-tool-ns",
+                "call_id": "chatcmpl-tool-ns",
+                "name": "send_input",
+                "arguments": '{"id": "agent-1"}',
+                "status": "completed",
+            },
+            {"type": "function_call_output", "call_id": "chatcmpl-tool-ns", "output": "sent"},
+        ]
+    }
+    verdict = resolve_terminal([a, b], response)
+    assert (verdict.model_call_id, verdict.method) == ("b", "item_id")
+
+
+def test_item_id_shared_by_two_different_calls_abstains():
+    a = _tool_call_entry("a", [1, 2], [3], "chatcmpl-tool-x")
+    b = _tool_call_entry("b", [1, 2, 3, 4], [5], "chatcmpl-tool-x")
+    response = {
+        "output": [
+            _tool_call_item("chatcmpl-tool-x"),
+            {"type": "function_call_output", "call_id": "chatcmpl-tool-x", "output": "ok"},
+        ]
+    }
+    verdict = resolve_terminal([a, b], response)
+    assert not verdict.attributed
+    assert "item_id_ambiguous" in verdict.reason
+
+
+def test_last_item_without_a_served_id_abstains():
+    a = _entry("a", [1, 2], [3], text="plan")
+    response = {
+        "output": [
+            _assistant_item("plan"),
+            {"type": "function_call_output", "call_id": "x", "output": "ok"},
+            _assistant_item("done"),
+        ]
+    }
+    verdict = resolve_terminal([a], response)
+    assert "last_item_has_no_id" in verdict.reason
+
+
+def test_item_id_with_different_content_does_not_attribute():
+    """A reused call id whose recorded arguments differ from the transcript's last tool call
+    names nothing: attributing it would train a chain that lacks the real terminal turn."""
+    a = _tool_call_entry("a", [1, 2], [3], "call_0")
+    last = {**_tool_call_item("call_0"), "arguments": '{"cmd": "rm -rf build"}'}
+    response = {
+        "output": [
+            _tool_call_item("call_0"),
+            {"type": "function_call_output", "call_id": "call_0", "output": "ok"},
+            last,
+            {"type": "function_call_output", "call_id": "call_0", "output": "done"},
+        ]
+    }
+    verdict = resolve_terminal([a], response)
+    assert not verdict.attributed
+    assert "item_id_content_mismatch" in verdict.reason
 
 
 def test_unattributed_aux_call_masks_and_picks_the_wrong_root():

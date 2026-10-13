@@ -1,0 +1,28 @@
+name: biomnibench_da
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: BiomniBench data-analysis tasks adapted to Harbor and evaluated with its rubric-based LLM judge.
+modality: text
+licensing: CC-BY-4.0
+authors:
+- Sanyam Kapoor
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: config.yaml
+agent_server: harbor_agent_general
+datasets:
+- name: biomnibench_da
+  type: benchmark
+  jsonl_fpath: benchmarks/biomnibench_da/data/gym.jsonl
+  prepare_script: benchmarks/biomnibench_da/harbor/adapter.py
+  num_repeats: 4
+model_server: policy_model
+canonical_split: benchmark
+lifecycle: experimental

@@ -262,7 +262,6 @@ def extract_mcq_letter(text: str) -> Optional[str]:
 
 
 class Ruler2ResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: Ruler2ResourcesServerConfig
 
     async def verify(self, body: Ruler2VerifyRequest) -> Ruler2VerifyResponse:

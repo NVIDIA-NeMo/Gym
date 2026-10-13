@@ -1054,6 +1054,27 @@ class TestOpenHandsHarnessProcessor:
         script_path = config.persistent_dir / f"agent_script_{config.agent_run_id}.sh"
         return script_path.read_text()
 
+    def test_get_run_command_writes_sampling_params_when_provided(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir, inference_params={"temperature": 0.7, "top_p": 0.95})
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenHandsHarnessProcessor(config=config).get_run_command()
+            script = self._read_agent_script(config)
+            assert "temperature = 0.7" in script
+            assert "top_p = 0.95" in script
+
+    def test_get_run_command_without_sampling_params(self) -> None:
+        # The request may omit temperature/top_p; the config must not require them.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir, inference_params={})
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            result = OpenHandsHarnessProcessor(config=config).get_run_command()
+            assert isinstance(result, ExecuteContainerCommandArgs)
+            script = self._read_agent_script(config)
+            assert "temperature =" not in script
+            assert "top_p =" not in script
+            assert 'base_url = "http://test-host:12345/v1"' in script
+
     def test_get_run_command_with_debug(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir, debug=True)
@@ -2402,6 +2423,118 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             result = wrapper._build_apptainer_command(params, cmd_args)
             assert "/swebench_setup" in result
 
+    @staticmethod
+    def _symlinked_setup_tree(tmp_path: Path, name: str) -> tuple[Path, Path]:
+        """A setup tree stored under ``shared/`` and reached through a symlink under ``linked/``."""
+        real = tmp_path / "shared" / name
+        real.mkdir(parents=True)
+        link = tmp_path / "linked" / name
+        link.parent.mkdir(exist_ok=True)
+        link.symlink_to(real)
+        return link, real
+
+    def test_real_path_bind_mounts(self, tmp_path) -> None:
+        tmp_path = tmp_path.resolve()
+        link, real = self._symlinked_setup_tree(tmp_path, "swe_swebench_setup")
+        assert swe_app._real_path_bind_mounts(link) == [f"--mount type=bind,src={real},dst={real}"]
+        assert swe_app._real_path_bind_mounts(str(link), ro=True) == [f"--mount type=bind,src={real},dst={real},ro"]
+        # A symlinked parent directory counts too.
+        assert swe_app._real_path_bind_mounts(link / "SWE-bench") == [
+            f"--mount type=bind,src={real}/SWE-bench,dst={real}/SWE-bench"
+        ]
+        assert swe_app._real_path_bind_mounts(real) == []
+
+    def test_symlinked_openhands_setup_is_also_bound_at_its_real_path(self, monkeypatch, tmp_path) -> None:
+        tmp_path = tmp_path.resolve()
+        link, real = self._symlinked_setup_tree(tmp_path, "swe_openhands_setup")
+        for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+            (real / "OpenHands" / subdir).mkdir(parents=True)
+        (real / "miniforge3").mkdir()
+        wrapper = _create_wrapper(monkeypatch)
+        params = _make_instance_config(str(tmp_path), openhands_setup_dir=link)
+        cmd_args = ExecuteContainerCommandArgs(
+            command="echo hello", expected_file_pattern="/tmp/*.json", mode="agent", timeout=300
+        )
+
+        result = wrapper._build_apptainer_command(params, cmd_args)
+
+        oh = real / "OpenHands"
+        expected = [
+            f"--mount type=bind,src={oh},dst={oh},ro",
+            f"--mount type=bind,src={oh}/.eval_sessions,dst={oh}/.eval_sessions",
+            f"--mount type=bind,src={oh}/logs,dst={oh}/logs",
+            f"--mount type=bind,src={oh}/evaluation/oh,dst={oh}/evaluation/oh",
+            f"--mount type=bind,src={real}/miniforge3,dst={real}/miniforge3,ro",
+        ]
+        for mount in expected:
+            assert mount in result
+        # The read-only parent is bound before its writable subdirectories.
+        assert result.index(expected[0]) < result.index(expected[1])
+        # The existing binds at the configured (link) path are unchanged.
+        assert f"--mount type=bind,src={link}/OpenHands,dst={link}/OpenHands,ro" in result
+
+    def test_no_real_path_binds_without_symlinks(self, monkeypatch, tmp_path) -> None:
+        tmp_path = tmp_path.resolve()
+        wrapper = _create_wrapper(monkeypatch)
+        params = _make_instance_config(str(tmp_path))
+        oh_dir = Path(params.openhands_setup_dir) / "OpenHands"
+        for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+            (oh_dir / subdir).mkdir(parents=True, exist_ok=True)
+        (Path(params.openhands_setup_dir) / "miniforge3").mkdir(parents=True, exist_ok=True)
+        agent = wrapper._build_apptainer_command(
+            params,
+            ExecuteContainerCommandArgs(
+                command="echo hello", expected_file_pattern="/tmp/*.json", mode="agent", timeout=300
+            ),
+        )
+        # Only the existing binds: /openhands_setup/... plus the same-path bind.
+        assert agent.count(f"src={oh_dir},") == 2
+        assert agent.count(f"src={params.openhands_setup_dir}/miniforge3,") == 2
+        evaluation = wrapper._build_apptainer_command(
+            params,
+            ExecuteContainerCommandArgs(
+                command="run_eval", expected_file_pattern="/tmp/*.json", mode="eval", timeout=300
+            ),
+        )
+        assert evaluation.count(f"src={params.swebench_setup_dir},") == 2
+
+    @pytest.mark.parametrize(
+        "dataset_name,setup_field",
+        [
+            ("princeton-nlp/SWE-bench_Verified", "swebench_setup_dir"),
+            ("SWE-bench_Multilingual", "swebench_multilingual_setup_dir"),
+            ("R2E-Gym/R2E-Gym-Subset", "r2e_gym_setup_dir"),
+        ],
+    )
+    def test_symlinked_eval_setup_is_also_bound_at_its_real_path(
+        self, monkeypatch, tmp_path, dataset_name, setup_field
+    ) -> None:
+        tmp_path = tmp_path.resolve()
+        link, real = self._symlinked_setup_tree(tmp_path, setup_field)
+        wrapper = _create_wrapper(monkeypatch)
+        problem_info = {
+            "problem_statement": "Fix",
+            "instance_id": "django__django-12345",
+            "base_commit": "abc",
+            "dataset_name": dataset_name,
+            "split": "test",
+            "instance_dict": "{}",
+            "container_formatter": ["docker://custom/{instance_id}"],
+        }
+        params = _make_instance_config(str(tmp_path), problem_info=problem_info, **{setup_field: link})
+        oh_dir = Path(params.openhands_setup_dir) / "OpenHands"
+        for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+            (oh_dir / subdir).mkdir(parents=True, exist_ok=True)
+        (Path(params.openhands_setup_dir) / "miniforge3").mkdir(parents=True, exist_ok=True)
+        cmd_args = ExecuteContainerCommandArgs(
+            command="run_eval", expected_file_pattern="/tmp/*.json", mode="eval", timeout=300
+        )
+
+        result = wrapper._build_apptainer_command(params, cmd_args)
+
+        assert f"--mount type=bind,src={link},dst={link}" in result
+        assert f"--mount type=bind,src={real},dst={real}" in result
+
     def test_memory_limit(self, monkeypatch) -> None:
         # No cgroups in the enroot sandbox, so the memory limit is enforced by
         # the gym-side RSS watchdog (_memory_watchdog), not a static ulimit
@@ -3416,3 +3549,98 @@ def test_merge_reparents_a_new_live_child_to_the_stable_recorded_root() -> None:
 
     merged = merge_replay_subagent_trajectories(manifest, captured)
     assert merged[0]["parent_session_id"] == "recorded_root"
+
+
+class TestEvaluatorLaunchFailure:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["launch_failure", "post_start_failure", "failed_tests"])
+    async def test_evaluator_failure_mask(self, tmp_path: Path, monkeypatch, outcome: str) -> None:
+        params = _make_instance_config(str(tmp_path), debug=False)
+        params.problem_info["dataset_name"] = "nv-internal-1"
+        params.problem_info["instance_dict"] = json.dumps({"fail_to_pass": ["test_regression"]})
+        params.metrics_fpath.write_text("{}")
+        params.generation_apptainer_spinup_timestamp_fpath.write_text(str(time.time()))
+        if outcome != "launch_failure":
+            params.final_eval_apptainer_spinup_timestamp_fpath.write_text(str(time.time()))
+
+        agent_output = tmp_path / "agent-output.json"
+        agent_output.write_text(
+            json.dumps(
+                {
+                    "instance_id": params.instance_id,
+                    "test_result": {"git_patch": "diff --git a/a.py b/a.py\n"},
+                    "metadata": {"llm_config": {"model": "test-model"}},
+                    "metrics": {},
+                }
+            )
+        )
+        report_path = tmp_path / "eval-output.json"
+        report_path.write_text(json.dumps({"tests": [{"name": "test_regression", "status": "FAILED"}]}))
+        eval_result = (
+            str(report_path)
+            if outcome == "failed_tests"
+            else RuntimeError("Command failed before producing an evaluation report")
+        )
+        agent = RunOpenHandsAgent(config=params)
+        active_command = MagicMock(watchdog_stats={})
+        with (
+            patch.object(agent, "_start_container_command", new_callable=AsyncMock, return_value=active_command),
+            patch.object(
+                agent,
+                "_finish_container_command",
+                new_callable=AsyncMock,
+                side_effect=[str(agent_output), eval_result],
+            ),
+            patch.object(agent, "_openhands_dir_copy_from_host", return_value=str(agent_output)),
+        ):
+            completed_report = await agent.process_single_datapoint()
+
+        metrics = SWEBenchMetrics.model_validate_json(params.metrics_fpath.read_text())
+        expected_mask = outcome == "launch_failure"
+        assert metrics.eval_launch_failed is expected_mask
+        assert not metrics.eval_timed_out
+        assert metrics.patch_exists is True
+        assert completed_report == (str(report_path) if outcome == "failed_tests" else None)
+
+        # Preserve a token-bearing completion through response assembly.
+        completions_dir = params.trajectories_root / "llm_completions" / params.instance_id
+        completions_dir.mkdir(parents=True)
+        (completions_dir / "001.json").write_text(
+            json.dumps(
+                {
+                    "messages": [{"role": "user", "content": "Fix the bug"}],
+                    "provider_specific_fields": {
+                        "prompt_token_ids": [1, 2],
+                        "generation_token_ids": [3, 4],
+                        "generation_log_probs": [-0.1, -0.2],
+                    },
+                    "response": {
+                        "id": "completion-1",
+                        "choices": [{"message": {"role": "assistant", "content": "Fixed"}}],
+                    },
+                    "kwargs": {"tools": []},
+                }
+            )
+        )
+        wrapper = _create_wrapper(monkeypatch)
+        wrapper._sem = asyncio.Semaphore(1)
+        wrapper._vllm_converter = swe_app.VLLMConverter(return_token_id_information=True)
+        processor = NVInternalDatasetProcessor(config=params)
+        with patch.object(swe_app.runner_ray_remote, "remote", new_callable=AsyncMock, return_value=completed_report):
+            response = await wrapper._inner_responses(params, processor)
+        with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=response):
+            result = await wrapper.run(swe_app.BaseRunRequest(responses_create_params=params.body))
+
+        assert result.reward == 0.0
+        assert result.mask_sample is expected_mask
+        assert result.instance_config.mask_sample is expected_mask
+        assert result.response.output[-1].generation_token_ids == [3, 4]
+        if outcome == "failed_tests":
+            # A completed negative verifier result is a valid policy outcome.
+            report = json.loads(report_path.read_text())[params.instance_id]
+            assert report["resolved"] is False
+            assert report["metadata"]["test_results"]["tests"][0]["status"] == "FAILED"
+
+    def test_legacy_metrics_do_not_imply_launch_failure(self) -> None:
+        metrics = SWEBenchMetrics.model_validate({"patch_exists": True, "eval_timed_out": False})
+        assert metrics.eval_launch_failed is False

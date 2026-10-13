@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import ast
 import asyncio
 import atexit
 import json
@@ -20,9 +21,13 @@ import resource
 import socket
 import sys
 import time
+import warnings
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
+from functools import partial
+from importlib import import_module
+from importlib.util import find_spec
 from ipaddress import ip_network
 from os import environ, getenv
 from pathlib import Path
@@ -55,6 +60,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
@@ -62,6 +68,7 @@ from nemo_gym.config_types import (
     TOKEN_CAPTURE_PATH_SEGMENT,
     BaseRunServerInstanceConfig,
     BaseServerConfig,
+    HeadServerUnreachableError,
 )
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
@@ -88,6 +95,7 @@ from nemo_gym.telemetry.connection_pool import (
     set_server_name,
 )
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.telemetry.startup import ServerStartupTimeline
 
 
 logger = logging.getLogger(__name__)
@@ -268,17 +276,33 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
 
     global_aiohttp_client_request_debug: bool = False
 
+    # Bounds match the Linux kernel limits; values outside them make setsockopt fail with EINVAL.
     global_aiohttp_tcp_keepalive_idle_seconds: int = Field(
         default=60,
-        description=("TCP_KEEPIDLE: seconds a socket must be idle before the kernel starts sending keepalive probes."),
+        ge=1,
+        le=32767,
+        description=(
+            "TCP_KEEPIDLE: seconds a socket must be idle before the kernel starts sending keepalive probes. "
+            "Applies to outgoing aiohttp connections and to connections accepted by Gym servers."
+        ),
     )
     global_aiohttp_tcp_keepalive_interval_seconds: int = Field(
         default=10,
-        description=("TCP_KEEPINTVL: seconds between successive keepalive probes."),
+        ge=1,
+        le=32767,
+        description=(
+            "TCP_KEEPINTVL: seconds between successive keepalive probes. "
+            "Applies to outgoing aiohttp connections and to connections accepted by Gym servers."
+        ),
     )
     global_aiohttp_tcp_keepalive_probes: int = Field(
         default=3,
-        description=("TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection."),
+        ge=1,
+        le=127,
+        description=(
+            "TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection. "
+            "Applies to outgoing aiohttp connections and to connections accepted by Gym servers."
+        ),
     )
 
 
@@ -300,6 +324,18 @@ def get_global_aiohttp_client(
     return set_global_aiohttp_client(cfg)
 
 
+def _set_tcp_keepalive(sock: socket.socket, idle_seconds: int, interval_seconds: int, probes: int) -> None:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    for opt, opt_value in (
+        # macOS has no TCP_KEEPIDLE; CPython exposes its equivalent as TCP_KEEPALIVE.
+        (getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None)), idle_seconds),
+        (getattr(socket, "TCP_KEEPINTVL", None), interval_seconds),
+        (getattr(socket, "TCP_KEEPCNT", None), probes),
+    ):
+        if opt is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, opt, opt_value)
+
+
 def _make_keepalive_socket_factory(
     idle_seconds: int,
     interval_seconds: int,
@@ -308,18 +344,34 @@ def _make_keepalive_socket_factory(
     def factory(addr_info) -> socket.socket:
         family, type_, proto, _canonname, _sockaddr = addr_info
         sock = socket.socket(family=family, type=type_, proto=proto)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        for opt_name, opt_value in (
-            ("TCP_KEEPIDLE", idle_seconds),
-            ("TCP_KEEPINTVL", interval_seconds),
-            ("TCP_KEEPCNT", probes),
-        ):
-            opt = getattr(socket, opt_name, None)
-            if opt is not None:
-                sock.setsockopt(socket.IPPROTO_TCP, opt, opt_value)
+        _set_tcp_keepalive(sock, idle_seconds, interval_seconds, probes)
         return sock
 
     return factory
+
+
+class KeepaliveHttpToolsProtocol(HttpToolsProtocol):
+    """Uvicorn's httptools protocol with TCP keepalive on every accepted connection.
+
+    A model server answers only after generation finishes, so a client connection can carry no bytes for many
+    minutes. Stateful network hops on some paths evict flows that stay idle that long, which silently drops the
+    eventual reply and leaves the client waiting on a half-open connection. Keepalive probes keep the flow alive and
+    let the kernel reap peers that are really gone. Uses the same ``global_aiohttp_tcp_keepalive_*`` settings as the
+    outgoing client connections.
+
+    Handed to uvicorn as ``partial(KeepaliveHttpToolsProtocol, keepalive=(idle, interval, probes))``: multi-worker
+    uvicorn pickles its config into worker processes, so this class must stay importable at module level.
+    """
+
+    def __init__(self, *args: Any, keepalive: Tuple[int, int, int], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._keepalive = keepalive
+
+    def connection_made(self, transport: asyncio.Transport) -> None:
+        sock = transport.get_extra_info("socket")
+        if sock is not None and sock.family in (socket.AF_INET, socket.AF_INET6):
+            _set_tcp_keepalive(sock, *self._keepalive)
+        super().connection_made(transport)
 
 
 def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:  # pragma: no cover
@@ -402,6 +454,7 @@ async def request(
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
+    _max_num_tries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -414,7 +467,14 @@ async def request(
     ``ServerClient`` server name, ``remote_agent_service`` for the remote agent's external
     service, or ``None`` for the fallback label ``external``. It is retained across retries
     and redirects and is not forwarded to aiohttp.
+
+    ``_max_num_tries`` caps this call's total attempts on every exception path. It replaces the
+    default generic-error limit (``MAX_NUM_TRIES`` attempts for external calls, unbounded for
+    internal ones). A ``_max_connection_retries`` limit still applies as well.
     """
+    if _max_num_tries is not None and _max_num_tries < 1:
+        raise ValueError("_max_num_tries must be at least 1")
+
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
         kwargs["data"] = orjson.dumps(kwargs.pop("json"))
@@ -428,6 +488,7 @@ async def request(
             method,
             url,
             _internal=_internal,
+            _max_num_tries=_max_num_tries,
             _max_connection_retries=_max_connection_retries,
             _server_name=_server_name,
             **kwargs,
@@ -436,6 +497,7 @@ async def request(
         method,
         url,
         _internal=_internal,
+        _max_num_tries=_max_num_tries,
         _max_connection_retries=_max_connection_retries,
         _server_name=_server_name,
         **kwargs,
@@ -448,6 +510,7 @@ async def _traced_request(
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
+    _max_num_tries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -486,6 +549,7 @@ async def _traced_request(
             method,
             url,
             _internal=_internal,
+            _max_num_tries=_max_num_tries,
             _max_connection_retries=_max_connection_retries,
             _server_name=_server_name,
             **kwargs,
@@ -538,6 +602,7 @@ async def _request_with_retries(
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
+    _max_num_tries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
@@ -545,15 +610,20 @@ async def _request_with_retries(
     token = set_server_name(_server_name or "external") if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY else None
     try:
         num_tries = 1
+        explicit_tries = 0
         retries = 0
         retry_start = time.monotonic()
         while True:
+            if _max_num_tries is not None:
+                explicit_tries += 1
             try:
                 return await client.request(method=method, url=url, **kwargs)
             except ServerDisconnectedError:
                 global _NUM_SERVER_DISCONNECTED_ERROR
                 _NUM_SERVER_DISCONNECTED_ERROR += 1
                 retries += 1
+                if _max_num_tries is not None and explicit_tries >= _max_num_tries:
+                    raise
                 if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                     print(
                         f"[request_retry url={url} error=ServerDisconnectedError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
@@ -570,6 +640,8 @@ async def _request_with_retries(
                 global _NUM_CLIENT_OS_ERROR
                 _NUM_CLIENT_OS_ERROR += 1
                 retries += 1
+                if _max_num_tries is not None and explicit_tries >= _max_num_tries:
+                    raise
                 if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                     print(
                         f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
@@ -585,18 +657,26 @@ async def _request_with_retries(
                 if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                     print_exc()
 
-                if _max_connection_retries is not None and num_tries >= _max_connection_retries:
+                # num_tries only advances on the default path, so count explicit attempts when capped.
+                attempts = explicit_tries if _max_num_tries is not None else num_tries
+                if _max_connection_retries is not None and attempts >= _max_connection_retries:
                     raise
 
-                # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
-                if not _internal:
-                    print(
-                        f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
+                if _max_num_tries is not None:
+                    if explicit_tries >= _max_num_tries:
+                        raise
+                else:
+                    # Internal calls skip this print and the MAX_NUM_TRIES limit, since the head server shuts
+                    # everything down if a Gym server fails. They still advance `num_tries`, so the
+                    # `_max_connection_retries` check above stops them. Connection errors count in `retries`.
+                    if not _internal:
+                        print(
+                            f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
 Sleeping 0.5s and retrying...
 """
-                    )
-                    if num_tries >= MAX_NUM_TRIES:
-                        raise e
+                        )
+                        if num_tries >= MAX_NUM_TRIES:
+                            raise e
 
                     num_tries += 1
 
@@ -611,7 +691,9 @@ async def raise_for_status(response: ClientResponse, content: Optional[bytes] = 
         if content is None:
             content = await response.content.read()
         if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
-            print(f"""Request info: {response.request_info}
+            # Not the full `request_info`: its headers carry `Authorization: Bearer <api key>`.
+            request_info = response.request_info
+            print(f"""Request info: {request_info.method} {_redacted_url(str(request_info.real_url))}
 Response content: {content}""")
 
         try:
@@ -653,6 +735,28 @@ class ServerClient(BaseModel):
     # Resolved base URLs, cached by server name.
     _server_base_urls: dict[str, str] = PrivateAttr(default_factory=dict)
 
+    def assistant_message_header(self, model_server_name: str) -> bytes | None:
+        """Read the optional header property of harnesses using this model server.
+
+        The property lives on the harness package so model workers need not import
+        an agent's app or install its runtime dependencies.
+        """
+        headers = set()
+        for instance in self.global_config_dict.values():
+            if not isinstance(instance, (dict, DictConfig)):
+                continue
+            for harness, config in instance.get("responses_api_agents", {}).items():
+                model = config.get("model_server") or {}
+                if model.get("name") != model_server_name or model.get("type") != "responses_api_models":
+                    continue
+                package = import_module(f"responses_api_agents.{harness}")
+                header = getattr(package, "_assistant_message_header", None)
+                if header is not None:
+                    headers.add(header.lower())
+        if len(headers) > 1:
+            raise ValueError(f"Harnesses using model server {model_server_name!r} declare different assistant headers")
+        return next(iter(headers), None)
+
     @classmethod
     def load_head_server_config(cls) -> BaseServerConfig:
         global_config_dict = get_global_config_dict()
@@ -683,8 +787,16 @@ class ServerClient(BaseModel):
                 f"{head_server_url}/global_config_dict_yaml",
             )
         except ConnectionError as e:
-            raise ValueError(
-                f"Could not connect to the head server at {head_server_url}. Perhaps you are not running a server or your head server is on a different port?"
+            # requests' ConnectionError also covers proxy and name-resolution failures; keep the real reason
+            # (with its traceback) for --verbose, since the ConfigError below is printed without its cause.
+            logger.debug(
+                "Could not fetch the global config from the head server at %s", head_server_url, exc_info=True
+            )
+            # A ConfigError so the CLI prints just this message (no traceback); the cause stays chained.
+            raise HeadServerUnreachableError(
+                f"Could not connect to the head server at {head_server_url}. Is the head server running? "
+                "Start it with: `gym env start`. If it is already running on a different host or port, pass "
+                "`++head_server.host=<host>` / `++head_server.port=<port>` so this command can find it."
             ) from e
 
         global_config_dict_yaml = response.content.decode()
@@ -907,9 +1019,19 @@ class UvicornProxyHeadersConfig(BaseModel):
 _NEMO_GYM_STARTED_RAY_CLUSTER: bool = False
 
 
+def ray_is_installed() -> bool:
+    """Whether Ray can be imported in this process, checked without importing it."""
+    return find_spec("ray") is not None
+
+
 def _get_ray():
     """Import Ray only for processes configured to use it."""
-    import ray
+    try:
+        import ray
+    except ImportError as e:
+        raise ImportError(
+            "This process needs Ray, but Ray isn't installed in its environment. Install the `nemo-gym[ray]` extra."
+        ) from e
 
     return ray
 
@@ -1081,26 +1203,76 @@ class ClientDisconnectCancellationMiddleware:
             task_group.start_soon(listen_for_disconnect)
 
 
-_WARNED_IMPLICIT_RAY_SERVERS: set[type] = set()
-
-
-def _server_uses_ray(server_class: type) -> bool:
-    ray_enabled = server_class.ray_enabled
-    if ray_enabled is not None:
-        return ray_enabled
-    if server_class not in _WARNED_IMPLICIT_RAY_SERVERS:
-        logger.warning(
-            f"{server_class.__module__}.{server_class.__name__} does not declare ray_enabled; "
-            "Ray remains enabled for backward compatibility. Set ray_enabled explicitly because "
-            "a future release will default it to false."
+def _connect_server_to_ray(server_class: type, global_config_dict: DictConfig) -> None:
+    """Join the run's Ray cluster if this server declares that it uses Ray."""
+    if not server_class.ray_enabled:
+        return
+    if _has_injected_global_config_env() and not global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME):
+        # Gym only launches servers without a cluster address when it decided no server needs Ray. Fail instead
+        # of letting initialize_ray start a private cluster in this process and in each of its workers.
+        raise RuntimeError(
+            f"{server_class.__module__}.{server_class.__name__} uses Ray, but this run has no Ray cluster. "
+            f"Declare `ray_enabled = True` on {server_class.__name__} itself so `gym` starts Ray for it, and "
+            "install the `nemo-gym[ray]` extra where `gym` runs."
         )
-        _WARNED_IMPLICIT_RAY_SERVERS.add(server_class)
-    return True
+    initialize_ray()
+
+
+def _declared_ray_enabled(class_node: ast.ClassDef) -> bool | None:
+    """The literal `ray_enabled` assigned in a class body, or None when there is none."""
+    for item in class_node.body:
+        if not isinstance(item, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "ray_enabled" for target in item.targets):
+            continue
+        if isinstance(item.value, ast.Constant) and isinstance(item.value.value, bool):
+            return item.value.value
+    return None
+
+
+def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
+    """The `ray_enabled` declaration of the server an entrypoint starts, read from source.
+
+    The supervisor must decide whether to start Ray before any server exists, and each server runs in its own
+    venv, so this reads the source instead of importing it. It finds the classes the entrypoint calls
+    `run_webserver()` on and checks their literal `ray_enabled` declarations.
+
+    Returns True when any of them declares True, False when all of them declare False, and None when that can't
+    be settled from the source alone, such as an inherited declaration, a class imported from another module, or
+    an unreadable entrypoint.
+    """
+    try:
+        source = entrypoint_fpath.read_text()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(source)
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return None
+
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    invoked_class_names = {
+        node.func.value.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "run_webserver"
+        and isinstance(node.func.value, ast.Name)
+    }
+    if not invoked_class_names:
+        return None
+    declarations = [_declared_ray_enabled(classes[name]) if name in classes else None for name in invoked_class_names]
+    if True in declarations:
+        return True
+    if all(declaration is False for declaration in declarations):
+        return False
+    return None
 
 
 class SimpleServer(BaseServer):
     server_client: ServerClient
-    ray_enabled: ClassVar[bool | None] = None
+    # Servers that use Ray must declare `ray_enabled = True` on the class their entrypoint runs. Gym reads it
+    # before launch to decide whether to start Ray, and connects only those servers to it.
+    ray_enabled: ClassVar[bool] = False
 
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
@@ -1110,7 +1282,7 @@ class SimpleServer(BaseServer):
         """Initialise this process's nemo-lens telemetry. Idempotent, once per process.
 
         Every Gym server is its own process with its own providers — there is no parent
-        handle to inherit, only the `NEMO_GYM_OTEL_*` environment the orchestrator
+        handle to inherit, only the `NEMO_GYM_OTEL_*` environment the supervisor
         exported before spawning it. A failure here is logged and swallowed: telemetry
         must never stop a server from serving.
         """
@@ -1282,19 +1454,27 @@ repr(e): {repr(e)}"""
 
     @classmethod
     def run_webserver(cls) -> Optional[FastAPI]:  # pragma: no cover
+        startup = ServerStartupTimeline(
+            getenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, cls.__name__),
+            _telemetry_server_type(cls),
+            worker=is_nemo_gym_fastapi_worker(),
+        )
         global_config_dict = get_global_config_dict()
 
         is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
 
         server_config = cls.load_config_from_global_config()
-        if _server_uses_ray(cls):
-            initialize_ray()
+        startup.mark("load_config")
+        _connect_server_to_ray(cls, global_config_dict)
+        if cls.ray_enabled:
+            startup.mark("init_ray")
 
         server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
             global_config_dict=global_config_dict,
         )
         server = cls(config=server_config, server_client=server_client)
+        startup.mark("init_server")
 
         if global_config_dict[DRY_RUN_KEY_NAME]:
             return
@@ -1305,14 +1485,17 @@ repr(e): {repr(e)}"""
         # Once per process — uvicorn's multi-worker path re-enters run_webserver in each
         # worker via the module import, and init_telemetry is idempotent.
         server.setup_telemetry()
+        startup.mark("init_telemetry")
 
         app = server.setup_webserver()
+        startup.mark("setup_webserver")
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
             from nemo_gym.mcp_auto_exposure import maybe_auto_expose
 
             maybe_auto_expose(server, app)
+            startup.mark("expose_tools_over_mcp")
         server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()
@@ -1337,9 +1520,11 @@ repr(e): {repr(e)}"""
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
         if profiling_config.profiling_enabled:
             server.setup_profiling(app, profiling_config)
+        startup.mark("configure_app")
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
         uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
+        keepalive_cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
         if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok and is_main_fastapi_proc:
             print(
                 "Disabling a uvicorn access logging so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
@@ -1354,10 +1539,17 @@ repr(e): {repr(e)}"""
             timeout_worker_healthcheck=global_config_dict.get(UVICORN_TIMEOUT_WORKER_HEALTHCHECK, 30),
             # Ensure server keepalive > client keepalive
             timeout_keep_alive=30,
-            # Parse HTTP with httptools instead of pure-Python h11.
-            # Explicit selection prevents Uvicorn from silently falling back to h11.
-            # A missing or incompatible httptools wheel now fails during startup.
-            http="httptools",
+            # Parse HTTP with httptools instead of pure-Python h11, and enable TCP keepalive on every accepted
+            # connection. Explicit selection prevents Uvicorn from silently falling back to h11; a missing or
+            # incompatible httptools wheel fails at import.
+            http=partial(
+                KeepaliveHttpToolsProtocol,
+                keepalive=(
+                    keepalive_cfg.global_aiohttp_tcp_keepalive_idle_seconds,
+                    keepalive_cfg.global_aiohttp_tcp_keepalive_interval_seconds,
+                    keepalive_cfg.global_aiohttp_tcp_keepalive_probes,
+                ),
+            ),
             access_log=uvicorn_logging_cfg.uvicorn_logging_show_200_ok,
             # Internal-only by default. Enabling this requires an explicit trusted-proxy allowlist,
             # so forwarded headers are never honored from an arbitrary peer.
@@ -1382,7 +1574,15 @@ repr(e): {repr(e)}"""
         else:
             uvicorn_kwargs["app"] = app
 
+        # The main process of a multi-worker server hands the app to Uvicorn workers and never serves it, so it reports now.
+        # Every process that serves the app reports when the app's lifespan startup finishes.
+        if is_main_fastapi_proc and uvicorn_kwargs.get("workers"):
+            startup.report()
+        else:
+            startup.report_when_serving(app)
+
         if is_main_fastapi_proc:
+            startup.announce_serve()
             try:
                 uvicorn.run(**uvicorn_kwargs)
             finally:

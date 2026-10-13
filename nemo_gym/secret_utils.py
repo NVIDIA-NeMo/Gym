@@ -20,9 +20,26 @@ from omegaconf import DictConfig, ListConfig, open_dict
 
 MASKED_VALUE = "****"
 
+# Matched case-insensitively anywhere in a key name, so `DB_PASSWORD`, `client_secret`, `apiKey` and an
+# `Authorization` header entry all count. `authorization`, not `auth`, so keys like `author` stay visible.
+_SECRET_KEY_SUBSTRINGS = (
+    "token",
+    "key",
+    "header",
+    "password",
+    "passwd",
+    "secret",
+    "credential",
+    "bearer",
+    "cookie",
+    "authorization",
+)
 
-def looks_like_secret_key(key: str) -> bool:
-    return "token" in key or "key" in key or "header" in key
+
+def looks_like_secret_key(key: object) -> bool:
+    # OmegaConf allows non-string keys (ints, bools, enums), so match on their string form.
+    lowered_key = str(key).lower()
+    return any(substring in lowered_key for substring in _SECRET_KEY_SUBSTRINGS)
 
 
 def hide_secrets_in_overrides(tokens: List[str]) -> List[str]:
@@ -40,7 +57,7 @@ def hide_secrets_in_overrides(tokens: List[str]) -> List[str]:
 
 
 def recursively_hide_secrets(dict_config: DictConfig) -> None:
-    """Mask every token/key leaf in place with '****' so a config can be printed or exported.
+    """Mask every secret-shaped leaf in place with '****' so a config can be printed or exported.
 
     Used by the config parser and the exporters.
     """

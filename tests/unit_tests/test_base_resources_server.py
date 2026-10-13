@@ -21,12 +21,15 @@ from nemo_gym.base_resources_server import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseVerifyResponse,
+    ResourcesSeedSessionRequest,
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_LOST
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.testing.session_conformance import check_resources_session_contract
 
 
 def _resources_server() -> SimpleResourcesServer:
@@ -96,6 +99,18 @@ class TestBaseResourcesServer:
         assert typed_seed.json()["resources_session_id"] == "resources-session"
         assert (legacy_seed.status_code, legacy_seed.json()) == (200, {})
         assert (typed_close.status_code, typed_close.json()) == (200, {"resources_session_id": "resources-session"})
+
+    def test_stateless_server_follows_the_session_contract(self) -> None:
+        check_resources_session_contract(
+            _resources_server().setup_webserver(),
+            ResourcesSeedSessionRequest(
+                resources_session_id="resources-session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="tasks", task_id="task"),
+                task_data={},
+            ),
+            keeps_state=False,
+        )
 
 
 class TestVerifyResponseFailureReporting:

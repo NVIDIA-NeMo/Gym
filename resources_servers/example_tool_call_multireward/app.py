@@ -78,7 +78,6 @@ class ToolCallMultiRewardVerifyResponse(BaseMultiRewardVerifyResponse):
 
 
 class ToolCallMultiRewardResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ToolCallMultiRewardResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

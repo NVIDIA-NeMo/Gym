@@ -105,7 +105,6 @@ class HaystackAgentVerifyResponse(BaseVerifyResponse):
 
 
 class HaystackAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: HaystackAgentConfig
 
     # Deserialized once at startup and shared (safely) across all requests.
