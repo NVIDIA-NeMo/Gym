@@ -15,6 +15,8 @@ from .registry import HARNESSES
 def validate_row(row: dict) -> None:
     """Validate Gym-owned check metadata before inserting it into Markdown."""
     for scenario in row["scenarios"]:
+        if scenario["verdict"] not in ("fulfilled", "not_fulfilled"):
+            raise ValueError("invalid scenario verdict in documentation results")
         for identifier in [scenario["scenario"], *(c["id"] for c in scenario["checks"])]:
             if not re.fullmatch(r"[a-z][a-z0-9_.-]*", identifier):
                 raise ValueError("invalid check or scenario identifier in documentation results")

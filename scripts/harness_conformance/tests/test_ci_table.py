@@ -78,7 +78,9 @@ def test_ci_renders_same_table_without_retaining_json(ci_evidence):
     assert "Generation report" not in text and "Unit-test gates" not in text
 
 
-@pytest.mark.parametrize("problem", ["sha", "missing", "partial", "scenarios", "identifier"])
+@pytest.mark.parametrize(
+    "problem", ["sha", "missing", "partial", "scenarios", "identifier", "missing_verdict", "invalid_verdict"]
+)
 def test_ci_invalid_evidence_is_reported_as_unavailable(ci_evidence, problem):
     artifacts, probes, summary, output = ci_evidence
     if problem == "sha":
@@ -89,6 +91,10 @@ def test_ci_invalid_evidence_is_reported_as_unavailable(ci_evidence, problem):
         summary["full_suite"] = False
     elif problem == "scenarios":
         summary["harnesses"]["pi"]["scenarios"].pop()
+    elif problem == "missing_verdict":
+        del summary["harnesses"]["pi"]["scenarios"][0]["verdict"]
+    elif problem == "invalid_verdict":
+        summary["harnesses"]["pi"]["scenarios"][0]["verdict"] = "invalid"
     else:
         summary["harnesses"]["pi"]["scenarios"][0]["checks"][0]["id"] = "<script>"
     (probes / "conformance_summary.json").write_text(json.dumps(summary))
