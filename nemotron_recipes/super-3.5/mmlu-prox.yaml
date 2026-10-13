@@ -18,7 +18,7 @@
 # pt, ko), one sample per question: 117,590 questions. Scored by accuracy on the answer
 # letter; there is no judge model.
 #
-#   nemotron_recipes/marlin/run.sh mmlu-prox
+#   nemotron_recipes/super-3.5/run.sh mmlu-prox
 #
 # Set in .env: nothing beyond the shared keys (see .env.example).
 #

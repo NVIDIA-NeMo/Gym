@@ -18,7 +18,7 @@
 # tools; a user-simulator model plays the customer. A task scores 1 if the final account
 # state and the agent's statements match the task's expected outcome.
 #
-#   nemotron_recipes/marlin/run.sh tau3
+#   nemotron_recipes/super-3.5/run.sh tau3
 #
 # Set in .env: SIM_KEY
 #

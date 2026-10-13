@@ -18,7 +18,7 @@
 # answer CORRECT or INCORRECT against the official one, as a JSON verdict; the score is the
 # mean reward over the judged answers.
 #
-#   nemotron_recipes/marlin/run.sh aa-lcr
+#   nemotron_recipes/super-3.5/run.sh aa-lcr
 #
 # Set in .env: JUDGE_API_KEY
 #

@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# SWE-bench Pro (public set): 731 harder, larger tasks x 3 repeats. The OpenCode agent fixes each
-# one inside a container holding the project; the project's tests decide. Needs Docker (task images
-# come from Docker Hub; log in to avoid pull limits) and ~4 CPU / 30 GB per concurrent task.
+# SWE-bench Multilingual: 300 real GitHub issues in other programming languages x 3 repeats.
+# The OpenCode agent fixes each one inside a container holding the project; the project's tests
+# decide. Needs Docker (task images come from Docker Hub; log in to avoid pull limits) and
+# ~2 CPU / 16 GB per concurrent task.
 #
-#   nemotron_recipes/marlin/run.sh swebench-pro
+#   nemotron_recipes/super-3.5/run.sh swebench-multilingual
 #
 # Set in .env: OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY, OPENCODE_DIR
 #
@@ -28,7 +29,7 @@
 
 gym_commit: 1e668906d2e69a9e8ee9aaafc60050a4025d9688
 benchmark_config:
-  - benchmarks/swebench/pro/opencode.yaml
+  - benchmarks/swebench/multilingual/opencode.yaml
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 policy_model:
@@ -57,18 +58,16 @@ num_samples_in_parallel: 16
 # OpenCode comes from your own copy (OPENCODE_DIR in .env; reproducibility.md has the download),
 # as in the published run, not downloaded inside each task container: many task images have no
 # curl. Both folders are mounted read-only into every sandbox.
-swebench_pro_opencode_resources_server:
+swebench_multilingual_opencode_resources_server:
   resources_servers:
-    swebench_pro:
+    swebench:
       sandbox_config:
         provider_options:
           volumes:
             - {name: opencode, host: {path: "${oc.env:OPENCODE_DIR}"}, mount_path: /opt/opencode, read_only: true}
             - {name: recipes, host: {path: "${oc.env:RECIPES_DIR}"}, mount_path: /opt/recipes, read_only: true}
-swebench_pro_opencode_sandboxed_agent:
+swebench_multilingual_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       remote_opencode_install_script_path: /opt/recipes/install-opencode.sh
       remote_opencode_binary_path: /opt/opencode/glibc/opencode
-      # Alpine-based task images need OpenCode's musl build.
-      remote_opencode_musl_binary_path: /opt/opencode/musl/opencode

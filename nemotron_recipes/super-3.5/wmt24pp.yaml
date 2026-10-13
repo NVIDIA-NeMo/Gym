@@ -17,7 +17,7 @@
 # one sample each. Scored by xCOMET-XXL (reported: COMET averaged over the 9 languages), plus
 # spBLEU and chrF.
 #
-#   nemotron_recipes/marlin/run.sh wmt24pp
+#   nemotron_recipes/super-3.5/run.sh wmt24pp
 #
 # Set in .env: HF_TOKEN
 #

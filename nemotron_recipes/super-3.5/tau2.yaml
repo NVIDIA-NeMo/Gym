@@ -16,7 +16,7 @@
 # Tau2 (retail, airline, telecom): 278 customer-service tasks x 8 repeats. A user-simulator model
 # plays the customer; a task scores 1 if the final state matches the expected outcome.
 #
-#   nemotron_recipes/marlin/run.sh tau2
+#   nemotron_recipes/super-3.5/run.sh tau2
 #
 # Set in .env: SIM_KEY
 #

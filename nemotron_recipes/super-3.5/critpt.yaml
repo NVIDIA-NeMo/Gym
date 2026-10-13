@@ -18,7 +18,7 @@
 # Artificial Analysis (AA) API grades the templates in batches of all 70 problems against
 # private test cases, and every rollout in a batch gets that batch's accuracy as its reward.
 #
-#   nemotron_recipes/marlin/run.sh critpt
+#   nemotron_recipes/super-3.5/run.sh critpt
 #
 # Set in .env: ARTIFICIAL_ANALYSIS_API_KEY
 #
@@ -42,7 +42,7 @@
 # LIMIT does not work for a smoke here: the 5 repeats of each problem come one after another
 # and LIMIT keeps the first rows, so a limited run cannot fill a batch and fails the same way.
 # For a smoke, copy this file to critpt-smoke.yaml, add `fire_after: 1` next to
-# verify_timeout_seconds below and run `LIMIT=1 nemotron_recipes/marlin/run.sh
+# verify_timeout_seconds below and run `LIMIT=1 nemotron_recipes/super-3.5/run.sh
 # critpt-smoke`. That is one AA call with the other 69 problems sent empty: it shows the
 # setup works, but it is not a score.
 

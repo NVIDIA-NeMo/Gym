@@ -18,7 +18,7 @@
 # (correct minus incorrect), accuracy (correct) and hallucination rate (incorrect among all
 # answers that are not correct).
 #
-#   nemotron_recipes/marlin/run.sh omniscience
+#   nemotron_recipes/super-3.5/run.sh omniscience
 #
 # Set in .env: JUDGE_API_KEY
 #

@@ -18,7 +18,7 @@
 # depth N of a breadth-first search. Reward: F1 between the returned and the expected node
 # set; there is no judge model.
 #
-#   nemotron_recipes/marlin/run.sh graphwalks
+#   nemotron_recipes/super-3.5/run.sh graphwalks
 #
 # Set in .env: nothing beyond the shared keys (see .env.example).
 #

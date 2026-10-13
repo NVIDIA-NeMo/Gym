@@ -20,11 +20,11 @@
 # Needs an active Gym venv, ./env.yaml (copy env.yaml.example) and .env loaded into your
 # shell (copy .env.example). Run from the Gym repo root.
 #
-#   nemotron_recipes/marlin/run.sh gpqa                          # full benchmark
-#   LIMIT=3 nemotron_recipes/marlin/run.sh gpqa                  # quick smoke
-#   nemotron_recipes/marlin/run.sh hle-vision                    # any <recipe>.yaml here
-#   OUT=<dir> PARALLEL=<n> nemotron_recipes/marlin/run.sh gpqa   # output dir, concurrency
-#   RESUME=1 nemotron_recipes/marlin/run.sh gpqa                 # continue an interrupted run
+#   nemotron_recipes/super-3.5/run.sh gpqa                          # full benchmark
+#   LIMIT=3 nemotron_recipes/super-3.5/run.sh gpqa                  # quick smoke
+#   nemotron_recipes/super-3.5/run.sh hle-vision                    # any <recipe>.yaml here
+#   OUT=<dir> PARALLEL=<n> nemotron_recipes/super-3.5/run.sh gpqa   # output dir, concurrency
+#   RESUME=1 nemotron_recipes/super-3.5/run.sh gpqa                 # continue an interrupted run
 #
 # Results land in ./results/<recipe>. Run without arguments to list the recipes.
 #
@@ -35,7 +35,7 @@
 
 set -euo pipefail
 
-RECIPES=nemotron_recipes/marlin
+RECIPES=nemotron_recipes/super-3.5
 [ -d "$RECIPES" ] || { echo "run this from the Gym repo root" >&2; exit 1; }
 # Absolute path, for recipes that mount files from here into their sandboxes (SWE-bench).
 export RECIPES_DIR="$PWD/$RECIPES"

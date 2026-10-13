@@ -18,7 +18,7 @@
 # steps, then OSWorld's own checker scores the result from 0 to 1 (partial credit kept).
 # Reported: raw_reward_rate, 100 x the mean score.
 #
-#   nemotron_recipes/marlin/run.sh osworld
+#   nemotron_recipes/super-3.5/run.sh osworld
 #
 # Set in .env: nothing beyond the shared keys (see .env.example).
 #
@@ -59,7 +59,7 @@ osworld_nano_omni_agent:
       datasets:
       - name: osworld
         type: benchmark
-        jsonl_fpath: nemotron_recipes/marlin/osworld_tasks.jsonl
+        jsonl_fpath: nemotron_recipes/super-3.5/osworld_tasks.jsonl
         prepare_script: benchmarks/osworld/prepare.py
         prompt_config: null
         num_repeats: 3

@@ -20,7 +20,7 @@
 #
 # Needs SciCode's ~1 GB test_data.h5, pointed at by TEST_DATA (reproducibility.md, "SciCode"):
 #
-#   TEST_DATA=/path/to/test_data.h5 nemotron_recipes/marlin/run.sh scicode
+#   TEST_DATA=/path/to/test_data.h5 nemotron_recipes/super-3.5/run.sh scicode
 #
 # Set in .env: TEST_DATA
 

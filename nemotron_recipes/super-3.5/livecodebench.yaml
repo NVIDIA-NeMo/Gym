@@ -13,17 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# GPQA Diamond (no tools): 198 questions x 8 repeats, scored by accuracy.
+# LiveCodeBench v6 (no tools, cascade prompt): 454 problems from 2024-08-01 to 2025-06-01
+# x 3 repeats. Gym runs the model's code against each problem's test cases locally; a
+# rollout scores 1 only if every test passes.
 #
-#   nemotron_recipes/marlin/run.sh gpqa
+#   nemotron_recipes/super-3.5/run.sh livecodebench
 #
-# Set in .env: HF_TOKEN
-#
-# Needs HF_TOKEN (gated dataset; accept the terms on the Hub first).
+# Set in .env: nothing beyond the shared keys (see .env.example).
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
 # Gym benchmark config this recipe builds on.
-benchmark_config: benchmarks/gpqa/config.yaml
+benchmark_config: benchmarks/livecodebench/v6_2408_2505/cascade.yaml
 
-# Benchmark-specific settings go here, on top of common.yaml. GPQA needs none.
+# Test cases run 8 at a time by default, each with a 10 s limit. The published run allowed
+# 256 at once on a large machine; raise it only if you have the cores, or tests slowed down
+# by contention time out and score 0.
+# livecodebench_v6_cascade_code_gen_resources_server:
+#   resources_servers:
+#     code_gen:
+#       num_processes: 256

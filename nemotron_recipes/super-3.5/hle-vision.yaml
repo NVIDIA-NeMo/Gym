@@ -17,7 +17,7 @@
 # each, graded by a gpt-5.6-luna judge. Needs a policy endpoint that accepts image inputs, HF_TOKEN
 # (gated dataset) and the judge endpoint in env.yaml, as for hle.yaml.
 #
-#   nemotron_recipes/marlin/run.sh hle-vision
+#   nemotron_recipes/super-3.5/run.sh hle-vision
 #
 # Set in .env: HF_TOKEN, JUDGE_API_KEY
 #

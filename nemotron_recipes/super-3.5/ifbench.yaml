@@ -17,7 +17,7 @@
 # constraints (57 instruction types). The reward is the fraction of a prompt's instructions
 # the response follows, checked strictly by AllenAI's IFBench rules; there is no judge model.
 #
-#   nemotron_recipes/marlin/run.sh ifbench
+#   nemotron_recipes/super-3.5/run.sh ifbench
 #
 # Set in .env: nothing beyond the shared keys (see .env.example).
 #

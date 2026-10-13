@@ -17,7 +17,7 @@
 # the web through Exa, reads the pages it finds and answers; a judge model (GLM-5.1) compares
 # the answer with the reference. Reported: mean/reward, the fraction judged correct.
 #
-#   nemotron_recipes/marlin/run.sh browsecomp
+#   nemotron_recipes/super-3.5/run.sh browsecomp
 #
 # Set in .env: EXA_API_KEY, JUDGE_API_KEY
 #

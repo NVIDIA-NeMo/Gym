@@ -17,7 +17,7 @@
 # The model works as Gym's Stirrup agent, up to 250 turns per task, in a sandbox where it can run
 # code, read and write files and search the web; its result is a set of files, the deliverable.
 #
-#   nemotron_recipes/marlin/run.sh gdpval
+#   nemotron_recipes/super-3.5/run.sh gdpval
 #
 # Set in .env: TAVILY_API_KEY, JUDGE_API_KEY
 #
