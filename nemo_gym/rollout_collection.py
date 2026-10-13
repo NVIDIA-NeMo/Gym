@@ -112,6 +112,7 @@ from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
     raise_for_status,
+    request,
 )
 from nemo_gym.server_utils import (
     setup_server_client as setup_server_client_utils,
@@ -1365,20 +1366,19 @@ def _sum_vllm_queue(metrics_text: str) -> Tuple[float, float]:
 async def _sample_server_queues(report: "RunTimingReport", base_urls: List[str], interval_s: float) -> None:
     """Poll every vLLM server's /metrics and record requests waiting and running, summed over servers."""
     metrics_urls = [re.sub(r"/v1/?$", "", u.rstrip("/")) + "/metrics" for u in base_urls]
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
-        while True:
-            waiting = running = 0.0
-            reached = 0
-            for url in metrics_urls:
-                try:
-                    async with session.get(url) as resp:
-                        w, r = _sum_vllm_queue(await resp.text())
-                    waiting, running, reached = waiting + w, running + r, reached + 1
-                except Exception:
-                    continue
-            if reached:
-                report.record_queue(waiting, running)
-            await asyncio.sleep(interval_s)
+    while True:
+        waiting = running = 0.0
+        reached = 0
+        for url in metrics_urls:
+            try:
+                resp = await request("GET", url, _max_num_tries=1, timeout=aiohttp.ClientTimeout(total=5))
+                w, r = _sum_vllm_queue(await resp.text())
+                waiting, running, reached = waiting + w, running + r, reached + 1
+            except Exception:
+                continue
+        if reached:
+            report.record_queue(waiting, running)
+        await asyncio.sleep(interval_s)
 
 
 def _print_on_sigterm(render: Callable[[], str]) -> Any:
