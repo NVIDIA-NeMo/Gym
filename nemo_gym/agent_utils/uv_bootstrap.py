@@ -9,7 +9,8 @@ runtime inside the sandbox with ``uv`` therefore asks the sandbox what it is and
 runs there. The static musl build of ``uv`` runs on glibc and musl alike, so it is the one
 downloaded; the host's own binary is reused only when it is known to run in the sandbox.
 
-Shared by the harnesses that install a Python runtime in the sandbox (Hermes today). Harnesses on
+``uv_for_sandbox`` is the entry point; everything else here is implementation detail. Shared by the
+harnesses that install a Python runtime in the sandbox (Hermes today). Harnesses on
 Node, such as Codex and Pi, do not acquire a ``uv`` dependency through this module.
 """
 
@@ -36,7 +37,9 @@ _DOWNLOAD_LOCKS: dict[Path, asyncio.Lock] = {}
 DEFAULT_UV_CACHE_DIR = "~/.cache/nemo_gym/uv"
 UV_RELEASE_URL = "https://github.com/astral-sh/uv/releases/download/{version}/uv-{target}.tar.gz"
 # One shell line: kernel, machine, C library. musl images ship the loader under /lib/ld-musl-*.so.1.
-PLATFORM_PROBE = "uname -s && uname -m && if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then echo musl; else echo gnu; fi"
+_PLATFORM_PROBE = (
+    "uname -s && uname -m && if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then echo musl; else echo gnu; fi"
+)
 _MACHINES = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}
 
 
@@ -45,7 +48,7 @@ class _Sandbox(Protocol):
 
 
 @dataclass(frozen=True)
-class SandboxPlatform:
+class _SandboxPlatform:
     """What ``uname -s``, ``uname -m`` and the C library probe reported inside the sandbox."""
 
     system: str
@@ -57,18 +60,20 @@ class SandboxPlatform:
         return _MACHINES.get(self.machine)
 
 
-async def probe_sandbox_platform(sandbox: _Sandbox, workdir: str | None, *, timeout_s: float = 30) -> SandboxPlatform:
+async def _probe_sandbox_platform(
+    sandbox: _Sandbox, workdir: str | None, *, timeout_s: float = 30
+) -> _SandboxPlatform:
     """Ask the sandbox for its kernel, machine and C library."""
-    result = await sandbox.exec(PLATFORM_PROBE, cwd=workdir, timeout_s=timeout_s)
+    result = await sandbox.exec(_PLATFORM_PROBE, cwd=workdir, timeout_s=timeout_s)
     lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
     if getattr(result, "return_code", 1) != 0 or len(lines) < 3:
         raise RuntimeError(
             f"Could not determine the sandbox platform: {result.stderr or result.stdout or 'no output'}"
         )
-    return SandboxPlatform(system=lines[0], machine=lines[1], libc=lines[2])
+    return _SandboxPlatform(system=lines[0], machine=lines[1], libc=lines[2])
 
 
-def uv_release_target(sandbox_platform: SandboxPlatform) -> str:
+def _uv_release_target(sandbox_platform: _SandboxPlatform) -> str:
     """The uv release target to download for a sandbox: the static musl build for its architecture."""
     if sandbox_platform.system != "Linux":
         raise RuntimeError(f"uv bootstrap supports Linux sandboxes only, not {sandbox_platform.system!r}")
@@ -77,7 +82,7 @@ def uv_release_target(sandbox_platform: SandboxPlatform) -> str:
     return f"{sandbox_platform.arch}-unknown-linux-musl"
 
 
-def host_uv_runs_in(sandbox_platform: SandboxPlatform) -> bool:
+def _host_uv_runs_in(sandbox_platform: _SandboxPlatform) -> bool:
     """Whether the host's own ``uv`` runs in the sandbox: a Linux host, the same architecture, and a glibc
     sandbox (the host binary is a gnu build; the musl download covers musl sandboxes)."""
     return (
@@ -88,7 +93,7 @@ def host_uv_runs_in(sandbox_platform: SandboxPlatform) -> bool:
     )
 
 
-def host_uv_version(uv_path: str) -> str:
+def _host_uv_version(uv_path: str) -> str:
     """``uv --version`` -> ``0.12.3``."""
     output = subprocess.run([uv_path, "--version"], check=True, capture_output=True, text=True).stdout
     parts = output.split()
@@ -97,7 +102,7 @@ def host_uv_version(uv_path: str) -> str:
     return parts[1]
 
 
-def download_uv(version: str, target: str, destination: Path) -> None:
+def _download_uv(version: str, target: str, destination: Path) -> None:
     """Fetch the uv release for ``target`` into ``destination`` (atomic, idempotent)."""
     url = UV_RELEASE_URL.format(version=version, target=target)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -128,21 +133,21 @@ async def uv_for_sandbox(sandbox: _Sandbox, workdir: str | None, cache_dir: str 
     if host_uv is None:
         raise RuntimeError("Installing a sandbox runtime requires uv on the agent host")
     try:
-        sandbox_platform = await probe_sandbox_platform(sandbox, workdir)
+        sandbox_platform = await _probe_sandbox_platform(sandbox, workdir)
     except RuntimeError as exc:
         # A sandbox that cannot answer the probe gets the host's binary, as before the probe existed.
         LOG.warning("%s; uploading the host's uv", exc)
         return Path(host_uv)
-    target = uv_release_target(sandbox_platform)
-    if host_uv_runs_in(sandbox_platform):
+    target = _uv_release_target(sandbox_platform)
+    if _host_uv_runs_in(sandbox_platform):
         return Path(host_uv)
-    version = await asyncio.to_thread(host_uv_version, host_uv)
+    version = await asyncio.to_thread(_host_uv_version, host_uv)
     cached = Path(cache_dir).expanduser() / version / target / "uv"
     if cached.is_file():
         return cached
     # Many rollouts start at once on a cold cache: the first caller downloads, the rest wait and
-    # find the file. Atomic replacement in download_uv covers other processes filling the same path.
+    # find the file. Atomic replacement in _download_uv covers other processes filling the same path.
     async with _DOWNLOAD_LOCKS.setdefault(cached, asyncio.Lock()):
         if not cached.is_file():
-            await asyncio.to_thread(download_uv, version, target, cached)
+            await asyncio.to_thread(_download_uv, version, target, cached)
     return cached

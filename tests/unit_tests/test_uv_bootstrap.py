@@ -14,14 +14,14 @@ import pytest
 
 from nemo_gym.agent_utils import uv_bootstrap
 from nemo_gym.agent_utils.uv_bootstrap import (
-    PLATFORM_PROBE,
-    SandboxPlatform,
-    download_uv,
-    host_uv_runs_in,
-    host_uv_version,
-    probe_sandbox_platform,
+    _PLATFORM_PROBE,
+    _download_uv,
+    _host_uv_runs_in,
+    _host_uv_version,
+    _probe_sandbox_platform,
+    _SandboxPlatform,
+    _uv_release_target,
     uv_for_sandbox,
-    uv_release_target,
 )
 
 
@@ -35,46 +35,46 @@ def _host(monkeypatch, *, system="Linux", machine="aarch64", uv="/usr/bin/uv", v
     monkeypatch.setattr(uv_bootstrap.platform, "system", lambda: system)
     monkeypatch.setattr(uv_bootstrap.platform, "machine", lambda: machine)
     monkeypatch.setattr(uv_bootstrap.shutil, "which", lambda name: uv)
-    monkeypatch.setattr(uv_bootstrap, "host_uv_version", lambda path: version)
+    monkeypatch.setattr(uv_bootstrap, "_host_uv_version", lambda path: version)
 
 
 async def test_probe_reports_kernel_machine_and_libc():
     sandbox = _sandbox("Linux", "aarch64", "musl")
-    assert await probe_sandbox_platform(sandbox, "/app") == SandboxPlatform("Linux", "aarch64", "musl")
-    sandbox.exec.assert_awaited_once_with(PLATFORM_PROBE, cwd="/app", timeout_s=30)
+    assert await _probe_sandbox_platform(sandbox, "/app") == _SandboxPlatform("Linux", "aarch64", "musl")
+    sandbox.exec.assert_awaited_once_with(_PLATFORM_PROBE, cwd="/app", timeout_s=30)
     with pytest.raises(RuntimeError, match="Could not determine the sandbox platform"):
-        await probe_sandbox_platform(_sandbox(return_code=1), "/app")
+        await _probe_sandbox_platform(_sandbox(return_code=1), "/app")
 
 
 @pytest.mark.parametrize(
     "platform_, target",
     [
-        (SandboxPlatform("Linux", "x86_64", "gnu"), "x86_64-unknown-linux-musl"),
-        (SandboxPlatform("Linux", "amd64", "musl"), "x86_64-unknown-linux-musl"),
-        (SandboxPlatform("Linux", "aarch64", "musl"), "aarch64-unknown-linux-musl"),
-        (SandboxPlatform("Linux", "arm64", "gnu"), "aarch64-unknown-linux-musl"),
+        (_SandboxPlatform("Linux", "x86_64", "gnu"), "x86_64-unknown-linux-musl"),
+        (_SandboxPlatform("Linux", "amd64", "musl"), "x86_64-unknown-linux-musl"),
+        (_SandboxPlatform("Linux", "aarch64", "musl"), "aarch64-unknown-linux-musl"),
+        (_SandboxPlatform("Linux", "arm64", "gnu"), "aarch64-unknown-linux-musl"),
     ],
 )
 def test_release_target_is_the_static_musl_build_for_the_architecture(platform_, target):
     # The musl build is static, so one download serves glibc and musl sandboxes alike.
-    assert uv_release_target(platform_) == target
+    assert _uv_release_target(platform_) == target
 
 
 def test_release_target_rejects_other_kernels_and_unknown_machines():
     with pytest.raises(RuntimeError, match="Linux sandboxes only"):
-        uv_release_target(SandboxPlatform("Darwin", "arm64", "gnu"))
+        _uv_release_target(_SandboxPlatform("Darwin", "arm64", "gnu"))
     with pytest.raises(RuntimeError, match="No uv build is known"):
-        uv_release_target(SandboxPlatform("Linux", "riscv64", "gnu"))
+        _uv_release_target(_SandboxPlatform("Linux", "riscv64", "gnu"))
 
 
 def test_host_uv_is_reused_only_on_a_matching_glibc_linux_sandbox(monkeypatch):
     _host(monkeypatch, machine="x86_64")
-    assert host_uv_runs_in(SandboxPlatform("Linux", "x86_64", "gnu"))
-    assert host_uv_runs_in(SandboxPlatform("Linux", "amd64", "gnu"))
-    assert not host_uv_runs_in(SandboxPlatform("Linux", "x86_64", "musl"))  # host build is gnu
-    assert not host_uv_runs_in(SandboxPlatform("Linux", "aarch64", "gnu"))
+    assert _host_uv_runs_in(_SandboxPlatform("Linux", "x86_64", "gnu"))
+    assert _host_uv_runs_in(_SandboxPlatform("Linux", "amd64", "gnu"))
+    assert not _host_uv_runs_in(_SandboxPlatform("Linux", "x86_64", "musl"))  # host build is gnu
+    assert not _host_uv_runs_in(_SandboxPlatform("Linux", "aarch64", "gnu"))
     _host(monkeypatch, system="Darwin", machine="arm64")
-    assert not host_uv_runs_in(SandboxPlatform("Linux", "aarch64", "gnu"))
+    assert not _host_uv_runs_in(_SandboxPlatform("Linux", "aarch64", "gnu"))
 
 
 async def test_same_platform_uses_host_uv(monkeypatch, tmp_path):
@@ -92,7 +92,7 @@ async def test_other_platforms_download_the_matching_musl_build_once(monkeypatch
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"uv")
 
-    monkeypatch.setattr(uv_bootstrap, "download_uv", fake_download)
+    monkeypatch.setattr(uv_bootstrap, "_download_uv", fake_download)
     first = await uv_for_sandbox(_sandbox("Linux", "x86_64", "gnu"), "/app", str(tmp_path))
     second = await uv_for_sandbox(_sandbox("Linux", "x86_64", "gnu"), "/app", str(tmp_path))
     musl = await uv_for_sandbox(_sandbox("Linux", "aarch64", "musl"), "/app", str(tmp_path))
@@ -116,7 +116,7 @@ async def test_concurrent_cold_cache_calls_share_one_download(monkeypatch, tmp_p
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"uv")
 
-    monkeypatch.setattr(uv_bootstrap, "download_uv", slow_download)
+    monkeypatch.setattr(uv_bootstrap, "_download_uv", slow_download)
     tasks = [
         asyncio.create_task(uv_for_sandbox(_sandbox("Linux", "x86_64", "gnu"), "/app", str(tmp_path)))
         for _ in range(8)
@@ -144,10 +144,10 @@ def test_host_uv_version_parses(monkeypatch):
         "run",
         lambda *a, **k: SimpleNamespace(stdout="uv 0.12.3 (aarch64-unknown-linux-gnu)\n"),
     )
-    assert host_uv_version("/usr/bin/uv") == "0.12.3"
+    assert _host_uv_version("/usr/bin/uv") == "0.12.3"
     monkeypatch.setattr(uv_bootstrap.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="nope"))
     with pytest.raises(RuntimeError, match="Unexpected uv version"):
-        host_uv_version("/usr/bin/uv")
+        _host_uv_version("/usr/bin/uv")
 
 
 def test_download_uv_extracts_the_binary(monkeypatch, tmp_path):
@@ -161,12 +161,12 @@ def test_download_uv_extracts_the_binary(monkeypatch, tmp_path):
     monkeypatch.setattr(uv_bootstrap, "UV_RELEASE_URL", tmp_path.as_uri() + "/{version}/uv-{target}.tar.gz")
     destination = tmp_path / "cache" / "0.12.3" / "x86_64-unknown-linux-musl" / "uv"
 
-    download_uv("0.12.3", "x86_64-unknown-linux-musl", destination)
+    _download_uv("0.12.3", "x86_64-unknown-linux-musl", destination)
 
     assert destination.read_bytes().startswith(b"#!/bin/sh")
     assert destination.stat().st_mode & 0o111
     with pytest.raises(RuntimeError, match="Could not download uv"):
-        download_uv("9.9.9", "x86_64-unknown-linux-musl", tmp_path / "cache" / "9.9.9" / "uv")
+        _download_uv("9.9.9", "x86_64-unknown-linux-musl", tmp_path / "cache" / "9.9.9" / "uv")
 
 
 async def test_a_sandbox_that_cannot_answer_the_probe_gets_the_host_uv(monkeypatch, tmp_path, caplog):
