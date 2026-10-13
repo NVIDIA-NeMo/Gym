@@ -394,3 +394,27 @@ row["_ng_rollout_id"] = f"step{step}.{task_index}-{rollout_index}"
 ```
 
 The id may contain letters, digits, dots, dashes, and underscores, and it must begin with a letter or digit.
+
+## Per-request sampling seeds for SWE OpenHands
+
+For a fresh SWE OpenHands rollout, a training client can supply
+`responses_create_params.metadata.sampling_seed` as a decimal string between
+`0` and `9223372036854775807`. Each logical rollout should receive its own stable
+seed, and retries of that rollout should reuse it.
+
+The SWE launcher exports the seed inside the agent container before starting
+OpenHands. The OpenHands Gym client derives a separate seed for each model-call
+ordinal and forwards it to the model server. This requires an OpenHands revision
+with sampling-seed protocol version 1 and a model backend that honors the request
+seed. The launcher checks the client protocol before starting generation;
+custom older OpenHands revisions fail instead of silently ignoring the seed.
+The supplied OpenHands recipes pin a compatible revision.
+
+Omitting `sampling_seed` preserves existing behavior. The separate OpenCode
+harness and partial trajectory replay are not supported by this protocol:
+a transcript alone does not restore the model-call counter. Restarting an entire
+rollout from its original input and seed is supported.
+
+Request seeding does not fix numerical kernel differences, policy-update timing,
+or variation in live tool execution. It does not seed repository tests, Python's
+`random`, or NumPy.
