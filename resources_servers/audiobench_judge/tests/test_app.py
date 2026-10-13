@@ -320,6 +320,16 @@ class TestAudioBenchJudgeServer:
         result = await server.verify(body)
         assert result.generation == "final answer"
 
+    async def test_row_fields_reach_the_rollout(self) -> None:
+        """subset_for_metrics (and other row fields) survive verify so compute_metrics() can group by them."""
+        server = _make_server(judge_text="Rating: 5")
+        body = _make_verify_request("an answer", "ref", "q?").model_copy(
+            update={"subset_for_metrics": "alpaca_audio_test"}
+        )
+        result = (await server.verify(body)).model_dump()
+        assert result["subset_for_metrics"] == "alpaca_audio_test"
+        assert "alpaca_audio_test/pass@1[avg-of-1]/accuracy" in server.compute_metrics([[result]])
+
     async def test_judge_prompt_is_audiobench_format(self) -> None:
         """Judge gets the AudioBench rating prompt — byte-equivalent with Skills' judge/audiobench.yaml."""
         server = _make_server(judge_text="Rating: 4")

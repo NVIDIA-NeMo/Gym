@@ -155,6 +155,9 @@ class JudgeEvaluation(BaseModel):
 
 
 class AudioBenchJudgeVerifyResponse(BaseVerifyResponse):
+    # Carries the request's extra fields (e.g. subset_for_metrics) through to compute_metrics().
+    model_config = ConfigDict(extra="allow")
+
     expected_answer: str
     question: str
     generation: str
