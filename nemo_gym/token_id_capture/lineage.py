@@ -57,7 +57,7 @@ from nemo_gym.token_id_capture.fingerprint import (
     FINGERPRINT_VERSION,
     assistant_fingerprint,
     conversation_digest,
-    tool_call_ids,
+    tool_call_turn_fingerprint,
     trailing_assistant_turn,
 )
 from nemo_gym.token_id_capture.fingerprint import (
@@ -261,10 +261,9 @@ class RolloutLineage:
 
     by_fingerprint: dict[str, list[str]] = field(default_factory=dict)
     by_call_id: dict[str, LineageNode] = field(default_factory=dict)
-    # Tool-call id -> model calls whose response carried it. Harnesses may rewrite tool-call *arguments* before
-    # echoing history (Claude Code strips `cd <cwd> &&` from Bash commands and fills schema defaults such as
-    # `replace_all: false`), which changes the assistant fingerprint, but they echo tool-call ids verbatim.
-    by_tool_call_id: dict[str, list[str]] = field(default_factory=dict)
+    # Full model-turn identity, ignoring only tool arguments. A known ID alone
+    # must not attach additional, missing, or altered model output to a parent.
+    by_tool_call_turn: dict[str, list[str]] = field(default_factory=dict)
     # Cache the cumulative token count for memory bounds.
     total_tokens: int = 0
 
@@ -291,34 +290,29 @@ class RolloutLineage:
             if len(digests) == 1 and candidates[0].digest:
                 candidates = [min(candidates, key=lambda node: node.call_id)]
         if not candidates:
-            # Fallback: the harness rewrote the model's tool-call arguments, so the content fingerprint
-            # misses, but the tool-call ids of the last model-authored turn still name exactly one served
-            # call. The context digest check below still guards against rewritten or compacted history.
-            fallback = self._candidates_by_tool_call_id(messages)
+            # A harness may rewrite tool arguments, but the complete model turn must otherwise
+            # agree with one served call. _continues still rejects altered/compacted request history.
+            fallback = self._candidates_by_tool_call_turn(messages)
             if fallback:
                 candidates = fallback
         if len(candidates) != 1:
             return ParentResolutionStatus.UNRESOLVED, None, "no_match" if not candidates else "ambiguous"
         return ParentResolutionStatus.RESOLVED, candidates[0], ""
 
-    def _candidates_by_tool_call_id(self, messages: list[dict]) -> list["LineageNode"]:
-        ids = tool_call_ids(trailing_assistant_turn(messages))
-        if not ids:
+    def _candidates_by_tool_call_turn(self, messages: list[dict]) -> list["LineageNode"]:
+        key = tool_call_turn_fingerprint(trailing_assistant_turn(messages))
+        if not key:
             return []
-        call_ids: list[str] = []
-        for tool_id in ids:
-            for call_id in self.by_tool_call_id.get(tool_id) or []:
-                if call_id not in call_ids:
-                    call_ids.append(call_id)
         return [
             node
-            for call_id in call_ids
+            for call_id in self.by_tool_call_turn.get(key) or []
             if (node := self.by_call_id.get(call_id)) is not None and self._continues(node, messages)
         ]
 
-    def _index_tool_call_ids(self, call_id: str, response_items: list[dict]) -> None:
-        for tool_id in tool_call_ids(response_items):
-            bucket = self.by_tool_call_id.setdefault(tool_id, [])
+    def _index_tool_call_turn(self, call_id: str, response_items: list[dict]) -> None:
+        key = tool_call_turn_fingerprint(response_items)
+        if key:
+            bucket = self.by_tool_call_turn.setdefault(key, [])
             if call_id not in bucket:
                 bucket.append(call_id)
 
@@ -393,7 +387,7 @@ class RolloutLineage:
         self.total_tokens += node.cum_len
         self.by_call_id[entry.model_call_id] = node
         self.by_fingerprint.setdefault(entry.continuation_fingerprint, []).append(entry.model_call_id)
-        self._index_tool_call_ids(entry.model_call_id, list(entry.output_items or []))
+        self._index_tool_call_turn(entry.model_call_id, list(entry.output_items or []))
 
     def record(
         self,
@@ -438,7 +432,7 @@ class RolloutLineage:
         fingerprint = assistant_fingerprint(messages)
         if fingerprint:
             self.by_fingerprint.setdefault(fingerprint, []).append(call_id)
-        self._index_tool_call_ids(call_id, list((messages or [])[node.context_len :]))
+        self._index_tool_call_turn(call_id, list((messages or [])[node.context_len :]))
 
 
 class LineageIndex:

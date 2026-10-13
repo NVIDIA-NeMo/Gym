@@ -49,9 +49,9 @@ places by different agent classes, so up to five witnesses testify:
                  fingerprint of the entry's own output (a final-turn-only
                  response), and the transcript's trailing model-authored
                  block (a merged multi-turn transcript). When none of them
-                 matches, the trailing block's tool-call ids must equal the
-                 ids of exactly one entry's output, for harnesses that echo
-                 tool-call ids verbatim but rewrite their arguments.
+                 matches, the trailing block must match one entry's complete
+                 output apart from tool arguments: IDs, names, order, and
+                 non-tool content still agree when a harness rewrites arguments.
 
 External staging rows omit token arrays because those tokens remain in framework storage.
 They carry a ``staging_key`` and precomputed content fingerprints instead.
@@ -85,7 +85,7 @@ from nemo_gym.token_id_capture.fingerprint import (
     _is_assistant_authored,
     assistant_fingerprint,
     canonicalize_tool_arguments,
-    tool_call_ids,
+    tool_call_turn_fingerprint,
 )
 from nemo_gym.token_id_capture.records import NAMESPACE_TOOL_DELIMITER, TokenEntry
 
@@ -435,21 +435,20 @@ def _content_witness(entries: list[TokenEntry], response: dict, reasons: list[st
             return ("content", winner)
         return ("content_cumulative" if cumulative_hit else "content_output", winner)
     if not matches:
-        # Fourth reading: the trailing block's tool-call ids. Harnesses such as Claude Code rewrite tool-call
-        # *arguments* when they echo history (strip `cd <cwd> &&`, fill schema defaults), which defeats the
-        # content hashes above, but they echo tool-call ids verbatim and a served call's ids are unique.
-        trailing_ids = tool_call_ids(trailing)
-        if trailing_ids:
-            wanted = set(trailing_ids)
+        # Fourth reading: the complete trailing model turn, ignoring only tool
+        # arguments. Tool IDs alone cannot corroborate changed/missing output
+        # or an uncaptured final assistant message (the #3972 witness contract).
+        target_turn = tool_call_turn_fingerprint(trailing)
+        if target_turn:
             id_matches: dict[str, TokenEntry] = {}
             for entry in entries:
                 if not entry.output_items:
                     continue
                 try:
-                    own_ids = set(tool_call_ids(list(entry.output_items)))
+                    own_turn = tool_call_turn_fingerprint(list(entry.output_items))
                 except (TypeError, ValueError):
                     continue
-                if own_ids and own_ids == wanted:
+                if own_turn == target_turn:
                     id_matches[entry.model_call_id] = entry
             winner = _collapse_identical(list(id_matches.values()))
             if winner is not None:

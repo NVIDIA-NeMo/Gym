@@ -287,16 +287,37 @@ def _update_field(hasher: Any, tag: bytes, value: str) -> None:
     hasher.update(encoded)
 
 
-def tool_call_ids(items: list[dict]) -> list[str]:
-    """Return the tool-call ids carried by model-authored items, in order, across dialects."""
-    ids: list[str] = []
+def tool_call_turn_fingerprint(items: list[dict]) -> str:
+    """Fingerprint a complete model turn while tolerating rewritten tool arguments.
+
+    Every tool ID and name, their order, and all non-tool assistant content must
+    agree. Missing/duplicate IDs abstain; they cannot identify a served call.
+    Chat/Anthropic bundled turns and Responses items use the same canonical
+    fields as the strict fingerprint. Empty assistant items remain accounted for.
+    This is an in-memory fallback key, not a replacement for the versioned
+    content fingerprint or the request-context digest.
+    """
+    hasher = hashlib.sha256(b"nemo-gym-tool-call-turn")
+    seen_ids: set[str] = set()
     for item in items or []:
-        if not isinstance(item, dict) or not _is_assistant_authored(item):
+        if not isinstance(item, dict):
+            raise ValueError(f"request item is not an object: {type(item).__name__}")
+        if not _is_assistant_authored(item):
             continue
-        for call_id, _name, _arguments in _tools_of(item):
-            if call_id:
-                ids.append(call_id)
-    return ids
+        content = _content_of(item.get("content"))
+        tools = _tools_of(item)
+        if not content and not tools:
+            _update_field(hasher, b"\x05", "empty-assistant")
+        for content_type, payload in content:
+            _update_field(hasher, b"\x00", content_type)
+            _update_field(hasher, b"\x01", payload)
+        for call_id, name, _arguments in tools:
+            if not call_id or not name or call_id in seen_ids:
+                return ""
+            seen_ids.add(call_id)
+            _update_field(hasher, b"\x02", call_id)
+            _update_field(hasher, b"\x03", name)
+    return hasher.hexdigest() if seen_ids else ""
 
 
 def trailing_assistant_turn(messages: list[dict]) -> list[dict]:
