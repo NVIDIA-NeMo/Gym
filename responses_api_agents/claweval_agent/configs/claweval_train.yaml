@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+claweval_agent:
+  responses_api_agents:
+    claweval_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      token_id_capture: true
+      task_roots:
+        original_100: ${oc.env:CLAW_EVAL_ORIGINAL_TASK_ROOT}
+        brief_100: ${oc.env:CLAW_EVAL_BRIEF_TASK_ROOT}
+        brief_1000: ${oc.env:CLAW_EVAL_B_TASK_ROOT}
+      claw_eval_source: ${oc.env:CLAW_EVAL_SOURCE}
+      harbor_python: ${oc.env:CLAW_EVAL_HARBOR_PYTHON}
+      output_root: ${oc.env:CLAW_EVAL_OUTPUT_ROOT}
+      runtime_root: ${oc.env:CLAW_EVAL_RUNTIME_ROOT,null}
+      docker_cli_dir: ${oc.env:CLAW_EVAL_DOCKER_CLI_DIR,null}
+      backend: ${oc.env:CLAW_EVAL_BACKEND,remote}
+      backend_dir: ${oc.env:CLAW_EVAL_BACKEND_DIR,null}
+      backend_wait_seconds: ${oc.env:CLAW_EVAL_BACKEND_WAIT_SECONDS,1800}
+      credentials_file: ${oc.env:CLAW_EVAL_CREDENTIALS_FILE,null}
+      judge_base_url: ${oc.env:CLAW_EVAL_JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      judge_model: ${oc.env:CLAW_EVAL_JUDGE_MODEL,gcp/google/gemini-3-flash-preview}
+      judge_api_key_env: ${oc.env:CLAW_EVAL_JUDGE_API_KEY_ENV,NV_INFERENCE_API_KEY}
+      concurrency: ${oc.env:CLAW_EVAL_CONCURRENCY,12}
+      max_turns: ${oc.env:CLAW_EVAL_MAX_TURNS,40}
+      verifier_timeout_multiplier: ${oc.env:CLAW_EVAL_VERIFIER_TIMEOUT_MULTIPLIER,1}
+      agent_timeout_multiplier: ${oc.env:CLAW_EVAL_AGENT_TIMEOUT_MULTIPLIER,null}
+      model_context_tokens: ${oc.env:CLAW_EVAL_CONTEXT_TOKENS,49152}
+      model_output_capability_tokens: ${oc.env:CLAW_EVAL_OUTPUT_TOKENS,8192}
+      model_call_timeout_ms: ${oc.env:CLAW_EVAL_MODEL_CALL_TIMEOUT_MS,3600000}
+      opencode_compaction_auto: ${oc.env:CLAW_EVAL_COMPACTION_AUTO,null}
+      opencode_compaction_prune: ${oc.env:CLAW_EVAL_COMPACTION_PRUNE,null}
+      opencode_disable_title: ${oc.env:CLAW_EVAL_DISABLE_TITLE,true}
+      local_step_cap_reply: ${oc.env:CLAW_EVAL_LOCAL_STEP_CAP_REPLY,false}
+      opencode_training_mode: ${oc.env:CLAW_EVAL_TRAINING_MODE,null}
+      opencode_subagents_enabled: ${oc.env:CLAW_EVAL_SUBAGENTS_ENABLED,false}
+      opencode_subagent_max_depth: 1
+      opencode_subagent_max_active: ${oc.env:CLAW_EVAL_SUBAGENT_MAX_ACTIVE,null}
+      opencode_delegation_prompt: ${oc.env:CLAW_EVAL_DELEGATION_PROMPT,null}
+      train_compaction_summaries: ${oc.env:CLAW_EVAL_TRAIN_COMPACTION_SUMMARIES,true}
+      capture_proxy_host: ${oc.env:CLAW_EVAL_CAPTURE_PROXY_HOST,null}
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: ${oc.env:TRAIN_PATH}
+        num_repeats: 1
+        license: Internal ClawEval task packages
+
+claweval_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: claweval_agent
