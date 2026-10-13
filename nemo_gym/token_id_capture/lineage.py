@@ -1125,6 +1125,26 @@ class FileLineageStore(IncrementalLineageStore):
     async def has_rows(self, rollout_id: str) -> bool:
         return await asyncio.to_thread(self._has_rows, rollout_id)
 
+    async def known_fingerprints(self, rollout_id: str) -> set[str]:
+        """Every request fingerprint a served call of this rollout can anchor.
+
+        Diagnostics only: lets a caller that failed to resolve a continuation
+        find the last model-authored turn the ledger still recognizes.
+        """
+        return await asyncio.to_thread(self._known_fingerprints, rollout_id)
+
+    def _known_fingerprints(self, rollout_id: str) -> set[str]:
+        known: set[str] = set()
+        with self._locked(rollout_id):
+            for record in self._read(rollout_id):
+                fingerprint = record.get("fingerprint")
+                if fingerprint:
+                    known.add(str(fingerprint))
+        with self._rollout_lock(rollout_id), self._read_locked(rollout_id):
+            _, lineage = self._refresh(rollout_id)
+            known.update(lineage.by_fingerprint)
+        return known
+
     def _has_rows(self, rollout_id: str) -> bool:
         with self._locked(rollout_id):
             if self._read(rollout_id):

@@ -26,6 +26,8 @@ Untagged traffic has no capture context.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import threading
 import time
@@ -318,15 +320,77 @@ async def resolve_parent(request_messages: list | None) -> None:
         )
         return
     logger.warning(
-        "Unresolved parent for model call %s of rollout %s; poisoning the call.",
+        "Unresolved parent for model call %s of rollout %s; poisoning the call. %s",
         context.model_call_id,
         context.rollout_id,
+        await _describe_unresolved_continuation(
+            ledger, context.rollout_id, request_messages, context.parent_resolution
+        ),
     )
     await ledger.record_failure(
         context.rollout_id,
         context.model_call_id,
         UNRESOLVED_PARENT_REASON,
     )
+
+
+async def _describe_unresolved_continuation(
+    ledger: Any,
+    rollout_id: str,
+    messages: list[dict] | None,
+    resolution: LineageResolution | None,
+) -> str:
+    """Name the first model-authored turn whose echo no longer matches a served call.
+
+    A continuation resolves by the fingerprint of its model-authored history,
+    so when it fails the useful fact is *where* the history stopped matching:
+    the longest prefix the ledger still recognizes, and the shape of the turn
+    after it (content parts, think tags, tool calls). Diagnostics only; any
+    failure here is reported in place of the description.
+    """
+    try:
+        from nemo_gym.token_id_capture.fingerprint import _content_of, _is_assistant_authored, _tools_of
+
+        reason = getattr(resolution, "reason", None)
+        known_fn = getattr(ledger, "known_fingerprints", None)
+        known: set[str] = set(await known_fn(rollout_id)) if known_fn is not None else set()
+        items = [item for item in (messages or []) if isinstance(item, dict)]
+        assistant_positions = [index for index, item in enumerate(items) if _is_assistant_authored(item)]
+        if not assistant_positions:
+            return f"reason={reason} assistant_turns=0"
+        matched_turns = 0
+        for turn, position in enumerate(assistant_positions, start=1):
+            if assistant_fingerprint(items[: position + 1]) in known:
+                matched_turns = turn
+        if matched_turns == len(assistant_positions):
+            return (
+                f"reason={reason} assistant_turns={matched_turns} every_prefix_known=True "
+                f"known_fingerprints={len(known)}"
+            )
+        position = assistant_positions[matched_turns]
+        turn = items[position]
+        content = [
+            (content_type, len(payload), payload.count("<think>"), payload.count("</think>"))
+            for content_type, payload in _content_of(turn.get("content"))
+        ]
+        tools = [
+            (call_id[:24], name, len(arguments), hashlib.sha256(arguments.encode("utf-8")).hexdigest()[:10])
+            for call_id, name, arguments in _tools_of(turn)
+        ]
+        summary = {
+            "reason": reason,
+            "assistant_turns": len(assistant_positions),
+            "matched_turns": matched_turns,
+            "divergent_turn": matched_turns + 1,
+            "message_index": position,
+            "content": content,
+            "tool_calls": tools,
+            "message_keys": sorted(str(key) for key in turn.keys()),
+            "known_fingerprints": len(known),
+        }
+        return "divergence=" + json.dumps(summary, default=str)[:2000]
+    except Exception as error:  # noqa: BLE001 - diagnostics must never change the outcome
+        return f"diagnostic_failed={type(error).__name__}: {error}"
 
 
 async def register_call_intent() -> None:

@@ -783,3 +783,35 @@ async def test_retire_does_not_remove_a_ledger_recreated_after_a_delete_between_
     assert not (tmp_path / "r1.lineage.retired").exists()
     manifest = RolloutManifest.model_validate(await store.manifest("r1"))
     assert [record.model_call_id for record in manifest.records] == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_unresolved_continuation_names_the_divergent_turn(tmp_path, caplog):
+    """The poisoning warning says which model-authored turn stopped matching a served call."""
+    store = FileLineageStore(tmp_path)
+    await _record_call_1(store)
+    tokens_2 = TOKENS_1 + [901, 902]
+    await store.record(
+        _commit(
+            _call_record(
+                "c2",
+                parent_call_id="c1",
+                prev_len=len(TOKENS_1),
+                delta_len=2,
+                chain_hash=compute_chain_hash(CHAIN_HASH_1, [901, 902]),
+                cumulative_hash=hash_token_ids(tokens_2),
+            ),
+            [USER_1, ASSISTANT_1, USER_2],
+            [ASSISTANT_2],
+            staging_chain=("r1/c1", "r1/c2"),
+        )
+    )
+    # The harness echoes the second turn with different text: turn 1 still matches, turn 2 does not.
+    rewritten_turn_2 = {"role": "assistant", "content": "second answer, edited by the harness"}
+    with caplog.at_level("WARNING"):
+        context = await _admit(store, [USER_1, ASSISTANT_1, USER_2, rewritten_turn_2, USER_3], model_call_id="c3")
+    assert context.capture_admission is None
+    message = next(r.getMessage() for r in caplog.records if "Unresolved parent for model call c3" in r.getMessage())
+    assert '"matched_turns": 1' in message
+    assert '"divergent_turn": 2' in message
+    assert '"reason": "no_match"' in message
