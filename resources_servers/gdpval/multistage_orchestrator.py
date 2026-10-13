@@ -2529,6 +2529,10 @@ async def run_e2e_multistage(
             route_failures_to_sidecar=route_failures_to_sidecar,
         ):
             completed = await future
+            # A failure while verifying comes after the rollout, so a retry judges the persisted deliverable;
+            # without one, /verify answers 404 and the policy runs again.
+            if completed.result.get("_ng_failure_stage") == "verification":
+                completed.result["reuse_cached_deliverable"] = True
             attach_rollout_evidence(completed.row, completed.result, completed.rollout_latency_ms)
             results.append((completed.row, completed.result))
         return results

@@ -277,7 +277,8 @@ gym eval reverify \
 In rubric mode, a verification without a usable judgement goes to the failures
 file as `judge_failed`, and `gym eval reverify --judge-failed-only` judges it
 again. In comparison mode a judging failure is a retryable environment-server
-failure, which `--resume` dispatches again.
+failure; a retry, in process with `multistage.retry_inprocess` or on `--resume`,
+judges the persisted deliverable again without the policy.
 
 To collect deliverables without judging them, for example for a reference set,
 set `++gdpval_resources_server.resources_servers.gdpval.judge_deliverables=false`.
@@ -360,9 +361,9 @@ gym eval run \
     ++multistage.stages='[{num_tasks: 45, partial_completion: {min_success_fraction: 0.9, min_per_reference_success_fraction: 0.5, min_successful_rows_per_reference: 1}}, {num_tasks: 220, num_models: 4}]'
 ```
 
-A resume dispatches the rows that did not finish again. A row a later stage was
-reusing is judged again from its deliverable; any other row runs the policy
-again. Each stage's sampled tasks and per-task
+A resume dispatches the rows that did not finish again. A row that failed during
+verification, or that a later stage was reusing, is judged again from its
+persisted deliverable; any other row runs the policy again. Each stage's sampled tasks and per-task
 reference assignment are recorded in the stage journal (and re-derived deterministically
 from the stage seed for older plans), so they replay identically on resume. Use
 the same `multistage.seed` so an unplanned stage draws the same tasks.

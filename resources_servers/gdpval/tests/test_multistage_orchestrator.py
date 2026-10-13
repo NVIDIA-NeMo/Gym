@@ -3604,7 +3604,14 @@ class TestCachedDeliverableReuse:
             },
         }
 
-    async def _run_two_stages(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, cached: bool):
+    async def _run_two_stages(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        cached: bool,
+        first_failure_stage: Optional[str] = None,
+    ):
         self.inputs_at_dispatch: List[List[int]] = []
         dispatched: List[Dict[str, Any]] = []
         verified: List[Dict[str, Any]] = []
@@ -3628,9 +3635,13 @@ class TestCachedDeliverableReuse:
                 test.inputs_at_dispatch.append([json.loads(line)["stage_index"] for line in inputs])
 
                 async def done(row):
-                    return rollout_collection_module._CompletedRollout(
-                        row=row, result=test._per_reference(row), rollout_latency_ms=None
-                    )
+                    result = test._per_reference(row)
+                    if first_failure_stage is not None and len(dispatched) == 1:
+                        result = {
+                            NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
+                            "_ng_failure_stage": first_failure_stage,
+                        }
+                    return rollout_collection_module._CompletedRollout(row=row, result=result, rollout_latency_ms=None)
 
                 return [done(row) for row in rows]
 
@@ -3670,7 +3681,7 @@ class TestCachedDeliverableReuse:
             check_completion=lambda **kwargs: None,
         )
         global_config = {
-            "multistage": {"enabled": True, "stages": ["1", "1"], "seed": 0},
+            "multistage": {"enabled": True, "stages": ["1", "1"], "seed": 0, "retry_inprocess": True},
             "gdpval_resources_server": {
                 "resources_servers": {
                     "gdpval": {"reference_models": {key: {"elo": elo} for key, elo in REF_ELOS.items()}}
@@ -3699,6 +3710,25 @@ class TestCachedDeliverableReuse:
             json.loads(line) for line in (tmp_path / "rollouts_materialized_inputs.jsonl").read_text().splitlines()
         ]
         assert [(row["stage_index"], row[TASK_INDEX_KEY_NAME]) for row in inputs] == [(0, 0), (1, 1)]
+
+    @pytest.mark.parametrize(
+        ("failure_stage", "dispatched_stages", "verified_stages"),
+        [("verification", [0], [0, 1]), ("agent", [0, 0], [1])],
+    )
+    async def test_a_retry_after_a_verification_failure_judges_the_persisted_deliverable(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure_stage: str,
+        dispatched_stages: List[int],
+        verified_stages: List[int],
+    ) -> None:
+        dispatched, verified, _ = await self._run_two_stages(
+            tmp_path, monkeypatch, cached=True, first_failure_stage=failure_stage
+        )
+
+        assert [row["stage_index"] for row in dispatched] == dispatched_stages
+        assert [call["json"]["stage_index"] for call in verified] == verified_stages
 
     async def test_without_a_cached_deliverable_the_policy_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
