@@ -338,6 +338,75 @@ class TestFernDocsLinks(unittest.TestCase):
 
         self.assertIn(expected_redirect, redirects)
 
+    def test_latest_bash_blocks_have_no_placeholders_that_bash_splits(self):
+        """`WANDB_API_KEY={your W&B API key}` runs `W&B` as a command; `${Your Username}` is a bad substitution.
+
+        Runnable blocks export a sample value first and reference the variable instead.
+        """
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        bash_block = re.compile(r"^```(?:bash|sh|shell)[^\n]*\n(.*?)^```", re.DOTALL | re.MULTILINE)
+        placeholders = []
+
+        for page in pages.rglob("*.mdx"):
+            for block in bash_block.findall(page.read_text()):
+                for line in block.splitlines():
+                    if re.search(r"\{[Yy]our [^{}]*\}", line):
+                        placeholders.append(f"{page.relative_to(REPO_ROOT)}: {line.strip()}")
+
+        self.assertEqual([], placeholders)
+
+    def test_latest_install_examples_use_the_newest_released_version(self):
+        snapshots = [path.stem for path in (REPO_ROOT / "fern/versions").glob("v*.yml")]
+        newest = max(snapshots, key=lambda tag: tuple(int(part) for part in tag[1:].split(".")))
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        pins = {
+            "get-started/installation.mdx": [
+                rf"nemo-gym=={newest[1:]}`",
+                rf"nvcr\.io/nvidia/nemo-gym:{newest}\n",
+                rf"\nNeMo Gym {newest}\n",
+            ],
+            "reference/rl-framework-compatibility.mdx": [rf"docker pull nvcr\.io/nvidia/nemo-gym:{newest}\n"],
+            "observability/configuration.mdx": [rf"\| `nemo\.gym\.version` \| `{newest[1:]}` \|"],
+        }
+
+        for page, patterns in pins.items():
+            text = (pages / page).read_text()
+            with self.subTest(page=page):
+                for pattern in patterns:
+                    self.assertRegex(text, pattern)
+                stale = re.findall(r"(?:nemo-gym==|nemo-gym:v|NeMo Gym v|`)(\d+\.\d+\.\d+)", text)
+                self.assertEqual([], [version for version in stale if f"v{version}" != newest])
+
+    def test_latest_link_labels_are_titles_not_slugs(self):
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        slug_labels = []
+
+        for page in pages.rglob("*.mdx"):
+            for label in re.findall(r"\[([a-z0-9]+(?:-[a-z0-9]+)+)\]\(/", page.read_text()):
+                slug_labels.append(f"{page.relative_to(REPO_ROOT)}: [{label}]")
+
+        self.assertEqual([], slug_labels)
+
+    def test_latest_r070_copy_review_items(self):
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        faq = (pages / "reference/faq.mdx").read_text()
+
+        self.assertIn("`{hf_organization}/{hf_dataset_prefix}-{domain}-{resources_server OR dataset_name}`", faq)
+        self.assertNotIn("Including it assumes", faq)
+        self.assertIn("the branch must already exist", faq)
+        self.assertIn(
+            "does not run an LLM itself; it is orchestration code", (pages / "agent-server/index.mdx").read_text()
+        )
+        self.assertNotIn(
+            "synthetic data generation using",
+            (pages / "environment-tutorials/single-step-environment.mdx").read_text(),
+        )
+        self.assertNotIn("to point to the hostname", (pages / "model-server/vllm.mdx").read_text())
+        british = [
+            str(page.relative_to(REPO_ROOT)) for page in pages.rglob("*.mdx") if "behaviour" in page.read_text()
+        ]
+        self.assertEqual([], british)
+
 
 if __name__ == "__main__":
     unittest.main()
