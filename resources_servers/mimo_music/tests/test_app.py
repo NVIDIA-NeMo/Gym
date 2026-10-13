@@ -12,6 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from types import SimpleNamespace
+
+from resources_servers.mimo_music.app import _final_text
 from resources_servers.mimo_music.scorer import compute_score, extract_abc
 
 
@@ -35,3 +38,12 @@ def test_extract_abc_from_fence() -> None:
 def test_clean_tune_scores_and_blank_line_is_rejected() -> None:
     assert 0.0 < compute_score("music", TUNE) <= 1.0
     assert compute_score("music", TUNE.replace("V:2", "\nV:2")) == 0.0
+
+
+def test_final_text_grades_last_reply_without_think() -> None:
+    def msg(text):
+        return SimpleNamespace(type="message", content=[SimpleNamespace(text=text)])
+
+    response = SimpleNamespace(output=[msg("draft X:1 bad"), msg("<think>try X:2</think>final tune")])
+    assert _final_text(response) == "final tune"
+    assert _final_text(SimpleNamespace(output=[])) == ""

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import re
 from typing import Any
 
 from pydantic import ConfigDict
@@ -49,7 +50,8 @@ def _final_text(response: Any) -> str:
     for item in response.output or []:
         if getattr(item, "type", None) == "message":
             texts.extend(getattr(part, "text", "") or "" for part in item.content or [])
-    return "\n".join(texts)
+    # Harness transcripts keep every assistant turn with reasoning inlined as <think>, so grade the final reply only.
+    return re.sub(r"<think>.*?</think>", "", texts[-1], flags=re.S).split("</think>")[-1] if texts else ""
 
 
 class MimoMusicResourcesServer(SimpleResourcesServer):
