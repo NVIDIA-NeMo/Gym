@@ -18,19 +18,20 @@ A Gym server answers every request on one asyncio event loop.
 When synchronous work such as validation, serialization, or garbage collection holds that loop, every other request waits, even though no single request looks slow.
 These metrics make that pressure visible without inspecting private asyncio internals:
 
-* ``gym.event_loop.lag`` (histogram, seconds): how late a sleeping coroutine wakes up.
+* ``gym.event_loop.lag_ms`` (histogram, milliseconds): how late a sleeping coroutine wakes up.
   A coroutine asks to wake after a fixed interval, and the lag is how much later than that it actually runs.
   This is the scheduler-pressure signal.
 * ``gym.event_loop.tasks`` (gauge, opt-in): how many asyncio tasks exist on the loop.
   This is resident work, not a queue depth: an idle task waiting on the network counts as much as a runnable one.
-* ``gym.gc.pause`` (histogram, seconds), and the ``gym.gc.collections``, ``gym.gc.collected``, and ``gym.gc.uncollectable`` counters, all by ``generation``.
-  ``gym.gc.count`` (gauge, by ``generation``) is the allocation count from ``gc.get_count()``.
+* ``gym.gc.pause_duration_ms`` (histogram, milliseconds), and the ``gym.gc.collections_total``, ``gym.gc.collected_total``, and ``gym.gc.uncollectable_total`` counters, all by ``nemo.gym.gc.generation``.
+  ``gym.gc.count`` (gauge, by ``nemo.gym.gc.generation``) is the allocation count from ``gc.get_count()``.
 * ``process.cpu.time`` (counter, seconds, by ``cpu.mode``), ``process.memory.usage``, ``process.thread.count``, and ``process.open_file_descriptor.count``.
-* ``gym.server.requests.in_flight``, ``gym.server.requests.cancelled``, and ``gym.server.requests.failed``.
+  These keep the OpenTelemetry process semantic-convention names, units, and attributes, so standard dashboards recognize them.
+* ``gym.server.requests.in_flight``, ``gym.server.requests.cancelled_total``, and ``gym.server.requests.failed_total``.
   The outermost server middleware keeps them as plain integers, and the exporter thread reads them.
 * ``gym.http.client.requests.in_flight``: outbound calls through ``server_utils.request`` still waiting for their response headers.
-* ``gym.driver.rollouts.offered``, ``gym.driver.rollouts.resident``, and ``gym.driver.rollouts.active``, plus the ``gym.driver.admission.duration``, ``gym.driver.output.write.duration``, ``gym.driver.output.write.bytes``, and ``gym.driver.materialize.duration`` histograms, from the rollout driver.
-* ``gym.driver.rollout.input.items``, ``gym.driver.rollout.output.items``, ``gym.driver.rollout.turns``, and ``gym.driver.rollout.tool_calls``: the size of each completed rollout, recorded once per rollout by the driver.
+* ``gym.driver.rollouts.offered_total``, ``gym.driver.rollouts.resident``, and ``gym.driver.rollouts.active``, plus the ``gym.driver.admission_duration_ms``, ``gym.driver.output_write_duration_ms``, ``gym.driver.output_write_bytes``, and ``gym.driver.materialize_duration_ms`` histograms, from the rollout driver.
+* ``gym.driver.rollout.input_items``, ``gym.driver.rollout.output_items``, ``gym.driver.rollout.turns``, and ``gym.driver.rollout.tool_calls``: the size of each completed rollout, recorded once per rollout by the driver.
 
 Each kind of work runs where it costs the least:
 
@@ -59,72 +60,72 @@ from typing import Any, AsyncIterator, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-EVENT_LOOP_LAG_INSTRUMENT = "gym.event_loop.lag"
+EVENT_LOOP_LAG_INSTRUMENT = "gym.event_loop.lag_ms"
 EVENT_LOOP_TASKS_INSTRUMENT = "gym.event_loop.tasks"
-GC_PAUSE_INSTRUMENT = "gym.gc.pause"
-GC_COLLECTIONS_INSTRUMENT = "gym.gc.collections"
-GC_COLLECTED_INSTRUMENT = "gym.gc.collected"
-GC_UNCOLLECTABLE_INSTRUMENT = "gym.gc.uncollectable"
+GC_PAUSE_INSTRUMENT = "gym.gc.pause_duration_ms"
+GC_COLLECTIONS_INSTRUMENT = "gym.gc.collections_total"
+GC_COLLECTED_INSTRUMENT = "gym.gc.collected_total"
+GC_UNCOLLECTABLE_INSTRUMENT = "gym.gc.uncollectable_total"
 GC_COUNT_INSTRUMENT = "gym.gc.count"
 PROCESS_CPU_TIME_INSTRUMENT = "process.cpu.time"
 PROCESS_MEMORY_USAGE_INSTRUMENT = "process.memory.usage"
 PROCESS_THREAD_COUNT_INSTRUMENT = "process.thread.count"
 PROCESS_OPEN_FDS_INSTRUMENT = "process.open_file_descriptor.count"
 REQUESTS_IN_FLIGHT_INSTRUMENT = "gym.server.requests.in_flight"
-REQUESTS_CANCELLED_INSTRUMENT = "gym.server.requests.cancelled"
-REQUESTS_FAILED_INSTRUMENT = "gym.server.requests.failed"
+REQUESTS_CANCELLED_INSTRUMENT = "gym.server.requests.cancelled_total"
+REQUESTS_FAILED_INSTRUMENT = "gym.server.requests.failed_total"
 OUTBOUND_IN_FLIGHT_INSTRUMENT = "gym.http.client.requests.in_flight"
-DRIVER_OFFERED_INSTRUMENT = "gym.driver.rollouts.offered"
+DRIVER_OFFERED_INSTRUMENT = "gym.driver.rollouts.offered_total"
 DRIVER_RESIDENT_INSTRUMENT = "gym.driver.rollouts.resident"
 DRIVER_ACTIVE_INSTRUMENT = "gym.driver.rollouts.active"
-DRIVER_ADMISSION_INSTRUMENT = "gym.driver.admission.duration"
-DRIVER_WRITE_DURATION_INSTRUMENT = "gym.driver.output.write.duration"
-DRIVER_WRITE_BYTES_INSTRUMENT = "gym.driver.output.write.bytes"
-DRIVER_MATERIALIZE_INSTRUMENT = "gym.driver.materialize.duration"
-ROLLOUT_INPUT_ITEMS_INSTRUMENT = "gym.driver.rollout.input.items"
-ROLLOUT_OUTPUT_ITEMS_INSTRUMENT = "gym.driver.rollout.output.items"
+DRIVER_ADMISSION_INSTRUMENT = "gym.driver.admission_duration_ms"
+DRIVER_WRITE_DURATION_INSTRUMENT = "gym.driver.output_write_duration_ms"
+DRIVER_WRITE_BYTES_INSTRUMENT = "gym.driver.output_write_bytes"
+DRIVER_MATERIALIZE_INSTRUMENT = "gym.driver.materialize_duration_ms"
+ROLLOUT_INPUT_ITEMS_INSTRUMENT = "gym.driver.rollout.input_items"
+ROLLOUT_OUTPUT_ITEMS_INSTRUMENT = "gym.driver.rollout.output_items"
 ROLLOUT_TURNS_INSTRUMENT = "gym.driver.rollout.turns"
 ROLLOUT_TOOL_CALLS_INSTRUMENT = "gym.driver.rollout.tool_calls"
 
 EVENT_LOOP_ATTRIBUTE = "nemo.gym.event_loop"
-GC_GENERATION_ATTRIBUTE = "generation"
+GC_GENERATION_ATTRIBUTE = "nemo.gym.gc.generation"
 CPU_MODE_ATTRIBUTE = "cpu.mode"
 
-#: Seconds. Lag below half a millisecond is ordinary scheduling, and lag of seconds means the loop was blocked outright.
-EVENT_LOOP_LAG_BOUNDARIES_S: tuple[float, ...] = (
-    0.0005,
-    0.001,
-    0.0025,
-    0.005,
-    0.01,
-    0.025,
-    0.05,
+#: Milliseconds. Lag below half a millisecond is ordinary scheduling, and lag of seconds means the loop was blocked outright.
+EVENT_LOOP_LAG_BOUNDARIES_MS: tuple[float, ...] = (
+    0.5,
+    1,
+    2.5,
+    5,
+    10,
+    25,
+    50,
+    100,
+    250,
+    500,
+    1000,
+    2500,
+    5000,
+)
+#: Milliseconds. A young-generation collection takes microseconds, and a full collection of a large heap can take most of a second.
+GC_PAUSE_BOUNDARIES_MS: tuple[float, ...] = (
     0.1,
     0.25,
     0.5,
     1,
     2.5,
     5,
-)
-#: Seconds. A young-generation collection takes microseconds, and a full collection of a large heap can take most of a second.
-GC_PAUSE_BOUNDARIES_S: tuple[float, ...] = (
-    0.0001,
-    0.00025,
-    0.0005,
-    0.001,
-    0.0025,
-    0.005,
-    0.01,
-    0.025,
-    0.05,
-    0.1,
-    0.25,
-    0.5,
-    1,
+    10,
+    25,
+    50,
+    100,
+    250,
+    500,
+    1000,
 )
 
 #: Upper bound on GC pauses held between two samples.
-#: Pauses beyond it are still counted in ``gym.gc.collections`` but are not recorded in the pause histogram.
+#: Pauses beyond it are still counted in ``gym.gc.collections_total`` but are not recorded in the pause histogram.
 _MAX_BUFFERED_GC_PAUSES = 10_000
 
 
@@ -231,9 +232,9 @@ class _Instruments:
     def __init__(self, meter: Any) -> None:
         self.lag = meter.create_histogram(
             EVENT_LOOP_LAG_INSTRUMENT,
-            unit="s",
+            unit="ms",
             description="How late a sleeping coroutine on the event loop woke up.",
-            explicit_bucket_boundaries_advisory=list(EVENT_LOOP_LAG_BOUNDARIES_S),
+            explicit_bucket_boundaries_advisory=list(EVENT_LOOP_LAG_BOUNDARIES_MS),
         )
         self.tasks = meter.create_gauge(
             EVENT_LOOP_TASKS_INSTRUMENT,
@@ -242,9 +243,9 @@ class _Instruments:
         )
         self.gc_pause = meter.create_histogram(
             GC_PAUSE_INSTRUMENT,
-            unit="s",
+            unit="ms",
             description="Duration of one garbage collection.",
-            explicit_bucket_boundaries_advisory=list(GC_PAUSE_BOUNDARIES_S),
+            explicit_bucket_boundaries_advisory=list(GC_PAUSE_BOUNDARIES_MS),
         )
         meter.create_observable_up_down_counter(
             REQUESTS_IN_FLIGHT_INSTRUMENT,
@@ -290,15 +291,15 @@ class _Instruments:
         )
         self.admission = meter.create_histogram(
             DRIVER_ADMISSION_INSTRUMENT,
-            unit="s",
+            unit="ms",
             description="Time one rollout waited for the driver's concurrency limit before it started.",
-            explicit_bucket_boundaries_advisory=list(DRIVER_DURATION_BOUNDARIES_S),
+            explicit_bucket_boundaries_advisory=list(DRIVER_DURATION_BOUNDARIES_MS),
         )
         self.write_duration = meter.create_histogram(
             DRIVER_WRITE_DURATION_INSTRUMENT,
-            unit="s",
+            unit="ms",
             description="Time to write and flush one rollout's output row.",
-            explicit_bucket_boundaries_advisory=list(DRIVER_DURATION_BOUNDARIES_S),
+            explicit_bucket_boundaries_advisory=list(DRIVER_DURATION_BOUNDARIES_MS),
         )
         self.write_bytes = meter.create_histogram(
             DRIVER_WRITE_BYTES_INSTRUMENT,
@@ -308,9 +309,9 @@ class _Instruments:
         )
         self.materialize = meter.create_histogram(
             DRIVER_MATERIALIZE_INSTRUMENT,
-            unit="s",
+            unit="ms",
             description="Time to read, repeat, and write a run's input rows before dispatch.",
-            explicit_bucket_boundaries_advisory=list(DRIVER_DURATION_BOUNDARIES_S),
+            explicit_bucket_boundaries_advisory=list(DRIVER_DURATION_BOUNDARIES_MS),
         )
         for attribute, name, description in (
             ("input_items", ROLLOUT_INPUT_ITEMS_INSTRUMENT, "Input items one completed rollout started with."),
@@ -398,20 +399,20 @@ class DriverCounts:
         """Rollouts admitted past the concurrency limit and running."""
 
 
-#: Seconds. Admission can wait for minutes behind a small concurrency limit, and writing one row takes microseconds.
-DRIVER_DURATION_BOUNDARIES_S: tuple[float, ...] = (
-    0.0001,
-    0.001,
-    0.01,
+#: Milliseconds. Admission can wait for minutes behind a small concurrency limit, and writing one row takes microseconds.
+DRIVER_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
     0.1,
-    0.5,
     1,
-    5,
     10,
-    30,
-    60,
-    300,
-    1800,
+    100,
+    500,
+    1000,
+    5000,
+    10000,
+    30000,
+    60000,
+    300000,
+    1800000,
 )
 #: Counts of items, turns, or calls in one rollout, from a single message to a very long agent trajectory.
 ROLLOUT_COUNT_BOUNDARIES: tuple[float, ...] = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 4096)
@@ -446,7 +447,7 @@ class _ProcessObserver:
 
     def record_gc_pauses(self) -> None:
         for generation, seconds in self.gc.drain_pauses():
-            self.gc_pause.record(seconds, attributes={GC_GENERATION_ATTRIBUTE: generation})
+            self.gc_pause.record(seconds * 1000.0, attributes={GC_GENERATION_ATTRIBUTE: generation})
 
 
 _PROCESS_LOCK = threading.Lock()
@@ -478,7 +479,7 @@ class MeteredAdmission:
     async def __aenter__(self) -> None:
         queued_at = time.perf_counter()
         await self._semaphore.__aenter__()
-        self._observer.admission.record(time.perf_counter() - queued_at)
+        self._observer.admission.record((time.perf_counter() - queued_at) * 1000.0)
         self._observer.driver.active += 1
 
     async def __aexit__(self, *exc_info: Any) -> Any:
@@ -542,7 +543,7 @@ async def _sample(state: _ProcessObserver, interval_seconds: float, loop_name: s
         deadline = time.monotonic() + interval_seconds
         await asyncio.sleep(interval_seconds)
         try:
-            state.lag.record(max(0.0, time.monotonic() - deadline), attributes=attributes)
+            state.lag.record(max(0.0, time.monotonic() - deadline) * 1000.0, attributes=attributes)
             if count_tasks:
                 # Walks every task on the loop, so it is opt-in: see `TelemetryConfig.event_loop_task_count`.
                 state.tasks.set(len(asyncio.all_tasks(loop)), attributes=attributes)

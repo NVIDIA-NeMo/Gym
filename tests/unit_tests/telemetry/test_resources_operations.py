@@ -51,10 +51,10 @@ def test_queue_wait_and_execution_are_recorded_by_operation_and_executor(collect
 
     assert snapshots == [{("verify", "subprocess"): 1}] * 3, "the limit of one runs one operation at a time"
     (queue,) = exported[ops.QUEUE_DURATION_INSTRUMENT]
-    assert queue.attributes == {"operation": "verify", "executor": "subprocess"}
-    assert queue.count == 3 and queue.max >= 0.09, "the third operation waited for the two ahead of it"
+    assert queue.attributes == {ops.OPERATION_ATTRIBUTE: "verify", ops.EXECUTOR_ATTRIBUTE: "subprocess"}
+    assert queue.count == 3 and queue.max >= 90, "the third operation waited for the two ahead of it, in milliseconds"
     (duration,) = exported[ops.DURATION_INSTRUMENT]
-    assert duration.attributes["outcome"] == "ok" and duration.count == 3
+    assert duration.attributes[ops.OUTCOME_ATTRIBUTE] == "ok" and duration.count == 3
     assert {point.value for point in exported[ops.ACTIVE_INSTRUMENT]} == {0}
     assert {point.value for point in exported[ops.QUEUED_INSTRUMENT]} == {0}
 
@@ -65,7 +65,7 @@ def test_the_block_can_report_a_timeout(collected):  # noqa: F811
             op.outcome = "timeout"
 
     (duration,) = _run(collected, body)[ops.DURATION_INSTRUMENT]
-    assert duration.attributes["outcome"] == "timeout"
+    assert duration.attributes[ops.OUTCOME_ATTRIBUTE] == "timeout"
 
 
 @pytest.mark.parametrize(
@@ -81,7 +81,7 @@ def test_an_exception_sets_the_outcome_and_still_releases_the_limit(collected, e
         assert not semaphore.locked()
 
     (duration,) = _run(collected, body)[ops.DURATION_INSTRUMENT]
-    assert duration.attributes["outcome"] == outcome
+    assert duration.attributes[ops.OUTCOME_ATTRIBUTE] == outcome
 
 
 def test_unknown_labels_are_folded_into_other(collected):  # noqa: F811
@@ -90,7 +90,10 @@ def test_unknown_labels_are_folded_into_other(collected):  # noqa: F811
             pass
 
     (duration,) = _run(collected, body)[ops.DURATION_INSTRUMENT]
-    assert (duration.attributes["operation"], duration.attributes["executor"]) == ("other", "other")
+    assert (duration.attributes[ops.OPERATION_ATTRIBUTE], duration.attributes[ops.EXECUTOR_ATTRIBUTE]) == (
+        "other",
+        "other",
+    )
 
 
 def test_without_metrics_it_only_enters_the_limit():

@@ -25,8 +25,8 @@ Wrapping the limited work in :func:`resources_operation` makes that visible:
 
 It reports, by ``operation`` and ``executor``:
 
-* ``gym.resources.operation.queue.duration`` (histogram, seconds): time waiting for the limit.
-* ``gym.resources.operation.duration`` (histogram, seconds, also by ``outcome``): time running inside the limit.
+* ``gym.resources.operation.queue_duration_ms`` (histogram, milliseconds): time waiting for the limit.
+* ``gym.resources.operation.duration_ms`` (histogram, milliseconds, also by ``outcome``): time running inside the limit.
   The count of each ``outcome``, such as ``timeout`` or ``crashed``, comes from this histogram.
 * ``gym.resources.operation.queued`` and ``gym.resources.operation.active``: how many operations wait and run right now.
 
@@ -44,13 +44,31 @@ OPERATIONS = frozenset({"verify", "tool", "judge", "other"})
 EXECUTORS = frozenset({"inline", "thread", "process", "subprocess", "other"})
 OUTCOMES = frozenset({"ok", "error", "timeout", "cancelled", "crashed"})
 
-QUEUE_DURATION_INSTRUMENT = "gym.resources.operation.queue.duration"
-DURATION_INSTRUMENT = "gym.resources.operation.duration"
+QUEUE_DURATION_INSTRUMENT = "gym.resources.operation.queue_duration_ms"
+DURATION_INSTRUMENT = "gym.resources.operation.duration_ms"
 QUEUED_INSTRUMENT = "gym.resources.operation.queued"
 ACTIVE_INSTRUMENT = "gym.resources.operation.active"
 
-#: Seconds. A verifier subprocess can wait behind its limit for minutes, and a cached check finishes in a millisecond.
-OPERATION_BOUNDARIES_S: tuple[float, ...] = (0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300, 1800)
+OPERATION_ATTRIBUTE = "nemo.gym.resources.operation"
+EXECUTOR_ATTRIBUTE = "nemo.gym.resources.executor"
+OUTCOME_ATTRIBUTE = "nemo.gym.resources.operation.outcome"
+
+#: Milliseconds. A verifier subprocess can wait behind its limit for minutes, and a cached check finishes in a millisecond.
+OPERATION_BOUNDARIES_MS: tuple[float, ...] = (
+    1,
+    5,
+    10,
+    50,
+    100,
+    500,
+    1000,
+    5000,
+    10000,
+    30000,
+    60000,
+    300000,
+    1800000,
+)
 
 
 class ResourcesOperation:
@@ -70,21 +88,21 @@ class _OperationMetrics:
         self.active: dict[tuple[str, str], int] = {}
         self.queue_duration = meter.create_histogram(
             QUEUE_DURATION_INSTRUMENT,
-            unit="s",
+            unit="ms",
             description="Time one resources operation waited for its concurrency limit.",
-            explicit_bucket_boundaries_advisory=list(OPERATION_BOUNDARIES_S),
+            explicit_bucket_boundaries_advisory=list(OPERATION_BOUNDARIES_MS),
         )
         self.duration = meter.create_histogram(
             DURATION_INSTRUMENT,
-            unit="s",
+            unit="ms",
             description="Time one resources operation ran inside its concurrency limit, by how it ended.",
-            explicit_bucket_boundaries_advisory=list(OPERATION_BOUNDARIES_S),
+            explicit_bucket_boundaries_advisory=list(OPERATION_BOUNDARIES_MS),
         )
 
         def observe(counts: dict[tuple[str, str], int]) -> Any:
             def callback(_options: Any) -> list:
                 return [
-                    Observation(value, {"operation": operation, "executor": executor})
+                    Observation(value, {OPERATION_ATTRIBUTE: operation, EXECUTOR_ATTRIBUTE: executor})
                     for (operation, executor), value in list(counts.items())
                 ]
 
@@ -137,14 +155,14 @@ async def resources_operation(limit: Any, *, operation: str, executor: str) -> A
         return
 
     key = (operation if operation in OPERATIONS else "other", executor if executor in EXECUTORS else "other")
-    attributes = {"operation": key[0], "executor": key[1]}
+    attributes = {OPERATION_ATTRIBUTE: key[0], EXECUTOR_ATTRIBUTE: key[1]}
     metrics.queued[key] = metrics.queued.get(key, 0) + 1
     queued_at = perf_counter()
     try:
         await limit.__aenter__()
     finally:
         metrics.queued[key] -= 1
-    metrics.queue_duration.record(perf_counter() - queued_at, attributes=attributes)
+    metrics.queue_duration.record((perf_counter() - queued_at) * 1000.0, attributes=attributes)
     metrics.active[key] = metrics.active.get(key, 0) + 1
     started = perf_counter()
     exc_info: tuple = (None, None, None)
@@ -160,5 +178,7 @@ async def resources_operation(limit: Any, *, operation: str, executor: str) -> A
     finally:
         metrics.active[key] -= 1
         outcome = op.outcome if op.outcome in OUTCOMES else "ok"
-        metrics.duration.record(perf_counter() - started, attributes={**attributes, "outcome": outcome})
+        metrics.duration.record(
+            (perf_counter() - started) * 1000.0, attributes={**attributes, OUTCOME_ATTRIBUTE: outcome}
+        )
         await limit.__aexit__(*exc_info)

@@ -1311,7 +1311,7 @@ def _record_output_write(started: float, serialized: bytes) -> None:
     """Record how long one output row took to write and how large it was, while metrics are exporting."""
     observer = driver_metrics()
     if observer is not None:
-        observer.write_duration.record(perf_counter() - started)
+        observer.write_duration.record((perf_counter() - started) * 1000.0)
         observer.write_bytes.record(len(serialized) + 1)
 
 
@@ -2722,7 +2722,7 @@ class RolloutCollectionHelper(BaseModel):
                     f.write(orjson.dumps(row) + b"\n")
             observer = driver_metrics()
             if observer is not None:
-                observer.materialize.record(perf_counter() - materialize_started)
+                observer.materialize.record((perf_counter() - materialize_started) * 1000.0)
             output_fpath.unlink(missing_ok=True)
             # A fresh run must not inherit retry attempts or published metrics
             # from an older run that used the same output path.

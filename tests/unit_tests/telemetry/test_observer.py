@@ -108,11 +108,13 @@ def test_the_observer_reports_loop_gc_and_process_metrics(collected):
     (lag,) = metrics[observer.EVENT_LOOP_LAG_INSTRUMENT]
     assert lag.count >= 1 and lag.attributes == {"nemo.gym.event_loop": "server"}
     assert observer.EVENT_LOOP_TASKS_INSTRUMENT not in metrics, "counting tasks is opt-in"
-    assert any(point.attributes == {"generation": 0} for point in metrics[observer.GC_PAUSE_INSTRUMENT])
+    assert any(
+        point.attributes == {observer.GC_GENERATION_ATTRIBUTE: 0} for point in metrics[observer.GC_PAUSE_INSTRUMENT]
+    )
     assert {p.attributes["cpu.mode"] for p in metrics[observer.PROCESS_CPU_TIME_INSTRUMENT]} == {"user", "system"}
     assert metrics[observer.PROCESS_MEMORY_USAGE_INSTRUMENT][0].value > 0
     assert metrics[observer.PROCESS_THREAD_COUNT_INSTRUMENT][0].value >= 1
-    assert {p.attributes["generation"] for p in metrics[observer.GC_COUNT_INSTRUMENT]} == {0, 1, 2}
+    assert {p.attributes[observer.GC_GENERATION_ATTRIBUTE] for p in metrics[observer.GC_COUNT_INSTRUMENT]} == {0, 1, 2}
     if sys.platform.startswith("linux"):
         assert metrics[observer.PROCESS_OPEN_FDS_INSTRUMENT][0].value > 0
 
@@ -129,7 +131,7 @@ def test_a_blocked_event_loop_shows_up_as_lag(collected):
     asyncio.run(block())
 
     (lag,) = collected()[observer.EVENT_LOOP_LAG_INSTRUMENT]
-    assert lag.max >= 0.1
+    assert lag.max >= 100  # milliseconds
 
 
 def test_the_gc_callback_is_installed_once_and_removed_with_the_last_loop(collected):
@@ -367,7 +369,7 @@ class TestDriverMetrics:
         assert active_after == 0 and resident_after == 0
         (admission,) = exported[observer.DRIVER_ADMISSION_INSTRUMENT]
         assert admission.count == 3
-        assert admission.max >= 0.09, "the third rollout waited for the two ahead of it"
+        assert admission.max >= 90, "the third rollout waited for the two ahead of it, in milliseconds"
 
     def test_resident_counts_rollouts_waiting_for_admission(self, collected):
         async def run():

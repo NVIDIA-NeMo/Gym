@@ -32,7 +32,6 @@ would disagree the first time one dropped a sample.
 | `gym.http.connection_pool.queue_duration_ms` | Histogram | ms | Time one queued connection acquisition waited for an aiohttp pool slot. |
 | `gym.http.connection_pool.connect_total` | Observable counter | count | All outbound aiohttp connection attempts (`connect()` calls), including attempts that later fail or are abandoned. |
 | `gym.rollout.completed_total` | Counter | count | Rollout attempts the collection driver finished handling, by outcome. See below. |
-
 | `gym.http.connection_pool.connect_duration_ms` | Histogram | ms | Time to open one new pooled connection, including DNS, TCP, and TLS setup. Reused connections record nothing. |
 | `gym.server.memory.usage` | Gauge | bytes | Current RSS or PSS for one managed server and its descendants. |
 | `gym.server.memory.sampled_peak` | Gauge | bytes | Largest value observed by the sampler for one managed server and its descendants. |
@@ -97,41 +96,43 @@ A Gym server answers every request on one asyncio event loop. When synchronous w
 
 | Metric | Type | Unit | Meaning |
 | --- | --- | --- | --- |
-| `gym.event_loop.lag` | Histogram | s | How late a sleeping coroutine wakes up, sampled once per interval. This is the signal that the event loop is busy. |
+| `gym.event_loop.lag_ms` | Histogram | ms | How late a sleeping coroutine wakes up, sampled once per interval. This is the signal that the event loop is busy. |
 | `gym.event_loop.tasks` | Gauge | count | Asyncio tasks that exist on the loop, reported only when `telemetry.event_loop_task_count` is true. This counts resident work, not a queue: a task waiting on the network counts as much as a runnable one. |
-| `gym.gc.pause` | Histogram | s | Duration of one garbage collection, by `generation`. |
-| `gym.gc.collections` | Counter | count | Garbage collections, by `generation`. |
-| `gym.gc.collected` | Counter | count | Objects freed, by `generation`. |
-| `gym.gc.uncollectable` | Counter | count | Objects found but not freed, by `generation`. |
-| `gym.gc.count` | Gauge | count | Allocations counted toward the next collection, by `generation`. |
+| `gym.gc.pause_duration_ms` | Histogram | ms | Duration of one garbage collection, by `nemo.gym.gc.generation`. |
+| `gym.gc.collections_total` | Counter | count | Garbage collections, by `nemo.gym.gc.generation`. |
+| `gym.gc.collected_total` | Counter | count | Objects freed, by `nemo.gym.gc.generation`. |
+| `gym.gc.uncollectable_total` | Counter | count | Objects found but not freed, by `nemo.gym.gc.generation`. |
+| `gym.gc.count` | Gauge | count | Allocations counted toward the next collection, by `nemo.gym.gc.generation`. |
 | `process.cpu.time` | Counter | s | Process CPU time, by `cpu.mode` (`user` or `system`). |
 | `process.memory.usage` | Gauge | bytes | Resident memory of the process. |
 | `process.thread.count` | Gauge | count | Threads in the process. |
 | `process.open_file_descriptor.count` | Gauge | count | Open file descriptors, where the platform reports them. |
 | `gym.server.requests.in_flight` | Up/down counter | count | HTTP requests the server is handling. |
-| `gym.server.requests.cancelled` | Counter | count | Requests cancelled because the client disconnected before the response finished. |
-| `gym.server.requests.failed` | Counter | count | Requests whose handler raised past every middleware. |
+| `gym.server.requests.cancelled_total` | Counter | count | Requests cancelled because the client disconnected before the response finished. |
+| `gym.server.requests.failed_total` | Counter | count | Requests whose handler raised past every middleware. |
 | `gym.http.client.requests.in_flight` | Up/down counter | count | Outbound calls through `server_utils.request` still waiting for their response headers. |
 
 The rollout driver, which is `gym eval run`, reports how much work it holds and where that work waits:
 
 | Metric | Type | Unit | Meaning |
 | --- | --- | --- | --- |
-| `gym.driver.rollouts.offered` | Counter | count | Rollouts handed to dispatch. |
+| `gym.driver.rollouts.offered_total` | Counter | count | Rollouts handed to dispatch. |
 | `gym.driver.rollouts.resident` | Up/down counter | count | Rollout tasks that exist and have not finished, whether waiting for admission or running. |
 | `gym.driver.rollouts.active` | Up/down counter | count | Rollouts admitted past the concurrency limit and running. |
-| `gym.driver.admission.duration` | Histogram | s | Time one rollout waited for the concurrency limit before it started. |
-| `gym.driver.output.write.duration` | Histogram | s | Time to write and flush one rollout's output row. |
-| `gym.driver.output.write.bytes` | Histogram | bytes | Size of one rollout's output row. |
-| `gym.driver.materialize.duration` | Histogram | s | Time to read, repeat, and write a run's input rows before dispatch. |
-| `gym.driver.rollout.input.items` | Histogram | count | Input items one completed rollout started with. |
-| `gym.driver.rollout.output.items` | Histogram | count | Output items in one completed rollout's final response. |
+| `gym.driver.admission_duration_ms` | Histogram | ms | Time one rollout waited for the concurrency limit before it started. |
+| `gym.driver.output_write_duration_ms` | Histogram | ms | Time to write and flush one rollout's output row. |
+| `gym.driver.output_write_bytes` | Histogram | bytes | Size of one rollout's output row. |
+| `gym.driver.materialize_duration_ms` | Histogram | ms | Time to read, repeat, and write a run's input rows before dispatch. |
+| `gym.driver.rollout.input_items` | Histogram | count | Input items one completed rollout started with. |
+| `gym.driver.rollout.output_items` | Histogram | count | Output items in one completed rollout's final response. |
 | `gym.driver.rollout.turns` | Histogram | count | Agent turns in one completed rollout. Recorded only when rollout observability produced the rollout's `ng_perf`. |
 | `gym.driver.rollout.tool_calls` | Histogram | count | Tool calls in one completed rollout, from `ng_perf`, or counted from the final response's `function_call` items without it. |
 
 Resident minus active is the number of rollouts waiting for admission. A standalone `gym eval run --no-serve` driver sets up its own telemetry from the `telemetry:` block, so it reports these metrics and the `gym.job` span too.
 
-`gym.event_loop.lag` and `gym.event_loop.tasks` carry `nemo.gym.event_loop`, which is `server` for a server's own loop, `head_server` for the head server's loop inside the supervisor, and `driver` for the rollout driver's loop.
+`gym.event_loop.lag_ms` and `gym.event_loop.tasks` carry `nemo.gym.event_loop`, which is `server` for a server's own loop, `head_server` for the head server's loop inside the supervisor, and `driver` for the rollout driver's loop.
+
+The `process.*` metrics keep the OpenTelemetry process semantic-convention names, units, and `cpu.mode` attribute, so standard dashboards recognize them. The Gym metrics follow Gym's own conventions: durations in milliseconds with a `_ms` suffix, counters with a `_total` suffix, and attributes under `nemo.gym.`.
 
 The work stays off the request path. The event loop runs one sampling coroutine per interval. Process, garbage-collection, and request totals are plain counters that the exporter's background thread reads when it exports, so a request costs a few integer updates and no OpenTelemetry call.
 
@@ -148,12 +149,12 @@ async with resources_operation(self._semaphore, operation="verify", executor="su
 
 | Metric | Type | Unit | Meaning |
 | --- | --- | --- | --- |
-| `gym.resources.operation.queue.duration` | Histogram | s | Time one operation waited for its limit. |
-| `gym.resources.operation.duration` | Histogram | s | Time one operation ran inside its limit, by `outcome`: `ok`, `error`, `timeout`, `cancelled`, or `crashed`. |
+| `gym.resources.operation.queue_duration_ms` | Histogram | ms | Time one operation waited for its limit. |
+| `gym.resources.operation.duration_ms` | Histogram | ms | Time one operation ran inside its limit, by `nemo.gym.resources.operation.outcome`: `ok`, `error`, `timeout`, `cancelled`, or `crashed`. |
 | `gym.resources.operation.queued` | Up/down counter | count | Operations waiting for their limit. |
 | `gym.resources.operation.active` | Up/down counter | count | Operations running inside their limit. |
 
-Every metric carries `operation` (`verify`, `tool`, `judge`, or `other`) and `executor` (`inline`, `thread`, `process`, `subprocess`, or `other`). They are recorded only while metrics are exported. `math_with_judge` uses this contract for its SymPy verifier subprocesses.
+Every metric carries `nemo.gym.resources.operation` (`verify`, `tool`, `judge`, or `other`) and `nemo.gym.resources.executor` (`inline`, `thread`, `process`, `subprocess`, or `other`). They are recorded only while metrics are exported. `math_with_judge` uses this contract for its SymPy verifier subprocesses.
 
 ### Memory Metrics
 
