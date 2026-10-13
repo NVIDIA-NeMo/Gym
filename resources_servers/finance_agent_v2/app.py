@@ -214,6 +214,12 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
         "wall time (a question has ~9 criteria x 3-10 calls) without stampeding the "
         "judge endpoint. 1 makes judging fully sequential.",
     )
+    reward_mode: Literal["partial_credit", "all_pass"] = Field(
+        default="partial_credit",
+        description="partial_credit: Vals's Partial Credit (severity-weighted pass fraction, "
+        "0.0 when any must_pass criterion fails). all_pass: binary, 1.0 only when every "
+        "criterion passes, i.e. every criterion is treated as must_pass.",
+    )
 
     # --- Tool response caching -----------------------------------------------
     # Disk cache for pricing, edgar_search, and sec.gov documents. Stores the raw
@@ -1096,9 +1102,14 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             scores["rubric_partial_credit"],
         )
 
+        if self.config.reward_mode == "all_pass":
+            reward = 1.0 if scores["rubric_all_pass"] else 0.0
+        else:
+            reward = scores["rubric_partial_credit"]
+
         return FinanceAgentV2VerifyResponse(
             **body.model_dump(),
-            reward=scores["rubric_partial_credit"],
+            reward=reward,
             rubric_judgements=list(judgements),
             **scores,
             judge_error=judge_error,

@@ -355,9 +355,13 @@ them, so a criterion cannot be graded more harshly for being expensive to fail.
 Criteria without `modifiers` default to severity 1.0 and non-gating, so an
 unweighted dataset scores as a plain pass fraction.
 
+Set `reward_mode: all_pass` for a binary reward instead: `1.0` only when every
+criterion passes, as if all of them were `must_pass`. The other fields below are
+reported the same way in both modes.
+
 | Field | Meaning |
 |---|---|
-| `reward` | Partial Credit — the weighted pass fraction, zeroed by any failed dealbreaker |
+| `reward` | Partial Credit — the weighted pass fraction, zeroed by any failed dealbreaker (`rubric_all_pass` as 0/1 under `reward_mode: all_pass`) |
 | `rubric_partial_credit` | the same number under Vals's name for it |
 | `rubric_weighted_fraction` | Partial Credit *before* gating; the gap is what the dealbreakers cost |
 | `rubric_all_pass` | `true` only when every criterion resolved and passed — Vals's All-Pass |

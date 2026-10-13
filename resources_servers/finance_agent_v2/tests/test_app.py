@@ -811,6 +811,20 @@ class TestVerifyRubricJudge:
         assert not any("severity" in p or "must_pass" in p for p in stub.prompts)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("votes", "expected_reward"),
+        [([[1, 1, 1], [1, 1, 1], [1, 1, 1]], 1.0), ([[1, 1, 1], [0, 0, 0], [1, 1, 1]], 0.0)],
+        ids=["all_pass", "one_fails"],
+    )
+    async def test_all_pass_reward_mode_is_binary(self, votes, expected_reward) -> None:
+        server, _ = _rubric_server(dict(zip((_C1, _C2, _C3), votes)), reward_mode="all_pass")
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2, _C3)))
+
+        assert res.reward == expected_reward
+        assert res.rubric_all_pass is (expected_reward == 1.0)
+        assert res.rubric_partial_credit == pytest.approx(sum(v[0] for v in votes) / 3)
+
+    @pytest.mark.asyncio
     async def test_weighting_is_backward_compatible_without_modifiers(self) -> None:
         """A rubric with no modifiers scores exactly as it did before weighting."""
         server, _ = _rubric_server({_C1: [1, 1, 1], _C2: [0, 0, 0]})
