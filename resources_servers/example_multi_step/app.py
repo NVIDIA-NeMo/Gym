@@ -68,7 +68,6 @@ class ExampleMultiStepVerifyResponse(BaseVerifyResponse):
 
 
 class ExampleMultiStepResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ExampleMultiStepResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

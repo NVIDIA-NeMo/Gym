@@ -44,6 +44,18 @@ EXPORTER_REGISTRY: dict[str, tuple[type[ExporterConfig], str, str]] = {
 _EXPORTERS: list[BaseExporter] = []
 
 
+def exporter_extras(config: Any) -> tuple[str, ...]:
+    """The install extras of every exporter `config` fully configures, in registry order.
+
+    A driver that installs Gym must install these too, or the exporter is skipped at run time.
+    """
+    return tuple(
+        extra
+        for config_model, _, extra in EXPORTER_REGISTRY.values()
+        if config_model.model_validate(config).is_available
+    )
+
+
 def _load_exporter_class(class_path: str) -> type[BaseExporter]:
     module_name, class_name = class_path.split(":")
     return getattr(import_module(module_name), class_name)

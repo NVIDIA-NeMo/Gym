@@ -37,7 +37,7 @@ from nemo_gym.global_config import (
     ROLLOUT_INFOS_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
-from nemo_gym.metrics_config import PassMajorityStat, Stat, is_primary_metric
+from nemo_gym.metrics_config import COMPLETION_TOKEN_METRIC_NAMES, PassMajorityStat, Stat, is_primary_metric
 
 
 # The per-task field flips are computed from. Every verify response carries `reward` at minimum.
@@ -95,7 +95,9 @@ def _repeat_metric_values(run: LoadedRun, name: str) -> List[float]:
 
 def _warn_if_repeat_samples_differ(run: LoadedRun, label: str) -> None:
     """Warn when repeat estimates cover incomplete or unequal task samples."""
-    sample_counts = {entry.get("sample_count") for entry in run.repeat_level_metrics}
+    sample_counts = {
+        entry["sample_count"] for entry in run.repeat_level_metrics if entry.get("sample_count") is not None
+    }
     if any(entry.get("missing_count", 0) > 0 for entry in run.repeat_level_metrics) or len(sample_counts) > 1:
         warnings.warn(
             f"{label} agent {run.agent_name!r} has incomplete or unequal task coverage across repeats; "
@@ -158,7 +160,16 @@ def build_metric_rows(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> L
 
     baseline_metrics = {**baseline.key_metrics, **baseline.agent_metrics}
     candidate_metrics = [{**run.key_metrics, **run.agent_metrics} for run in candidates]
-    key_metric_names = set(baseline.key_metrics) | {name for run in candidates for name in run.key_metrics}
+    for metrics in (baseline_metrics, *candidate_metrics):
+        for name in COMPLETION_TOKEN_METRIC_NAMES:
+            repeat_mean = _numeric(metrics.get(f"{Stat.MEAN.across_repeats_prefix}{name}"))
+            if repeat_mean is not None:
+                metrics[name] = repeat_mean
+    headline_metric_names = (
+        set(baseline.key_metrics)
+        | {name for run in candidates for name in run.key_metrics}
+        | set(COMPLETION_TOKEN_METRIC_NAMES)
+    )
 
     rows: List[MetricRow] = []
     for name in _ordered_metric_names(baseline_metrics, candidate_metrics):
@@ -180,7 +191,7 @@ def build_metric_rows(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> L
         rows.append(
             MetricRow(
                 metric=name,
-                is_key_metric=name in key_metric_names,
+                is_key_metric=name in headline_metric_names,
                 present_in=present_in,
                 baseline=baseline_value,
                 candidates=candidate_values,

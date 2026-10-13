@@ -56,7 +56,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from nemo_gym.server_utils import request as http_request
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 
@@ -64,12 +64,16 @@ from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 LOG = logging.getLogger(__name__)
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+RESOURCE_ONLY_METADATA_KEYS = frozenset(
+    {"baseline_response", "baseline_model", "baseline_dataset_file", "baseline_row_index"}
+)
 
 
 @dataclass
 class SimpleAgentSessionState(AgentSessionState):
     tool_access: DirectHTTPToolAccess | None
-    resources_cookies: dict[str, str]
+    # None means the session holds no resources cookie jar, so close leaves the Environment Server's jar unchanged.
+    resources_cookies: dict[str, str] | None
     observations: AgentObservationBundle | None = None
     activations: int = 0
 
@@ -100,8 +104,17 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 
 
 class SimpleAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: SimpleAgentConfig
+
+    @staticmethod
+    def _strip_resource_only_metadata(
+        body: NeMoGymResponseCreateParamsNonStreaming,
+    ) -> NeMoGymResponseCreateParamsNonStreaming:
+        # Keep judge-only baseline data out of policy requests to avoid unnecessary payload.
+        metadata = dict(body.metadata or {})
+        for key in RESOURCE_ONLY_METADATA_KEYS:
+            metadata.pop(key, None)
+        return body.model_copy(update={"metadata": metadata or None})
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> SimpleAgentSessionState:
         if body.sandbox_access is not None:
@@ -119,7 +132,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return SimpleAgentSessionState(
             request=body,
             tool_access=direct_access,
-            resources_cookies=dict(direct_access.cookies) if direct_access is not None else {},
+            resources_cookies=dict(direct_access.cookies) if direct_access is not None else None,
         )
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
@@ -150,6 +163,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         turns: list[TrajectoryTurn] = []
         trajectory_gaps: list[ObservationGap] = []
         body = body.model_copy(deep=True)
+        body = self._strip_resource_only_metadata(body)
 
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -394,7 +408,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             collect_trajectory=collect_trajectory,
         )
         if state is not None:
-            state.resources_cookies = dict(resources_server_cookies or {})
+            if state.tool_access is not None:
+                state.resources_cookies = dict(resources_server_cookies or {})
             if trajectory is not None:
                 # A session returns agent evidence at close, where the Environment Server records it.
                 previous = state.observations
@@ -439,7 +454,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         response = await self.server_client.post(
             server_name=self.config.name,
             url_path=self.url_path_for_run("/v1/responses", body),
-            json=body.responses_create_params,
+            json=self._strip_resource_only_metadata(body.responses_create_params),
             cookies=cookies,
         )
         await raise_for_status(response)
@@ -521,3 +536,5 @@ def _cookies(response: Any) -> dict[str, str]:
 
 if __name__ == "__main__":
     SimpleAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = SimpleAgent.run_webserver()  # noqa: F401

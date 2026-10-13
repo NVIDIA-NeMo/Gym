@@ -80,8 +80,6 @@ class LegalAgentBenchResourcesServerConfig(BaseResourcesServerConfig):
 class LegalAgentBenchResourcesServer(SimpleResourcesServer):
     """Prepare immutable source assets and a credential-isolated runtime tree."""
 
-    ray_enabled = False
-
     config: LegalAgentBenchResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

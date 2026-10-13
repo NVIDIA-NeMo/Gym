@@ -89,7 +89,6 @@ def _assistant_text(messages: List[NeMoGymResponseOutputMessage]) -> str:
 
 
 class ToolSandboxAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: ToolSandboxAgentConfig
 
     def update_agent_state(

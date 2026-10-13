@@ -31,6 +31,7 @@ from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.benchmarks import (
     BenchmarkConfig,
     discover_benchmarks,
@@ -53,6 +54,13 @@ from nemo_gym.config_types import (
     ServerInstanceConfig,
 )
 from nemo_gym.discovery import read_config_metadata
+from nemo_gym.eval_plan import (
+    PlanBenchmark,
+    PlanGym,
+    build_eval_plan,
+    eval_plan_json_schema,
+    write_eval_plan,
+)
 from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
@@ -66,6 +74,8 @@ from nemo_gym.global_config import (
     resolve_dataset_agent,
     taskset_environment_server_name,
 )
+from nemo_gym.orchestration.jobs import installed_gym_commit
+from nemo_gym.package_info import __version__
 
 
 logger = logging.getLogger(__name__)
@@ -255,16 +265,8 @@ def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
         ) from exc
 
 
-@exit_cleanly_on_config_error
-def prepare_benchmark() -> None:
-    """CLI command: prepare benchmark data."""
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        )
-    )
-    prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
-
+def _datasets_to_prepare(global_config_dict: DictConfig) -> List[BenchmarkConfig]:
+    """Every dataset the resolved config prepares: benchmark datasets and other datasets with a prepare_script."""
     # A benchmark dataset may be declared by an agent block (legacy) or a resources server
     # block (decoupled layout). `resolve_dataset_agent` is the same resolver rollout dispatch
     # uses, so preparation and rollout always agree.
@@ -321,16 +323,21 @@ def prepare_benchmark() -> None:
                 if inspected_server_instances
                 else "No server instances with `responses_api_agents` were found in the resolved config."
             )
-            + " Pass a config with `gym eval prepare --config <config path>`."
+            + " Pass a config with `--config <config path>` or a benchmark with `--benchmark <name>`."
         )
 
+    return datasets_to_prepare
+
+
+def _prepare_datasets(datasets: Sequence[BenchmarkConfig], prepare_benchmark_config: PrepareBenchmarkConfig) -> None:
+    """Run each dataset's prepare script, after validating all of them."""
     # Validate all datasets before preparing any
     prepare_script_missing: List[BenchmarkConfig] = []
     prepare_function_missing: List[BenchmarkConfig] = []
 
     validated: List[Tuple[BenchmarkConfig, str]] = []
     already_prepared: List[BenchmarkConfig] = []
-    for benchmark_config in datasets_to_prepare:
+    for benchmark_config in datasets:
         prepare_script = benchmark_config.dataset.prepare_script
         if prepare_script is None:
             raise ConfigError(f"Dataset {benchmark_config.name!r} has no prepare_script")
@@ -394,6 +401,96 @@ def prepare_benchmark() -> None:
     else:
         results = map(_multiprocess_benchmark_prepare_fn, validated)
         list(tqdm(results, total=len(validated)))
+
+
+@exit_cleanly_on_config_error
+def prepare_benchmark() -> None:
+    """CLI command: prepare benchmark data."""
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        )
+    )
+    prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
+    _prepare_datasets(_datasets_to_prepare(global_config_dict), prepare_benchmark_config)
+
+
+class PlanBenchmarkConfig(PrepareBenchmarkConfig):
+    """
+    Prepare one benchmark and write its plan: every task once, with a stable id and a digest of its input.
+
+    The plan file's format is versioned and printed by `--schema`.
+    Benchmarks whose rows have no `task_id`/`problem_id`/`instance_id`, and benchmarks with a prompt template,
+    are refused.
+
+    Examples:
+
+    ```bash
+    gym eval plan --benchmark terminal_bench_2_1/terminus_2 --out plan.json
+    gym eval plan --schema
+    ```
+    """
+
+    plan_output_fpath: Path | None = Field(default=None, description="Where to write the plan file")
+    plan_task_ids: List[str] | None = Field(default=None, description="Only plan these task ids")
+    print_plan_schema: bool = Field(default=False, description="Print the plan file's JSON Schema and exit")
+
+
+def _gym_relative_path(path: str) -> str:
+    """A config path relative to the Gym checkout when it lies inside it, so plans match across machines."""
+    try:
+        return str(Path(path).resolve().relative_to(PARENT_DIR.resolve()))
+    except ValueError:
+        return str(path)
+
+
+@exit_cleanly_on_config_error
+def plan_benchmark() -> None:
+    """CLI command: write a benchmark's evaluation plan."""
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        )
+    )
+    plan_config = PlanBenchmarkConfig.model_validate(global_config_dict)
+    if plan_config.print_plan_schema:
+        print(eval_plan_json_schema(), end="")
+        return
+    if plan_config.plan_output_fpath is None:
+        raise ConfigError("Pass `--out <path>` for the plan file.")
+
+    # Other datasets with a prepare script are not benchmarks, so they are not part of the plan.
+    benchmarks = [
+        dataset
+        for dataset in _datasets_to_prepare(global_config_dict)
+        if isinstance(dataset.dataset, BenchmarkDatasetConfig)
+    ]
+    if len(benchmarks) != 1:
+        raise ConfigError(
+            f"A plan covers exactly one benchmark, but the config declares {len(benchmarks)}: "
+            f"{[benchmark.name for benchmark in benchmarks]}."
+        )
+    benchmark = benchmarks[0]
+    if benchmark.dataset.prompt_config is not None:
+        raise ConfigError(
+            f"Benchmark {benchmark.name!r} declares a prompt template ({benchmark.dataset.prompt_config}); "
+            "plans do not support prompt templates yet."
+        )
+
+    _prepare_datasets([benchmark], plan_config)
+    rows = [json.loads(line) for line in benchmark.dataset.jsonl_fpath.read_text().splitlines() if line.strip()]
+    plan = build_eval_plan(
+        rows,
+        benchmark=PlanBenchmark(
+            name=benchmark.name,
+            config_paths=[_gym_relative_path(path) for path in global_config_dict.get("config_paths") or []],
+        ),
+        taskset=benchmark.dataset.taskset or benchmark.name,
+        gym=PlanGym(version=__version__, commit=installed_gym_commit()),
+        selected_task_ids=plan_config.plan_task_ids,
+    )
+    write_eval_plan(plan, plan_config.plan_output_fpath)
+    print(f"Wrote the plan for {benchmark.name} ({len(plan.tasks)} tasks) to {plan_config.plan_output_fpath}")
 
 
 def _validate_split_datasets_declared(split: str, server_instance_configs: Sequence[ServerInstanceConfig]) -> None:
