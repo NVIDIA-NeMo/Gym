@@ -96,6 +96,14 @@ children too.
 - The secondary model must be a separate Gym model server, because Gym's vLLM model server replaces the request's
   model name with its own.
 - Children of a swarm share the sandbox; they edit the same working tree.
+- Only `coder` children (the default `subagent_type`) receive MCP tools. Kimi's read-only `explore` and `plan`
+  profiles get Bash and file tools only, so a root that delegates MCP-backed work to `explore` children leaves them
+  without the task tools. This is native Kimi Code behavior.
+- The runtime and `KIMI_CODE_HOME` live under `/var/tmp/nemo-gym-kimi-<id>`, outside the default `/tmp` workdir. An
+  agent that searches the whole filesystem can still find its own session files there; the run's own session is
+  selected by the id Kimi prints, so a `kimi` process an agent starts itself is not counted.
+- The prompt is passed as one command-line argument, so a single prompt is limited to Linux's 128 KiB per-argument
+  limit.
 - Only the root transcript becomes `response.output`; child conversations stay in the native session files.
 - Tested with Kimi Code 2.1.1. The session layout (`sessions/<workdir key>/<session>/agents/<agent>/wire.jsonl`) and
   its event names are internal to Kimi Code and may change between releases.

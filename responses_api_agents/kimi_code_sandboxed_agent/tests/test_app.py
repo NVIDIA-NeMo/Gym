@@ -48,7 +48,8 @@ STDOUT = [
         ],
     },
     {"role": "tool", "tool_call_id": "call-1", "content": "<agent_swarm_result>9, 25</agent_swarm_result>"},
-    {"role": "assistant", "content": "9 and 25"},
+    {"role": "assistant", "content": "<think>combine</think>9 and 25"},
+    {"role": "meta", "type": "session.resume_hint", "session_id": "session_1"},
 ]
 
 
@@ -88,10 +89,14 @@ WIRES = {
 
 def sessions_archive() -> bytes:
     buffer = io.BytesIO()
+    # session_2 stands for a kimi process an agent started itself; it must not be counted.
+    wires = {("session_1", agent): events for agent, events in WIRES.items()} | {
+        ("session_2", "main"): [usage("x", 999)]
+    }
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        for agent, events in WIRES.items():
+        for (session, agent), events in wires.items():
             data = "\n".join(json.dumps(e) for e in events).encode()
-            info = tarfile.TarInfo(f"sessions/wd_workspace_0/session_1/agents/{agent}/wire.jsonl")
+            info = tarfile.TarInfo(f"sessions/wd_workspace_0/{session}/agents/{agent}/wire.jsonl")
             info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
     return buffer.getvalue()
@@ -173,7 +178,12 @@ async def test_swarm_run_counts_children_and_routes_through_gym(tmp_path, monkey
     result = await server.run(SimpleNamespace(cookies={}), request_body())
 
     assert result.reward == 1 and not result.kimi_failed
-    assert [item.type for item in result.response.output] == ["function_call", "function_call_output", "message"]
+    assert [item.type for item in result.response.output] == [
+        "function_call",
+        "function_call_output",
+        "reasoning",
+        "message",
+    ]
     assert result.response.output[-1].content[0].text == "9 and 25"
     # Root and both children: input = inputOther + cache reads; output = 1 per record.
     assert result.response.usage.input_tokens == 100 + 200 + 10 + 20 + 4 * 2

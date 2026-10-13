@@ -40,13 +40,11 @@ from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, SandboxObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.agent_tools import (
@@ -143,41 +141,25 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
     return base
 
 
+def _json_or_none(line: str) -> Any:
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+
 def parse_stream_json(stdout: str) -> list[Any]:
-    """Convert the root agent's `--output-format stream-json` chat messages to Responses output items."""
+    """Convert the root agent's `--output-format stream-json` chat messages to Responses output items.
+
+    Gym model servers return reasoning inside `<think>` tags in the content, which the converter splits off again.
+    """
+    converter = ResponsesConverter(return_token_id_information=False)
     output = []
-    for line in stdout.splitlines():
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for message in map(_json_or_none, stdout.splitlines()):
         if not isinstance(message, dict):
             continue
         if message.get("role") == "assistant":
-            if isinstance(message.get("content"), str) and message["content"]:
-                output.append(
-                    NeMoGymResponseOutputMessage(
-                        id=f"msg_{uuid4().hex}",
-                        role="assistant",
-                        status="completed",
-                        type="message",
-                        content=[
-                            NeMoGymResponseOutputText(type="output_text", text=message["content"], annotations=[])
-                        ],
-                    )
-                )
-            for call in message.get("tool_calls") or []:
-                function = call.get("function") or {}
-                output.append(
-                    NeMoGymResponseFunctionToolCall(
-                        type="function_call",
-                        call_id=call["id"],
-                        id=call["id"],
-                        name=function.get("name", ""),
-                        arguments=function.get("arguments") or "{}",
-                        status="completed",
-                    )
-                )
+            output.extend(converter.postprocess_assistant_message_dict(message))
         elif message.get("role") == "tool":
             content = message.get("content")
             output.append(
@@ -194,10 +176,8 @@ def parse_session(session_dir: Path) -> tuple[NeMoGymResponseUsage | None, list[
     """Sum model usage over the root and every subagent, and list the subagents from the wire logs."""
     usages, subagents = [], {}
     for wire in sorted(session_dir.glob("agents/*/wire.jsonl")):
-        for line in wire.read_text(errors="replace").splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
+        for event in map(_json_or_none, wire.read_text(errors="replace").splitlines()):
+            if not isinstance(event, dict):
                 continue
             kind = event.get("type")
             if kind == "usage.record":
@@ -351,7 +331,8 @@ class KimiCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if not prompts:
             raise ValueError("Kimi Code needs at least one user message")
 
-        remote = "/tmp/nemo-gym-kimi-" + uuid4().hex
+        # Outside the usual task workdirs, so the agent's workspace listing and searches do not include the runtime.
+        remote = "/var/tmp/nemo-gym-kimi-" + uuid4().hex
         home = remote + "/home"
         files = {home + "/config.toml": to_toml(self.build_kimi_config(body))}
         if mcp:
@@ -458,9 +439,19 @@ class KimiCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     except Exception:
                         LOG.exception("Failed to stop Kimi Code sandbox")
 
-        output = parse_stream_json((root / "stdout.jsonl").read_text(errors="replace"))
-        sessions = sorted((root / "sessions").glob("*/session_*"))
-        usage, subagents = parse_session(sessions[-1]) if sessions else (None, [])
+        stdout = (root / "stdout.jsonl").read_text(errors="replace")
+        output = parse_stream_json(stdout)
+        # Agents can start other kimi processes in the box, so pick this run's session by the id it printed.
+        session_id = next(
+            (
+                m["session_id"]
+                for m in map(_json_or_none, stdout.splitlines())
+                if isinstance(m, dict) and m.get("session_id")
+            ),
+            None,
+        )
+        sessions = list((root / "sessions").glob(f"*/{session_id}")) if session_id else []
+        usage, subagents = parse_session(sessions[0]) if sessions else (None, [])
         failed = bool(
             execution["error_type"]
             or execution["return_code"] != 0
