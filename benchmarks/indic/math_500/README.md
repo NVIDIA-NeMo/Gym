@@ -21,7 +21,9 @@ using the shared math agent, prompt, and symbolic verifier used by English
   formats beyond `\boxed{}`; this setting is isolated from the English verifier.
   For an unboxed response, only the selected final-answer candidate is graded;
   earlier intermediate answers cannot earn credit. Answer labels must introduce
-  an answer line or heading, rather than occur inside ordinary prose. Multiline
+  an answer line, heading, or explicit answer assertion (including later
+  corrections), rather than occur incidentally in prose. A spaced unary minus
+  is preserved; list markers are stripped only before an answer label. Multiline
   math blocks remain intact, and accompanying prose or units are parsed as text
   instead of being boxed as part of a mathematical expression. Unboxed candidates
   longer than 512 characters after trimming whitespace are rejected before cleanup.

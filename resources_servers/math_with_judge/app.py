@@ -133,8 +133,14 @@ _ANSWER_LABEL_RE = re.compile(
     r"(?:(?:therefore|thus|hence|so|इसलिए)[,،]?[ \t]+)?"
     rf"(?:\*\*|__)?(?:the[ \t]+)?(?:{'|'.join(_ANSWER_LABELS)})(?!\w)"
     r"[ \t]*+(?:\*\*|__)?[ \t]*+"
-    r"(?:(?:is|है|আছে|છે|ಆಗಿದೆ|ആണ്|आहे|ਹੈ|ہے)(?!\w)[ \t]*+[:：=]?|[:：=]|-[ \t]+|(?=\r?$))"
+    r"(?:(?:is|है|আছে|છે|ಆಗಿದೆ|ആണ്|आहे|ਹੈ|ہے)(?!\w)[ \t]*+[:：=]?|[:：=]|(?=-[ \t]+)|(?=\r?$))"
     r"[ \t]*+(?:\*\*|__)?[ \t]*+"
+)
+# Inline corrections require an explicit assertion, so incidental phrases such
+# as "check the answer by substitution" cannot override a final-answer label.
+_ANSWER_STATEMENT_RE = re.compile(
+    rf"(?i)(?<!\w)(?:the[ \t]+)?(?:{'|'.join(_ANSWER_LABELS)})(?!\w)[ \t]++"
+    r"(?:is|है|আছে|છે|ಆಗಿದೆ|ആണ്|आहे|ਹੈ|ہے)(?!\w)[ \t]*+[:：=]?[ \t]*+"
 )
 _OUTER_MATH_DELIMITERS = ((r"\(", r"\)"), (r"\[", r"\]"), ("$$", "$$"), ("$", "$"))
 
@@ -147,7 +153,9 @@ def _clean_answer_candidate(candidate: str) -> Optional[str]:
         return None
     candidate = re.sub(r"^(?:\*\*|__|`)+", "", candidate)
     candidate = re.sub(r"(?:\*\*|__|`)+$", "", candidate).strip()
-    candidate = re.sub(r"^[ \t]*(?:[:：=]|-[ \t]+)[ \t]*", "", candidate)
+    # A list marker is unambiguous before an answer label, but here a leading
+    # hyphen may be a unary minus (including the spaced form "- 18").
+    candidate = re.sub(r"^[ \t]*[:：=][ \t]*", "", candidate)
     candidate = re.sub(r"(?:\*\*|__)+$", "", candidate.rstrip()).strip()
 
     candidate = candidate.rstrip(".|।۔").strip()
@@ -172,8 +180,9 @@ def _extract_leading_answer_block(response: str) -> Optional[str]:
 def _extract_unboxed_answer_candidate(response: str) -> Optional[str]:
     """Extract an explicitly marked or concise final answer without using the reference answer."""
     matches = list(_ANSWER_LABEL_RE.finditer(response))
+    matches.extend(_ANSWER_STATEMENT_RE.finditer(response))
     if matches:
-        return _extract_leading_answer_block(response[matches[-1].end() :])
+        return _extract_leading_answer_block(response[max(matches, key=lambda match: match.end()).end() :])
 
     # A final display-math block can span lines even without an answer heading.
     tail = response.rstrip().rstrip(".|।۔").rstrip()
@@ -191,7 +200,7 @@ def _extract_unboxed_answer_candidate(response: str) -> Optional[str]:
         return None
 
     candidate = _clean_answer_candidate(nonempty_lines[-1])
-    if candidate is None or len(candidate) > 512 or candidate.startswith(("#", "- ", "* ")):
+    if candidate is None or len(candidate) > 512 or candidate.startswith(("#", "* ")):
         return None
 
     # A standalone final line may be a number, LaTeX expression, equation,
@@ -205,10 +214,28 @@ def _extract_unboxed_answer_candidate(response: str) -> Optional[str]:
 
 def _prepare_unboxed_verification_response(candidate: str) -> str:
     """Preserve mathematical syntax without treating explanatory prose as LaTeX."""
-    # Bare symbolic expressions and tuples need math delimiters. Restrict this
-    # conversion to math tokens, so words and Indic units stay outside LaTeX.
-    if re.fullmatch(r"(?:\\[A-Za-z]+|[A-Za-z](?![A-Za-z])|[\d\s{}\[\]().,+*/^=<>_|!%:;−±-])+", candidate):
-        candidate = f"${candidate}$"
+    # Consume each command once; allowing its last letter to become a separate
+    # token causes exponential backtracking when a later unit or prose follows.
+    match = re.match(r"(?:\\[A-Za-z]++|[A-Za-z](?![A-Za-z])|[\d\s{}\[\]().,+*/^=<>_|!%:;−±-])++", candidate)
+    if match:
+        # Keep the leading expression together (including a spaced unary minus
+        # or a sum of fractions), with units/explanations outside math delimiters.
+        # An opening parenthesis before prose is not part of the expression.
+        stack = []
+        end = 0
+        for index, character in enumerate(match[0]):
+            if character in "({[":
+                stack.append(character)
+            elif character in ")}]":
+                if not stack or stack.pop() != {")": "(", "}": "{", "]": "["}[character]:
+                    break
+            if not stack:
+                end = index + 1
+        # Fully mathematical candidates retain their original syntax, including
+        # mixed interval delimiters such as (0, 1]. Parsing belongs to the library.
+        expression = candidate if match.end() == len(candidate) else candidate[:end].rstrip()
+        if expression and expression[-1] not in "+-*/^=<>_|:;−±":
+            candidate = f"${expression}$" + candidate[len(expression) :]
     # The anchor gives a leading answer precedence over numbers in an explanation.
     # Only the selected span is passed here; earlier answers are never reintroduced.
     return f"Final answer is {candidate}"
