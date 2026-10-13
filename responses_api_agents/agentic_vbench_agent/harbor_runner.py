@@ -101,9 +101,12 @@ def job_config(
     }
     if model_timeout_ms is not None:
         provider_options["timeout"] = model_timeout_ms
+    # OpenCode gives the built-in ``openai`` provider special Responses API
+    # routing.  ``@ai-sdk/openai-compatible`` only implements the generic
+    # language-model interface, so a custom provider name is required here.
     opencode_config = {
         "provider": {
-            "openai": {
+            "nemo": {
                 "npm": "@ai-sdk/openai-compatible",
                 "options": provider_options,
                 "models": {
@@ -182,7 +185,7 @@ def job_config(
         "agents": [
             {
                 "name": "opencode",
-                "model_name": f"openai/{model}",
+                "model_name": f"nemo/{model}",
                 "kwargs": {"version": "1.14.39", "opencode_config": opencode_config},
                 # OpenCode reserves min(model output limit, this cap; default 32000) when deciding
                 # to compact. The Factory adapter sends max_tokens equal to the output limit, so the

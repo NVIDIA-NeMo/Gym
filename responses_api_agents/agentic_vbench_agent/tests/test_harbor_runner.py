@@ -213,9 +213,11 @@ def make_job(**kwargs) -> dict:
 
 
 def test_max_turns_caps_opencode_build_agent_steps() -> None:
-    config = make_job(max_turns=50)["agents"][0]["kwargs"]["opencode_config"]
+    agent = make_job(max_turns=50)["agents"][0]
+    config = agent["kwargs"]["opencode_config"]
     assert config["agent"] == {"build": {"steps": 50}}
-    assert config["provider"]["openai"]["options"]["baseURL"] == "http://10.0.0.5:3825"
+    assert config["provider"]["nemo"]["options"]["baseURL"] == "http://10.0.0.5:3825"
+    assert agent["model_name"] == "nemo/m"
 
 
 def test_turns_are_uncapped_by_default() -> None:
@@ -231,7 +233,7 @@ def test_opencode_reserves_the_declared_output_limit() -> None:
     agent = make_job()["agents"][0]
     # A template, because Harbor redacts literal *TOKEN* values when persisting the job config.
     assert agent["env"] == {"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "${OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX}"}
-    model = agent["kwargs"]["opencode_config"]["provider"]["openai"]["models"]["m"]
+    model = agent["kwargs"]["opencode_config"]["provider"]["nemo"]["models"]["m"]
     assert model["limit"] == {"context": 262144, "output": 100000}
 
 
@@ -371,9 +373,9 @@ def test_judge_key_prefers_credentials_then_hub_then_driver_key() -> None:
 
 
 def test_model_call_timeout_reaches_opencode_provider() -> None:
-    options = make_job(model_timeout_ms=3_600_000)["agents"][0]["kwargs"]["opencode_config"]["provider"]["openai"]
+    options = make_job(model_timeout_ms=3_600_000)["agents"][0]["kwargs"]["opencode_config"]["provider"]["nemo"]
     assert options["options"]["timeout"] == 3_600_000
-    assert "timeout" not in make_job()["agents"][0]["kwargs"]["opencode_config"]["provider"]["openai"]["options"]
+    assert "timeout" not in make_job()["agents"][0]["kwargs"]["opencode_config"]["provider"]["nemo"]["options"]
     with pytest.raises(ValueError, match="timeout"):
         make_job(model_timeout_ms=0)
 
