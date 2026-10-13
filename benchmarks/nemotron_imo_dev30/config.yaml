@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - resources_servers/proof_jury_judge/configs/proof_jury_judge.yaml
+
+nemotron_imo_dev30_proof_jury_judge_simple_agent:
+  _inherit_from: proof_jury_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: nemotron_imo_dev30
+        type: benchmark
+        jsonl_fpath: benchmarks/nemotron_imo_dev30/data/nemotron_imo_dev30_benchmark.jsonl
+        prompt_config: benchmarks/nemotron_imo_dev30/prompts/default.yaml
+        prepare_script: benchmarks/nemotron_imo_dev30/prepare.py
+        num_repeats: 4
+
+nemotron_imo_dev30_proof_jury_judge_environment_server:
+  _inherit_from: proof_jury_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: nemotron_imo_dev30_proof_jury_judge_simple_agent

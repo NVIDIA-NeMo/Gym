@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+proof_jury_judge:
+  resources_servers:
+    proof_jury_judge:
+      entrypoint: app.py
+      domain: math
+      verified: false
+      description: Reference-free IMO proof grading (0-7) by a jury of three frontier LLM judges
+      value: Measure natural-language olympiad proof quality without reference solutions
+      judges:
+      - type: responses_api_models
+        name: proof_jury_judge_openai_model
+      - type: responses_api_models
+        name: proof_jury_judge_google_model
+      - type: responses_api_models
+        name: proof_jury_judge_anthropic_model
+      reconcile_spread: 2
+
+# The jury: one flagship model per lab, served by an OpenAI-compatible gateway (by default
+# NVIDIA's inference API; set JUDGE_API_KEY). `X-Inference-Priority: batch` selects the gateway's
+# long-request lane: long judgments exceed the default lane's 360 s limit.
+proof_jury_judge_openai_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      api_key: ${oc.env:JUDGE_API_KEY,dummy_api_key}
+      model: openai/openai/gpt-6.1-sol
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      extra_body:
+        reasoning_effort: high
+        max_completion_tokens: 128000
+      default_headers:
+        X-Inference-Priority: batch
+
+proof_jury_judge_google_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      api_key: ${oc.env:JUDGE_API_KEY,dummy_api_key}
+      model: gcp/google/gemini-3.1-pro-preview
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      extra_body:
+        reasoning_effort: high
+        max_completion_tokens: 65536
+      default_headers:
+        X-Inference-Priority: batch
+
+proof_jury_judge_anthropic_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      api_key: ${oc.env:JUDGE_API_KEY,dummy_api_key}
+      model: azure/anthropic/claude-opus-5-5
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      extra_body:
+        max_tokens: 128000
+        thinking:
+          type: enabled
+          budget_tokens: 120000
+      default_headers:
+        X-Inference-Priority: batch
+
+proof_jury_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: proof_jury_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/proof_jury_judge/data/example.jsonl
+        license: Creative Commons Attribution 4.0 International
+
+proof_jury_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: proof_jury_judge_simple_agent

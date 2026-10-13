@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The opening of the standard proof-generation prompt of "An Open Recipe for IMO Gold"
+# (arXiv 2609.10712, Appendix B.1), without its self-evaluation instructions.
+user: |-
+  Your task is to solve a given problem. The problem may ask you to prove a statement, or ask for an answer. If finding an answer is required, you should come up with the answer, and your final solution should also be a rigorous proof of that answer being valid.
+
+  ## Problem
+
+  {problem}
