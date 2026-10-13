@@ -868,8 +868,9 @@ def test_exception_http_details_tolerates_lazy_response_failure():
 def test_context_overflow_error_fields_reads_the_engine_body_and_the_marked_code():
     from nemo_gym.base_responses_api_model import (
         CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
-        CONTEXT_OVERFLOW_ERROR_CODE_ATTRIBUTE,
+        PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
         context_overflow_error_fields,
+        is_propagated_refusal,
     )
 
     overflow = (
@@ -885,10 +886,12 @@ def test_context_overflow_error_fields_reads_the_engine_body_and_the_marked_code
         {"error": {"message": overflow, "type": "BadRequestError", "param": "input_tokens", "code": 400}}
     ).encode()
     assert context_overflow_error_fields(error) == (overflow, CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, "input_tokens")
+    assert not is_propagated_refusal(error)
 
     # The code is whatever the server stored when it marked the error; a refusal of the request's own
-    # max_tokens carries none.
-    setattr(error, CONTEXT_OVERFLOW_ERROR_CODE_ATTRIBUTE, None)
+    # max_tokens carries none, and the attribute's presence still marks the error.
+    setattr(error, PROPAGATED_REFUSAL_CODE_ATTRIBUTE, None)
+    assert is_propagated_refusal(error)
     error.response_content = json.dumps(
         {"error": {"message": "max_tokens must be at least 1, got 0.", "param": None, "code": 400}}
     ).encode()
