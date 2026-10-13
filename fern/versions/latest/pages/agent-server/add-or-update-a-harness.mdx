@@ -27,6 +27,7 @@ sequenceDiagram
     participant A as Agent Server<br/>(FastAPI adapter)
     participant S as Task sandbox<br/>(provider runtime)
     participant M as Model Server<br/>(FastAPI)
+    participant V as Verifier sandbox<br/>(SWE-Pro)
 
     Note over R,S: Provider examples: OpenSandbox HTTP(S), OpenShell gRPC,<br/>Docker CLI, Local subprocess
     E->>R: HTTP/JSON: POST /seed_session
@@ -50,18 +51,41 @@ sequenceDiagram
     A->>S: Provider exec + disconnect: release session
     A-->>E: HTTP/JSON: close result and observations
     E->>R: HTTP/JSON: POST /verify
+    alt TB2.1 borrowed session (linked revision below)
+        R->>S: Provider exec: run tests in the original sandbox
+        S-->>R: Test results and reward
+        Note over R,S: Retain task sandbox until Resources close
+    else SWE-Pro borrowed session
+        R->>S: Provider exec/files: export and download patch
+        R->>S: Provider API: stop original task sandbox
+        R->>V: Provider API/files: create verifier with patch and inputs
+        R->>V: Provider exec: run verification
+        V-->>R: Verification results
+        R->>V: Provider API: stop verifier sandbox
+    end
     R-->>E: HTTP/JSON: reward and grading evidence
     E->>R: HTTP/JSON: POST /close_session
     R->>S: Provider API/CLI: destroy task sandbox if still present
 ```
 
-Resources owns the sandbox. The agent borrows it. **Agent close must succeed before verification.**
-
-Resources may retire the task sandbox during verification. For example, SWE-Pro exports the patch, stops the task sandbox, and grades in a fresh sandbox; final Resources close releases any remaining resources.
+Resources Server decides which sandbox to reuse, when to create a verifier sandbox, and when to stop each sandbox it owns. The agent borrows the task sandbox: agent close stops harness work and disconnects without destroying that borrowed sandbox. **Agent close must succeed before verification.** EnvironmentServer orders the session calls and final cleanup; Resources implements the benchmark's sandbox lifetime policy.
 
 The `...` in agent and model routes represents Gym's rollout and optional token-capture prefix; preserve it when forwarding requests.
 
 On interruption, close joins or retries finalization: confirm cleanup, capture available artifacts, then release resources. Output collection must finish before deleting session files or stopping an agent-owned sandbox.
+
+### Two sandbox lifetime policies
+
+These cases describe the normal borrowed-session path with golden-patch mode disabled. The diagram shows one verification attempt; validation, retries, and error handling are omitted.
+
+| Resources implementation | Where verification runs | When Resources stops the sandboxes |
+| --- | --- | --- |
+| [TB2.1 session path, #3902 at `d4f9f1aa2`](https://github.com/NVIDIA-NeMo/Gym/blob/d4f9f1aa209b5c20f946a781c391d493a7d821b4/resources_servers/terminal_bench_2_1/app.py#L409-L526) | Retrieves the same sandbox used by the agent and runs `bash /tests/test.sh` there. | `verify()` calls `_verify(..., keep_sandbox_for_close=True)`, so verification retains the sandbox. EnvironmentServer's final Resources `/close_session` reaches `close_resources_session()`, which stops it. |
+| [SWE-Pro at `7f16ec541`](https://github.com/NVIDIA-NeMo/Gym/blob/7f16ec541534b95dde258c449be09a461b33e8d4/resources_servers/swebench_pro/app.py#L464-L560) | Extracts and downloads the patch from the task sandbox, then creates a fresh verifier sandbox with the patch and verification inputs. | `_extract_model_patch()` stops the original sandbox in its `finally` cleanup. Each verification attempt stops its new verifier sandbox in `finally`; final Resources close releases any remaining session resources. |
+
+The TB2.1 case is scoped to the linked #3902 implementation. Its [close handler](https://github.com/NVIDIA-NeMo/Gym/blob/d4f9f1aa209b5c20f946a781c391d493a7d821b4/resources_servers/terminal_bench_2_1/app.py#L197-L218) retains sandbox ownership if stopping fails so close can retry. Check the implementation available in your checkout before selecting a pairing.
+
+Both policies keep the Resources session API and the agent's borrowed `SandboxAccess` contract unchanged. Keep the decision to reuse a sandbox or create a fresh verifier in Resources; an agent swap must preserve the benchmark's ownership and verification policy. Final Resources close is still required even when verification has already released the original sandbox.
 
 ### Configure an experiment
 
