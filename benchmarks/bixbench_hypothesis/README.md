@@ -64,48 +64,33 @@ gym eval run --resume --concurrency 8 \
 
 ### Source
 
-The adapter expects one directory per split. Each split contains a JSONL task
-file named after the split and a `capsules/` directory containing the task
-datasets:
-
-```text
-bixbench-hypothesis/
-└── <split>/
-    ├── <split>.jsonl
-    └── capsules/
-        └── <task capsule directories and files>/
-```
-
-Each JSONL record in `<split>.jsonl` follows the `BBHTask` schema in the [adapter](./adapter.py).
+See [EdisonScientific/bixbench_hypothesis](https://huggingface.co/datasets/EdisonScientific/bixbench_hypothesis) for the source dataset.
 
 ### Harbor
 
-The adapter writes one Harbor directory per split which acts as a complete benchmark folder.
-
-All tasks use `gitlab-master.nvidia.com/nemotron-life-science/benchmarks/bbh:latest`. This image is built automatically by CI from the [`Dockerfile`](./Dockerfile).
+The adapter generates the Harbor benchmark with one directory per task and a `gym.jsonl` index.
 
 Each generated task starts from [`task-template/`](./harbor/task-template); `task.jsonl`, `instruction.md`, and `bbh.md` are
 rendered with task-specific values, while the matching source capsule is copied to `environment/data/`.
 
 ```text
-harbor-bbh/
-└── <split>/
-    ├── gym.jsonl
-    └── bbh-task__<task id>/
-        ├── task.toml
-        ├── environment/
-        │   ├── opencode.json
-        │   ├── task.jsonl
-        │   ├── data/
-        │   │   └── <copied capsule contents>/
-        │   └── .opencode/agents/bbh.md
-        └── steps/rollout/
-            ├── instruction.md
-            ├── workdir/setup.sh
-            └── tests/test.sh
+data/
+├── gym.jsonl
+└── bbh-task__<task id>/
+    ├── task.toml
+    ├── environment/
+    │   ├── opencode.json
+    │   ├── task.jsonl
+    │   ├── data/
+    │   │   └── <copied capsule contents>/
+    │   └── .opencode/agents/bbh.md
+    └── steps/rollout/
+        ├── instruction.md
+        ├── workdir/setup.sh
+        └── tests/test.sh
 ```
 
-- `gym.jsonl`: Harbor evaluation inputs for the tasks in the split for use with [NeMo Gym](https://github.com/NVIDIA-NeMo/gym). Each row follows the `HarborRunRequest` schema.
+- `gym.jsonl`: Harbor evaluation inputs for all generated tasks for use with [NeMo Gym](https://github.com/NVIDIA-NeMo/gym). Each row follows the `HarborRunRequest` schema.
   ```json
   {"task_name":"bbh-task__<task id>","responses_create_params":{"input":[]}}
   ```
