@@ -17,6 +17,7 @@ import getpass
 import re
 import shlex
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from nemo_gym import __version__
 from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
+from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_CONFIG_NAME,
     COLLECTOR_DIR,
@@ -161,6 +163,11 @@ class SlurmExecutor(BaseExecutor):
         cluster = next(iter(config.compute))
         benchmark_names = list(config.driver.benchmarks)
         _validate_benchmark_names(benchmark_names)
+        # The remote lookup overlaps the other validation, staging, the SSH connect and the mount
+        # check; it is joined before anything is copied or queued, so a bad ref still fails first.
+        pool = ThreadPoolExecutor(max_workers=1)
+        ref_check = pool.submit(validate_gym_install_ref, config)
+        pool.shutdown(wait=False)
         token = None
         if otel_active(config):
             validate_destination(config)
@@ -171,6 +178,7 @@ class SlurmExecutor(BaseExecutor):
         remote_run_dir = Path(config.job.output_path) / gym_job_id
 
         if dry_run:
+            ref_check.result()
             self._dry_run(config, compute, remote_run_dir)
             return None
 
@@ -178,6 +186,7 @@ class SlurmExecutor(BaseExecutor):
             staging = self._stage(config, compute, remote_run_dir, Path(staging_str))
             with get_connection(compute.hostname) as conn:
                 _validate_mounts(config, conn)
+                ref_check.result()
                 conn.copy(staging, remote_run_dir)
                 token_export = [f"export {config.otel.token_env}={shlex.quote(token)}"] if token is not None else []
                 output = conn.run(

@@ -75,7 +75,7 @@ def needs_environment_server(instance: dict) -> bool:
     """True for an agent instance a run dispatches to, so it needs a server in front of it.
 
     Unbound templates leave `resources_server.name` unset for composition to fill, or
-    use Hermes' native session interface with no Resources binding. A shared overlay names
+    explicitly select a native session interface without Resources. A shared overlay names
     several benchmarks' agents to override one field on each; without an entrypoint or an
     `_inherit_from` supplying one, that name is not a server
     a run can start, and declaring a server for it strands the reference in every run that merges
@@ -88,9 +88,13 @@ def needs_environment_server(instance: dict) -> bool:
     resources_server = agent.get("resources_server", {})
     if (resources_server or {}).get("name") == "???":
         return False
-    # Explicitly unbound Hermes uses native sessions; its compatibility /run requires Resources.
-    # A legacy relay here would conflict with the Environment Server supplied by composition.
-    if agent_type == "hermes_agent" and resources_server is None:
+    # Explicitly unbound native templates do not use the compatibility /run route.
+    # A legacy relay would conflict with the Environment Server supplied by composition.
+    # An omitted binding can inherit Resources and must still migrate.
+    if (
+        agent_type in {"hermes_agent", "pi_agent", "codex_agent", "openclaw_agent", "opencode_agent"}
+        and resources_server is None
+    ):
         return False
     return bool(agent.get("entrypoint") or instance.get("_inherit_from"))
 

@@ -74,8 +74,6 @@ class SessionState(BaseModel):
 class OpenEnvResourcesServer(SimpleResourcesServer):
     """Generic adapter that wraps any OpenEnv environment as a NeMo-Gym resource server."""
 
-    ray_enabled = False
-
     config: OpenEnvResourcesServerConfig
     _sessions: Dict[str, SessionState] = {}
     _env_class: Any = None

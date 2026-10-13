@@ -29,7 +29,6 @@ from resources_servers.gymnasium import GymnasiumServer, extract_text
 
 
 class ExampleMultiTurnEnv(GymnasiumServer):
-    ray_enabled = False
     session_turns: Dict[str, int] = Field(default_factory=dict)
 
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
