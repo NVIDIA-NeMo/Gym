@@ -192,9 +192,47 @@ def test_a_session_without_a_sandbox_is_rejected(client):
         _seed(client, tool_accesses=[_TOOL_ACCESS])
 
 
-def test_a_session_without_direct_tools_is_rejected(client):
-    with pytest.raises(ValueError, match="exactly one direct HTTP tool access"):
-        _seed(client, sandbox_access=_sandbox_access())
+def test_a_session_with_two_direct_tool_accesses_is_rejected(client):
+    second = _TOOL_ACCESS.model_copy(update={"name": "other.direct_http"})
+    with pytest.raises(ValueError, match="at most one direct HTTP tool access"):
+        _seed(client, sandbox_access=_sandbox_access(), tool_accesses=[_TOOL_ACCESS, second])
+
+
+def test_an_episode_without_tools_needs_no_tool_access(agent, client, root, monkeypatch):
+    agent.config.finish_tool_names = None
+    model = _ModelServer(
+        [
+            _call("code_exec", json.dumps({"cmd": "echo done > report.txt"})),
+            _call("finish", json.dumps({"reason": "done", "paths": ["report.txt"]})),
+        ]
+    )
+    monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: model.base_url)
+    try:
+        seeded = _seed(client, sandbox_access=_sandbox_access(str(root)))
+        response = client.post(
+            f"/ng-rollout/{_EPISODE.capture_key}/v1/responses", json={"input": "Write the report.", "model": "policy"}
+        )
+        _close(client)
+    finally:
+        model.close()
+
+    assert seeded.status_code == 200
+    assert response.status_code == 200, response.text
+    assert [item["name"] for item in response.json()["output"] if item["type"] == "function_call"] == [
+        "code_exec",
+        "finish",
+    ]
+    assert (root / "report.txt").read_text() == "done\n"
+
+
+def test_request_tools_without_a_tool_access_are_rejected(client, root):
+    _seed(client, sandbox_access=_sandbox_access(str(root)))
+
+    with pytest.raises(ValueError, match="grants no tool access"):
+        client.post(
+            f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
+            json={"input": "Write the report.", "model": "policy", "tools": _TOOLS},
+        )
 
 
 def test_a_session_requiring_mcp_tools_is_rejected(client):

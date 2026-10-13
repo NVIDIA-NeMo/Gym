@@ -334,7 +334,8 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
 
     _report_invalid_arguments()
     system_prompt, messages = messages_from_input(payload["input"], payload["instructions"])
-    access = payload["tool_access"]
+    # Without tool access the request has no task tools, so the client is never used.
+    access = payload["tool_access"] or {"base_url": "", "cookies": {}, "headers": {}}
     async with httpx.AsyncClient(
         base_url=access["base_url"].rstrip("/"),
         cookies=access["cookies"],

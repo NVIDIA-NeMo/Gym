@@ -37,7 +37,7 @@ HARNESS_FILES = ("nemo_agent.py", "nemo_client.py", "stirrup_utils.py", "sandbox
 @dataclass
 class StirrupSessionState(AgentSessionState):
     session: SandboxSession[dict[str, Any]]
-    tool_access: DirectHTTPToolAccess
+    tool_access: DirectHTTPToolAccess | None
     resources_cookies: dict[str, str]
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = field(default=None)
