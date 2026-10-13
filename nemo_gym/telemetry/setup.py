@@ -17,13 +17,13 @@
 Gym's process model is the thing this module exists to handle. Megatron-LM is one
 process tree and NeMo-RL is a Ray driver plus actors, but a Gym run is **N independent
 FastAPI processes** — a resources server, a model server, an agent server, sometimes more
-— spawned by a CLI orchestrator via ``Popen``, each with its own interpreter. There is no
+— spawned by a CLI supervisor via ``Popen``, each with its own interpreter. There is no
 shared memory and no parent handle to inherit: the only thing that crosses the boundary
 is the environment.
 
 So there are two entry points:
 
-* :func:`configure_telemetry_env` — called once in the **orchestrator** (``gym env
+* :func:`configure_telemetry_env` — called once in the **supervisor** (``gym env
   start`` / ``gym env test``) before any server is spawned. It translates the
   ``telemetry:`` config block into ``NEMO_GYM_OTEL_*`` env vars with ``setdefault``, so
   every server process it spawns resolves the same settings, and any env var the user set
@@ -104,6 +104,10 @@ _ENV_FIELD_MAP = {
     "instrument_aiohttp": f"{_OTEL_PREFIX}_INSTRUMENT_AIOHTTP",
 }
 
+#: The ``_ENV_FIELD_MAP`` fields that nemo-lens itself reads, each with a ``NEMO_LENS_<KEY>`` fallback.
+#: Exporting one of them as ``NEMO_GYM_OTEL_<KEY>`` would shadow that fallback.
+_LENS_FIELDS = frozenset({"span_groups", "traces_enabled", "metrics_enabled", "logs_enabled", "exporter", "run_id"})
+
 _MEMORY_PROFILING_ENV_FIELD_MAP = {
     "enabled": f"{_OTEL_PREFIX}_MEMORY_PROFILING_ENABLED",
     "interval_seconds": f"{_OTEL_PREFIX}_MEMORY_PROFILING_INTERVAL_SECONDS",
@@ -119,6 +123,18 @@ _OTLP_ENV_FIELD_MAP = {
 }
 
 _TRUTHY = ("1", "true", "yes", "on")
+
+
+def _lens_fallback_name(env_name: str) -> str:
+    """The ``NEMO_LENS_*`` fallback for Gym's ``NEMO_GYM_OTEL_*`` *env_name*."""
+    return _OTEL_FALLBACK_PREFIX + env_name.removeprefix(_OTEL_PREFIX)
+
+
+def _same_setting(config_value: Any, env_value: str) -> bool:
+    """Whether *env_value* asks for the same setting as *config_value*."""
+    if isinstance(config_value, bool):
+        return (env_value.lower() in _TRUTHY) == config_value
+    return env_value == str(config_value)
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -187,7 +203,7 @@ def telemetry_config_from_global_config(global_config_dict: Any) -> TelemetryCon
 def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> Optional[str]:
     """Translate the ``telemetry:`` block into env vars for spawned server processes.
 
-    Call once in the orchestrator, **before** spawning any server. ``os.environ`` is what
+    Call once in the supervisor, **before** spawning any server. ``os.environ`` is what
     ``Popen`` snapshots into each child, so this is how a YAML setting reaches a server
     process that shares nothing else with its parent.
 
@@ -220,6 +236,18 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
         value = getattr(telemetry_config, field, None)
         if value is None:
             continue
+        fallback = _lens_fallback_name(env_name)
+        fallback_value = os.environ.get(fallback, "").strip()
+        if field in _LENS_FIELDS and fallback_value:
+            if field in telemetry_config.model_fields_set and not _same_setting(value, fallback_value):
+                logger.warning(
+                    "telemetry.%s=%r from the config is ignored because %s=%r is set",
+                    field,
+                    value,
+                    fallback,
+                    fallback_value,
+                )
+            continue
         os.environ.setdefault(env_name, "1" if value is True else "0" if value is False else str(value))
 
     for field, env_name in _MEMORY_PROFILING_ENV_FIELD_MAP.items():
@@ -239,12 +267,13 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
 
     # One run id for the whole fleet, so every server's spans and metrics carry the same
     # nemo.run.id resource attribute and a backend can group them. Generated here because
-    # the orchestrator is the only process that sees the whole run; each server would
+    # the supervisor is the only process that sees the whole run; each server would
     # otherwise mint its own.
-    run_id = os.environ.get(f"{_OTEL_PREFIX}_RUN_ID", "").strip()
+    run_id_env = f"{_OTEL_PREFIX}_RUN_ID"
+    run_id = os.environ.get(run_id_env, "").strip() or os.environ.get(f"{_OTEL_FALLBACK_PREFIX}_RUN_ID", "").strip()
     if not run_id:
         run_id = os.environ.get("SLURM_JOB_ID", "").strip() or uuid4().hex[:12]
-        os.environ[f"{_OTEL_PREFIX}_RUN_ID"] = run_id
+        os.environ[run_id_env] = run_id
     return run_id
 
 
@@ -301,13 +330,13 @@ def server_venv_requirements() -> list:
 
     Gym builds an isolated venv per server, and those venvs install ``nemo-gym[dev]`` —
     not ``nemo-gym[telemetry]``. Without this, telemetry would be enabled in the
-    orchestrator and simply absent in every server process, which is the one
+    supervisor and simply absent in every server process, which is the one
     configuration that produces a trace with a hole in the middle of it.
 
     Pinning is derived from what *this* process has installed rather than restated here.
     A ``[tool.uv.sources]`` entry only governs dependencies resolved through the local
     project: a bare ``nemo-lens[sdk]`` passed to ``uv pip install`` ignores it and
-    resolves from PyPI, which would put lens 0.1.0 in the servers while the orchestrator
+    resolves from PyPI, which would put lens 0.1.0 in the servers while the supervisor
     runs the pinned commit. Reading the installed distribution's ``direct_url.json``
     makes that skew impossible by construction instead of by keeping two pins in sync.
 
@@ -371,7 +400,7 @@ def init_telemetry(
         server_name: This server's Gym config name (e.g. ``example_single_tool_call``).
             Used to disambiguate ``service.name`` across the fleet.
         server_type: ``resources_servers`` | ``responses_api_agents`` |
-            ``responses_api_models``, or ``orchestrator`` for the CLI.
+            ``responses_api_models``, or ``supervisor`` for the CLI.
         resource_attributes: Extra process-lifetime attributes to merge.
 
     Returns:
