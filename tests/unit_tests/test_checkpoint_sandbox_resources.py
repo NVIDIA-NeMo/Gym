@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A resources server whose sessions own sandboxes, checkpointed through the real resources participant."""
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any, ClassVar
@@ -130,7 +131,7 @@ async def test_the_snapshot_is_committed_and_a_fresh_server_forks_it(tmp_path: P
     assert snapshot["fs"] == ["echo one >> notes"]
 
     # Every Gym process dies. A fresh server restores the checkpoint and the replacement attempt replays "two".
-    _, fresh = make_server(provider)
+    restored, fresh = make_server(provider)
     async with fresh:
         fresh.cookies.update(cookies)
         restore = await fresh.post(
@@ -140,6 +141,7 @@ async def test_the_snapshot_is_committed_and_a_fresh_server_forks_it(tmp_path: P
         )
         await fresh.post("/ng-control/v1/checkpoint/resume", json=control("r1"), headers=AUTH)
         replayed = await fresh.post("/append", json={"line": "two"})
+        await restored._sandboxes.settle()
 
     assert restore.status_code == 200, restore.text
     forked = replayed.json()["sandbox_id"]
@@ -168,6 +170,7 @@ async def test_a_commit_that_no_longer_continues_a_restored_session_stops_its_sa
             headers=AUTH,
         )
         await fresh.post("/ng-control/v1/checkpoint/resume", json=control("r1"), headers=AUTH)
+        await restored._sandboxes.settle()
         [forked] = restored._sandboxes.session_ids
         fork_id = restored._sandboxes.get(forked).handle.sandbox_id
         assert fork_id != "sb-1" and provider.boxes["sb-1"]["state"] == "stopped"
@@ -271,19 +274,56 @@ async def test_a_park_failure_does_not_fail_the_stop_commit(tmp_path: Path) -> N
     assert provider.boxes["sb-1"]["state"] == "running", "runs out its TTL; the checkpoint is durable regardless"
 
 
-async def test_verify_ends_the_episode_and_deletes_its_snapshots(tmp_path: Path) -> None:
+async def test_verify_ends_the_episode_and_the_next_commit_deletes_its_snapshots(tmp_path: Path) -> None:
     provider = FakeSnapshotProvider()
     _, client = make_server(provider)
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
         await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
-        await client.post("/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path)), headers=AUTH)
+        await client.post(
+            "/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path / "c1")), headers=AUTH
+        )
         await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
         assert len(provider.snapshots) == 1
         verified = await client.post("/verify", json=VERIFY)
+        # The latest checkpoint still names the snapshot, and the controller may not have written the result yet.
+        assert provider.boxes["sb-1"]["state"] == "stopped" and len(provider.snapshots) == 1
+        await client.post("/ng-control/v1/checkpoint/prepare", json=control("c2"), headers=AUTH)
+        await client.post(
+            "/ng-control/v1/checkpoint/commit", json=control("c2", checkpoint_dir=str(tmp_path / "c2")), headers=AUTH
+        )
+        await client.post("/ng-control/v1/checkpoint/resume", json=control("c2"), headers=AUTH)
 
     assert verified.status_code == 200, verified.text
-    assert provider.boxes["sb-1"]["state"] == "stopped" and provider.snapshots == {}
+    assert provider.snapshots == {}, "the new checkpoint names nothing of the finished episode"
+
+
+async def test_a_park_that_outlives_the_commit_deadline_still_stops_every_sandbox(tmp_path: Path) -> None:
+    provider = FakeSnapshotProvider()
+    gate = asyncio.Event()
+    original_close = provider.close
+
+    async def slow_close(handle: Any) -> None:
+        await gate.wait()
+        await original_close(handle)
+
+    provider.close = slow_close  # type: ignore[method-assign]
+    server, client = make_server(provider)
+    async with client:
+        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
+        commit = await client.post(
+            "/ng-control/v1/checkpoint/commit",
+            json=control(checkpoint_dir=str(tmp_path), timeout=0.3, stop=True),
+            headers=AUTH,
+        )
+        assert commit.status_code == 200, commit.text
+        assert commit.json()["phase"] == "committed", "the deadline fails the park, not the commit"
+        assert provider.boxes["sb-1"]["state"] == "running" and server._sandboxes.session_ids == []
+        gate.set()
+        async with asyncio.timeout(5):
+            while provider.boxes["sb-1"]["state"] != "stopped":
+                await asyncio.sleep(0.01)
 
 
 async def test_sandbox_access_follows_the_sandbox_across_a_restore(tmp_path: Path) -> None:

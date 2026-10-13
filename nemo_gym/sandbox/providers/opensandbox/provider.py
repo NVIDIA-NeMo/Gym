@@ -606,8 +606,10 @@ class OpenSandboxOperationConfig:
     command_retries: int = 0
     close_timeout_s: float | None = 30.0
     pause_resume_timeout_s: float = 600.0
-    # Create-to-ready budget for one snapshot, which pushes the sandbox's layers to the registry.
-    snapshot_timeout_s: float = 600.0
+    # Create-to-ready budget for one snapshot, which pushes the sandbox's layers to the registry. Kept below
+    # the controller's default commit deadline (300 s), so a slow push fails the export with a typed error
+    # instead of running into the deadline.
+    snapshot_timeout_s: float = 240.0
     # Poll short status/log requests instead of holding one SSE stream open for
     # the whole command. Set this behind a load balancer that caps stream
     # duration, which would otherwise drop the stream and hang the client.
@@ -1074,11 +1076,10 @@ class OpenSandboxProvider:
         return {"sandbox_id": handle.sandbox_id}
 
     async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:
-        """Snapshot a running sandbox and return the snapshot id once the server reports it ``Ready``.
+        """Start a snapshot of a running sandbox and return its id at once.
 
-        Creation is asynchronous on the server: the SDK call returns the id at once and the snapshot is polled
-        over the management API until it is ready, within ``operations.snapshot_timeout_s``. A snapshot that
-        fails, or is not ready in time, raises; the sandbox itself is unaffected either way.
+        Creation is asynchronous on the server: the snapshot is usable only once :meth:`wait_snapshot_ready`
+        returns. The sandbox itself is unaffected either way.
         """
         info = await self._await_sdk_call(
             handle.raw.create_snapshot(name),
@@ -1086,7 +1087,13 @@ class OpenSandboxProvider:
             sandbox_id=handle.sandbox_id,
             timeout_s=self._connection.request_timeout_s,
         )
-        snapshot_id = str(info.id)
+        return str(info.id)
+
+    async def wait_snapshot_ready(self, snapshot_id: str) -> None:
+        """Poll the management API until the snapshot is ``Ready``, within ``operations.snapshot_timeout_s``.
+
+        A snapshot that fails, or is not ready in time, raises.
+        """
         timeout_s = self._operations.snapshot_timeout_s
         lifecycle_timeout = asyncio.timeout(timeout_s)
         try:
@@ -1094,25 +1101,24 @@ class OpenSandboxProvider:
                 while True:
                     status, payload = await self._management_request("GET", f"/v1/snapshots/{snapshot_id}")
                     if status >= 400:
-                        raise RuntimeError(
-                            f"OpenSandbox snapshot {snapshot_id!r} of sandbox {handle.sandbox_id!r} lookup failed "
-                            f"-> HTTP {status}"
-                        )
+                        raise RuntimeError(f"OpenSandbox snapshot {snapshot_id!r} lookup failed -> HTTP {status}")
                     state = str(((payload.get("status") or {}).get("state")) or payload.get("state") or "").lower()
                     if state == "ready":
-                        return snapshot_id
+                        return
                     if state in {"failed", "error"}:
                         reason = (payload.get("status") or {}).get("message") or state
+                        raise RuntimeError(f"OpenSandbox snapshot {snapshot_id!r} failed: {reason}")
+                    if not state:
+                        # Waiting on a record that reports no state would only end in the timeout.
                         raise RuntimeError(
-                            f"OpenSandbox snapshot {snapshot_id!r} of sandbox {handle.sandbox_id!r} failed: {reason}"
+                            f"OpenSandbox snapshot {snapshot_id!r} lookup returned no state: {payload!r}"
                         )
                     await asyncio.sleep(self._create.connect_poll_s)
         except TimeoutError as e:
             if not lifecycle_timeout.expired():
                 raise
             raise TimeoutError(
-                f"Timed out waiting for OpenSandbox snapshot {snapshot_id!r} of sandbox {handle.sandbox_id!r} to be "
-                f"ready after {timeout_s:g}s"
+                f"Timed out waiting for OpenSandbox snapshot {snapshot_id!r} to be ready after {timeout_s:g}s"
             ) from e
 
     async def delete_snapshot(self, snapshot_id: str) -> None:
@@ -1123,16 +1129,15 @@ class OpenSandboxProvider:
 
     async def _management_request(self, method: str, path: str) -> tuple[int, dict[str, Any]]:
         """One call to the server's management API over Gym's shared aiohttp client, which the SDK handle does
-        not expose; returns the HTTP status and the JSON body (``{}`` when there is none)."""
+        not expose; returns the HTTP status and the JSON object body (``{}`` when there is none)."""
         import aiohttp
 
         from nemo_gym.server_utils import request
 
         if self._connection.domain is None:
             raise RuntimeError("OpenSandbox snapshot operations require connection.domain")
-        base_url = self._connection.domain.rstrip("/")
-        if "://" not in base_url:
-            base_url = f"{self._connection.protocol or 'https'}://{base_url}"
+        # The connection config keeps the scheme in ``protocol`` and the host (with any path prefix) in ``domain``.
+        base_url = f"{self._connection.protocol or 'https'}://{self._connection.domain.rstrip('/')}"
         headers = {"OPEN-SANDBOX-API-KEY": self._connection.api_key} if self._connection.api_key else {}
         timeout_s = float(self._connection.request_timeout_s) if self._connection.request_timeout_s else 30.0
         # Same certificate policy as the SDK transport and the PTY sockets (connection.tls_verify).
@@ -1146,11 +1151,21 @@ class OpenSandboxProvider:
             **tls,
         )
         async with response:
+            if response.status >= 400:
+                return response.status, {}
             try:
                 payload = await response.json(content_type=None)
-            except Exception:
-                payload = None
-            return response.status, payload if isinstance(payload, dict) else {}
+            except (aiohttp.ContentTypeError, ValueError) as error:
+                raise RuntimeError(
+                    f"OpenSandbox management API answered {method} {path} with HTTP {response.status} and a body "
+                    "that is not JSON"
+                ) from error
+            if payload is not None and not isinstance(payload, dict):
+                raise RuntimeError(
+                    f"OpenSandbox management API answered {method} {path} with HTTP {response.status} and a body "
+                    f"that is not a JSON object: {payload!r}"
+                )
+            return response.status, payload or {}
 
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
         """Rebuild a live handle from an OpenSandbox sandbox id via the SDK.
