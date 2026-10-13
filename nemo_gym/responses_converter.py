@@ -921,7 +921,7 @@ class ResponsesConverter(BaseModel):
             previous_response_id=responses_create_params.previous_response_id,
             prompt=responses_create_params.prompt,
             reasoning=responses_create_params.reasoning,
-            service_tier=responses_create_params.service_tier,
+            service_tier=chat_completion.service_tier or responses_create_params.service_tier,
             text=responses_create_params.text,
             top_logprobs=responses_create_params.top_logprobs,
             truncation=responses_create_params.truncation,
