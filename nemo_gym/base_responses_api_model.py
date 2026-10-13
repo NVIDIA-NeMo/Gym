@@ -67,6 +67,7 @@ from nemo_gym.responses_streaming import (
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
 from nemo_gym.rollout_observability import (
+    NG_AGENT_OBSERVATIONS_KEY,
     AgentObservationBundle,
     ObservationGap,
     TrajectoryRecord,
@@ -2012,7 +2013,7 @@ def merge_model_call_capture_into_record(
             logger.warning("Could not read model-call capture for rollout %s.", rollout_id, exc_info=True)
             calls = []
             gaps.append(ObservationGap(code="model_call_capture_unreadable"))
-    observations = record.get("ng_agent_observations")
+    observations = record.get(NG_AGENT_OBSERVATIONS_KEY)
     if observations is not None:
         try:
             bundle = AgentObservationBundle.model_validate(observations)
@@ -2048,7 +2049,7 @@ def merge_model_call_capture_into_record(
                         "Could not associate assistant message calls for rollout %s.", rollout_id, exc_info=True
                     )
                     bundle.gaps.append(ObservationGap(code="assistant_message_call_join_failed"))
-            record["ng_agent_observations"] = bundle.model_dump(mode="json")
+            record[NG_AGENT_OBSERVATIONS_KEY] = bundle.model_dump(mode="json")
         except Exception:
             logger.warning("Could not join agent observations for rollout %s.", rollout_id, exc_info=True)
             gaps.append(ObservationGap(code="agent_observation_join_failed"))

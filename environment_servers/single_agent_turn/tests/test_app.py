@@ -522,6 +522,13 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
 )
 async def test_dependency_failure_closes_sessions(stage: str, error: Exception) -> None:
     environment, client = _environment_server()
+    observations = {
+        "source": "hermes",
+        "records": [{"kind": "agent_invocation", "invocation_id": "root", "status": "failed", "model_calls": []}],
+    }
+    close_body = orjson.loads(client.responses[3].body)
+    close_body["agent_observations"] = observations
+    client.responses[3] = _Response(close_body)
     responses = client.responses
     if stage == "agent":
         client.responses = [*responses[:2], error, responses[3], responses[5]]
@@ -535,6 +542,14 @@ async def test_dependency_failure_closes_sessions(stage: str, error: Exception) 
     assert result.failure.failure_reason == str(error)
     assert result.failure.terminal is isinstance(error, ValueError)
     assert result.failure.partial_response == (_agent_response() if stage == "verification" else None)
+    # The closed agent session's evidence survives the failure, including in the legacy flat reply.
+    assert result.failure.agent_observations == AgentObservationBundle.model_validate(observations)
+    legacy = SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)._legacy_result(
+        result
+    )
+    assert legacy["ng_agent_observations"] == AgentObservationBundle.model_validate(observations).model_dump(
+        mode="json"
+    )
     paths = [path for _, path, _ in client.calls]
     assert paths == [
         "/seed_session",

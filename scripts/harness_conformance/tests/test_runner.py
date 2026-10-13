@@ -216,6 +216,47 @@ def retained_episode(tmp_path):
     return tmp_path, witness
 
 
+@pytest.mark.parametrize(
+    "mutation,failed_check",
+    [
+        (None, None),
+        ("skipped_verifier", "verifier.outcome"),
+        ("wrong_reward", "verifier.saved_reward"),
+        ("masked", "verifier.saved_outcome"),
+        ("incomplete", "verifier.saved_outcome"),
+        ("missing_completion", "evaluation.evaluation_completed"),
+    ],
+)
+def test_terminal_model_error_still_requires_completed_unmasked_verification(retained_episode, mutation, failed_check):
+    directory, witness = retained_episode
+    bundle = directory / "rollouts.jsonl"
+    record = json.loads(bundle.read_text())
+    # A rejected policy call produces no final answer; grading must still happen.
+    witness["verifications"][0]["answer_seen"] = False
+    if mutation == "skipped_verifier":
+        witness["verifications"] = []
+    elif mutation == "wrong_reward":
+        record["reward"] = 1.0
+    elif mutation == "masked":
+        record.update(mask_sample=True, failure_kind="agent_request_failed", failure_reason="HTTP 400")
+    elif mutation == "incomplete":
+        record.update(evaluation_completed=False, failure_kind="verifier_error", failure_reason="not graded")
+    elif mutation == "missing_completion":
+        del record["evaluation_completed"]
+    bundle.write_text(json.dumps(record) + "\n")
+    (directory / "witness.json").write_text(json.dumps(witness))
+    result = inspect_episode(SCENARIO["model_error"], directory, {"returncode": 0, "timed_out": False})
+    checks = {c["id"]: c for c in result["checks"]}
+    assert checks["verifier.answer"]["status"] == "not_applicable"
+    if failed_check:
+        assert checks[failed_check]["status"] == "fail"
+        assert result["verdict"] == "not_fulfilled"
+    else:
+        assert result["evidence"]["TE-6"]["artifact_verdict"] == "fulfilled"
+        for check_id in ("verifier.outcome", "verifier.saved_reward", "verifier.saved_outcome"):
+            assert checks[check_id]["status"] == "pass"
+
+
 def test_behavior_failure_does_not_erase_artifact_success(retained_episode):
     directory, witness = retained_episode
     result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
@@ -483,7 +524,7 @@ def test_missing_rollout_fails_required_checks_and_preserves_exclusions(tmp_path
     assert checks["calls.outcome"]["status"] == "fail"
     assert checks["calls.outcome"]["reasons"][0].startswith("required input is unavailable")
     assert checks["tool_calls.present"]["status"] == "not_applicable"
-    assert checks["evaluation.reward"]["status"] == "not_applicable"
+    assert checks["evaluation.reward"]["status"] == "fail"
     assert checks["turns.present"]["status"] == "not_applicable"
     assert checks["steps.attempt_accounting"]["status"] == "not_applicable"
     assert result["evidence"]["TE-1"]["verdict"] == "not_fulfilled"
