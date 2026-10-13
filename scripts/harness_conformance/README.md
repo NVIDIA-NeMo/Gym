@@ -9,7 +9,7 @@ all registered harnesses. Changes limited to `fern/`, `docs/`, or root Markdown
 files are skipped. Scheduled and manual CI runs exercise all harnesses.
 
 Each job installs the adapter's pinned runtime, validates the runner, checker,
-and adapter tests, then runs every scenario. Execution errors fail the probe job;
+and adapter tests, then runs every scenario. P0 execution errors fail the probe job;
 completed measurements can succeed as jobs even when they find conformance failures.
 Warnings and a detailed table remain available in the Actions summary.
 
@@ -117,7 +117,23 @@ python scripts/run_harness_conformance.py --harness codex \
 | `retry_429` | Two 429 replies before the tool sequence | TE-1–TE-9, including distinct attempts with identical request bodies |
 | `retry_500` | One 500 reply before the tool sequence | TE-1–TE-9, including retained error payloads |
 | `model_error` | Persistent 400 with no model response ID | TE-1, TE-2, TE-4, TE-7, and TE-8/TE-9 |
+| `agent_timeout_no_model_output` (P1) | Withhold every model reply until the 30-second agent deadline; root invocation and agent response must be `incomplete` | Agent outcome, retained calls and health; no steps or tools expected |
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
+
+The timeout scenario and its two behavioral checks are P1. It runs by default
+and reports all evidence, health and execution failures, but does not affect the
+P0 CI gate. Existing checks retain their tiers; the scenario tier controls whether
+that execution gates CI. The seven existing scenarios remain P0.
+
+The timeout scenario configures the agent run deadline, not a Model Server deadline.
+Use `--timeout 300` to allow setup and cleanup; the runner deadline
+must be at least 60 seconds longer than the agent deadline. The endpoint sends no
+HTTP status or response body. It does not prescribe retries. Checks read the root
+`$.ng_trajectory.invocations[*].status` and `$.response.status`; these describe the
+agent run, not the individual model call. Missing outcome evidence fails.
+The legacy Hermes path has no configurable agent run deadline: this scenario
+reports an execution error for that preset instead of timing out the collector
+and mistaking that for a harness deadline.
 
 Both Chat Completions and Responses are supported, including streaming. Supplied
 usage includes prompt, completion, reasoning, total, and cached counts. Chat

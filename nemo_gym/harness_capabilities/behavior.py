@@ -377,3 +377,48 @@ def model_checks(
         )
     )
     return result.dump()
+
+
+def agent_timeout_checks(witness: dict | None, record: dict | None) -> list[dict]:
+    """A silent model must leave an incomplete agent run, never a failed or completed one."""
+    results = Results()
+    attempts = (witness or {}).get("attempts", [])
+    results.run(
+        BehavioralCheck(
+            id="model.response_withheld",
+            tier="P1",
+            evidence=(),
+            location="witness.json",
+            reason="expected at least one model request and no model replies",
+            predicate=lambda: (
+                bool(attempts)
+                and all(
+                    a.get("response_withheld") is True and a.get("response") is None and a.get("status_code") is None
+                    for a in attempts
+                )
+            ),
+            available=witness is not None,
+        )
+    )
+    roots = [
+        inv
+        for inv in _objects(_mapping((record or {}).get("ng_trajectory")).get("invocations"))
+        if inv.get("parent_invocation_id") is None
+    ]
+    results.run(
+        BehavioralCheck(
+            id="agent.timeout_outcome",
+            tier="P1",
+            evidence=(),
+            location="$.ng_trajectory.invocations[*].status; $.response.status",
+            reason="the agent run deadline must leave one root invocation and response with status incomplete",
+            predicate=lambda: (
+                len(roots) == 1
+                and roots[0].get("status") == "incomplete"
+                and _mapping((record or {}).get("response")).get("status") == "incomplete"
+            ),
+            available=record is not None,
+            depends_on=("model.response_withheld",),
+        )
+    )
+    return results.dump()

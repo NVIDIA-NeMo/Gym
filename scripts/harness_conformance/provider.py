@@ -3,6 +3,7 @@
 
 """Controlled Chat/Responses endpoints and private episode witnesses."""
 
+import asyncio
 import json
 import shlex
 from dataclasses import dataclass, field
@@ -115,6 +116,21 @@ class Probe:
         body = await request.json()
         self._observe_tool_results(body)
         index = len(self.attempts)
+        if self.scenario.agent_timeout_seconds is not None:
+            self.attempts.append(
+                {
+                    "attempt_id": f"attempt-{index}",
+                    "request": body,
+                    "response": None,
+                    "status_code": None,
+                    "response_withheld": True,
+                }
+            )
+            self.save()
+            # No headers, body, or fabricated HTTP timeout: the real agent deadline must fire.
+            while not await request.is_disconnected():
+                await asyncio.sleep(0.05)
+            raise asyncio.CancelledError
         status = 200
         if index < len(self.scenario.http_errors):
             status = self.scenario.http_errors[index]

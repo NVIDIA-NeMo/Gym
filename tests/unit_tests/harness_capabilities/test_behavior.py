@@ -112,3 +112,42 @@ def test_missing_output_witness_cannot_qualify_artifacts(behavior_episode):
     assert checks["tools.witness_output"]["reasons"] == [
         "retained tool output differs from the independent tool witness"
     ]
+
+
+@pytest.mark.parametrize(
+    "root_status,response_status,passes",
+    [
+        ("incomplete", "incomplete", True),
+        ("failed", "incomplete", False),
+        ("incomplete", "failed", False),
+        ("completed", "completed", False),
+        ("unknown", "incomplete", False),
+    ],
+)
+def test_agent_timeout_requires_both_agent_outcomes(root_status, response_status, passes):
+    from nemo_gym.harness_capabilities.behavior import agent_timeout_checks
+
+    witness = {"attempts": [{"response_withheld": True, "response": None, "status_code": None}]}
+    record = {
+        "ng_trajectory": {"invocations": [{"invocation_id": "root", "status": root_status}]},
+        "response": {"status": response_status},
+    }
+    checks = {c["id"]: c for c in agent_timeout_checks(witness, record)}
+    assert checks["model.response_withheld"]["status"] == "pass"
+    assert (checks["agent.timeout_outcome"]["status"] == "pass") == passes
+    # A completed child must not override the root's outcome.
+    record["ng_trajectory"]["invocations"].append(
+        {"invocation_id": "child", "parent_invocation_id": "root", "status": "completed"}
+    )
+    assert agent_timeout_checks(witness, record) == list(checks.values())
+
+
+def test_agent_timeout_cannot_pass_without_stimulus_or_saved_root():
+    from nemo_gym.harness_capabilities.behavior import agent_timeout_checks
+
+    record = {"ng_trajectory": {"invocations": [{"status": "incomplete"}]}, "response": {"status": "incomplete"}}
+    for witness in (None, {"attempts": []}, {"attempts": [{"status_code": 504}]}):
+        assert all(c["status"] == "fail" for c in agent_timeout_checks(witness, record))
+    witness = {"attempts": [{"response_withheld": True, "response": None, "status_code": None}]}
+    for record in (None, {"response": {"status": "incomplete"}}):
+        assert agent_timeout_checks(witness, record)[1]["status"] == "fail"

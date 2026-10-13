@@ -16,7 +16,7 @@ from pathlib import Path
 import psutil
 
 from nemo_gym import harness_capabilities
-from nemo_gym.harness_capabilities.behavior import inspect_behavior
+from nemo_gym.harness_capabilities.behavior import agent_timeout_checks, inspect_behavior
 from nemo_gym.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
 from nemo_gym.harness_capabilities.cli import digest_file, inspect_bundle, json_rows
 from nemo_gym.harness_capabilities.health import inspect_health
@@ -108,14 +108,18 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     record = records[0][1] if len(records) == 1 else None
     scope = EvidenceScope(tools=scenario.tool_steps > 0, steps=scenario.steps)
     artifact = inspect_record(record, scope=scope)
-    checks = artifact["checks"] + inspect_behavior(
-        witness,
-        record,
-        http_errors=scenario.http_errors,
-        terminal_error=scenario.terminal_error,
-        tool_steps=scenario.tool_steps,
-        expected_reward=scenario.expected_reward,
-        fingerprint=_fingerprint,
+    checks = artifact["checks"] + (
+        agent_timeout_checks(witness, record)
+        if scenario.agent_timeout_seconds is not None
+        else inspect_behavior(
+            witness,
+            record,
+            http_errors=scenario.http_errors,
+            terminal_error=scenario.terminal_error,
+            tool_steps=scenario.tool_steps,
+            expected_reward=scenario.expected_reward,
+            fingerprint=_fingerprint,
+        )
     )
     health_inputs = [path for path in (bundle, directory / "rollouts_failures.jsonl") if path.is_file()]
     checks += inspect_health(
@@ -136,8 +140,11 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     behavior_passed = all(c["status"] in ("pass", "not_applicable") for c in behavioral)
     return {
         "scenario": scenario.name,
+        "tier": scenario.tier,
         "exercised": record is not None,
-        "verdict": "fulfilled" if gate_passes(checks) else "not_fulfilled",
+        "verdict": "fulfilled"
+        if gate_passes(checks) and (scenario.tier == "P0" or gate_passes(checks, tier=scenario.tier))
+        else "not_fulfilled",
         "issues": [reason for c in checks if c["status"] == "fail" for reason in c["reasons"]],
         "checks": checks,
         "behavioral_status": "pass" if behavior_passed else "fail",
@@ -211,13 +218,14 @@ def run_suite(
                 str(timeout),
             ]
             execution = run_process(command, directory=directory, timeout=timeout + 30)
-            execution_error |= execution["returncode"] != 0 or execution["timed_out"]
+            execution_error |= scenario.tier == "P0" and (execution["returncode"] != 0 or execution["timed_out"])
             try:
                 result = inspect_episode(scenario, directory, execution)
             except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
-                execution_error = True
+                execution_error |= scenario.tier == "P0"
                 result = {
                     "scenario": scenario.name,
+                    "tier": scenario.tier,
                     "exercised": False,
                     "verdict": "not_fulfilled",
                     "execution": execution,
@@ -242,7 +250,9 @@ def run_suite(
         rows[harness] = {
             "scenarios": results,
             "evidence": counts,
-            "verdict": "fulfilled" if all(r["verdict"] == "fulfilled" for r in results) else "not_fulfilled",
+            "verdict": "fulfilled"
+            if all(r["verdict"] == "fulfilled" for r in results if r["tier"] == "P0")
+            else "not_fulfilled",
         }
     passed = all(row["verdict"] == "fulfilled" for row in rows.values())
     summary = {
@@ -255,7 +265,7 @@ def run_suite(
         "harnesses": rows,
         "limits": [
             "local harness runtime and controlled Chat/Responses model only; no remote sandbox qualification",
-            "all current checks are P0, including ownership and call-to-step checks",
+            "P0 scenarios gate CI; P1/P2 scenario failures remain diagnostic, including execution errors",
             "multimodal, compaction, parallelism and deployment health are outside this suite",
         ],
     }
