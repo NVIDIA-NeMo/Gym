@@ -311,13 +311,48 @@ _SERVER_TELEMETRY_PACKAGES = (
 )
 
 
+def _direct_reference(requirement_name: str, direct_url: dict) -> Optional[str]:
+    """PEP 508 direct reference for a PEP 610 ``direct_url.json`` record.
+
+    Covers the three shapes the record can take: a VCS checkout pinned to its commit, a
+    local directory, and an archive such as a wheel installed from a file or a URL. Each
+    keeps its ``subdirectory``. Returns None when the record has nothing reinstallable,
+    so the caller can fall back to a version pin.
+    """
+    url = direct_url.get("url")
+    if not url:
+        return None
+    vcs_info = direct_url.get("vcs_info")
+    if vcs_info:
+        commit = vcs_info.get("commit_id") or vcs_info.get("requested_revision")
+        if not commit:
+            return None
+        url = f"{vcs_info.get('vcs', 'git')}+{url}@{commit}"
+    elif "dir_info" in direct_url:
+        # A local directory install (`pip install /path` or `-e /path`) has a version no
+        # index serves; the server venv installs the same directory.
+        if not url.startswith("file:"):
+            return None
+    elif "archive_info" not in direct_url:
+        return None
+    subdirectory = direct_url.get("subdirectory")
+    if subdirectory:
+        url = f"{url}#subdirectory={subdirectory}"
+    # No spaces around the '@'. PEP 508 allows either form, but `setup_env_command`
+    # interpolates this into a shell command line and joins head_server_deps unquoted, so
+    # the spaced form would be split into separate arguments. Quoting at that call site
+    # would be the better fix and is tracked separately.
+    return f"{requirement_name}@{url}"
+
+
 def installed_requirement(dist_name: str, requirement_name: str) -> Optional[str]:
     """Build a requirement string pinning *dist_name* to the copy installed right here.
 
     Prefers the recorded install source over the version number. A git-installed
     nemo-lens reports a local version such as ``0.2.0+b85578f`` that exists on no index,
     so ``==`` would be unsatisfiable; the recorded VCS URL and commit reinstall exactly
-    what this process is running.
+    what this process is running. The same holds for a wheel built locally and for a
+    plugin checked out from a repository subfolder.
     """
     from importlib.metadata import PackageNotFoundError, distribution
 
@@ -331,22 +366,9 @@ def installed_requirement(dist_name: str, requirement_name: str) -> Optional[str
         if raw:
             import json
 
-            direct_url = json.loads(raw)
-            vcs_info = direct_url.get("vcs_info")
-            if vcs_info and direct_url.get("url"):
-                commit = vcs_info.get("commit_id") or vcs_info.get("requested_revision")
-                vcs = vcs_info.get("vcs", "git")
-                if commit:
-                    # No spaces around the '@'. PEP 508 allows either form, but
-                    # `setup_env_command` interpolates this into a shell command line and
-                    # joins head_server_deps unquoted, so the spaced form would be split
-                    # into separate arguments. Quoting at that call site would be the
-                    # better fix and is tracked separately.
-                    return f"{requirement_name}@{vcs}+{direct_url['url']}@{commit}"
-            if "dir_info" in direct_url and direct_url.get("url", "").startswith("file:"):
-                # A local directory install (`pip install /path` or `-e /path`) has a
-                # version no index serves; the server venv installs the same directory.
-                return f"{requirement_name}@{direct_url['url']}"
+            requirement = _direct_reference(requirement_name, json.loads(raw))
+            if requirement is not None:
+                return requirement
     except Exception:  # pragma: no cover - metadata is best-effort
         logger.debug("nemo-lens: could not read direct_url.json for %s", dist_name, exc_info=True)
 

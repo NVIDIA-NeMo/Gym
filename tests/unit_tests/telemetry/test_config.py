@@ -560,3 +560,37 @@ def test_installed_requirement_pins_an_index_install_by_version(monkeypatch):
 
     monkeypatch.setattr("importlib.metadata.distribution", lambda name: _DirectURLDistribution(None))
     assert telemetry_setup.installed_requirement("gym-substrate", "gym-substrate") == "gym-substrate==0.1.0"
+
+
+def test_installed_requirement_pins_a_wheel_install_by_its_url(monkeypatch):
+    """A wheel installed from a file records archive_info; its version is on no index."""
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    monkeypatch.setattr(
+        "importlib.metadata.distribution",
+        lambda name: _DirectURLDistribution(
+            {"url": "file:///home/u/dist/gym_substrate-0.1.0-py3-none-any.whl", "archive_info": {"hashes": {}}}
+        ),
+    )
+    assert telemetry_setup.installed_requirement("gym-substrate", "gym-substrate") == (
+        "gym-substrate@file:///home/u/dist/gym_substrate-0.1.0-py3-none-any.whl"
+    )
+
+
+def test_installed_requirement_keeps_the_git_subdirectory(monkeypatch):
+    """A plugin checked out from a repository subfolder is not the project at the root."""
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    monkeypatch.setattr(
+        "importlib.metadata.distribution",
+        lambda name: _DirectURLDistribution(
+            {
+                "url": "https://github.com/org/plugins",
+                "vcs_info": {"vcs": "git", "commit_id": "0123abc"},
+                "subdirectory": "providers/gym-substrate",
+            }
+        ),
+    )
+    assert telemetry_setup.installed_requirement("gym-substrate", "gym-substrate") == (
+        "gym-substrate@git+https://github.com/org/plugins@0123abc#subdirectory=providers/gym-substrate"
+    )
