@@ -30,6 +30,7 @@ from resources_servers.conversational_tool_use_simulation.app import (
     ConversationalToolUseSimulationServer,
     ConversationalToolUseVerifyRequest,
     ConversationMessage,
+    Evaluation,
     MessageType,
     RecordAgentMessageRequest,
     RecordAgentOutputsRequest,
@@ -37,6 +38,7 @@ from resources_servers.conversational_tool_use_simulation.app import (
     SimulatedToolCallRequest,
     Source,
     TrajectoryEvaluationType,
+    UserAgentEnvironmentEvaluation,
     VerificationFailureLabel,
     VerificationResult,
     VerificationType,
@@ -1252,6 +1254,80 @@ async def test_malformed_judge_output_uses_only_semantic_attempts(monkeypatch) -
     assert result.reward == 1
     assert call_model.await_count == 2
     sleep.assert_not_awaited()
+
+
+COMBINED_EVALUATION = {
+    "customer_success": True,
+    "customer_explanation": "ok",
+    "representative_success": True,
+    "representative_explanation": "ok",
+    "tool_results_success": True,
+    "tool_results_explanation": "ok",
+}
+
+
+async def _run_judge(server, state, combined: bool):
+    if combined:
+        return await server._generate_user_agent_environment_evaluation(state, "Evaluate this trajectory.")
+    return await server._generate_judge_evaluation(Source.USER, "Evaluate this message.", state)
+
+
+@pytest.mark.parametrize(("combined", "output_model"), [(False, Evaluation), (True, UserAgentEnvironmentEvaluation)])
+async def test_judge_requests_structured_output_for_its_evaluation_schema(monkeypatch, combined, output_model) -> None:
+    # A schema only in the prompt lets judges reply `{"properties": {...}}` or with unquoted strings.
+    server = make_server(enable_llm_judge=True)
+    request = RequestStub()
+    await server.seed_session(
+        request,
+        ConversationalToolUseSeedSessionRequest(
+            domain_name="subscription support",
+            profile="general",
+            policy="policy",
+            customer_scenario={"reason_for_contact": "I need help."},
+        ),
+    )
+    state = server.session_id_to_state["session_1"]
+    reply = COMBINED_EVALUATION if combined else {"success": True, "explanation": "ok"}
+    call_model = AsyncMock(return_value=make_judge_response(json.dumps(reply)))
+    monkeypatch.setattr(server, "_call_model", call_model)
+
+    await _run_judge(server, state, combined)
+
+    params = call_model.await_args.kwargs["params"]
+    assert params.model_dump(exclude_unset=True)["text"] == {
+        "format": {
+            "type": "json_schema",
+            "name": output_model.__name__,
+            "schema": output_model.model_json_schema(),
+        }
+    }
+    assert server.config.judge_responses_create_params.text is None
+
+
+@pytest.mark.parametrize("combined", [False, True])
+async def test_judge_keeps_a_configured_text_format(monkeypatch, combined) -> None:
+    server = make_server(enable_llm_judge=True)
+    server.config.judge_responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[], text={"format": {"type": "json_object"}}
+    )
+    request = RequestStub()
+    await server.seed_session(
+        request,
+        ConversationalToolUseSeedSessionRequest(
+            domain_name="subscription support",
+            profile="general",
+            policy="policy",
+            customer_scenario={"reason_for_contact": "I need help."},
+        ),
+    )
+    state = server.session_id_to_state["session_1"]
+    reply = COMBINED_EVALUATION if combined else {"success": True, "explanation": "ok"}
+    call_model = AsyncMock(return_value=make_judge_response(json.dumps(reply)))
+    monkeypatch.setattr(server, "_call_model", call_model)
+
+    await _run_judge(server, state, combined)
+
+    assert call_model.await_args.kwargs["params"].text == {"format": {"type": "json_object"}}
 
 
 async def test_combined_judge_uses_provider_retry_path(monkeypatch) -> None:
