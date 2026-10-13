@@ -111,6 +111,8 @@ The Terminal Bench 2.1 behavior applies to the linked #3902 revision. Check whet
 
 Neither policy changes the Resources Server's session API or the `SandboxAccess` contract that the agent receives. Keep the choice between reusing the task sandbox and creating a verifier sandbox in the Resources Server, so that swapping the agent cannot change the benchmark's ownership or verification policy. The final `/close_session` call is still required when verification has already stopped the original sandbox.
 
+To choose a policy, first preserve the verification protocol of an existing benchmark. For a new benchmark, reuse the task sandbox when scoring depends on its final state, including changes that an exported artifact would not capture. Use a fresh verifier sandbox when the contract is to apply an exported artifact, such as a patch, to a clean baseline and score it there.
+
 ## Integration contracts
 
 An adapter implements three contracts: one with the Environment Server, one with the task sandbox, and one for tools. Settle all three before you write harness-specific code.
@@ -241,6 +243,14 @@ You also need a running vLLM-compatible model endpoint and an OpenSandbox deploy
 - `POLICY_BASE_URL`, `POLICY_API_KEY`, and `POLICY_MODEL_NAME` for the model endpoint.
 - `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` for the sandbox provider.
 - `GYM_HOST`, a bindable address of the Gym host that task sandboxes can reach. Do not use a loopback address or `0.0.0.0`, because sandboxes cannot call back to them.
+
+On Linux, you can find a candidate IPv4 address by running this command on the Gym node:
+
+```bash
+export GYM_HOST="$(getent ahostsv4 "$(hostname -f)" | awk 'NR==1 {print $1}')"
+```
+
+Use the result only if it is a local interface address that the task sandboxes can reach. If the command returns no address, or the host has several interfaces with different routes to the sandboxes, set `GYM_HOST` explicitly to the right address. Hostname resolution alone does not prove connectivity.
 
 The sandbox must reach the Gym Model Server's allocated port, and the Gym Model Server must reach the upstream endpoint. Keep credentials out of committed YAML files.
 
