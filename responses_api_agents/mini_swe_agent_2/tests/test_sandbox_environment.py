@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxStatus
+from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxStatus
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import (
     MiniSWESandboxEnvironment,
     MiniSWESandboxEnvironmentConfig,
@@ -128,25 +128,46 @@ def _env_with_sandbox(sandbox: Any) -> MiniSWESandboxEnvironment:
     return env
 
 
-class _LostSandbox:
-    def __init__(self, status: SandboxStatus) -> None:
+class _FakeSandbox:
+    def __init__(self, result: SandboxExecResult, status: SandboxStatus = SandboxStatus.RUNNING) -> None:
+        self._result = result
         self._status = status
 
-    def exec(self, command: str, **kwargs: Any):
-        return type(
-            "Result", (), {"stdout": "", "stderr": "actor not found", "return_code": 125, "error_type": "sandbox"}
-        )()
+    def exec(self, command: str, **kwargs: Any) -> SandboxExecResult:
+        return self._result
 
     def status(self) -> SandboxStatus:
         return self._status
 
 
+_GONE = SandboxExecResult(stdout="", stderr="actor not found", return_code=125, error_type="sandbox")
+_TIMED_OUT = SandboxExecResult(stdout=None, stderr="ReadTimeout: timed out", return_code=125, error_type="timeout")
+
+
 def test_execute_raises_when_sandbox_is_gone() -> None:
-    env = _env_with_sandbox(_LostSandbox(SandboxStatus.ERROR))
+    env = _env_with_sandbox(_FakeSandbox(_GONE, SandboxStatus.ERROR))
     with pytest.raises(RuntimeError, match="sandbox is error"):
         env.execute({"command": "ls"})
 
 
-def test_execute_returns_provider_failure_while_sandbox_lives() -> None:
-    env = _env_with_sandbox(_LostSandbox(SandboxStatus.RUNNING))
-    assert env.execute({"command": "ls"})["returncode"] == 125
+def test_execute_raises_on_provider_failure_while_sandbox_lives() -> None:
+    env = _env_with_sandbox(_FakeSandbox(_GONE, SandboxStatus.RUNNING))
+    with pytest.raises(RuntimeError, match=r"\(sandbox\), sandbox is running: actor not found"):
+        env.execute({"command": "ls"})
+
+
+def test_execute_raises_when_exec_times_out() -> None:
+    env = _env_with_sandbox(_FakeSandbox(_TIMED_OUT))
+    with pytest.raises(RuntimeError, match=r"\(timeout\), sandbox is running: ReadTimeout"):
+        env.execute({"command": "git apply patch.diff"})
+
+
+@pytest.mark.parametrize("return_code", [1, 125])
+def test_execute_returns_command_exit_code_as_observation(return_code: int) -> None:
+    result = SandboxExecResult(stdout="", stderr="tests failed", return_code=return_code, error_type=None)
+    env = _env_with_sandbox(_FakeSandbox(result))
+    assert env.execute({"command": "pytest"}) == {
+        "output": "tests failed",
+        "returncode": return_code,
+        "exception_info": "",
+    }
