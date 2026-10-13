@@ -17,8 +17,10 @@ All third-party software is used without modification unless otherwise noted
 `baselines/ref_full4k.json` from [XiaomiMiMo/verl](https://github.com/XiaomiMiMo/verl/tree/a2ad9f6160b03ff2d47e59832bfb6b289f37c917/recipes/design/music/scorer),
 revision `a2ad9f6160b03ff2d47e59832bfb6b289f37c917`, under Apache-2.0.
 Original Copyright 2026 Bytedance Ltd. and/or its affiliates notices are retained.
-Local changes are formatting and SPDX modification notices only; the scoring
-formula and reference baseline are unchanged.
+Local changes are formatting, SPDX modification notices, and classifying a
+signal-terminated renderer as an infrastructure failure before inspecting its
+MIDI output. The scoring formula, composition rejection gates, and reference
+baseline are unchanged.
 
 The environment invokes [abcMIDI](https://github.com/sshlien/abcmidi) as an
 external executable (GPL-2.0-or-later). Its source and binaries are **not**

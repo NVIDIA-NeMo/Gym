@@ -13,6 +13,8 @@ follows the prompt's requested key, mood, instrumentation, or length.
 - Task rows: `responses_create_params.input` with a composition request.
   Optional `verifier_metadata` is preserved for provenance, not scored.
 - Agent: the existing `simple_agent`, with one generation and no tools.
+- Environment Server: the existing `legacy_agent` relay routes rollout requests
+  to `mimo_music_simple_agent`, as required by current Gym config composition.
 - Verifier: this resources server's `/verify` endpoint; no session state.
 - Model: any compatible Gym model server. Thinking models are supported:
   reasoning items and inline `<think>` / `<thinking>` blocks are not scored.
@@ -38,11 +40,15 @@ The reference is a statistical proxy for musical structure. A positive reward
 does not establish prompt compliance or human musical preference. Reward
 profiling should report average reward, not label it binary task accuracy.
 
-Bad model output receives a valid zero. A missing renderer, scorer-worker failure,
+Bad model output receives a valid zero. A missing or signal-terminated renderer, scorer-worker failure,
 unexpected analysis exception, or the scorer wall-time limit returns `mask_sample: true`
 with a `failure_kind` and `failure_reason`. Cancellation kills the scorer's
 process group, including its renderer child. Up to `num_processes` scorers run
 at once (default 4); each has `score_timeout_seconds` (default 30).
+
+Renderer signal termination is checked before MIDI parsing, including when a
+partial output file exists. Ordinary parser rejections with a normal exit
+(including nonzero exit status) retain their native zero reward and are not masked.
 
 The scorer executes an external native parser, not arbitrary generated Python
 or shell code. Subprocess isolation and timeouts are not a security sandbox:

@@ -1,4 +1,4 @@
-# Modifications: formatting for NeMo Gym.
+# Modifications: formatting and renderer signal-failure classification for NeMo Gym.
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Bytedance Ltd. and/or its affiliates
@@ -188,6 +188,10 @@ def do(rec):
             ) from e
         except Exception as e:
             return {**base, "skip": f"abc2midi:{repr(e)[:60]}"}
+        # A signal is an execution failure, even if the renderer left partial MIDI.
+        # The Gym worker masks abc2midi:* failures instead of training on a false zero.
+        if p.returncode < 0:
+            return {**base, "skip": f"abc2midi:terminated by signal {-p.returncode} (return code {p.returncode})"}
         log = (p.stdout + p.stderr).decode("utf-8", "replace")
         err = len(re.findall(r"^Error", log, re.M))
         bar = len(re.findall(r"Bar \d+ has", log))
