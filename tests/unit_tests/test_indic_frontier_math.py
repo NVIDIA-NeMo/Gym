@@ -145,24 +145,18 @@ def snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     }
     (tmp_path / "answers.json").write_text(json.dumps(manifest))
     monkeypatch.setattr(prep, "BENCHMARK_DIR", tmp_path)
-    for code in ("en", "hi"):
-        rows = (
-            english
-            if code == "en"
-            else [
-                {
-                    **english[0],
-                    "problem": "१+१ की गणना करें।",
-                    "language": "Hindi",
-                    "language_code": "hi",
-                    "judge_pass_stage": "failed_after_correction_review_needed",
-                    "human_evaluation_pending": True,
-                }
-            ]
-        )
-        directory = tmp_path / "data" / code
-        directory.mkdir(parents=True)
-        pq.write_table(pa.Table.from_pylist(rows), directory / "sample.parquet")
+    rows = [
+        {
+            "id": "p1",
+            "tier": 1,
+            "problem": english[0]["problem"],
+            "answer": r"\(2\)",
+            "solution": "This solution must not be included in prepared rows.",
+            "problem_Hindi_translation": "१+१ की गणना करें।",
+        }
+    ]
+    pq.write_table(pa.Table.from_pylist(rows), tmp_path / "sample.parquet")
+    monkeypatch.setattr(prep, "hf_hub_download", lambda **kwargs: pytest.fail("Unexpected network access"))
     return tmp_path
 
 
@@ -177,7 +171,14 @@ def test_join_and_no_reference_in_prompt(snapshot: Path) -> None:
     assert rows[0]["task_id"] != rows[1]["task_id"]
     assert rows[0]["responses_create_params"]["input"][0]["content"].endswith("१+१ की गणना करें।")
     assert "expected_answer" not in json.dumps(rows[0]["responses_create_params"])
-    assert json.loads((snapshot / "output/preparation.json").read_text())["failed_translation_review"] == 1
+    assert rows[0]["judge_pass_stage"] == "not_provided"
+    assert rows[1]["judge_pass_stage"] == "english_source"
+    assert all("solution" not in row and "answer" not in row for row in rows)
+    audit = json.loads((snapshot / "output/preparation.json").read_text())
+    assert audit["failed_translation_review"] == 0
+    assert audit["source_id"] == "ai4bharat/indic-frontier-math"
+    assert audit["source_revision"] is None
+    assert audit["local_override"] is True
     raw_rows = [
         json.loads(line) for line in (snapshot / "output/indic_frontiermath_raw.jsonl").read_text().splitlines()
     ]
@@ -187,7 +188,7 @@ def test_join_and_no_reference_in_prompt(snapshot: Path) -> None:
 
 
 def test_changed_english_rejected(snapshot: Path) -> None:
-    path = snapshot / "data/en/sample.parquet"
+    path = snapshot / "sample.parquet"
     rows = pq.read_table(path).to_pylist()
     rows[0]["problem"] = "Changed problem"
     pq.write_table(pa.Table.from_pylist(rows), path)
@@ -202,9 +203,63 @@ def test_invalid_language_selection(snapshot: Path, languages: list[str]) -> Non
 
 
 def test_missing_translation_rejected(snapshot: Path) -> None:
-    path = snapshot / "data/hi/sample.parquet"
-    pq.write_table(pq.read_table(path).slice(0, 0), path)
-    with pytest.raises(ValueError, match="Problem IDs for hi"):
+    path = snapshot / "sample.parquet"
+    table = pq.read_table(path).drop_columns(["problem_Hindi_translation"])
+    pq.write_table(table, path)
+    with pytest.raises(ValueError, match="Missing source columns.*problem_Hindi_translation"):
+        prep.prepare(dataset_dir=str(snapshot), languages=["hi"])
+
+
+def test_download_uses_ai4bharat_pinned_revision(snapshot: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    downloads = []
+
+    def download(**kwargs: str) -> str:
+        downloads.append(kwargs)
+        return str(snapshot / "sample.parquet")
+
+    monkeypatch.setattr(prep, "hf_hub_download", download)
+    output = prep.prepare(languages=["hi"], output_dir=str(snapshot / "output"))
+    assert downloads == [
+        {
+            "repo_id": "ai4bharat/indic-frontier-math",
+            "filename": "sample.parquet",
+            "repo_type": "dataset",
+            "revision": prep.SOURCE_REVISION,
+        }
+    ]
+    assert json.loads(output.read_text())["question"] == "१+१ की गणना करें।"
+    audit = json.loads(output.with_name("preparation.json").read_text())
+    assert audit["source_revision"] == prep.SOURCE_REVISION
+    assert audit["local_override"] is False
+
+
+@pytest.mark.parametrize(
+    "field,value,error",
+    [
+        ("problem_Hindi_translation", "", "Empty problem for hi"),
+        ("problem_Hindi_translation", "  ", "Empty problem for hi"),
+        ("problem_Hindi_translation", None, "Empty problem for hi"),
+        ("answer", "3", "Source answer changed"),
+        ("tier", 2, "Tier mismatch"),
+        ("id", "wrong-id", "Source problem IDs"),
+    ],
+)
+def test_source_mismatch_rejected_before_output(snapshot: Path, field: str, value: object, error: str) -> None:
+    path = snapshot / "sample.parquet"
+    rows = pq.read_table(path).to_pylist()
+    rows[0][field] = value
+    pq.write_table(pa.Table.from_pylist(rows), path)
+    output = snapshot / "output"
+    with pytest.raises(ValueError, match=error):
+        prep.prepare(dataset_dir=str(snapshot), languages=["hi"], output_dir=str(output))
+    assert not output.exists()
+
+
+def test_duplicate_source_ids_rejected(snapshot: Path) -> None:
+    path = snapshot / "sample.parquet"
+    rows = pq.read_table(path).to_pylist()
+    pq.write_table(pa.Table.from_pylist(rows * 2), path)
+    with pytest.raises(ValueError, match="Source problem IDs"):
         prep.prepare(dataset_dir=str(snapshot), languages=["hi"])
 
 

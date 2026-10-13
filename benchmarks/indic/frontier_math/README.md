@@ -1,8 +1,9 @@
 # Indic FrontierMath
 
-Twelve math questions in English and fourteen Indic languages, with one response
-per question and language. Accuracy is the fraction of correct answers. A complete
-language has twelve questions; report coverage for incomplete runs.
+Uses `ai4bharat/indic-frontier-math`: twelve public sample math questions in
+English and fourteen Indic languages, with one response per question and language.
+Accuracy is the fraction of correct answers. A complete language has twelve
+questions; report coverage for incomplete runs.
 
 ## Prepare
 
@@ -13,18 +14,45 @@ python -m pip install -r benchmarks/indic/frontier_math/requirements.txt
 gym eval prepare --benchmark indic/frontier_math
 ```
 
-The loader finds `huggingface_datasets/anushakamathofficial/indic_frontiermath`
-under an ancestor of the checkout. To specify a source directory or languages:
+The loader downloads `sample.parquet` from `ai4bharat/indic-frontier-math` at
+revision `dcae6631c88d3ae1a26c188eb8aa13ad4c7f4ad7`. Authenticate with Hugging Face
+if access is required. For an offline cache, provide a directory containing that
+file:
 
 ```bash
 python benchmarks/indic/frontier_math/prepare.py \
-  --dataset-dir /path/to/indic_frontiermath --languages en hi
+  --dataset-dir /path/to/indic-frontier-math --languages en hi
 ```
+
+The Gym preparer also accepts `+prepare_script_args.dataset_dir=/path/to/indic-frontier-math`.
+By default, all fifteen languages are prepared. To prepare the twelve evaluation
+languages:
+
+```bash
+python benchmarks/indic/frontier_math/prepare.py \
+  --dataset-dir /path/to/indic-frontier-math \
+  --languages bn gu hi kn mr ml ne or pa ta te ur
+```
+
+Each source row contains the English `problem`, `answer`, and one
+`problem_<Language>_translation` column per Indic language. Preparation validates
+problem IDs, English statement fingerprints, tiers, and answers against the
+versioned answer key. Missing or empty selected translations fail preparation.
+Source solutions are excluded from prepared rows and model input.
 
 Preparation writes raw rows for Gym's prompt system, rendered requests for
 standalone runners, per-language JSONL files, and a preparation manifest under
 `benchmarks/indic/frontier_math/data/`. Generated data is gitignored. The configured
 prompt is applied exactly once; answer metadata is excluded from model input.
+The manifest records the source file's SHA-256 and the selected languages. Local
+overrides record a null source revision because a directory alone cannot establish
+which Hub revision its contents represent.
+
+The source does not supply per-item translation-review labels. Translated rows
+therefore use `judge_pass_stage=not_provided` and `human_evaluation_pending=true`;
+no per-item approval is inferred from the dataset's aggregate review description.
+This snapshot includes corrected translations, so regenerate prepared data and
+label new results with the dataset revision or file checksum when comparing runs.
 
 ## Run
 
@@ -78,5 +106,5 @@ normalization uses the verifier's pinned dependencies.
 
 ```bash
 python -m pytest tests/unit_tests/test_indic_frontier_math.py
-gym env test --resources-server frontiermath
+gym env test +entrypoint=resources_servers/frontiermath +should_validate_data=true
 ```

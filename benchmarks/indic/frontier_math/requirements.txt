@@ -1,1 +1,2 @@
 pyarrow>=19
+huggingface-hub>=0.34

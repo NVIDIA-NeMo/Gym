@@ -1,5 +1,5 @@
 name: indic/frontier_math
-version: 0.1.0
+version: 0.2.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
@@ -8,6 +8,7 @@ description: Translations of 12 public FrontierMath problems with exact text-ans
 modality: text
 licensing: unknown
 authors:
+  - ai4bharat
   - anushakamathofficial
 reward:
   range: [0.0, 1.0]
