@@ -108,10 +108,12 @@ _DEADLINE_SLACK_SEC = 2.0
 def _agent_deadline_passed(result: dict[str, Any], *, elapsed: float, timeout: float) -> bool:
     """Whether a TimeoutError came from the agent's own deadline rather than a provider transport failure.
 
-    Evidence is either the runner's own record that the supervisor stopped it (``stop_reason`` of
-    ``wall_time`` or an ``interrupted`` transcript) or wall-clock time at or past the budget.
+    Evidence is either the runner's own record that the supervisor stopped it at the deadline
+    (``stop_reason == "wall_time"``) or wall-clock time at or past the budget. A bare ``interrupted``
+    transcript is not evidence: cleanup after an early provider failure also interrupts the runner, which
+    then records ``stop_reason == "cancelled"``.
     """
-    if result.get("stop_reason") == "wall_time" or result.get("interrupted") is True:
+    if result.get("stop_reason") == "wall_time":
         return True
     return elapsed + _DEADLINE_SLACK_SEC >= timeout
 
@@ -632,7 +634,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             )
         except TimeoutError:
             # The in-sandbox supervisor normally stops Hermes at the deadline and the runner writes its
-            # interrupted transcript. If even the supervisor overran, a captured transcript is still a
+            # wall_time transcript. If even the supervisor overran, a captured transcript is still a
             # scored timeout outcome, but only with evidence that the agent deadline passed: providers
             # raise TimeoutError for transport failures too, and an early one with a saved transcript is
             # an infrastructure failure, not a wall-time result. An overrun that left nothing behind

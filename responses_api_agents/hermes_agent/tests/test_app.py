@@ -613,11 +613,17 @@ class TestSanity:
         assert response.metadata["stop_reason"] == "wall_time"
         assert response.metadata["hermes_error_type"] == "TimeoutError"
 
-    async def test_runner_recorded_interruption_counts_as_deadline_evidence(self, monkeypatch) -> None:
-        # The supervisor stopped Hermes at the deadline and the runner wrote an interrupted transcript; the
+    async def test_runner_recorded_deadline_counts_as_deadline_evidence(self, monkeypatch) -> None:
+        # The supervisor stopped Hermes at the deadline and the runner wrote a wall_time transcript; the
         # provider's own timeout fired a little later. No wall clock needed.
         sandbox = self._sandbox_with_saved_transcript(
-            {"messages": [], "final_response": None, "completed": False, "interrupted": True}
+            {
+                "messages": [],
+                "final_response": None,
+                "completed": False,
+                "interrupted": True,
+                "stop_reason": "wall_time",
+            }
         )
         hermes, request, _ = self._sandbox_session(monkeypatch, sandbox)
         clock = iter([0.0, 1.0])
@@ -629,6 +635,30 @@ class TestSanity:
         )
 
         assert response.metadata["stop_reason"] == "wall_time"
+
+    async def test_cleanup_cancellation_after_an_early_provider_timeout_stays_a_failure(self, monkeypatch) -> None:
+        # An early provider TimeoutError makes the session clean up: close publishes stop.request, the
+        # supervisor signals the runner, and the runner records an interrupted transcript with
+        # stop_reason "cancelled". That interruption is a consequence of the failure, not deadline
+        # evidence, so the failure must stand rather than become a scoreable wall_time outcome.
+        sandbox = self._sandbox_with_saved_transcript(
+            {
+                "messages": [],
+                "final_response": None,
+                "completed": False,
+                "interrupted": True,
+                "stop_reason": "cancelled",
+            }
+        )
+        hermes, request, _ = self._sandbox_session(monkeypatch, sandbox)
+        clock = iter([0.0, 1.0])
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+        with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
+            await hermes.responses(
+                request,
+                NeMoGymResponseCreateParamsNonStreaming(input="fix bug", metadata={"agent_timeout_sec": "900"}),
+            )
 
     async def test_close_during_activation_stops_the_runner(self, monkeypatch) -> None:
         class _Sandbox:
@@ -1365,7 +1395,7 @@ class TestSandboxUv:
         async def exec_(command, **_kwargs):
             if "import run_agent" in command:
                 return MagicMock(return_code=next(import_results), stdout="", stderr="")
-            if command == uv_bootstrap.PLATFORM_PROBE:
+            if command == uv_bootstrap._PLATFORM_PROBE:
                 return MagicMock(return_code=0, stdout="Linux\nx86_64\ngnu\n", stderr="")
             return MagicMock(return_code=0, stdout="", stderr="")
 
@@ -1373,9 +1403,9 @@ class TestSandboxUv:
         monkeypatch.setattr(uv_bootstrap.shutil, "which", lambda name: "/usr/bin/uv")
         monkeypatch.setattr(uv_bootstrap.platform, "machine", lambda: "aarch64")
         monkeypatch.setattr(uv_bootstrap.platform, "system", lambda: "Linux")
-        monkeypatch.setattr(uv_bootstrap, "host_uv_version", lambda uv: "0.12.3")
+        monkeypatch.setattr(uv_bootstrap, "_host_uv_version", lambda uv: "0.12.3")
         monkeypatch.setattr(
-            uv_bootstrap, "download_uv", lambda v, t, d: (d.parent.mkdir(parents=True), d.write_bytes(b"uv"))
+            uv_bootstrap, "_download_uv", lambda v, t, d: (d.parent.mkdir(parents=True), d.write_bytes(b"uv"))
         )
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.get_global_config_dict", lambda: {"runtime": {}})
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.resolve_provider_config", MagicMock())

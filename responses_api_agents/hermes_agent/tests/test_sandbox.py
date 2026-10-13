@@ -1247,11 +1247,18 @@ async def test_early_provider_timeout_with_a_transcript_stays_a_failure(agent, s
         await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
 
 
-async def test_runner_recorded_interruption_is_deadline_evidence(agent, state, monkeypatch):
-    """The supervisor stopped Hermes at the deadline and the runner wrote an interrupted transcript; the
+async def test_runner_recorded_deadline_is_deadline_evidence(agent, state, monkeypatch):
+    """The supervisor stopped Hermes at the deadline and the runner wrote a wall_time transcript; the
     provider's own timeout then fired early. The runner's record is enough evidence."""
     state.execute = AsyncMock(side_effect=TimeoutError("deadline"))
-    state.session.artifacts = {"result": {**_CAPTURED_TRANSCRIPT["result"], "completed": False, "interrupted": True}}
+    state.session.artifacts = {
+        "result": {
+            **_CAPTURED_TRANSCRIPT["result"],
+            "completed": False,
+            "interrupted": True,
+            "stop_reason": "wall_time",
+        }
+    }
     body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={AGENT_TIMEOUT_METADATA_KEY: "900.0"})
     clock = iter([0.0, 3.0])
     monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
@@ -1260,6 +1267,27 @@ async def test_runner_recorded_interruption_is_deadline_evidence(agent, state, m
 
     assert result.response.metadata["stop_reason"] == "wall_time"
     assert result.response.metadata["hermes_error_type"] == "TimeoutError"
+
+
+async def test_cleanup_cancellation_after_an_early_provider_timeout_stays_a_failure(agent, state, monkeypatch):
+    """An early provider TimeoutError triggers cleanup: close publishes stop.request and the runner records an
+    interrupted transcript with stop_reason "cancelled". That is a consequence of the failure, not evidence
+    that the agent deadline passed, so the failure stands."""
+    state.execute = AsyncMock(side_effect=TimeoutError("Hermes sandbox supervisor exceeded its execution deadline"))
+    state.session.artifacts = {
+        "result": {
+            **_CAPTURED_TRANSCRIPT["result"],
+            "completed": False,
+            "interrupted": True,
+            "stop_reason": "cancelled",
+        }
+    }
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={AGENT_TIMEOUT_METADATA_KEY: "900.0"})
+    clock = iter([0.0, 1.0])
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+    with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
+        await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
 
 
 @pytest.mark.parametrize("artifacts", [None, {"result": "garbled"}])
