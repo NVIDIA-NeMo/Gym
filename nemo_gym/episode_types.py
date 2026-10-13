@@ -4,6 +4,7 @@
 """Wire contracts for environment servers."""
 
 import re
+from collections.abc import Mapping
 from typing import Generic, TypeVar
 
 from pydantic import (
@@ -20,6 +21,9 @@ from typing_extensions import Self
 from nemo_gym.failure_kinds import FailureStage, validate_failure_kind
 
 
+_CAPTURE_KEY_ATTEMPT = re.compile(r"-a([1-9][0-9]*)$")
+
+
 class EpisodeId(BaseModel):
     """Identify one physical attempt of a logical rollout."""
 
@@ -32,7 +36,7 @@ class EpisodeId(BaseModel):
     @classmethod
     def reserve_attempt_suffix(cls, rollout_id: str) -> str:
         """Keep the derived capture key injective without changing existing keys."""
-        if re.search(r"-a[1-9][0-9]*$", rollout_id):
+        if _CAPTURE_KEY_ATTEMPT.search(rollout_id):
             raise ValueError("rollout_id must not end with the reserved attempt suffix '-a<N>'")
         return rollout_id
 
@@ -40,6 +44,14 @@ class EpisodeId(BaseModel):
     def capture_key(self) -> str:
         """Return the attempt-qualified key used by capture routes."""
         return self.rollout_id if self.attempt == 0 else f"{self.rollout_id}-a{self.attempt}"
+
+    @classmethod
+    def from_capture_key(cls, capture_key: str) -> Self:
+        """Invert ``capture_key``; the reserved attempt suffix makes the mapping one-to-one."""
+        match = _CAPTURE_KEY_ATTEMPT.search(capture_key)
+        if match is None:
+            return cls(rollout_id=capture_key)
+        return cls(rollout_id=capture_key[: match.start()], attempt=int(match.group(1)))
 
 
 class TaskId(BaseModel):
@@ -52,6 +64,16 @@ class TaskId(BaseModel):
         description="Run-unique taskset name; use the '<environment>:<taskset>' convention for blended runs.",
     )
     task_id: str = Field(min_length=1)
+
+
+def is_materialized_task_row(row: Mapping[str, object]) -> bool:
+    """Return whether a row has a materialized-task envelope.
+
+    This identifies the routing shape, not whether the envelope is valid. A malformed
+    ``task_input`` must still route as a materialized task and fail task validation instead
+    of falling through to the legacy run-request path.
+    """
+    return isinstance(row.get("task_id"), Mapping) and "task_input" in row
 
 
 class EpisodeFailure(BaseModel):

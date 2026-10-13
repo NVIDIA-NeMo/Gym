@@ -29,3 +29,25 @@ gym eval run \
 ```
 
 See `benchmarks/gdpval/README.md` for the full run recipe.
+
+## Judge failure telemetry
+
+Comparison judging can optionally write structured request and failure metadata:
+
+```yaml
+judge_telemetry_output_dir: /path/to/run/judge_telemetry
+```
+
+Each resources-server process writes a separate `judge-events.<pid>.jsonl` file.
+Events correlate preflight exclusions, provider attempts, retries, recovery, and
+invalid responses with the task, reference, judge, request size, file counts,
+relative file labels, media types, and attachment sizes. Prompts, attachment
+contents, base64 payloads, credentials, and absolute paths are never recorded.
+Telemetry is best-effort and does not alter judge routing, retries, scores, or
+ELO calculation.
+
+Summarize one file or a directory of process-local files with:
+
+```bash
+python -m resources_servers.gdpval.judge_telemetry /path/to/run/judge_telemetry
+```

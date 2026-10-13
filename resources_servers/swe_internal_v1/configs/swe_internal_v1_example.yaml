@@ -22,3 +22,11 @@ swe_internal_v1_example_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/swe_internal_v1/data/example.jsonl
+
+swe_internal_v1_example_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swe_internal_v1_example_agent

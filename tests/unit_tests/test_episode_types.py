@@ -11,6 +11,7 @@ from nemo_gym.episode_types import (
     EpisodeId,
     MaterializedTask,
     TaskId,
+    is_materialized_task_row,
 )
 
 
@@ -90,7 +91,7 @@ def test_single_agent_protocol_inherits_shared_failure_metadata(stage: str) -> N
         failure_kind="transport_unreachable",
         stage=stage,
     )
-    saved = failure.model_dump(mode="json", exclude={"partial_response"})
+    saved = failure.model_dump(mode="json", exclude={"partial_response", "agent_observations"})
     shared = EpisodeFailure.model_validate(saved)
     assert shared.stage == stage and shared.failure_kind == "transport_unreachable"
     assert shared.terminal is False
@@ -110,3 +111,18 @@ def test_unknown_execution_stage_is_optional_but_stage_aliases_are_rejected() ->
     assert EpisodeFailure(failure_reason="Lost reply", terminal=False, failure_kind="transport_timeout").stage is None
     with pytest.raises(ValidationError, match="stage"):
         EpisodeFailure(failure_reason="Failed scoring", terminal=False, stage="verifier")
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        ({"task_id": {"taskset": "test", "task_id": "1"}, "task_input": {}}, True),
+        ({"task_id": {"taskset": "test", "task_id": "1"}}, False),
+        ({"task_id": {"taskset": "test", "task_id": "1"}, "task_input": None}, True),
+        ({"task_id": None, "task_input": {}}, False),
+        ({"task_id": "test:1", "task_input": {}}, False),
+        ({"task_id": {"taskset": "test", "task_id": "1"}, "task_input": []}, True),
+    ],
+)
+def test_materialized_task_row_identifies_routing_shape(row: dict[str, object], expected: bool) -> None:
+    assert is_materialized_task_row(row) is expected

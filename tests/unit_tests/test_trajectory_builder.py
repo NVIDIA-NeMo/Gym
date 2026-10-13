@@ -27,6 +27,7 @@ from nemo_gym.token_id_capture import (
     TokenCaptureSnapshot,
     assert_prefix_contiguity,
     compute_digest,
+    mask_incomplete_when_attributed_from_config,
     prefix_merging,
     project_chain_to_output_items,
     project_main_chain_response,
@@ -606,6 +607,127 @@ def test_multiple_roots_are_masked_instead_of_rewarding_an_auxiliary_chain(tmp_p
     assert built["mask_sample"] is True
     assert built["metrics"]["roots"] == 2
     assert built["metrics"]["chains"] == 2
+
+
+# --- the incomplete-capture masking setting ---------------------------------------
+
+
+# A history rewrite: the harness resends turn 1's history without token 11
+# (a stripped reasoning span), so turn 2's prompt no longer extends turn 1's
+# cumulative sequence and the build splits into two clean roots.
+HISTORY_REWRITE = [
+    _entry("c1", [1, 2], [10, 11, 12], created_at=1.0),
+    _entry("c2", [1, 2, 10, 12, 7], [13], created_at=2.0),
+]
+
+
+class _FrozenSource:
+    """A ``TokenSource`` serving one pre-frozen snapshot."""
+
+    def __init__(self, entries, incomplete=False):
+        self._entries = tuple(entries)
+        self._incomplete = incomplete
+
+    async def freeze(self, rollout_id):
+        return TokenCaptureSnapshot(
+            rollout_id=rollout_id,
+            entries=self._entries,
+            incomplete=self._incomplete,
+            snapshot_id="frozen-1",
+            version=1,
+        )
+
+    async def drop(self, rollout_id, *, snapshot_id, version):
+        return True
+
+    async def close(self):
+        return None
+
+
+def test_a_history_rewrite_split_is_masked_by_default():
+    """A multi-root build masks even when every chain is clean."""
+    built = asyncio.run(trajectories_from_source("t0-r0", _FrozenSource(HISTORY_REWRITE)))
+
+    assert built["mask_sample"] is True
+    assert built["metrics"]["roots"] == 2
+    assert built["metrics"]["chains"] == 2
+    # The split is pure: nothing was quarantined and no retry is unresolved.
+    assert built["metrics"]["quarantined_calls"] == 0
+    assert built["unresolved_retries"] == []
+
+
+def _attributed_incomplete_capture() -> tuple[_FrozenSource, dict]:
+    """An incomplete snapshot whose verified response attributes the terminal to a captured call."""
+    terminal_output = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "final model answer", "annotations": []}],
+        }
+    ]
+    first = _entry("c1", [1, 2], [3, 4])
+    second = _entry("c2", [1, 2, 3, 4, 5], [6], parent="c1", created_at=1.0)
+    second.output_items = terminal_output
+    return _FrozenSource([first, second], incomplete=True), {"id": "resp-reconstructed", "output": terminal_output}
+
+
+def test_an_incomplete_capture_masks_even_with_a_delivered_attribution_by_default():
+    """The default masks any incomplete snapshot, whatever terminal attribution found."""
+    source, verified = _attributed_incomplete_capture()
+
+    built = asyncio.run(trajectories_from_source("t0-r0", source, verified_response=verified))
+
+    assert built["metrics"]["capture_incomplete"] is True
+    assert built["metrics"]["terminal_attribution"]["chain"] == "delivered"
+    assert built["mask_sample"] is True
+
+
+def test_an_incomplete_capture_with_a_delivered_attribution_trains_when_configured():
+    """A call that never committed its record cannot sit inside a delivered chain.
+
+    A harness killed at its timeout backstop leaves one registered-but-
+    uncommitted call. When the verified response's final content attributes
+    the terminal to a captured call and that call's chain delivers whole, the
+    uncaptured call is off the scored path, and with
+    ``mask_incomplete_when_attributed`` off the build trains.
+    """
+    source, verified = _attributed_incomplete_capture()
+
+    built = asyncio.run(
+        trajectories_from_source("t0-r0", source, verified_response=verified, mask_incomplete_when_attributed=False)
+    )
+
+    assert built["metrics"]["capture_incomplete"] is True
+    assert built["metrics"]["terminal_attribution"]["chain"] == "delivered"
+    assert built["mask_sample"] is False
+
+
+@pytest.mark.parametrize("mask_incomplete_when_attributed", [True, False])
+def test_an_incomplete_capture_without_attribution_masks(mask_incomplete_when_attributed: bool):
+    """Without a delivered attribution the uncaptured call may be the real
+    terminal, so an incomplete snapshot masks even a single clean chain."""
+    first = _entry("c1", [1, 2], [3, 4])
+    second = _entry("c2", [1, 2, 3, 4, 5], [6], parent="c1", created_at=1.0)
+
+    built = asyncio.run(
+        trajectories_from_source(
+            "t0-r0",
+            _FrozenSource([first, second], incomplete=True),
+            mask_incomplete_when_attributed=mask_incomplete_when_attributed,
+        )
+    )
+
+    assert built["metrics"]["capture_incomplete"] is True
+    assert built["mask_sample"] is True
+
+
+def test_mask_incomplete_when_attributed_from_config_reads_the_capture_block():
+    assert mask_incomplete_when_attributed_from_config({}) is True
+    assert (
+        mask_incomplete_when_attributed_from_config({"token_id_capture": {"mask_incomplete_when_attributed": False}})
+        is False
+    )
 
 
 def test_the_builder_runs_once_per_rollout(tmp_path, monkeypatch):

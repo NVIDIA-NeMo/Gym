@@ -14,9 +14,12 @@
 # limitations under the License.
 
 
+import sys
 from pathlib import Path
 
+import numpy as np
 import orjson
+import pandas as pd
 import pytest
 
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
@@ -48,6 +51,31 @@ def _result(task_idx: int, rollout_idx: int, reward: float = 1.0, total_tokens: 
 
 
 class TestRewardProfile:
+    def test_histogram_adjacent_floats(self) -> None:
+        pytest.importorskip("wandb")
+        data = pd.Series([1.0, np.nextafter(1.0, 2.0), float("nan")])
+        original = data.copy()
+        histogram = RewardProfiler().histogram(data)
+        assert histogram.histogram == [2]
+        assert histogram.bins[0] <= 1.0
+        assert histogram.bins[-1] >= np.nextafter(1.0, 2.0)
+        pd.testing.assert_series_equal(data, original)
+
+    def test_histogram_normal_range_unchanged(self) -> None:
+        wandb = pytest.importorskip("wandb")
+        data = pd.Series([0.0, 0.5, 1.0])
+        assert RewardProfiler().histogram(data).to_json() == wandb.Histogram(data).to_json()
+
+    def test_histogram_unrelated_error_propagates(self, monkeypatch) -> None:
+        wandb = pytest.importorskip("wandb")
+
+        def invalid_histogram(data):
+            raise ValueError("unrelated histogram failure")
+
+        monkeypatch.setattr(wandb, "Histogram", invalid_histogram)
+        with pytest.raises(ValueError, match="unrelated histogram failure"):
+            RewardProfiler().histogram(pd.Series([0.0, 1.0]))
+
     def _clean_metrics(self, metrics: list[dict]) -> None:
         for row in metrics:
             for key in list(row):
@@ -708,6 +736,32 @@ class TestRewardProfile:
         assert summary["complete_input_rows"] == 1
         assert summary["missing_input_rows"] == 1
         assert summary["partial_input_rows"] == 0
+
+
+class TestHistogram:
+    def test_returns_a_wandb_histogram_when_wandb_is_installed(self) -> None:
+        from wandb import Histogram
+
+        result = RewardProfiler().histogram(pd.Series([1, 2, 3]))
+
+        assert isinstance(result, Histogram)
+
+    def test_falls_back_to_none_when_wandb_is_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # wandb is an optional extra (`nemo-gym[wandb]`); this stat is always dropped by
+        # prepare_for_serialization before it reaches any JSON output or exporter, so a plain
+        # Gym install must be able to skip it instead of failing.
+        monkeypatch.setitem(sys.modules, "wandb", None)
+
+        assert RewardProfiler().histogram(pd.Series([1, 2, 3])) is None
+
+    def test_warns_when_wandb_is_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(sys.modules, "wandb", None)
+
+        with pytest.warns(UserWarning, match=r"pip install nemo-gym\[wandb\]"):
+            RewardProfiler().histogram(pd.Series([1, 2, 3]))
+
+    def test_empty_data_returns_none(self) -> None:
+        assert RewardProfiler().histogram(pd.Series([], dtype=float)) is None
 
 
 class TestWriteToDisk:

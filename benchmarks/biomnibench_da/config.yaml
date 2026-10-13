@@ -1,0 +1,56 @@
+prepare_script_args:
+  output_dir: benchmarks/biomnibench_da/data
+  docker_image: benchmarks/biomnibench_da:latest
+
+biomnibench_da:
+  responses_api_agents:
+    harbor_agent_general:
+      entrypoint: app.py
+      domain: agent
+      description: Harbor agent integration for BiomniBench data-analysis tasks using OpenCode in Singularity environments.
+
+      datasets:
+        - name: biomnibench_da
+          type: benchmark
+          jsonl_fpath: ${prepare_script_args.output_dir}/gym.jsonl
+          prepare_script: benchmarks/biomnibench_da/harbor/adapter.py
+          prepare_dependencies:
+            - huggingface_hub
+            - tomli_w
+            - tqdm
+            - tyro
+          num_repeats: 4
+
+      harbor_max_retries: 3
+
+      ## TIP: Auto-resolves to a sibling harbor folder when set.
+      harbor_jobs_dir: ${oc.select:output_jsonl_fpath,''}
+
+      harbor_dataset:
+        path: ${prepare_script_args.output_dir}
+
+      harbor_environment:
+        type: singularity
+        kwargs:
+          singularity_image_cache_dir: ${oc.env:SINGULARITY_CACHEDIR}/harbor
+          singularity_force_pull: false
+          singularity_no_mount: home,tmp
+
+      harbor_agent:
+        name: opencode
+        model_name: ${policy_model_name}
+        env:
+          OPENCODE_CONFIG_CONTENT: '{"snapshot": false}'
+          NVINF_API_KEY: \${NVINF_API_KEY:-}
+          VLLM_API_BASE: \${VLLM_API_BASE:-}
+
+      ## This benchmark's judge emits `score`, not `reward`.
+      harbor_reward_key: score
+
+biomnibench_da_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: biomnibench_da
