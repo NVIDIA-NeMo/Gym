@@ -116,7 +116,7 @@ class CleanupContext:
 
 
 class HandledEpisodeError(Exception):
-    """Carry a failure that belongs in the native episode response."""
+    """Carry a failure that belongs in the episode response."""
 
     def __init__(self, failure: EpisodeFailure) -> None:
         super().__init__(failure.failure_reason)

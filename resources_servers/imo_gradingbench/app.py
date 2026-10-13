@@ -205,7 +205,6 @@ class ImoGradingBenchVerifyResponse(BaseVerifyResponse):
 
 
 class ImoGradingBenchResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ImoGradingBenchConfig
 
     # --- verify ------------------------------------------------------------

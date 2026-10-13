@@ -104,7 +104,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
         # Register cleanup before seed so a lost seed response cannot hide the caller-assigned session ID.
         # Final cleanup closes this session after run() returns, outside the episode deadline.
-        cleanup.register_cleanup("resources session", close_resources)
+        resources_cleanup = cleanup.register_cleanup("resources session", close_resources)
 
         try:
             seed_http_response = await self.server_client.post(
@@ -190,7 +190,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             if agent_close_response.agent_session_id != agent_session_id:
                 raise ValueError("Agent close returned a different agent_session_id")
-            if agent_close_response.resources_cookies is not None:
+            # Verify identifies the episode by the Resources session cookie.
+            # An agent that held no Resources cookie jar returns None or an empty jar.
+            # Neither may replace the cookie from the Resources seed.
+            if agent_close_response.resources_cookies:
                 resources_cookies = agent_close_response.resources_cookies
 
         # Register cleanup before seed so cancellation can close a remotely created session even if its response is lost.
@@ -245,7 +248,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             ) from error
 
         # Verification needs this close response: it carries the Agent's observations and final Resources cookies.
-        # A repeated close cannot return them, so a transient failure retries the whole episode instead.
+        # Session-capable agents replay this receipt when ServerClient retries a lost reply.
         try:
             await agent_cleanup.close()
         except Exception as error:
@@ -280,6 +283,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 partial_response=agent_response,
             ) from error
 
+        # Keep one bounded retry in final unwind without erasing a completed verdict.
+        cleanup.register_cleanup("post-verification resources session", resources_cleanup.close)
         return SingleAgentTurnResponse(
             episode_id=request.episode_id,
             task_id=request.task.task_id,

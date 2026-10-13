@@ -19,7 +19,7 @@ from sys import platform
 import setuptools
 
 dependencies = [
-    "nemo-gym[dev]",
+    "nemo-gym[dev,ray]",
 
     # We specifically pin the vllm dependency because we have tested on this version.
     # Updated Mon Aug 24, 2026 with vllm==0.25.1

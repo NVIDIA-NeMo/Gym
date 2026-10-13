@@ -42,7 +42,6 @@ class AzureOpenAIModelServerConfig(BaseResponsesAPIModelConfig):
 
 
 class AzureOpenAIModelServer(SimpleResponsesAPIModel):
-    ray_enabled = False
     config: AzureOpenAIModelServerConfig
 
     def model_post_init(self, context):

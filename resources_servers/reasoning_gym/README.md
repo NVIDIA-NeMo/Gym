@@ -18,7 +18,7 @@ python scripts/create_dataset.py \
 **Multiple tasks (composite):**
 ```bash
 python scripts/create_dataset.py \
-    --tasks knights_knaves,syllogisms,leg_counting \
+    --tasks knights_knaves,syllogism,leg_counting \
     --size 1000 \
     --output data/train_composite.jsonl
 ```

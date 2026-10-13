@@ -103,8 +103,10 @@ class ArenaMetrics:
 
         # Collect valid judge scores and the data needed for each aggregate.
         for rollouts in tasks:
-            # Slice membership belongs to the prompt and is shared by repeated rollouts.
-            prompt_slices = rollouts[0].get("prompt_slices") or {}
+            # Slice membership belongs to the prompt and is shared by repeated rollouts. Take it from
+            # the first rollout that has it: a row counted as zero for a rollout that never ran can
+            # come first and carries no slices.
+            prompt_slices = next((r["prompt_slices"] for r in rollouts if r.get("prompt_slices")), {})
             slice_keys = {(namespace, label) for namespace, labels in prompt_slices.items() for label in labels}
             task_games = [game for rollout in rollouts for game in rollout.get("games") or []]
             if task_games and all(game.get("verdict") in DECISIVE_VERDICTS for game in task_games):

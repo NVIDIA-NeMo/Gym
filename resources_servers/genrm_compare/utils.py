@@ -30,6 +30,7 @@ import hashlib
 import itertools
 import json
 import logging
+import math
 import re
 from math import isfinite
 from typing import Any, Dict, List, Optional, Tuple
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_COMPARISON_STRATEGIES = frozenset({"circular", "all_pairs"})
 SUPPORTED_AGGREGATOR_METHODS = frozenset({"simple_tiebreaker"})
+SUPPORTED_SCORE_SOURCES = frozenset({"overall", "rubric_mean"})
 
 # GenRM ranking midpoint - rankings are 1-6, midpoint is 3.5
 # Used in tiebreaker: ranking < 3.5 means response_1 is better, > 3.5 means response_2 is better
@@ -184,26 +186,75 @@ def generate_comparison_pairs(strategy: str, num_responses: int) -> List[Tuple[i
 # =============================================================================
 
 
+def _extract_rubric_mean(
+    parsed: Dict[str, Any], expected_rubric_ids: Optional[Tuple[int, ...]] = None
+) -> Optional[Tuple[float, float, float]]:
+    """Return equal-weight rubric means, or None if any rubric is invalid."""
+    evaluations = parsed.get("rubric_evaluations")
+    if not isinstance(evaluations, list) or not evaluations:
+        return None
+
+    scores = []
+    rubric_ids = []
+    for evaluation in evaluations:
+        if not isinstance(evaluation, dict) or not all(
+            key in evaluation for key in ("rubric_id", "score_1", "score_2", "ranking")
+        ):
+            return None
+        raw_rubric_id = evaluation["rubric_id"]
+        # bool is an int subclass, and int() silently truncates fractional floats.
+        if isinstance(raw_rubric_id, bool) or (
+            isinstance(raw_rubric_id, float) and (not math.isfinite(raw_rubric_id) or not raw_rubric_id.is_integer())
+        ):
+            return None
+        try:
+            rubric_id = int(raw_rubric_id)
+            values = tuple(float(evaluation[key]) for key in ("score_1", "score_2", "ranking"))
+        except (TypeError, ValueError):
+            return None
+        if not all(math.isfinite(value) for value in values):
+            return None
+        if not (1 <= values[0] <= 5 and 1 <= values[1] <= 5 and 1 <= values[2] <= 6):
+            return None
+        rubric_ids.append(rubric_id)
+        scores.append(values)
+
+    # Exact ID matching prevents missing, duplicate, or unrelated rubrics from being mixed.
+    if len(set(rubric_ids)) != len(rubric_ids):
+        return None
+    if expected_rubric_ids is not None and set(rubric_ids) != set(expected_rubric_ids):
+        return None
+    return tuple(float(np.mean(values)) for values in zip(*scores))
+
+
 def parse_genrm_output(
     output: str,
     default_score: float,
     default_ranking: float,
     *,
+    score_source: str = "overall",
+    expected_rubric_ids: Optional[Tuple[int, ...]] = None,
     raise_on_fail: bool = False,
 ) -> Tuple[float, float, float]:
     """Parse GenRM output to extract scores from JSON format.
 
-    Searches for JSON in the output text, trying:
-    1. Fenced JSON blocks (```json {...} ```)
-    2. Any {...} JSON objects, taking the last valid one
+    Searches for JSON in fenced blocks or {...} objects.
 
-    Expected JSON format:
+    Overall format (flat or nested under ``overall``):
         {"score_1": <1-5>, "score_2": <1-5>, "ranking": <1-6>}
 
     Args:
         output: Raw text output from GenRM model
         default_score: Default score if parsing fails
         default_ranking: Default ranking if parsing fails
+        score_source: "overall" reads the scores above. "rubric_mean" averages
+            score_1, score_2 and ranking from a nonempty ``rubric_evaluations`` list.
+            Each item needs a unique integer-valued ``rubric_id`` (no bools or
+            fractional IDs) and all three finite values: scores 1-5, ranking 1-6.
+            One invalid item rejects the whole verdict; rubric mode never falls
+            back to overall scores.
+        expected_rubric_ids: Exact rubric ID set; order does not matter. None accepts
+            any valid set here, but server endpoints require IDs in rubric mode.
         raise_on_fail: If True, raise GenRMOutputParseError on failure
 
     Returns:
@@ -211,6 +262,7 @@ def parse_genrm_output(
 
     Raises:
         GenRMOutputParseError: If raise_on_fail=True and parsing fails
+        ValueError: If score_source is unsupported
     """
 
     def _try_parse(json_str: str) -> Optional[Tuple[float, float, float]]:
@@ -222,6 +274,10 @@ def parse_genrm_output(
 
         if not isinstance(parsed, dict):
             return None
+
+        if score_source == "rubric_mean":
+            # None follows the normal parse-failure path: retry, then configured defaults.
+            return _extract_rubric_mean(parsed, expected_rubric_ids)
 
         # Handle nested format: {"rubric_evaluations": [...], "overall": {...}}
         if "overall" in parsed and isinstance(parsed["overall"], dict):
@@ -274,6 +330,9 @@ def parse_genrm_output(
                             break
             i += 1
         return results
+
+    if score_source not in SUPPORTED_SCORE_SOURCES:
+        raise ValueError(f"Unknown score_source: {score_source}. Supported: {sorted(SUPPORTED_SCORE_SOURCES)}")
 
     try:
         # Strategy 1: Look for fenced JSON blocks (```json ... ```)
@@ -697,6 +756,8 @@ def aggregate_scores(
     group_reasoning_length_penalty_coeff: float,
     group_answer_length_penalty_coeff: float,
     group_style_penalty_coeff: float = 0.0,
+    # Only this leading prefix receives group-relative length and style adjustments.
+    adjustment_count: Optional[int] = None,
 ) -> Tuple[List[float], Dict[str, float], List[float], List[float]]:
     """Aggregate pairwise comparison results into per-response rewards.
 
@@ -719,6 +780,7 @@ def aggregate_scores(
         group_style_penalty_coeff: Coefficient for style density penalty.
             Penalizes responses with higher density of formatting elements
             (headers, lists, bold, emojis) relative to text length.
+        adjustment_count: Number of leading responses eligible for adjustments. Defaults to all responses.
 
     Returns:
         Tuple of:
@@ -772,6 +834,10 @@ def aggregate_scores(
     # Store base scores before length/style adjustments
     base_scores = list(final_scores)
     bonuses = [0.0] * num_responses
+    # Fixed-baseline mode appends the baseline, so only the leading trainable prefix is adjusted.
+    adjustment_count = num_responses if adjustment_count is None else adjustment_count
+    adjusted_scores = final_scores[:adjustment_count]
+    adjusted_objs = response_objs[:adjustment_count]
 
     # Apply length bonuses if any are configured
     if any(
@@ -782,25 +848,27 @@ def aggregate_scores(
             group_answer_length_penalty_coeff > 0,
         ]
     ):
-        final_scores, length_bonuses = apply_length_bonuses(
-            scores=final_scores,
-            response_objs=response_objs,
+        adjusted_scores, length_bonuses = apply_length_bonuses(
+            scores=adjusted_scores,
+            response_objs=adjusted_objs,
             reasoning_bonus=reasoning_bonus,
             answer_bonus=answer_bonus,
             top_percentile=top_percentile,
             group_reasoning_length_penalty_coeff=group_reasoning_length_penalty_coeff,
             group_answer_length_penalty_coeff=group_answer_length_penalty_coeff,
         )
-        bonuses = [b + lb for b, lb in zip(bonuses, length_bonuses)]
+        bonuses[:adjustment_count] = length_bonuses
 
     # Apply style penalties if configured
     if group_style_penalty_coeff > 0:
-        final_scores, style_adjustments = apply_style_penalties(
-            scores=final_scores,
-            response_objs=response_objs,
+        adjusted_scores, style_adjustments = apply_style_penalties(
+            scores=adjusted_scores,
+            response_objs=adjusted_objs,
             group_style_penalty_coeff=group_style_penalty_coeff,
         )
-        bonuses = [b + sa for b, sa in zip(bonuses, style_adjustments)]
+        bonuses[:adjustment_count] = [b + value for b, value in zip(bonuses, style_adjustments)]
+
+    final_scores[:adjustment_count] = adjusted_scores
 
     # Compute metrics
     metrics: Dict[str, float] = {}

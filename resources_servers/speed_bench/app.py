@@ -432,7 +432,6 @@ def _compute_std_metrics(tasks: List[List[Dict[str, Any]]], score_keys: tuple) -
 
 
 class SpeedBenchResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: SpeedBenchResourcesServerConfig
 
     # State populated lazily on the first verify() call so the benchmark window

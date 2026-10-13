@@ -189,7 +189,6 @@ class NVARCVerifyResponse(BaseVerifyResponse):
 
 
 class NVARCResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: NVARCResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

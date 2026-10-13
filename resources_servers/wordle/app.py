@@ -186,7 +186,6 @@ class GetGameStateResponse(BaseModel):
 
 
 class WordleResourcesServer(GymnasiumServer):
-    ray_enabled = False
     config: WordleResourcesServerConfig
 
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:

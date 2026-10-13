@@ -48,6 +48,7 @@ class GuiCoordinateVerifyResponse(BaseVerifyResponse):
     extracted_x: Optional[float]
     extracted_y: Optional[float]
     distance: Optional[float]
+    metadata: Optional[dict[str, Any]] = None
 
 
 def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
@@ -95,7 +96,6 @@ def _compute_reward(
 
 
 class GuiCoordinateResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: GuiCoordinateResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

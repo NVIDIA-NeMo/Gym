@@ -61,6 +61,7 @@ def browsers(monkeypatch):
 
     def _create_backend(config, session_metadata=None):
         browser = _Browser(open_delay_s=settings["open_delay_s"])
+        browser.session_metadata = session_metadata
         created.append(browser)
         return browser
 
@@ -304,3 +305,25 @@ def test_mcp_tool_calls_reach_the_browser_opened_under_the_callers_id(browsers) 
     assert called["result"].get("isError") is not True, called
     assert len(browsers.created) == 1
     assert server._session_id_to_state["resources-session"].answer == "42"
+
+
+def test_the_browser_is_tagged_with_the_episode_the_training_side_records(browsers) -> None:
+    """The resources_session_id is minted inside the Environment Server; only the episode
+    reaches the training record, so that is what a provider-side session must carry."""
+    client = TestClient(_server().setup_webserver())
+
+    client.post("/seed_session", json=_seed_json(episode={"rollout_id": "rollout-7", "attempt": 2}))
+
+    assert browsers.created[0].session_metadata == {
+        "rollout_session_id": "resources-session",
+        "rollout_id": "rollout-7",
+        "attempt": "2",
+    }
+
+
+def test_an_agent_run_seed_has_no_episode_to_tag(browsers) -> None:
+    client = TestClient(_server().setup_webserver())
+
+    client.post("/seed_session", json={"initial_url": "https://example.com/"})
+
+    assert set(browsers.created[0].session_metadata) == {"rollout_session_id"}

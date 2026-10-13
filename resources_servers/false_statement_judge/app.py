@@ -164,8 +164,6 @@ class FalseStatementVerifyResponse(BaseVerifyResponse):
 class FalseStatementJudgeServer(SimpleResourcesServer):
     """LLM-judge grader for prove-the-false-statement benchmarks."""
 
-    ray_enabled = False
-
     config: FalseStatementJudgeConfig
 
     def model_post_init(self, context):
