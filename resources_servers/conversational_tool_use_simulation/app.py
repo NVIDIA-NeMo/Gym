@@ -432,7 +432,6 @@ class ConversationalToolUseVerifyRequest(BaseVerifyRequest):
 class ConversationalToolUseVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
-    instance_config: Dict[str, Any] = Field(default_factory=lambda: {"mask_sample": False})
     terminal_state: Optional[str] = None
     result: ConversationalToolUseResult
     trajectory_invalid_reasons: List[str] = Field(default_factory=list)
@@ -1373,7 +1372,7 @@ Return type in JSON Schema format: {return_type}
                 "failure_labels": state.failure_labels,
                 "judge_generation_error": state.judge_generation_error,
                 "judge_diagnostics": state.judge_diagnostics,
-                "instance_config": {"mask_sample": self._should_mask_sample(state)},
+                "mask_sample": self._should_mask_sample(state),
                 "result": self._trajectory_result(state),
             }
         )

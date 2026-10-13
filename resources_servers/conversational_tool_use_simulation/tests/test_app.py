@@ -674,7 +674,7 @@ async def test_agent_step_limit_records_tool_calls_without_tool_simulation(monke
     assert state.failure_labels == [VerificationFailureLabel.TRAJECTORY_FAILURE]
     assert state.terminal_error == "The maximum number of agent steps of 50 has been reached"
     verified = await server.verify(request, make_verify_request())
-    assert verified.instance_config == {"mask_sample": False}
+    assert verified.mask_sample is False
 
 
 async def test_agent_step_limit_after_text_and_user_reply_preserves_messages() -> None:
@@ -744,7 +744,7 @@ async def test_tool_argument_enum_is_validated_by_jsonschema() -> None:
     assert verified.reward == 0.0
     assert verified.trajectory_invalid_reasons == ["invalid_agent_tool_call"]
     assert verified.failure_labels == [VerificationFailureLabel.AGENT_FAILURE]
-    assert verified.instance_config == {"mask_sample": False}
+    assert verified.mask_sample is False
     assert verified.result.trajectory.messages[-1].tool_name == "update_subscription"
 
 
@@ -780,7 +780,7 @@ async def test_user_generation_error_records_invalid_reason(monkeypatch) -> None
     assert verified.reward == 0.0
     assert verified.trajectory_invalid_reasons == ["message_generation_error"]
     assert verified.failure_labels == [VerificationFailureLabel.USER_FAILURE]
-    assert verified.instance_config == {"mask_sample": True}
+    assert verified.mask_sample is True
 
 
 async def test_tool_generation_error_records_invalid_reason(monkeypatch) -> None:
@@ -829,7 +829,7 @@ async def test_tool_generation_error_records_invalid_reason(monkeypatch) -> None
     verified = await server.verify(request, make_verify_request())
     assert verified.trajectory_invalid_reasons == ["message_generation_error"]
     assert verified.failure_labels == [VerificationFailureLabel.TOOL_FAILURE]
-    assert verified.instance_config == {"mask_sample": True}
+    assert verified.mask_sample is True
 
 
 async def test_none_tool_schemas_skip_validation(monkeypatch) -> None:
@@ -1025,7 +1025,7 @@ async def test_transfer_ground_truth_mismatch_zeroes_reward_and_skips_judge(
 
     assert verified.reward == 0.0
     assert verified.failure_labels == [VerificationFailureLabel.AGENT_FAILURE]
-    assert verified.instance_config == {"mask_sample": False}
+    assert verified.mask_sample is False
     assert verified.transfer_ground_truth_enforced is True
     assert verified.transfer_ground_truth_mismatch is True
     assert verified.judge_skipped_for_transfer_mismatch is True
@@ -1129,7 +1129,7 @@ async def test_llm_judge_labels_tool_response_failure_and_short_circuits(monkeyp
     assert verified.trajectory_invalid_reasons == ["no_reward_environment_message"]
     assert verified.failure_labels == [VerificationFailureLabel.TOOL_FAILURE]
     assert verified.num_tool_failures == 1
-    assert verified.instance_config == {"mask_sample": True}
+    assert verified.mask_sample is True
     agent_verification = verified.result.trajectory.agent_verification_result
     assert agent_verification is not None
     assert agent_verification.trajectory_invalid_reasons == ["no_reward_environment_message"]
@@ -1175,7 +1175,7 @@ async def test_combined_verification_type_uses_single_judge_shape(monkeypatch) -
     assert verified.reward == 0.0
     assert verified.trajectory_invalid_reasons == []
     assert verified.failure_labels == [VerificationFailureLabel.AGENT_FAILURE]
-    assert verified.instance_config == {"mask_sample": False}
+    assert verified.mask_sample is False
     assert verified.judge_diagnostics["verification_type"] == "complete_trajectory_combined_evaluation"
     assert verified.judge_diagnostics["conversation_verification_result"]["reward"] == 0
     trajectory_result = verified.result.trajectory
@@ -1467,7 +1467,8 @@ async def test_judge_exception_is_synchronized_into_internal_sidecar(monkeypatch
     assert verified.reward == 0.0
     assert verified.trajectory_invalid_reasons == ["verification_generation_error"]
     assert verified.failure_labels == [VerificationFailureLabel.VERIFICATION_GENERATION_ERROR]
-    assert verified.instance_config == {"mask_sample": True}
+    assert verified.mask_sample is True
+    assert "instance_config" not in verified.model_dump()
     assert verified.judge_generation_error == "RuntimeError: judge provider unavailable"
     agent_verification = verified.result.trajectory.agent_verification_result
     assert agent_verification is not None
