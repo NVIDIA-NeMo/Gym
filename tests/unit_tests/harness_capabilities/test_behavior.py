@@ -151,3 +151,39 @@ def test_agent_timeout_cannot_pass_without_stimulus_or_saved_root():
     witness = {"attempts": [{"response_withheld": True, "response": None, "status_code": None}]}
     for record in (None, {"response": {"status": "incomplete"}}):
         assert agent_timeout_checks(witness, record)[1]["status"] == "fail"
+
+
+@pytest.mark.parametrize(
+    "mutation", [None, "request", "body", "status", "response_id", "identity", "missing", "stimulus"]
+)
+def test_server_timeout_evidence_requires_exact_saved_exchange(mutation):
+    from nemo_gym.harness_capabilities.behavior import model_server_timeout_checks
+
+    request = {"input": "hello"}
+    response = {"error": {"type": "model_timeout", "message": "deadline exceeded", "code": "504"}}
+    witness = {"attempts": [{"request": request, "response": response, "status_code": 504}]}
+    call = {
+        "model_call_id": "call-1",
+        "request": request,
+        "response": response,
+        "response_metadata": {"status_code": 504, "response_id": None},
+    }
+    record = {"ng_trajectory": {"model_calls": [call]}}
+    if mutation == "request":
+        call["request"] = {"input": "other"}
+    elif mutation == "body":
+        call["response"] = {"error": {"type": "other"}}
+    elif mutation == "status":
+        call["response_metadata"]["status_code"] = 500
+    elif mutation == "response_id":
+        call["response_metadata"]["response_id"] = "invented"
+    elif mutation == "identity":
+        call["model_call_id"] = " "
+    elif mutation == "missing":
+        record = None
+    elif mutation == "stimulus":
+        witness = None
+    checks = model_server_timeout_checks(witness, record, fingerprint=fingerprint)
+    assert all(c["tier"] == "P1" for c in checks)
+    assert (checks[1]["status"] == "pass") == (mutation is None)
+    assert (checks[0]["status"] == "pass") == (mutation != "stimulus")

@@ -649,3 +649,36 @@ def test_diagnostic_scenario_failures_do_not_block_p0(tmp_path, monkeypatch, tie
     assert saved["tier"] == tier
     assert failure_details("pi", output)[0] == ("0 / 1" if tier == "P1" else "1 / 2")
     assert f"{scenario.name} ({tier})" in (output / "conformance_report.md").read_text()
+
+
+@pytest.mark.parametrize("dialect", ["chat/completions", "responses"])
+@pytest.mark.parametrize("bundle_name", ["rollouts.jsonl", "rollouts_failures.jsonl"])
+def test_server_timeout_response_is_retained_without_requiring_retry(tmp_path, dialect, bundle_name):
+    scenario = SCENARIO["model_server_timeout_response"]
+    probe = Probe(scenario, tmp_path)
+    body = {"model": "probe", "messages" if dialect == "chat/completions" else "input": []}
+    with TestClient(probe.model_app()) as client:
+        response = client.post(f"/ng-rollout/0-0/v1/{dialect}", json=body)
+    assert response.status_code == 504
+    assert response.json()["error"]["type"] == "model_timeout"
+    # No retry or verifier is needed to satisfy the recording contract.
+    call = {
+        "model_call_id": "c1",
+        "request": body,
+        "response": response.json(),
+        "response_metadata": {"status_code": 504, "response_id": None},
+    }
+    (tmp_path / bundle_name).write_text(json.dumps({"ng_trajectory": {"model_calls": [call]}}) + "\n")
+    result = inspect_episode(scenario, tmp_path, {"returncode": 1, "timed_out": False})
+    assert result["verdict"] == "fulfilled"
+    assert result["delivery"] == ("rollout" if bundle_name == "rollouts.jsonl" else "failure_record")
+    assert result["health_report"] is None
+    assert {c["id"] for c in result["checks"]} == {"model.timeout_stimulus", "model.timeout_retained"}
+    assert not probe.finished and not probe.verifications
+    assert all(c["tier"] == "P1" for c in result["checks"])
+    # Missing timeout evidence fails the P1 scenario; suite gating is tested separately.
+    (tmp_path / bundle_name).write_text(json.dumps({"ng_trajectory": {}}) + "\n")
+    result = inspect_episode(scenario, tmp_path, {"returncode": 1, "timed_out": False})
+    assert result["verdict"] == "not_fulfilled"
+    assert result["behavioral_status"] == "fail"
+    assert next(c for c in result["checks"] if c["id"] == "model.timeout_retained")["status"] == "fail"

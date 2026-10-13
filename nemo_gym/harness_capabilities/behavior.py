@@ -422,3 +422,45 @@ def agent_timeout_checks(witness: dict | None, record: dict | None) -> list[dict
         )
     )
     return results.dump()
+
+
+def model_server_timeout_checks(witness: dict | None, record: dict | None, *, fingerprint: Callable) -> list[dict]:
+    """Check a saved HTTP timeout without requiring retries, grading or time-limit records."""
+    results = Results()
+    attempts = (witness or {}).get("attempts", [])
+    first = attempts[0] if attempts else {}
+    results.run(
+        BehavioralCheck(
+            id="model.timeout_stimulus",
+            tier="P1",
+            evidence=("TE-1",),
+            location="witness.json",
+            reason="the controlled endpoint must return an explicit HTTP 504 model timeout",
+            predicate=lambda: first.get("status_code") == 504
+            and _mapping(_mapping(first.get("response")).get("error")).get("type") == "model_timeout",
+            available=bool(attempts),
+        )
+    )
+    calls = _objects(_mapping((record or {}).get("ng_trajectory")).get("model_calls"))
+    results.run(
+        BehavioralCheck(
+            id="model.timeout_retained",
+            tier="P1",
+            evidence=("TE-1",),
+            location="$.ng_trajectory.model_calls",
+            reason="the saved model call must retain the witnessed HTTP 504 timeout body, request and absent response ID",
+            predicate=lambda: any(
+                isinstance(c.get("model_call_id"), str)
+                and bool(c["model_call_id"].strip())
+                and fingerprint(
+                    c.get("request"), _mapping(c.get("response_metadata")).get("status_code"), c.get("response")
+                )
+                == fingerprint(first.get("request"), first.get("status_code"), first.get("response"))
+                and _mapping(c.get("response_metadata")).get("response_id") is None
+                for c in calls
+            ),
+            available=record is not None,
+            depends_on=("model.timeout_stimulus",),
+        )
+    )
+    return results.dump()

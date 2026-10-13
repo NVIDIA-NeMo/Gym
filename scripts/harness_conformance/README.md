@@ -117,15 +117,16 @@ python scripts/run_harness_conformance.py --harness codex \
 | `retry_429` | Two 429 replies before the tool sequence | TE-1–TE-9, including distinct attempts with identical request bodies |
 | `retry_500` | One 500 reply before the tool sequence | TE-1–TE-9, including retained error payloads |
 | `model_error` | Persistent 400 with no model response ID | TE-1, TE-2, TE-4, TE-7, and TE-8/TE-9 |
+| `model_server_timeout_response` (P1) | Return HTTP 504 on the first model request | Retain the request and timeout error in a saved model call; no retry or recovery requirement |
 | `agent_timeout_no_model_output` (P1) | Withhold every model reply until the 30-second agent deadline; root invocation and agent response must be `incomplete` | Agent outcome, retained calls and health; no steps or tools expected |
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
 
-The timeout scenario and its two behavioral checks are P1. It runs by default
-and reports all evidence, health and execution failures, but does not affect the
+Both timeout scenarios and their behavioral checks are P1. They run by default
+and report their failures without affecting the
 P0 CI gate. Existing checks retain their tiers; the scenario tier controls whether
 that execution gates CI. The seven existing scenarios remain P0.
 
-The timeout scenario configures the agent run deadline, not a Model Server deadline.
+The `agent_timeout_no_model_output` scenario configures the agent run deadline.
 Use `--timeout 300` to allow setup and cleanup; the runner deadline
 must be at least 60 seconds longer than the agent deadline. The endpoint sends no
 HTTP status or response body. It does not prescribe retries. Checks read the root
@@ -134,6 +135,11 @@ agent run, not the individual model call. Missing outcome evidence fails.
 The legacy Hermes path has no configurable agent run deadline: this scenario
 reports an execution error for that preset instead of timing out the collector
 and mistaking that for a harness deadline.
+
+The HTTP-504 scenario checks only `model.timeout_stimulus` and `model.timeout_retained`.
+It accepts evidence in a normal rollout or failure row, without reading capture sidecars,
+requiring `time_limits`, or imposing grading or health expectations. It tests how the
+harness retains a server timeout response, not how a server enforces its deadline.
 
 Both Chat Completions and Responses are supported, including streaming. Supplied
 usage includes prompt, completion, reasoning, total, and cached counts. Chat

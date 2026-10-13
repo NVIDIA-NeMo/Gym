@@ -23,6 +23,7 @@ class Scenario:
     usage: bool = True
     http_errors: tuple[int, ...] = ()
     terminal_error: bool = False
+    server_timeout_response: bool = False
     expected_reward: float = 1.0
     steps: bool = True
     tier: PriorityTier = "P0"
@@ -81,6 +82,16 @@ SCENARIOS = (
             # retain a known zero total, even though the failed attempt has no usage.
             "rollout_token_count_mismatch": "healthy",
         },
+    ),
+    Scenario(
+        "model_server_timeout_response",
+        "Return an explicit HTTP 504 timeout on the first model request; check saved timeout evidence only.",
+        evidence=(),
+        tool_steps=0,
+        steps=False,
+        http_errors=(504,),
+        server_timeout_response=True,
+        tier="P1",
     ),
     Scenario(
         "agent_timeout_no_model_output",

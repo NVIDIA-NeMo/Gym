@@ -142,6 +142,8 @@ class Probe:
             payload = {
                 "error": {"message": "controlled model failure", "type": "conformance_error", "code": str(status)}
             }
+            if self.scenario.server_timeout_response:
+                payload["error"].update(message="controlled model timeout", type="model_timeout")
         else:
             try:
                 if self.finished:
