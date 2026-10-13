@@ -444,6 +444,61 @@ calculator_agent:
 
 The Agent Server's `resources_server.name` must match the top-level Resources Server instance name.
 
+For an Environment Server, add `taskset: <name>` to the dataset
+declaration and map that name in `environment_server_routes`. The normal
+`gym dataset collate` and `gym eval run --benchmark ...` paths then convert prepared
+flat rows to `task_id` and `task_input`; no separate conversion command is needed.
+Collation leaves task-owned fields flat inside `task_input`; each Environment Server
+validates its own input when dispatched. The built-in `single_agent_turn` server
+also accepts the existing `{responses_create_params, task_data}` shape. Its
+`task_data` key is reserved as that container; additional flat fields are merged
+into it, with conflicting values rejected. Dataset metrics count custom rows
+without requiring Responses API fields; response-specific metrics are collected
+only when those fields validate.
+The source JSONL stays unchanged and can still be shared with flat-row recipes.
+Omit `taskset` to keep the current flat-row format. This option accepts flat input
+only; already materialized input should be passed directly with `--input`.
+
+For example, add these keys to a config whose `swebench_pro_hermes` Environment
+Server binds the `swebench_pro_hermes_resources_server` instance:
+
+```yaml
+environment_server_routes:
+  swebench_pro: swebench_pro_hermes
+
+swebench_pro_hermes_resources_server:
+  resources_servers:
+    swebench_pro:
+      datasets:
+        - name: swebench_pro
+          type: benchmark
+          taskset: swebench_pro
+          jsonl_fpath: benchmarks/swebench/data/swebench_pro_benchmark.jsonl
+          prepare_script: benchmarks/swebench/pro/prepare.py
+```
+
+`environment_routing_mode` does not need to change: converted rows route by their
+taskset in every mode. They reject run-level `+responses_create_params.*`
+overrides, `num_repeats_add_seed`, and run-level `skills`. Set response parameters
+in the source row before collation; benchmark prompt configs still apply to input messages.
+
+The task's qualified ID is `<taskset>/<id>`. The ID is taken from `task_id`,
+`problem_id`, or `instance_id`, in that order. Without an explicit ID, an existing
+`_ng_task_index` takes precedence; otherwise collation uses a zero-based source-row
+index across all datasets of the same type, before repeats. Adding or reordering
+other datasets in that collation can shift these positional IDs.
+
+These tasksets route to an Environment Server, not to an agent, so their datasets
+do not set `agent`. Benchmark discovery, `gym eval prepare`, and collation check the
+route instead: every agent the Environment Server references must exist, a dataset
+declared on an agent must be one of them, and a dataset declared on a resources
+server must be the one the Environment Server binds. The agent does not need its
+own `resources_server` binding. An Environment Server can front several agents
+through fields other than `agent_server`, such as a `user_agent` and an
+`assistant_agent`. When it does and names no `agent_server`, `gym eval list` shows
+the Environment Server instead of an agent. Collation preserves existing collector
+task indices, rollout IDs, and retry attempts outside `task_input`.
+
 ## Next Steps
 
 - Build a seed/verify environment in [Single-Step Environment](/environment-tutorials/single-step-environment).

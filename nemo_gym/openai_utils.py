@@ -28,8 +28,11 @@ from typing import (
     get_args,
 )
 
+from aiohttp import ClientTimeout
 from openai.types.chat import (
     ChatCompletion,
+    ChatCompletionAllowedToolChoiceParam,
+    ChatCompletionAllowedToolsParam,
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
@@ -37,6 +40,9 @@ from openai.types.chat import (
     ChatCompletionMessage,
     ChatCompletionMessageToolCall,
     ChatCompletionMessageToolCallParam,
+    ChatCompletionNamedToolChoiceCustomParam,
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionPredictionContentParam,
     ChatCompletionSystemMessageParam,
     ChatCompletionToolMessageParam,
     ChatCompletionToolParam,
@@ -52,15 +58,28 @@ from openai.types.chat.chat_completion_message_custom_tool_call import ChatCompl
 from openai.types.chat.chat_completion_message_custom_tool_call_param import ChatCompletionMessageCustomToolCallParam
 from openai.types.chat.completion_create_params import (
     ChatCompletionAudioParam,
-    ChatCompletionPredictionContentParam,
     ChatCompletionStreamOptionsParam,
-    ChatCompletionToolChoiceOptionParam,
     ReasoningEffort,
     ResponseFormat,
     WebSearchOptions,
 )
 from openai.types.responses import (
+    ApplyPatchToolParam,
+    ComputerToolParam,
+    ComputerUsePreviewToolParam,
+    ContainerAutoParam,
+    ContainerNetworkPolicyAllowlistParam,
+    ContainerNetworkPolicyDisabledParam,
+    ContainerNetworkPolicyDomainSecretParam,
+    ContainerReferenceParam,
+    CustomToolParam,
+    FileSearchToolParam,
+    FunctionShellToolParam,
     FunctionToolParam,
+    InlineSkillParam,
+    LocalEnvironmentParam,
+    LocalSkillParam,
+    NamespaceToolParam,
     Response,
     ResponseApplyPatchToolCall,
     ResponseApplyPatchToolCallOutput,
@@ -78,7 +97,20 @@ from openai.types.responses import (
     ResponseInputTextParam,
     ResponseToolSearchCall,
     ResponseToolSearchOutputItem,
+    SkillReferenceParam,
+    ToolChoiceAllowedParam,
+    ToolChoiceApplyPatchParam,
+    ToolChoiceCustomParam,
+    ToolChoiceFunctionParam,
+    ToolChoiceMcpParam,
+    ToolChoiceOptions,
+    ToolChoiceShellParam,
+    ToolChoiceTypesParam,
+    ToolSearchToolParam,
+    WebSearchPreviewToolParam,
+    WebSearchToolParam,
 )
+from openai.types.responses.namespace_tool_param import Tool as NamespaceToolParamTool
 from openai.types.responses.response_conversation_param_param import ResponseConversationParamParam
 from openai.types.responses.response_create_params import (
     ContextManagement,
@@ -90,12 +122,11 @@ from openai.types.responses.response_create_params import (
     ResponsesModel,
     ResponseTextConfigParam,
     StreamOptions,
-    ToolChoice,
-    ToolParam,
 )
 from openai.types.responses.response_function_call_output_item_list_param import (
     ResponseFunctionCallOutputItemListParam,
 )
+from openai.types.responses.response_function_web_search import ActionFind, ActionOpenPage, ActionSearch
 from openai.types.responses.response_input_content_param import ResponseInputContentParam
 from openai.types.responses.response_input_item import (
     AdditionalTools as InputAdditionalTools,
@@ -123,7 +154,7 @@ from openai.types.responses.response_output_item import (
 from openai.types.responses.response_output_item import (
     McpApprovalResponse as OutputMcpApprovalResponse,
 )
-from openai.types.responses.response_output_text_param import Annotation, Logprob
+from openai.types.responses.response_output_text_param import Annotation
 from openai.types.responses.response_reasoning_item import (
     Content as ReasoningContent,
 )
@@ -133,9 +164,27 @@ from openai.types.responses.response_reasoning_item import (
 from openai.types.responses.response_usage import InputTokensDetails as ResponseInputTokensDetails
 from openai.types.responses.response_usage import OutputTokensDetails as ResponseOutputTokensDetails
 from openai.types.responses.response_usage import ResponseUsage
+from openai.types.responses.tool_param import (
+    CodeInterpreter,
+    CodeInterpreterContainerCodeInterpreterToolAuto,
+    ImageGeneration,
+    LocalShell,
+    Mcp,
+)
 from openai.types.shared.chat_model import ChatModel
-from openai.types.shared_params import FunctionDefinition
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Discriminator, Field, PrivateAttr, Tag, model_validator
+from openai.types.shared_params import ComparisonFilter, CompoundFilter, FunctionDefinition
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Discriminator,
+    Field,
+    PrivateAttr,
+    Tag,
+    field_serializer,
+    model_serializer,
+    model_validator,
+)
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import (
@@ -231,6 +280,28 @@ class NeMoGymResponseReasoningItem(BaseModel):
     # status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
 
 
+class NeMoGymLogprobTopLogprob(TypedDict, total=False):
+    """Copy of openai.types.responses.response_output_text_param.LogprobTopLogprob with List in place of Iterable."""
+
+    token: Required[str]
+    bytes: Required[List[int]]
+    logprob: Required[float]
+
+
+class NeMoGymLogprob(TypedDict, total=False):
+    """Copy of openai.types.responses.response_output_text_param.Logprob with List in place of Iterable.
+
+    Pydantic validates an Iterable field into a lazy iterator that can be read only once.
+    The model server fills these logprobs, and the agent sends the output message back as input on the next turn.
+    With the lazy form, orjson cannot encode that next request, and a second serialization returns empty lists.
+    """
+
+    token: Required[str]
+    bytes: Required[List[int]]
+    logprob: Required[float]
+    top_logprobs: Required[List[NeMoGymLogprobTopLogprob]]
+
+
 class NeMoGymResponseOutputText(BaseModel):
     # Override the Iterable to avoid lazy iterators in Pydantic validation.
     # The default is the empty list because a client that replays an output message it received
@@ -239,7 +310,7 @@ class NeMoGymResponseOutputText(BaseModel):
     annotations: List[Annotation] = Field(default_factory=list)
     text: str
     type: Literal["output_text"] = "output_text"
-    logprobs: Optional[List[Logprob]] = None
+    logprobs: Optional[List[NeMoGymLogprob]] = None
 
 
 class NeMoGymResponseOutputRefusal(BaseModel):
@@ -388,7 +459,37 @@ class NeMoGymResponseFileSearchToolCall(ResponseFileSearchToolCall):
 
 
 class NeMoGymResponseFunctionWebSearch(ResponseFunctionWebSearch):
-    """A hosted web-search call (OpenAI Responses ``web_search_call`` output item)."""
+    """A hosted web-search output item returned by the OpenAI Responses API."""
+
+    # Hosted-tool output is provider-owned bookkeeping. Keep the SDK's typed
+    # actions for shapes it knows, and preserve other action payloads opaquely
+    # rather than coupling response validation to today's provider vocabulary.
+    model_config = ConfigDict(extra="allow")
+
+    # The live API can emit completed bookkeeping items without an action
+    # object, so retain that valid omission instead of rejecting the response.
+    action: Optional[Union[ActionSearch, ActionOpenPage, ActionFind, Dict[str, Any]]] = Field(
+        default=None, union_mode="left_to_right"
+    )
+
+    @field_serializer("action", mode="wrap")
+    def _serialize_action_as_received(self, action: Any, handler: Any, info: Any) -> Any:
+        if isinstance(action, BaseModel):
+            # Dump only the fields the provider sent so replayed payloads round-trip unchanged.
+            return action.model_dump(
+                mode="json" if info.mode_is_json() else "python",
+                by_alias=bool(info.by_alias),
+                exclude_unset=True,
+                exclude_none=info.exclude_none,
+            )
+        return handler(action)
+
+    @model_serializer(mode="wrap")
+    def _serialize_without_inventing_action(self, handler: Any) -> dict[str, Any]:
+        payload = handler(self)
+        if "action" not in self.model_fields_set:
+            payload.pop("action", None)
+        return payload
 
 
 class NeMoGymResponseComputerToolCall(ResponseComputerToolCall):
@@ -776,6 +877,92 @@ def _normalize_tool_for_replay(tool: Any) -> Any:
     return tool
 
 
+# The request tool and tool-choice types below override each SDK Iterable field with a List.
+# Pydantic validates an Iterable into a lazy iterator that can be read only once.
+# A request holding one cannot be encoded by orjson, cannot be deep-copied,
+# and returns an empty list on its second serialization.
+
+
+class NeMoGymContainerNetworkPolicyAllowlistParam(ContainerNetworkPolicyAllowlistParam, total=False):
+    domain_secrets: List[ContainerNetworkPolicyDomainSecretParam]
+
+
+NeMoGymContainerNetworkPolicyParam: TypeAlias = Union[
+    ContainerNetworkPolicyDisabledParam, NeMoGymContainerNetworkPolicyAllowlistParam
+]
+
+
+class NeMoGymContainerAutoParam(ContainerAutoParam, total=False):
+    network_policy: NeMoGymContainerNetworkPolicyParam
+    skills: List[Union[SkillReferenceParam, InlineSkillParam]]
+
+
+class NeMoGymLocalEnvironmentParam(LocalEnvironmentParam, total=False):
+    skills: List[LocalSkillParam]
+
+
+class NeMoGymFunctionShellToolParam(FunctionShellToolParam, total=False):
+    environment: Optional[Union[NeMoGymContainerAutoParam, NeMoGymLocalEnvironmentParam, ContainerReferenceParam]]
+
+
+class NeMoGymCodeInterpreterContainerAutoParam(CodeInterpreterContainerCodeInterpreterToolAuto, total=False):
+    network_policy: NeMoGymContainerNetworkPolicyParam
+
+
+class NeMoGymCodeInterpreterToolParam(CodeInterpreter, total=False):
+    container: Required[Union[str, NeMoGymCodeInterpreterContainerAutoParam]]
+
+
+class NeMoGymCompoundFilter(CompoundFilter, total=False):
+    # The SDK types each nested filter as ComparisonFilter or object, so a nested compound filter stays a plain dict.
+    filters: Required[List[Union[ComparisonFilter, object]]]
+
+
+class NeMoGymFileSearchToolParam(FileSearchToolParam, total=False):
+    filters: Optional[Union[ComparisonFilter, NeMoGymCompoundFilter]]
+
+
+class NeMoGymNamespaceToolParam(NamespaceToolParam, total=False):
+    tools: Required[List[NamespaceToolParamTool]]
+
+
+# Same members in the same order as openai.types.responses.ToolParam, so union validation is unchanged.
+NeMoGymToolParam: TypeAlias = Union[
+    FunctionToolParam,
+    NeMoGymFileSearchToolParam,
+    ComputerToolParam,
+    ComputerUsePreviewToolParam,
+    WebSearchToolParam,
+    Mcp,
+    NeMoGymCodeInterpreterToolParam,
+    ImageGeneration,
+    LocalShell,
+    NeMoGymFunctionShellToolParam,
+    CustomToolParam,
+    NeMoGymNamespaceToolParam,
+    ToolSearchToolParam,
+    WebSearchPreviewToolParam,
+    ApplyPatchToolParam,
+]
+
+
+class NeMoGymToolChoiceAllowedParam(ToolChoiceAllowedParam, total=False):
+    tools: Required[List[Dict[str, object]]]
+
+
+# Same members in the same order as openai.types.responses.response_create_params.ToolChoice.
+NeMoGymToolChoice: TypeAlias = Union[
+    ToolChoiceOptions,
+    NeMoGymToolChoiceAllowedParam,
+    ToolChoiceTypesParam,
+    ToolChoiceFunctionParam,
+    ToolChoiceMcpParam,
+    ToolChoiceCustomParam,
+    ToolChoiceApplyPatchParam,
+    ToolChoiceShellParam,
+]
+
+
 class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     """
     This class is a copy of openai.types.responses.response_create_params.ResponseCreateParamsNonStreaming
@@ -827,9 +1014,9 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     stream_options: Optional[StreamOptions] = None
     temperature: Optional[float] = None
     text: Optional[ResponseTextConfigParam] = None
-    tool_choice: ToolChoice = "auto"  # OpenAI default
+    tool_choice: NeMoGymToolChoice = "auto"  # OpenAI default
     # Override the Iterable to avoid lazy iterators in Pydantic validation.
-    tools: List[ToolParam] = Field(default_factory=list)
+    tools: List[NeMoGymToolParam] = Field(default_factory=list)
     top_logprobs: Optional[int] = None
     top_p: Optional[float] = None
     truncation: Optional[Literal["auto", "disabled"]] = None
@@ -1196,6 +1383,29 @@ NeMoGymChatCompletionMessageParam: TypeAlias = Annotated[
 ]
 
 
+class NeMoGymChatCompletionPredictionContentParam(ChatCompletionPredictionContentParam):
+    # Override the Iterable to avoid lazy iterators in Pydantic validation.
+    content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+
+
+class NeMoGymChatCompletionAllowedToolsParam(ChatCompletionAllowedToolsParam):
+    # Override the Iterable to avoid lazy iterators in Pydantic validation.
+    tools: Required[List[Dict[str, object]]]
+
+
+class NeMoGymChatCompletionAllowedToolChoiceParam(ChatCompletionAllowedToolChoiceParam):
+    allowed_tools: Required[NeMoGymChatCompletionAllowedToolsParam]
+
+
+# Same members in the same order as openai.types.chat.ChatCompletionToolChoiceOptionParam.
+NeMoGymChatCompletionToolChoiceOptionParam: TypeAlias = Union[
+    Literal["none", "auto", "required"],
+    NeMoGymChatCompletionAllowedToolChoiceParam,
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionNamedToolChoiceCustomParam,
+]
+
+
 # Provider extensions accepted by the strict chat request model beyond the
 # OpenAI SDK's own field set. Tests pin the model's fields to SDK ∪ this set so
 # unknown keys keep failing validation while these documented contracts pass.
@@ -1218,7 +1428,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     modalities: Optional[List[Literal["text", "audio"]]] = None
     n: Optional[int] = None
     parallel_tool_calls: bool = True  # OpenAI default
-    prediction: Optional[ChatCompletionPredictionContentParam] = None
+    prediction: Optional[NeMoGymChatCompletionPredictionContentParam] = None
     presence_penalty: Optional[float] = None
     prompt_cache_key: Optional[str] = None
     prompt_cache_retention: Optional[Literal["in_memory", "24h"]] = None
@@ -1231,7 +1441,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     store: Optional[bool] = None
     stream_options: Optional[ChatCompletionStreamOptionsParam] = None
     temperature: Optional[float] = None
-    tool_choice: Optional[ChatCompletionToolChoiceOptionParam] = None
+    tool_choice: Optional[NeMoGymChatCompletionToolChoiceOptionParam] = None
     tools: Optional[List[NeMoGymChatCompletionToolUnionParam]] = None
     top_logprobs: Optional[int] = None
     top_p: Optional[float] = None
@@ -1291,6 +1501,9 @@ def _parsed_error_codes(content: bytes | str) -> list[str]:
         return []
     if not isinstance(payload, dict):
         return []
+    if "error" not in payload and isinstance(payload.get("detail"), dict):
+        # A NeMo Gym model server returns a propagated provider error body as FastAPI's `detail`.
+        payload = payload["detail"]
     error = payload.get("error")
     if isinstance(error, str):
         return [error]
@@ -1344,6 +1557,40 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         description="Extra headers to include in every request.",
     )
 
+    max_num_tries: Optional[Literal[1]] = Field(
+        default=None,
+        description=(
+            "Set to 1 to disable both inner transport and HTTP-status retry "
+            "layers when a caller owns the complete retry schedule; this overrides "
+            "max_http_attempts and the transport's generic-error retry limit. None "
+            "preserves NeMo Gym's default behavior."
+        ),
+    )
+
+    request_timeout_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Total time limit for each HTTP attempt (aiohttp ClientTimeout.total), "
+            "not a deadline for the whole retry schedule. None means no limit."
+        ),
+    )
+    connect_timeout_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Time limit for each HTTP attempt to obtain a connection, including "
+            "waiting for a free aiohttp connection-pool slot (ClientTimeout.connect). "
+            "Requires request_timeout_seconds."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_timeout_pair(self) -> "NeMoGymAsyncOpenAI":
+        if self.connect_timeout_seconds is not None and self.request_timeout_seconds is None:
+            raise ValueError("connect_timeout_seconds requires request_timeout_seconds")
+        return self
+
     # Spent-key/auth trip: (status, body, url). Later calls raise a fresh exception.
     _permanent_trip: Optional[tuple[int, bytes, str]] = PrivateAttr(default=None)
 
@@ -1384,14 +1631,20 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 "Authorization": f"Bearer {self.api_key}",
             },
             "_internal": self.internal,
+            "_max_num_tries": self.max_num_tries,
             "_max_connection_retries": self.max_connection_retries,
         }
+        if self.request_timeout_seconds is not None:
+            request_kwargs["timeout"] = ClientTimeout(
+                total=self.request_timeout_seconds,
+                connect=self.connect_timeout_seconds,
+            )
         return await self._request_with_retry(**request_kwargs)
 
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
         if self._permanent_trip is not None:
             self._raise_permanent_error()
-        max_num_tries = self.max_http_attempts
+        max_num_tries = self.max_num_tries or self.max_http_attempts
         tries = 0
         while tries < max_num_tries:
             if self._permanent_trip is not None:
@@ -1412,8 +1665,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             if response.status == 429 and _error_body_is_permanent_quota(content):
                 self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
 
-            # Internal NeMo Gym servers extend max tries for retryable errors.
-            if response.status in RATE_LIMIT_ERROR_CODES and self.internal:
+            # Internal NeMo Gym servers extend max tries for retryable errors unless
+            # the caller owns the complete retry schedule.
+            if self.max_num_tries is None and response.status in RATE_LIMIT_ERROR_CODES and self.internal:
                 max_num_tries += 1
 
             # Preserve the final error body for raise_for_status and avoid sleeping

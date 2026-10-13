@@ -20,6 +20,7 @@ import socket
 from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import uvicorn
 from aiohttp import ClientOSError, ClientResponseError, RequestInfo, TCPConnector
 from fastapi import Request
@@ -28,18 +29,20 @@ from fastapi.exceptions import RequestValidationError
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from pydantic import ValidationError
-from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
+from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, fail, mark, raises
+from requests.exceptions import ProxyError
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from yarl import URL
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
-from nemo_gym.config_types import BaseRunServerInstanceConfig
+from nemo_gym.config_types import BaseRunServerInstanceConfig, ConfigError, HeadServerUnreachableError
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import (
     NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,
     NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME,
@@ -308,6 +311,66 @@ class TestServerUtils:
         with raises(ValueError):
             ServerClient.load_from_global_config()
 
+    def _nothing_listening_on_the_head_server(self, monkeypatch: MonkeyPatch, host: str, port: int) -> ConnectionError:
+        """Make `load_from_global_config` take the fetch path and have the head server refuse the connection."""
+        global_config_dict = DictConfig({"head_server": {"host": host, "port": port}})
+        monkeypatch.setattr(
+            nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=global_config_dict)
+        )
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+
+        refused = ConnectionError("[Errno 61] Connection refused")
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", MagicMock(side_effect=refused))
+        return refused
+
+    def test_ServerClient_load_from_global_config_unreachable_head_server_is_a_ConfigError(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # An unreachable head server is a user mistake (nothing started, or the wrong port), not a bug:
+        # it must be a ConfigError so `exit_cleanly_on_config_error` prints the message instead of a
+        # traceback (#2687), and still a ValueError for callers that already catch that.
+        refused = self._nothing_listening_on_the_head_server(monkeypatch, host="127.0.0.1", port=11000)
+
+        with raises(HeadServerUnreachableError) as exc_info:
+            ServerClient.load_from_global_config()
+
+        assert isinstance(exc_info.value, ConfigError)
+        assert isinstance(exc_info.value, ValueError)
+        # The low-level cause is not lost, just kept off the user-facing message.
+        assert exc_info.value.__cause__ is refused
+
+    def test_ServerClient_load_from_global_config_unreachable_head_server_message_is_actionable(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # Same wording as `gym env status`: name the address that was tried, then the fix for each of
+        # the two likely causes (nothing running -> `gym env start`; running elsewhere -> override).
+        self._nothing_listening_on_the_head_server(monkeypatch, host="10.0.0.5", port=9500)
+
+        with raises(HeadServerUnreachableError) as exc_info:
+            ServerClient.load_from_global_config()
+
+        message = str(exc_info.value)
+        assert message.startswith("Could not connect to the head server at http://10.0.0.5:9500.")
+        assert "Is the head server running? Start it with: `gym env start`." in message
+        assert "`++head_server.host=<host>` / `++head_server.port=<port>`" in message
+
+    def test_ServerClient_load_from_global_config_unreachable_head_server_logs_the_cause_at_debug(
+        self, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+    ) -> None:
+        # A proxy or name-resolution failure is also a requests ConnectionError, and the CLI prints the
+        # ConfigError without its cause, so the real reason must still reach `--verbose` (DEBUG) output.
+        self._nothing_listening_on_the_head_server(monkeypatch, host="127.0.0.1", port=11000)
+        proxy_error = ProxyError("Tunnel connection failed: 407 Proxy Authentication Required")
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", MagicMock(side_effect=proxy_error))
+
+        with caplog.at_level(logging.DEBUG, logger="nemo_gym.server_utils"), raises(HeadServerUnreachableError):
+            ServerClient.load_from_global_config()
+
+        (record,) = [record for record in caplog.records if record.name == "nemo_gym.server_utils"]
+        assert record.levelno == logging.DEBUG
+        assert "http://127.0.0.1:11000" in record.getMessage()
+        assert record.exc_info[1] is proxy_error
+
     async def test_ServerClient_get_post_sanity(self, monkeypatch: MonkeyPatch) -> None:
         server_client = ServerClient(
             head_server_config=BaseServerConfig(host="abcdef", port=12345),
@@ -342,6 +405,76 @@ class TestServerUtils:
             url_path="blah blah",
         )
         assert "my mock response" == actual_response
+
+    @mark.parametrize("tracing_enabled", [False, True])
+    @mark.parametrize("internal", [False, True])
+    @mark.parametrize("error_type", [RuntimeError, ClientOSError, nemo_gym.server_utils.ServerDisconnectedError])
+    async def test_explicit_transport_attempt_cap_disables_request_retry(
+        self,
+        monkeypatch: MonkeyPatch,
+        tracing_enabled: bool,
+        internal: bool,
+        error_type: type[Exception],
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
+        client = self._mock_global_client(monkeypatch, error_type("transport failed"), failures=None)
+
+        with raises(error_type, match="transport failed"):
+            await nemo_gym.server_utils.request(
+                method="POST",
+                url="https://example.test",
+                _internal=internal,
+                _max_num_tries=1,
+            )
+
+        assert client.request.await_count == 1
+
+    @mark.parametrize("attempt_cap", [0, -1])
+    async def test_explicit_transport_attempt_cap_rejects_nonpositive_values(
+        self, monkeypatch: MonkeyPatch, attempt_cap: int
+    ) -> None:
+        client = self._mock_global_client(monkeypatch, ClientOSError(), failures=0)
+        with raises(ValueError, match="_max_num_tries must be at least 1"):
+            await nemo_gym.server_utils.request("POST", "https://example.test", _max_num_tries=attempt_cap)
+        client.request.assert_not_awaited()
+
+    @mark.parametrize("tracing_enabled", [False, True])
+    async def test_explicit_transport_attempt_cap_counts_mixed_errors(
+        self,
+        monkeypatch: MonkeyPatch,
+        tracing_enabled: bool,
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
+        client = MagicMock()
+        client.request = AsyncMock(
+            side_effect=[
+                RuntimeError("generic failure"),
+                nemo_gym.server_utils.ClientOSError("socket failure"),
+                "must not be reached",
+            ]
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_aiohttp_client",
+            lambda: client,
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_utils.asyncio,
+            "sleep",
+            AsyncMock(),
+        )
+
+        with raises(
+            nemo_gym.server_utils.ClientOSError,
+            match="socket failure",
+        ):
+            await nemo_gym.server_utils.request(
+                method="POST",
+                url="https://example.test",
+                _max_num_tries=2,
+            )
+
+        assert client.request.await_count == 2
 
     async def test_ServerClient_preserves_external_capture_url(self, monkeypatch: MonkeyPatch) -> None:
         server_client = ServerClient(
@@ -476,6 +609,32 @@ class TestServerUtils:
         assert httpx_client_request_mock.call_count == 3
         for call in httpx_client_request_mock.call_args_list:
             assert call.kwargs["url"].startswith("http://xyz:54321")
+
+    async def test_ServerClient_post_encodes_replayed_output_logprobs(self, monkeypatch: MonkeyPatch) -> None:
+        """A request body that replays assistant output with logprobs is sent as JSON with the logprobs intact."""
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=11000),
+            global_config_dict=DictConfig({"my_server": {"a": {"b": {"host": "xyz", "port": 54321}}}}),
+        )
+        aiohttp_client_mock = MagicMock()
+        aiohttp_client_request_mock = AsyncMock(return_value="ok")
+        aiohttp_client_mock.return_value.request = aiohttp_client_request_mock
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", aiohttp_client_mock)
+
+        logprobs = [{"token": "a", "bytes": [97], "logprob": -0.5, "top_logprobs": []}]
+        assistant_message = {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "a", "annotations": [], "logprobs": logprobs}],
+        }
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": [assistant_message]})
+
+        await server_client.post(server_name="my_server", url_path="/v1/responses", json=body)
+
+        sent = orjson.loads(aiohttp_client_request_mock.call_args.kwargs["data"])
+        assert sent["input"][0]["content"][0]["logprobs"] == logprobs
 
     def _mock_ray_return_value(self, monkeypatch: MonkeyPatch, return_value: bool) -> MagicMock:
         ray_mock = MagicMock()
@@ -1515,25 +1674,106 @@ class TestServerUtils:
         assert "[upstream_request_failed]" in captured
         assert "ValueError: actionable inner failure" in captured
 
-    def _mock_global_client(self, monkeypatch: MonkeyPatch, connection_errors: int) -> MagicMock:
-        """Global-client stand-in whose request() raises ClientOSError `connection_errors` times, then succeeds."""
+    def _mock_global_client(self, monkeypatch: MonkeyPatch, error: Exception, failures: int | None) -> MagicMock:
+        """Global-client stand-in whose request() raises `error` on the first `failures` calls, then succeeds.
+
+        With `failures=None`, request() always raises. Once called more often than any test needs, it fails the test
+        instead, so a retry loop that never stops fails fast instead of hanging. It uses `fail()`, whose BaseException
+        the loop's `except Exception` cannot catch.
+        """
         client = MagicMock()
-        client.request = AsyncMock(side_effect=[ClientOSError()] * connection_errors + [client.success_response])
+        # The most any test needs is MAX_NUM_TRIES + 3 calls.
+        allowed_calls = nemo_gym.server_utils.MAX_NUM_TRIES + 6
+        attempts = 0
+
+        def request(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts > allowed_calls:
+                fail("retry loop did not stop")
+            if failures is None or attempts <= failures:
+                raise error
+            return client.success_response
+
+        client.request = AsyncMock(side_effect=request)
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
         monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
         return client
 
-    async def test_request_bounded_connection_retries_surface_dead_endpoint(self, monkeypatch: MonkeyPatch) -> None:
-        client = self._mock_global_client(monkeypatch, connection_errors=10)
+    @mark.parametrize("tracing_enabled", [False, True])
+    @mark.parametrize(("attempt_cap", "expected_attempts"), [(None, 3), (1, 1), (5, 3)])
+    async def test_request_bounded_connection_retries_surface_dead_endpoint(
+        self, monkeypatch: MonkeyPatch, tracing_enabled: bool, attempt_cap: int | None, expected_attempts: int
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
+        client = self._mock_global_client(monkeypatch, ClientOSError(), failures=None)
         with raises(ClientOSError):
-            await nemo_gym.server_utils.request("POST", "http://dead-host:1/v1", _max_connection_retries=3)
-        assert client.request.await_count == 3
+            await nemo_gym.server_utils.request(
+                "POST", "http://dead-host:1/v1", _max_num_tries=attempt_cap, _max_connection_retries=3
+            )
+        assert client.request.await_count == expected_attempts
+        assert "_max_num_tries" not in client.request.call_args.kwargs
+        assert "_max_connection_retries" not in client.request.call_args.kwargs
+
+    @mark.parametrize(("attempt_cap", "expected_attempts"), [(1, 1), (5, 3)])
+    async def test_request_caps_generic_errors_at_the_lower_attempt_limit(
+        self, monkeypatch: MonkeyPatch, attempt_cap: int, expected_attempts: int
+    ) -> None:
+        client = self._mock_global_client(monkeypatch, TimeoutError("upstream timed out"), failures=None)
+
+        with raises(TimeoutError, match="upstream timed out"):
+            await nemo_gym.server_utils.request(
+                "POST", "http://slow-host:1/v1", _max_num_tries=attempt_cap, _max_connection_retries=3
+            )
+
+        assert client.request.await_count == expected_attempts
 
     async def test_request_connection_retries_unbounded_by_default(self, monkeypatch: MonkeyPatch) -> None:
-        client = self._mock_global_client(monkeypatch, connection_errors=4)
+        client = self._mock_global_client(monkeypatch, ClientOSError(), failures=4)
         response = await nemo_gym.server_utils.request("POST", "http://flaky-host:1/v1")
         assert response is client.success_response
         assert client.request.await_count == 5
+
+    @mark.parametrize("tracing_enabled", [False, True])
+    async def test_request_retry_cap_bounds_internal_callers(
+        self, monkeypatch: MonkeyPatch, tracing_enabled: bool
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
+        client = self._mock_global_client(monkeypatch, RuntimeError("boom"), failures=None)
+        # Above MAX_NUM_TRIES, so the test can tell the cap apart from MAX_NUM_TRIES.
+        cap = nemo_gym.server_utils.MAX_NUM_TRIES + 2
+
+        with raises(RuntimeError, match="boom"):
+            await nemo_gym.server_utils.request(
+                "POST", "http://head:1/v1", _internal=True, _max_connection_retries=cap
+            )
+
+        assert client.request.await_count == cap
+        assert nemo_gym.server_utils.asyncio.sleep.await_count == cap - 1
+
+    async def test_request_internal_callers_without_a_cap_retry_past_max_num_tries(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
+    ) -> None:
+        failures = nemo_gym.server_utils.MAX_NUM_TRIES + 2
+        client = self._mock_global_client(monkeypatch, RuntimeError("boom"), failures=failures)
+
+        response = await nemo_gym.server_utils.request("POST", "http://head:1/v1", _internal=True)
+
+        assert response is client.success_response
+        assert client.request.await_count == failures + 1
+        assert capsys.readouterr().out == ""
+
+    async def test_request_external_callers_stop_at_max_num_tries(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
+    ) -> None:
+        client = self._mock_global_client(monkeypatch, RuntimeError("boom"), failures=None)
+
+        with raises(RuntimeError, match="boom"):
+            await nemo_gym.server_utils.request("POST", "http://model:1/v1")
+
+        assert client.request.await_count == nemo_gym.server_utils.MAX_NUM_TRIES
+        out = capsys.readouterr().out
+        assert out.count("Hit an exception while making a request") == nemo_gym.server_utils.MAX_NUM_TRIES
 
 
 _SPOOFED_HOST = "203.0.113.99"
@@ -1763,7 +2003,8 @@ class TestRunWebserverProxyKwargs:
     def test_proxy_headers_disabled_by_default_single_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
 
-        self.ray_loader_mock.assert_called_once()
+        # Servers that don't declare ray_enabled = True run without Ray.
+        self.ray_loader_mock.assert_not_called()
         assert kwargs["proxy_headers"] is False
         assert [] == kwargs["forwarded_allow_ips"]
         # A single worker passes the app object itself rather than an import string.
@@ -1773,13 +2014,18 @@ class TestRunWebserverProxyKwargs:
     def test_proxy_headers_disabled_by_default_multi_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=4)
 
-        self.ray_loader_mock.assert_called_once()
+        self.ray_loader_mock.assert_not_called()
         # Multi-worker launches re-import the app, so uvicorn receives an import string.
         assert isinstance(kwargs["app"], str)
         assert kwargs["app"].endswith(":app")
         assert 4 == kwargs["workers"]
         assert kwargs["proxy_headers"] is False
         assert [] == kwargs["forwarded_allow_ips"]
+
+    def test_undeclared_server_does_not_join_a_configured_cluster(self, monkeypatch: MonkeyPatch) -> None:
+        self._capture_uvicorn_kwargs(monkeypatch, {"ray_head_node_address": "10.0.0.1:6379"}, num_workers=1)
+
+        self.ray_loader_mock.assert_not_called()
 
     def test_ray_disabled_skips_initialization(self, monkeypatch: MonkeyPatch) -> None:
         self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1, ray_enabled=False)
@@ -1945,3 +2191,64 @@ class TestHeadServerProxyKwargs:
 
         assert kwargs["proxy_headers"] is True
         assert kwargs["forwarded_allow_ips"] == ["10.0.0.1"]
+
+
+@mark.parametrize("header", [None, b"X-Other-Harness-Reply"])
+def test_model_header_comes_from_its_harness_property(monkeypatch, header):
+    import sys
+    from types import ModuleType
+
+    harness = ModuleType("responses_api_agents.test_header_harness")
+    harness._assistant_message_header = header
+    plain = ModuleType("responses_api_agents.test_plain_harness")
+    monkeypatch.setitem(sys.modules, harness.__name__, harness)
+    monkeypatch.setitem(sys.modules, plain.__name__, plain)
+    client = ServerClient(
+        head_server_config={"host": "localhost", "port": 0},
+        global_config_dict=OmegaConf.create(
+            {
+                "first": {
+                    "responses_api_agents": {
+                        "test_header_harness": {
+                            "model_server": {"type": "responses_api_models", "name": "first_model"},
+                        }
+                    }
+                },
+                "second": {
+                    "responses_api_agents": {
+                        "test_plain_harness": {
+                            "model_server": {"type": "responses_api_models", "name": "second_model"},
+                        }
+                    }
+                },
+                "observability_enabled": True,
+            }
+        ),
+    )
+    assert client.assistant_message_header("first_model") == (header.lower() if header else None)
+    assert client.assistant_message_header("second_model") is None
+    assert client.assistant_message_header("unused_model") is None
+
+
+def test_shared_model_rejects_conflicting_harness_headers(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    config = {}
+    for index, header in enumerate((b"x-one-reply", b"x-two-reply")):
+        name = f"test_header_{index}"
+        harness = ModuleType(f"responses_api_agents.{name}")
+        harness._assistant_message_header = header
+        monkeypatch.setitem(sys.modules, harness.__name__, harness)
+        config[name] = {
+            "responses_api_agents": {
+                name: {
+                    "model_server": {"type": "responses_api_models", "name": "policy"},
+                }
+            }
+        }
+    client = ServerClient(
+        head_server_config={"host": "localhost", "port": 0}, global_config_dict=OmegaConf.create(config)
+    )
+    with raises(ValueError, match="different assistant headers"):
+        client.assistant_message_header("policy")

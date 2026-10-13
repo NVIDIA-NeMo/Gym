@@ -4,6 +4,7 @@
 import asyncio
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -20,9 +21,11 @@ import uvicorn
 from run_agent import AIAgent
 from tools.mcp_tool import shutdown_mcp_servers
 
+from nemo_gym.agent_utils import process_supervisor
+from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
 from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
-from nemo_gym.sandbox import process_supervisor
+from nemo_gym.rollout_observability import AgentInvocation
 from nemo_gym.server_utils import ServerClient
 from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherResourcesServer,
@@ -31,6 +34,44 @@ from resources_servers.example_mcp_weather.app import (
 from responses_api_agents.hermes_agent.app import HermesAgent, HermesAgentConfig
 from responses_api_agents.hermes_agent.sandbox_runner import _run, _use_model_server
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
+
+
+def test_sandbox_iteration_limit_stays_on_child_when_observations_are_imported() -> None:
+    agent = HermesAgent(
+        config=HermesAgentConfig(
+            host="127.0.0.1",
+            port=0,
+            name="hermes",
+            entrypoint="app.py",
+            model_server={"type": "responses_api_models", "name": "model"},
+            resources_server={"type": "resources_servers", "name": "resources"},
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    raw = {
+        "invocations": [
+            {"invocation_id": "root", "status": "completed"},
+            {
+                "invocation_id": "root.child-1",
+                "parent_invocation_id": "root",
+                "status": "incomplete",
+                "stop_reason": "max_iterations",
+            },
+        ]
+    }
+
+    invocations = [
+        record
+        for record in agent._sandbox_observations({}, raw, runtime_info=None).records
+        if isinstance(record, AgentInvocation)
+    ]
+
+    assert len(invocations) == 2
+    assert invocations[0].status == "completed"
+    assert invocations[0].stop_reason is None
+    assert invocations[1].parent_invocation_id == "root"
+    assert invocations[1].status == "incomplete"
+    assert invocations[1].stop_reason == "max_iterations"
 
 
 def _completion(message: dict) -> dict:
@@ -134,6 +175,42 @@ def _payload(model_base_url: str, **overrides) -> dict:
         "user_message": "fix bug",
         **overrides,
     }
+
+
+@pytest.mark.parametrize("marker", ["present", "absent", "omitted"])
+def test_interruption_uses_supplied_stop_request_path(tmp_path, monkeypatch, restore_process_globals, marker):
+    from responses_api_agents.hermes_agent import sandbox_runner
+
+    class Agent:
+        def __init__(self, **kwargs):
+            self._session_messages = [{"role": "assistant", "content": "partial answer"}]
+
+        def _build_api_kwargs(self, messages):
+            return {}
+
+        def run_conversation(self, *args, **kwargs):
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            return {"completed": True, "messages": self._session_messages}
+
+        def interrupt(self, message):
+            assert message == ("sandbox cancellation" if marker == "present" else "sandbox timeout")
+
+    monkeypatch.setattr("run_agent.AIAgent", Agent)
+    monkeypatch.setattr(sandbox_runner, "_use_model_server", lambda _url: None)
+    payload = _payload("http://unused/v1")
+    if marker != "omitted":
+        marker_path = tmp_path / "custom-stop-marker"
+        payload["stop_request_path"] = str(marker_path)
+        if marker == "present":
+            marker_path.touch()
+    output_path = tmp_path / "output.json"
+    result = _run(payload, tmp_path, output_path=output_path)["result"]
+    expected = "cancelled" if marker == "present" else "wall_time"
+    assert result["stop_reason"] == expected
+    assert result["interrupted"] and not result["completed"]
+    checkpoint = json.loads(output_path.read_text())["result"]
+    assert checkpoint["stop_reason"] == expected
+    assert checkpoint["messages"][-1]["content"] == "partial answer"
 
 
 def test_granted_mcp_tools_reach_the_seeded_resources_session(tmp_path, restore_process_globals) -> None:
@@ -246,6 +323,8 @@ def test_iteration_limit_summary_reaches_the_model_server(
         ],
     }
     answers = [_completion(tool_call), _completion({"content": "summary of the work"})]
+    answers[0]["id"] = "chatcmpl-tool"
+    answers[1]["id"] = "chatcmpl-summary"
 
     with _ModelServer(answers) as model_server:
         if execution == "sandbox":
@@ -254,6 +333,13 @@ def test_iteration_limit_summary_reaches_the_model_server(
                 tmp_path,
             )
             assert output["result"]["final_response"] == "summary of the work"
+            assert output["result"]["stop_reason"] == "max_iterations"
+            assert output["observations"]["invocations"][0]["stop_reason"] == "max_iterations"
+            assert output["observations"]["invocations"][0]["status"] == "incomplete"
+            assert output["observations"]["invocations"][0]["model_response_ids"] == [
+                "chatcmpl-tool",
+                "chatcmpl-summary",
+            ]
         else:
             from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
@@ -286,12 +372,27 @@ def test_iteration_limit_summary_reaches_the_model_server(
                 ),
             )
             monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args: model_server.base_url)
-            output = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="fix bug")))
+            observations = []
+            output = asyncio.run(
+                agent._create_response(
+                    NeMoGymResponseCreateParamsNonStreaming(input="fix bug"),
+                    observation_collector=observations.append,
+                )
+            )
             assert output.output[-1].content[0].text == "summary of the work"
+            assert output.status == "incomplete"
+            assert output.metadata["stop_reason"] == "max_iterations"
+            assert observations[0].records[0].stop_reason == "max_iterations"
+            assert observations[0].records[0].status == "incomplete"
+            assert [call.response_id for call in observations[0].records[0].model_calls] == [
+                "chatcmpl-tool",
+                "chatcmpl-summary",
+            ]
 
     assert len(model_server.requests) == 2
     assert all(not request.get("stream") for request in model_server.requests)
     first = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(model_server.requests[0])
+    NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(model_server.requests[1])
     assert all("chat_template_kwargs" not in body for body in model_server.requests)
     if template_enabled:
         assert json.loads(first.metadata["chat_template_kwargs"]) == {
@@ -346,7 +447,8 @@ def test_worker_stop_checkpoints_partial_work_before_hard_cleanup(tmp_path, coop
     from responses_api_agents.hermes_agent import sandbox_runner
 
     input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
-    input_path.write_text(json.dumps(_payload("http://unused/v1")))
+    stop_request_path = tmp_path / STOP_REQUEST_FILE
+    input_path.write_text(json.dumps({**_payload("http://unused/v1"), "stop_request_path": str(stop_request_path)}))
     # Run the real worker/observer under the real supervisor, with a deterministic slow harness.
     driver = """
 import os, pathlib, sys, time, types
@@ -385,7 +487,7 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
             "--cleanup-timeout",
             "0.5",
             "--stop-file",
-            str(tmp_path / "runner.stop"),
+            str(stop_request_path),
             "--receipt",
             str(tmp_path / "cleanup.json"),
             "--",
@@ -410,7 +512,7 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
             while not (tmp_path / "model.patch").exists() and process.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.01)
             assert (tmp_path / "model.patch").exists()
-            (tmp_path / "runner.stop").touch()
+            stop_request_path.touch()
             process.terminate()
         _, stderr = process.communicate(timeout=10)
         assert process.returncode == 0, stderr

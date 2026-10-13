@@ -225,10 +225,11 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
         cookies: Any,
+        model_url_path: str,
     ):
         response = await self.server_client.post(
             server_name=self.config.model_server.name,
-            url_path="/v1/responses",
+            url_path=model_url_path,
             json=body,
             cookies=cookies,
         )
@@ -245,6 +246,7 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
             body=body,
             row_metadata={},
             initial_cookies=request.cookies,
+            model_url_path=self.url_path_for_request("/v1/responses", request),
         )
         for key, value in model_cookies.items():
             response.set_cookie(key, value)
@@ -255,6 +257,7 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         row_metadata: dict[str, Any],
         initial_cookies: Any,
+        model_url_path: str = "/v1/responses",
     ) -> tuple[NeMoGymResponse, Any, dict[str, Any]]:
         body = body.model_copy(deep=True)
         if body.max_output_tokens is None and self.config.max_output_tokens is not None:
@@ -301,7 +304,7 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
                 metadata_extra["extra_body"] = json.dumps(current_extra)
                 model_body.metadata = metadata_extra
 
-            model_response, model_cookies = await self._call_model(model_body, model_cookies)
+            model_response, model_cookies = await self._call_model(model_body, model_cookies, model_url_path)
             new_outputs.extend(model_response.output)
             usage = _response_usage_add(usage, model_response.usage)
             final_response = model_response
@@ -367,6 +370,7 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
             body=body.responses_create_params,
             row_metadata=body.model_dump(exclude={"responses_create_params", "response"}),
             initial_cookies=cookies,
+            model_url_path=self.url_path_for_run("/v1/responses", body),
         )
 
         verify_request_body = body.model_dump()

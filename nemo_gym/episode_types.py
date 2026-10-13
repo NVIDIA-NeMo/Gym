@@ -4,6 +4,7 @@
 """Wire contracts for environment servers."""
 
 import re
+from collections.abc import Mapping
 from typing import Generic, TypeVar
 
 from pydantic import (
@@ -52,6 +53,16 @@ class TaskId(BaseModel):
         description="Run-unique taskset name; use the '<environment>:<taskset>' convention for blended runs.",
     )
     task_id: str = Field(min_length=1)
+
+
+def is_materialized_task_row(row: Mapping[str, object]) -> bool:
+    """Return whether a row has a materialized-task envelope.
+
+    This identifies the routing shape, not whether the envelope is valid. A malformed
+    ``task_input`` must still route as a materialized task and fail task validation instead
+    of falling through to the legacy run-request path.
+    """
+    return isinstance(row.get("task_id"), Mapping) and "task_input" in row
 
 
 class EpisodeFailure(BaseModel):

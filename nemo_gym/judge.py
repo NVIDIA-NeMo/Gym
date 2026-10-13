@@ -32,6 +32,7 @@ exception it sees, so covering a whole ``verify()`` would misfile ordinary bugs
 """
 
 import functools
+import re
 from typing import Any, Awaitable, Callable, Type, TypeVar
 
 from fastapi.encoders import jsonable_encoder
@@ -42,6 +43,15 @@ from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_sta
 
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
+
+
+def normalize_math_judge_verdict(text: str) -> str:
+    """Canonicalize whitespace inside A=B/A!=B markers without changing other text."""
+    return re.sub(
+        r"\[\[\s*A\s*(!\s*)?=\s*B\s*\]\]",
+        lambda match: "[[A!=B]]" if match.group(1) else "[[A=B]]",
+        text,
+    )
 
 
 class JudgeError(Exception):

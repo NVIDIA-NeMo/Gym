@@ -17,10 +17,10 @@ from uuid import uuid4
 
 
 try:
-    from .model_kwargs import _model_api_kwargs
+    from .model_kwargs import _model_api_kwargs, install_summary_compat
     from .sandbox_observer import SandboxHermesObserver
 except ImportError:
-    from model_kwargs import _model_api_kwargs
+    from model_kwargs import _model_api_kwargs, install_summary_compat
     from sandbox_observer import SandboxHermesObserver
 
 
@@ -108,6 +108,7 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
         )
 
     agent._build_api_kwargs = build_api_kwargs
+    install_summary_compat(agent, preserve_reasoning_history=payload["chat_template_kwargs_enabled"])
     result = None
     error = None
     stop_reason = None
@@ -125,7 +126,8 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     def interrupt(*_: object) -> None:
         nonlocal stop_reason
         # Close publishes this marker before signalling the supervisor. A deadline does not.
-        stop_reason = "cancelled" if (session_dir / "runner.stop").exists() else "wall_time"
+        stop_request_path = payload.get("stop_request_path")
+        stop_reason = "cancelled" if stop_request_path and Path(stop_request_path).exists() else "wall_time"
         # Save first: a blocked tool or API call may not unwind before the hard cleanup.
         if output_path is not None:
             partial = progress()
@@ -143,6 +145,8 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
             payload["history"],
             task_id=payload["agent_session_id"],
         )
+        if getattr(agent, "_gym_iteration_limit_reached", False):
+            result.setdefault("stop_reason", "max_iterations")
     except BaseException as exception:
         if stop_reason is not None:
             result = progress()

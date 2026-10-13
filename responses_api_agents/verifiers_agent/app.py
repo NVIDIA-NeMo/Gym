@@ -234,6 +234,7 @@ class VerifiersNeMoGymResponse(NeMoGymResponse):
     output: list[dict[str, Any]]
     reward: float
     metrics: dict[str, Any] = Field(default_factory=dict)
+    exported_state: dict[str, Any] = Field(default_factory=dict, exclude_if=lambda value: not value)
     parallel_tool_calls: bool = True
     tool_choice: str = "auto"
     tools: list = Field(default_factory=list)
@@ -269,6 +270,11 @@ class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
 
     vf_env_id: str = Field(default="", description="Verifiers environment ID")
     vf_env_args: dict = Field(default_factory=dict, description="Verifiers environment arguments")
+    export_state_columns: list[str] = Field(
+        default_factory=list,
+        description="Extra verifiers State keys (JSON-serializable) copied into response.exported_state, e.g. "
+        "['assertion_results'] for AutomationBench per-assertion verdicts. Empty leaves rollouts unchanged.",
+    )
 
     max_tokens: int = Field(default=8192, description="Max tokens for generation")
 
@@ -585,17 +591,22 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 "temperature": getattr(body.responses_create_params, "temperature", None) or self.config.temperature,
                 "top_p": getattr(body.responses_create_params, "top_p", None) or self.config.top_p,
             }
+            extra_columns = [c for c in self.config.export_state_columns if c != "trajectory"]
             outputs = await vf_env.run_group(
                 group_inputs=[rollout_input],
                 client=client,
                 model=self.config.model_name,
                 sampling_args=sampling_args,
-                state_columns=["trajectory"],
+                state_columns=["trajectory", *extra_columns],
             )
 
             rollout_output = outputs[0]
             reward = rollout_output.get("reward", 0.0) or 0.0
             metrics = rollout_output.get("metrics", {}) or {}
+            # verifiers exports a column missing from the State as None (a typo, or the rubric never set it).
+            exported_state = {c: rollout_output[c] for c in extra_columns if rollout_output.get(c) is not None}
+            if missing := [c for c in extra_columns if c not in exported_state]:
+                logger.warning(f"Task {task_idx}: export_state_columns {missing} not on the verifiers State, omitted")
 
             output = self._convert_trajectory_to_output(rollout_output)
 
@@ -625,6 +636,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 group_id=str(task_idx),
                 reward=reward,
                 metrics=metrics,
+                exported_state=exported_state,
             )
         except Exception as e:
             logger.error(f"Exception in responses(): {type(e).__name__}: {e}")

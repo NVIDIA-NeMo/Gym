@@ -20,6 +20,7 @@ import pytest
 
 from nemo_gym.orchestration.ray_serve_gateway import (
     MAX_ONGOING_REQUESTS_PER_INSTANCE,
+    PROXY_TIMEOUT,
     build_instance_command,
     deployment_options,
     free_local_port,
@@ -158,6 +159,12 @@ def test_deployment_options_carries_replica_count_and_placement():
     options = deployment_options(args)
     assert options["num_replicas"] == 4
     assert options["max_replicas_per_node"] == 4
+
+
+def test_proxy_timeout_does_not_cut_off_long_requests():
+    # aiohttp's default total timeout is 300 s; a long generation must not be turned into a 500.
+    assert PROXY_TIMEOUT.total is None
+    assert PROXY_TIMEOUT.sock_read is None
 
 
 # ---------------------------------------------------------------------------

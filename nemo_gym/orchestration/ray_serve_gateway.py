@@ -49,6 +49,9 @@ HEALTH_TIMEOUT_S = 900.0
 # Each replica only proxies to its own vLLM, which batches and queues itself. Ray Serve's
 # default of 5 in-flight requests per replica would cap every instance at 5 concurrent requests.
 MAX_ONGOING_REQUESTS_PER_INSTANCE = 65536
+# aiohttp's default 300 s total timeout would cut off long generations with a 500; vLLM
+# bounds each request itself, so the proxy adds no limit of its own.
+PROXY_TIMEOUT = aiohttp.ClientTimeout(total=None)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -155,7 +158,7 @@ class VLLMInstance:
         # RAY_ADDRESS makes vLLM's own Ray executor join this cluster instead of starting its own.
         env = {**os.environ, "RAY_ADDRESS": ray.get_runtime_context().gcs_address}
         self._proc = subprocess.Popen(cmd, env=env)
-        self._session = aiohttp.ClientSession()
+        self._session = aiohttp.ClientSession(timeout=PROXY_TIMEOUT)
         self._wait_until_healthy()
 
     def _wait_until_healthy(self) -> None:

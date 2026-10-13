@@ -214,8 +214,8 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
         # Typed sessions, which an Environment Server seeds and closes by resources_session_id.
         self._session_id_to_identity: dict[str, tuple[EpisodeId, TaskId]] = {}
-        self._native_session_locks: dict[str, asyncio.Lock] = {}
-        self._closed_native_sessions: dict[str, EpisodeId] = {}
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._closed_sessions: dict[str, EpisodeId] = {}
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -250,9 +250,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         except ValidationError as error:
             raise RequestValidationError(error.errors()) from error
         session_id = typed.resources_session_id
-        lock = self._native_session_locks.setdefault(session_id, asyncio.Lock())
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
-            closed_episode_id = self._closed_native_sessions.get(session_id)
+            closed_episode_id = self._closed_sessions.get(session_id)
             if closed_episode_id is not None:
                 if typed.episode_id != closed_episode_id:
                     raise ValueError("episode_id does not match the closed resources session")
@@ -263,7 +263,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 raise ValueError("episode_id does not match the seeded resources session")
             await self._stop_session_sandbox(session_id)
             self._session_id_to_identity.pop(session_id, None)
-            self._closed_native_sessions[session_id] = typed.episode_id
+            self._closed_sessions[session_id] = typed.episode_id
             request.session.pop(SESSION_ID_KEY, None)
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
@@ -277,8 +277,8 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
 
     async def shutdown(self) -> None:
         self._session_id_to_identity.clear()
-        self._native_session_locks.clear()
-        self._closed_native_sessions.clear()
+        self._session_locks.clear()
+        self._closed_sessions.clear()
         for session_id in list(self._session_id_to_sandbox):
             try:
                 await self._stop_session_sandbox(session_id)
@@ -361,9 +361,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
 
         session_id = body.resources_session_id
         request.session[SESSION_ID_KEY] = session_id
-        lock = self._native_session_locks.setdefault(session_id, asyncio.Lock())
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
-            if session_id in self._closed_native_sessions:
+            if session_id in self._closed_sessions:
                 raise ValueError(f"Resources session is already closed: {session_id}")
             identity = self._session_id_to_identity.get(session_id)
             if identity is not None:
