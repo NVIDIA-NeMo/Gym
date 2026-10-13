@@ -61,6 +61,7 @@ LOG = logging.getLogger(__name__)
 
 # Tools that start other agents; removing them is the solo control.
 SUBAGENT_TOOLS = ["agent", "list_agents"]
+BRIDGE_TOOL = "tool_call"
 API_KEY_ENV = "NEMO_GYM_MODEL_API_KEY"  # pragma: allowlist secret
 SUBAGENT_PROMPT = Path(__file__).with_name("general-purpose-agent.md")
 _CONVERTER = ResponsesConverter(return_token_id_information=False)
@@ -173,11 +174,16 @@ def parse_stream(stdout: str) -> tuple[list[Any], dict[str, Any] | None]:
                 if text.strip():
                     items += _CONVERTER.postprocess_assistant_message_dict({"role": "assistant", "content": text})
             elif event["type"] == "assistant" and kind == "tool_use":
+                name, arguments = block.get("name", ""), block.get("input") or {}
+                # Deferred tools (MCP tools, agent, ...) are invoked through the tool_call bridge;
+                # record the underlying call so verifiers see the real tool name and arguments.
+                if name == BRIDGE_TOOL and isinstance(arguments, dict) and arguments.get("name"):
+                    name, arguments = arguments["name"], arguments.get("arguments") or {}
                 items.append(
                     NeMoGymResponseFunctionToolCall(
-                        arguments=json.dumps(block.get("input") or {}),
+                        arguments=json.dumps(arguments),
                         call_id=block.get("id", ""),
-                        name=block.get("name", ""),
+                        name=name,
                         id=block.get("id"),
                         status="completed",
                     )
