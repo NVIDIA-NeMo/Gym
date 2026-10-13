@@ -1316,7 +1316,7 @@ class RunTimingReport:
             timed_out = self._timed_out / n
             rows.append(
                 (
-                    "ended by wall-clock limit",
+                    "hit wall-clock limit",
                     f"{timed_out:.1%} ({self._timed_out})",
                     f"<= {self._timed_out_max_fraction:.0%}",
                     timed_out <= self._timed_out_max_fraction,
@@ -1900,6 +1900,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     server_queue_metrics_urls: Optional[List[str]] = Field(
         default=None,
         description=(
+            "Only used when dispatch_start_report_within_s is set. "
             "vLLM base URLs (the policy model's base_url list) whose /metrics the run timing summary polls "
             "for requests waiting and running, summed over servers."
         ),

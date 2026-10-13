@@ -23,7 +23,7 @@ from typing import List, Optional
 
 import aiohttp
 from fastapi import Request, Response
-from pydantic import ConfigDict, ValidationError
+from pydantic import ConfigDict, Field, ValidationError
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -143,10 +143,10 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = 400
-    # Wall-clock budget per rollout, measured from the first model call. Past it the loop
+    # Wall-clock budget per rollout, measured from the start of the rollout loop. Past it the loop
     # stops, the response carries `timed_out`, and the harness scores the sample 0 without
     # a judge call. None keeps the loop bounded by max_steps only.
-    rollout_timeout_s: Optional[float] = None
+    rollout_timeout_s: Optional[float] = Field(default=None, ge=0)
     keep_rounds: int = 9999
     nudge_steps: bool = True
     max_context_tokens: int = 196608

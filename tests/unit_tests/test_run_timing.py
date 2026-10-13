@@ -41,7 +41,7 @@ def test_all_started_rows_and_late_start():
     table = r.table()
     assert "50.0 min" in _row(table, "all rollouts started by") and "WARNING" in _row(table, "all rollouts started by")
     assert "75.0%" in _row(table, "started within 30 min") and "WARNING" in _row(table, "started within 30 min")
-    assert "25.0% (1)" in _row(table, "ended by wall-clock limit")
+    assert "25.0% (1)" in _row(table, "hit wall-clock limit")
     assert "50.0%" in _row(table, "longer than 150 min")
 
 
@@ -69,7 +69,7 @@ def test_timeout_failure_class_counts_as_timed_out():
     r = _report(1)
     r.record_start(r._t0)
     r.record_result({"_ng_failure_class": "timeout_exceeded"}, 10)
-    assert "100.0% (1)" in _row(r.table(), "ended by wall-clock limit")
+    assert "100.0% (1)" in _row(r.table(), "hit wall-clock limit")
 
 
 async def test_sigterm_hook_installs_and_restores():

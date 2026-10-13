@@ -510,7 +510,7 @@ class TestRolloutTimeout:
         http = MagicMock()
         http.ok = True
         http.status = 200
-        # Only one model call is ever read: the loop times out before the second one.
+        # No model call is sent: the zero budget expires first.
         http.read = AsyncMock(return_value=json.dumps(tool_turn).encode())
         http.content.read = AsyncMock(return_value=b'{"results_string": "r"}')
         http.cookies = {}
