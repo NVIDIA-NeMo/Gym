@@ -250,6 +250,62 @@ async def test_single_agent_turn_with_direct_resources_tools() -> None:
     assert resources_close_body.episode_id == EpisodeId(rollout_id="rollout", attempt=2)
 
 
+@pytest.mark.parametrize("missing_usage", [False, True])
+async def test_shared_model_usage_covers_agent_lifecycle_but_excludes_resources_and_judge(
+    tmp_path, monkeypatch, missing_usage
+) -> None:
+    from nemo_gym.base_responses_api_model import CaptureStore
+
+    server, client = _environment_server()
+    client.global_config_dict.observability_enabled = True
+    client.global_config_dict.model_call_capture_dir = str(tmp_path)
+    for index in (2, 4):
+        payload = orjson.loads(client.responses[index].body)
+        response_payload = payload if index == 2 else payload["response"]
+        response_payload["usage"] = {
+            "input_tokens": 999,
+            "output_tokens": 1,
+            "total_tokens": 1000,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        }
+        client.responses[index] = _Response(payload)
+    store = CaptureStore(tmp_path)
+    original_post = _Client.post
+
+    async def post(self, server_name, url_path, **kwargs):
+        response = await original_post(self, server_name, url_path, **kwargs)
+        # Capture from setup, root, delegate/compaction and close, regardless of
+        # harness transcript format or whether it retained a model response ID.
+        prompt = {
+            "/seed_session": 1000,
+            "/v1/agent_sessions": 10,
+            "/ng-rollout/rollout-a2/v1/responses": 20,
+            "/v1/agent_sessions/close": 30,
+            "/verify": 2000,
+        }.get(url_path)
+        if prompt is not None:
+            usage = {"prompt_tokens": prompt, "completion_tokens": 5}
+            if missing_usage and url_path == "/v1/agent_sessions/close":
+                usage = None
+            store.record("rollout-a2", {"response": {"usage": usage}})
+        return response
+
+    monkeypatch.setattr(_Client, "post", post)
+    result = await server.run_request(_request())
+    assert result.result.reward == 1.0
+    usage = result.result.response.usage
+    sent_usage = next(kwargs["json"]["response"]["usage"] for _, path, kwargs in client.calls if path == "/verify")
+    if missing_usage:
+        assert usage is None
+        assert sent_usage is None
+    else:
+        assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (60, 15, 75)
+        assert usage.input_tokens_details.cached_tokens is None
+        assert usage.output_tokens_details.reasoning_tokens is None
+        assert sent_usage == usage.model_dump()
+
+
 async def test_single_agent_turn_translates_resources_mcp_metadata_to_canonical_tool_access() -> None:
     environment_server, client = _environment_server(resources_tool_transports=["direct_http", "mcp"])
     client.responses[0] = _Response(

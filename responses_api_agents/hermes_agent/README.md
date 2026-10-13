@@ -128,6 +128,12 @@ system message and ignored request `temperature`. It now combines the prompts an
 the request temperature, just like sandbox execution. These changes can affect scores.
 Remove unsupported fields that older versions silently ignored.
 
+With Model Server capture enabled, Hermes `/run` supplies provider-reported `response.usage`, including when called through `legacy_agent` as in `hermes_reasoning_gym`. It counts the current agent execution after Resources seeding and before verification, excluding prior captures and judge calls. Session-based pairings get the same accounting from the shared [single-agent-turn Environment Server](../../environment_servers/single_agent_turn/README.md).
+
+Set `observability_enabled: true` and an absolute `model_call_capture_dir` shared by the Model Server and the server owning the lifecycle (Hermes for legacy `/run`, or the Environment Server for session-based pairings). Legacy run requests need Gym rollout identity, which `gym eval run` supplies. Counts include only exchanges routed through that rollout's Model Server URL. Enabled lifecycle capture replaces native usage, including with `null` when capture or usage is missing or incomplete. Training token-ID capture alone does not enable model-call accounting or observed quality checks.
+
+Direct `/v1/responses` calls, capture-disabled runs, and legacy runs without rollout identity retain Hermes's native usage. Input uses its cache-inclusive `prompt_tokens`; output uses `completion_tokens`, which includes reasoning. Cached/reasoning details are passed through when present. Missing native totals remain `null`, and numeric zero is preserved. These counters cover the calls accumulated by pinned Hermes: they can omit summary, compression or delegated calls, and missing provider usage can leave zero or partial totals. Its Chat Completions normalizer can also omit reasoning details. Native usage does not replace model-call evidence for rollout quality checks.
+
 ## Runtime and model requirements
 
 Sandbox sessions live in the memory of the worker that seeded them, so seeding a session requires `num_workers: 1`. Calling the agent's `/run` directly keeps no session and still supports several workers.
