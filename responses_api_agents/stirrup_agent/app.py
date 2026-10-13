@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Stirrup agent that runs each episode inside the task sandbox it borrows from the environment.
+"""Stirrup agent that runs each episode inside the task sandbox it borrows from the environment, or one it starts.
 
 The agent server installs Stirrup in the sandbox, stages ``sandbox_runner.py`` and runs it under Gym's process
 supervisor. Shell commands run in the sandbox; task tools are the resources server's routes, reached over HTTP.
@@ -20,7 +20,7 @@ supervisor. Shell commands run in the sandbox; task tools are the resources serv
 import asyncio
 import time
 from asyncio import Semaphore
-from typing import Any, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -54,7 +54,7 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.sandbox.config import resolve_provider_config
@@ -197,6 +197,12 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         default=None,
         description="Request tools that end the episode when they succeed. None uses Stirrup's own finish tool.",
     )
+    sandbox_provider: Optional[str] = Field(
+        default=None, description="Sandbox provider config to start a sandbox from when the session lends none."
+    )
+    sandbox_config: Dict[str, Any] = Field(
+        default_factory=dict, description="SandboxSpec fields for a sandbox started from sandbox_provider."
+    )
     sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
     sandbox_runner_timeout_seconds: float = Field(default=12600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
@@ -211,11 +217,18 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         self.sem = Semaphore(self.config.concurrency)
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> StirrupSessionState:
-        if body.sandbox_access is None:
-            raise ValueError("Stirrup requires sandbox access")
-        connection = body.sandbox_access.connection
-        if not isinstance(connection, DirectSandboxConnection):
-            raise ValueError("Stirrup supports only direct sandbox connections")
+        owns_sandbox = body.sandbox_access is None
+        if owns_sandbox:
+            if self.config.sandbox_provider is None:
+                raise ValueError("Stirrup requires sandbox_access or a configured sandbox_provider")
+            provider_ref = self.config.sandbox_provider
+            workdir = self.config.sandbox_config.get("workdir")
+        else:
+            connection = body.sandbox_access.connection
+            if not isinstance(connection, DirectSandboxConnection):
+                raise ValueError("Stirrup supports only direct sandbox connections")
+            provider_ref = connection.provider_config_ref
+            workdir = body.sandbox_access.workdir
         accesses = self.effective_tool_accesses(body)
         unsupported = [access.name for access in accesses if isinstance(access, MCPToolAccess) and access.required]
         if unsupported:
@@ -225,12 +238,22 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             raise ValueError("Stirrup supports at most one direct HTTP tool access")
         tool_access = direct_accesses[0] if direct_accesses else None
 
-        provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
+        provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         try:
             if provider.name != "local":
                 # The runner calls the model server from the sandbox, which cannot reach a loopback address.
                 sandbox_server_url(self.config.model_server.name, require_reachable=True)
-            sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+            if owns_sandbox:
+                sandbox = AsyncSandbox(provider)
+                sandbox_config = self.config.sandbox_config.copy()
+                # Provider TTLs outlive this server; reserve ten minutes for setup/cleanup overhead.
+                sandbox_config.setdefault(
+                    "ttl_s",
+                    self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
+                )
+                await sandbox.start(SandboxSpec(**sandbox_config))
+            else:
+                sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
         except BaseException:
             await provider.aclose()
             raise
@@ -238,8 +261,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             request=body,
             session=SandboxSession(
                 sandbox=sandbox,
-                workdir=body.sandbox_access.workdir,
+                workdir=workdir,
                 session_dir=f"/tmp/nemo-gym-stirrup-sessions/{uuid4().hex}",
+                owns_sandbox=owns_sandbox,
                 harness="Stirrup",
             ),
             tool_access=tool_access,
