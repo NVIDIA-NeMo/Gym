@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Select the upstream prompt and scorer for an explicit task rubric."""
 
+import math
 from pathlib import Path
 from typing import Literal
 
@@ -29,6 +30,15 @@ RubricName = Literal[
     "spatialvlm_qa",
     "generic",
 ]
+
+
+def rating_to_reward(rating: float, *, power: float = 2.0) -> float:
+    """Shape the final capped rubric rating; power=1 restores linear rewards."""
+    if not math.isfinite(rating) or not 0 <= rating <= 5:
+        raise ValueError("rating must be finite and between 0 and 5")
+    if not math.isfinite(power) or power < 1:
+        raise ValueError("reward power must be finite and at least 1")
+    return (rating / 5.0) ** power
 
 
 def system_prompt(*, dataset_name: RubricName) -> str:

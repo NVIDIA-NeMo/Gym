@@ -7,7 +7,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, JsonValue
 
 from nemo_gym.verifier_fixture import VerifierFixture
-from resources_servers.vision2code.evaluation import RubricName, aggregate_rating
+from resources_servers.vision2code.evaluation import RubricName, aggregate_rating, rating_to_reward
 
 
 class RubricRequest(BaseModel):
@@ -21,7 +21,7 @@ class RubricVerifier:
     def verify(self, body: RubricRequest) -> float:
         """Exercise the production weighted score, caps, and reward normalization."""
         result = aggregate_rating(body.parsed, dataset_name=body.dataset, candidate_inspection=body.inspection)
-        return result["final_rating_0_to_5"] / 5.0
+        return rating_to_reward(result["final_rating_0_to_5"])
 
 
 VERIFIER_FIXTURE = VerifierFixture(

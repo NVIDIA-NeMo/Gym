@@ -20,6 +20,7 @@ vision2code:
       sandbox_image: ${oc.env:VISION2CODE_SQSH}
       execution_timeout: 60
       render_concurrency: 4
+      reward_power: 2.0
       artifact_dir: ${oc.env:VISION2CODE_ARTIFACTS,artifacts/vision2code}
       datasets:
         - name: example

@@ -96,15 +96,57 @@ def judge_result(name, score=4):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "score,power,expected",
+    [(0, 2, 0), (1, 2, 0.04), (2, 2, 0.16), (3, 2, 0.36), (4, 2, 0.64), (5, 2, 1), (3, 1, 0.6), (3, 3, 0.216)],
+)
+async def test_configurable_reward_curve(setup, score, power, expected):
+    server, body, _, judge = setup
+    body.verifier_metadata.rubric = "generic"
+    server.config.reward_power = power
+    judge.return_value = judge_result("generic", score)
+    result = await server.verify(body)
+    assert result.reward == pytest.approx(expected)
+    assert result.rubric_result["final_rating_0_to_5"] == score
+    saved = json.loads(Path(result.artifacts["result"]).read_text())
+    assert saved["reward"] == pytest.approx(expected)
+    assert saved["reward_power"] == power
+
+
+@pytest.mark.asyncio
+async def test_reward_curve_applies_after_rubric_caps(setup):
+    server, body, _, judge = setup
+    scores = {c["id"]: 5 for c in DATASET_RUBRICS["ChartQA"]["categories"]}
+    scores["numeric_information_fidelity"] = 1
+    judge.return_value = response(json.dumps({"category_scores": scores, "rationales": {}}))
+    result = await server.verify(body)
+    assert result.rubric_result["raw_score_0_to_5"] == 3.8
+    assert result.rubric_result["final_rating_0_to_5"] == 2.5
+    assert result.reward == 0.25
+    assert not result.mask_sample
+
+
+@pytest.mark.parametrize("power", [0, -1, 0.5, float("nan"), float("inf")])
+def test_invalid_reward_power(setup, power):
+    server, *_ = setup
+    values = server.config.model_dump()
+    values["reward_power"] = power
+    with pytest.raises(ValidationError, match="reward_power"):
+        app.Vision2CodeConfig.model_validate(values)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("name", get_args(RubricName))
 async def test_same_environment_all_rubrics(setup, name):
     server, body, renderer, judge = setup
     body.verifier_metadata.rubric = name
     judge.return_value = judge_result(name)
     result = await server.verify(body)
-    assert result.reward == 0.8
+    assert result.reward == pytest.approx(0.64)
     assert not result.mask_sample
     assert result.rubric_result["rubric_dataset"] == name
+    assert result.rubric_result["final_rating_0_to_5"] == 4.0
+    assert result.reward_power == 2.0
     kwargs = judge.call_args.kwargs
     assert kwargs["server_name"] == "separate_judge"
     assert kwargs["url_path"] == "/v1/responses"
@@ -119,7 +161,7 @@ async def test_same_environment_all_rubrics(setup, name):
     assert name in request["input"][1]["content"][-1]["text"]
     assert "print('policy code')" == renderer.call_args.kwargs["code"]
     assert Path(result.artifacts["result"]).is_file()
-    assert json.loads(Path(result.artifacts["result"]).read_text())["reward"] == 0.8
+    assert json.loads(Path(result.artifacts["result"]).read_text())["reward"] == pytest.approx(0.64)
 
 
 @pytest.mark.asyncio
@@ -188,7 +230,7 @@ async def test_committed_reference_is_independent_of_server_working_directory(se
     monkeypatch.chdir(tmp_path)
     judge.return_value = judge_result("ChartQA")
     result = await server.verify(body)
-    assert result.reward == 0.8 and not result.mask_sample
+    assert result.reward == pytest.approx(0.64) and not result.mask_sample
     content = judge.call_args.kwargs["json"].model_dump()["input"][1]["content"]
     expected = json.loads(example.read_text())["responses_create_params"]["input"][1]["content"][0]["image_url"]
     assert content[1]["image_url"] == expected
@@ -216,7 +258,7 @@ async def test_concurrency_and_unique_artifacts(setup):
     results = await asyncio.gather(*(server.verify(body) for _ in range(6)))
     assert peak == 2
     assert len({r.artifacts["directory"] for r in results}) == 6
-    assert all(r.reward == 0.8 for r in results)
+    assert all(r.reward == pytest.approx(0.64) for r in results)
 
 
 @pytest.mark.asyncio
@@ -260,7 +302,7 @@ async def test_masking_excludes_judge_failures_from_gym_metrics(setup):
     assert valid.model_dump()["_ng_task_index"] == 12
     assert invalid.model_dump()["_ng_rollout_index"] == 1
     metrics = compute_aggregate_metrics([valid.model_dump(), invalid.model_dump()])
-    assert metrics.agent_metrics["mean/reward"] == 0.8
+    assert metrics.agent_metrics["mean/reward"] == pytest.approx(0.64)
 
 
 @pytest.mark.asyncio
@@ -269,6 +311,7 @@ async def test_reverification_clears_stale_failure_fields(setup):
     body.model_extra.update(
         {
             "reward": 0,
+            "reward_power": 1.0,
             "mask_sample": True,
             "failure_kind": "judge_failed",
             "_ng_failure_class": "judge_failed",
@@ -277,6 +320,7 @@ async def test_reverification_clears_stale_failure_fields(setup):
     )
     judge.return_value = judge_result("ChartQA")
     result = await server.verify(body)
-    assert result.reward == 0.8 and not result.mask_sample
+    assert result.reward == pytest.approx(0.64) and not result.mask_sample
+    assert result.reward_power == 2.0
     assert result.failure_kind is None and "_ng_failure_class" not in result.model_dump()
     assert result.model_dump()["instance_config"]["mask_sample"] is False
