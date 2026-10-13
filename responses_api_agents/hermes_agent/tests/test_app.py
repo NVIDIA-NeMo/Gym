@@ -882,6 +882,23 @@ class TestResultClassification:
             )
 
     @pytest.mark.parametrize(
+        "error", ["HTTP 400: controlled model failure", "HTTP 413: payload too large", "HTTP 422: bad params"]
+    )
+    def test_terminal_model_rejection_is_a_gradable_outcome(self, error) -> None:
+        # The model endpoint refused the request for what it asked, after Hermes's retries. The conformance
+        # suite's model_error scenario expects this to reach the verifier as an unmasked zero.
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        response = hermes._response_from_result(
+            body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            result={"failed": True, "error": error, "messages": []},
+            model_name="model",
+        )
+        assert response.status == "failed"
+        assert response.error is not None and response.error.message == error
+        assert response.metadata["model_rejected"] == error.split()[1].rstrip(":")
+        assert "provider_failed" not in response.metadata
+
+    @pytest.mark.parametrize(
         "outcome",
         [
             {"failed": True, "error": "First response truncated due to output length limit"},
@@ -1234,7 +1251,7 @@ class TestObservability:
             runtime_gap,
         ]
 
-    @pytest.mark.parametrize("provider_failed", [False, True])
+    @pytest.mark.parametrize("provider_failed", [False, True, "model_rejected"])
     def test_run_returns_observations_without_leaking_internal_attachment(self, provider_failed) -> None:
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {"observability_enabled": True}
@@ -1251,7 +1268,11 @@ class TestObservability:
                 "tools": [],
             }
         )
-        if provider_failed:
+        if provider_failed == "model_rejected":
+            # A terminal HTTP 400 from the model: graded, not masked (conformance model_error scenario).
+            response = response.model_copy(update={"metadata": {"model_rejected": "400"}, "status": "failed"})
+            provider_failed = False
+        elif provider_failed:
             response = response.model_copy(
                 update={
                     "metadata": {"provider_failed": "true"},

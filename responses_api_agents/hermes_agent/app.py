@@ -17,6 +17,7 @@ import atexit
 import logging
 import math
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -82,6 +83,22 @@ from responses_api_agents.hermes_agent.sandbox import DEFAULT_UV_CACHE_DIR, Harn
 # Task rows materialized from a task's own agent timeout carry it as request metadata under this key
 # (seconds, as a string); the episode's wall-clock budget is capped by it.
 AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
+
+# HTTP statuses a model endpoint returns for what the request asked, after Hermes's own retries: the
+# conversation was refused (malformed or too long for the model), so the episode is a graded zero, not an
+# infrastructure failure. Auth, routing, rate-limit and server errors stay provider failures and are masked.
+MODEL_REJECTION_STATUSES = frozenset({400, 413, 422})
+_HTTP_STATUS = re.compile(r"\bHTTP (\d{3})\b")
+_TRUNCATION_ERROR = "First response truncated due to output length limit"
+
+
+def _model_rejection_status(error: object) -> int | None:
+    """The HTTP status in a Hermes API error text when it is a model rejection, else ``None``."""
+    match = _HTTP_STATUS.search(str(error or ""))
+    if match is None:
+        return None
+    status = int(match.group(1))
+    return status if status in MODEL_REJECTION_STATUSES else None
 
 
 # Tolerance for clock skew between the agent host and the sandbox supervisor's deadline.
@@ -758,11 +775,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
         retain_provider_failure: bool = False,
     ) -> NeMoGymResponse:
         # The pinned Hermes marks provider/API failures with `failed`, but model-limit and
-        # invalid-tool outcomes with `partial`. Keep those partial patches gradable. Its one
-        # model-caused `failed` outcome is first-response truncation (run_agent.py).
-        provider_failed = (
-            bool(result.get("failed")) and result.get("error") != "First response truncated due to output length limit"
-        )
+        # invalid-tool outcomes with `partial`. Keep those partial patches gradable. Its model-caused
+        # `failed` outcomes are first-response truncation (run_agent.py) and a terminal rejection of the
+        # request by the model endpoint (HTTP 400, 413, 422): both reach the verifier unmasked.
+        failed = bool(result.get("failed")) and result.get("error") != _TRUNCATION_ERROR
+        rejection_status = _model_rejection_status(result.get("error")) if failed else None
+        provider_failed = failed and rejection_status is None
         if provider_failed and not retain_provider_failure:
             raise RuntimeError(f"Hermes agent failed: {result.get('error') or 'unknown provider/API failure'}")
 
@@ -820,6 +838,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if provider_failed:
             metadata["provider_failed"] = "true"
             harness_error = harness_error or "unknown provider/API failure"
+        if rejection_status is not None:
+            metadata["model_rejected"] = str(rejection_status)
         response_error = None
         if harness_error:
             from openai.types.responses import ResponseError  # pyright: ignore[reportMissingImports]
