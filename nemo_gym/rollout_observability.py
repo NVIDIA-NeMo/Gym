@@ -20,6 +20,9 @@ if TYPE_CHECKING:
     from nemo_gym.base_responses_api_model import ModelCallRecord
 
 
+NG_AGENT_OBSERVATIONS_KEY = "ng_agent_observations"
+
+
 class ObservationModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 

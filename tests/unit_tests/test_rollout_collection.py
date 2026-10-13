@@ -4494,6 +4494,54 @@ class TestRolloutCollection:
         run_health_checks.assert_called_once_with(output_fpath, workers=None, ignored_checks=[])
         format_health_report.assert_called_once_with(health_result)
 
+    async def test_a_failed_episode_with_agent_evidence_joins_its_model_calls(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        merged: list[int] = []
+        monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", MagicMock())
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "merge_model_call_capture_into_record",
+            lambda record, *args, **kwargs: merged.append(record[TASK_INDEX_KEY_NAME]),
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "model_call_capture_dirs_from_config", lambda _: [tmp_path / "capture"]
+        )
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
+            for i in range(3)
+        ]
+        input_jsonl_fpath.write_text("\n".join(samples) + "\n")
+        failure = {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS, NG_TERMINAL_KEY: False}
+        results = [
+            {"response": {}, "reward": 1.0},
+            failure | {"ng_agent_observations": {"source": "stirrup", "records": []}},
+            failure,
+        ]
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples: list[dict], *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    result = dict(results[example[TASK_INDEX_KEY_NAME]])
+                    future.set_result(_CompletedRollout(row=example, result=result, rollout_latency_ms=None))
+                    futures.append(future)
+                return futures
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            route_failures_to_sidecar=True,
+            disable_aggregation=True,
+        )
+
+        await TestRolloutCollectionHelper().run_from_config(config)
+
+        # The success and the failure that returned agent evidence are joined; the bare failure is not.
+        assert sorted(merged) == [0, 1]
+
     async def test_run_from_config_sanity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
@@ -9092,6 +9140,7 @@ class TestEnvironmentServerRouting:
                 "terminal": False,
                 "stage": "agent",
                 "partial_response": {"id": "partial"},
+                "agent_observations": {"source": "stirrup", "records": []},
             },
         }
         assert nemo_gym.rollout_collection._is_episode_response(reply)
@@ -9103,6 +9152,7 @@ class TestEnvironmentServerRouting:
         assert record["_ng_failure_message"] == "agent unavailable"
         assert record["_ng_failure_stage"] == "agent"
         assert record["_ng_failure_partial_response"] == {"id": "partial"}
+        assert record["ng_agent_observations"] == {"source": "stirrup", "records": []}
         assert record[nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] == "a"
         assert "reward" not in record
 

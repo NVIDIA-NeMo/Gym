@@ -22,6 +22,7 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnRequest,
@@ -94,12 +95,14 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
             }
             if response.failure.partial_response is not None:
                 failure["_ng_failure_partial_response"] = response.failure.partial_response.model_dump(mode="json")
+            if response.failure.agent_observations is not None:
+                failure[NG_AGENT_OBSERVATIONS_KEY] = response.failure.agent_observations.model_dump(mode="json")
             return failure
         if response.result is None:
             raise ValueError("Successful episode response has no result")
         result = response.result.model_dump(mode="json")
-        if result.get("ng_agent_observations") is None:
-            result.pop("ng_agent_observations", None)
+        if result.get(NG_AGENT_OBSERVATIONS_KEY) is None:
+            result.pop(NG_AGENT_OBSERVATIONS_KEY, None)
         result["agent_ref"] = agent_ref
         return result
 

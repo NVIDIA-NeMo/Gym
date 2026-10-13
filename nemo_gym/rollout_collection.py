@@ -87,6 +87,7 @@ from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, m
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
+    NG_AGENT_OBSERVATIONS_KEY,
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
@@ -385,6 +386,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             record["_ng_failure_stage"] = failure["stage"]
         if failure.get("partial_response") is not None:
             record["_ng_failure_partial_response"] = failure["partial_response"]
+        if failure.get("agent_observations") is not None:
+            record[NG_AGENT_OBSERVATIONS_KEY] = failure["agent_observations"]
         return record
     result = response.get("result")
     if not isinstance(result, Mapping):
@@ -449,7 +452,7 @@ def _nonnegative_int(value: Any) -> Optional[int]:
 
 
 def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
-    for key in (NG_TRAJECTORY_KEY, "ng_agent_observations"):
+    for key in (NG_TRAJECTORY_KEY, NG_AGENT_OBSERVATIONS_KEY):
         observations = result.get(key)
         gaps = observations.get("gaps") if isinstance(observations, dict) else None
         if isinstance(gaps, list) and any(isinstance(gap, dict) and gap.get("code") == code for gap in gaps):
@@ -593,7 +596,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         except Exception as exc:
             gaps.append(ObservationGap(code="producer_trajectory_invalid", detail=type(exc).__name__))
 
-    raw_observations = result.get("ng_agent_observations")
+    raw_observations = result.get(NG_AGENT_OBSERVATIONS_KEY)
     if raw_observations is not None:
         try:
             observations = AgentObservationBundle.model_validate(raw_observations)
@@ -771,7 +774,7 @@ def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> No
         )
         target = result.get("ng_model_call_capture")
         if not isinstance(target, dict):
-            target = result.get("ng_agent_observations")
+            target = result.get(NG_AGENT_OBSERVATIONS_KEY)
         gap_attached = False
         if isinstance(target, dict):
             gaps = target.setdefault("gaps", [])
@@ -2851,7 +2854,8 @@ class RolloutCollectionHelper(BaseModel):
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off). Never alters the harness output/reward already in `result`.
-                if capture_dirs and not no_result:
+                # A failed episode that returned agent evidence made model calls worth joining.
+                if capture_dirs and (not no_result or NG_AGENT_OBSERVATIONS_KEY in result):
                     merge_model_call_capture_into_record(
                         result,
                         capture_dirs,
@@ -2860,7 +2864,7 @@ class RolloutCollectionHelper(BaseModel):
 
                 if (
                     "ng_model_call_capture" in result
-                    or "ng_agent_observations" in result
+                    or NG_AGENT_OBSERVATIONS_KEY in result
                     or NG_TRAJECTORY_KEY in result
                 ):
                     _attach_trajectory_record(row, result)
@@ -3287,7 +3291,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     not in (
                         "response",
                         "responses_create_params",
-                        "ng_agent_observations",
+                        NG_AGENT_OBSERVATIONS_KEY,
                         "ng_model_call_capture",
                         NG_TRAJECTORY_KEY,
                     )
