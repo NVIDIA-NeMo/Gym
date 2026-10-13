@@ -1212,8 +1212,23 @@ NG_ELAPSED_KEY = "elapsed_seconds"
 
 
 class RunTimingReport:
-    """Start coverage, wall-clock-limit hits and long rollouts of one collection, as a two-row
-    table (this run | healthy). Diagnostic only: it never stops the run."""
+    """Health table for a collection whose rollouts have a per-rollout wall-clock limit.
+
+    A per-rollout limit (e.g. BrowseComp's ``rollout_timeout_s``) makes the score depend on the
+    deployment as well as the model: if the servers are too few or too slow, rollouts start late,
+    queue for the GPU, or run into the limit, and are scored 0 for reasons unrelated to the model.
+    This table shows whether a run stayed clear of that, so a score from a starved run is not
+    mistaken for a model result. Each row compares this run with a healthy bound:
+
+    - start coverage: rollouts started within ``start_within_s`` and all started by
+      ``all_started_within_s`` (late starts eat into a fixed job allocation);
+    - rollouts ended by the wall-clock limit (above the bound, the limit is shaping the score);
+    - rollouts longer than ``long_rollout_s`` (an early sign that the limit is too tight);
+    - summed waiting / running requests on the model servers, when their URLs are given
+      (requests queue instead of being served).
+
+    Diagnostic only: it prints a warning per unhealthy row and never stops the run.
+    """
 
     def __init__(
         self,
