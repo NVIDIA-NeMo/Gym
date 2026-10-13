@@ -2079,15 +2079,22 @@ def _git_history_sanitize_cmd(repo_path: str, base_commit: str, log_path: str) -
     Removes every remote, deletes every ref whose tip is not an ancestor of HEAD (or of ``base_commit`` when it
     resolves, so harnesses that reset to it keep working) and every ref to a non-commit object, expires all
     reflogs and runs ``git gc --prune=now`` so the dropped commits are gone from the object store, not just
-    unreferenced. Ancestor tags/branches, HEAD and the working tree are untouched. Best effort: a missing
-    repository or a git failure is written to ``log_path`` and never blocks the rollout.
+    unreferenced. A valid base outside HEAD ancestry is pinned under ``refs/nemo-gym/base-commit`` before
+    deleting refs, so a later harness reset can still reach it. Ancestor tags/branches, HEAD and the working
+    tree are untouched. Best effort: a missing repository or a git failure is written to ``log_path`` and
+    never blocks the rollout.
     """
     script = f"""set -u
 g() {{ git -c safe.directory='*' "$@"; }}
 cd {shlex.quote(repo_path)} 2>/dev/null && [ -e .git ] || {{ echo "no git repository at {shlex.quote(repo_path)}"; exit 0; }}
 before=$(g rev-list --all --count)
 base={shlex.quote(base_commit)}
-g rev-parse -q --verify "$base^{{commit}}" >/dev/null 2>&1 || base=
+# Resolve symbolic/remote names before deleting the refs that give them meaning.
+base=$(g rev-parse -q --verify --end-of-options "$base^{{commit}}" 2>/dev/null) || base=
+if [ -n "$base" ] && ! g merge-base --is-ancestor "$base" HEAD; then
+  # An ancestor of a deleted future ref is otherwise unreachable after reflog expiry.
+  g update-ref refs/nemo-gym/base-commit "$base" || {{ echo "could not preserve base commit; skipping cleanup"; exit 1; }}
+fi
 for remote in $(g remote); do g remote remove "$remote"; done
 {{
   g for-each-ref --no-merged=HEAD --format='%(refname)' |

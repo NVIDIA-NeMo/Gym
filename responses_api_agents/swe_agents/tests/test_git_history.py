@@ -14,6 +14,8 @@
 # limitations under the License.
 """``sanitize_git_history``: the agent only sees git history reachable from HEAD (or base_commit)."""
 
+import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -125,7 +127,74 @@ class TestGitHistorySanitizer:
         assert sorted(_git(repo, "for-each-ref", "--format=%(refname)").split()) == [
             "refs/heads/main",
             "refs/heads/side",
+            "refs/nemo-gym/base-commit",
         ]
+
+    @pytest.mark.parametrize("base_kind", ["sha", "remote", "tag"])
+    def test_unreferenced_base_survives_pruning_and_harness_reset(self, tmp_path: Path, base_kind: str) -> None:
+        repo = tmp_path / "testbed"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "main")
+        initial = _commit(repo, "v0\n", "initial")
+        base = _commit(repo, "bug\n", "base")
+        future = _commit(repo, "fixed\n", "future fix")
+        _git(repo, "checkout", "-q", "-b", "side", initial)
+        side = _commit(repo, "side\n", "side")
+        _git(repo, "checkout", "-q", "--detach", side)
+        # main points past base; there is no surviving ref directly at base.
+        supplied = base
+        if base_kind == "remote":
+            _git(repo, "remote", "add", "origin", "https://example.invalid/repo.git")
+            _git(repo, "update-ref", "refs/remotes/origin/base", base)
+            supplied = "origin/base"
+        elif base_kind == "tag":
+            _git(repo, "tag", "base-tag", base)
+            supplied = "base-tag"
+        (repo / "notes.txt").write_text("keep me\n")
+
+        _sanitize(repo, supplied, tmp_path / "git_sanitize.log")
+
+        assert _git(repo, "rev-parse", "HEAD") == side
+        assert (repo / "lib.py").read_text() == "side\n"
+        assert (repo / "notes.txt").read_text() == "keep me\n"
+        assert _object_exists(repo, base)
+        assert not _object_exists(repo, future)
+        assert _git(repo, "remote") == ""
+        assert _git(repo, "reflog", "--all") == ""
+        assert set(_git(repo, "rev-list", "--all").split()) == {initial, base, side}
+        # Repeat after remotes have gone, then exercise OpenHands' actual reset requirement.
+        _sanitize(repo, base, tmp_path / "git_sanitize_again.log")
+        _git(repo, "reset", "--hard", base)
+        assert _git(repo, "rev-parse", "HEAD") == base
+        assert (repo / "lib.py").read_text() == "bug\n"
+
+    def test_pin_failure_stops_before_deleting_refs(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo = tmp_path / "testbed"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "main")
+        initial = _commit(repo, "v0\n", "initial")
+        base = _commit(repo, "bug\n", "base")
+        future = _commit(repo, "fixed\n", "future fix")
+        _git(repo, "checkout", "-q", "--detach", initial)
+        _git(repo, "remote", "add", "origin", "https://example.invalid/repo.git")
+        real_git = shutil.which("git")
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        wrapper = bin_dir / "git"
+        wrapper.write_text(
+            '#!/bin/sh\nif [ "$3" = update-ref ] && [ "$4" = refs/nemo-gym/base-commit ]; then exit 1; fi\n'
+            f'exec {shlex.quote(real_git)} "$@"\n'
+        )
+        wrapper.chmod(0o755)
+        monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+
+        log = _sanitize(repo, base, tmp_path / "git_sanitize.log")
+
+        assert "could not preserve base commit; skipping cleanup" in log
+        assert _git(repo, "rev-parse", "main") == future
+        assert _git(repo, "remote") == "origin"
+        assert _object_exists(repo, base)
+        assert _object_exists(repo, future)
 
     def test_unknown_base_commit_falls_back_to_head(self, tmp_path: Path) -> None:
         repo = tmp_path / "testbed"
