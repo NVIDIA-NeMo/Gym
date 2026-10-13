@@ -39,8 +39,10 @@ from nemo_gym.global_config import (
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
     ENVIRONMENT_SERVER_FAILURE_CLASS,
+    NG_ENVIRONMENT_SERVER_KEY,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_RESULT_TYPE_KEY,
     NG_TERMINAL_KEY,
     SharedRolloutCollectionConfig,
 )
@@ -3642,7 +3644,13 @@ class TestCachedDeliverableReuse:
                             NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
                             "_ng_failure_stage": first_failure_stage,
                         }
-                    return rollout_collection_module._CompletedRollout(row=row, result=result, rollout_latency_ms=None)
+                    return rollout_collection_module._CompletedRollout(
+                        row=row,
+                        result=result,
+                        rollout_latency_ms=None,
+                        environment_server="gdpval_environment_server",
+                        environment_server_type="single_agent_turn_legacy",
+                    )
 
                 return [done(row) for row in rows]
 
@@ -3707,6 +3715,10 @@ class TestCachedDeliverableReuse:
         (message,) = call["json"]["response"]["output"]
         assert message["content"][0]["text"] == "Judge-only mode: scoring pre-existing cached deliverables."
         assert sorted(row["stage_index"] for row in persisted) == [0, 1]
+        # Dispatched and reused results name the environment server that ran them, as run_from_config's do.
+        assert {
+            (row[NG_ENVIRONMENT_SERVER_KEY], row[NG_RESULT_TYPE_KEY], row[TASK_SOURCE_KEY_NAME]) for row in persisted
+        } == {("gdpval_environment_server", "single_agent_turn_legacy", "gdpval_stirrup_agent")}
         inputs = [
             json.loads(line) for line in (tmp_path / "rollouts_materialized_inputs.jsonl").read_text().splitlines()
         ]

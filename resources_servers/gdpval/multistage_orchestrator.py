@@ -81,6 +81,7 @@ from nemo_gym.global_config import (
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
 from nemo_gym.path_utils import failures_path_for, materialized_path_for
@@ -92,6 +93,7 @@ from nemo_gym.rollout_collection import (
     NG_ENVIRONMENT_SERVER_KEY,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_RESULT_TYPE_KEY,
     NG_TERMINAL_KEY,
     NG_TRAJECTORY_KEY,
     DispatchLatencyTracker,
@@ -778,11 +780,16 @@ def find_gdpval_reference_elos(global_config_dict: Mapping[str, Any]) -> Dict[st
     return {}
 
 
-def resources_server_for_row(row: Mapping[str, Any], global_config_dict: Any) -> str:
-    """Name the resources server that verifies a row: the one bound by the environment server fronting its agent."""
-    environment_server = row.get(NG_ENVIRONMENT_SERVER_KEY) or _environment_server_for_agent(
+def environment_server_for_row(row: Mapping[str, Any], global_config_dict: Any) -> str:
+    """Name the environment server a row runs through: its stamped one, or the one fronting its agent."""
+    return row.get(NG_ENVIRONMENT_SERVER_KEY) or _environment_server_for_agent(
         row[AGENT_REF_KEY_NAME]["name"], _environment_servers_by_agent(global_config_dict)
     )
+
+
+def resources_server_for_row(row: Mapping[str, Any], global_config_dict: Any) -> str:
+    """Name the resources server that verifies a row: the one bound by the environment server fronting its agent."""
+    environment_server = environment_server_for_row(row, global_config_dict)
     environment_config = next(iter(global_config_dict[environment_server]["environment_servers"].values()))
     reference = environment_config.get("resources_server")
     if not reference or not reference.get("name"):
@@ -927,6 +934,8 @@ def tag_results(
         out[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
         out[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
         out[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+        if TASK_SOURCE_KEY_NAME in row:
+            out[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
         if ATTEMPT_INDEX_KEY_NAME in row:
             out[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
         out["stage_index"] = stage_index
@@ -2514,6 +2523,11 @@ async def run_e2e_multistage(
                     raise
                 result = _agent_request_failure_row(error, getattr(error, "status", None))
                 result["reuse_cached_deliverable"] = True
+        environment_server = environment_server_for_row(row, server_client.global_config_dict)
+        result[NG_ENVIRONMENT_SERVER_KEY] = environment_server
+        result[NG_RESULT_TYPE_KEY] = next(
+            iter(server_client.global_config_dict[environment_server]["environment_servers"])
+        )
         attach_rollout_evidence(row, result, (time.time() - started_at) * 1000)
         return row, result
 
@@ -2538,6 +2552,10 @@ async def run_e2e_multistage(
             # without one, /verify answers 404 and the policy runs again.
             if completed.result.get("_ng_failure_stage") == "verification":
                 completed.result["reuse_cached_deliverable"] = True
+            if completed.environment_server is not None:
+                completed.result[NG_ENVIRONMENT_SERVER_KEY] = completed.environment_server
+            if completed.environment_server_type is not None:
+                completed.result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
             attach_rollout_evidence(completed.row, completed.result, completed.rollout_latency_ms)
             results.append((completed.row, completed.result))
         return results
