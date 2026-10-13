@@ -624,3 +624,51 @@ class TestTokenAccounting:
         old_row = {"reward": 0.0, "response": {"usage": _usage(200)}}
         with pytest.raises(ValueError, match="different token accounting versions"):
             _aggregate([row, old_row])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefilled", [False, True])
+async def test_collector_builds_perf_from_generated_substeps(prefilled):
+    from nemo_gym.rollout_collection import _attach_ng_perf, _attach_trajectory_record
+
+    agent = _agent(observability_enabled=True)
+    calls = []
+    problem_id = "62" if prefilled else "1"
+    body = _run_request(problem_id=problem_id, n_steps=3, _ng_task_index=0, _ng_rollout_index=0)
+
+    def post(server_name, url_path, json, cookies):
+        if url_path.endswith("/v1/responses"):
+            response_id = f"r{len(calls)}"
+            calls.append(
+                {
+                    "model_call_id": f"c{len(calls)}",
+                    "response_id": response_id,
+                    "model_ref": agent.config.model_server.model_dump(),
+                    "tokens_in": 10,
+                    "tokens_out": 20,
+                }
+            )
+            return _Resp({**_model_json("x = 1"), "id": response_id})
+        return _Resp({"reward": 0.0})
+
+    agent.server_client.post = AsyncMock(side_effect=post)
+    with patch.object(app, "raise_for_status", AsyncMock()):
+        result = await agent.run(_FakeRequest(), body)
+    result["ng_model_call_capture"] = {"calls": calls}
+    _attach_trajectory_record(body.model_dump(), result)
+    _attach_ng_perf(result, observability_enabled=True, rollout_latency_ms=123)
+    expected = 2 if prefilled else 3
+    assert result["ng_perf"] == {
+        "num_turns": expected,
+        "num_tool_calls": 0,
+        "token_observability_coverage": 1.0,
+        "prompt_tokens": expected * 10,
+        "completion_tokens": expected * 20,
+        "total_latency_ms": 123,
+    }
+    assert [t["turn_no"] for t in result["ng_trajectory"]["turns"]] == list(range(1, expected + 1))
+    # An unmatched capture remains a missing contribution, not an invented count.
+    result["ng_trajectory"]["model_calls"].pop()
+    _attach_ng_perf(result, observability_enabled=True)
+    assert result["ng_perf"]["token_observability_coverage"] == (expected - 1) / expected
+    assert result["ng_perf"]["completion_tokens"] == (expected - 1) * 20

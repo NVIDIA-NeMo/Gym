@@ -69,9 +69,9 @@ LOG = logging.getLogger("nemo_gym.vllm_model")
 def _log_unhandled_engine_error(request: Request, status: int, body: str, route: str) -> None:
     """Log an engine answer the server does not handle, once, before it is re-raised.
 
-    The caller receives only the HTTP status. The engine's body names the rejected field or
-    the engine's reason, and the rollout id (set by the capture route's prefix) names the
-    caller, so both are kept here together with the request path.
+    The shared model error handler preserves the upstream status and body. The log
+    additionally ties that error to the request path and rollout id (set by the
+    capture route's prefix).
     """
     LOG.warning(
         "engine answered %s to a %s for %s (rollout %s): %s",
@@ -84,6 +84,30 @@ def _log_unhandled_engine_error(request: Request, status: int, body: str, route:
 
 
 _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE = "nemo_gym_vllm_propagate_context_error"
+
+
+def _is_context_length_error(error: ClientResponseError) -> bool:
+    """Recognize request overflow without swallowing runtime KV-cache failures."""
+    if error.status != 400:
+        return False
+
+    message = error.response_content.decode(errors="replace")
+    if "context length" in message or "max_tokens" in message:
+        return True
+
+    # llama.cpp supplies a dedicated error type, unlike vLLM's BadRequestError.
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        payload = payload.get("error", payload)
+    if isinstance(payload, dict) and payload.get("type") == "exceed_context_size_error":
+        return True
+
+    # Retain compatibility when a proxy forwards only llama.cpp's message.
+    return "exceeds the available context size" in message or "is larger than the max context size" in message
+
 
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
@@ -311,7 +335,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # How long a missing endpoint file allows for the use of the last-known-good clients.
     endpoint_stale_grace_s: float = 300.0
 
-    # Connection-error retry bound applied to clients when endpoint_file is set.
+    # Connection-error retry bound applied to the clients when endpoint_file or
+    # route_around_failing_endpoints is set. Unbounded (None), a client retries a refused
+    # connection forever, so a dead endpoint never reaches the failure count that moves
+    # sessions off it.
     endpoint_connection_retries: Optional[int] = 8
 
     # Expose the Gym session (one per rollout) as the backend's conversation id.
@@ -382,7 +409,6 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
 
 class VLLMModel(SimpleResponsesAPIModel):
-    ray_enabled = False
     config: VLLMModelConfig
 
     _TOKENIZE_CHAT_FIELDS: ClassVar[tuple[str, ...]] = (
@@ -440,7 +466,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 api_key=self.config.api_key,
                 default_headers=self.config.default_headers,
                 max_connection_retries=(
-                    self.config.endpoint_connection_retries if self.config.endpoint_file else None
+                    self.config.endpoint_connection_retries
+                    if (self.config.endpoint_file or self.config.route_around_failing_endpoints)
+                    else None
                 ),
             )
             for base_url in self.config.base_url
@@ -1048,12 +1076,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
             4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
             """
-            result_content_str = e.response_content.decode()
-
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
-            if is_out_of_context_length:
+            result_content_str = e.response_content.decode(errors="replace")
+            if _is_context_length_error(e):
                 execution["error_category"] = "context_length_exceeded"
                 if self.config.propagate_context_overflow_errors:
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
@@ -1386,11 +1410,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
-            result_content_str = e.response_content.decode()
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
-            if is_out_of_context_length:
+            result_content_str = e.response_content.decode(errors="replace")
+            if _is_context_length_error(e):
                 execution["error_category"] = "context_length_exceeded"
                 if self.config.propagate_context_overflow_errors:
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
@@ -1751,7 +1772,10 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
-        session_id = request.session[SESSION_ID_KEY]
+        # Route by rollout when the call carries one: agents that drop cookies get a new
+        # session per call, which scatters a rollout's turns and lets the slowest endpoint
+        # collect them. Keying on the rollout keeps its turns on one endpoint.
+        session_id = current_rollout_id() or request.session[SESSION_ID_KEY]
         client = self._session_id_to_client.get(session_id)
         if self.config.route_around_failing_endpoints:
             hashed = self._hashed_client(session_id)
