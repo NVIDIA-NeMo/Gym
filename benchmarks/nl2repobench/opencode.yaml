@@ -45,6 +45,20 @@ nl2repobench_opencode_sandboxed_agent:
       # is already 21600s (6hr), comfortably above this, so it's left as-is.
       opencode_model_call_timeout: 14400000
 
+      # The shared default (262144, see opencode_sandboxed_agent.yaml) is reused verbatim as
+      # OpenCode's declared model.limit.context/input/output in the generated opencode.json
+      # (_create_opencode_config in app.py) - OpenCode computes its auto-compaction trigger as a
+      # fraction of that declared limit, not of the real served context window. Empirically,
+      # compaction was firing around ~240-246K single-turn input tokens, i.e. ~92-94% of 262144 -
+      # right where you'd expect a percentage-of-declared-limit trigger to land. Neither
+      # Lightning's nor dima's vLLM config sets --max-model-len, so the real served window is the
+      # checkpoint's native max_position_embeddings (1,048,576 for both - confirmed via
+      # config.json, same architecture/dims), far above either value below. Raised here to push
+      # the compaction trigger point out to ~500K and give the model roughly 2x more headroom
+      # before OpenCode starts summarizing/pruning older turns - scoped to nl2repobench only so
+      # other opencode_sandboxed_agent benchmarks keep today's 262144 behavior.
+      opencode_max_context_window: 524288
+
       # The agent sandbox denies all egress except the policy model host
       # (enforce_agent_no_network: true), so the default `curl
       # https://opencode.ai/install` fallback fails (confirmed via a live
