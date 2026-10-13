@@ -44,6 +44,8 @@ mimo_rl_oss_agent:
       sandbox_provider: sandbox
       sandbox_python: /opt/mimo-rt/venv/bin/python
       setup_commands:
+      # terminal_bench tests fetch tools with curl, which some task images lack.
+      - command -v curl >/dev/null || (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl ca-certificates) >/dev/null 2>&1 || true
       - sh /work/gym_mount/responses_api_agents/mimoagent/install_runtime.sh
       rollout_timeout: 7200
       concurrency: 32
