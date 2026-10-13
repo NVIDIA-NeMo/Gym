@@ -1,6 +1,6 @@
 # NeMo multi-harness training: cross-cluster handoff
 
-Last reconciled: **2026-10-09 10:43 PDT**
+Last reconciled: **2026-10-12 17:15 PDT**
 
 This is the operational handoff for resuming the NeMo Gym + NeMo RL
 multi-harness work on another cluster. It records what is pushed, what has
@@ -10,47 +10,55 @@ exact acceptance gates. The longer design and code map are in
 
 ## Current live status
 
-- The current implementation commits are Gym `3baa93c02` and NeMo RL
-  `68fc9a372` on branch `ehosseiniasl/multi-harness-training-routing`. They are
-  the commits that must be present before the next runtime validation.
-- Nano job `2180485`, W&B run
-  [`dv8ch7n8`](https://wandb.ai/adlr/multi-harness-RL/runs/dv8ch7n8), completed
-  all four optimizer updates available in its one-epoch configuration. The
-  final reported reward was `0.625`, gradient norm was approximately `0.6386`,
-  maximum TMPE was approximately `1.0351`, and token capture reported zero
-  masked samples, zero invalid rows, and zero poisoned rows. Its Slurm state is
-  `FAILED` only because the old post-run auditor required nonzero response-level
-  usage, while all eight OpenClaw response objects reported zero usage.
-- The same run exposed two remaining harness issues. OpenClaw's native
-  compaction requests used the `reasoning` assistant field that Gym did not
-  accept, so all OpenClaw trajectories likely ended through the harness salvage
-  path. Hermes learned the real 16K limit only after a 16,385-token backend
-  rejection.
-- Gym `3baa93c02` fixes those issues. The chat schema now preserves both
-  `reasoning` and `reasoning_content`; AnyTerminal keeps policy calls on the
-  correlated token-capture URL while routing native compaction to the
-  uncorrelated model endpoint; Hermes receives the real 15,872-token context
-  and uses the uncorrelated endpoint for compression.
-- RL `68fc9a372` fixes observability lost during token-capture reassembly.
-  Scalar and numeric-histogram rollout metrics now survive the finalizer and
-  are mirrored into the resolved harness namespace. W&B should receive keys
-  such as `train/anyterminal_openclaw/total_reward/mean`,
-  `train/anyterminal_pi/turns_per_sample/mean`, and equivalent OpenCode and
-  Hermes token/success/masking/termination metrics. Full-result W&B Tables are
-  deliberately not sent through the metadata-only finalizer sidecar.
-- The Qwen, Nano, and Super recipes now set both `max_num_epochs` and
-  `max_num_steps` to `1000000`; the scheduler allocation is the practical run
-  boundary. Do not override either field to four or one. W&B is enabled for
-  entity/project `adlr/multi-harness-RL`.
-- Focused validation for the new commits passes: 9 Gym schema/streaming/runner
-  tests, 3 RL rollout/finalizer metric tests, 5 RL recipe-resolution tests, and
-  Ruff formatting/lint checks. A fresh four-harness Nano W&B run is still
-  required to prove that the new per-harness series populate with real data.
-- Acceptance remains blocked on that clean Nano rerun followed by the requested
-  Super 8-node synchronous and Super 16-node asynchronous runs. Both Super runs
-  must use
-  `/lustre/fsw/portfolios/nemotron/users/ehosseiniasl/checkpoints/super35-journey-mopd2-identity-upsampling-from-my-step30-yifuw-001_boosted_mtp`
-  and online W&B project `adlr/multi-harness-RL`.
+- The reconciled local implementation commits are Gym `f719d1066` and NeMo RL
+  `39107584` on branch `ehosseiniasl/multi-harness-training-routing`. Both
+  branches include the latest upstream `main` and are fast-forward descendants
+  of the current PR heads. At this reconciliation point they are not yet on
+  GitHub because the SSH identities available to this session are not accepted
+  by GitHub; do not treat the PR heads as current until both commits are visible.
+- Nano job `2231151`, W&B run
+  [`hsnq2vt7`](https://wandb.ai/adlr/multi-harness-RL/runs/hsnq2vt7), is the
+  clean two-node synchronous correctness proof. One real Terminal-Bench 2.1
+  `fix-git` row was fanned out to OpenCode, OpenClaw, Pi, and Hermes with two
+  siblings per harness. All eight agents returned exit code zero and non-empty
+  responses; every row had `mask_sample=false`, no poisoned rollout, no agent
+  or container timeout, and no sandbox failure. The controller closed all four
+  harness groups, emitted eight rewards, completed weight synchronization, and
+  reached optimizer step 1. The job was then stopped manually because it was a
+  correctness proof, not because training had a configured step cap.
+- The same run proves the per-harness W&B namespaces and tables are populated
+  for all four harnesses. Its overall mean reward was `0.375`; per-harness means
+  were OpenCode `0.0`, OpenClaw `0.5`, Pi `1.0`, and Hermes `0.0`. These are
+  task/model outcomes rather than routing failures. Both OpenCode siblings
+  stopped at exactly 17 committed root model turns and retained their captured
+  output.
+- The production recipe retains all deployment behavior from the scale recipe:
+  Kubernetes/OpenSandbox provisioning, an external vLLM deployment, 16 TP1
+  inference engines spread four per service node, consistent-hash session
+  routing, 196,608-token context, vLLM prefix caching, asynchronous scheduling,
+  a 2,048-rollout global batch, external-service readiness gating, checkpoint
+  support, and online W&B. Multi-harness fan-out is additive to this stack.
+- The readiness integration starts training allocation while external pools
+  load so training GPUs are not left idle, while Gym requests remain gated on
+  all required services. For a router-backed model pool the readiness probe
+  checks the fan-out proxy's control port, and rollout/control URLs are resolved
+  before the training process starts.
+- The Qwen, Nano, and Super recipes set both `max_num_epochs` and
+  `max_num_steps` to `1000000`; do not override either field with a short debug
+  limit. Scheduler cancellation after a documented proof is allowed. W&B is
+  enabled for entity/project `adlr/multi-harness-RL`.
+- Reconciliation validation includes 166 passing NeMo RL recipe, sharding,
+  readiness, and Gym utility tests; clean Ruff and shell syntax checks; the
+  previously passing Gym token-ledger, token-capture, and OpenCode suites; and
+  the live Nano proof above. A focused OpenCode hard-turn-cap test also passes
+  on the reconciled tree, although pytest can linger in async teardown on the
+  login node after reporting the pass.
+- The remaining acceptance gates are to push both reconciled commits, confirm
+  the PR checks, then run Super 8-node synchronous and Super 16-node
+  asynchronous training. Both Super runs must use
+  `/lustre/fsw/portfolios/nemotron/users/ehosseiniasl/checkpoints/super35-journey-mopd2-identity-upsampling-from-my-step30-yifuw-001_boosted_mtp`,
+  send every source prompt to all four P0 harnesses, keep online W&B enabled,
+  and leave the GRPO step budget unlimited in practice.
 
 The older evidence below is retained as failure history. When its wording says
 "newest," interpret that relative to its section; this live-status section is
