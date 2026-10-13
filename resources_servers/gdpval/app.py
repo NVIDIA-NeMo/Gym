@@ -407,6 +407,8 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
 
     # /verify writes each rollout's files to ``<persist_deliverables_dir>/task_<task_id>/repeat_<n>/``.
     persist_deliverables_dir: str
+    # False persists the deliverables without judging them, e.g. to collect a reference set; the rows are masked.
+    judge_deliverables: bool = True
     # Names a top-level sandbox provider block.
     sandbox_provider: str
     sandbox_config: GDPValSandboxConfig
@@ -934,6 +936,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
             body = body.model_copy(update={"deliverables_dir": await self._collect_deliverables(session)})
         elif body.reuse_cached_deliverable and body.deliverables_dir is None:
             body = body.model_copy(update={"deliverables_dir": self._cached_deliverables_dir(body)})
+        if not self.config.judge_deliverables:
+            return GDPValVerifyResponse(
+                **body.model_dump(), reward=0.0, mask_sample=True, verify_mode=self.config.reward_mode
+            )
         if self.config.reward_mode == "comparison":
             return await self._verify_comparison(body)
 
