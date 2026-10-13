@@ -212,6 +212,7 @@ class LongTransductionVerifyResponse(LongTransductionVerifyRequest, BaseVerifyRe
 
 
 class LongTransductionServer(SimpleResourcesServer):
+    ray_enabled = False
     config: LongTransductionConfig
 
     async def verify(self, body: LongTransductionVerifyRequest) -> LongTransductionVerifyResponse:

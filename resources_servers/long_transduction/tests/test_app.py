@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.server_utils import ServerClient
 from resources_servers.long_transduction.app import (
@@ -15,6 +16,7 @@ from resources_servers.long_transduction.app import (
     LongTransductionVerifyRequest,
     _strip_reasoning,
 )
+from resources_servers.long_transduction.task_data import TaskData
 
 
 @pytest.fixture
@@ -67,6 +69,30 @@ CASES = [
         for kind in ("csv_permutation_homogeneous", "csv_permutation_heterogeneous", "csv_kv_lookup")
     ],
 ]
+
+
+@pytest.mark.parametrize("kind,payload,gold", CASES, ids=[case[0] for case in CASES])
+def test_task_schema_preserves_all_task_variants(kind: str, payload: dict[str, object], gold: str) -> None:
+    row = {"type": kind, **payload, "expected_output": gold, "target_tokens": 2048, "custom_metadata": "kept"}
+    validated = TaskData.model_validate(row).model_dump(exclude_unset=True)
+    assert validated == row
+
+
+def test_task_schema_supports_legacy_rows() -> None:
+    row = {"expressions": [{"expr": "1+2", "answer": 3}]}
+    task = TaskData.model_validate(row)
+    assert task.type is None
+    assert task.model_dump(exclude_unset=True) == row
+
+
+@pytest.mark.parametrize("payload", [{"target_tokens": "invalid"}, {"uuid_lines": [123]}, {"expressions": [123]}])
+def test_task_schema_rejects_malformed_payloads(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        TaskData.model_validate(payload)
+
+
+def test_server_explicitly_opts_out_of_ray() -> None:
+    assert LongTransductionServer.ray_enabled is False
 
 
 @pytest.mark.parametrize("kind,payload,gold", CASES, ids=[case[0] for case in CASES])
