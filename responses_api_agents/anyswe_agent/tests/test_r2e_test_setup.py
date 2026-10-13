@@ -75,6 +75,8 @@ class TestR2ETestSetup:
 
     def test_grader_links_the_tests_before_running_them(self, tmp_path: Path) -> None:
         scripts: list[str] = []
+        uploads: list[tuple[str, bytes]] = []
+        patch_bytes = b"diff with non-UTF-8 content: \xff\r\n"
 
         class _FakeSandbox:
             def __init__(self, provider, spec) -> None:
@@ -87,7 +89,7 @@ class TestR2ETestSetup:
                 pass
 
             async def upload(self, local: Path, remote: str) -> None:
-                pass
+                uploads.append((remote, local.read_bytes()))
 
             async def exec(self, command: str, **kwargs):
                 return SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
@@ -106,8 +108,9 @@ class TestR2ETestSetup:
             container="registry.example.com/r2e:pkg__repo-1",
         )
         with patch("responses_api_agents.anyswe_agent.app.AsyncSandbox", _FakeSandbox):
-            asyncio.run(AnySweAgent.__new__(AnySweAgent)._grade_r2e_patch(params, "diff\n"))
+            asyncio.run(AnySweAgent.__new__(AnySweAgent)._grade_r2e_patch(params, patch_bytes))
 
+        assert uploads == [("/root/patch.diff", patch_bytes)]
         assert len(scripts) == 1
         script = scripts[0]
         link = script.index("ln -s /r2e_tests /testbed/r2e_tests")

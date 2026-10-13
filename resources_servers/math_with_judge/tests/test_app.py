@@ -20,7 +20,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from math_verify.errors import TimeoutException
-from pytest import approx, fixture, raises, skip
+from pytest import approx, fixture, mark, raises, skip
 
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
@@ -635,6 +635,25 @@ class TestApp:
             second_not_equal_item,
         )
 
+    @mark.parametrize("first_verdict", ["[[ A=B ]]", "[[ A = B ]]", "[[\nA=B\n]]"])
+    async def test_whitespace_equal_requires_reverse_judgement(self, config, first_verdict):
+        server_mock = MagicMock(spec=ServerClient)
+        response_mock = AsyncMock()
+        post_mock = MagicMock(read=response_mock)
+        server_mock.post = AsyncMock(return_value=post_mock)
+        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
+        first_item = self._create_response_output_message(first_verdict)
+        second_item = self._create_response_output_message("[[ A != B ]]")
+        response_mock.side_effect = [
+            json.dumps(self._create_response("first", first_item)),
+            json.dumps(self._create_response("second", second_item)),
+        ]
+        reward, evaluations = await resources_server._verify_answer_with_judge("question", "4", "5")
+        assert reward == 0.0
+        assert len(evaluations) == 2
+        assert server_mock.post.await_count == 2
+        assert evaluations[0].response.output[-1].content[-1].text == first_verdict
+
     async def _generate_and_check_judge_evaluation(
         self,
         resources_server: LibraryJudgeMathResourcesServer,
@@ -737,7 +756,7 @@ class TestApp:
         await self._generate_and_check_judge_evaluation(
             resources_server,
             "equal_first_question",
-            True,
+            False,
             "equal_first_id",
             equal_first_item,
         )
@@ -750,10 +769,77 @@ class TestApp:
         await self._generate_and_check_judge_evaluation(
             resources_server,
             "not_equal_first_question",
-            False,
+            True,
             "not_equal_first_id",
             not_equal_first_item,
         )
+
+    @mark.parametrize(
+        ("first_text", "reverse_text", "expected_reward", "expected_calls"),
+        [
+            ("[[A!=B]] Wait, equivalent. Final: [[A=B]]", "[[A=B]]", 1.0, 2),
+            ("[[A!=B]] Wait, equivalent. Final: [[A=B]]", "[[A!=B]]", 0.0, 2),
+            ("[[A=B]] Wait, different. Final: [[A!=B]]", "[[A=B]]", 0.0, 1),
+            ("[[A=B]]", "[[A=B]] Final: [[A!=B]]", 0.0, 2),
+            ("[[A=B]]", "[[A!=B]] Final: [[A=B]]", 1.0, 2),
+            ("[[A!=B]] Final: [[ A = B ]]", "[[ A = B ]]", 1.0, 2),
+            ("[[A=B]] Final: [[ A != B ]]", "[[A=B]]", 0.0, 1),
+            ("[[ A = B ]]", "[[A=B]] Final: [[ A != B ]]", 0.0, 2),
+            ("[[ A = B ]]", "[[A!=B]] Final: [[\nA = B\n]]", 1.0, 2),
+            ("[[A=B]] [[A=B]]", "[[A=B]]", 1.0, 2),
+            ("[[A!=B]] [[A!=B]]", "[[A=B]]", 0.0, 1),
+            ("No verdict", "[[A=B]]", 0.0, 1),
+            ("[[A=B]]", "No verdict", 0.0, 2),
+        ],
+    )
+    async def test_last_verdict_preserves_reverse_check(
+        self,
+        config: LibraryJudgeMathResourcesServerConfig,
+        first_text: str,
+        reverse_text: str,
+        expected_reward: float,
+        expected_calls: int,
+    ) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        response_mock = AsyncMock()
+        server_mock.post = AsyncMock(return_value=MagicMock(read=response_mock))
+        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
+        texts = [first_text, reverse_text]
+        response_mock.side_effect = [
+            json.dumps(self._create_response(str(index), self._create_response_output_message(text)))
+            for index, text in enumerate(texts)
+        ]
+        reward, evaluations = await resources_server._verify_answer_with_judge("question", "expected", "generated")
+        assert reward == expected_reward
+        assert len(evaluations) == server_mock.post.await_count == expected_calls
+        for evaluation, text in zip(evaluations, texts):
+            assert evaluation.response.output[-1].content[-1].text == text
+        if expected_calls == 2:
+            reverse_prompt = evaluations[1].responses_create_params.input[-1].content
+            assert reverse_prompt.index("generated") < reverse_prompt.index("expected")
+
+    @mark.parametrize("final_text", ["No verdict", "[[A!=B]]", "[[A=B]]"])
+    async def test_verdict_ignores_reasoning_trace(
+        self,
+        config: LibraryJudgeMathResourcesServerConfig,
+        final_text: str,
+    ) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        response = self._create_response("final", self._create_response_output_message(final_text))
+        response["output"].insert(
+            0,
+            {
+                "id": "reasoning",
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "[[A!=B]] [[A=B]]"}],
+            },
+        )
+        response_mock = AsyncMock(return_value=json.dumps(response))
+        server_mock.post = AsyncMock(return_value=MagicMock(read=response_mock))
+        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
+        equal, evaluation = await resources_server._generate_judge_evaluation("question", "first", "second")
+        assert equal is (final_text == "[[A=B]]")
+        assert evaluation.response.output[0].summary[0].text == "[[A!=B]] [[A=B]]"
 
 
 # ──────────────────────────────────────────────────────────
