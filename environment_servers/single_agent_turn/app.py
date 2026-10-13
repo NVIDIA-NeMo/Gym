@@ -38,7 +38,7 @@ from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
-from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY
+from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, AgentObservationBundle
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnFailure,
@@ -172,10 +172,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
         # Cleanup callbacks return None.
         # Capture agent-owned observations and the final Resources Server cookie jar for the episode result.
-        agent_close_response: AgentCloseSessionResponse | None = None
+        agent_observations: AgentObservationBundle | None = None
 
         async def close_agent() -> None:
-            nonlocal agent_close_response, resources_cookies
+            nonlocal agent_observations, resources_cookies
             close_http_response = await self.server_client.post(
                 server_name=self.config.agent_server.name,
                 url_path="/v1/agent_sessions/close",
@@ -191,6 +191,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             if agent_close_response.agent_session_id != agent_session_id:
                 raise ValueError("Agent close returned a different agent_session_id")
+            agent_observations = agent_close_response.agent_observations
             # Verify identifies the episode by the Resources session cookie.
             # An agent that held no Resources cookie jar returns None or an empty jar.
             # Neither may replace the cookie from the Resources seed.
@@ -251,7 +252,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 stage="agent",
                 failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
-                agent_observations=agent_close_response.agent_observations if agent_close_response else None,
+                agent_observations=agent_observations,
             ) from error
 
         # Verification needs this close response: it carries the Agent's observations and final Resources cookies.
@@ -288,7 +289,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
-                agent_observations=agent_close_response.agent_observations if agent_close_response else None,
+                agent_observations=agent_observations,
             ) from error
 
         # Keep one bounded retry in final unwind without erasing a completed verdict.
@@ -296,13 +297,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         return SingleAgentTurnResponse(
             episode_id=request.episode_id,
             task_id=request.task.task_id,
-            result=verification.model_copy(
-                update={
-                    NG_AGENT_OBSERVATIONS_KEY: agent_close_response.agent_observations
-                    if agent_close_response is not None
-                    else None
-                }
-            ),
+            result=verification.model_copy(update={NG_AGENT_OBSERVATIONS_KEY: agent_observations}),
         )
 
     def _agent_responses_path(self, request: SingleAgentTurnRequest) -> str:
