@@ -6,7 +6,7 @@ position: 5
 
 # Add or Update a Harness
 
-A *harness* is an agent runtime, such as Hermes, Pi, or Codex, that runs the model and tool loop. A Gym *adapter* is the Agent Server that wraps the harness. This page explains how to integrate a harness that runs inside a task sandbox, and how to validate a new harness or an upgrade.
+A *harness* is an agent runtime, such as Hermes, Pi, or Codex, that runs the model and tool loop. A Gym *adapter* is the Agent Server that wraps the harness. This page explains how to integrate a harness that runs inside a task sandbox, and how to validate a new harness or an upgrade. The same contracts apply to an adapter for an agent framework, such as [LangChain DeepAgents](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/langchain_deepagents_agent); that adapter loads the user's agent instead of installing a CLI.
 
 In sandbox execution, the adapter stays outside the sandbox, and the harness and its tools run inside it. If an adapter also supports host execution, keep that path working and test it separately.
 
@@ -25,6 +25,59 @@ Session support varies by adapter. Check the adapter's README for supported feat
 | Task sandbox | The isolated environment that contains the task repository. The harness and its tools run here. |
 | Borrowed or owned sandbox | A sandbox is *borrowed* when the Resources Server creates it and passes it to the agent, and *owned* when the agent creates it. Only the owner destroys a sandbox. |
 | Detached task service | A process that the task deliberately starts in its own process group or session, such as a server that the verifier queries. It can outlive the harness. |
+
+## Choose an integration path
+
+Decide how deeply Gym needs to integrate with the agent before you write an adapter. Each path below exists today, and you can start with a lighter path and move to a deeper one later.
+
+```mermaid
+flowchart LR
+    AGENT["Existing agent"] --> SCORES{"Need only<br/>evaluation scores?"}
+    SCORES -->|Yes| REMOTE["Remote Agent"]
+    SCORES -->|No| EPISODE{"Does the agent own<br/>the episode protocol?"}
+    EPISODE -->|Yes| ENV["Custom Environment Server"]
+    EPISODE -->|No| ADAPTER["Agent Server adapter<br/>(this page)"]
+```
+
+| Path | What you build | What Gym does | Limits |
+| --- | --- | --- | --- |
+| [Remote Agent](/main/agent-server/remote-agent) | An HTTP service that you host, with a `/v1/responses` endpoint that returns the agent's next step. | Drives the loop, runs the environment tools that your service requests, holds the session, and verifies the result. | Gym sees only what your service returns. Your service calls its own model, so Gym cannot capture model calls or training token IDs, and the service cannot use a task sandbox. |
+| Agent Server adapter | An adapter under `responses_api_agents/<harness>/` that runs the harness or framework. | Everything in [What Gym provides](#what-gym-provides), including model-call capture, tool grants, and task sandboxes. | You write the conversion and mapping code described in [What you write](#what-you-write). |
+| Custom Environment Server | A server that owns the episode protocol, such as [`nemo_user_sim`](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/nemo_user_sim), which routes simulated-user and assistant turns through their own Agent Servers. | Rollout collection, the `BaseEnvironmentServer` base class with concurrency and cleanup handling, and the Resources Server session and verification APIs. | Not covered on this page. See [system design](/main/infrastructure/engineering-notes/system-design) for how Environment Servers drive rollouts. |
+
+### Choose the capabilities you need
+
+An adapter can stop at any level below. Each level adds work and enables a specific Gym capability. State the supported level in the adapter's README, and reject or document anything it does not support.
+
+| Capability | What it enables | What the adapter must do | How to check it |
+| --- | --- | --- | --- |
+| Evaluation | Rewards from the benchmark's verifier. | Implement the [session contract](#agent-server-and-environment-server), return a `NeMoGymResponse`, and route model calls through a Gym Model Server so that the later levels need no rework. | A real model and task with verification. |
+| Observability | Trajectories for debugging, with tool timing and usage. | Keep the rollout prefix on model calls, and return an `AgentObservationBundle` that records missing evidence as gaps. See [Preserve inputs, outputs, and errors](#preserve-inputs-outputs-and-errors). | [Harness Conformance](/main/observability/harness-conformance) and inspection of saved rollouts. |
+| Environment tools and task sandboxes | The same agent runs against environment-provided tools and sandboxes, across benchmarks. | Map tool grants and `SandboxAccess` into the harness's configuration. See [Integration contracts](#integration-contracts). | A second pairing that works through configuration changes alone. |
+| Training | Exact token IDs and log probabilities for policy optimization. | Send every model call that can return policy-generated text through the training-capture route. See [Route every model call through the Model Server](#route-every-model-call-through-the-model-server). | `_ng_token_capture` metrics on the collected rollouts, with `mask_sample` absent or `false`. |
+
+### What you write
+
+An adapter supplies the knowledge that is specific to the harness or framework:
+
+1. **Install or load the agent.** For example, a framework adapter lists the framework in its `requirements.txt`, while Pi and Codex install a pinned runtime into the task sandbox at seed.
+2. **Configure and invoke it.** Build the harness configuration from the adapter configuration and the request, then call the SDK or start the CLI. For example, Hermes writes a `config.yaml`, and Pi and Codex start a `sandbox_runner.py` shim.
+3. **Map native inputs, results, and traces to Gym.** Convert the request into the harness's input, the harness's output into a `NeMoGymResponse`, and its model and tool activity into an `AgentObservationBundle`.
+4. **Map Gym connections into the harness's native configuration.** Set the rollout-prefixed Model Server URL as the harness's model base URL, add tool grants to its tool configuration, and run it in `SandboxAccess.workdir`. For example, Hermes adds each MCP grant to the `mcp_servers` section of its configuration.
+
+### What Gym provides
+
+| Component | What it handles |
+| --- | --- |
+| Environment Server (`single_agent_turn`) | The episode order: Resources Server seed, agent session, activation, agent close, verification, and cleanup. |
+| `SimpleResponsesAPIAgent` | The HTTP endpoints, the [agent-session contract](#agent-server-and-environment-server), and rollout URL helpers such as `base_url_for_run()` and `resolve_model_base_url()`. |
+| Model Server | Provider normalization, rollout-prefixed routing, [model-call capture](/main/model-server/model-call-capture), and [training-token capture](/main/tutorials/training-tutorials/external-agent-harnesses). |
+| `nemo_gym.sandbox` | Sandbox providers, `AsyncSandbox`, and text file transfer. |
+| `nemo_gym.agent_utils` | Supervised harness execution in a task sandbox: launch, termination, artifact capture, and release. See the `agent_utils` section below. |
+| `nemo_gym.rollout_observability` | The observation schemas. Rollout collection joins agent observations with captured model calls. |
+| Harness Conformance | Scripted probes and an evidence checker for trajectory evidence. |
+
+Gym does not provide adapter scaffolding or default conversion and usage accounting; each adapter implements them.
 
 ## Architecture and ownership
 
@@ -212,6 +265,8 @@ The current adapters support the following tool sources:
 | Hermes | Hermes toolsets, selected with `enabled_toolsets` and `disabled_toolsets`, for example `[terminal]`. | `mcp` only. Each granted MCP server becomes a Hermes toolset with the same name. Required `direct_http` grants are rejected. | Chat Completions |
 | Pi | Pi's built-in sandbox tools. `sandbox_bash_timeout_seconds` limits each bash call. | None in native sessions. Required grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
 | Codex | Codex's shell and file tools. Native sessions require `sandbox_mode: danger-full-access`, because the task sandbox supplies isolation. | None in native sessions. Required grants are rejected; keep `resources_tool_transports: []`. | Responses (streaming) |
+
+When a tool belongs to the task, prefer a Resources Server tool grant over a built-in harness tool. Different agents can then share one implementation, and the adapter works across environments without benchmark-specific changes. Use built-in harness tools for behavior that is native to the harness, such as its shell or file editor. See [Tools in Agent vs. Resources Server](/main/agent-server/integrate-existing-agents#tools-in-agent-vs-resources-server).
 
 Document the supported tool sources, the model API, and the rejected options in the adapter's README.
 
@@ -653,9 +708,33 @@ For Hermes, the adapter uploads the episode input to `input.json` and passes an 
 
 The Hermes shim creates the harness with `model_base_url` and points its auxiliary clients at the same Model Server. The adapter converts the harness output back into a `NeMoGymResponse`. This model traffic is independent of the supervisor's cleanup files.
 
-Apply instructions, sampling parameters, and limits, or reject the ones the harness does not support. After overrides, check the model requests the harness actually sends. Distinguish per-call limits from episode budgets. Preserve prompt semantics and reasoning and tool history across upgrades.
+### Route every model call through the Model Server
+
+Point every model client in the harness at the rollout-prefixed Gym Model Server URL, built with `base_url_for_run()` or `resolve_model_base_url()`. This includes auxiliary calls that the harness or framework makes on its own, such as summarization, context compaction, title generation, and subagents. Hermes, for example, points its auxiliary clients at the same Model Server as its main loop.
+
+A call sent directly to an external provider is not captured. For training, Gym does not guess at missing calls: if a call's output reaches a later prompt but its chain cannot be proven, Gym sets `mask_sample: true` on the rollout. With `token_id_capture.max_mask_fraction` set, collection stops when too many rollouts are masked.
+
+Send back the cookies that the Model Server returns on later calls of the same rollout, as `SimpleAgent` does. The vLLM Model Server keeps a rollout's calls on one backend endpoint by using the rollout ID, or the session cookie when no rollout ID is present. A call with neither starts a new session and can land on a different endpoint.
+
+For training, enable `token_id_capture` on an adapter whose responses carry no token IDs, together with the run-level `token_id_capture.enabled` setting. See [Training on External Agent Harnesses](/main/tutorials/training-tutorials/external-agent-harnesses) for the model server configuration and the capture metrics. If the harness cannot route all of its policy-generating calls through the Model Server, mark the adapter as evaluation-only in its README and leave `token_id_capture` disabled.
+
+### Map configuration and request fields explicitly
+
+Handle each configuration and request field in one of three ways: apply it, reject it with a clear error, or document that the adapter ignores it by design. Never drop a field silently. For example, Pi rejects request fields that it does not support with HTTP 422, and Codex rejects `max_output_tokens`, `temperature`, `top_p`, and reasoning controls, because it cannot enforce them for a custom Gym provider.
+
+Read only the settings that the harness actually supports. Do not forward a value from another part of the Gym configuration, such as a step limit, unless the harness has an equivalent setting with the same meaning.
+
+After overrides, check the model requests that the harness actually sends. Distinguish per-call limits from episode budgets. Preserve prompt semantics, reasoning, and tool history across upgrades.
+
+Some frameworks change their behavior based on a model or runtime profile. For example, DeepAgents reads `max_input_tokens` from the model profile to decide when to summarize, and the [DeepAgents adapter](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/langchain_deepagents_agent) sets that profile from its configuration. Expose such profiles as adapter configuration, pin them, and keep them fixed when you compare an upgrade.
+
+### Convert outputs without silent loss
 
 Return a `NeMoGymResponse` with text, reasoning, tool calls and results, usage, and status where available. Collect [rollout evidence](/main/observability/rollout-evidence#add-evidence-to-a-custom-agent): tool timing, model-call references, aggregated usage, and explicit evidence gaps.
+
+When a native item has no exact Responses API equivalent, decide whether to convert it, drop it, or keep it only as an artifact. Record anything that is lost as an `ObservationGap` with a specific code, and never drop tool calls or their results. Keep the harness's raw output and execution artifacts, including the ones available after a failure.
+
+### Keep execution health separate from reward
 
 Preserve the model's HTTP status and error bodies, so that context-limit handling and retries can use them. Keep execution health separate from reward:
 
@@ -675,6 +754,8 @@ A reward of `1` or an HTTP `200` response alone does not prove that an episode w
 ## Make retries and close safe
 
 Validate the session identity and cookies. In a single-activation session, identical retries join or replay the invocation, and conflicting requests are rejected. A disconnected client must not cancel shared work.
+
+One Agent Server process serves concurrent sessions. Keep per-session state and credentials out of process-wide state, such as `os.environ`, module globals, or a shared home directory. Pass them per invocation instead, for example through the subprocess environment or the session directory.
 
 Serialize close requests. Keep successful close responses for a documented, bounded retry window, and reject stale activations. For a borrowed sandbox, remove only adapter-owned files and disconnect; the Resources Server destroys the sandbox.
 
@@ -761,6 +842,7 @@ Record evidence conformance and sandbox lifecycle validation separately, because
 - **Real smoke test.** Run a real model on a real task with tools and verification. Confirm that the harness runs in the sandbox, that the agent closes before verification, and that the sandbox owner cleans it up. Inspect failures, traces, artifacts, and grading coverage.
 - **Composition.** Show a second compatible pairing that works through configuration changes alone. Record versions and unsupported combinations.
 - **Upgrades.** Compare the same harness before and after the upgrade with a fixed model, tasks, prompts, sampling parameters, limits, images, verifier, and concurrency. Compare scores and failures. Different harnesses do not need to score the same.
+- **Isolation.** Run concurrent sessions with different configurations and credentials, and check that no setting, credential, or file from one session reaches another.
 - **Scale.** Measure setup time, memory, process count, and close latency before you scale up. Validate [training support](/main/tutorials/training-tutorials/external-agent-harnesses) separately from inference.
 
 In the PR, include the commands, versions, evidence, limitations, tests, and pre-commit results.
