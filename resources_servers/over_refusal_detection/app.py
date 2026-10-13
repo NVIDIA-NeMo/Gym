@@ -166,8 +166,6 @@ class OverRefusalDetectionResourcesServer(SimpleResourcesServer):
     Goal: Train models to be helpful on safe prompts, reducing false refusals.
     """
 
-    ray_enabled = False
-
     config: OverRefusalDetectionConfig
 
     def setup_webserver(self) -> FastAPI:

@@ -388,6 +388,27 @@ async def test_verifier_only_episode_does_not_expose_resource_tools() -> None:
     assert client.calls[1][2]["json"]["sandbox_access"] is not None
 
 
+@pytest.mark.parametrize("close_cookies", [{}, None])
+async def test_agent_without_a_resources_cookie_jar_keeps_the_seed_cookie_for_verify(
+    close_cookies: dict[str, str] | None,
+) -> None:
+    # An agent with no direct HTTP grant never sees the Resources cookie, so it closes with no jar or an empty jar.
+    # Verify and close must still carry the seed's cookie, which is how a stateful Resources Server finds the episode.
+    environment, client = _environment_server()
+    close = {"agent_session_id": "agent-session"}
+    if close_cookies is not None:
+        close["resources_cookies"] = close_cookies
+    client.responses[3] = _Response(close)
+
+    result = await environment.run_request(_request())
+
+    assert result.result.reward == 1.0
+    verify_call, resources_close_call = client.calls[4], client.calls[5]
+    assert (verify_call[1], resources_close_call[1]) == ("/verify", "/close_session")
+    assert verify_call[2]["cookies"] == {"session": "cookie-value"}
+    assert resources_close_call[2]["cookies"] == {"session": "cookie-value"}
+
+
 @pytest.mark.parametrize("reward", [0.0, 1.0])
 @pytest.mark.parametrize("mask_sample", [False, True])
 async def test_failed_agent_response_still_reaches_verification(reward: float, mask_sample: bool) -> None:
@@ -480,6 +501,13 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
 )
 async def test_dependency_failure_closes_sessions(stage: str, error: Exception) -> None:
     environment, client = _environment_server()
+    observations = {
+        "source": "hermes",
+        "records": [{"kind": "agent_invocation", "invocation_id": "root", "status": "failed", "model_calls": []}],
+    }
+    close_body = orjson.loads(client.responses[3].body)
+    close_body["agent_observations"] = observations
+    client.responses[3] = _Response(close_body)
     responses = client.responses
     if stage == "agent":
         client.responses = [*responses[:2], error, responses[3], responses[5]]
@@ -493,6 +521,14 @@ async def test_dependency_failure_closes_sessions(stage: str, error: Exception) 
     assert result.failure.failure_reason == str(error)
     assert result.failure.terminal is isinstance(error, ValueError)
     assert result.failure.partial_response == (_agent_response() if stage == "verification" else None)
+    # The closed agent session's evidence survives the failure, including in the legacy flat reply.
+    assert result.failure.agent_observations == AgentObservationBundle.model_validate(observations)
+    legacy = SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)._legacy_result(
+        result
+    )
+    assert legacy["ng_agent_observations"] == AgentObservationBundle.model_validate(observations).model_dump(
+        mode="json"
+    )
     paths = [path for _, path, _ in client.calls]
     assert paths == [
         "/seed_session",

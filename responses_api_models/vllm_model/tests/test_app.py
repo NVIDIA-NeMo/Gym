@@ -61,6 +61,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     PermanentEndpointError,
 )
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.token_id_capture import (
     CaptureContext,
@@ -845,15 +846,31 @@ class TestApp:
 
     @mark.parametrize("propagate", [False, True])
     @mark.parametrize("responses_api", [False, True])
+    @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+    @mark.parametrize(
+        "error_content",
+        [
+            b'{"error":{"message":"maximum context length","code":400}}',
+            b'{"error":{"type":"exceed_context_size_error","message":"request too long","code":400}}',
+        ],
+        ids=["vllm", "llamacpp"],
+    )
     def test_context_overflow_propagation_flag(
-        self, monkeypatch: MonkeyPatch, propagate: bool, responses_api: bool
+        self,
+        monkeypatch: MonkeyPatch,
+        propagate: bool,
+        responses_api: bool,
+        use_completions_api: bool,
+        error_content: bytes,
     ) -> None:
         server = self._setup_server(monkeypatch, propagate_context_overflow_errors=propagate)
+        server.config.use_completions_api = use_completions_api
         request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
         error = ClientResponseError(request_info, (), status=400, message="Bad Request")
-        error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
+        error.response_content = error_content
         mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
         mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        mock_client.create_completion = AsyncMock(side_effect=error)
         server._clients = [mock_client]
 
         app = server.setup_webserver()
@@ -867,7 +884,7 @@ class TestApp:
 
         if propagate:
             assert response.status_code == 400
-            assert response.json() == {"error": {"message": "maximum context length", "code": 400}}
+            assert response.json() == json.loads(error_content)
         else:
             assert response.status_code == 200
             if responses_api:
@@ -875,13 +892,17 @@ class TestApp:
             else:
                 assert '"finish_reason": "length"' in response.text
 
+        used_method = mock_client.create_completion if use_completions_api else mock_client.create_chat_completion
+        unused_method = mock_client.create_chat_completion if use_completions_api else mock_client.create_completion
+        used_method.assert_awaited_once()
+        unused_method.assert_not_awaited()
+
     @mark.parametrize("use_completions_api", [False, True])
     def test_an_engine_error_the_server_does_not_handle_is_logged_with_its_body(
         self, monkeypatch: MonkeyPatch, caplog, use_completions_api: bool
     ) -> None:
-        # Any engine answer but the handled context-length 400 reaches the caller as a plain
-        # server error that carries only the status; the log keeps the status, the request path,
-        # the rollout id, and the engine's body.
+        # Unhandled engine errors preserve the upstream status/body for SDK classifiers.
+        # The warning also retains the request path and rollout id for diagnosis.
         server = self._setup_server(monkeypatch, use_completions_api=use_completions_api)
         request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
         error = ClientResponseError(request_info, (), status=422, message="Unprocessable Entity")
@@ -902,7 +923,8 @@ class TestApp:
                 json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
             )
 
-        assert response.status_code == 500
+        assert response.status_code == 422
+        assert response.content == error.response_content
         logged = [
             record.getMessage()
             for record in caplog.records
@@ -1132,6 +1154,34 @@ class TestApp:
             client_indices.append(next(i for i, client in enumerate(worker._clients) if client is selected_client))
 
         assert client_indices[0] == client_indices[1]
+
+    def test_calls_of_one_rollout_share_an_endpoint_whatever_their_session(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(4)]
+
+        with rollout_context("task-7-0"):
+            picked = {server._resolve_client(self._request_for_session(f"fresh-{i}")) for i in range(32)}
+
+        assert len(picked) == 1
+
+    def test_rollouts_spread_across_endpoints(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(2)]
+
+        picked = []
+        for task in range(64):
+            with rollout_context(f"task-{task}-0"):
+                picked.append(server._resolve_client(self._request_for_session("one-shared-session")))
+
+        assert set(picked) == set(server._clients)
+
+    def test_without_a_rollout_the_session_still_picks_the_endpoint(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(4)]
+
+        picked = server._resolve_client(self._request_for_session("session-a"))
+
+        assert picked is server._clients[self._hashed_client_idx("session-a", 4)]
 
     @staticmethod
     def _request_for_session(session_id: str) -> MagicMock:
@@ -4595,6 +4645,120 @@ def _make_completions_backend_model(
     )
 
 
+@mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+@mark.parametrize(
+    ("status", "error_content", "expect_length"),
+    [
+        (400, '{"message": "This model\'s maximum context length is 262144 tokens."}', True),
+        (400, '{"message": "max_tokens must be at least 1, got -6677."}', True),
+        (
+            400,
+            json.dumps({"error": {"type": "exceed_context_size_error", "message": "request too long"}}),
+            True,
+        ),
+        (
+            400,
+            "request (268821 tokens) exceeds the available context size (262144 tokens), try increasing it",
+            True,
+        ),
+        (400, "input (268821 tokens) is larger than the max context size (262144 tokens)", True),
+        (
+            500,
+            json.dumps(
+                {
+                    "error": {
+                        "type": "exceed_context_size_error",
+                        "message": "request (268821 tokens) exceeds the available context size (262144 tokens)",
+                    }
+                }
+            ),
+            False,
+        ),
+        (500, '{"message": "context length allocation failed"}', False),
+        (500, "unified KV cache is full: context size exceeded", False),
+        (500, "speculative batch index is outside the sub-batch", False),
+        (401, '{"error": {"message": "Invalid API key"}}', False),
+        (400, '{"error": {"message": "Unknown model"}}', False),
+        (400, "Invalid context size configuration", False),
+        (400, "unified KV cache is full: context size exceeded", False),
+    ],
+    ids=[
+        "vllm-context-length",
+        "vllm-max-tokens",
+        "llamacpp-error-type",
+        "llamacpp-request-text",
+        "llamacpp-input-text",
+        "http500-overflow",
+        "http500-context-length",
+        "http500-unified-kv",
+        "http500-speculative-batch",
+        "http401-auth",
+        "http400-unrelated",
+        "http400-context-config",
+        "http400-unified-kv",
+    ],
+)
+async def test_backend_context_overflow_handling(
+    monkeypatch: MonkeyPatch,
+    propagate: bool,
+    use_completions_api: bool,
+    status: int,
+    error_content: str,
+    expect_length: bool,
+) -> None:
+    monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value={}))
+    model = _make_completions_backend_model() if use_completions_api else TestApp()._setup_server(monkeypatch)
+    model.config.propagate_context_overflow_errors = propagate
+    error = ClientResponseError(MagicMock(), (), status=status, message="backend request failed")
+    error.response_content = error_content.encode()
+    client = MagicMock(spec=NeMoGymAsyncOpenAI)
+    client.create_chat_completion = AsyncMock(side_effect=error)
+    client.create_completion = AsyncMock(side_effect=error)
+    model._clients = [client]
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "context-overflow-test"}
+    request.headers = {}
+    body = NeMoGymChatCompletionCreateParamsNonStreaming(
+        messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hello")],
+    )
+
+    if expect_length and not propagate:
+        result = await model.chat_completions(request, body)
+        assert result.object == "chat.completion"
+        assert result.model == model.config.model
+        assert len(result.choices) == 1
+        assert result.choices[0].finish_reason == "length"
+        assert result.choices[0].message.role == "assistant"
+        assert result.choices[0].message.content is None
+        assert result.choices[0].message.tool_calls is None
+    else:
+        with raises(ClientResponseError) as exc_info:
+            await model.chat_completions(request, body)
+        assert exc_info.value is error
+        assert exc_info.value.status == status
+        assert exc_info.value.response_content == error_content.encode()
+
+    execution = request.state.nemo_gym_model_execution
+    assert execution["upstream_attempted"] is True
+    assert execution["upstream_status_code"] == status
+    if expect_length:
+        assert execution["error_category"] == "context_length_exceeded"
+    else:
+        assert "error_category" not in execution
+    if expect_length and not propagate:
+        assert execution["response_source"] == "local"
+        assert execution["local_response_reason"] == "context_length_exceeded"
+    else:
+        assert execution["response_source"] == "upstream"
+        assert execution["local_response_reason"] is None
+
+    used_method = client.create_completion if use_completions_api else client.create_chat_completion
+    unused_method = client.create_chat_completion if use_completions_api else client.create_completion
+    used_method.assert_awaited_once()
+    unused_method.assert_not_awaited()
+
+
 class TestCompletionsBackendRawRender:
     def test_single_user_message_string_content(self) -> None:
         model = _make_completions_backend_model()
@@ -5975,8 +6139,29 @@ class TestEndpointFile:
         server._endpoint_last_check_at = None  # window over: the next call re-checks
         server._maybe_rebind_endpoint()
         assert server.config.base_url == ["http://newer-host:8712/v1"]
-        # Static base_url clients keep today's retry-forever behavior.
+        # Static base_url clients without route-around keep unbounded connection retries.
         assert self._make_server(tmp_path, endpoint_file=None)._clients[0].max_connection_retries is None
+
+    def test_route_around_bounds_connection_retries_over_a_static_url_list(self, tmp_path) -> None:
+        """``route_around_failing_endpoints`` needs bounded clients even without an endpoint file.
+
+        ``_call_endpoint`` counts a connection error against an endpoint only once the client
+        raises it, and a client built with ``max_connection_retries=None`` retries a refused
+        connection forever, so an unbounded client would never let a dead endpoint reach the
+        failure threshold that moves its sessions elsewhere.
+        """
+        static_urls = ["http://engine-0:8712/v1", "http://engine-1:8712/v1"]
+        server = self._make_server(
+            tmp_path,
+            endpoint_file=None,
+            base_url=static_urls,
+            route_around_failing_endpoints=True,
+            endpoint_connection_retries=3,
+        )
+        assert [client.max_connection_retries for client in server._clients] == [3, 3]
+        # Without route-around or an endpoint file, the same list keeps unbounded retries.
+        server = self._make_server(tmp_path, endpoint_file=None, base_url=static_urls)
+        assert [client.max_connection_retries for client in server._clients] == [None, None]
 
     def test_unpublished_endpoint_grace_lifecycle(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         endpoint_file = tmp_path / "endpoint.txt"

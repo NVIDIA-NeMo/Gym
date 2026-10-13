@@ -55,8 +55,7 @@ gym eval run --no-serve \
     --output /tmp/ifbench_rollouts.jsonl \
     --num-repeats 1 \
     --max-output-tokens 4096 \
-    --temperature 0.0 \
-    --prompt-config benchmarks/ifbench/prompts/default.yaml
+    --temperature 0.0
 ```
 
 ## Licensing

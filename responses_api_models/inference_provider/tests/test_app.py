@@ -102,6 +102,10 @@ class TestSanity:
         assert server.config.uses_reasoning_parser is True
         assert server.config.extra_body == {"frequency_penalty": 0.5}
 
+    async def test_correlate_via_user_field_defaults_to_false(self) -> None:
+        server = _make_server()
+        assert server.config.correlate_via_user_field is False
+
 
 class TestInferenceProvider:
     async def test_basic_chat_completion(self, monkeypatch: MonkeyPatch) -> None:
@@ -215,6 +219,94 @@ class TestInferenceProvider:
             },
         )
         assert called_kwargs["temperature"] == 0.9
+
+    async def test_correlate_via_user_field_disabled_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        called_kwargs = {}
+
+        async def mock_create_chat(**kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return _mock_chat_response()
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+
+        client.post(
+            "/ng-rollout/task0-rollout1/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "test"}]},
+        )
+        assert "user" not in called_kwargs
+
+    async def test_correlate_via_user_field_sets_user_from_rollout_id(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server(correlate_via_user_field=True)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        called_kwargs = {}
+
+        async def mock_create_chat(**kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return _mock_chat_response()
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+
+        response = client.post(
+            "/ng-rollout/task0-rollout1/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "test"}]},
+        )
+        assert response.status_code == 200
+        assert called_kwargs["user"] == "task0-rollout1"
+
+    async def test_correlate_via_user_field_without_rollout_prefix_omits_user(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server(correlate_via_user_field=True)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        called_kwargs = {}
+
+        async def mock_create_chat(**kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return _mock_chat_response()
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+
+        client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "test"}]},
+        )
+        assert "user" not in called_kwargs
+
+    async def test_correlate_via_user_field_does_not_override_explicit_user(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server(correlate_via_user_field=True)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        called_kwargs = {}
+
+        async def mock_create_chat(**kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return _mock_chat_response()
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+
+        client.post(
+            "/ng-rollout/task0-rollout1/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "test"}],
+                "user": "caller-supplied-user",
+            },
+        )
+        assert called_kwargs["user"] == "caller-supplied-user"
 
     async def test_reasoning_parser_strips_think_tags_from_input(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server(uses_reasoning_parser=True)
