@@ -18,6 +18,7 @@ from scripts.harness_conformance.scenarios import SCENARIOS
 
 from nemo_gym.base_responses_api_model import build_model_call_record
 from nemo_gym.harness_capabilities.cli import json_rows
+from nemo_gym.server_utils import ServerClient
 from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
 
 
@@ -58,6 +59,28 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, tmp_path):
 
         module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
         getattr(module, HARNESSES[harness] + "Config").model_validate(agent)
+
+
+@pytest.mark.parametrize("scenario_name", ["tool_success", "retry_429"])
+def test_probe_retains_configured_assistant_message_identity(tmp_path, scenario_name):
+    from omegaconf import OmegaConf
+
+    config = _config("opencode", tmp_path, [10001, 10002, 10003, 10004], 12)
+    server_client = ServerClient(head_server_config=config["head_server"], global_config_dict=OmegaConf.create(config))
+    header = server_client.assistant_message_header("policy_model")
+    assert header is not None
+    probe = Probe(SCENARIO[scenario_name], tmp_path)
+    with TestClient(probe.model_app(assistant_message_header=header)) as client:
+        response = client.post(
+            "/ng-rollout/0-0/v1/chat/completions",
+            json={"model": "conformance-model", "messages": [], "tools": [TOOL]},
+            headers={"x-session-id": "session", header.decode(): "assistant-message"},
+        )
+    assert response.status_code == (429 if scenario_name == "retry_429" else 200)
+    [(_, capture)] = list(json_rows(tmp_path / "capture/0-0.capture.jsonl"))
+    call = build_model_call_record(capture, call_index=0)
+    assert call.client_session_id == "session"
+    assert call.client_assistant_message_id == "assistant-message"
 
 
 @pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure", "usage_omitted", "retry_429", "retry_500"])
@@ -182,6 +205,7 @@ def test_verifier_records_actual_final_answer(tmp_path, name, reward):
 def retained_episode(tmp_path):
     # Contract fixture only: used to prove a green artifact cannot hide a missing live probe.
     record, witness = evidence_and_witness()
+    record["response"]["usage"] = {"input_tokens": 20, "output_tokens": 10, "total_tokens": 30}
     calls = [
         {**c, "status_code": c["response_metadata"]["status_code"]} for c in record["ng_trajectory"]["model_calls"]
     ]
@@ -190,6 +214,47 @@ def retained_episode(tmp_path):
     (tmp_path / "capture").mkdir()
     (tmp_path / "capture/0-0.capture.jsonl").write_text("".join(json.dumps(c) + "\n" for c in calls))
     return tmp_path, witness
+
+
+@pytest.mark.parametrize(
+    "mutation,failed_check",
+    [
+        (None, None),
+        ("skipped_verifier", "verifier.outcome"),
+        ("wrong_reward", "verifier.saved_reward"),
+        ("masked", "verifier.saved_outcome"),
+        ("incomplete", "verifier.saved_outcome"),
+        ("missing_completion", "evaluation.evaluation_completed"),
+    ],
+)
+def test_terminal_model_error_still_requires_completed_unmasked_verification(retained_episode, mutation, failed_check):
+    directory, witness = retained_episode
+    bundle = directory / "rollouts.jsonl"
+    record = json.loads(bundle.read_text())
+    # A rejected policy call produces no final answer; grading must still happen.
+    witness["verifications"][0]["answer_seen"] = False
+    if mutation == "skipped_verifier":
+        witness["verifications"] = []
+    elif mutation == "wrong_reward":
+        record["reward"] = 1.0
+    elif mutation == "masked":
+        record.update(mask_sample=True, failure_kind="agent_request_failed", failure_reason="HTTP 400")
+    elif mutation == "incomplete":
+        record.update(evaluation_completed=False, failure_kind="verifier_error", failure_reason="not graded")
+    elif mutation == "missing_completion":
+        del record["evaluation_completed"]
+    bundle.write_text(json.dumps(record) + "\n")
+    (directory / "witness.json").write_text(json.dumps(witness))
+    result = inspect_episode(SCENARIO["model_error"], directory, {"returncode": 0, "timed_out": False})
+    checks = {c["id"]: c for c in result["checks"]}
+    assert checks["verifier.answer"]["status"] == "not_applicable"
+    if failed_check:
+        assert checks[failed_check]["status"] == "fail"
+        assert result["verdict"] == "not_fulfilled"
+    else:
+        assert result["evidence"]["TE-6"]["artifact_verdict"] == "fulfilled"
+        for check_id in ("verifier.outcome", "verifier.saved_reward", "verifier.saved_outcome"):
+            assert checks[check_id]["status"] == "pass"
 
 
 def test_behavior_failure_does_not_erase_artifact_success(retained_episode):
@@ -211,6 +276,20 @@ def test_execution_status_does_not_erase_retained_results(retained_episode):
     assert result["verdict"] == "fulfilled" and result["behavioral_status"] == "pass"
     assert result["execution"] == {"returncode": 1, "timed_out": True}
     assert not any(c["id"].startswith("execution") for c in result["checks"])
+
+
+def test_health_failure_blocks_p0_without_erasing_artifact_or_behavior_passes(retained_episode):
+    directory, _ = retained_episode
+    bundle = directory / "rollouts.jsonl"
+    record = json.loads(bundle.read_text())
+    record["response"]["usage"]["input_tokens"] = 999
+    bundle.write_text(json.dumps(record) + "\n")
+    result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
+    assert result["verdict"] == "not_fulfilled" and result["behavioral_status"] == "pass"
+    assert all(row["verdict"] == "fulfilled" for row in result["evidence"].values())
+    failed = [c["id"] for c in result["checks"] if c["status"] == "fail"]
+    assert failed == ["health.rollout_token_count_mismatch"]
+    assert (directory / result["health_report"]).is_file()
 
 
 @pytest.mark.parametrize(
@@ -445,7 +524,7 @@ def test_missing_rollout_fails_required_checks_and_preserves_exclusions(tmp_path
     assert checks["calls.outcome"]["status"] == "fail"
     assert checks["calls.outcome"]["reasons"][0].startswith("required input is unavailable")
     assert checks["tool_calls.present"]["status"] == "not_applicable"
-    assert checks["evaluation.reward"]["status"] == "not_applicable"
+    assert checks["evaluation.reward"]["status"] == "fail"
     assert checks["turns.present"]["status"] == "not_applicable"
     assert checks["steps.attempt_accounting"]["status"] == "not_applicable"
     assert result["evidence"]["TE-1"]["verdict"] == "not_fulfilled"

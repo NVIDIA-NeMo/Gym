@@ -35,6 +35,7 @@ import os
 import re
 import time
 from abc import abstractmethod
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, ClassVar, Iterable, Literal, Mapping, NotRequired, Optional, TypedDict
@@ -42,13 +43,32 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
+from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
+from nemo_gym._checkpoint.control import install_control_routes, install_participant
+from nemo_gym._checkpoint.model import (
+    CheckpointableLedger,
+    PolicyAdmissionMiddleware,
+    PolicyModelParticipant,
+    attach_capture_context,
+    generation_cut_requester,
+    ledger_removal_refusal,
+    reject_ungated_ledger_writers,
+    worker_control_root,
+)
+from nemo_gym._checkpoint.model_workers import (
+    COORDINATOR_SOCKET_ENV,
+    PolicyCoordinator,
+    PolicyWorkerLink,
+    coordinator_socket_path,
+)
+from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
+from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -66,6 +86,7 @@ from nemo_gym.responses_streaming import (
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
 from nemo_gym.rollout_observability import (
+    NG_AGENT_OBSERVATIONS_KEY,
     AgentObservationBundle,
     ObservationGap,
     TrajectoryRecord,
@@ -76,6 +97,7 @@ from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
     SimpleServer,
+    is_nemo_gym_fastapi_worker,
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -104,7 +126,7 @@ from nemo_gym.token_id_capture.store import make_token_store
 logger = logging.getLogger(__name__)
 
 _CHAT_KEEPALIVE_SECONDS = 15.0
-_SSE_KEEPALIVE = b": keep-alive\n\n"
+_SSE_KEEPALIVE = SSE_KEEPALIVE
 
 
 # Stateless; shared by every model server's default /v1/messages handler.
@@ -229,6 +251,13 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "so a backend with free-form tool support keeps them."
         ),
     )
+    # Only the policy instance drains during a partial-rollout checkpoint.
+    # Judge and simulator instances keep serving so accepted tool and verifier calls can finish.
+    checkpoint_policy: bool = False
+    # Ask inference workers to stage the prefix of each in-flight call at a checkpoint,
+    # so a restored call continues it instead of regenerating.
+    # Requires external token staging on workers that implement the generation-cut endpoint.
+    checkpoint_generation_cuts: bool = False
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -239,6 +268,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     # Subclasses can declare successful metadata or health routes here.
     # Unknown successful routes fail closed during training-token capture.
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
+    # Main process of a multi-worker policy server under checkpointing: coordinates the workers.
+    _policy_coordinator: Optional[PolicyCoordinator] = PrivateAttr(default=None)
 
     async def _finalize_served_response(self, response: Any) -> None:
         """Finalize capture after conversion to the response returned to the client."""
@@ -256,12 +287,28 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:
+        """Allow adapters to retain an explicit upstream-status compatibility policy."""
+        return True
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
+        @app.exception_handler(ClientResponseError)
+        async def upstream_error(request: Request, error: ClientResponseError) -> Response:
+            if not self._should_propagate_upstream_http_error(error):
+                raise error
+            # Preserve the provider's structured error while the buffered response
+            # is still uncommitted, including context limits and rate limits.
+            return Response(
+                content=getattr(error, "response_content", error.message),
+                status_code=error.status,
+                media_type=(error.headers or {}).get("Content-Type", "application/json"),
+            )
+
         self.setup_session_middleware(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        install_model_call_capture(
+        capture_ledger = install_model_call_capture(
             app,
             capture_config,
             model_server_name=self.config.name,
@@ -293,7 +340,89 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.messages", self.messages, model_attributes)
         )
 
+        self.setup_policy_checkpoint(app, capture_ledger)
         return app
+
+    def setup_policy_checkpoint(self, app: FastAPI, capture_ledger: CaptureLedger | None) -> None:
+        global_config_dict = getattr(self.server_client, "global_config_dict", None)
+        settings = checkpoint_settings(global_config_dict)
+        if settings is not None and capture_ledger is not None:
+            # Every model server sharing the run's capture ledger checks, so one outside the gate refuses to start.
+            reject_ungated_ledger_writers(global_config_dict)
+        if settings is None or not self.config.checkpoint_policy:
+            return
+        capture_settings = token_id_capture_config(global_config_dict)
+        if capture_settings is not None and capture_settings.enabled and capture_ledger is None:
+            raise ValueError(
+                "checkpoint_policy with token_id_capture requires external_staging: only the token-free "
+                "capture ledger is checkpointed, and the training framework owns the staged tokens"
+            )
+        if capture_ledger is not None and not isinstance(capture_ledger, CheckpointableLedger):
+            raise ValueError(f"checkpoint_policy requires a checkpointable capture ledger, got {type(capture_ledger)}")
+        cut_requester = None
+        if self.config.checkpoint_generation_cuts:
+            if capture_ledger is None:
+                raise ValueError("checkpoint_generation_cuts requires token_id_capture with external_staging")
+            cut_requester = generation_cut_requester(
+                capture_settings.token_id_capture.resolve_control_auth_token(),
+                control_root=self.generation_cut_control_root,
+            )
+        num_workers = self.config.num_workers or 1
+        if num_workers == 1:
+            participant = PolicyModelParticipant(
+                capture_ledger, server_name=self.config.name, cut_requester=cut_requester
+            )
+            install_participant(
+                app,
+                participant,
+                auth_token=settings.control_auth_token,
+                lease_grace_seconds=settings.lease_grace_seconds,
+                instance_name=self.config.name,
+            )
+            gate = participant.gate
+        elif not is_nemo_gym_fastapi_worker():
+            # The main process of a multi-worker server serves no requests.
+            # It coordinates the workers uvicorn is about to spawn;
+            # they inherit the socket path through the environment.
+            socket_path = coordinator_socket_path()
+            self._policy_coordinator = PolicyCoordinator(
+                capture_ledger,
+                expected_workers=num_workers,
+                instance_name=self.config.name,
+                lease_grace_seconds=settings.lease_grace_seconds,
+                socket_path=socket_path,
+            )
+            self._policy_coordinator.start_in_background()
+            os.environ[COORDINATOR_SOCKET_ENV] = socket_path
+            return
+        else:
+            link = PolicyWorkerLink(
+                socket_path=os.environ[COORDINATOR_SOCKET_ENV],
+                server_name=self.config.name,
+                cut_requester=cut_requester,
+                ledger=capture_ledger,
+            )
+            install_control_routes(app, link.dispatch, auth_token=settings.control_auth_token)
+            original_lifespan = app.router.lifespan_context
+
+            @asynccontextmanager
+            async def lifespan_with_coordinator(application: FastAPI) -> AsyncIterator[Any]:
+                await link.connect()
+                try:
+                    async with original_lifespan(application) as state:
+                        yield state
+                finally:
+                    await link.disconnect()
+
+            app.router.lifespan_context = lifespan_with_coordinator
+            gate = link.gate
+        # Outermost of this app's middleware: a refused call must not register capture intent.
+        app.add_middleware(PolicyAdmissionMiddleware, gate=gate)
+        app.state.nemo_gym_policy_gate = gate
+
+    def generation_cut_control_root(self, base_url: str) -> str:
+        """The URL root where the inference worker serving ``base_url`` takes generation cuts."""
+        return worker_control_root(base_url)
 
     @abstractmethod
     async def chat_completions(
@@ -315,10 +444,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         always do), the request is first sanitized from the streaming wire dialect (extra
         bookkeeping fields, ``namespace`` tool specs — see ``nemo_gym.responses_streaming``),
         delegated to the same ``responses()``, and the complete response is re-emitted as a
-        synthesized Responses SSE event stream. A ``responses()`` failure on this path is turned
-        into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
-        and an ``HTTPException`` raised by ``responses()`` still fail eagerly with their status, before
-        the stream is committed).
+        synthesized Responses SSE event stream. Upstream HTTP errors and ``HTTPException``
+        retain their status before the stream starts. Other ``responses()`` failures become terminal
+        ``response.failed`` events; bad-request validation still fails eagerly.
         """
         if not body.get("stream"):
             params = _validate_responses_params(body)
@@ -350,13 +478,13 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             )
             response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
             return await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
-        except HTTPException:
-            # A status the server chose to return, such as a propagated provider error, is raised
-            # before the stream is committed, so the client receives it like a validation error.
+        except (ClientResponseError, HTTPException):
+            # Generation is buffered: no headers or SSE bytes have been sent yet.
+            # Let the shared HTTP handler retain the upstream error code and body.
             raise
         except Exception as exc:
-            # The streaming contract is already the response's shape, so a backend failure must be a
-            # terminal response.failed event, not an HTTP 500 the client would see as a broken stream.
+            # Keep the existing terminal-SSE fallback for failures without an
+            # upstream HTTP response to preserve.
             logger.exception("responses() failed while serving a streaming /v1/responses request")
             return StreamingResponse(
                 synthesize_responses_failure_sse(str(exc)),
@@ -427,8 +555,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 except Exception as exc:
                     logger.exception("chat_completions() failed after streaming headers were sent")
                     status = getattr(exc, "status_code", None) or getattr(exc, "status", None) or 500
+                    detail = exc.detail if isinstance(exc, HTTPException) else "Model request failed"
+                    if isinstance(exc, ClientResponseError):
+                        # Headers are committed; apply the HTTP propagation policy to the SSE error instead.
+                        if self._should_propagate_upstream_http_error(exc):
+                            detail = getattr(exc, "response_content", None) or exc.message
+                            if isinstance(detail, bytes):
+                                detail = detail.decode(errors="replace")
+                        else:
+                            status = 500
                     error = {
-                        "message": f"HTTP {status}: {exc.detail if isinstance(exc, HTTPException) else 'Model request failed'}",
+                        "message": f"HTTP {status}: {detail}",
                         "type": "server_error" if status >= 500 else "invalid_request_error",
                         "code": status,
                     }
@@ -1410,6 +1547,9 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         or not context.external_staging
         or context.capture_admission is None
         or context.committed
+        # A checkpoint gate owns a deferred row: it publishes it when the response starts,
+        # and a call whose response never starts made no answer to record, so it is not poisoned.
+        or context.deferred_commit is not None
         or context.lineage_store is None
     ):
         return
@@ -1607,6 +1747,7 @@ class _CaptureMiddleware:
                 admitted_at=time.time(),
             )
             sink_token = set_token_sink(capture_context)
+            attach_capture_context(capture_context)
 
         # Training-only capture has no evaluation record.
         # Persist capture failure before forwarding a terminal event or finishing a JSON response.
@@ -1811,8 +1952,8 @@ def install_model_call_capture(
     global_config_dict: Any = None,
     num_workers: int | None = None,
     non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
-) -> None:
-    """Install model-call capture middleware.
+) -> CaptureLedger | None:
+    """Install model-call capture middleware and return the capture ledger when staging is external.
 
     Always strip ``/ng-rollout/<id>/...`` before routing.
     Evaluation capture records requests and responses for that path.
@@ -1858,13 +1999,14 @@ def install_model_call_capture(
         if not isinstance(lineage_store, CaptureLedger):
             raise ValueError(
                 "token_id_capture.external_staging requires the lineage store to implement "
-                "the CaptureLedger protocol (record, record_failure, manifest, has_rows)"
+                "the CaptureLedger protocol (record, record_failure, manifest, has_rows, retire, delete)"
             )
         capture_ledger: CaptureLedger = lineage_store
         install_rollout_control_routes(
             app,
             capture_ledger,
             auth_token=capture_settings.token_id_capture.resolve_control_auth_token(),
+            refuse_removal=lambda: ledger_removal_refusal(app),
         )
 
     owned_endpoints = [
@@ -1902,6 +2044,7 @@ def install_model_call_capture(
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,
     )
+    return capture_ledger if external_staging else None
 
 
 # --- Run-level capture helpers (rollout-collection side) ---
@@ -1987,7 +2130,7 @@ def merge_model_call_capture_into_record(
             logger.warning("Could not read model-call capture for rollout %s.", rollout_id, exc_info=True)
             calls = []
             gaps.append(ObservationGap(code="model_call_capture_unreadable"))
-    observations = record.get("ng_agent_observations")
+    observations = record.get(NG_AGENT_OBSERVATIONS_KEY)
     if observations is not None:
         try:
             bundle = AgentObservationBundle.model_validate(observations)
@@ -2023,7 +2166,7 @@ def merge_model_call_capture_into_record(
                         "Could not associate assistant message calls for rollout %s.", rollout_id, exc_info=True
                     )
                     bundle.gaps.append(ObservationGap(code="assistant_message_call_join_failed"))
-            record["ng_agent_observations"] = bundle.model_dump(mode="json")
+            record[NG_AGENT_OBSERVATIONS_KEY] = bundle.model_dump(mode="json")
         except Exception:
             logger.warning("Could not join agent observations for rollout %s.", rollout_id, exc_info=True)
             gaps.append(ObservationGap(code="agent_observation_join_failed"))
