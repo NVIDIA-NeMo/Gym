@@ -32,13 +32,17 @@ set -euo pipefail
 
 GYM_ROOT="${GYM_ROOT:-$PWD}"
 OUT="${1:-$PWD/gdpval.sif}"
+case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
 DEF="${GDPVAL_DEF:-$GYM_ROOT/responses_api_agents/stirrup_agent/containers/gdpval.def}"
 
 command -v apptainer >/dev/null || { echo "apptainer not installed (https://apptainer.org/docs/admin/main/installation.html)" >&2; exit 1; }
 [ -r "$DEF" ] || { echo "gdpval.def not readable at $DEF — set GYM_ROOT to your Gym checkout (or GDPVAL_DEF to the .def)" >&2; exit 1; }
 
 echo "Building $OUT from $DEF  (multi-GB; several minutes)…"
-apptainer build --fakeroot "$OUT" "$DEF"
+# gdpval.def stages its vendored manifests with relative %files paths, which
+# apptainer resolves against the build's working directory: build from the
+# definition's own directory.
+(cd "$(dirname "$DEF")" && apptainer build --fakeroot "$OUT" "$(basename "$DEF")")
 echo
 echo "Built: $OUT"
 echo "Next:  export GDPVAL_CONTAINER_PATH=$OUT"

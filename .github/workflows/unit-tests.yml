@@ -90,7 +90,7 @@ jobs:
         run: |
           ./scripts/ci/core_unit_tests.sh
           source ./scripts/ci/setup_dev.sh
-          uv sync --extra dev --extra sandbox --extra openshell
+          uv sync --extra dev --extra sandbox --extra openshell --extra mlflow --extra wandb
           source .venv/bin/activate
           pytest --cov=. --cov-append --cov-report=term-missing \
             --cov-fail-under="$(python3 scripts/ci/cov_fail_under.py)" --durations=10 -m sandbox

@@ -56,17 +56,25 @@ gym env start --resources-server tavily_search/tavily_search_langchain_deepagent
     --model-type inference_provider/openrouter
 ```
 
-To attach this agent to a different resources server, add the generic
-[`configs/langchain_deepagents_agent.yaml`](configs/langchain_deepagents_agent.yaml) alongside your
-resources server's config and override its `resources_server.name` (`???` by default):
+To use this agent with an existing resources-server config, select the generic
+[`configs/langchain_deepagents_agent.yaml`](configs/langchain_deepagents_agent.yaml) via `--agent-type`.
+For example:
 
 ```bash
-gym env start --resources-server <your_server> --model-type inference_provider/openrouter \
-    --config responses_api_agents/langchain_deepagents_agent/configs/langchain_deepagents_agent.yaml \
-    +langchain_deepagents_agent.responses_api_agents.langchain_deepagents_agent.resources_server.name=<your_server>_resources_server
+gym env start --resources-server reasoning_gym \
+    --model-type inference_provider/openrouter \
+    --agent-type langchain_deepagents_agent
 ```
 
+Replace `reasoning_gym` with your resources-server config. Gym replaces its bundled agent with DeepAgents
+and updates the existing environment server's agent reference. Leave `resources_server.name` in the
+generic agent config unset (`???`): overriding it disables this automatic composition and can leave an
+extra agent without an environment server, causing configuration validation to fail.
+
 ### Run the agent
+
+For the prebundled `reasoning_gym` combo above, use the command below. If you launched with the generic
+`--agent-type` example instead, use `--agent reasoning_gym_langchain_deepagents_agent`.
 
 ```bash
 gym eval run --no-serve --agent reasoning_gym_langchain_deepagents_agent_model_server \

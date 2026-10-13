@@ -29,3 +29,11 @@ newton_bench_simple_agent:
         type: example
         jsonl_fpath: resources_servers/newton_bench/data/example.jsonl
         license: Apache 2.0
+
+newton_bench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: newton_bench_simple_agent

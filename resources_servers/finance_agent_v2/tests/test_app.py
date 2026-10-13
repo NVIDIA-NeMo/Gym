@@ -1200,6 +1200,14 @@ class TestAggregateMetrics:
         assert metrics["mean/rubric_partial_credit"] == 0.5
         assert metrics["mean/rubric_all_pass"] == 0.5
 
+    def test_repeat_metrics_include_legacy_give_up_as_zero(self) -> None:
+        give_up = {"reward": 0.0, "rubric_judgements": None, "judge_error": None}
+        metrics = _make_server().compute_repeat_metrics([[self._rollout()], [give_up]])
+
+        assert metrics["mean/rubric_fraction"] == 0.5
+        assert metrics["mean/rubric_partial_credit"] == 0.5
+        assert "rubric/rollouts" not in metrics
+
     def test_judge_errors_stay_out_of_the_means_that_give_ups_join(self) -> None:
         """A give-up is a model result and scores zero; a judge failure is not, and
         must not be averaged in as if the model had answered badly."""

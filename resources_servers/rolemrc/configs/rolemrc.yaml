@@ -35,3 +35,11 @@ rolemrc_simple_agent:
           repo_id: Junrulu/RoleMRC
           artifact_fpath: roleMRC_test.jsonl
         license: MIT
+
+rolemrc_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: rolemrc_simple_agent

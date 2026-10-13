@@ -19,3 +19,11 @@ scicodepile_benchmark_simple_agent:
         prepare_script: benchmarks/scicodepile/prepare.py
         num_repeats: 1
         license: Apache 2.0
+
+scicodepile_benchmark_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: scicodepile_benchmark_simple_agent

@@ -7,6 +7,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
+from fastapi import Body
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_environment_server import (
@@ -26,19 +27,24 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
-from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT, AgentServerRef, ResourcesServerRef
+from nemo_gym.config_types import (
+    TOKEN_CAPTURE_PATH_SEGMENT,
+    AgentServerRef,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ResourcesServerRef,
+)
 from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
+from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, AgentObservationBundle
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnFailure,
     SingleAgentTurnRequest,
-    SingleAgentTurnResourcesVerifyRequest,
     SingleAgentTurnResponse,
     SingleAgentTurnResult,
-    SingleAgentTurnVerificationInput,
 )
 from nemo_gym.tool_access import (
     DirectHTTPToolAccess,
@@ -65,6 +71,16 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     request_model = SingleAgentTurnRequest
     response_model = SingleAgentTurnResponse
 
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Forward to the resources server, which owns verification in this protocol."""
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/aggregate_metrics",
+            json=body,
+        )
+        await raise_for_status(response)
+        return AggregateMetrics.model_validate(await get_response_json(response))
+
     async def run(
         self,
         request: SingleAgentTurnRequest,
@@ -89,7 +105,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
         # Register cleanup before seed so a lost seed response cannot hide the caller-assigned session ID.
         # Final cleanup closes this session after run() returns, outside the episode deadline.
-        cleanup.register_cleanup("resources session", close_resources)
+        resources_cleanup = cleanup.register_cleanup("resources session", close_resources)
 
         try:
             seed_http_response = await self.server_client.post(
@@ -112,7 +128,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="seed",
-                message=str(error),
+                failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -131,13 +147,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             if seed.resources_tools is None:
                 raise self._failure(
                     stage="seed",
-                    message="Resources seed did not return requested MCP metadata",
+                    failure_reason="Resources seed did not return requested MCP metadata",
                     terminal=True,
                 )
             if seed.resources_tools.transport != "http":
                 raise self._failure(
                     stage="seed",
-                    message=f"Unsupported resources MCP transport: {seed.resources_tools.transport}",
+                    failure_reason=f"Unsupported resources MCP transport: {seed.resources_tools.transport}",
                     terminal=True,
                 )
             url_path = seed.resources_tools.url_path.lstrip("/")
@@ -156,10 +172,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
         # Cleanup callbacks return None.
         # Capture agent-owned observations and the final Resources Server cookie jar for the episode result.
-        agent_close_response: AgentCloseSessionResponse | None = None
+        agent_observations: AgentObservationBundle | None = None
 
         async def close_agent() -> None:
-            nonlocal agent_close_response, resources_cookies
+            nonlocal agent_observations, resources_cookies
             close_http_response = await self.server_client.post(
                 server_name=self.config.agent_server.name,
                 url_path="/v1/agent_sessions/close",
@@ -175,7 +191,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             if agent_close_response.agent_session_id != agent_session_id:
                 raise ValueError("Agent close returned a different agent_session_id")
-            if agent_close_response.resources_cookies is not None:
+            agent_observations = agent_close_response.agent_observations
+            # Verify identifies the episode by the Resources session cookie.
+            # An agent that held no Resources cookie jar returns None or an empty jar.
+            # Neither may replace the cookie from the Resources seed.
+            if agent_close_response.resources_cookies:
                 resources_cookies = agent_close_response.resources_cookies
 
         # Register cleanup before seed so cancellation can close a remotely created session even if its response is lost.
@@ -203,7 +223,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="agent",
-                message=str(error),
+                failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -223,20 +243,26 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
             agent_response = NeMoGymResponse.model_validate(await get_response_json(agent_http_response))
         except Exception as error:
+            # The agent's evidence of the failed turn arrives with its session close.
+            try:
+                await agent_cleanup.close()
+            except Exception:
+                pass  # Final unwind retries the close and logs its failure.
             raise self._failure(
                 stage="agent",
-                message=str(error),
+                failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
+                agent_observations=agent_observations,
             ) from error
 
         # Verification needs this close response: it carries the Agent's observations and final Resources cookies.
-        # A repeated close cannot return them, so a transient failure retries the whole episode instead.
+        # Session-capable agents replay this receipt when ServerClient retries a lost reply.
         try:
             await agent_cleanup.close()
         except Exception as error:
             raise self._failure(
                 stage="cleanup",
-                message=str(error),
+                failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
             ) from error
@@ -244,14 +270,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             verify_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=SingleAgentTurnResourcesVerifyRequest(
-                    episode_id=request.episode_id,
-                    task_id=request.task.task_id,
-                    verification_input=SingleAgentTurnVerificationInput(
-                        responses_create_params=task_input.responses_create_params,
-                        response=agent_response,
+                # The Resources Server's own flat verify body, as an Agent's /run sends it; the session
+                # cookie identifies the episode.
+                json=task_input.task_data
+                | {
+                    "responses_create_params": task_input.responses_create_params.model_dump(
+                        mode="json", exclude_unset=True
                     ),
-                ),
+                    "response": agent_response.model_dump(mode="json"),
+                },
                 cookies=resources_cookies,
             )
             await raise_for_status(verify_http_response)
@@ -259,21 +286,18 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="verification",
-                message=str(error),
+                failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
+                agent_observations=agent_observations,
             ) from error
 
+        # Keep one bounded retry in final unwind without erasing a completed verdict.
+        cleanup.register_cleanup("post-verification resources session", resources_cleanup.close)
         return SingleAgentTurnResponse(
             episode_id=request.episode_id,
             task_id=request.task.task_id,
-            result=verification.model_copy(
-                update={
-                    "ng_agent_observations": agent_close_response.agent_observations
-                    if agent_close_response is not None
-                    else None
-                }
-            ),
+            result=verification.model_copy(update={NG_AGENT_OBSERVATIONS_KEY: agent_observations}),
         )
 
     def _agent_responses_path(self, request: SingleAgentTurnRequest) -> str:
@@ -292,16 +316,18 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     def _failure(
         *,
         stage: str,
-        message: str,
+        failure_reason: str,
         terminal: bool,
         partial_response: Any = None,
+        agent_observations: Any = None,
     ) -> HandledEpisodeError:
         return HandledEpisodeError(
             SingleAgentTurnFailure(
                 stage=stage,
-                message=message[:2000],
+                failure_reason=failure_reason[:2000],
                 terminal=terminal,
                 partial_response=partial_response,
+                agent_observations=agent_observations,
             )
         )
 

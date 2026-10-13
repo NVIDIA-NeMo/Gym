@@ -18,6 +18,7 @@ ruler_benchmark_simple_agent:
         jsonl_fpath: benchmarks/ruler/data/ruler_nemotron_3_1m_benchmark.jsonl
         prompt_config: null
         prepare_script: benchmarks/ruler/prepare_nemotron_3_1m.py
+        prepare_dependencies: [wonderwords, html2text, tenacity]
         num_repeats: 1
 
 # RULER seeds an assistant "answer prefix" as the final input message (add_answer_prefix=True in the
@@ -44,3 +45,10 @@ policy_model:
       uses_reasoning_parser: false
       chat_template_kwargs:
         enable_thinking: false
+
+ruler_benchmark_environment_server:
+  _inherit_from: ruler_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: ruler_benchmark_simple_agent

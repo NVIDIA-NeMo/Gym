@@ -135,7 +135,6 @@ TEST_SH_PATCHES = {
 
 
 class TerminalBench21ResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: TerminalBench21ResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -300,6 +299,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         start_time = time()
         try:
             await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
+            # Test scripts write rewards here even if their test runner fails to start.
+            setup_result = await eval_sandbox.exec("mkdir -p /logs/verifier", timeout_s=self.config.evaluation_timeout)
+            if setup_result.return_code != 0:
+                raise RuntimeError(f"Failed to prepare TerminalBench verifier output directory: {setup_result}")
             eval_result = await eval_sandbox.exec(
                 "bash /tests/test.sh",
                 timeout_s=self.config.evaluation_timeout,
@@ -320,8 +323,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             try:
                 with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
                     await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
-                    temp_file.seek(0)
-                    reward = float(temp_file.read())
+                    # Providers such as Docker can replace the destination file during download.
+                    reward = float(Path(temp_file.name).read_text())
 
                 evaluation_completed = True
             except:

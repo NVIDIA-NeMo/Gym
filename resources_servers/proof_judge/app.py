@@ -219,7 +219,6 @@ class IncorrectGroupCoordinator(BaseModel):
 
 
 class ProofWithJudgeResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ProofWithJudgeResourcesServerConfig
 
     _ext_clients: Optional[list] = PrivateAttr(default=None)

@@ -13,7 +13,7 @@ After rollout collection, NeMo Gym computes **aggregate metrics** for each agent
 2. **Group by agent** — responses are partitioned by agent name.
 3. **Call `/aggregate_metrics`** — for each agent, the stripped verify responses are POSTed to the agent's `/aggregate_metrics` endpoint.
 4. **Compute stats** — per-task and overall statistics (`mean`, `max`, `min`, `median`, `std`) are computed for every numeric field. If the resources server overrides `compute_metrics()` or `get_key_metrics()`, those are called to add additional metrics.
-5. **Compute variability stats** — when an agent has two or more repeats, per-repeat statistics are computed for every numeric field and summarized across repeats. See [Repeat-Level Metrics](#repeat-level-metrics).
+5. **Compute variability stats** — when an agent has two or more repeats, eligible numeric per-repeat metrics are summarized across repeats. See [Repeat-Level Metrics](#repeat-level-metrics).
 6. **Write results** — all per-agent metrics are written to `<output>_aggregate_metrics.json`.
 
 ## Output Format
@@ -30,6 +30,7 @@ The output file is a JSON array with one entry per agent:
       "min/reward": 0.0,
       "median/reward": 1.0,
       "std/reward": 0.433,
+      "num_repeats": 2,
 
       "mean_across_repeats/mean/reward": 0.75,
       "median_across_repeats/mean/reward": 0.75,
@@ -55,7 +56,7 @@ The output file is a JSON array with one entry per agent:
 | Field | Description |
 |---|---|
 | `agent_ref` | Agent identity (`{"name": "..."}`) |
-| `agent_metrics` | Overall stats across all rollouts, plus any custom metrics from `compute_metrics()`, plus cross-repeat aggregates |
+| `agent_metrics` | Overall stats, custom metrics, `num_repeats` (distinct repeat indices), and cross-repeat aggregates |
 | `key_metrics` | Headline numbers (default: all `mean/*` entries from `agent_metrics`) |
 | `group_level_metrics` | Per-task breakdown — one entry per task with stats across that task's rollouts |
 | `repeat_level_metrics` | Per-repeat breakdown — one entry per `_ng_rollout_index` with stats across that repeat's tasks. Empty unless the agent has two or more repeats |
@@ -100,14 +101,14 @@ To check real coverage, use the numbers that *are* measured against the material
 
 ### Across repeats
 
-The per-repeat `mean/{field}` values are themselves summarized and merged into `agent_metrics`, treating each repeat as one observation. This answers a different question than the keys above: not "how much do tasks vary within a repeat" but "how much does the headline score move if I run the whole benchmark again."
+Eligible numeric point estimates in `repeat_level_metrics` are summarized across repeats and merged into `agent_metrics`. Each repeat counts as one observation. This includes `mean/{field}` and custom benchmark metrics (for example, `subtask_accuracy`) supplied by `compute_repeat_metrics()`. Existing statistics and uncertainty estimates, including suffixes such as `/p95` and `/ci_low_95`, remain in `repeat_level_metrics` without being aggregated again.
 
 | Key | Description |
 |---|---|
-| `mean_across_repeats/mean/{field}` | Mean of the per-repeat means |
-| `median_across_repeats/mean/{field}` | Median of the per-repeat means |
-| `se_across_repeats/mean/{field}` | Standard error across repeats  |
-| `ci_low_95_across_repeats/mean/{field}`, `ci_high_95_across_repeats/mean/{field}` | 95% confidence interval of that mean |
+| `mean_across_repeats/{metric}`, `median_across_repeats/{metric}` | Mean and median of the per-repeat metric |
+| `std_across_repeats/{metric}`, `se_across_repeats/{metric}` | Standard deviation and standard error across repeats |
+| `min_across_repeats/{metric}`, `max_across_repeats/{metric}` | Range across repeats |
+| `ci_low_95_across_repeats/{metric}`, `ci_high_95_across_repeats/{metric}` | 95% confidence interval of the cross-repeat mean; requires two values |
 
 
 <Note>
@@ -138,21 +139,25 @@ The same statistics are laid out differently depending on which command produced
 | `gym eval run`, `gym eval aggregate` | `<output>_aggregate_metrics.json` | `repeat_level_metrics` nested inside each agent's object |
 | `gym eval profile` | `<rollouts>_repeat_level_metrics.json` | A separate flat list, each entry carrying its own `agent_ref` |
 
-`gym eval profile` always writes its file, containing `[]` when there is only one repeat. Either way, the cross-repeat aggregates (`mean_across_repeats/mean/*`, `se_across_repeats/mean/*`, and the CI bounds) live in `agent_metrics`.
+`gym eval profile` always writes its file, containing `[]` when there is only one repeat. Cross-repeat aggregates (`*_across_repeats/{metric}`) live in `agent_metrics`.
 
 ---
 
 ## Custom Metrics
 
-Override two hooks on your resources server to add custom metrics.
+Override these hooks on your resources server to add custom metrics.
 
 ### `compute_metrics(tasks)`
 
 Receives all verify responses grouped by task. Use this for metrics that need the full dataset — pass@k, confidence intervals, cross-task statistics.
 
+### `compute_repeat_metrics(tasks)`
+
+Receives one repeat grouped by task. Return eligible finite numeric point estimates to include them in cross-repeat aggregates.
+
 ### `get_key_metrics(agent_metrics)`
 
-Selects headline numbers from the final `agent_metrics` dict. Default returns all `mean/*` entries.
+Selects headline numbers from full-run `agent_metrics`. Default returns all `mean/*` entries.
 
 ### Example: pass@k
 

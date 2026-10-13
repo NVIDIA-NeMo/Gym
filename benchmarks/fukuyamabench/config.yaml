@@ -22,3 +22,10 @@ fukuyamabench_benchmark_agent:
         # The corpus is downloaded at runtime and its rights are unresolved; see
         # resources_servers/fukuyamabench/README.md "Licensing".
         license: TBD
+
+fukuyamabench_benchmark_environment_server:
+  _inherit_from: fukuyamabench_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: fukuyamabench_benchmark_agent

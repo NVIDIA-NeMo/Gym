@@ -20,8 +20,9 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from math_verify.errors import TimeoutException
-from pytest import approx, fixture, raises, skip
+from pytest import approx, fixture, mark, raises, skip
 
+from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
@@ -166,6 +167,10 @@ class TestApp:
         assert _extract_last_boxed_answer(r"\boxed{\frac{1}{2}}") == r"\frac{1}{2}"
         assert _extract_last_boxed_answer(r"\boxed{ exact text }") == " exact text "
         assert _extract_last_boxed_answer(r"\boxed{unclosed") is None
+
+    async def test_reverify_mode(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
+        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        assert await resources_server.get_reverify_mode() == ReverifyMode.STATELESS
 
     async def test_verify(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
@@ -630,6 +635,25 @@ class TestApp:
             second_not_equal_item,
         )
 
+    @mark.parametrize("first_verdict", ["[[ A=B ]]", "[[ A = B ]]", "[[\nA=B\n]]"])
+    async def test_whitespace_equal_requires_reverse_judgement(self, config, first_verdict):
+        server_mock = MagicMock(spec=ServerClient)
+        response_mock = AsyncMock()
+        post_mock = MagicMock(read=response_mock)
+        server_mock.post = AsyncMock(return_value=post_mock)
+        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
+        first_item = self._create_response_output_message(first_verdict)
+        second_item = self._create_response_output_message("[[ A != B ]]")
+        response_mock.side_effect = [
+            json.dumps(self._create_response("first", first_item)),
+            json.dumps(self._create_response("second", second_item)),
+        ]
+        reward, evaluations = await resources_server._verify_answer_with_judge("question", "4", "5")
+        assert reward == 0.0
+        assert len(evaluations) == 2
+        assert server_mock.post.await_count == 2
+        assert evaluations[0].response.output[-1].content[-1].text == first_verdict
+
     async def _generate_and_check_judge_evaluation(
         self,
         resources_server: LibraryJudgeMathResourcesServer,
@@ -732,7 +756,7 @@ class TestApp:
         await self._generate_and_check_judge_evaluation(
             resources_server,
             "equal_first_question",
-            True,
+            False,
             "equal_first_id",
             equal_first_item,
         )
@@ -745,10 +769,77 @@ class TestApp:
         await self._generate_and_check_judge_evaluation(
             resources_server,
             "not_equal_first_question",
-            False,
+            True,
             "not_equal_first_id",
             not_equal_first_item,
         )
+
+    @mark.parametrize(
+        ("first_text", "reverse_text", "expected_reward", "expected_calls"),
+        [
+            ("[[A!=B]] Wait, equivalent. Final: [[A=B]]", "[[A=B]]", 1.0, 2),
+            ("[[A!=B]] Wait, equivalent. Final: [[A=B]]", "[[A!=B]]", 0.0, 2),
+            ("[[A=B]] Wait, different. Final: [[A!=B]]", "[[A=B]]", 0.0, 1),
+            ("[[A=B]]", "[[A=B]] Final: [[A!=B]]", 0.0, 2),
+            ("[[A=B]]", "[[A!=B]] Final: [[A=B]]", 1.0, 2),
+            ("[[A!=B]] Final: [[ A = B ]]", "[[ A = B ]]", 1.0, 2),
+            ("[[A=B]] Final: [[ A != B ]]", "[[A=B]]", 0.0, 1),
+            ("[[ A = B ]]", "[[A=B]] Final: [[ A != B ]]", 0.0, 2),
+            ("[[ A = B ]]", "[[A!=B]] Final: [[\nA = B\n]]", 1.0, 2),
+            ("[[A=B]] [[A=B]]", "[[A=B]]", 1.0, 2),
+            ("[[A!=B]] [[A!=B]]", "[[A=B]]", 0.0, 1),
+            ("No verdict", "[[A=B]]", 0.0, 1),
+            ("[[A=B]]", "No verdict", 0.0, 2),
+        ],
+    )
+    async def test_last_verdict_preserves_reverse_check(
+        self,
+        config: LibraryJudgeMathResourcesServerConfig,
+        first_text: str,
+        reverse_text: str,
+        expected_reward: float,
+        expected_calls: int,
+    ) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        response_mock = AsyncMock()
+        server_mock.post = AsyncMock(return_value=MagicMock(read=response_mock))
+        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
+        texts = [first_text, reverse_text]
+        response_mock.side_effect = [
+            json.dumps(self._create_response(str(index), self._create_response_output_message(text)))
+            for index, text in enumerate(texts)
+        ]
+        reward, evaluations = await resources_server._verify_answer_with_judge("question", "expected", "generated")
+        assert reward == expected_reward
+        assert len(evaluations) == server_mock.post.await_count == expected_calls
+        for evaluation, text in zip(evaluations, texts):
+            assert evaluation.response.output[-1].content[-1].text == text
+        if expected_calls == 2:
+            reverse_prompt = evaluations[1].responses_create_params.input[-1].content
+            assert reverse_prompt.index("generated") < reverse_prompt.index("expected")
+
+    @mark.parametrize("final_text", ["No verdict", "[[A!=B]]", "[[A=B]]"])
+    async def test_verdict_ignores_reasoning_trace(
+        self,
+        config: LibraryJudgeMathResourcesServerConfig,
+        final_text: str,
+    ) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        response = self._create_response("final", self._create_response_output_message(final_text))
+        response["output"].insert(
+            0,
+            {
+                "id": "reasoning",
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "[[A!=B]] [[A=B]]"}],
+            },
+        )
+        response_mock = AsyncMock(return_value=json.dumps(response))
+        server_mock.post = AsyncMock(return_value=MagicMock(read=response_mock))
+        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
+        equal, evaluation = await resources_server._generate_judge_evaluation("question", "first", "second")
+        assert equal is (final_text == "[[A=B]]")
+        assert evaluation.response.output[0].summary[0].text == "[[A!=B]] [[A=B]]"
 
 
 # ──────────────────────────────────────────────────────────
@@ -964,3 +1055,83 @@ class TestAggregateMetrics:
         assert "pass@1[avg-of-2]/symbolic_accuracy/std_dev_across_runs" in am
         assert "pass@2/symbolic_accuracy" in result.key_metrics
         assert "majority@2/symbolic_accuracy" in result.key_metrics
+
+
+async def test_failure_zero_uses_verifier_fields_and_counts_every_repeat():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from nemo_gym.config_types import ResourcesServerRef
+    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.reward_profile import compute_pass_majority_metrics
+    from nemo_gym.sandbox import agent_tools
+    from resources_servers.math_with_judge.app import LibraryJudgeMathResourcesServer, LibraryJudgeMathVerifyRequest
+
+    original = NeMoGymResponse.model_validate(
+        dict(
+            id="failed-generation",
+            created_at=0,
+            model="test",
+            object="response",
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": "answer",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "\\boxed{4}", "annotations": []}],
+                }
+            ],
+            tool_choice="auto",
+            tools=[],
+            parallel_tool_calls=True,
+        )
+    )
+    body = LibraryJudgeMathVerifyRequest.model_validate(
+        dict(
+            responses_create_params={"input": "Compute 2+2"},
+            response=original,
+            question="Compute 2+2",
+            expected_answer="4",
+        )
+    )
+    grader = LibraryJudgeMathResourcesServer(
+        config=LibraryJudgeMathResourcesServerConfig(
+            host="127.0.0.1",
+            port=8080,
+            entrypoint="",
+            name="math",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    grader._verify_answer_with_judge = AsyncMock(side_effect=AssertionError("Empty answers must not call the judge"))
+
+    async def post(**kwargs):
+        assert kwargs["json"]["response"]["output"] == []
+        result = await grader.verify(LibraryJudgeMathVerifyRequest.model_validate(kwargs["json"]))
+        return SimpleNamespace(
+            ok=True, read=AsyncMock(return_value=result.model_dump_json().encode()), raise_for_status=lambda: None
+        )
+
+    client = SimpleNamespace(post=AsyncMock(side_effect=post))
+    result = await agent_tools.verify_agent_response(
+        client,
+        ResourcesServerRef(type="resources_servers", name="math"),
+        body,
+        original,
+        {},
+        force_zero_reward=True,
+    )
+    assert result["reward"] == result["library_reward"] == 0
+    assert result["failure_kind"] == "agent_run_error"
+    assert result["response"] == original.model_dump(mode="json")
+    assert result["extracted_answer"] is None
+    correct = dict(reward=1, library_reward=1, extracted_answer="4")
+    metrics = compute_pass_majority_metrics(
+        [[result] * 8 + [correct] * 8], score_fn=grader._math_score_fn, answer_key="extracted_answer"
+    )[0]
+    assert metrics["pass@1[avg-of-16]/symbolic_accuracy"] == 50
+    assert metrics["pass@1[avg-of-8]/symbolic_accuracy"] == 0
+    assert not grader._verify_answer_with_judge.called

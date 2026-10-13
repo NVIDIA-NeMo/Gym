@@ -21,3 +21,10 @@ aegis_v4_safety_benchmark_simple_agent:
         prepare_script: benchmarks/aegis_v4_safety/prepare.py
         num_repeats: 1
         license: Apache 2.0
+
+aegis_v4_safety_benchmark_environment_server:
+  _inherit_from: aegis_v4_safety_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: aegis_v4_safety_benchmark_simple_agent

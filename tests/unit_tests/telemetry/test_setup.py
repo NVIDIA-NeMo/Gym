@@ -28,7 +28,9 @@ from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry.setup import (
     get_telemetry,
     init_telemetry,
+    is_metrics_exporter_active,
     is_telemetry_env_enabled,
+    is_telemetry_metrics_enabled,
     shutdown_telemetry,
 )
 from tests.unit_tests.telemetry.conftest import import_without_lens, no_lens, requires_lens
@@ -56,6 +58,7 @@ def enabled_console_env(clean_otel_env):
 def test_init_returns_none_when_disabled(clean_otel_env):
     assert init_telemetry(server_name="x") is None
     assert get_telemetry() is None
+    assert is_metrics_exporter_active() is False
 
 
 def test_init_does_not_import_lens_when_disabled(clean_otel_env, monkeypatch):
@@ -89,12 +92,13 @@ def test_init_returns_none_when_lens_is_absent(clean_otel_env):
     with no_lens():
         assert init_telemetry(server_name="x") is None
     assert get_telemetry() is None
+    assert is_metrics_exporter_active() is False
 
 
 def test_invalid_env_disables_rather_than_crashing_the_server(clean_otel_env):
     """A malformed telemetry env var must not take a Gym server process down."""
     clean_otel_env.setenv("NEMO_GYM_OTEL_ENABLED", "1")
-    clean_otel_env.setenv("NEMO_GYM_OTEL_EXPORT_RANK", "not-an-int")
+    clean_otel_env.setenv("NEMO_GYM_OTEL_TRACES_ENABLED", "not-a-bool")
     assert init_telemetry(server_name="x") is None
 
 
@@ -107,6 +111,7 @@ def test_setup_failure_is_swallowed(clean_otel_env, monkeypatch):
 
     monkeypatch.setattr("nemo.lens.setup_telemetry", boom)
     assert init_telemetry(server_name="x") is None
+    assert is_metrics_exporter_active() is False
 
 
 # --------------------------------------------------------------------------- #
@@ -114,11 +119,25 @@ def test_setup_failure_is_swallowed(clean_otel_env, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
+def test_configured_metrics_do_not_imply_an_active_exporter(enabled_console_env):
+    enabled_console_env.setenv("NEMO_GYM_OTEL_METRICS_ENABLED", "1")
+    assert is_telemetry_metrics_enabled() is True
+    assert is_metrics_exporter_active() is False
+
+
 def test_init_builds_an_exporting_handle(enabled_console_env):
     handle = init_telemetry(server_name="weather", server_type="resources_servers")
     assert handle is not None
     assert handle.is_exporting is True
     assert get_telemetry() is handle
+    assert is_metrics_exporter_active() is True
+
+
+def test_metrics_exporter_is_inactive_when_metrics_are_disabled(enabled_console_env):
+    enabled_console_env.setenv("NEMO_GYM_OTEL_METRICS_ENABLED", "0")
+    handle = init_telemetry(server_name="weather")
+    assert handle is not None and handle.is_exporting is True
+    assert is_metrics_exporter_active() is False
 
 
 def test_enabled_span_groups_follow_the_config(enabled_console_env):
@@ -249,30 +268,102 @@ def test_concurrent_init_calls_produce_exactly_one_setup(enabled_console_env, mo
     assert len({id(r) for r in results}) == 1, "every thread must observe the same handle"
 
 
-def test_non_exporting_rank_gets_a_silent_handle(clean_otel_env):
-    """Rank 1..N under `single_rank`: no-op providers and no enabled span groups."""
+def test_each_server_reports_itself_as_a_single_rank_world(enabled_console_env, monkeypatch):
+    """nemo-lens has no notion of rank; a process that reports none cannot be filtered by it."""
+    from nemo.lens.semconv import NV_DL_RANK, NV_DL_WORLD_SIZE
+
+    captured = {}
+
+    def capture(config, **kwargs):
+        captured.update(kwargs.get("resource_attributes") or {})
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr("nemo.lens.setup_telemetry", capture)
+    init_telemetry(server_name="weather")
+
+    assert captured[NV_DL_RANK] == 0
+    assert captured[NV_DL_WORLD_SIZE] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Another library already initialised nemo-lens in this process (NeMo-RL)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def lens_initialised_elsewhere(enabled_console_env):
+    """Stand in for NeMo-RL having called `setup_telemetry` before Gym in this process."""
+    from nemo.lens import NemoLensConfig, setup_telemetry
+
+    setup_telemetry(
+        NemoLensConfig(enabled=True, exporter="console", span_groups="default", metrics_enabled=False),
+        resource_attributes={"nv.dl.rank": 0},
+        _allow_reinit=True,
+    )
+    return enabled_console_env
+
+
+def test_init_reuses_lens_initialised_by_another_library(lens_initialised_elsewhere, monkeypatch):
+    """A second `setup_telemetry` raises in nemo-lens; Gym must reuse the providers instead."""
+
+    def second_setup(*args, **kwargs):
+        raise AssertionError("Gym must not call setup_telemetry when lens is already initialised")
+
+    monkeypatch.setattr("nemo.lens.setup_telemetry", second_setup)
+
+    handle = init_telemetry(server_name="weather")
+
+    assert handle is not None
+    assert handle.is_exporting is True
+    assert get_telemetry() is handle
+
+
+def test_reused_lens_still_enables_gym_span_groups(lens_initialised_elsewhere):
+    """Gym's groups join the owner's spec, since presets union across registry namespaces."""
     from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 
-    clean_otel_env.setenv("NEMO_GYM_OTEL_ENABLED", "1")
-    clean_otel_env.setenv("NEMO_GYM_OTEL_EXPORTER", "console")
-    clean_otel_env.setenv("NEMO_GYM_OTEL_SPAN_GROUPS", "all")
-    clean_otel_env.setenv("NEMO_GYM_OTEL_EXPORT_STRATEGY", "single_rank")
-    clean_otel_env.setenv("NEMO_GYM_OTEL_EXPORT_RANK", "0")
+    init_telemetry(server_name="weather")
 
-    handle = init_telemetry(server_name="weather", rank=3, world_size=4)
-    assert handle is not None
-    assert handle.is_exporting is False
-    assert is_span_group_enabled("server") is False
+    assert is_span_group_enabled("server") is True
+    assert is_span_group_enabled("http_client") is True
 
 
-def test_all_ranks_strategy_exports_from_every_process(clean_otel_env):
-    """The Gym default: no server process is silenced, so traces have no holes."""
-    clean_otel_env.setenv("NEMO_GYM_OTEL_ENABLED", "1")
-    clean_otel_env.setenv("NEMO_GYM_OTEL_EXPORTER", "console")
-    clean_otel_env.setenv("NEMO_GYM_OTEL_EXPORT_STRATEGY", "all_ranks")
+# The global meter provider can be set only once per process, so these tests pin what the owner
+# registered instead of depending on which earlier test set it.
+@pytest.mark.parametrize("provider_kind", ["proxy", "noop"])
+def test_reused_lens_without_metrics_keeps_pool_metrics_off(lens_initialised_elsewhere, monkeypatch, provider_kind):
+    from opentelemetry.metrics import NoOpMeterProvider
+    from opentelemetry.metrics._internal import _ProxyMeterProvider
 
-    handle = init_telemetry(server_name="weather", rank=3, world_size=4)
-    assert handle.is_exporting is True
+    # With metrics off, lens leaves OTel's default proxy provider in place.
+    provider = _ProxyMeterProvider() if provider_kind == "proxy" else NoOpMeterProvider()
+    monkeypatch.setattr("opentelemetry.metrics.get_meter_provider", lambda: provider)
+
+    init_telemetry(server_name="weather")
+
+    assert is_metrics_exporter_active() is False
+
+
+def test_reused_lens_with_metrics_enables_pool_metrics(lens_initialised_elsewhere, monkeypatch):
+    from opentelemetry.sdk.metrics import MeterProvider
+
+    provider = MeterProvider(shutdown_on_exit=False)
+    monkeypatch.setattr("opentelemetry.metrics.get_meter_provider", lambda: provider)
+
+    init_telemetry(server_name="weather")
+
+    assert is_metrics_exporter_active() is True
+
+
+def test_shutdown_leaves_providers_gym_does_not_own(lens_initialised_elsewhere, monkeypatch):
+    """Shutting down borrowed providers would end the owning library's telemetry too."""
+    handle = init_telemetry(server_name="weather")
+
+    def must_not_shutdown(*args, **kwargs):
+        raise AssertionError("Gym shut down providers it does not own")
+
+    monkeypatch.setattr(handle, "shutdown", must_not_shutdown)
+    shutdown_telemetry()
 
 
 def test_forked_child_inherits_working_telemetry(enabled_console_env):
@@ -340,6 +431,7 @@ def test_is_telemetry_env_enabled_does_not_require_lens(clean_otel_env):
     clean_otel_env.setenv("NEMO_LENS_ENABLED", "1")
     module = import_without_lens("nemo_gym.telemetry.setup")
     assert module.is_telemetry_env_enabled() is True
+    assert module.is_metrics_exporter_active() is False
     assert is_telemetry_env_enabled() is True
 
 

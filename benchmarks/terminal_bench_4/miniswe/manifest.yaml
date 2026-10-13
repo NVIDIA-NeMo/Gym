@@ -1,0 +1,31 @@
+name: terminal_bench_4/miniswe
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: The pinned 66-task Terminal-Bench 4.0 dataset with the mini-SWE 2.4.6
+  native loop owned by the agent server and separate official verification.
+modality: text
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../miniswe.yaml
+resources_server: terminal_bench_4
+agent_server: miniswe_sandboxed_agent
+datasets:
+- name: terminal_bench_4
+  type: benchmark
+  jsonl_fpath: benchmarks/terminal_bench_4/data/benchmark.jsonl
+  prepare_script: benchmarks/terminal_bench_4/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: agent
+lifecycle: active

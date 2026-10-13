@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, Optional, Tuple, TypeVar
 
 from omegaconf import DictConfig, OmegaConf
-from omegaconf.errors import InterpolationKeyError
+from omegaconf.errors import InterpolationKeyError, InterpolationResolutionError
 
 from nemo_gym import component_search_roots
 from nemo_gym.global_config import (
@@ -71,17 +71,21 @@ _UNSET_VALUE_PLACEHOLDER = "__unset_for_listing__"
 _SERVER_GROUP_KEYS = ("resources_servers", "responses_api_agents", "responses_api_models", "environment_servers")
 
 
+class _ListingConfigParser(GlobalConfigDictParser):
+    def raise_on_missing_values(self, global_config_dict: DictConfig) -> None:
+        # Includes and inheritance can introduce required values after the initial
+        # config is read. Listing needs their metadata, not runtime credentials.
+        for path in self.collect_missing_value_paths(global_config_dict):
+            OmegaConf.update(global_config_dict, path, _UNSET_VALUE_PLACEHOLDER)
+
+
 def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfig) -> DictConfig:
-    """`parse_no_environment` for listing: fill unset `???` and undefined `${...}` values (runtime-only
+    """`parse_no_environment` for listing: fill unset `???`, `${...}` and environment values (runtime-only
     things like API keys/endpoints) with a placeholder so the config still resolves enough to identify the
-    component. Never mutates the input; errors other than those two propagate.
+    component. Never mutates the input; other config and resolver errors propagate.
     """
     working = deepcopy(initial_config_dict)  # never mutate the caller's config
-    parser = GlobalConfigDictParser()
-
-    # Fill all `???` leaves in one pass. The loop below only adds placeholder keys, so no new `???` appear.
-    for path in parser.collect_missing_value_paths(working):
-        OmegaConf.update(working, path, _UNSET_VALUE_PLACEHOLDER)
+    parser = _ListingConfigParser()
 
     # OmegaConf reports undefined `${...}` keys only one at a time (as InterpolationKeyError), so loop:
     # inject a placeholder for each reported key and retry until it resolves.
@@ -98,6 +102,15 @@ def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfi
                 raise  # can't identify/clear the missing key; let the caller decide (warn + skip)
             injected.add(key)
             working = OmegaConf.merge(DictConfig({key: _UNSET_VALUE_PLACEHOLDER}), working)
+        except InterpolationResolutionError as e:
+            # oc.env reports an absent variable as a resolver error, not an
+            # InterpolationKeyError. Replace only the affected config field;
+            # never change the process environment or swallow other resolver errors.
+            key = e.full_key
+            if not re.search(r"Environment variable '[^']+' not found", str(e)) or not key or key in injected:
+                raise
+            injected.add(key)
+            OmegaConf.update(working, key, _UNSET_VALUE_PLACEHOLDER, force_add=True)
 
 
 def iter_server_configs(container):

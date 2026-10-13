@@ -4,6 +4,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
@@ -19,6 +20,143 @@ from nemo_gym.environment.manifest import (
 
 
 REPO_ROOT = Path(__file__).parents[2]
+
+
+def test_dump_preserves_existing_benchmark_manifest_format() -> None:
+    path = REPO_ROOT / "benchmarks/gpqa/manifest.yaml"
+    assert dump_manifest(load_manifest(path)) == path.read_text()
+
+
+def test_dump_preserves_nondefault_composition_extensions() -> None:
+    raw = _manifest(kind="benchmark")
+    raw.update(config_path="../variant.yaml", dataset_owner="selected_agent", prompt_source="prepared")
+    raw.pop("standard_prompt_config")
+    raw["datasets"][0].pop("prompt_config")
+    manifest = EnvironmentManifest.model_validate(raw)
+    dumped = yaml.safe_load(dump_manifest(manifest))
+    assert dumped["config_path"] == "../variant.yaml"
+    assert dumped["dataset_owner"] == "selected_agent"
+    assert dumped["prompt_source"] == "prepared"
+    assert EnvironmentManifest.model_validate(dumped) == manifest
+
+
+def test_migration_defaults_and_metadata() -> None:
+    manifest = EnvironmentManifest.model_validate(_manifest())
+    assert manifest.prompt_source == "template"
+    assert manifest.config_path == "config.yaml"
+    assert manifest.dataset_owner is None
+    raw = _manifest()
+    raw.update(config_path="../config_web.yaml", dataset_owner=" web_agent ")
+    manifest = EnvironmentManifest.model_validate(raw)
+    assert manifest.config_path == "../config_web.yaml"
+    assert manifest.dataset_owner == "web_agent"
+
+
+@pytest.mark.parametrize("backend", ["pydantic", "schema"])
+@pytest.mark.parametrize("kind", ["environment", "benchmark"])
+@pytest.mark.parametrize("source", ["missing", "template", "prepared", "agent"])
+@pytest.mark.parametrize("prompt", ["missing", None, "prompt.yaml"])
+@pytest.mark.parametrize("dataset_prompt", [None, "runtime.yaml"])
+def test_prompt_contract(backend, kind, source, prompt, dataset_prompt) -> None:
+    raw = _manifest(kind=kind)
+    raw.pop("standard_prompt_config", None)
+    if source != "missing":
+        raw["prompt_source"] = source
+    if prompt != "missing":
+        raw["standard_prompt_config"] = prompt
+    raw["datasets"][0]["prompt_config"] = dataset_prompt
+    effective_source = "template" if source == "missing" else source
+    valid = not (
+        (kind == "benchmark" and effective_source == "template" and prompt in ("missing", None))
+        or (effective_source == "prepared" and prompt not in ("missing", None))
+        or (effective_source != "template" and dataset_prompt is not None)
+    )
+    if backend == "schema":
+        assert Draft202012Validator(manifest_json_schema()).is_valid(raw) == valid
+    elif valid:
+        assert EnvironmentManifest.model_validate(raw).prompt_source == effective_source
+    else:
+        with pytest.raises(ValidationError, match="prompt"):
+            EnvironmentManifest.model_validate(raw)
+
+
+@pytest.mark.parametrize("source", ["template", "prepared", "agent"])
+@pytest.mark.parametrize("split", [None, "missing"])
+def test_all_benchmark_prompt_sources_require_canonical_split(source, split) -> None:
+    raw = _manifest(kind="benchmark")
+    raw.update(prompt_source=source, standard_prompt_config=None)
+    raw["datasets"][0].pop("prompt_config")
+    raw["canonical_split"] = split
+    if split == "missing":
+        raw.pop("canonical_split")
+    with pytest.raises(ValidationError, match="canonical_split"):
+        EnvironmentManifest.model_validate(raw)
+    assert not Draft202012Validator(manifest_json_schema()).is_valid(raw)
+
+
+@pytest.mark.parametrize("profile", list(IntegrationProfile))
+@pytest.mark.parametrize("resource", ["missing", None, "verifier"])
+def test_resources_server_required_but_nullable_by_profile(profile, resource) -> None:
+    raw = _manifest(profile=profile)
+    raw["resources_server"] = resource
+    if resource == "missing":
+        raw.pop("resources_server")
+    valid = resource != "missing" and (resource is not None or profile != "custom-gym-verifier")
+    assert Draft202012Validator(manifest_json_schema()).is_valid(raw) == valid
+    if valid:
+        manifest = EnvironmentManifest.model_validate(raw)
+        dumped = yaml.safe_load(dump_manifest(manifest))
+        assert "resources_server" in dumped
+        assert dumped["resources_server"] == resource
+        assert EnvironmentManifest.model_validate(dumped) == manifest
+    else:
+        with pytest.raises(ValidationError, match="resources_server"):
+            EnvironmentManifest.model_validate(raw)
+
+
+@pytest.mark.parametrize("field,value", [("config_path", ""), ("dataset_owner", ""), ("prompt_source", "unknown")])
+def test_migration_fields_reject_invalid_values(field, value) -> None:
+    raw = _manifest()
+    raw[field] = value
+    with pytest.raises(ValidationError, match=field):
+        EnvironmentManifest.model_validate(raw)
+    assert not Draft202012Validator(manifest_json_schema()).is_valid(raw)
+
+
+@pytest.mark.parametrize("tree", ["benchmarks", "environments"])
+@pytest.mark.parametrize("config", ["config.yaml", "../config_web.yaml", "../../shared.yaml"])
+def test_resolve_manifest_config_within_catalog(tmp_path: Path, tree: str, config: str) -> None:
+    from nemo_gym.environment import manifest as module
+
+    raw = _manifest()
+    raw["config_path"] = config
+    manifest = EnvironmentManifest.model_validate(raw)
+    path = tmp_path / tree / "foo" / "config_web" / "manifest.yaml"
+    assert module.resolve_manifest_config_path(path, manifest) == (path.parent / config).resolve()
+
+
+@pytest.mark.parametrize("config", ["/tmp/config.yaml", "../../../outside.yaml", "../../../environments/a.yaml"])
+def test_resolve_manifest_config_rejects_escape(tmp_path: Path, config: str) -> None:
+    from nemo_gym.environment import manifest as module
+
+    raw = _manifest()
+    raw["config_path"] = config
+    manifest = EnvironmentManifest.model_validate(raw)
+    path = tmp_path / "benchmarks" / "foo" / "config_web" / "manifest.yaml"
+    with pytest.raises(ManifestError, match="config_path"):
+        module.resolve_manifest_config_path(path, manifest)
+
+
+def test_resolve_manifest_config_rejects_symlink_escape(tmp_path: Path) -> None:
+    from nemo_gym.environment import manifest as module
+
+    directory = tmp_path / "benchmarks" / "foo"
+    directory.mkdir(parents=True)
+    (directory / "config.yaml").symlink_to(tmp_path / "outside.yaml")
+    with pytest.raises(ManifestError, match="config_path"):
+        module.resolve_manifest_config_path(
+            directory / "manifest.yaml", EnvironmentManifest.model_validate(_manifest())
+        )
 
 
 def _manifest(*, profile: str = "custom-gym-verifier", kind: str = "environment") -> dict:
@@ -207,16 +345,24 @@ def test_manifest_accepts_spdx_expressions_and_private_license_values(licensing:
 
 def test_manifest_rejects_bad_reward_duplicate_authors_and_unknown_fields() -> None:
     raw = _manifest()
-    raw["reward"]["range"] = [1, 1]
+    raw["reward"]["range"] = [1, 0]
     raw["authors"] = ["alice", "alice"]
     raw["surprise"] = True
 
     with pytest.raises(ValidationError) as error:
         EnvironmentManifest.model_validate(raw)
     message = str(error.value)
-    assert "lower < upper" in message
+    assert "lower <= upper" in message
     assert "authors must be unique" in message
     assert "Extra inputs are not permitted" in message
+
+
+def test_manifest_represents_constant_placeholder_reward() -> None:
+    raw = _manifest()
+    raw["reward"]["range"] = [0, 0]
+    manifest = EnvironmentManifest.model_validate(raw)
+    assert manifest.reward.range == (0, 0)
+    Draft202012Validator(manifest_json_schema()).validate(raw)
 
 
 def test_manifest_rejects_duplicate_dataset_names() -> None:

@@ -35,7 +35,14 @@ from typing import TYPE_CHECKING, Any
 
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
 from nemo_gym.token_id_capture.lineage import stamp_continuation
-from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolution, LineageResolver, TokenSink
+from nemo_gym.token_id_capture.protocols import (
+    CaptureLedger,
+    LineageResolution,
+    LineageResolver,
+    RolloutRetiredError,
+    TokenCaptureFrozenError,
+    TokenSink,
+)
 from nemo_gym.token_id_capture.records import (
     UNRESOLVED_PARENT_REASON,
     ParentResolutionStatus,
@@ -107,6 +114,9 @@ class CaptureContext:
     request_items: list[dict] | None = None
     # Retain the worker acknowledgement privately until API conversion finishes.
     external_commit_coords: dict[str, Any] | None = None
+    # A normal worker completion was received, even if its acknowledgement is
+    # missing. Synthetic guard/overflow completions leave this false.
+    external_worker_response_seen: bool = False
 
     @property
     def parent_call_id(self) -> str | None:
@@ -277,7 +287,18 @@ async def resolve_parent(request_messages: list | None) -> None:
             )
         return
     is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
-    if is_root or not await ledger.has_rows(context.rollout_id):
+    try:
+        has_rows = await ledger.has_rows(context.rollout_id)
+    except RolloutRetiredError:
+        # A late call of an abandoned attempt, or the first call of a duplicate run. Admitting it would stage
+        # tokens that the ledger then refuses to record, so no manifest would ever name them.
+        logger.warning(
+            "Model call %s of rollout %s arrived after the rollout was retired; its tokens are not captured.",
+            context.model_call_id,
+            context.rollout_id,
+        )
+        return
+    if is_root or not has_rows:
         context.capture_admission = CaptureAdmission(
             rollout_id=context.rollout_id,
             model_call_id=context.model_call_id,
@@ -405,12 +426,12 @@ async def commit_entry(
     if context is None:
         return
     if entry.rollout_id != context.rollout_id or entry.model_call_id != context.model_call_id:
-        logger.warning(
-            "Training-token capture identity mismatch for model call %s of rollout %s.",
-            context.model_call_id,
-            context.rollout_id,
-        )
-        await _mark_incomplete(context)
+        if await _mark_incomplete(context):
+            logger.warning(
+                "Training-token capture identity mismatch for model call %s of rollout %s.",
+                context.model_call_id,
+                context.rollout_id,
+            )
         return
     if context.token_sink is None:
         context.committed = True
@@ -452,6 +473,19 @@ async def commit_entry(
         entry.parent_resolution_reason = resolution.reason or ""
         await context.token_sink.put(entry)
         context.committed = True
+    except TokenCaptureFrozenError:
+        # The rollout finished and its capture was frozen while this call was
+        # still in flight (for example its harness was killed at a timeout
+        # backstop). The freeze already judged completeness from the durable
+        # intent ledger, so the verdict is sealed. Drop the late record.
+        # Marking the rollout incomplete here would mutate the frozen state
+        # and break conditional retirement of the snapshot finalize consumed.
+        logger.warning(
+            "Training-token capture for model call %s of rollout %s arrived after the capture "
+            "was frozen or retired; the late record is dropped.",
+            context.model_call_id,
+            context.rollout_id,
+        )
     except Exception:
         await _capture_failed(context, "write")
 
@@ -462,7 +496,10 @@ async def _capture_failed(context: CaptureContext, stage: str) -> None:
     Bad token payloads must not fail the model call.
     Mark the rollout so consumers can mask the sample.
     Call this only from an ``except`` block.
+    A call that arrives after its rollout was frozen or retired is a late call, not a capture failure.
     """
+    if not await _mark_incomplete(context):
+        return
     with _STATS_LOCK:
         _CAPTURE_FAILURES[0] += 1
         failures = _CAPTURE_FAILURES[0]
@@ -475,7 +512,6 @@ async def _capture_failed(context: CaptureContext, stage: str) -> None:
         context.rollout_id,
         exc_info=True,
     )
-    await _mark_incomplete(context)
 
 
 async def _capture_missing(context: CaptureContext, reason: str) -> None:
@@ -492,20 +528,21 @@ async def _capture_missing(context: CaptureContext, reason: str) -> None:
     """
     if context.committed or context.token_sink is None:
         return
-    logger.warning(
-        "Training-token capture has no token ids for model call %s of rollout %s: %s.",
-        context.model_call_id,
-        context.rollout_id,
-        reason,
-    )
-    await _mark_incomplete(context)
+    if await _mark_incomplete(context):
+        logger.warning(
+            "Training-token capture has no token ids for model call %s of rollout %s: %s.",
+            context.model_call_id,
+            context.rollout_id,
+            reason,
+        )
 
 
-async def _mark_incomplete(context: CaptureContext) -> None:
+async def _mark_incomplete(context: CaptureContext) -> bool:
     """Mark the rollout, or say loudly why it could not be marked.
 
     A missing ``mark_incomplete`` method can hide incomplete capture.
     Log that condition as an error.
+    Return False when the call is late (its rollout was frozen or retired), so callers can stay quiet.
     """
     mark = getattr(context.token_sink, "mark_incomplete", None)
     if mark is None:
@@ -515,8 +552,18 @@ async def _mark_incomplete(context: CaptureContext) -> None:
             type(context.token_sink).__name__,
             context.rollout_id,
         )
-        return
+        return True
     try:
         await mark(context.rollout_id, context.model_call_id)
+    except TokenCaptureFrozenError:
+        # The rollout was frozen or retired while this call was in flight, for example an abandoned attempt's
+        # late call. Its verdict is sealed, or nobody will read it, so there is nothing to mark.
+        logger.warning(
+            "Model call %s of rollout %s finished after the capture was frozen or retired; not marking it incomplete.",
+            context.model_call_id,
+            context.rollout_id,
+        )
+        return False
     except Exception:
         logger.warning("Could not mark rollout %s incomplete.", context.rollout_id, exc_info=True)
+    return True

@@ -30,7 +30,10 @@ from nemo_gym.health.checks import (
     CHECK_REGISTRY,
     _bind_policy_call_views,
     _canonical_trajectory,
+    _ended_on_failed_call,
+    _is_context_overflow_rejection,
     _is_failed,
+    _is_failed_attempt,
     _is_successful,
     _normalized_trajectory_calls,
     _replay_identity,
@@ -159,6 +162,9 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         if CheckInput.AGENT_TURNS in spec.reads and not turns_observed:
             unobserved.append(spec.id)
             continue
+        if CheckInput.OBSERVED_MODEL_CALLS in spec.reads and not (model_calls_observed and calls):
+            unobserved.append(spec.id)
+            continue
         binding_input = next(iter(spec.reads & CALL_BINDING_INPUTS), None)
         bindings = owned_bindings if binding_input == CheckInput.OWNED_MODEL_CALLS else turn_bindings
         if binding_input is not None:
@@ -178,12 +184,17 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             or not bindings.complete
             or not bindings.matched_calls
             or not _transcript_tokens(record)[2]
-            or any(call.get("tokens_in") is None or call.get("tokens_out") is None for call in bindings.matched_calls)
+            or any(
+                not _is_failed_attempt(call) and (call.get("tokens_in") is None or call.get("tokens_out") is None)
+                for call in bindings.matched_calls
+            )
         ):
             unobserved.append(spec.id)
             continue
         if spec.id == "model_call_runaway_generation" and any(
-            call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS and call.get("response") is None
+            not _is_context_overflow_rejection(call)
+            and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
+            and call.get("response") is None
             for call in bindings.matched_calls
         ):
             unobserved.append(spec.id)
@@ -217,6 +228,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
     return RolloutDigest(
         task_index=task_index,
         rollout_index=rollout_index,
+        stage_index=record.get("stage_index"),
         rollout_id=rollout_id,
         verdict=verdict,
         findings=findings,
@@ -226,8 +238,12 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         model_calls=len(calls),
         successful_model_calls=sum(_is_successful(call) for call in turn_bindings.matched_calls),
         model_call_errors=len(failed),
+        model_call_errors_usage_unknown=sum(
+            _is_failed_attempt(call) and (call.get("tokens_in") is None or call.get("tokens_out") is None)
+            for call in failed
+        ),
         errors_by_status=dict(errors_by_status),
-        ended_on_error=bool(calls and _is_failed(calls[-1])),
+        ended_on_error=_ended_on_failed_call(calls),
         duplicated_calls=duplicated,
         transcript_prompt_tokens=transcript_prompt,
         transcript_completion_tokens=transcript_completion,
@@ -289,9 +305,9 @@ def _mark_duplicate_identities(digests: list[RolloutDigest], ignored_checks: fro
     if "rollout_duplicate_identity" in ignored_checks:
         return
 
-    grouped: dict[tuple[int | str, int | str], list[RolloutDigest]] = defaultdict(list)
+    grouped: dict[tuple[int | str | None, int | str, int | str], list[RolloutDigest]] = defaultdict(list)
     for digest in digests:
-        grouped[(digest.task_index, digest.rollout_index)].append(digest)
+        grouped[(digest.stage_index, digest.task_index, digest.rollout_index)].append(digest)
 
     for copies in grouped.values():
         if len(copies) < 2:
@@ -407,6 +423,9 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
                     "by_status": dict(sorted(error_statuses.items())),
                     "rollouts_affected": sum(bool(digest.model_call_errors) for digest in digests),
                     "ended_on_error": sum(digest.ended_on_error for digest in digests),
+                    # Failed calls with no finished response and no usage: the token checks skip them,
+                    # and any tokens the server spent on them are counted nowhere else.
+                    "usage_unknown": sum(digest.model_call_errors_usage_unknown for digest in digests),
                 },
                 "duplicated_calls": {
                     "replayed": sum(digest.duplicated_calls for digest in digests),
@@ -424,11 +443,11 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
     }
 
 
-def _sort_key(digest: RolloutDigest) -> tuple[tuple[int, Any], tuple[int, Any]]:
-    def part(value: int | str) -> tuple[int, Any]:
+def _sort_key(digest: RolloutDigest) -> tuple[tuple[int, Any], ...]:
+    def part(value: int | str | None) -> tuple[int, Any]:
         return (0, value) if isinstance(value, int) else (1, str(value))
 
-    return part(digest.task_index), part(digest.rollout_index)
+    return part(digest.task_index), part(digest.rollout_index), part(digest.stage_index)
 
 
 def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output_dir: Path) -> tuple[Path, Path]:
@@ -449,6 +468,8 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
                 "findings": findings,
                 "unobserved": digest.unobserved,
             }
+            if digest.stage_index is not None:
+                row["stage_index"] = digest.stage_index
             handle.write(orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE))
     return summary_path, verdicts_path
 

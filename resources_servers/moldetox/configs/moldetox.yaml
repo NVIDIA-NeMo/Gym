@@ -25,3 +25,11 @@ moldetox_simple_agent:
         type: validation
         jsonl_fpath: resources_servers/moldetox/data/val.jsonl
         license: Creative Commons Attribution 4.0 International
+
+moldetox_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: moldetox_simple_agent

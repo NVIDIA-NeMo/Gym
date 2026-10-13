@@ -14,11 +14,15 @@
 # limitations under the License.
 
 import socket
+from unittest.mock import call, patch
 
 import pytest
 
 from nemo_gym.orchestration.ray_serve_gateway import (
+    MAX_ONGOING_REQUESTS_PER_INSTANCE,
+    PROXY_TIMEOUT,
     build_instance_command,
+    deployment_options,
     free_local_port,
     max_replicas_per_node,
     parse_args,
@@ -91,16 +95,22 @@ def test_parse_args_accepts_gpus_per_node_for_caller_compatibility():
 # ---------------------------------------------------------------------------
 
 
-def test_free_local_port_returns_a_usable_port():
-    port = free_local_port()
-    assert 0 < port < 65536
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("", port))
+@pytest.mark.parametrize("port", [12345, 54321])
+def test_free_local_port_binds_ephemeral_tcp_port_and_closes_socket(port):
+    # The socket is closed on return, so neither uniqueness nor later availability is guaranteed.
+    with patch("nemo_gym.orchestration.ray_serve_gateway.socket.socket") as socket_factory:
+        sock = socket_factory.return_value.__enter__.return_value
+        sock.getsockname.return_value = ("0.0.0.0", port)
 
+        assert free_local_port() == port
 
-def test_free_local_port_returns_distinct_ports_across_calls():
-    ports = {free_local_port() for _ in range(20)}
-    assert len(ports) == 20
+    assert socket_factory.mock_calls == [
+        call(socket.AF_INET, socket.SOCK_STREAM),
+        call().__enter__(),
+        call().__enter__().bind(("", 0)),
+        call().__enter__().getsockname(),
+        call().__exit__(None, None, None),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +135,36 @@ def test_max_replicas_per_node_one_when_footprint_exactly_fills_a_node():
 def test_max_replicas_per_node_one_when_footprint_exceeds_a_node():
     # TP8 x PP2 = 16 GPUs/instance, spans 2 nodes - no other instance's driver may share either node.
     assert max_replicas_per_node(tensor_parallel_size=8, pipeline_parallel_size=2, gpus_per_node=8) == 1
+
+
+# ---------------------------------------------------------------------------
+# deployment_options
+# ---------------------------------------------------------------------------
+
+
+def test_deployment_options_lifts_the_per_instance_request_cap():
+    # Ray Serve defaults max_ongoing_requests to 5, which would cap each vLLM instance at 5
+    # concurrent requests no matter how large its own batch is.
+    args = parse_args(["--model", "/m", "--port", "8000", "--number-of-instances", "6", "--tensor-parallel-size", "8"])
+    options = deployment_options(args)
+    assert options["max_ongoing_requests"] == MAX_ONGOING_REQUESTS_PER_INSTANCE
+    assert MAX_ONGOING_REQUESTS_PER_INSTANCE >= 16384
+
+
+def test_deployment_options_carries_replica_count_and_placement():
+    args = parse_args(
+        ["--model", "/m", "--port", "8000", "--number-of-instances", "4", "--tensor-parallel-size", "2"]
+        + ["--gpus-per-node", "8"]
+    )
+    options = deployment_options(args)
+    assert options["num_replicas"] == 4
+    assert options["max_replicas_per_node"] == 4
+
+
+def test_proxy_timeout_does_not_cut_off_long_requests():
+    # aiohttp's default total timeout is 300 s; a long generation must not be turned into a 500.
+    assert PROXY_TIMEOUT.total is None
+    assert PROXY_TIMEOUT.sock_read is None
 
 
 # ---------------------------------------------------------------------------

@@ -23,3 +23,11 @@ denovo_swe_example_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/denovo_swe/data/example.jsonl
+
+denovo_swe_example_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: denovo_swe_example_agent

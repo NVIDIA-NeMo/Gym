@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock
 import pytest
 from harbor.models.trajectories import Trajectory
 
+from responses_api_agents.harbor_agent_general import app
 from responses_api_agents.harbor_agent_general.app import HarborAgent, HarborVerifyResponse
 
 
@@ -252,3 +253,31 @@ async def test_run_job_rejects_failed_steps_and_invalidates_resume(tmp_path, mon
     else:
         assert Path(await HarborAgent.run_job(config.model_dump(mode="json"), "task")) == trial_dir
         assert result_path.exists()
+
+
+@pytest.fixture
+def agent(monkeypatch: pytest.MonkeyPatch) -> HarborAgent:
+    """An agent built without a server: compute_metrics reads only the rollouts it is handed."""
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+    return HarborAgent.model_construct()
+
+
+def test_compute_metrics_scores_pass_at_k_from_the_verifier_reward(agent: HarborAgent) -> None:
+    """Binary rewards get the combinatorial estimator, continuous ones max-of-k."""
+
+    # Task 0 passed one of two attempts, task 1 neither.
+    metrics = agent.compute_metrics([[{"reward": 1.0}, {"reward": 0.0}], [{"reward": 0.0}, {"reward": 0.0}]])
+    assert metrics["pass@1/accuracy"] == 25.0
+    assert metrics["pass@2/accuracy"] == 50.0
+    assert metrics["pass@1[avg-of-2]/accuracy"] == 25.0
+
+    # Harbor reports a score, not an extracted answer, so there is nothing to take a majority of.
+    assert not any("majority" in key for key in metrics)
+
+    continuous = agent.compute_metrics([[{"reward": 0.3}, {"reward": 0.7}]])
+    assert continuous["pass@2/accuracy"] == 70.0
+
+
+def test_compute_metrics_leaves_an_unscored_rollout_out_of_the_average(agent: HarborAgent) -> None:
+    """A row carrying no reward is a rollout nobody scored, which is not the same as a zero."""
+    assert agent.compute_metrics([[{"reward": 1.0}, {}]])["pass@1/accuracy"] == 100.0

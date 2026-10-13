@@ -142,6 +142,50 @@ def _token_information_from_mapping(value: Dict[str, Any]) -> Optional[TokenIDLo
     return TokenIDLogProbMixin.model_validate(value)
 
 
+def _chat_logprobs_to_responses(logprobs: Any) -> Optional[List[Dict[str, Any]]]:
+    """Chat choice logprobs in the shape ``ResponseOutputText.logprobs`` expects.
+
+    Same field names on both sides; the Responses models require ``bytes`` to be
+    iterable where chat allows null.
+    """
+    content = getattr(logprobs, "content", None)
+    if not content:
+        return None
+
+    def _one(entry: Any) -> Dict[str, Any]:
+        out = entry.model_dump()
+        out["bytes"] = out.get("bytes") or []
+        out["top_logprobs"] = [{**alt, "bytes": alt.get("bytes") or []} for alt in (out.get("top_logprobs") or [])]
+        return out
+
+    return [_one(entry) for entry in content]
+
+
+def _align_logprobs_to_text(
+    logprobs: Optional[List[Dict[str, Any]]], original: str, removed: List[Tuple[int, int]]
+) -> Optional[List[Dict[str, Any]]]:
+    """Keep the token entries that survive removing the ``removed`` character spans.
+
+    Reasoning extraction shortens the output text; its logprobs must shrink with it or
+    they describe different text. The kept positions come from the removal itself, never
+    from searching for the answer text, which may also occur inside the reasoning. If the
+    tokens do not reconstruct ``original`` the alignment is unknowable and the logprobs
+    are dropped rather than misattributed.
+    """
+    if not logprobs or not removed:
+        return logprobs
+    if "".join(e.get("token") or "" for e in logprobs) != original:
+        return None
+    kept, offset = [], 0
+    for entry in logprobs:
+        token_end = offset + len(entry.get("token") or "")
+        inside_removed = any(start <= offset and token_end <= end for start, end in removed)
+        if token_end > offset and not inside_removed:
+            kept.append(entry)
+        offset = token_end
+    return kept or None
+
+
 class ResponsesConverter(BaseModel):
     """Converts between OpenAI Responses API and Chat Completions API formats."""
 
@@ -169,6 +213,13 @@ class ResponsesConverter(BaseModel):
         responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
     ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
         responses_create_params = responses_create_params.model_dump(exclude_none=True, exclude_unset=True)
+        if responses_create_params.get("include") == []:
+            del responses_create_params["include"]
+
+        # Codex serializes include=[] even when no additional fields are requested.
+        # Only the empty list is equivalent to omission; nonempty includes still require Responses.
+        if responses_create_params.get("include") == []:
+            responses_create_params.pop("include")
 
         unsupported_fields = sorted(
             {
@@ -280,8 +331,22 @@ class ResponsesConverter(BaseModel):
 
         text = responses_create_params.pop("text", None)
         if text is not None:
-            if text.get("format") is not None:
-                raise NotImplementedError("Responses text format has no implemented Chat Completions conversion.")
+            text_format = text.get("format")
+            if text_format is not None:
+                format_type = text_format.get("type")
+                if format_type == "json_schema":
+                    json_schema = {"name": text_format["name"], "schema": text_format["schema"]}
+                    for key in ("strict", "description"):
+                        if text_format.get(key) is not None:
+                            json_schema[key] = text_format[key]
+                    responses_create_params["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": json_schema,
+                    }
+                elif format_type == "json_object":
+                    responses_create_params["response_format"] = {"type": "json_object"}
+                elif format_type != "text":
+                    raise NotImplementedError(f"Unsupported Responses text format type {format_type!r}.")
             if text.get("verbosity") is not None:
                 responses_create_params["verbosity"] = text["verbosity"]
 
@@ -507,6 +572,11 @@ class ResponsesConverter(BaseModel):
         See: https://docs.nvidia.com/nemo/gym/main/infrastructure/engineering-notes/responses-api-evolution
         for background on reasoning in the Responses API.
         """
+        if m.get("encrypted_content") or m.get("content"):
+            raise NotImplementedError(
+                "Responses reasoning content/encrypted_content cannot be preserved by this Chat Completions "
+                "conversion; route the request to a model server that passes Responses through."
+            )
         state.assistant_item_buffered = True
         if "summary" in m and m["summary"]:
             texts = [s["text"] for s in m["summary"]]
@@ -657,15 +727,24 @@ class ResponsesConverter(BaseModel):
     # =======================================================
 
     def postprocess_chat_response(self, choice: NeMoGymChoice) -> List[NeMoGymResponseOutputItem]:
-        return self.postprocess_assistant_message_dict(choice.message.model_dump(exclude_none=True))
+        return self.postprocess_assistant_message_dict(
+            choice.message.model_dump(exclude_none=True),
+            logprobs=_chat_logprobs_to_responses(choice.logprobs),
+        )
 
-    def postprocess_assistant_message_dict(self, message_dict: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
+    def postprocess_assistant_message_dict(
+        self, message_dict: Dict[str, Any], *, logprobs: Any = None
+    ) -> List[NeMoGymResponseOutputItem]:
         response_output = []
 
         content = message_dict.get("content") or ""
         refusal = message_dict.get("refusal") or ""
         if self.uses_reasoning_parser:
             reasoning_matches, content = self._extract_reasoning_from_content(content)
+            if reasoning_matches:
+                original = message_dict.get("content") or ""
+                removed = [m.span() for m in self.THINK_TAG_PATTERN.finditer(original)]
+                logprobs = _align_logprobs_to_text(logprobs, original, removed)
         else:
             reasoning_matches = []
         if reasoning_matches:
@@ -690,6 +769,7 @@ class ResponsesConverter(BaseModel):
                         type="output_text",
                         text=content,
                         annotations=[],
+                        logprobs=logprobs,
                     )
                 )
             if refusal:

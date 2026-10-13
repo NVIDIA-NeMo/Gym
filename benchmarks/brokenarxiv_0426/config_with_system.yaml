@@ -20,3 +20,10 @@ brokenarxiv_0426_false_statement_judge_simple_agent:
         jsonl_fpath: benchmarks/brokenarxiv_0426/data/brokenarxiv_0426_withsys.jsonl
         prompt_config: benchmarks/brokenarxiv_0426/prompts/with_system.yaml
         prepare_script: benchmarks/brokenarxiv_0426/prepare.py
+
+brokenarxiv_0426_false_statement_judge_environment_server:
+  _inherit_from: false_statement_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: brokenarxiv_0426_false_statement_judge_simple_agent

@@ -30,3 +30,11 @@ workspace_bench_claude_code_agent:
           jsonl_fpath: benchmarks/workspace_bench/data/workspace_bench_lite.jsonl
           prepare_script: benchmarks/workspace_bench/prepare.py
           num_repeats: 1
+
+workspace_bench_claude_code_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: workspace_bench_claude_code_agent

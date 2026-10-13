@@ -25,3 +25,10 @@ gdp_pdf_benchmark_simple_agent:
         prepare_script: benchmarks/gdp_pdf/prepare.py
         num_repeats: 5
         license: MIT
+
+gdp_pdf_benchmark_simple_environment_server:
+  _inherit_from: gdp_pdf_simple_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: gdp_pdf_benchmark_simple_agent

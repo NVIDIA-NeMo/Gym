@@ -1,0 +1,32 @@
+name: fukuyamabench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: Organic reaction-mechanism prediction over sets B and C, with binary
+  exact-match rewards reported per tier and eight draws per case. Dataset rights remain
+  unresolved.
+modality: text
+licensing: unknown
+authors:
+- Rima Shahbazyan
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+dataset_owner: fukuyamabench_benchmark_agent
+resources_server: fukuyamabench
+agent_server: simple_agent
+datasets:
+- name: fukuyamabench
+  type: benchmark
+  jsonl_fpath: benchmarks/fukuyamabench/data/fukuyamabench_benchmark.jsonl
+  prepare_script: benchmarks/fukuyamabench/prepare.py
+  num_repeats: 8
+model_server: policy_model
+canonical_split: B+C
+prompt_source: prepared
+lifecycle: active
