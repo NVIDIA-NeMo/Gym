@@ -1,0 +1,51 @@
+config_paths:
+  - environments/hermes_reasoning_gym/config.yaml
+  - environments/openclaw_reasoning_gym/config.yaml
+  - environments/opencode_reasoning_gym/config.yaml
+  - environments/pi_reasoning_gym/config.yaml
+
+# Dataset rows are stamped with task_source=reasoning_gym. agent_pool selects
+# exactly one harness before any repeated generations are dispatched.
+agent_pool:
+  reasoning_gym:
+    - hermes_reasoning_gym_agent
+    - openclaw_reasoning_gym_agent
+    - opencode_reasoning_gym_agent
+    - pi_reasoning_gym_agent
+
+# The four included single-harness profiles carry equivalent dataset
+# declarations. Own the data once on their shared resources server so dataset
+# collation does not emit four copies of every task.
+reasoning_gym:
+  resources_servers:
+    reasoning_gym:
+      description: Reasoning Gym tasks routed across Hermes, OpenClaw, OpenCode, and Pi
+      value: Train one policy on several external agent harnesses
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: environments/hermes_reasoning_gym/data/example.jsonl
+        - name: train
+          type: train
+          jsonl_fpath: environments/hermes_reasoning_gym/data/train_knights_knaves.jsonl
+          license: Apache 2.0
+
+hermes_reasoning_gym_agent:
+  responses_api_agents:
+    hermes_agent:
+      datasets: []
+
+openclaw_reasoning_gym_agent:
+  responses_api_agents:
+    openclaw_agent:
+      datasets: []
+
+opencode_reasoning_gym_agent:
+  responses_api_agents:
+    opencode_agent:
+      datasets: []
+
+pi_reasoning_gym_agent:
+  responses_api_agents:
+    pi_agent:
+      datasets: []

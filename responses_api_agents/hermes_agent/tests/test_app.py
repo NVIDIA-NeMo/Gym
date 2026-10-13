@@ -119,6 +119,35 @@ class TestSanity:
         agent = HermesAgent(config=_config(model="Qwen3.6-35B-A3B"), server_client=MagicMock(spec=ServerClient))
         assert agent._model_name() == "Qwen3.6-35B-A3B"
 
+    def test_context_window_is_written_for_preflight_compaction(self) -> None:
+        agent = HermesAgent(
+            config=_config(model="model", context_window=15872),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        built = yaml.safe_load(agent._build_config())
+
+        assert built["model"] == {"default": "model", "context_length": 15872}
+
+    def test_compaction_can_use_an_uncorrelated_model_endpoint(self) -> None:
+        agent = HermesAgent(
+            config=_config(
+                model="model",
+                api_key="test-key",  # pragma: allowlist secret
+                compaction_base_url="http://policy:8000/v1",
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        built = yaml.safe_load(agent._build_config())
+
+        assert built["auxiliary"]["compression"] == {
+            "provider": "custom",
+            "model": "model",
+            "base_url": "http://policy:8000/v1",
+            "api_key": "test-key",  # pragma: allowlist secret
+        }
+
     @pytest.mark.parametrize("with_mcp", [False, True])
     async def test_sandbox_access_selects_runtime_provider(self, monkeypatch, with_mcp) -> None:
         hermes = HermesAgent(

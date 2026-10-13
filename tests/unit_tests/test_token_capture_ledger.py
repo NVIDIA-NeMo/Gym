@@ -10,13 +10,18 @@ fail-closed poisoning.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION
+from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore, _custody_columns
-from nemo_gym.token_id_capture.protocols import CaptureLedger, RolloutRemovalPayload, RolloutRetiredError
+from nemo_gym.token_id_capture.protocols import (
+    CaptureLedger,
+    LineageResolution,
+    RolloutRemovalPayload,
+    RolloutRetiredError,
+)
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, compute_digest
 from nemo_gym.token_id_capture.sink import (
     UNRESOLVED_PARENT_REASON,
@@ -250,6 +255,29 @@ async def test_admission_match_uses_staging_chain_without_wire_prefix(store):
 
 
 @pytest.mark.asyncio
+async def test_admission_retries_a_lookup_that_overlaps_ledger_publication():
+    store = InMemoryLineageStore()
+    await _record_call_1(store)
+    request = [USER_1, ASSISTANT_1, USER_2]
+    committed = await store.resolve("r1", request)
+    assert committed.status == ParentResolutionStatus.RESOLVED
+    resolve = AsyncMock(
+        side_effect=[
+            LineageResolution(ParentResolutionStatus.UNRESOLVED, reason="no_match"),
+            committed,
+        ]
+    )
+
+    with patch.object(store, "resolve", resolve):
+        context = await _admit(store, request)
+
+    assert resolve.await_count == 2
+    assert context.capture_admission is not None
+    assert context.capture_admission.parent_call_id == "c1"
+    assert context.capture_admission.mode == "token_in"
+
+
+@pytest.mark.asyncio
 async def test_staging_chain_grows_across_external_calls(store):
     await _record_call_1(store)
     tokens_2 = TOKENS_1 + [901, 902]
@@ -325,6 +353,36 @@ async def test_ambiguous_siblings_are_unresolved(store):
 
 
 @pytest.mark.asyncio
+async def test_repeated_fingerprint_selects_the_deepest_matching_context(store):
+    """A reasoning-only response may repeat its parent's assistant fingerprint."""
+    await _record_call_1(store)
+    tokens_2 = TOKENS_1 + [901]
+    chain_hash_2 = compute_chain_hash(CHAIN_HASH_1, [901])
+    await store.record(
+        _commit(
+            _call_record(
+                "c2",
+                parent_call_id="c1",
+                prev_len=len(TOKENS_1),
+                delta_len=1,
+                chain_hash=chain_hash_2,
+                cumulative_hash=hash_token_ids(tokens_2),
+            ),
+            [USER_1, ASSISTANT_1, USER_2],
+            [{"role": "assistant", "content": ""}],
+            staging_chain=("r1/c1", "r1/c2"),
+        )
+    )
+
+    match = (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match
+
+    assert match is not None
+    assert match.model_call_id == "c2"
+    assert match.prev_len == len(tokens_2)
+    assert match.staging_chain == ("r1/c1", "r1/c2")
+
+
+@pytest.mark.asyncio
 async def test_commit_ordering_parent_resolvable_only_after_record(store):
     # Before the ledger row exists, the follow-up cannot resolve a parent.
     assert (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match is None
@@ -335,6 +393,70 @@ async def test_commit_ordering_parent_resolvable_only_after_record(store):
     assert list(match.cumulative_token_ids) == []
     assert match.prev_len == len(TOKENS_1)
     assert match.chain_hash == CHAIN_HASH_1
+
+
+@pytest.mark.asyncio
+async def test_file_store_rebases_when_a_known_continuation_changes_context(tmp_path):
+    store = FileLineageStore(tmp_path)
+    missing = await store.resolve("r1", [USER_1, ASSISTANT_SEEDED, USER_2])
+    assert missing.status == ParentResolutionStatus.UNRESOLVED
+    assert missing.reason == "ledger_fingerprint_missing"
+
+    await _record_call_1(store)
+    changed_context = await store.resolve(
+        "r1",
+        [{"role": "user", "content": "changed"}, ASSISTANT_1, USER_2],
+    )
+    assert changed_context.status == ParentResolutionStatus.ROOT
+    assert changed_context.reason == "ledger_context_rebased"
+
+    context = await _admit(
+        store,
+        [{"role": "user", "content": "changed"}, ASSISTANT_1, USER_2],
+    )
+    assert context.capture_admission is not None
+    assert context.capture_admission.mode == "text"
+    assert context.capture_admission.parent_call_id is None
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.failures == []
+
+
+@pytest.mark.asyncio
+async def test_ledger_rebases_when_harness_merges_an_independent_assistant_branch(store):
+    record = _call_record("c1").model_copy(update={"output_fingerprint": assistant_fingerprint([ASSISTANT_1])})
+    await store.record(_commit(record, [USER_1], [ASSISTANT_1]))
+
+    independent_summary = {"role": "assistant", "content": "independent compacted summary"}
+    merged_request = [USER_1, independent_summary, ASSISTANT_1, USER_2]
+    resolution = await store.resolve("r1", merged_request)
+
+    assert resolution.status == ParentResolutionStatus.ROOT
+    assert resolution.reason in {"context_rebased", "ledger_context_rebased"}
+    context = await _admit(store, merged_request)
+    assert context.capture_admission is not None
+    assert context.capture_admission.mode == "text"
+    assert context.capture_admission.parent_call_id is None
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.failures == []
+
+
+@pytest.mark.asyncio
+async def test_ledger_rebases_past_an_assistant_shaped_harness_control_message(store):
+    record = _call_record("c1").model_copy(update={"output_fingerprint": assistant_fingerprint([ASSISTANT_1])})
+    await store.record(_commit(record, [USER_1], [ASSISTANT_1]))
+
+    max_steps_marker = {"role": "assistant", "content": "CRITICAL - MAXIMUM STEPS REACHED"}
+    request = [USER_1, ASSISTANT_1, USER_2, max_steps_marker, USER_3]
+    resolution = await store.resolve("r1", request)
+
+    assert resolution.status == ParentResolutionStatus.ROOT
+    assert resolution.reason in {"context_rebased", "ledger_context_rebased"}
+    context = await _admit(store, request)
+    assert context.capture_admission is not None
+    assert context.capture_admission.mode == "text"
+    assert context.capture_admission.parent_call_id is None
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.failures == []
 
 
 @pytest.mark.asyncio

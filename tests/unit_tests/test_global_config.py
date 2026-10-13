@@ -2072,6 +2072,7 @@ class TestConfigLoadErrors:
                 canonical: {},
                 "agent_name": legacy,
                 "agent_map": {"source": legacy},
+                "agent_pool": {"source": [legacy]},
                 "fan_out": {"source": [legacy]},
             }
         )
@@ -2082,6 +2083,7 @@ class TestConfigLoadErrors:
         assert config.agent_name == canonical
         assert config.agent_map.source == canonical
         assert config.agent_map[legacy] == canonical
+        assert config.agent_pool.source == [canonical]
         assert config.fan_out.source == [canonical]
         assert f"`{legacy}` -> `{canonical}`" in caplog.text
 

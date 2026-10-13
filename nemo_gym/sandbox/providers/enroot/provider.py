@@ -151,6 +151,10 @@ class EnrootCreateConfig:
     sqsh_cache_dir: str | None = None
     rw: bool = True
     remap_root: bool = False
+    # Isolate the sandbox process tree behind its own PID namespace. This is
+    # the secure default for direct host execution. Nested runtimes whose
+    # outer container forbids mounting a fresh /proc may disable it explicitly.
+    unshare_pid: bool = True
     # Clear the Docker ENTRYPOINT before launching the init so images with a
     # non-shell entrypoint (e.g. ENTRYPOINT ["python"]) don't wrap the init
     # command and exit immediately. Set to False only when the image entrypoint
@@ -256,7 +260,12 @@ def _translate_docker_uri(image: str) -> str:
 def _resource_gpu_env(resources: SandboxResources) -> dict[str, str]:
     """Map a neutral GPU request onto NVIDIA_VISIBLE_DEVICES for the enroot hook."""
     if not resources.gpu:
-        return {}
+        # Enroot inherits NVIDIA_VISIBLE_DEVICES from its parent process.  That is
+        # surprising (and can expose GPUs) when the sandbox did not request one;
+        # it also makes the NVIDIA hook run inside a GPU-enabled Pyxis parent.
+        # ``void`` is the NVIDIA runtime's documented opt-out value and causes
+        # Enroot's 98-nvidia hook to exit before invoking nvidia-container-cli.
+        return {"NVIDIA_VISIBLE_DEVICES": "void"}
     return {"NVIDIA_VISIBLE_DEVICES": ",".join(str(i) for i in range(resources.gpu))}
 
 
@@ -324,11 +333,15 @@ class EnrootProvider:
             "ENROOT_DATA_PATH": data_path,
             "ENROOT_CACHE_PATH": cache_path,
             "ENROOT_RUNTIME_PATH": runtime_path,
+        }
+        if cfg.unshare_pid:
             # Isolate each container's /proc so sibling sandboxes and host
             # processes are not visible inside the container. Stock enroot
-            # defaults this to "no"; we always force it on.
-            "ENROOT_UNSHARE_PID": "yes",
-        }
+            # defaults this to off.
+            self._enroot_env["ENROOT_UNSHARE_PID"] = "yes"
+        else:
+            # Enroot treats any non-empty value (including "no") as enabled.
+            self._enroot_env.pop("ENROOT_UNSHARE_PID", None)
         # Serializes concurrent imports of the same image within this process.
         self._import_locks: dict[str, asyncio.Lock] = {}
 
@@ -370,7 +383,12 @@ class EnrootProvider:
             return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
             return return_code, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
 
-    async def _start_detached(self, argv: list[str]) -> tuple[Any, IO[bytes], IO[bytes]]:
+    async def _start_detached(
+        self,
+        argv: list[str],
+        *,
+        env: Mapping[str, str] | None = None,
+    ) -> tuple[Any, IO[bytes], IO[bytes]]:
         """Launch the long-lived ``enroot start`` init without awaiting its exit.
 
         ``enroot start`` does not daemonize — it stays in the foreground for the
@@ -387,7 +405,7 @@ class EnrootProvider:
             stdout=out_f,
             stderr=err_f,
             start_new_session=True,
-            env=self._enroot_env,
+            env=self._enroot_env if env is None else env,
         )
         return proc, out_f, err_f
 
@@ -503,7 +521,12 @@ class EnrootProvider:
         init_command = f"{self._create_config.init_command}  # {name}"
         argv += [name, "sh", "-c", init_command]
 
-        proc, out_f, err_f = await self._start_detached(argv)
+        # The NVIDIA Enroot hook reads its own process environment before the
+        # container environment assembled by ``-e``. Override the inherited
+        # value here as well, otherwise a CPU sandbox launched by a GPU-enabled
+        # trainer still executes nvidia-container-cli.
+        launch_env = {**self._enroot_env, **_resource_gpu_env(resources)}
+        proc, out_f, err_f = await self._start_detached(argv, env=launch_env)
         instance = _EnrootInstance(
             name=name,
             sqsh_path=sqsh_path,
@@ -545,14 +568,13 @@ class EnrootProvider:
                 raise EnrootCreateError(
                     f"enroot start exited early (code={instance.proc.returncode}) for {instance.name!r}: {stderr}"
                 )
-            pid, _running = await self._lookup_container(instance.name)
-            if pid is None:
+            pid, present = await self._lookup_container(instance.name)
+            if pid is None and self._proc_scan_allowed(present):
                 # Nested-in-pyxis fallback: when enroot runs as real root
-                # (ENROOT_ALLOW_SUPERUSER) it does not create a per-container user
-                # namespace, so `enroot list` shows the container as present but cannot
-                # map a PID to it. The detached `enroot start` stays in the foreground
-                # for the container lifetime, so its init is a descendant — find it by
-                # walking the start process's tree for the init command.
+                # (ENROOT_ALLOW_SUPERUSER) it may omit the named container entirely or
+                # show it without a PID. When PID namespaces are explicitly disabled,
+                # scan even if `enroot list` could not associate the rootfs name. The
+                # unique marker prevents matching another concurrent sandbox.
                 pid = await loop.run_in_executor(
                     None,
                     _find_container_init_pid,
@@ -568,6 +590,10 @@ class EnrootProvider:
                     f"{self._create_config.start_timeout_s:g}s: {stderr}"
                 )
             await asyncio.sleep(self._create_config.start_poll_s)
+
+    def _proc_scan_allowed(self, present: bool) -> bool:
+        """Whether container discovery may fall back to scanning ``/proc``."""
+        return present or not self._create_config.unshare_pid
 
     @staticmethod
     def _read_temp(handle: IO[bytes]) -> str:

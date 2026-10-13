@@ -2154,10 +2154,11 @@ def test_separate_model_worker_instances_share_committed_lineage(tmp_path):
 
 
 def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
-    """Reject lineage across a changed system prompt.
+    """Break lineage across a changed system prompt and capture a new root.
 
     Anthropic sends the system prompt beside the message list.
-    Reusing the old prefix would continue instructions that the harness did not send.
+    Reusing the old prefix would continue instructions that the harness did not
+    send, but the second call's full prompt tokens are still safe as a text root.
     """
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     store = TokenCaptureStore(tmp_path)
@@ -2180,7 +2181,7 @@ def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
     entries = store.read_entries("sys0")
     assert len(entries) == 2
     assert entries[1].parent_call_id is None
-    assert entries[1].parent_resolution == ParentResolutionStatus.UNRESOLVED
+    assert entries[1].parent_resolution == ParentResolutionStatus.ROOT
 
     # Unchanged instructions preserve the link.
     call("sys1", "SYSTEM ONE", first)
@@ -2237,7 +2238,7 @@ async def test_lineage_lookup_failure_is_persisted_as_unresolved(tmp_path):
 
 
 def test_a_changed_tool_schema_breaks_the_link():
-    """Reject lineage across a changed tool schema."""
+    """Break lineage across a changed tool schema and start a text root."""
     turn = [{"role": "user", "content": "hi"}, _ASSISTANT_TURN]
     with_search = _request_messages({"messages": turn, "tools": [{"name": "search"}]})
     with_bash = _request_messages({"messages": turn, "tools": [{"name": "bash"}]})
@@ -2247,9 +2248,7 @@ def test_a_changed_tool_schema_breaks_the_link():
     assert (
         lineage.resolve(with_search + [{"role": "user", "content": "next"}]).status == ParentResolutionStatus.RESOLVED
     )
-    assert (
-        lineage.resolve(with_bash + [{"role": "user", "content": "next"}]).status == ParentResolutionStatus.UNRESOLVED
-    )
+    assert lineage.resolve(with_bash + [{"role": "user", "content": "next"}]).status == ParentResolutionStatus.ROOT
 
 
 def test_the_envelope_does_not_change_the_lookup_key():
@@ -2772,15 +2771,15 @@ def test_digest_and_cum_len_are_filled_for_every_entry():
     assert normal.cum_len == 3 and normal.digest == compute_digest([1, 2, 3])
 
 
-def test_a_rewritten_conversation_does_not_resolve_to_the_original_call():
-    """Reject an assistant match when the earlier conversation changed."""
+def test_a_rewritten_conversation_starts_a_new_text_root():
+    """Do not reuse a parent when earlier context changed."""
     lineage = RolloutLineage()
     original = [{"role": "user", "content": "solve task ALPHA"}]
     lineage.record("call-1", original + [_ASSISTANT_TURN], cum_tokens=[1, 2, 3], digest="d1")
 
     compacted = [{"role": "user", "content": "SUMMARY: we were working on task BETA"}, _ASSISTANT_TURN]
 
-    assert lineage.resolve(compacted).status == ParentResolutionStatus.UNRESOLVED
+    assert lineage.resolve(compacted).status == ParentResolutionStatus.ROOT
 
 
 def test_appending_a_tool_result_still_resolves():
@@ -2915,6 +2914,63 @@ def test_reasoning_the_harness_drops_does_not_break_resolution():
     resolved = lineage.resolve(sent + served)
     assert resolved.status == ParentResolutionStatus.RESOLVED
     assert resolved.match is not None and resolved.match.model_call_id == "call-1"
+
+
+def test_wrapped_reasoning_the_chat_harness_drops_does_not_break_resolution():
+    """Resolve a tool continuation when Chat omits synthesized reasoning."""
+    sent = [{"role": "user", "content": "q"}]
+    tool_call = {"id": "tool-1", "function": {"name": "lookup", "arguments": '{"q":"x"}'}}
+    served = {"role": "assistant", "content": "<think>private reasoning</think>", "tool_calls": [tool_call]}
+    echoed = {"role": "assistant", "content": "", "tool_calls": [tool_call]}
+    lineage = RolloutLineage()
+    lineage.record("call-1", sent + [served], cum_tokens=[1, 2], digest="d", context_len=len(sent))
+
+    resolved = lineage.resolve(sent + [echoed, {"role": "tool", "tool_call_id": "tool-1", "content": "result"}])
+
+    assert resolved.status == ParentResolutionStatus.RESOLVED
+    assert resolved.match is not None and resolved.match.model_call_id == "call-1"
+
+    changed = {**echoed, "tool_calls": [{**tool_call, "function": {**tool_call["function"], "arguments": "{}"}}]}
+    assert lineage.resolve(sent + [changed]).status == ParentResolutionStatus.UNRESOLVED
+
+
+def test_openclaw_tool_call_id_rewrite_does_not_break_resolution():
+    """Resolve the lossless vLLM tool-call ID rewrite observed in OpenClaw."""
+    sent = [{"role": "user", "content": "q"}]
+    served_id = "chatcmpl-tool-863127ed64b40525"
+    echoed_id = "chatcmpltool863127ed64b40525"
+    served = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": served_id,
+                "function": {"name": "exec", "arguments": '{"command":"whoami"}'},
+            }
+        ],
+    }
+    echoed = {
+        **served,
+        "tool_calls": [{**served["tool_calls"][0], "id": echoed_id}],
+    }
+    lineage = RolloutLineage()
+    lineage.record("call-1", sent + [served], cum_tokens=[1, 2], digest="d", context_len=len(sent))
+
+    resolved = lineage.resolve(sent + [echoed, {"role": "tool", "tool_call_id": echoed_id, "content": "root"}])
+
+    assert resolved.status == ParentResolutionStatus.RESOLVED
+    assert resolved.match is not None and resolved.match.model_call_id == "call-1"
+
+    changed = {
+        **echoed,
+        "tool_calls": [
+            {
+                **echoed["tool_calls"][0],
+                "id": "chatcmpltoolffffffffffffffff",
+            }
+        ],
+    }
+    assert lineage.resolve(sent + [changed]).status == ParentResolutionStatus.UNRESOLVED
 
 
 @pytest.mark.parametrize(

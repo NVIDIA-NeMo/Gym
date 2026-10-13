@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+anyterminal_opencode:
+  responses_api_agents:
+    anyterminal_agent:
+      entrypoint: app.py
+      domain: coding
+      description: Terminal Bench run by OpenCode natively inside the task container.
+      value: Evaluate terminal-task capabilities on Terminal Bench with any Gym agent.
+
+      agent_server_module: responses_api_agents.opencode_agent.app
+      agent_server_class: OpenCodeAgent
+      agent_config_class: OpenCodeAgentConfig
+      agent_kwargs:
+        model: model
+        openai_api_key: EMPTY  # pragma: allowlist secret
+        workspace_root: /tmp/opencode
+        repo_dir: "."
+        thinking: true
+        timeout: 3600
+        setup_timeout: 300
+        extra_args:
+          - --dangerously-skip-permissions
+        opencode_version: 1.17.11
+        system_prompt: Inspect and edit the current task workspace, run relevant checks, and leave the requested solution applied.
+        opencode_config:
+          permission:
+            bash: allow
+            edit: allow
+            webfetch: allow
+
+      container_formatter: "docker://{docker_image}"
+      concurrency: 6
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyterminal_agent/data/terminal_bench.jsonl
+
+anyterminal_opencode_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: anyterminal_opencode

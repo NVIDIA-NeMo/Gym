@@ -55,6 +55,7 @@ import orjson
 from nemo_gym.token_id_capture.fingerprint import (
     FINGERPRINT_VERSION,
     assistant_fingerprint,
+    assistant_item_fingerprints,
     conversation_digest,
 )
 from nemo_gym.token_id_capture.fingerprint import (
@@ -255,6 +256,7 @@ class RolloutLineage:
     """Keep an append-only per-rollout call index."""
 
     by_fingerprint: dict[str, list[str]] = field(default_factory=dict)
+    output_fingerprints: set[str] = field(default_factory=set)
     by_call_id: dict[str, LineageNode] = field(default_factory=dict)
     # Cache the cumulative token count for memory bounds.
     total_tokens: int = 0
@@ -270,11 +272,28 @@ class RolloutLineage:
             return ParentResolutionStatus.ROOT, None, ""
         # dict.fromkeys: a call id indexed twice (e.g. by racing refreshes) is one candidate.
         call_ids = list(dict.fromkeys(self.by_fingerprint.get(fingerprint) or []))
+        if not call_ids:
+            item_fingerprints = assistant_item_fingerprints(messages)
+            if any(item_fingerprint in self.output_fingerprints for item_fingerprint in item_fingerprints):
+                # The harness retained a response we served but merged it with
+                # another model-authored branch or appended an assistant-shaped
+                # control message (for example OpenCode's maximum-step marker).
+                # No single token chain covers that prompt. Capture it as a
+                # fresh text root instead of poisoning the rollout or reusing
+                # an invalid prefix.
+                return ParentResolutionStatus.ROOT, None, "context_rebased"
         candidates = [
             node
             for call_id in call_ids
             if (node := self.by_call_id.get(call_id)) is not None and self._continues(node, messages)
         ]
+        if candidates:
+            # The same assistant fingerprint can recur when a call emits only
+            # reasoning (which harnesses may omit). Prefer the deepest proven
+            # context; it is the most recent parent represented by this
+            # request. Equally deep siblings remain ambiguous below.
+            deepest_context = max(node.context_len for node in candidates)
+            candidates = [node for node in candidates if node.context_len == deepest_context]
         if len(candidates) > 1:
             # Calls with identical cumulative tokens are interchangeable.
             # Keep different token sequences unresolved.
@@ -282,6 +301,13 @@ class RolloutLineage:
             if len(digests) == 1 and candidates[0].digest:
                 candidates = [min(candidates, key=lambda node: node.call_id)]
         if len(candidates) != 1:
+            if call_ids and not candidates:
+                # The harness retained a model-authored turn that we served,
+                # but rewrote an earlier prompt prefix (for example a dynamic
+                # timestamp or a final-answer context reset). Reusing parent
+                # tokens would be invalid. Starting a new text root is safe:
+                # the rewritten request is captured as prompt and masked.
+                return ParentResolutionStatus.ROOT, None, "context_rebased"
             return ParentResolutionStatus.UNRESOLVED, None, "no_match" if not candidates else "ambiguous"
         return ParentResolutionStatus.RESOLVED, candidates[0], ""
 
@@ -356,6 +382,9 @@ class RolloutLineage:
         self.total_tokens += node.cum_len
         self.by_call_id[entry.model_call_id] = node
         self.by_fingerprint.setdefault(entry.continuation_fingerprint, []).append(entry.model_call_id)
+        output_fingerprint = assistant_fingerprint(list(entry.output_items))
+        if output_fingerprint:
+            self.output_fingerprints.add(output_fingerprint)
 
     def record(
         self,
@@ -369,6 +398,7 @@ class RolloutLineage:
         parent_staging_chain: list[str] | None = None,
         cum_len: int | None = None,
         chain_hash: str = "",
+        output_fingerprint: str | None = None,
     ) -> None:
         """Index a completed call by its continuation fingerprint.
 
@@ -400,6 +430,8 @@ class RolloutLineage:
         fingerprint = assistant_fingerprint(messages)
         if fingerprint:
             self.by_fingerprint.setdefault(fingerprint, []).append(call_id)
+        if output_fingerprint:
+            self.output_fingerprints.add(output_fingerprint)
 
 
 class LineageIndex:
@@ -511,6 +543,7 @@ class InMemoryLineageStore:
             parent_staging_chain=list(commit.staging_chain),
             cum_len=record.cum_len,
             chain_hash=record.chain_hash,
+            output_fingerprint=record.output_fingerprint,
         )
         rows.append(row)
 
@@ -932,15 +965,17 @@ class FileLineageStore(IncrementalLineageStore):
         resolution = super()._resolve(rollout_id, request_items)
         if resolution.status != ParentResolutionStatus.UNRESOLVED:
             return resolution
-        match = self._resolve_row(rollout_id, request_items)
+        match, reason = self._resolve_row(rollout_id, request_items)
         if match is not None:
             return LineageResolution(ParentResolutionStatus.RESOLVED, match=match)
-        return resolution
+        if reason == "ledger_context_rebased":
+            return LineageResolution(ParentResolutionStatus.ROOT, reason=reason)
+        return LineageResolution(ParentResolutionStatus.UNRESOLVED, reason=reason or resolution.reason)
 
-    def _resolve_row(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None:
+    def _resolve_row(self, rollout_id: str, request_items: list[dict]) -> tuple[LineageMatch | None, str]:
         fingerprint = assistant_fingerprint(request_items)
         if not fingerprint:
-            return None
+            return None, "empty_fingerprint"
         with self._locked(rollout_id):
             # Failure rows and fingerprints from incompatible algorithms cannot resolve as parents.
             records = [
@@ -949,22 +984,61 @@ class FileLineageStore(IncrementalLineageStore):
                 if record.get("fingerprint") == fingerprint
                 and record.get("fingerprint_version") == FINGERPRINT_VERSION
             ]
-        if len(records) != 1:
-            return None
-        record = records[0]
-        context_len = int(record["context_len"])
-        if len(request_items) < context_len:
-            return None
-        if conversation_digest(request_items[:context_len]) != record["context_digest"]:
-            return None
-        return LineageMatch(
-            model_call_id=str(record["model_call_id"]),
-            # Token-free custody rows omit the column; legacy rows keep it.
-            cumulative_token_ids=tuple(int(token) for token in record.get("cumulative_token_ids") or ()),
-            digest=str(record["digest"]),
-            staging_chain=tuple(record.get("staging_chain") or []),
-            prev_len=int(record.get("cum_len") or 0),
-            chain_hash=str(record.get("chain_hash") or ""),
+        if not records:
+            item_fingerprints = set(assistant_item_fingerprints(request_items))
+            if item_fingerprints:
+                with self._locked(rollout_id):
+                    output_matches = [
+                        record
+                        for record in self._read(rollout_id)
+                        if record.get("output_fingerprint") in item_fingerprints
+                        and record.get("fingerprint_version") == FINGERPRINT_VERSION
+                    ]
+                if output_matches:
+                    # At least one assistant item is ours, but the harness
+                    # merged it with another assistant branch or appended its
+                    # own assistant-shaped control message. Reusing either
+                    # branch's token prefix would be wrong; a text root is the
+                    # safe continuation boundary.
+                    return None, "ledger_context_rebased"
+            return None, "ledger_fingerprint_missing"
+        candidates = []
+        for record in records:
+            context_len = int(record["context_len"])
+            if len(request_items) >= context_len and (
+                conversation_digest(request_items[:context_len]) == record["context_digest"]
+            ):
+                candidates.append(record)
+        if not candidates:
+            # The fingerprint proves that at least one model-authored turn
+            # came from this rollout, while the digest proves its token prefix
+            # changed. Admit a parentless text capture instead of poisoning
+            # the whole rollout or reusing an invalid token prefix.
+            return None, "ledger_context_rebased"
+        deepest_context = max(int(record["context_len"]) for record in candidates)
+        candidates = [record for record in candidates if int(record["context_len"]) == deepest_context]
+        if len(candidates) > 1:
+            # Equivalent custody rows are interchangeable. Different token
+            # chains with the same witnesses stay fail-closed as ambiguous.
+            custody = {
+                (record.get("digest"), record.get("cum_len"), record.get("chain_hash")) for record in candidates
+            }
+            if len(custody) == 1 and candidates[0].get("digest"):
+                candidates = [min(candidates, key=lambda record: str(record["model_call_id"]))]
+        if len(candidates) != 1:
+            return None, "ledger_fingerprint_ambiguous"
+        record = candidates[0]
+        return (
+            LineageMatch(
+                model_call_id=str(record["model_call_id"]),
+                # Token-free custody rows omit the column; legacy rows keep it.
+                cumulative_token_ids=tuple(int(token) for token in record.get("cumulative_token_ids") or ()),
+                digest=str(record["digest"]),
+                staging_chain=tuple(record.get("staging_chain") or []),
+                prev_len=int(record.get("cum_len") or 0),
+                chain_hash=str(record.get("chain_hash") or ""),
+            ),
+            "",
         )
 
     async def record(self, commit: CaptureLedgerCommit) -> None:

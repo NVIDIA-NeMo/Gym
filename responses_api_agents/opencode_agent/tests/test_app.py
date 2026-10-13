@@ -44,6 +44,8 @@ from responses_api_agents.opencode_agent.app import (
     OpenCodeAgent,
     OpenCodeAgentConfig,
     OpenCodeAgentRunRequest,
+    _communicate_with_turn_limit,
+    _completed_root_model_turns,
     _extract_instruction,
     _parse_opencode_session,
     parse_opencode_session,
@@ -126,6 +128,63 @@ class TestSanity:
     def test_semaphore_initialized(self) -> None:
         agent = _make_agent(concurrency=4)
         assert agent.sem._value == 4
+
+
+class TestTurnLimit:
+    def test_counts_completed_root_turns_including_compaction(self, tmp_path: Path) -> None:
+        completed = {"role": "assistant", "agent": "build", "time": {"created": 1, "completed": 2}}
+        db = _session_db(
+            tmp_path,
+            [
+                ("root", completed, []),
+                (
+                    "root",
+                    {"role": "assistant", "agent": "compaction", "summary": True, "time": {"completed": 3}},
+                    [],
+                ),
+                ("child", completed, []),
+                ("root", {"role": "assistant", "agent": "build", "time": {"created": 4}}, []),
+                ("root", "user", []),
+            ],
+            sessions=[("root", None), ("child", "root")],
+        )
+
+        assert _completed_root_model_turns(db) == 2
+
+    async def test_committed_turn_cap_terminates_without_timeout(self, tmp_path: Path) -> None:
+        class Process:
+            returncode = None
+
+            def __init__(self) -> None:
+                self.finished = asyncio.Event()
+                self.terminated = False
+                self.killed = False
+
+            async def communicate(self):
+                await self.finished.wait()
+                return b"", b"cap stderr"
+
+            def terminate(self) -> None:
+                self.terminated = True
+                self.returncode = -15
+                self.finished.set()
+
+            def kill(self) -> None:
+                self.killed = True
+                self.returncode = -9
+                self.finished.set()
+
+        process = Process()
+        with patch("responses_api_agents.opencode_agent.app._completed_root_model_turns", return_value=17) as count:
+            stderr, timed_out, turn_limit_reached = await _communicate_with_turn_limit(
+                process, tmp_path / "opencode.db", timeout=1, max_model_turns=17
+            )
+
+        assert stderr == b"cap stderr"
+        assert not timed_out
+        assert turn_limit_reached
+        assert process.terminated and not process.killed
+        count.assert_called_once()
 
 
 class TestExtractInstruction:
@@ -519,6 +578,24 @@ class TestEnv:
         assert provider["options"]["baseURL"] == "http://model/v1"
         assert provider["models"]["Qwen3.6-35B-A3B"]["limit"]["output"] == 131072
 
+    def test_model_server_emits_optional_input_limit_for_compaction(self) -> None:
+        agent = _make_agent(
+            model="model",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            context_window=16384,
+            max_input_tokens=11776,
+            max_output_tokens=4096,
+        )
+
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            config = agent._build_opencode_config()
+
+        assert config["provider"]["nemo"]["models"]["model"]["limit"] == {
+            "context": 16384,
+            "input": 11776,
+            "output": 4096,
+        }
+
     def test_model_server_replayed_reasoning_is_accepted_by_gym_chat_completions(self) -> None:
         agent = _make_agent(model="m", model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
         with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
@@ -711,6 +788,59 @@ class TestRepoDir:
         assert "agent_artifact_unavailable" in {gap.code for gap in observations.gaps}
         assert "turns_unavailable" in {gap.code for gap in trajectory.gaps}
         assert repo_dir.is_dir()
+        assert not workspace.exists()
+
+    async def test_turn_cap_preserves_committed_output_and_marks_invocation(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        repo_dir = tmp_path / "repo"
+
+        class Process:
+            returncode = None
+
+            def __init__(self) -> None:
+                self.finished = asyncio.Event()
+
+            async def communicate(self):
+                await self.finished.wait()
+                return b"", b""
+
+            def terminate(self) -> None:
+                self.returncode = -15
+                self.finished.set()
+
+            def kill(self) -> None:
+                self.returncode = -9
+                self.finished.set()
+
+        process = Process()
+
+        async def create_process(*args, **kwargs):
+            db_dir = workspace / ".opencode-data" / "opencode"
+            db_dir.mkdir(parents=True)
+            messages = [
+                (
+                    {"role": "assistant", "agent": "build", "time": {"created": i, "completed": i + 1}},
+                    [{"type": "text", "text": "final answer" if i == 16 else f"turn {i + 1}"}],
+                )
+                for i in range(17)
+            ]
+            _session_db(db_dir, messages)
+            return process
+
+        agent = _make_agent(repo_dir=str(repo_dir), max_model_turns=17)
+        with (
+            patch.object(agent, "_workspace_root", return_value=workspace),
+            patch(
+                "responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec",
+                side_effect=create_process,
+            ),
+        ):
+            output, _, _, observations = await agent._run_opencode("fix the issue", None)
+
+        assert output[-1].content[0].text == "final answer"
+        [invocation] = _invocations(observations)
+        assert invocation.status == "incomplete"
+        assert invocation.stop_reason == "max_iterations"
         assert not workspace.exists()
 
 

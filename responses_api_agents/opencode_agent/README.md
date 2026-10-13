@@ -112,6 +112,14 @@ preserved; otherwise the temporary workspace is removed after the call. A local
 working directory is not filesystem isolation. Existing sandboxed benchmarks keep
 using `opencode_sandboxed_agent` directly; there is no bridge or execution-mode flag.
 
+Local calls can set `max_model_turns` to bound completed root-agent model turns.
+Compaction summaries consume this total-call budget, while subagent turns do not.
+When the limit is reached, Gym terminates the CLI only after the turn is committed,
+parses the persisted output and token usage, and records
+`stop_reason=max_iterations`. When pairing the limit with OpenCode's native
+`agent.build.steps: N`, allow for expected compactions if all `N` working turns
+must remain available; `N + 1` is sufficient only when no compaction is expected.
+
 ## Configuration compatibility
 
 The shipped YAML now uses `model: ${policy_model_name}`, `thinking: true` (the class

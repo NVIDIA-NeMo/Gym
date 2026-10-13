@@ -9,12 +9,21 @@ anyterminal_hermes:
       agent_server_module: responses_api_agents.hermes_agent.app
       agent_server_class: HermesAgent
       agent_config_class: HermesAgentConfig
+      # Hermes accepts temperature on the request; max_output_tokens is adapted
+      # to its max_tokens config and unsupported fields such as top_p are omitted.
+      agent_request_sampling_fields:
+        - temperature
       agent_kwargs:
+        model: model
         max_turns: 90
         terminal_backend: local
         terminal_timeout: 180
         compression_enabled: true
         compression_threshold: 0.85
+        # Match the 16K training backend with headroom for one generated token.
+        # Hermes otherwise assumes a much larger unknown-model context and only
+        # learns the real boundary after an avoidable HTTP 400.
+        context_window: 15872
 
       container_formatter: "docker://{docker_image}"
 

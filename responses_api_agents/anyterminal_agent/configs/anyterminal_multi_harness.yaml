@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - responses_api_agents/anyterminal_agent/configs/anyterminal_opencode.yaml
+  - responses_api_agents/anyterminal_agent/configs/anyterminal_openclaw.yaml
+  - responses_api_agents/anyterminal_agent/configs/anyterminal_pi.yaml
+  - responses_api_agents/anyterminal_agent/configs/anyterminal_hermes.yaml
+
+# The dataset has a neutral source name. Callers choose the routing behavior:
+# use agent_pool.anyterminal_multi_harness to select one harness per task, or
+# fan_out.anyterminal_multi_harness to run every task through every harness.
+
+anyterminal_opencode:
+  responses_api_agents:
+    anyterminal_agent:
+      datasets: []
+
+anyterminal_openclaw:
+  responses_api_agents:
+    anyterminal_agent:
+      datasets: []
+
+anyterminal_pi:
+  responses_api_agents:
+    anyterminal_agent:
+      datasets: []
+
+anyterminal_hermes:
+  responses_api_agents:
+    anyterminal_agent:
+      datasets: []
+
+# Routing-only dataset owner. Its runtime fields mirror Hermes so an un-routed
+# row still has a valid fallback, but normal multi-harness runs replace it with
+# one or all of the four explicitly named harnesses above.
+anyterminal_multi_harness:
+  # Copy rather than inherit: Hermes must remain available as one of the
+  # explicit fan-out destinations.
+  _copy: anyterminal_hermes
+  responses_api_agents:
+    anyterminal_agent:
+      description: Shared Terminal-Bench source for multi-harness routing.
+      value: Route one Terminal-Bench dataset across multiple Gym agents.
+      datasets:
+        - name: terminal_bench_multi_harness
+          type: train
+          jsonl_fpath: responses_api_agents/anyterminal_agent/data/terminal_bench.jsonl
+          license: Apache 2.0
+
+anyterminal_multi_harness_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: anyterminal_multi_harness

@@ -11,7 +11,7 @@ anyterminal_openclaw:
       agent_config_class: OpenClawAgentConfig
       agent_kwargs:
         model: model
-        openclaw_version: "2026.6.11"
+        openclaw_version: "2026.6.35"
         timeout: 3600
         setup_timeout: 1200
         thinking: "off"
@@ -20,8 +20,50 @@ anyterminal_openclaw:
           agents:
             defaults:
               workspace: "."
+              # Terminal-Bench supplies the complete task in the user turn. Do not create or
+              # inject OpenClaw's generic workspace bootstrap files or startup-memory prelude;
+              # their fixed prompt can exhaust a training model's input budget before the first
+              # policy call.
+              skipBootstrap: true
+              contextInjection: never
+              startupContext:
+                enabled: false
+              # OpenClaw defaults to a 20k-token compaction reserve, which leaves no usable
+              # prompt budget for the 15,872-token training context. Keep one policy turn in
+              # reserve and avoid an extra agentic memory-flush call before compaction.
+              compaction:
+                reserveTokens: 4096
+                reserveTokensFloor: 4096
+                keepRecentTokens: 4096
+                memoryFlush:
+                  enabled: false
+                postCompactionSections: []
+              # Terminal commands such as package installation can emit tens of thousands of
+              # characters. Bound each retained result so a single tool call cannot force an
+              # otherwise healthy rollout through compaction.
+              contextLimits:
+                toolResultMaxChars: 4000
+              # An explicit empty filter removes bundled skills from both discovery and the
+              # system prompt. The global zero limits below defend the same invariant if the
+              # selected agent id cannot be resolved and the filter fallback changes upstream.
+              skills: []
+          skills:
+            limits:
+              maxSkillsInPrompt: 0
+              maxSkillsPromptChars: 0
+          # The terminal harness only uses the built-in exec tool. Loading unrelated browser,
+          # canvas, memory, phone, and voice plugins adds startup latency and prompt material.
+          plugins:
+            enabled: false
           tools:
-            profile: coding
+            # Keep the initial tool schema below the policy context limit. Terminal-Bench only
+            # needs a shell; the broad coding profile also enables web, memory, sessions, cron,
+            # media, and planning tools whose schemas can overflow before the first model call.
+            profile: minimal
+            alsoAllow:
+              - exec
+            deny:
+              - session_status
 
       container_formatter: "docker://{docker_image}"
 
