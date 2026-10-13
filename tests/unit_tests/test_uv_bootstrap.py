@@ -3,7 +3,9 @@
 
 """The uv build a harness uploads is chosen for the sandbox's OS, architecture and C library."""
 
+import asyncio
 import tarfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -97,6 +99,37 @@ async def test_other_platforms_download_the_matching_musl_build_once(monkeypatch
     assert first == second == tmp_path / "0.12.3" / "x86_64-unknown-linux-musl" / "uv"
     assert musl == tmp_path / "0.12.3" / "aarch64-unknown-linux-musl" / "uv"
     assert downloads == [("0.12.3", "x86_64-unknown-linux-musl"), ("0.12.3", "aarch64-unknown-linux-musl")]
+
+
+async def test_concurrent_cold_cache_calls_share_one_download(monkeypatch, tmp_path):
+    _host(monkeypatch, machine="aarch64")
+    started = threading.Event()
+    release = threading.Event()
+    downloads: list[tuple[str, str]] = []
+
+    def slow_download(version, target, destination):
+        # Runs in the worker thread like the real download. It is held open until every other caller
+        # has queued behind the lock, so none of them can observe a cold cache after it finishes.
+        downloads.append((version, target))
+        started.set()
+        assert release.wait(timeout=10)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"uv")
+
+    monkeypatch.setattr(uv_bootstrap, "download_uv", slow_download)
+    tasks = [
+        asyncio.create_task(uv_for_sandbox(_sandbox("Linux", "x86_64", "gnu"), "/app", str(tmp_path)))
+        for _ in range(8)
+    ]
+    while not started.is_set():
+        await asyncio.sleep(0.01)
+    for _ in range(10):  # let every other task reach the lock
+        await asyncio.sleep(0)
+    release.set()
+    paths = await asyncio.gather(*tasks)
+    assert downloads == [("0.12.3", "x86_64-unknown-linux-musl")]
+    assert set(paths) == {tmp_path / "0.12.3" / "x86_64-unknown-linux-musl" / "uv"}
+    assert paths[0].read_bytes() == b"uv"
 
 
 async def test_missing_host_uv_is_an_error(monkeypatch, tmp_path):

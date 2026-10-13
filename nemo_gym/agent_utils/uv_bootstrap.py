@@ -30,6 +30,8 @@ from typing import Protocol
 
 
 LOG = logging.getLogger(__name__)
+# One lock per cache path, so concurrent cold-cache callers in a process share one download.
+_DOWNLOAD_LOCKS: dict[Path, asyncio.Lock] = {}
 
 DEFAULT_UV_CACHE_DIR = "~/.cache/nemo_gym/uv"
 UV_RELEASE_URL = "https://github.com/astral-sh/uv/releases/download/{version}/uv-{target}.tar.gz"
@@ -136,6 +138,11 @@ async def uv_for_sandbox(sandbox: _Sandbox, workdir: str | None, cache_dir: str 
         return Path(host_uv)
     version = await asyncio.to_thread(host_uv_version, host_uv)
     cached = Path(cache_dir).expanduser() / version / target / "uv"
-    if not cached.is_file():
-        await asyncio.to_thread(download_uv, version, target, cached)
+    if cached.is_file():
+        return cached
+    # Many rollouts start at once on a cold cache: the first caller downloads, the rest wait and
+    # find the file. Atomic replacement in download_uv covers other processes filling the same path.
+    async with _DOWNLOAD_LOCKS.setdefault(cached, asyncio.Lock()):
+        if not cached.is_file():
+            await asyncio.to_thread(download_uv, version, target, cached)
     return cached
