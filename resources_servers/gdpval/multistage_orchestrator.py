@@ -97,11 +97,13 @@ from nemo_gym.rollout_collection import (
     NG_TERMINAL_KEY,
     NG_TRAJECTORY_KEY,
     DispatchLatencyTracker,
+    RolloutCollectionHelper,
     _agent_request_failure_row,
     _attach_trajectory_record,
     _environment_server_for_agent,
     _environment_servers_by_agent,
     _has_observation_gap,
+    _record_rollout_outcome,
     get_max_rollout_attempts,
     is_terminal_failure,
     observed_elapsed,
@@ -2262,6 +2264,16 @@ def route_stage_rows(output_fpath: str | Path, rows: Sequence[Mapping[str, Any]]
         fail_handle.flush()
         os.fsync(main_handle.fileno())
         os.fsync(fail_handle.fileno())
+    for row in rows:
+        dispatch_name = RolloutCollectionHelper._dispatch_name(row)
+        if row.get(NG_NO_PERSIST_KEY):
+            # A drained row never ran, so it is not an attempt.
+            if not row.get(NG_DISPATCH_DRAINED_KEY):
+                _record_rollout_outcome(row, "omitted", dispatch_name)
+        elif row.get(NG_FAILURE_CLASS_KEY) is not None:
+            _record_rollout_outcome(row, "failed", dispatch_name)
+        else:
+            _record_rollout_outcome(row, "scored", dispatch_name)
 
 
 def _gate_partial_outcome_omissions(

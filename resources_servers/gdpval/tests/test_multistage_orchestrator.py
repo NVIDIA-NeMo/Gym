@@ -39,6 +39,7 @@ from nemo_gym.global_config import (
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
     ENVIRONMENT_SERVER_FAILURE_CLASS,
+    NG_DISPATCH_DRAINED_KEY,
     NG_ENVIRONMENT_SERVER_KEY,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
@@ -2915,7 +2916,18 @@ class TestJournalIO:
         assert len(resume.rows_by_stage[0]) == 1
 
         resume.on_plan(1, {"stage_index": 1, "status": "planned", "reference_ids": ["b"]})
-        resume.on_rows(1, [{"stage_index": 1, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "task_id": "t0"}])
+        resume.on_rows(
+            1,
+            [
+                {
+                    "stage_index": 1,
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    "task_id": "t0",
+                    AGENT_REF_KEY_NAME: {"name": "gdpval_stirrup_agent"},
+                }
+            ],
+        )
         resume.on_outcome(1, {"stage_index": 1, "status": "complete"})
 
         plans, outcomes, fp = read_journal(journal)
@@ -2925,7 +2937,7 @@ class TestJournalIO:
 
 
 class TestFailureRouting:
-    def test_route_stage_rows_splits_by_outcome(self, tmp_path: Path) -> None:
+    def test_route_stage_rows_splits_by_outcome(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         out = tmp_path / "rollouts.jsonl"
         rows = [
             {"stage_index": 0, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "task_id": "t0"},
@@ -2943,7 +2955,23 @@ class TestFailureRouting:
                 "task_id": "t2",
                 NG_NO_PERSIST_KEY: True,
             },
+            {
+                "stage_index": 0,
+                TASK_INDEX_KEY_NAME: 3,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "task_id": "t3",
+                NG_NO_PERSIST_KEY: True,
+                NG_DISPATCH_DRAINED_KEY: True,
+            },
         ]
+        rows = [{**row, NG_ENVIRONMENT_SERVER_KEY: "gdpval_environment_server"} for row in rows]
+        outcomes: List[Tuple[str, str]] = []
+        monkeypatch.setattr(rollout_collection_module, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(
+            rollout_collection_module,
+            "record_rollout_completed",
+            lambda outcome, *, dispatch_name, **kwargs: outcomes.append((outcome, dispatch_name)),
+        )
         route_stage_rows(out, rows)
 
         main = [json.loads(line) for line in out.read_text().splitlines()]
@@ -2952,6 +2980,12 @@ class TestFailureRouting:
         assert [r["task_id"] for r in main] == ["t0"]
         assert [r["task_id"] for r in sidecar] == ["t1"]
         assert sidecar[0]["stage_index"] == 0
+        # Counted as run_from_config counts them; a drained row never ran, so it is not counted.
+        assert outcomes == [
+            ("scored", "gdpval_environment_server"),
+            ("failed", "gdpval_environment_server"),
+            ("omitted", "gdpval_environment_server"),
+        ]
 
     def test_load_gated_keys_terminal_and_max_attempts(self, tmp_path: Path) -> None:
         out = tmp_path / "rollouts.jsonl"
