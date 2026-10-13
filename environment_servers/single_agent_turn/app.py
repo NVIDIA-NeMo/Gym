@@ -38,6 +38,7 @@ from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
+from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnFailure,
@@ -290,7 +291,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             task_id=request.task.task_id,
             result=verification.model_copy(
                 update={
-                    "ng_agent_observations": agent_close_response.agent_observations
+                    NG_AGENT_OBSERVATIONS_KEY: agent_close_response.agent_observations
                     if agent_close_response is not None
                     else None
                 }
