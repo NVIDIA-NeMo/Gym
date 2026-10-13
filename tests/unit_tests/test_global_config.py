@@ -2185,6 +2185,36 @@ class TestConfigLoadErrors:
         assert parsed["head_server"] == {"host": "127.0.0.1", "port": DEFAULT_HEAD_SERVER_PORT}
         assert parsed["disallowed_ports"] == [DEFAULT_HEAD_SERVER_PORT]
 
+    @mark.parametrize(
+        "server_host",
+        [{"host": None}, {}],  # an explicit null, and no `host` key at all
+        ids=["null-host", "omitted-host"],
+    )
+    def test_parse_head_server_host_may_reference_a_defaulted_server_host(self, server_host: dict) -> None:
+        # The referenced host is only filled in by validate_and_populate_defaults, so the head server block must not
+        # be resolved and validated before that runs.
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig(
+                {
+                    "test_resource": {
+                        "resources_servers": {
+                            "test_server": {"entrypoint": "app.py", "domain": "other", "port": 12000, **server_host}
+                        }
+                    },
+                    "head_server": {"host": "${test_resource.resources_servers.test_server.host}"},
+                }
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+
+        parsed = parser.parse(parse_config)
+
+        assert parsed["test_resource"]["resources_servers"]["test_server"]["host"] == "127.0.0.1"
+        assert parsed["head_server"]["host"] == "127.0.0.1"
+        assert parsed["head_server"]["port"] == DEFAULT_HEAD_SERVER_PORT
+
     def test_parse_keeps_a_head_server_value_pydantic_can_coerce(self) -> None:
         # The check is deliberately lax and validate-only: a quoted port in existing YAML keeps working, and the
         # block is left exactly as written, so `gym env resolve` still prints what the user configured. The
