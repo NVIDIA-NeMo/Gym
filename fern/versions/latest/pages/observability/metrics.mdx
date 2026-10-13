@@ -52,8 +52,9 @@ Reused cached results do not increment it. Coverage comes from the output files,
 
 `nemo.gym.rollout.outcome` is `scored` (written to the main output, masked and forced-zero
 results and supported unscored completions included), `failed` (a saved failure), or `omitted` (a saved
-intentional omission, including terminal skips and bare no-persist replies). Kill-shaped failures are saved
-as failures so they remain eligible for retry. The historical `scored` label does not guarantee a measured reward.
+intentional omission, including terminal skips and bare no-persist replies). A reported `kill_shaped` failure
+(a Slurm SIGTERM, a dead Ray actor, or an out-of-memory kill) is saved as a failure so it remains eligible
+for retry. The historical `scored` label does not guarantee a measured reward.
 Rows drained by the dispatch budget never ran and are not counted. Every point carries
 `nemo.gym.rollout.dispatch.name`, the environment server or, when rows name none, the agent.
 Attempts with a failure class also carry `nemo.gym.failure_class` and, when supplied,
