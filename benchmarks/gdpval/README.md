@@ -14,6 +14,51 @@ Downloads `openai/gdpval` from HuggingFace and writes
 gym eval prepare --benchmark gdpval
 ```
 
+## Prerequisites for every run
+
+The Stirrup agent needs Ray, and two settings have no working default. Set up all
+three before any `gym eval run` below. A judge-only run (`JUDGE_ONLY=true`, see
+[Fresh vs. cached deliverables](#fresh-vs-cached-deliverables)) executes no task
+and needs Ray and the deliverables directory, not the sandbox.
+
+Run every command in this README from the repository root: `gym eval prepare`
+looks for `benchmarks/gdpval/prepare.py` relative to the current directory, and
+the exports below use `$PWD`.
+
+**Ray.** Ray is an optional NeMo Gym extra. Without it where `gym` runs,
+`gym eval run` stops with ``These servers use Ray, but Ray isn't installed where
+`gym` runs: gdpval_stirrup_agent``. Add `--extra ray` to your `uv sync`
+(`nemo-gym[ray]` with pip):
+
+```bash
+uv sync --extra dev --extra ray
+```
+
+**Apptainer sandbox.** GDPVal tasks run their code only inside the Apptainer
+image built from
+[`containers/gdpval.def`](../../responses_api_agents/stirrup_agent/containers/gdpval.def),
+and the host that runs the agent server needs the `apptainer` binary. The agent
+rejects its local backend for GDPVal. Without the image, every task fails with
+`RuntimeError: GDPval requires the Apptainer sandbox ...` and the run stops with
+`None of the N dispatched rollouts produced a result`, writing no aggregate
+metrics. Build the image from its own directory, verify it as described in
+[Apptainer Sandboxing](../../responses_api_agents/stirrup_agent/README.md#apptainer-sandboxing),
+and point the benchmark at it with an absolute path:
+
+```bash
+(cd responses_api_agents/stirrup_agent/containers && apptainer build gdpval.sif gdpval.def)
+export GDPVAL_CONTAINER_PATH=$PWD/responses_api_agents/stirrup_agent/containers/gdpval.sif
+```
+
+**Absolute deliverables directory.** The agent saves each task's deliverables
+under `persist_deliverables_dir` and requires an absolute path. The config
+default, `output/gdpval/deliverables`, is relative, so the agent server exits at
+startup with `persist_deliverables_dir must be an absolute path` unless you set:
+
+```bash
+export PERSIST_DELIVERABLES_DIR=$PWD/output/gdpval/deliverables
+```
+
 ## Run rubric mode (default)
 
 Each deliverable is scored 0–1 against the task rubric.
@@ -670,7 +715,8 @@ judge proxies start idle; drop them with `~<name>` if you want a clean run.
 
 After `gym eval run` returns, the resources server's
 `/aggregate_metrics` endpoint emits headline scores in
-`results/<output>_metrics.json`:
+`<output stem>_aggregate_metrics.json` next to the rollouts file (for example
+`results/gdpval_rubric_aggregate_metrics.json`):
 
 - Rubric mode: `mean/reward` (pass@1 equivalent), computed over rows with a
   usable judge response. Rows flagged `invalid_judge_response` are left out and

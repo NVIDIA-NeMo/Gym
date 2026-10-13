@@ -1,6 +1,10 @@
 # GDPVal benchmark — Stirrup agent + GDPVal resources server.
 #
-# Run:
+# Run from the repository root. Needs the `ray` extra and both exports; see
+# "Prerequisites for every run" in README.md:
+#   uv sync --extra dev --extra ray
+#   export GDPVAL_CONTAINER_PATH=/abs/path/to/gdpval.sif  # Apptainer image built from containers/gdpval.def
+#   export PERSIST_DELIVERABLES_DIR=/abs/path/to/deliverables
 #   gym eval prepare --benchmark gdpval
 #   gym eval run \
 #     --model-type vllm_model --benchmark gdpval \

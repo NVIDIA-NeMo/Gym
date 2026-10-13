@@ -66,10 +66,11 @@ For each GDPVal task, the agent:
 
 ## Prerequisites
 
-1. **Install NeMo Gym** (see the [top-level README](../../README.md)):
+1. **Install NeMo Gym** with the `ray` extra; the agent runs on Ray (see the
+   [top-level README](../../README.md)):
    ```bash
    uv venv --python 3.13.14 && source .venv/bin/activate
-   uv sync --extra dev
+   uv sync --extra dev --extra ray
    ```
 2. **Install document-generation dependencies** (needed for the GDPVal deliverable formats —
    `.docx`, `.xlsx`, `.pptx`, `.pdf`):
@@ -80,8 +81,9 @@ For each GDPVal task, the agent:
    # System-level (Ubuntu/Debian):
    sudo apt install libreoffice libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev
    ```
-3. **(Optional) Install Apptainer** if you want sandboxed code execution
-   (see [Apptainer Sandboxing](#apptainer-sandboxing)).
+3. **Install Apptainer.** Required for `task: gdpval`: the agent rejects its local
+   backend for GDPVal and runs every task in the Apptainer image (see
+   [Apptainer Sandboxing](#apptainer-sandboxing)). Other tasks use the local backend.
 
 ## Quick Start
 
@@ -94,7 +96,10 @@ agent with the GDPVal resources server and supports
 # 1. Prepare the GDPVal benchmark JSONL.
 gym eval prepare --benchmark gdpval
 
-# 2. Collect rollouts end-to-end (servers spin up automatically).
+# 2. Collect rollouts end-to-end (servers spin up automatically). Both paths
+#    must be absolute; build gdpval.sif first (see Apptainer Sandboxing).
+GDPVAL_CONTAINER_PATH=/abs/path/to/gdpval.sif \
+PERSIST_DELIVERABLES_DIR=/abs/path/to/deliverables \
 JUDGE_API_KEY=... HF_TOKEN=... \
 gym eval run \
   --model-type openai_model \
@@ -109,7 +114,7 @@ gym eval run \
 Each output line contains `responses_create_params`, the full `response`, a
 `reward` in `[0, 1]`, and a `judge_response` with per-criterion breakdown.
 Aggregate metrics (`mean/reward` for rubric mode, ELO for comparison mode)
-land in `results/gdpval_rubric_metrics.json`.
+land in `results/gdpval_rubric_aggregate_metrics.json`.
 
 ## Configuration
 
@@ -125,7 +130,7 @@ The agent reads its Hydra config at `configs/stirrup_agent.yaml`. Notable keys:
 | `user_prompt_template` | `???` | Path to the user prompt Jinja2 template. |
 | `resources_server` | required | Reference to the GDPVal resources server (which scores the deliverable via `/verify`). |
 | `gdpval_container_path` | `null` | Path to an Apptainer `.sif` (see below). |
-| `persist_deliverables_dir` | `null` | If set, each task's artifacts land in `<dir>/task_<task_id>/`. The resources server reads this dir to score the deliverable. |
+| `persist_deliverables_dir` | `null` | If set, each task's artifacts land in `<dir>/task_<task_id>/`. The resources server reads this dir to score the deliverable. Must be an absolute path. |
 | `execute_only` | `false` | If true, run tasks and cache deliverables but **skip judging** — no `reward` / `judge_response` (see [Task-Only Execution Mode](#task-only-execution-mode)). Mutually exclusive with `judge_only`. |
 | `judge_only` | `false` | If true, skip task execution and score the deliverables already cached under `persist_deliverables_dir` (see [Judge-Only Mode](#judge-only-mode)). Mutually exclusive with `execute_only`. |
 | `rerun_incomplete` | `false` | If true, skip the rollout for tasks that already **finished** (a finish marker is cached) and only re-run the ones that didn't (see [Task Re-run Mode](#task-re-run-mode)). Composes with `execute_only` and `judge_only`. |
@@ -390,9 +395,13 @@ gym eval run \
 
 ### Apptainer Sandboxing
 
-Some GDPVal tasks ask the model to install packages or run untrusted code. By default the
-agent uses a local sandbox; setting `gdpval_container_path` to an Apptainer `.sif` routes
-all `code_exec` calls through a persistent container.
+GDPVal requires this sandbox. Its tasks ask the model to install packages, run
+untrusted code, and use a heavy toolchain (TeX Live, the data/ML/document stack)
+that the evaluation container does not carry. Setting `gdpval_container_path` to
+an Apptainer `.sif` routes all `code_exec` calls through a persistent container.
+With it unset, every GDPVal task fails with
+`RuntimeError: GDPval requires the Apptainer sandbox ...`; the agent never falls
+back to the local backend for GDPVal.
 
 Build the supplied container definition. Build **from the `containers/`
 directory**: the definition stages the vendored GDPval-AA v2 manifests via
@@ -432,6 +441,9 @@ stirrup_agent:
     stirrup_agent:
       gdpval_container_path: /abs/path/to/gdpval.sif
 ```
+
+The [GDPVal benchmark](../../benchmarks/gdpval/README.md) reads the path from the
+`GDPVAL_CONTAINER_PATH` environment variable instead.
 
 ### Pairwise ELO Judging
 
