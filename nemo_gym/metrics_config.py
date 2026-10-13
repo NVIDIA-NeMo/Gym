@@ -25,6 +25,7 @@ from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAM
 
 STAT_SEPARATOR = "/"
 ACROSS_REPEATS_MARKER = f"_across_repeats{STAT_SEPARATOR}"
+COMPLETION_TOKEN_METRIC_NAMES: Tuple[str, ...] = ("mean_completion_tokens", "mean_tokens_per_turn")
 
 
 class Stat(StrEnum):

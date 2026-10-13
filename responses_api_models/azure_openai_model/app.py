@@ -42,7 +42,6 @@ class AzureOpenAIModelServerConfig(BaseResponsesAPIModelConfig):
 
 
 class AzureOpenAIModelServer(SimpleResponsesAPIModel):
-    ray_enabled = False
     config: AzureOpenAIModelServerConfig
 
     def model_post_init(self, context):
@@ -84,7 +83,7 @@ class AzureOpenAIModelServer(SimpleResponsesAPIModel):
             previous_response_id=body.previous_response_id,
             prompt=body.prompt,
             reasoning=body.reasoning,
-            service_tier=body.service_tier,
+            service_tier=chat_completion_response.service_tier or body.service_tier,
             text=body.text,
             top_logprobs=body.top_logprobs,
             truncation=body.truncation,

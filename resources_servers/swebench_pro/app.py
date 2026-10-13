@@ -202,7 +202,6 @@ class SWEBenchProVerifyResponse(BaseVerifyResponse):
 
 
 class SWEBenchProResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: SWEBenchProResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:

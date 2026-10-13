@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import aiohttp
+from fastapi import HTTPException
 from pydantic import Field, model_validator
 
 from nemo_gym.base_responses_api_model import (
@@ -209,8 +210,8 @@ class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
 
     # With uses_reasoning_parser, replayed assistant turns also get their
     # <think> block moved back into reasoning_content/reasoning on the way
-    # upstream, as vllm_model does under the same flag name. Off only for an
-    # upstream whose template must see the tags inline.
+    # upstream, as vllm_model does under the same flag name. When False, omit
+    # prior assistant reasoning from both inline tags and reasoning fields.
     uses_interleaved_reasoning: bool = True
 
     # Force these fields onto every outbound body, the way vllm_model's pin of
@@ -269,7 +270,6 @@ class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
 
 
 class SwitchyardModel(SimpleResponsesAPIModel):
-    ray_enabled = False
     config: SwitchyardModelConfig
 
     def model_post_init(self, context: Any) -> None:
@@ -350,7 +350,7 @@ class SwitchyardModel(SimpleResponsesAPIModel):
             raise RuntimeError(
                 "switchyard_model could not import switchyard_rust, so it cannot host a proxy. It ships "
                 "with this server's nemo-switchyard dependency; if you are running a custom environment, "
-                "install it with `pip install nemo-switchyard==0.2.0` or set switchyard_base_url to attach "
+                "install it with `pip install nemo-switchyard==0.3.0` or set switchyard_base_url to attach "
                 "to a proxy you run yourself."
             ) from error
 
@@ -562,6 +562,25 @@ class SwitchyardModel(SimpleResponsesAPIModel):
         return self._client.model_copy(update={"default_headers": headers})
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        if self.config.uses_reasoning_parser or self.config.sampling_overrides:
+            # Keep opt-in vLLM parity on the Chat wire format. Switchyard 0.3.0's
+            # Responses-to-Chat translation drops Chat-only sampling fields and
+            # replays reasoning independently of our interleaved-reasoning flag.
+            converter = ResponsesConverter(
+                return_token_id_information=False, uses_reasoning_parser=self.config.uses_reasoning_parser
+            )
+            try:
+                chat_body = converter.responses_to_chat_completion_create_params(body)
+            except NotImplementedError as error:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Switchyard vLLM parity requires a Chat-compatible Responses request: {error}",
+                ) from error
+            completion = await self.chat_completions(chat_body)
+            return converter.chat_completion_to_response(
+                responses_create_params=body.model_copy(update={"model": completion.model}),
+                chat_completion=completion,
+            )
         body_dict = self._finalize_body(self.config.extra_body | body.model_dump(exclude_unset=True))
         async with self._semaphore:
             response_dict = await self.client_for_request().create_response(**body_dict)

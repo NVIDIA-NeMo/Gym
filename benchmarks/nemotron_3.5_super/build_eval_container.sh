@@ -85,7 +85,7 @@ git remote add origin $NEMO_GYM_GIT_URL
 git fetch origin $NEMO_GYM_GIT_REF
 git checkout $NEMO_GYM_GIT_REF
 
-uv sync --active
+uv sync --active --extra all
 
 ########################################
 # START Benchmark specific preparation

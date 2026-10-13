@@ -91,6 +91,13 @@ Set `uses_reasoning_parser: true` when the upstream runs a reasoning parser (for
   right after the think block without acting, and the proxied arm scored 17.5% against 30.9% for a
   direct `vllm_model` run of the same weights. With the rewrite the two arms agree.
 
+When reasoning parsing or non-empty sampling overrides are enabled, Gym converts
+`/v1/responses` requests to Chat before sending them through Switchyard, matching
+`vllm_model`'s Chat-backed path. This makes replay and Chat-format sampling pins
+apply to both endpoints. Responses-only features without a Chat representation
+(such as `previous_response_id` or hosted tools) return 422 in this mode. Leave
+both options disabled for transparent native Responses forwarding.
+
 ## Pinned sampling
 
 `sampling_overrides` forces fields onto every outbound body after the caller's, with `vllm_model`'s
