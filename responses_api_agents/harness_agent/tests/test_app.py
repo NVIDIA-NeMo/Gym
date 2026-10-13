@@ -455,16 +455,52 @@ async def test_agent_runner_failure_reports_its_log():
     )
     agent._provider.close = AsyncMock()
     body = NeMoGymResponseCreateParamsNonStreaming(input="hello")
-    with (
-        patch.object(agent, "_sandbox_model_url", return_value="https://model.example"),
-        pytest.raises(RuntimeError, match="runner failed.*runner traceback"),
-    ):
-        await agent.responses(MagicMock(), body)
+    with patch.object(agent, "_sandbox_model_url", return_value="https://model.example"):
+        resp = await agent.responses(MagicMock(), body)
+    assert resp.output == []
+    assert resp.metadata["failure_kind"] == "agent_run_error"
+    assert "runner failed (1): runner traceback" in resp.metadata["failure_reason"]
+    agent._provider.close.assert_awaited_once_with(handle)
     files = agent._provision_box.await_args.args[1]
     config = json.loads(files["/work/agent_config.json"])
     assert config["resources_server"]["name"] == "rs"
     assert config["model_server"]["name"] == "model"
     assert "adapter_id" not in config
+
+
+@pytest.mark.parametrize(
+    "error, kind",
+    [
+        (TimeoutError("exec exceeded hard cap"), "agent_timeout"),
+        (RuntimeError("SANDBOX::ENDED (OOMKilled)"), "agent_run_error"),
+    ],
+)
+async def test_runner_failure_is_masked_and_closes_resource_sandbox(error, kind):
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(return_value=MagicMock(cookies={}))
+    handle = MagicMock(provider_name="opensandbox")
+    agent._provision_box = AsyncMock(return_value=handle)
+    agent._provider.connect = AsyncMock(return_value=handle)
+    agent._provider.exec = AsyncMock(side_effect=[SandboxExecResult("/testbed\n", "", 0), error])
+    agent._provider.upload_file = AsyncMock()
+    agent._provider.close = AsyncMock()
+    body = HarnessAgentRunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+    with (
+        patch.object(agent, "_sandbox_model_url", return_value="https://model.example"),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch(
+            "responses_api_agents.harness_agent.app.get_response_json",
+            new=AsyncMock(return_value={"sandbox_handle": "box-1"}),
+        ),
+    ):
+        result = await agent.run(MagicMock(cookies={}), body)
+    assert result.reward == 0.0
+    assert result.mask_sample is True
+    assert result.instance_config == {"mask_sample": True}
+    assert result.failure_kind == kind
+    assert result.response.output == []
+    assert agent.server_client.post.await_count == 1
+    agent._provider.close.assert_awaited_once_with(handle)
 
 
 def test_gym_tar_built_on_init():

@@ -19,6 +19,7 @@ import shlex
 import socket
 import subprocess
 import tempfile
+import time
 from asyncio import Semaphore
 from contextvars import ContextVar
 from pathlib import Path
@@ -37,6 +38,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import AGENT_RUN_ERROR, AGENT_TIMEOUT
 from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -279,6 +281,21 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             token = _RUN_CONTEXT.set(run_context)
             try:
                 agent_resp = await self.responses(request, body.responses_create_params)
+                failure_kind = (agent_resp.metadata or {}).get("failure_kind")
+                if failure_kind:
+                    masked = HarnessAgentVerifyResponse.model_validate(
+                        body.model_dump()
+                        | {
+                            "response": agent_resp.model_dump(mode="json"),
+                            "reward": 0.0,
+                            "mask_sample": True,
+                            "failure_kind": failure_kind,
+                            "failure_reason": agent_resp.metadata.get("failure_reason"),
+                            "instance_config": {"mask_sample": True},
+                        }
+                    )
+                    await self._close_run_sandbox(run_context)
+                    return masked
                 agent_resp_json = agent_resp.model_dump(mode="json")
                 verify_resp = await self.server_client.post(
                     server_name=self.config.resources_server.name,
@@ -387,6 +404,22 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 raise RuntimeError(f"expected one JSON row in {path}, got {len(lines)}")
             return json.loads(lines[0])
 
+    def _failed_response(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, failure_kind: str, reason: str
+    ) -> NeMoGymResponse:
+        LOG.warning("%s: %s", failure_kind, reason)
+        return NeMoGymResponse(
+            id=f"harness-failed-{uuid4().hex}",
+            created_at=int(time.time()),
+            model=body.model or self.config.model_server.name,
+            object="response",
+            output=[],
+            parallel_tool_calls=bool(body.parallel_tool_calls),
+            tool_choice=body.tool_choice or "auto",
+            tools=[],
+            metadata={"failure_kind": failure_kind, "failure_reason": reason},
+        )
+
     async def responses(
         self,
         request: Request,
@@ -435,16 +468,23 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                             "/work/runner_config.json": json.dumps(runner_config),
                         },
                     )
-            r = await self._provider.exec(
-                handle,
-                f"{runner_cmd} > runner.out 2>&1",
-                cwd=work_dir,
-                timeout_s=self.config.rollout_timeout,
-            )
+            try:
+                r = await self._provider.exec(
+                    handle,
+                    f"{runner_cmd} > runner.out 2>&1",
+                    cwd=work_dir,
+                    timeout_s=self.config.rollout_timeout,
+                )
+            except TimeoutError as e:
+                return self._failed_response(body, AGENT_TIMEOUT, f"runner timed out: {e}")
+            except Exception as e:
+                return self._failed_response(body, AGENT_RUN_ERROR, f"runner sandbox failed: {e!r}")
             logs = await self._provider.exec(handle, "tail -c 6000 runner.out", cwd=work_dir, timeout_s=30)
             if r.return_code != 0 or "RUNNER_DONE" not in (logs.stdout or ""):
-                raise RuntimeError(
-                    f"runner failed ({r.return_code}): {(logs.stdout or logs.stderr or r.stderr or '')[-6000:]}"
+                return self._failed_response(
+                    body,
+                    AGENT_RUN_ERROR,
+                    f"runner failed ({r.return_code}): {(logs.stdout or logs.stderr or r.stderr or '')[-6000:]}",
                 )
 
             resp = NeMoGymResponse.model_validate(
