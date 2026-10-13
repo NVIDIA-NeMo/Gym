@@ -242,10 +242,16 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
             agent_response = NeMoGymResponse.model_validate(await get_response_json(agent_http_response))
         except Exception as error:
+            # The agent's evidence of the failed turn arrives with its session close.
+            try:
+                await agent_cleanup.close()
+            except Exception:
+                pass  # Final unwind retries the close and logs its failure.
             raise self._failure(
                 stage="agent",
                 failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
+                agent_observations=agent_close_response.agent_observations if agent_close_response else None,
             ) from error
 
         # Verification needs this close response: it carries the Agent's observations and final Resources cookies.
@@ -282,6 +288,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
+                agent_observations=agent_close_response.agent_observations if agent_close_response else None,
             ) from error
 
         # Keep one bounded retry in final unwind without erasing a completed verdict.
@@ -317,6 +324,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         failure_reason: str,
         terminal: bool,
         partial_response: Any = None,
+        agent_observations: Any = None,
     ) -> HandledEpisodeError:
         return HandledEpisodeError(
             SingleAgentTurnFailure(
@@ -324,6 +332,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 failure_reason=failure_reason[:2000],
                 terminal=terminal,
                 partial_response=partial_response,
+                agent_observations=agent_observations,
             )
         )
 

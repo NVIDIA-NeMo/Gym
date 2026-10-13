@@ -367,6 +367,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             record["_ng_failure_stage"] = failure["stage"]
         if failure.get("partial_response") is not None:
             record["_ng_failure_partial_response"] = failure["partial_response"]
+        if failure.get("agent_observations") is not None:
+            record[NG_AGENT_OBSERVATIONS_KEY] = failure["agent_observations"]
         return record
     result = response.get("result")
     if not isinstance(result, Mapping):
@@ -2831,7 +2833,8 @@ class RolloutCollectionHelper(BaseModel):
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off). Never alters the harness output/reward already in `result`.
-                if capture_dirs and not no_result:
+                # A failed episode that returned agent evidence made model calls worth joining.
+                if capture_dirs and (not no_result or NG_AGENT_OBSERVATIONS_KEY in result):
                     merge_model_call_capture_into_record(
                         result,
                         capture_dirs,

@@ -95,6 +95,8 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
             }
             if response.failure.partial_response is not None:
                 failure["_ng_failure_partial_response"] = response.failure.partial_response.model_dump(mode="json")
+            if response.failure.agent_observations is not None:
+                failure[NG_AGENT_OBSERVATIONS_KEY] = response.failure.agent_observations.model_dump(mode="json")
             return failure
         if response.result is None:
             raise ValueError("Successful episode response has no result")
