@@ -49,6 +49,13 @@ def create_dataset(version=1):
     data_base = f"../../ARC-AGI{'-' + str(version) if version != 1 else ''}"
     training_dir = Path(f"{data_base}/data/training")
     evaluation_dir = Path(f"{data_base}/data/evaluation")
+    repo_url = "https://github.com/fchollet/ARC-AGI" if version == 1 else "https://github.com/arcprize/ARC-AGI-2"
+    for split_dir in (training_dir, evaluation_dir):
+        if not any(split_dir.glob("*.json")):
+            raise FileNotFoundError(
+                f"No ARC-AGI-{version} tasks in {split_dir.resolve()}. Clone {repo_url} into the Gym root "
+                "and run this script from its own directory."
+            )
 
     Path("data").mkdir(exist_ok=True)
 
@@ -113,11 +120,12 @@ def create_dataset(version=1):
     print(f"Created evaluation dataset with {len(evaluation_dataset)} tasks at {evaluation_output_file}")
 
     example_output_file = Path(f"data/example_{version}.jsonl")
+    example_dataset = evaluation_dataset[:5]
     with open(example_output_file, "w") as f:
-        for entry in evaluation_dataset[:5]:
+        for entry in example_dataset:
             f.write(json.dumps(entry) + "\n")
 
-    print(f"Created example dataset with 5 tasks at {example_output_file}")
+    print(f"Created example dataset with {len(example_dataset)} tasks at {example_output_file}")
 
 
 if __name__ == "__main__":
