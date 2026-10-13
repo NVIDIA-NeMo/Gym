@@ -19,6 +19,7 @@ has to reach a server process. These tests cover that translation and, important
 precedence: a raw env var set by the user must beat YAML, never the other way round.
 """
 
+import json
 import logging
 import os
 
@@ -528,3 +529,34 @@ def test_enabling_via_lens_env_still_carries_yaml_settings_to_servers(clean_otel
 
     assert os.environ["NEMO_GYM_OTEL_SPAN_GROUPS"] == "per_rollout"
     assert os.environ["NEMO_GYM_OTEL_EXPORTER"] == "console"
+
+
+class _DirectURLDistribution:
+    version = "0.1.0"
+
+    def __init__(self, direct_url: dict | None) -> None:
+        self._direct_url = direct_url
+
+    def read_text(self, filename: str) -> str | None:
+        assert filename == "direct_url.json"
+        return None if self._direct_url is None else json.dumps(self._direct_url)
+
+
+def test_installed_requirement_pins_a_local_directory_install(monkeypatch):
+    """`pip install /path` records only dir_info; a version pin would name a release no index serves."""
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    monkeypatch.setattr(
+        "importlib.metadata.distribution",
+        lambda name: _DirectURLDistribution({"url": "file:///home/u/gym-substrate", "dir_info": {}}),
+    )
+    assert telemetry_setup.installed_requirement("gym-substrate", "gym-substrate") == (
+        "gym-substrate@file:///home/u/gym-substrate"
+    )
+
+
+def test_installed_requirement_pins_an_index_install_by_version(monkeypatch):
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    monkeypatch.setattr("importlib.metadata.distribution", lambda name: _DirectURLDistribution(None))
+    assert telemetry_setup.installed_requirement("gym-substrate", "gym-substrate") == "gym-substrate==0.1.0"

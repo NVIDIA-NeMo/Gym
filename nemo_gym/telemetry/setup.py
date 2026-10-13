@@ -343,6 +343,10 @@ def installed_requirement(dist_name: str, requirement_name: str) -> Optional[str
                     # into separate arguments. Quoting at that call site would be the
                     # better fix and is tracked separately.
                     return f"{requirement_name}@{vcs}+{direct_url['url']}@{commit}"
+            if "dir_info" in direct_url and direct_url.get("url", "").startswith("file:"):
+                # A local directory install (`pip install /path` or `-e /path`) has a
+                # version no index serves; the server venv installs the same directory.
+                return f"{requirement_name}@{direct_url['url']}"
     except Exception:  # pragma: no cover - metadata is best-effort
         logger.debug("nemo-lens: could not read direct_url.json for %s", dist_name, exc_info=True)
 
