@@ -297,9 +297,10 @@ def _execution_outcome(execution: Any) -> tuple[int, str | None, str | None]:
     """Map a streamed SDK execution to ``(return_code, error_type, stderr_note)``.
 
     The SDK fills in ``exit_code=0`` itself once execd sends its completion
-    event, so no exit code, no error and no completion event means the stream
-    ended before the command did (sandbox deleted mid-command, connection
-    dropped). That is not a success: the command's outcome is unknown.
+    event. With no exit code, error or completion event, the stream ended
+    without reporting the command's outcome. The command may have completed
+    or still be running; neither success nor failure is confirmed. Return a
+    sandbox error rather than assuming success.
     """
     if execution.exit_code is not None:
         return execution.exit_code, None, None
