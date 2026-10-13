@@ -732,3 +732,28 @@ def test_external_commit_marker_rejects_cross_request_acknowledgement() -> None:
             mark_external_staging_committed(rollout_id="rollout-2", model_call_id="c1")
     finally:
         reset_token_sink(token)
+
+
+@pytest.mark.parametrize("child", [False, True])
+def test_complete_call_computes_staging_digest_once(child: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import Mock
+
+    from nemo_gym.token_id_capture.staging import records
+
+    compute = Mock(wraps=records.compute_staging_digest)
+    monkeypatch.setattr(records, "compute_staging_digest", compute)
+    # Also count the former caller-side alias if duplicate hashing is reintroduced.
+    monkeypatch.setattr("nemo_gym.token_id_capture.staging.capture.compute_staging_digest", compute, raising=False)
+    capture, sink = _capture(weight_version=7)
+    coords = capture.complete_call(
+        capture.begin_call(_child() if child else _root()),
+        prompt_token_ids=[10, 11, 12, 13] if child else [10],
+        generated_token_ids=[21],
+        generated_logprobs=[-0.25],
+    )
+    assert coords.disposition == "staged"
+    assert compute.call_count == 1
+    record = sink.records[0]
+    assert coords.digest == record.digest
+    assert StagedCallRecord.model_validate_json(record.model_dump_json()) == record
+    assert compute.call_count == 2

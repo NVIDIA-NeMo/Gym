@@ -58,7 +58,6 @@ class GenerativeRewardModelVerifyResponse(BaseVerifyResponse):
 
 
 class GenerativeRewardModelResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: GenerativeRewardModelResourcesServerConfig
 
     def _fail(self, body) -> GenerativeRewardModelVerifyResponse:

@@ -121,7 +121,7 @@ def render_matrices(harnesses: dict) -> str:
             "| Check | " + " | ".join(s["scenario"] for s in scenarios) + " |",
             "|---|" + "---|" * len(scenarios),
         ]
-        for kind in ("schema", "semantic", "behavioral"):
+        for kind in ("schema", "semantic", "behavioral", "health"):
             group = []
             for key in keys:
                 found = [next((c for c in s.get("checks", []) if c["id"] == key), None) for s in scenarios]

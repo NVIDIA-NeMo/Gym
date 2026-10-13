@@ -47,6 +47,14 @@ gym eval run --no-serve \
 `prepare.py` writes `data/swebench_verified.jsonl`. Each row must resolve to a
 task image through its `image` field or `container_formatter`.
 
+With the Apptainer sandbox provider, `container_formatter` may instead be one or
+more local `.sif` path templates, for example `/images/r2e_gym/{instance_id}.sif`.
+A `.sif` template takes precedence over the row's `image` / `docker_image`, so
+rollouts never pull from a registry. Like `swe_agents`, the resolver tries the raw
+`instance_id`, R2E-Gym's `<repo>_final_<hash>` name, and the `__` to `_1776_` /
+`_s_` rewrites, and accepts exact file names only. A row can also pin an image
+with `sif_path` in its metadata.
+
 ## Agents
 
 The included configurations run Hermes Agent, Claude Code, Cline, Pi, OpenClaw, or OpenCode
@@ -66,21 +74,37 @@ agent into each task image. `agent_runtime_source` controls other delivery modes
 
 - `baked` uses the runtime in the task image and is the default.
 - `auto` builds the portable runtime with `setup_scripts/<agent>_deps.sh` once
-  and uploads the resulting archive to each sandbox.
+  and uploads the resulting archive to each sandbox. The runtime is rebuilt when
+  the setup scripts, the agent's sources, `nemo_gym` or `pyproject.toml` change.
 - A local tarball path uploads a prebuilt runtime.
 - An HTTP(S) URL downloads a prebuilt runtime inside the sandbox.
 
 Each archive must contain the runtime's `bin/python` at its root.
 
+The runner itself starts with `python -I`, so the task image's `PYTHONPATH` and
+user site cannot shadow the runtime's packages. For the CLI harnesses (Claude
+Code, Cline, OpenCode, OpenClaw and Pi), only the harness executable, plus `node`
+when the executable is a node script, is put on the agent's `PATH`. The agent's
+`python`, `pip` and `node` therefore resolve to the task image, not the runtime.
+
 Private task images can pass registry credentials through
 `sandbox_spec.provider_options.image_auth`.
+
+With the Apptainer provider, anyswe always adds `--no-home` to
+`create.extra_start_args`. Apptainer would otherwise bind the Gym server's home
+(`/root` when the server runs as root) over the task image's `/root` in every
+sandbox, hiding toolchains that images keep there, such as R2E-Gym's
+`/root/.local/share/uv` interpreters.
 
 ## Reward
 
 SWE-bench and SWE-bench Multilingual use the official `make_test_spec` and
 `get_eval_report` path. R2E-Gym requires every fail-to-pass and pass-to-pass test
 to report `PASSED` (or `XFAIL`). Required tests match pytest node ids, unittest-style
-`Class.test` names and colored output. R2E-Gym rows without test lists are graded
+`Class.test` names and colored output. A supplied class or file must match; it
+never falls back to an unrelated test with the same method name. Shortened or
+bare names must identify exactly one logged test, and parameter IDs are preserved.
+R2E-Gym rows without test lists are graded
 with R2E-Gym's own rule: the test-status map from the run's short test summary must
 equal the row's `expected_output_json` exactly. The grading transcript is saved as
 `eval_output.txt` next to the rollout artifacts.
@@ -91,3 +115,8 @@ after max-iteration or context-window termination set `mask_sample=true`.
 
 Each rollout includes the trajectory, patch, reward, grading fields, and
 `mask_sample`.
+
+The patch is the agent's change to the task repository since it started. Binary
+files are left out, because a "Binary files differ" stanza makes `git apply`
+reject the whole patch. The diff is kept byte for byte, so changes to CRLF or
+non-UTF-8 files apply in the grading sandbox.
