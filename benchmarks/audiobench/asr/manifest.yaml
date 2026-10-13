@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: audiobench/asr
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: AudioBench ASR (21 sub-datasets) scored by corpus WER with AudioBench normalization.
+modality: audio
+licensing: unknown
+authors: [gwarmstrong]
+reward:
+  range: [0, 1]
+  higher_is_better: true
+determinism: stochastic
+resources_server: asr_with_pc
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+  - name: audiobench_asr
+    type: benchmark
+    jsonl_fpath: benchmarks/audiobench/data/audiobench_asr.jsonl
+    prepare_script: benchmarks/audiobench/asr/prepare.py
+    prompt_config: benchmarks/audiobench/prompts/default.yaml
+    num_repeats: 1
+standard_prompt_config: benchmarks/audiobench/prompts/default.yaml
+canonical_split: benchmark
+session_model: episode
+state: none
+lifecycle: active

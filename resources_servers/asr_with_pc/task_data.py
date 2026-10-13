@@ -3,7 +3,7 @@
 """Task-data schema for the asr_with_pc server.
 
 Task fields ride at the top level; there is no verifier_metadata. Mirrors
-``ASRWithPCVerifyRequest`` (app.py): one model covers all four task families because the
+``ASRWithPCVerifyRequest`` (app.py): one model covers all six task families because the
 ``task_type`` discriminator is itself Optional (a missing value falls back to the server
 config's default), so a discriminated union cannot dispatch on it.
 
@@ -38,13 +38,26 @@ class TaskData(BaseModel):
         description="Source-dataset split name (e.g. 'test'); never read by verify().",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
-    task_type: Optional[Literal["ASR-PC", "ASR", "Hallucination", "ASR_LEADERBOARD"]] = Field(
+    task_type: Optional[Literal["ASR-PC", "ASR", "Hallucination", "ASR_LEADERBOARD", "BLEU", "EXACT_MATCH"]] = Field(
         default=None,
         description=(
             "Per-row scoring-family override; when absent the server config's task_type (default 'ASR-PC') "
             "applies. 'Hallucination' rows need audio_duration; 'ASR_LEADERBOARD' rows need reference_fields."
         ),
         json_schema_extra={"consumed_by": ["verify"]},
+    )
+    normalization_mode: Optional[Literal["standard", "audiobench"]] = Field(
+        default=None,
+        description=(
+            "Per-row ASR text-normalization override; when absent the server config's normalization_mode "
+            "(default 'standard') applies. 'audiobench' adds digits-to-words on top of the Whisper normalizer."
+        ),
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
+    subset_for_metrics: Optional[str] = Field(
+        default=None,
+        description="Sub-dataset name; when present, compute_metrics() adds per-subset pass@k metrics.",
+        json_schema_extra={"consumed_by": ["metrics"]},
     )
     audio_duration: Optional[float] = Field(
         default=None,

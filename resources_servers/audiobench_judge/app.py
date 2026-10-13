@@ -27,22 +27,24 @@ and ``is_correct = rating >= 3`` for binary pass@k accounting — same shape as
 NeMo Skills' ``audio_metrics.AudioMetrics._extract_judge_result``.
 """
 
-import logging
+import asyncio
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -51,10 +53,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
-from nemo_gym.server_utils import get_response_json
 
-
-LOG = logging.getLogger(__name__)
 
 _DEFAULT_JUDGE_PROMPT_PATH = str(Path(__file__).parent / "prompts" / "judge.yaml")
 
@@ -113,6 +112,8 @@ def extract_judge_result(judgement_text: str) -> tuple[bool, float]:
 
 
 class AudioBenchJudgeConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
@@ -131,6 +132,7 @@ class AudioBenchJudgeConfig(BaseResourcesServerConfig):
             "don't support the OpenAI Responses API."
         ),
     )
+    judge_max_concurrency: int = Field(default=32, ge=1)
 
 
 class AudioBenchJudgeRunRequest(BaseRunRequest):
@@ -164,11 +166,14 @@ class AudioBenchJudgeResourcesServer(SimpleResourcesServer):
     """
 
     config: AudioBenchJudgeConfig
+    _judge_prompt_template: str = PrivateAttr()
+    _judge_semaphore: asyncio.Semaphore = PrivateAttr()
 
-    def model_post_init(self, context):
+    def model_post_init(self, context: Any) -> None:
         prompt_data = yaml.safe_load(Path(self.config.judge_prompt_path).read_text())
-        self._judge_prompt_template: str = prompt_data["user"]
-        return super().model_post_init(context)
+        self._judge_prompt_template = prompt_data["user"]
+        self._judge_semaphore = asyncio.Semaphore(self.config.judge_max_concurrency)
+        super().model_post_init(context)
 
     async def verify(self, body: AudioBenchJudgeVerifyRequest) -> AudioBenchJudgeVerifyResponse:
         generation = _extract_assistant_text(body.response).strip()
@@ -199,6 +204,10 @@ class AudioBenchJudgeResourcesServer(SimpleResourcesServer):
         AudioBench's reference judge does a single forward pass (no two-sided
         order swap like Arena Hard). We mirror that — extra calls per row are
         non-trivial cost on large eval sets like 34-dataset audiobench.judge.
+
+        A failed judge call raises ``JudgeError`` (via ``call_judge``); the base
+        server's failsafe masks that row instead of scoring it as a wrong answer.
+        An unparseable judge reply is a legitimate rating of 0.
         """
         if not generation:
             # Empty generation → rating 0; skip the LLM call to save tokens.
@@ -211,49 +220,59 @@ class AudioBenchJudgeResourcesServer(SimpleResourcesServer):
             generation=generation,
         )
 
+        responses_create_params = config.judge_responses_create_params.model_copy(deep=True)
+        responses_create_params.input = [NeMoGymEasyInputMessage(role="user", content=judge_prompt)]
+
         if config.use_chat_completions_for_judge:
             chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(
                 messages=[{"role": "user", "content": judge_prompt}],
-                max_tokens=config.judge_responses_create_params.max_output_tokens or 512,
-                temperature=config.judge_responses_create_params.temperature or 0.0,
-                top_p=config.judge_responses_create_params.top_p or 1.0,
+                max_tokens=responses_create_params.max_output_tokens or 512,
+                temperature=responses_create_params.temperature or 0.0,
+                top_p=responses_create_params.top_p or 1.0,
             )
-            try:
-                response = await self.server_client.post(
+            async with self._judge_semaphore:
+                chat_response = await call_judge(
+                    self.server_client,
                     server_name=config.judge_model_server.name,
                     url_path="/v1/chat/completions",
                     json=chat_params,
+                    response_model=NeMoGymChatCompletion,
                 )
-                chat_response = NeMoGymChatCompletion.model_validate(await get_response_json(response))
-            except Exception as e:  # noqa: BLE001
-                LOG.warning("audiobench_judge: judge call failed (%s); scoring rating=0", e)
-                return 0.0, False, None
             content = chat_response.choices[0].message.content if chat_response.choices else None
-            judge_text = content.strip() if content else ""
-            # No NeMoGymResponse to record on the chat-completions branch; tests
-            # and downstream rollout artifacts inspect only judge_rating /
-            # judge_correct / generation, not judge_evaluation.
-            judge_evaluation = None
+            # Wrap the chat content in a minimal NeMoGymResponse so judge_evaluation is
+            # populated the same way on both judge API surfaces.
+            judge_response = NeMoGymResponse.model_validate(
+                {
+                    "id": chat_response.id,
+                    "created_at": chat_response.created,
+                    "model": chat_response.model,
+                    "object": "response",
+                    "output": [
+                        {
+                            "id": "msg_chat",
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": content or "", "annotations": []}],
+                        }
+                    ],
+                    "parallel_tool_calls": False,
+                    "tool_choice": "none",
+                    "tools": [],
+                }
+            )
         else:
-            responses_create_params = config.judge_responses_create_params.model_copy(deep=True)
-            responses_create_params.input = [
-                NeMoGymEasyInputMessage(role="user", content=judge_prompt),
-            ]
-            try:
-                response = await self.server_client.post(
+            async with self._judge_semaphore:
+                judge_response = await call_judge(
+                    self.server_client,
                     server_name=config.judge_model_server.name,
                     url_path="/v1/responses",
                     json=responses_create_params,
+                    response_model=NeMoGymResponse,
                 )
-                judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
-            except Exception as e:  # noqa: BLE001
-                LOG.warning("audiobench_judge: judge call failed (%s); scoring rating=0", e)
-                return 0.0, False, None
-            judge_evaluation = JudgeEvaluation(
-                responses_create_params=responses_create_params, response=judge_response
-            )
-            judge_text = _extract_assistant_text(judge_response)
 
+        judge_evaluation = JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
+        judge_text = _extract_assistant_text(judge_response).strip()
         is_correct, rating = extract_judge_result(judge_text)
         return rating, is_correct, judge_evaluation
 
@@ -287,12 +306,12 @@ class AudioBenchJudgeResourcesServer(SimpleResourcesServer):
             score_fn=self._score_fn,
             answer_key=None,
         )[0]
-        # Per-sub-dataset breakdown — keyed off the ``dataset_name`` field
+        # Per-sub-dataset breakdown — keyed off the ``subset_for_metrics`` field
         # the audiobench prepare script stamps on every row. Skipped when
         # rows don't carry the field (e.g. an LLM-judge benchmark that
         # isn't audiobench).
-        if any(t and t[0].get("dataset_name") for t in tasks):
-            subset = compute_subset_metrics(tasks, subset_key="dataset_name", score_fn=self._score_fn)
+        if any(t and t[0].get("subset_for_metrics") for t in tasks):
+            subset = compute_subset_metrics(tasks, subset_key="subset_for_metrics", score_fn=self._score_fn)
             metrics.update(subset)
         return metrics
 

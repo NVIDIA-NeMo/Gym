@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/asr_with_pc/configs/asr_with_pc.yaml
+
+audiobench_asr_asr_with_pc_resources_server:
+  _inherit_from: asr_with_pc
+  resources_servers:
+    asr_with_pc:
+      task_type: ASR
+      normalization_mode: audiobench
+
+audiobench_asr_asr_with_pc_simple_agent:
+  _inherit_from: asr_with_pc_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: audiobench_asr_asr_with_pc_resources_server
+      datasets:
+      - name: audiobench_asr
+        type: benchmark
+        jsonl_fpath: benchmarks/audiobench/data/audiobench_asr.jsonl
+        prepare_script: benchmarks/audiobench/asr/prepare.py
+        prompt_config: benchmarks/audiobench/prompts/default.yaml
+        num_repeats: 1
+        license: Multiple (CC-BY-4.0, MERaLiON-NSC gated; per-sub-dataset)
+
+audiobench_asr_asr_with_pc_environment_server:
+  _inherit_from: asr_with_pc_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: audiobench_asr_asr_with_pc_simple_agent

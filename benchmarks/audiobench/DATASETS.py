@@ -54,10 +54,10 @@ DATASETS: dict[str, DatasetSpec] = {
     "dream_tts_mcq_test":             {"hf_repo": "AudioLLMs/dream_tts_mcq_test",                   "hf_split": "test",  "bucket": "judge", "description": "DREAM dialogue reading comprehension via TTS-rendered prompts."},
     "iemocap_emotion_test":           {"hf_repo": "AudioLLMs/iemocap_emotion_recognition",          "hf_split": "test",  "bucket": "judge", "description": "IEMOCAP emotion recognition phrased as open-ended QA."},
     "iemocap_gender_test":            {"hf_repo": "AudioLLMs/iemocap_gender_recognition",           "hf_split": "test",  "bucket": "judge", "description": "IEMOCAP gender recognition phrased as open-ended QA."},
-    "imda_ar_dialogue":               {"hf_repo": "MERaLiON/Multitask-National-Speech-Corpus-v1",   "hf_split": "train", "hf_data_dir": "AR-DIALOGUE", "bucket": "judge", "license_gated": True, "description": "IMDA Singlish accent recognition (dialogue level). License-gated."},  # pragma: allowlist secret
-    "imda_ar_sentence":               {"hf_repo": "MERaLiON/Multitask-National-Speech-Corpus-v1",   "hf_split": "train", "hf_data_dir": "AR-SENTENCE", "bucket": "judge", "license_gated": True, "description": "IMDA Singlish accent recognition (sentence level). License-gated."},  # pragma: allowlist secret
-    "imda_gr_dialogue":               {"hf_repo": "MERaLiON/Multitask-National-Speech-Corpus-v1",   "hf_split": "train", "hf_data_dir": "GR-DIALOGUE", "bucket": "judge", "license_gated": True, "description": "IMDA Singlish gender recognition (dialogue level). License-gated."},  # pragma: allowlist secret
-    "imda_gr_sentence":               {"hf_repo": "MERaLiON/Multitask-National-Speech-Corpus-v1",   "hf_split": "train", "hf_data_dir": "GR-SENTENCE", "bucket": "judge", "license_gated": True, "description": "IMDA Singlish gender recognition (sentence level). License-gated."},  # pragma: allowlist secret
+    "imda_ar_dialogue":               {"hf_repo": "MERaLiON/Multitask-National-Speech-Corpus-v1",   "hf_split": "train", "hf_data_dir": "PQA-AR-Dialogue-Test", "bucket": "judge", "license_gated": True, "description": "IMDA Singlish accent recognition (dialogue level). License-gated."},  # pragma: allowlist secret
+    "imda_ar_sentence":               {"hf_repo": "MERaLiON/Multitask-National-Speech-Corpus-v1",   "hf_split": "train", "hf_data_dir": "PQA-AR-Sentence-Test", "bucket": "judge", "license_gated": True, "description": "IMDA Singlish accent recognition (sentence level). License-gated."},  # pragma: allowlist secret
+    "imda_gr_dialogue":               {"hf_repo": "MERaLiON/Multitask-National-Speech-Corpus-v1",   "hf_split": "train", "hf_data_dir": "PQA-GR-Dialogue-Test", "bucket": "judge", "license_gated": True, "description": "IMDA Singlish gender recognition (dialogue level). License-gated."},  # pragma: allowlist secret
+    "imda_gr_sentence":               {"hf_repo": "MERaLiON/Multitask-National-Speech-Corpus-v1",   "hf_split": "train", "hf_data_dir": "PQA-GR-Sentence-Test", "bucket": "judge", "license_gated": True, "description": "IMDA Singlish gender recognition (sentence level). License-gated."},  # pragma: allowlist secret
     "imda_part3_30s_ds_human_test":   {"hf_repo": "MERaLiON/Multitask-National-Speech-Corpus-v1",   "hf_split": "train", "hf_data_dir": "SDS-PART3-Test", "bucket": "judge", "license_gated": True, "description": "IMDA NSC Part 3 dialogue summarization (30s). License-gated."},  # pragma: allowlist secret
     "imda_part4_30s_ds_human_test":   {"hf_repo": "MERaLiON/Multitask-National-Speech-Corpus-v1",   "hf_split": "train", "hf_data_dir": "SDS-PART4-Test", "bucket": "judge", "license_gated": True, "description": "IMDA NSC Part 4 dialogue summarization (30s). License-gated."},  # pragma: allowlist secret
     "imda_part5_30s_ds_human_test":   {"hf_repo": "MERaLiON/Multitask-National-Speech-Corpus-v1",   "hf_split": "train", "hf_data_dir": "SDS-PART5-Test", "bucket": "judge", "license_gated": True, "description": "IMDA NSC Part 5 dialogue summarization (30s). License-gated."},  # pragma: allowlist secret
@@ -116,18 +116,49 @@ DATASETS: dict[str, DatasetSpec] = {
     "spoken_mqa_single_step_reasoning": {"hf_repo": "amao0o0/spoken-mqa", "hf_split": "single_step_reasoning", "bucket": "exact_match", "instruction": "Listen to the question and answer with the numeric result only.", "description": "Spoken-MQA single-step reasoning."},
     "spoken_mqa_multi_step_reasoning":  {"hf_repo": "amao0o0/spoken-mqa", "hf_split": "multi_step_reasoning",  "bucket": "exact_match", "instruction": "Listen to the question and answer with the numeric result only.", "description": "Spoken-MQA multi-step reasoning."},
 }
+
+# Pinned HF commit for every source repo, so a prepare run is reproducible.
+HF_REVISIONS: dict[str, str] = {
+    "AudioLLMs/MMAU-mini":                          "db5fcbf6ceafb0b9e9d0d733f909052e26175ed0",  # pragma: allowlist secret
+    "AudioLLMs/aishell_1_zh_test":                  "e73dc7f096ecea5c8e5c722446c8d3b4014fdd18",  # pragma: allowlist secret
+    "AudioLLMs/alpaca_audio_test":                  "7eb2ab279975033690d67bee66e45eb612a430ee",  # pragma: allowlist secret
+    "AudioLLMs/audiocaps_qa_test":                  "6cf6853c52f55482126f226a8859eb71f2021e0e",  # pragma: allowlist secret
+    "AudioLLMs/audiocaps_test":                     "fb42aac15212cbddd723fbbf04b6071b60a9f8fe",  # pragma: allowlist secret
+    "AudioLLMs/clotho_aqa_test":                    "a7f4a7983d490e87a79eb041fede83e418c0ea4f",  # pragma: allowlist secret
+    "AudioLLMs/cn_college_listen_mcq_test":         "708d8ef278b5eadae714c314889f5d81ded18a25",  # pragma: allowlist secret
+    "AudioLLMs/common_voice_15_en_test":            "d7af6c5f2e2965f019b369f86a7a9f1be3ccc0a9",  # pragma: allowlist secret
+    "AudioLLMs/covost2_en_id_test":                 "51a4b1517f07e1dcf9180aa270f264961165cab3",  # pragma: allowlist secret
+    "AudioLLMs/covost2_en_ta_test":                 "23c23a71d698faf6c940e18753ade03acbcef86b",  # pragma: allowlist secret
+    "AudioLLMs/covost2_en_zh_test":                 "6fe92d7fabaee215b078b022abbe8959280f3187",  # pragma: allowlist secret
+    "AudioLLMs/covost2_id_en_test":                 "3998e50bec6eefdae5b38278238c359acb583f4c",  # pragma: allowlist secret
+    "AudioLLMs/covost2_ta_en_test":                 "76a89636191da366b0d0d51f4c23dbe93257d5ba",  # pragma: allowlist secret
+    "AudioLLMs/covost2_zh_en_test":                 "f9aec51472baf5ecad82ee9440e5a99e64fb0fef",  # pragma: allowlist secret
+    "AudioLLMs/dream_tts_mcq_test":                 "a495d7c2a1facf4eb27af6dfc4c3878de8828cf8",  # pragma: allowlist secret
+    "AudioLLMs/earnings21_test":                    "1edcc0d56dc6cdb6d21420f3155936e48485928d",  # pragma: allowlist secret
+    "AudioLLMs/earnings22_test":                    "19da542f94ac74d603b9cb5eed0e13792517ccf4",  # pragma: allowlist secret
+    "AudioLLMs/gigaspeech2-test":                   "77f58d8c13f1ede8dcef4b7214255c37f056a5bc",  # pragma: allowlist secret
+    "AudioLLMs/gigaspeech_test":                    "77582c9e37dc7cc98ab2dd21702a94ddcf95f976",  # pragma: allowlist secret
+    "AudioLLMs/iemocap_emotion_recognition":        "72ca1bd6e70a9522e91c9ddfe4cf3e1d4407cd80",  # pragma: allowlist secret
+    "AudioLLMs/iemocap_gender_recognition":         "4e44e63a84eb1a33035b973193b50fccf3452738",  # pragma: allowlist secret
+    "AudioLLMs/librispeech_test_clean":             "80ac8624e83d495d4bb9313dbb311b57ea13b4da",  # pragma: allowlist secret
+    "AudioLLMs/librispeech_test_other":             "4417cb8c3515a71afeadf36df1d30eb42952d671",  # pragma: allowlist secret
+    "AudioLLMs/meld_emotion_test":                  "005648394595a101e7c4ebeddd70043e7ba4a7a7",  # pragma: allowlist secret
+    "AudioLLMs/meld_sentiment_test":                "912e2aea9d2b2b8f79678fe4d5e89c98539548e7",  # pragma: allowlist secret
+    "AudioLLMs/mu_chomusic_test":                   "47531859d1be6f6389c5dfd6a1f8c1354f1ba375",  # pragma: allowlist secret
+    "AudioLLMs/openhermes_instruction_test":        "574f252dd1847b08bbb4331c9d7100bd872f0cfe",  # pragma: allowlist secret
+    "AudioLLMs/peoples_speech_test":                "a9982cc64c0b586336472a101ca52d8f82dec4bb",  # pragma: allowlist secret
+    "AudioLLMs/public_sg_speech_qa_test":           "ec4bcaf2615eaba0ca30b86f1f53ce4acb620f85",  # pragma: allowlist secret
+    "AudioLLMs/seame_dev_man":                      "4a510d3e42acdf71a08441219b70fab0df9d255d",  # pragma: allowlist secret
+    "AudioLLMs/seame_dev_sge":                      "9b41e3e4b96ac23a05636b46a5792ed3ef54378b",  # pragma: allowlist secret
+    "AudioLLMs/slue_p2_sqa5_test":                  "24809a6ef2e1243543d97a993c9b12765f0a0bff",  # pragma: allowlist secret
+    "AudioLLMs/spoken_squad_test":                  "b55aab98726d0eab95eeef1ee9992a0532b3226e",  # pragma: allowlist secret
+    "AudioLLMs/tedlium3_long_form_test":            "097511c11b7b8550e17f938bd2bcb127de0ded13",  # pragma: allowlist secret
+    "AudioLLMs/tedlium3_test":                      "aef8b18c0ee54a0123de5e671b2b889dbdd0b5c6",  # pragma: allowlist secret
+    "AudioLLMs/voxceleb_accent_test":               "d89c114a8337920f51879e1cf7b93a9c01697263",  # pragma: allowlist secret
+    "AudioLLMs/voxceleb_gender_test":               "0844e44484101caf53beaf8b243ec574de016359",  # pragma: allowlist secret
+    "AudioLLMs/wavcaps_qa_test":                    "9be38b7c3c8b971ec42cee607a7670a3ec2d116a",  # pragma: allowlist secret
+    "AudioLLMs/wavcaps_test":                       "3f87f655ebfb769579890d952504fd32fb853649",  # pragma: allowlist secret
+    "MERaLiON/Multitask-National-Speech-Corpus-v1": "d169debbce4a2dc07f7293360d3eed33c06793b9",  # pragma: allowlist secret
+    "amao0o0/spoken-mqa":                           "a1f9ec6143c6ce12966d7c6b3283905d679645c9",  # pragma: allowlist secret
+}
 # fmt: on
-
-
-JUDGE_SLUGS = [s for s, c in DATASETS.items() if c["bucket"] == "judge"]
-ASR_SLUGS = [s for s, c in DATASETS.items() if c["bucket"] == "asr"]
-BLEU_SLUGS = [s for s, c in DATASETS.items() if c["bucket"] == "bleu"]
-EXACT_MATCH_SLUGS = [s for s, c in DATASETS.items() if c["bucket"] == "exact_match"]
-
-# Sanity: the registry should match Skills' upstream JUDGE_DATASETS +
-# NONJUDGE_DATASETS (32 + 31 = 63 sub-datasets).
-assert len(JUDGE_SLUGS) == 32, len(JUDGE_SLUGS)
-assert len(ASR_SLUGS) == 21, len(ASR_SLUGS)
-assert len(BLEU_SLUGS) == 6, len(BLEU_SLUGS)
-assert len(EXACT_MATCH_SLUGS) == 4, len(EXACT_MATCH_SLUGS)
-assert len(DATASETS) == 63, len(DATASETS)

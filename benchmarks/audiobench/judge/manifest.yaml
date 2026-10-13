@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: audiobench/judge
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: AudioBench open-ended audio understanding (32 sub-datasets) rated 0-5 by an LLM judge.
+modality: audio
+licensing: unknown
+authors: [gwarmstrong]
+reward:
+  range: [0, 1]
+  higher_is_better: true
+determinism: stochastic
+resources_server: audiobench_judge
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+  - name: audiobench_judge
+    type: benchmark
+    jsonl_fpath: benchmarks/audiobench/data/audiobench_judge.jsonl
+    prepare_script: benchmarks/audiobench/judge/prepare.py
+    prompt_config: benchmarks/audiobench/prompts/default.yaml
+    num_repeats: 1
+standard_prompt_config: benchmarks/audiobench/prompts/default.yaml
+canonical_split: benchmark
+session_model: episode
+state: none
+lifecycle: active

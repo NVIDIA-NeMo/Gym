@@ -69,7 +69,11 @@ def extract_punctuation(text: str) -> List[str]:
     return [c for c in text if not c.isalnum() and not c.isspace()]
 
 
-def preprocess_asr_text(text: str, mode: str = "standard") -> str:
+# "audiobench" adds digits-to-words on top of the Whisper normalization ("standard").
+_NORMALIZATION_MODES = Literal["standard", "audiobench"]
+
+
+def preprocess_asr_text(text: str, *, mode: _NORMALIZATION_MODES = "standard") -> str:
     """Whisper text normalizer + lowercase + whitespace collapse.
 
     ``mode``:
@@ -92,23 +96,11 @@ def preprocess_asr_text(text: str, mode: str = "standard") -> str:
 def _digits_to_words(text: str) -> str:
     """Convert standalone digit tokens to their spelled-out form.
 
-    Lazy import of ``num2words`` so the standard normalization path doesn't
-    pay the import cost. Falls back to leaving the digit string in place
-    if ``num2words`` isn't installed (no hard requirement on the standard
-    asr_with_pc venv).
+    ``num2words`` is imported lazily so the standard normalization path doesn't pay the import cost.
     """
-    try:
-        from num2words import num2words
-    except ImportError:
-        return text
+    from num2words import num2words
 
-    def _replace(match: "re.Match[str]") -> str:
-        try:
-            return num2words(int(match.group(0)))
-        except (ValueError, TypeError):
-            return match.group(0)
-
-    return re.sub(r"\b\d+\b", _replace, text)
+    return re.sub(r"\b\d+\b", lambda match: num2words(int(match.group(0))), text)
 
 
 def calculate_per(reference: str, hypothesis: str) -> float:
@@ -189,7 +181,9 @@ def evaluate_asr_pc(reference: str, hypothesis: str) -> Dict[str, Any]:
     }
 
 
-def evaluate_asr(reference: str, hypothesis: str, normalization_mode: str = "standard") -> Dict[str, Any]:
+def evaluate_asr(
+    reference: str, hypothesis: str, *, normalization_mode: _NORMALIZATION_MODES = "standard"
+) -> Dict[str, Any]:
     """Standard ASR WER (Whisper-normalized) — no PC scoring.
 
     Used by benchmarks that only score standard WER (e.g. asr-leaderboard).
@@ -258,9 +252,9 @@ def evaluate_bleu(reference: str, hypothesis: str) -> Dict[str, Any]:
     """Sentence-level sacrebleu for translation tasks (CoVoST2 et al).
 
     Returns the sentence BLEU as a 0-1 fraction (sacrebleu reports 0-100).
-    ``is_correct = bleu >= 0.5`` is a coarse per-row threshold; corpus-level
-    BLEU should be aggregated at metric time via ``compute_metrics`` over the
-    raw reference/hypothesis pairs (TODO: corpus-level BLEU aggregator).
+    ``is_correct = bleu >= 0.5`` is a coarse per-row threshold; the headline
+    corpus-level BLEU is aggregated in ``compute_metrics`` over the raw
+    reference/hypothesis pairs.
     """
     from sacrebleu.metrics import BLEU
 
@@ -301,7 +295,8 @@ def evaluate_exact_match(reference: str, hypothesis: str) -> Dict[str, Any]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 _TASK_TYPES = Literal["ASR-PC", "ASR", "Hallucination", "ASR_LEADERBOARD", "BLEU", "EXACT_MATCH"]
-_NORMALIZATION_MODES = Literal["standard", "audiobench"]
+# Task types scored without WER; their rollouts are left out of the WER aggregates in compute_metrics().
+_NON_WER_TASK_TYPES = ("BLEU", "EXACT_MATCH")
 
 
 class ASRWithPCConfig(BaseResourcesServerConfig):
@@ -501,6 +496,8 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         }
         if r.get("hallucination_rate") is not None:
             scores["hallucination_rate"] = float(r["hallucination_rate"])
+        if r.get("bleu") is not None:
+            scores["bleu"] = float(r["bleu"])
         return scores
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
@@ -513,6 +510,7 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         the per-row ``text_<suffix>`` references.
         """
         import jiwer
+        from sacrebleu.metrics import BLEU
 
         metrics, _, _, max_k = compute_pass_majority_metrics(
             tasks,
@@ -537,6 +535,8 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         for k in range(1, max_k + 1):
             refs_std: List[str] = []
             hyps_std: List[str] = []
+            bleu_refs: List[str] = []
+            bleu_hyps: List[str] = []
             wer_c_scores: List[float] = []
             wer_pc_scores: List[float] = []
             per_scores: List[float] = []
@@ -545,6 +545,12 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
 
             for rollouts in tasks:
                 for r in rollouts[:k]:
+                    task_type = r.get("task_type") or self.config.task_type
+                    if task_type == "BLEU" and r.get("text"):
+                        bleu_refs.append(r["text"])
+                        bleu_hyps.append(r.get("pred_text") or "")
+                    if task_type in _NON_WER_TASK_TYPES:
+                        continue
                     refs_std.append(r.get("text", ""))
                     hyps_std.append(r.get("pred_text", ""))
                     if r.get("wer_c") is not None:
@@ -564,6 +570,8 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
                         ref_corpus[suffix].append(ref_norm)
                         hyp_corpus[suffix].append(hyp_norm)
 
+            if bleu_refs:
+                metrics[f"corpus_bleu@k={k}"] = BLEU().corpus_score(bleu_hyps, [bleu_refs]).score
             if not refs_std:
                 continue
 
@@ -578,13 +586,13 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
                 if ref_corpus[suffix]:
                     metrics[f"wer_{suffix}@k={k}"] = 100.0 * jiwer.wer(ref_corpus[suffix], hyp_corpus[suffix])
 
-        # Per-sub-dataset breakdown via ``dataset_name`` field. Used by the
+        # Per-sub-dataset breakdown via ``subset_for_metrics`` field. Used by the
         # audiobench buckets where one rollout collection covers many
         # sub-datasets (alpaca_audio_test vs gigaspeech_test vs ...) and the
         # reviewer wants per-sub-dataset accuracy alongside the headline.
-        # Skipped when rows don't carry ``dataset_name`` (e.g. librispeech_pc).
-        if any(t and t[0].get("dataset_name") for t in tasks):
-            subset = compute_subset_metrics(tasks, subset_key="dataset_name", score_fn=self._score_fn)
+        # Skipped when rows don't carry ``subset_for_metrics`` (e.g. librispeech_pc).
+        if any(t and t[0].get("subset_for_metrics") for t in tasks):
+            subset = compute_subset_metrics(tasks, subset_key="subset_for_metrics", score_fn=self._score_fn)
             metrics.update(subset)
 
         return metrics
@@ -624,6 +632,11 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
                 if suffix in ("c", "pc"):
                     continue
                 key[f"wer_{suffix}"] = agent_metrics[k_str_key]
+
+        # Corpus BLEU (BLEU task_type) at the highest k, exposed as ``bleu``.
+        bleu_ks = [int(name.split("=")[1]) for name in agent_metrics if name.startswith("corpus_bleu@k=")]
+        if bleu_ks:
+            key["bleu"] = agent_metrics[f"corpus_bleu@k={max(bleu_ks)}"]
 
         return key
 

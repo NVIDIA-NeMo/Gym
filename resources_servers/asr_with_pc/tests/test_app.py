@@ -12,6 +12,7 @@ WER values against numeric expectations computed offline (jiwer 3.x).
 import base64
 import json
 from pathlib import Path
+from typing import Any, Dict
 from unittest.mock import MagicMock
 
 import pytest
@@ -678,8 +679,7 @@ class TestAudiobenchNormalization:
 
     AudioBench's text normalizer is more aggressive than Whisper's: standalone
     digit tokens get spelled out (so "I bought 3 apples" matches "I bought
-    three apples"). Falls back to leaving digits in place if num2words isn't
-    installed.
+    three apples").
     """
 
     def test_digits_get_spelled_out(self) -> None:
@@ -775,3 +775,44 @@ class TestBleuExactMatchDispatch:
         # With audiobench normalization, digits→words should make these match.
         assert result.wer == pytest.approx(0.0)
         assert result.is_correct is True
+
+
+class TestAudiobenchMetrics:
+    """BLEU / EXACT_MATCH rows stay out of WER aggregates; subset_for_metrics adds per-subset metrics."""
+
+    async def _rollout(self, server: ASRWithPCResourcesServer, hyp: str, ref: str, **fields: Any) -> Dict[str, Any]:
+        body = _make_verify_request(hyp, ref).model_copy(update=fields)
+        return (await server.verify(body)).model_dump()
+
+    async def test_bleu_rows_report_corpus_bleu_not_wer(self) -> None:
+        server = _make_server(task_type="BLEU")
+        tasks = [
+            [await self._rollout(server, "the cat sat on the mat", "the cat sat on the mat")],
+            [await self._rollout(server, "a dog ran", "the bird flew away")],
+        ]
+        metrics = server.compute_metrics(tasks)
+        assert not any(name.startswith(("corpus_wer@", "wer_c@", "per@")) for name in metrics)
+        assert 0.0 < metrics["corpus_bleu@k=1"] < 100.0
+        assert metrics["pass@1[avg-of-1]/bleu"] == pytest.approx(50.0 * (tasks[0][0]["bleu"] + tasks[1][0]["bleu"]))
+        key = server.get_key_metrics(metrics)
+        assert key["bleu"] == metrics["corpus_bleu@k=1"]
+        assert "wer" not in key
+
+    async def test_mixed_rows_keep_wer_over_asr_rows_only(self) -> None:
+        server = _make_server(task_type="ASR")
+        asr_row = await self._rollout(server, "hello world", "hello world")
+        em_row = await self._rollout(server, "43", "42", task_type="EXACT_MATCH")
+        metrics = server.compute_metrics([[asr_row], [em_row]])
+        assert metrics["corpus_wer@k=1"] == pytest.approx(0.0)
+        assert metrics["pass@1[avg-of-1]/accuracy"] == pytest.approx(50.0)
+        assert "corpus_bleu@k=1" not in metrics
+
+    async def test_subset_for_metrics_breakdown(self) -> None:
+        server = _make_server(task_type="EXACT_MATCH")
+        tasks = [
+            [await self._rollout(server, "42", "42", subset_for_metrics="spoken_mqa_long_digit")],
+            [await self._rollout(server, "7", "8", subset_for_metrics="spoken_mqa_multi_step_reasoning")],
+        ]
+        metrics = server.compute_metrics(tasks)
+        assert metrics["spoken_mqa_long_digit/pass@1[avg-of-1]/accuracy"] == pytest.approx(100.0)
+        assert metrics["spoken_mqa_multi_step_reasoning/pass@1[avg-of-1]/accuracy"] == pytest.approx(0.0)

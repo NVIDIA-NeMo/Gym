@@ -1,122 +1,127 @@
 # AudioBench
 
-Port of the [AudioBench](https://github.com/AudioLLMs/AudioBench) benchmark
-suite from [NeMo Skills](https://github.com/NVIDIA/NeMo-Skills/tree/main/nemo_skills/dataset/audiobench)
-into NeMo Gym. **63 sub-datasets** across four scoring buckets:
+Port of the [AudioBench](https://github.com/AudioLLMs/AudioBench) suite from
+[NeMo Skills](https://github.com/NVIDIA/NeMo-Skills/tree/main/nemo_skills/dataset/audiobench)
+into NeMo Gym: **63 sub-datasets** in four benchmarks, one per scoring method.
 
-| Bucket | Count | Verifier | Resource server | Agent |
-|---|---:|---|---|---|
-| Judge (open-ended LLM-graded) | 32 | 0–5 LLM rating prompt, byte-equivalent with Skills' `judge/audiobench.yaml` | [`audiobench_judge`](../../resources_servers/audiobench_judge/) | `audiobench_judge_simple_agent` |
-| ASR | 21 | Whisper + audiobench-style WER (digits→words) | [`asr_with_pc`](../../resources_servers/asr_with_pc/) (`task_type=ASR`, `normalization_mode=audiobench`) | `audiobench_asr_simple_agent` |
-| BLEU translation | 6 | sacrebleu sentence BLEU | `asr_with_pc` (`task_type=BLEU`) | `audiobench_bleu_simple_agent` |
-| Exact-match (spoken-mqa) | 4 | lowercase + punct-strip + whitespace-collapse | `asr_with_pc` (`task_type=EXACT_MATCH`) | `audiobench_exact_match_simple_agent` |
+| Benchmark | Sub-datasets | Verifier | Resources server |
+|---|---:|---|---|
+| `audiobench/judge` | 32 | LLM judge rates the answer 0–5 against the reference (prompt byte-equivalent with Skills' `judge/audiobench.yaml`) | [`audiobench_judge`](../../resources_servers/audiobench_judge/) |
+| `audiobench/asr` | 21 | Whisper normalization + digits→words, corpus WER | [`asr_with_pc`](../../resources_servers/asr_with_pc/) (`task_type: ASR`, `normalization_mode: audiobench`) |
+| `audiobench/bleu` | 6 | sacreBLEU (CoVoST 2 speech translation) | `asr_with_pc` (`task_type: BLEU`) |
+| `audiobench/exact_match` | 4 | Lowercase, punctuation-stripped exact match (Spoken-MQA) | `asr_with_pc` (`task_type: EXACT_MATCH`) |
 
-Source-of-truth registry (HF repo + split + bucket + license + instruction
-override per sub-dataset): [`DATASETS.py`](DATASETS.py).
+Each benchmark lives in its own directory (`judge/`, `asr/`, `bleu/`,
+`exact_match/`) with a `config.yaml`, `manifest.yaml`, and `prepare.py`.
+They share the sub-dataset registry [`DATASETS.py`](DATASETS.py), the
+download and row mapping in [`_prepare_lib.py`](_prepare_lib.py), the prompt,
+and the `data/` directory.
 
-## How the bucketing works
+## Data provenance
 
-Each sub-dataset belongs to exactly one bucket. The bucket determines:
-* which `agent_ref` is stamped on every row in `prepare_<bucket>.py`,
-* which prepared JSONL the row lands in (`data/audiobench_<bucket>.jsonl`),
-* which agent's resource server runs `verify()` on the rollout.
+[`DATASETS.py`](DATASETS.py) lists every sub-dataset's Hugging Face repo,
+split, and data directory (the same mapping as Skills' `audiobench/prepare.py`),
+and `HF_REVISIONS` pins each repo to a fixed commit. Most sources are
+`AudioLLMs/*` test sets; the IMDA sub-datasets come from
+[`MERaLiON/Multitask-National-Speech-Corpus-v1`](https://huggingface.co/datasets/MERaLiON/Multitask-National-Speech-Corpus-v1)
+and Spoken-MQA from [`amao0o0/spoken-mqa`](https://huggingface.co/datasets/amao0o0/spoken-mqa).
+Licenses vary per sub-dataset (CC-BY-4.0, CC-BY-NC-4.0, Apache-2.0, and the
+IMDA National Speech Corpus license); check each source before use.
 
-`ng_collect_rollouts` reads the agent name from each row's `agent_ref` and
-dispatches accordingly, so a single rollout collection can mix sub-datasets
-from one bucket; the per-row `dataset_name` field is then used by the
-resource server's `compute_metrics()` (via `compute_subset_metrics`) to
-break results down per sub-dataset inside each agent's metric block.
+Every prepared row carries `subset_for_metrics` (the sub-dataset slug), so the
+resources server reports per-sub-dataset metrics next to the benchmark-level
+ones.
 
-## Preparation
+## Audio handling
 
-Download all 63 sub-datasets at once via the standard pipeline (one job
-per bucket):
+`prepare.py` writes one WAV per row to `benchmarks/audiobench/data/audio/`
+and references it from `responses_create_params.metadata.audio_path`. The
+`vllm_model` adapter reads that file, base64-encodes it, and splices an
+`audio_url` content block into the user message.
 
-```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/audiobench/config.yaml]"
-```
+By default `audio_path` is the absolute path of the local `data/audio/`
+directory. When the model server runs on another host or in a container, pass
+`audio_prefix` with the directory where `data/audio/` is mounted there.
 
-Or per-bucket directly:
+These benchmarks require an audio-capable vLLM endpoint. The resources
+servers only accept vLLM-based model adapters (`--model-type vllm_model`);
+set `--model-url` to the vLLM server.
 
-```bash
-python benchmarks/audiobench/prepare_judge.py            # all 32 judge datasets
-python benchmarks/audiobench/prepare_asr.py              # all 21 ASR datasets
-python benchmarks/audiobench/prepare_bleu.py             # all 6 covost2
-python benchmarks/audiobench/prepare_exact_match.py      # all 4 spoken-mqa
-```
+## Prompt
 
-Each per-bucket script accepts `--datasets foo,bar,baz` and
-`--max-samples-per-dataset N` for selective preparation:
+[`prompts/default.yaml`](prompts/default.yaml) is a fixed system prompt plus
+`user: "{instruction}"`. `instruction` is set per row: the sub-dataset's own
+instruction from the source row, or a per-sub-dataset override in
+`DATASETS.py` (ASR language cues, translation direction, Spoken-MQA answer
+format).
 
-```bash
-# only prepare a smoke set of the judge bucket
-python benchmarks/audiobench/prepare_judge.py \
-    --datasets alpaca_audio_test,audiocaps_test,mmau_mini --max-samples-per-dataset 5
-```
-
-License-gated sub-datasets (the 18 IMDA splits hosted on
-[`MERaLiON/Multitask-National-Speech-Corpus-v1`](https://huggingface.co/datasets/MERaLiON/Multitask-National-Speech-Corpus-v1))
-will fail to download until the user accepts the license on the HF page
-and authenticates with `huggingface-cli login`. The prepare script
-**skips** any sub-dataset that raises `GatedRepoError` (or any other HF
-loading error) and prints a per-skipped warning at the end — the rest of
-the bucket still lands.
-
-## Running
-
-Start the four servers (audiobench_judge + three asr_with_pc variants +
-the model under test):
+## Prepare benchmark data
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/audiobench/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym eval prepare --benchmark audiobench/judge
+gym eval prepare --benchmark audiobench/asr
+gym eval prepare --benchmark audiobench/bleu
+gym eval prepare --benchmark audiobench/exact_match
 ```
 
-Collect rollouts for one bucket at a time (each writes its own metric
-block in `rollouts_aggregate_metrics.json`):
+`prepare()` accepts `datasets` (sub-dataset slugs from that benchmark),
+`max_samples_per_dataset`, and `audio_prefix`:
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=audiobench_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/audiobench/data/audiobench_judge.jsonl \
-    +output_jsonl_fpath=results/audiobench_judge_rollouts.jsonl \
-    +num_repeats=4
+gym eval prepare --benchmark audiobench/judge \
+    '+prepare_script_args={datasets: [alpaca_audio_test, mmau_mini], max_samples_per_dataset: 5}'
 ```
 
-Repeat with `audiobench_asr_simple_agent`, `audiobench_bleu_simple_agent`,
-`audiobench_exact_match_simple_agent`. Or concatenate the four bucket
-JSONLs into a single mixed input — `ng_collect_rollouts` reads each row's
-`agent_ref` and dispatches to the right server, then groups results by
-agent at aggregation time.
+The same options are available from the command line, e.g.
+`python benchmarks/audiobench/judge/prepare.py --datasets alpaca_audio_test --max-samples-per-dataset 5`.
+
+If a source repo is license-gated on Hugging Face, accept its license and run
+`hf auth login`. A `license_gated` sub-dataset that is still inaccessible is
+skipped with a warning; any other download failure stops the prepare.
+
+## Judge model
+
+`audiobench/judge` sends each answer to a separate judge model, by default
+`openai/gpt-oss-20b` on `https://integrate.api.nvidia.com/v1` through
+`/v1/chat/completions` (temperature 0, 512 output tokens). Set
+`judge_api_key` in `env.yaml`, and `judge_base_url` / `judge_model_name` to use
+a different judge. A failed judge call masks the row instead of scoring it as
+wrong.
+
+## Running servers
+
+```bash
+gym env start \
+    --model-type vllm_model \
+    --model-url http://<vllm-host>:<port>/v1 \
+    --model <audio-capable-model> \
+    --benchmark audiobench/judge
+```
+
+`--benchmark` is repeatable, so one server set can host all four benchmarks.
+
+## Collecting rollouts
+
+```bash
+gym eval run --no-serve \
+    --agent audiobench_judge_audiobench_judge_simple_agent \
+    --output results/audiobench_judge_rollouts.jsonl
+```
+
+Agents for the other benchmarks are `audiobench_asr_asr_with_pc_simple_agent`,
+`audiobench_bleu_asr_with_pc_simple_agent`, and
+`audiobench_exact_match_asr_with_pc_simple_agent`. Each benchmark runs one
+repeat per task (`num_repeats: 1`); pass `--num-repeats N` for pass@k.
 
 ## Verification
 
-| Metric | Bucket | Source |
+| Benchmark | Headline metrics | Per-sub-dataset |
 |---|---|---|
-| `judge_score` (mean rating × 20, 0–100) and `pass@k` (rating ≥ 3) | judge | LLM judge call, prompt byte-equivalent with Skills `judge/audiobench.yaml` |
-| corpus `wer` + per-sub-dataset breakdowns | asr | `jiwer` over Whisper-normalized + digits→words text |
-| sentence `bleu` (0..1) and per-sub-dataset breakdowns | bleu | `sacrebleu` |
-| `pass@k/accuracy` and per-sub-dataset breakdowns | exact_match | string equality after lowercase + punctuation strip |
+| `audiobench/judge` | `judge_score` (mean rating × 20, 0–100); `accuracy` (rating ≥ 3) | `<slug>/pass@1[avg-of-k]/judge_score`, `.../accuracy` |
+| `audiobench/asr` | corpus `wer` | `<slug>/pass@1[avg-of-k]/accuracy` (per-row WER < 0.5) |
+| `audiobench/bleu` | corpus `bleu` (0–100) | `<slug>/pass@1[avg-of-k]/bleu` (mean sentence BLEU) |
+| `audiobench/exact_match` | `accuracy` | `<slug>/pass@1[avg-of-k]/accuracy` |
 
-Per-sub-dataset breakdowns are emitted by each resource server's
-`compute_metrics()` via `compute_subset_metrics(subset_key="dataset_name")`,
-so e.g. the judge agent's metric block contains both the cross-dataset
-headline and `alpaca_audio_test/pass@1[avg-of-1]/accuracy`,
-`audiocaps_test/pass@1[avg-of-1]/accuracy`, … keys.
-
-## Skills↔Gym structural parity
-
-| Aspect | Skills | This port |
-|---|---|---|
-| Source files for the entire AudioBench port | 5 (dispatcher prepare.py + 2 template `__init__.py` + parent `__init__.py` + judge YAML) | ~10 (one benchmark dir with 4 thin prepare scripts + shared lib + DATASETS registry) |
-| Sub-dataset selection at prepare time | `ns prepare-data audiobench --datasets X,Y,Z` | `python prepare_<bucket>.py --datasets X,Y,Z` |
-| Per-sub-dataset directory creation at runtime | yes (template `__init__.py` copied per sub-dataset) | no — sub-dataset is a row-level `dataset_name` field |
-| Mixed-sub-dataset rollout collection | one `ns eval` per benchmark group | one `ng_collect_rollouts` per bucket; mixed agents supported via per-row `agent_ref` |
-| Per-sub-dataset metric breakdown | computed inside each `*Metrics.evaluate` | `compute_subset_metrics(subset_key="dataset_name")` inside each server's `compute_metrics()` |
-
-The Gym port is a strict superset of Skills' coverage: same 63 sub-datasets,
-same scoring logic (judge prompt + threshold + score formula byte-equivalent;
-ASR / BLEU / exact-match implementations mirror Skills' `audio_metrics.py`),
-plus per-sub-dataset breakdowns inside each agent block instead of one big
-aggregate.
+The judge prompt, rating parser, and score formula match Skills'
+`AudioMetrics`; ASR, BLEU, and exact-match scoring mirror Skills'
+`audio_metrics.py`.

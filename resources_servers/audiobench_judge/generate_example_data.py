@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
 """Generate ``data/example.jsonl`` for the audiobench_judge resource server.
 
 Produces 5 example rows with 1-second silence WAV data-URIs (small enough to
@@ -24,10 +21,8 @@ import argparse
 import base64
 import io
 import json
+import wave
 from pathlib import Path
-
-import numpy as np
-import soundfile as sf
 
 
 SYSTEM_PROMPT = "You are a helpful assistant. /no_think"
@@ -60,9 +55,13 @@ SAMPLES = [
 
 
 def _silent_wav_base64(duration_sec: float = 1.0, sample_rate: int = 16000) -> str:
-    audio = np.zeros(int(duration_sec * sample_rate), dtype=np.int16)
+    frame_count = int(duration_sec * sample_rate)
     buf = io.BytesIO()
-    sf.write(buf, audio, sample_rate, format="WAV", subtype="PCM_16")
+    with wave.open(buf, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(b"\x00\x00" * frame_count)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 

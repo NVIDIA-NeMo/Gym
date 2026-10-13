@@ -23,6 +23,17 @@ overridable per-row in the verify request body):
   request's `reference_fields` (e.g. `["text_tn", "text_itn"]`). Emits
   `wer_<suffix>` and `is_correct_<suffix>` per field; suffix is the field
   name with leading `text_` stripped (`text_tn` → `tn`).
+- **`task_type: BLEU`** — sentence-level sacreBLEU against `expected_answer`
+  for speech translation (AudioBench CoVoST 2). Emits `bleu` as a 0–1
+  fraction. `is_correct = bleu >= 0.5`.
+- **`task_type: EXACT_MATCH`** — lowercase, punctuation-stripped,
+  whitespace-collapsed exact match (AudioBench Spoken-MQA).
+  `is_correct = normalized prediction == normalized reference`.
+
+`normalization_mode` (server config, overridable per row) selects the text
+normalization for the WER task types: `standard` (default) is the Whisper
+normalizer described below; `audiobench` additionally spells out digit tokens
+(`3` → `three`), matching AudioBench's normalization.
 
 Aggregation:
 
@@ -32,6 +43,10 @@ Aggregation:
 - `hallucination_rate` (Hallucination) is sample-mean.
 - `wer_<suffix>` (ASR_LEADERBOARD) is corpus-level over each row's
   `text_<suffix>` reference.
+- `bleu` (BLEU) is corpus-level sacreBLEU (0–100). BLEU and EXACT_MATCH rows
+  are left out of the WER aggregates.
+- Rows that carry `subset_for_metrics` also get per-subset pass@k metrics
+  (`<subset>/pass@1[avg-of-k]/accuracy`, ...).
 
 Standard WER uses Whisper's English text normalizer + lowercase + punctuation
 strip. WER_PC tokenizes punctuation as separate tokens so word boundaries and

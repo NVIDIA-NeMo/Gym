@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
 """Unit tests for the audiobench_judge resources server.
 
 Two test surfaces:
@@ -16,12 +13,15 @@ Two test surfaces:
 """
 
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from pytest import approx
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -33,7 +33,11 @@ from resources_servers.audiobench_judge.app import (
     AudioBenchJudgeVerifyRequest,
     extract_judge_result,
 )
+from resources_servers.audiobench_judge.generate_example_data import SAMPLES, main, make_example
+from resources_servers.audiobench_judge.task_data import TaskData
 
+
+EXAMPLE_DATA_PATH = Path(__file__).parents[1] / "data" / "example.jsonl"
 
 MINIMAL_RESPONSES_CREATE_PARAMS = {
     "input": [{"role": "user", "content": "test"}],
@@ -41,7 +45,7 @@ MINIMAL_RESPONSES_CREATE_PARAMS = {
 }
 
 
-def _make_config() -> AudioBenchJudgeConfig:
+def _make_config(use_chat_completions_for_judge: bool = False) -> AudioBenchJudgeConfig:
     return AudioBenchJudgeConfig(
         host="0.0.0.0",
         port=8080,
@@ -52,6 +56,7 @@ def _make_config() -> AudioBenchJudgeConfig:
             name="audiobench_judge_model",
         ),
         judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        use_chat_completions_for_judge=use_chat_completions_for_judge,
     )
 
 
@@ -82,10 +87,26 @@ def _make_judge_post_mock(judge_text: str):
     async def _read_json(*_args, **_kwargs) -> dict[str, Any]:
         return _make_response_with_text(judge_text).model_dump()
 
-    response = MagicMock()
+    response = MagicMock(ok=True)
     response.json = AsyncMock(side_effect=_read_json)
     response.read = AsyncMock(return_value=json.dumps(_make_response_with_text(judge_text).model_dump()).encode())
     response.text = AsyncMock(return_value=json.dumps(_make_response_with_text(judge_text).model_dump()))
+    return response
+
+
+def _make_chat_judge_post_mock(content: str | None) -> MagicMock:
+    """Build a mock ``server_client.post`` reply shaped like a /v1/chat/completions response."""
+    chat_completion = {
+        "id": "chatcmpl_test",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "dummy",
+        "choices": [
+            {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}},
+        ],
+    }
+    response = MagicMock(ok=True)
+    response.read = AsyncMock(return_value=json.dumps(chat_completion).encode())
     return response
 
 
@@ -93,6 +114,13 @@ def _make_server(judge_text: str = "Rating: 5") -> AudioBenchJudgeResourcesServe
     config = _make_config()
     server_client = MagicMock(spec=ServerClient)
     server_client.post = AsyncMock(return_value=_make_judge_post_mock(judge_text))
+    return AudioBenchJudgeResourcesServer(config=config, server_client=server_client)
+
+
+def _make_chat_server(content: str | None) -> AudioBenchJudgeResourcesServer:
+    config = _make_config(use_chat_completions_for_judge=True)
+    server_client = MagicMock(spec=ServerClient)
+    server_client.post = AsyncMock(return_value=_make_chat_judge_post_mock(content))
     return AudioBenchJudgeResourcesServer(config=config, server_client=server_client)
 
 
@@ -216,15 +244,81 @@ class TestAudioBenchJudgeServer:
         # Confirm the judge model was never hit.
         server.server_client.post.assert_not_called()
 
-    async def test_judge_call_failure_rated_zero(self) -> None:
-        """If the judge LLM call raises, score the row as rating 0 instead of crashing."""
+    async def test_judge_call_failure_is_not_a_wrong_answer(self) -> None:
+        """A failed judge call raises JudgeError; the failsafe masks the row instead of scoring it 0."""
         server = _make_server(judge_text="Rating: 5")
         server.server_client.post = AsyncMock(side_effect=RuntimeError("judge unreachable"))
         body = _make_verify_request("an answer", "ref", "q?")
-        result = await server.verify(body)
+        with pytest.raises(JudgeError, match="judge unreachable"):
+            await server.verify(body)
+        result = json.loads((await judge_failsafe(server.verify)(body)).body)
+        assert result["_ng_failure_class"] == "judge_failed"
+        assert result["mask_sample"] is True
+        assert result["reward"] == 0.0
+
+    async def test_judge_http_error_is_not_a_wrong_answer(self) -> None:
+        """A non-2xx judge reply raises JudgeError before the body is parsed."""
+        server = _make_server()
+        error_reply = MagicMock(ok=False)
+        error_reply.raise_for_status = MagicMock(side_effect=RuntimeError("401 Unauthorized"))
+        error_reply.content.read = AsyncMock(return_value=b"unauthorized")
+        server.server_client.post = AsyncMock(return_value=error_reply)
+        with pytest.raises(JudgeError, match="401 Unauthorized"):
+            await server.verify(_make_verify_request("an answer", "ref", "q?"))
+
+    async def test_chat_completions_judge_records_evaluation(self) -> None:
+        """The chat-completions judge path scores the reply and still populates judge_evaluation."""
+        server = _make_chat_server("Rating: 4")
+        result = await server.verify(_make_verify_request("My answer", "The reference", "q?"))
+        assert result.reward == 1.0
+        assert result.judge_rating == 4.0
+        assert result.judge_evaluation.response.output_text == "Rating: 4"
+        call_kwargs = server.server_client.post.call_args.kwargs
+        assert call_kwargs["url_path"] == "/v1/chat/completions"
+        assert call_kwargs["json"].max_tokens == 512
+        assert "The reference" in call_kwargs["json"].messages[0]["content"]
+
+    async def test_chat_completions_empty_judge_reply_rated_zero(self) -> None:
+        """A received-but-empty judge reply is a legitimate rating of 0, not a judge failure."""
+        server = _make_chat_server(None)
+        result = await server.verify(_make_verify_request("My answer", "ref", "q?"))
         assert result.reward == 0.0
         assert result.judge_rating == 0.0
-        assert result.judge_evaluation is None
+        assert result.judge_evaluation.response.output_text == ""
+
+    async def test_generation_ignores_non_text_output_items(self) -> None:
+        """Only assistant output_text parts are judged; reasoning items and refusals are skipped."""
+        server = _make_server(judge_text="Rating: 5")
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {"id": "rs_1", "type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking"}]},
+                {
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "type": "message",
+                    "status": "completed",
+                    "content": [
+                        {"type": "refusal", "refusal": "no"},
+                        {"type": "output_text", "text": "final answer", "annotations": []},
+                    ],
+                },
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+        body = AudioBenchJudgeVerifyRequest(
+            responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
+            response=response,
+            question="q?",
+            expected_answer="ref",
+        )
+        result = await server.verify(body)
+        assert result.generation == "final answer"
 
     async def test_judge_prompt_is_audiobench_format(self) -> None:
         """Judge gets the AudioBench rating prompt — byte-equivalent with Skills' judge/audiobench.yaml."""
@@ -283,6 +377,25 @@ class TestAggregateMetrics:
         # judge_score: avg(4,2)*20 = 60.0
         assert metrics["pass@1[avg-of-2]/judge_score"] == approx(60.0)
 
+    def test_compute_metrics_per_dataset_breakdown(self) -> None:
+        """Rows stamped with subset_for_metrics get per-sub-dataset metrics alongside the overall ones."""
+        server = _make_server()
+        tasks = [
+            [
+                {
+                    "judge_correct": True,
+                    "judge_rating": 5.0,
+                    "generation": "a",
+                    "subset_for_metrics": "alpaca_audio_test",
+                }
+            ],
+            [{"judge_correct": False, "judge_rating": 1.0, "generation": "b", "subset_for_metrics": "mmau_mini"}],
+        ]
+        metrics = server.compute_metrics(tasks)
+        assert metrics["pass@1[avg-of-1]/accuracy"] == approx(50.0)
+        assert metrics["alpaca_audio_test/pass@1[avg-of-1]/accuracy"] == approx(100.0)
+        assert metrics["mmau_mini/pass@1[avg-of-1]/judge_score"] == approx(20.0)
+
     def test_no_answer_flag(self) -> None:
         empty = AudioBenchJudgeResourcesServer._score_fn(
             {"judge_correct": False, "judge_rating": 0.0, "generation": ""}
@@ -300,9 +413,35 @@ class TestAggregateMetrics:
             "pass@1[avg-of-4]/accuracy": 75.0,
             "pass@2/accuracy": 85.0,
             "pass@4/accuracy": 90.0,
+            "mean/input_tokens": 7,
             "mean/output_tokens": 42,
         }
         key = server.get_key_metrics(agent_metrics)
         assert key["pass@1[avg-of-4]/accuracy"] == 75.0
         assert key["pass@4/accuracy"] == 90.0
+        assert key["mean/input_tokens"] == 7
         assert key["mean/output_tokens"] == 42
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Example data
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_example_data_matches_generator_and_task_data_schema() -> None:
+    rows = [json.loads(line) for line in EXAMPLE_DATA_PATH.read_text().splitlines() if line.strip()]
+    generated_rows = [
+        make_example(sample_id=f"example-{i:02d}", question=s["question"], expected_answer=s["expected_answer"])
+        for i, s in enumerate(SAMPLES)
+    ]
+    assert rows == generated_rows
+    for row in rows:
+        assert row["responses_create_params"]["metadata"]["audio_data"].startswith("data:audio/wav;base64,")
+        TaskData.model_validate({k: v for k, v in row.items() if k != "responses_create_params"})
+
+
+def test_generate_example_data_main_writes_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    out_path = tmp_path / "example.jsonl"
+    monkeypatch.setattr("sys.argv", ["generate_example_data.py", "--out", str(out_path)])
+    main()
+    assert out_path.read_text() == EXAMPLE_DATA_PATH.read_text()
