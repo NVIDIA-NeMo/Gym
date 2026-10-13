@@ -22,7 +22,7 @@ import sys
 import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping
-from time import time
+from time import monotonic, time
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
@@ -82,6 +82,21 @@ from responses_api_agents.hermes_agent.sandbox import DEFAULT_UV_CACHE_DIR, Harn
 # Task rows materialized from a task's own agent timeout carry it as request metadata under this key
 # (seconds, as a string); the episode's wall-clock budget is capped by it.
 AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
+
+
+# Tolerance for clock skew between the agent host and the sandbox supervisor's deadline.
+_DEADLINE_SLACK_SEC = 2.0
+
+
+def _agent_deadline_passed(result: dict[str, Any], *, elapsed: float, timeout: float) -> bool:
+    """Whether a TimeoutError came from the agent's own deadline rather than a provider transport failure.
+
+    Evidence is either the runner's own record that the supervisor stopped it (``stop_reason`` of
+    ``wall_time`` or an ``interrupted`` transcript) or wall-clock time at or past the budget.
+    """
+    if result.get("stop_reason") == "wall_time" or result.get("interrupted") is True:
+        return True
+    return elapsed + _DEADLINE_SLACK_SEC >= timeout
 
 
 def _usage_from_result(result: dict[str, Any]) -> Optional[NeMoGymResponseUsage]:
@@ -591,6 +606,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         }
         timeout = self._agent_timeout_sec(body)
         timed_out = False
+        started = monotonic()
         try:
             output = await state.execute(
                 payload,
@@ -600,9 +616,21 @@ class HermesAgent(SimpleResponsesAPIAgent):
         except TimeoutError:
             # The in-sandbox supervisor normally stops Hermes at the deadline and the runner writes its
             # interrupted transcript. If even the supervisor overran, a captured transcript is still a
-            # scored timeout outcome; an overrun that left nothing behind stays an infrastructure failure.
+            # scored timeout outcome, but only with evidence that the agent deadline passed: providers
+            # raise TimeoutError for transport failures too, and an early one with a saved transcript is
+            # an infrastructure failure, not a wall-time result. An overrun that left nothing behind
+            # stays an infrastructure failure as well.
             artifacts = state.session.artifacts
             if not isinstance(artifacts, dict) or not isinstance(artifacts.get("result"), dict):
+                raise
+            elapsed = monotonic() - started
+            if not _agent_deadline_passed(artifacts["result"], elapsed=elapsed, timeout=timeout):
+                LOG.warning(
+                    "Hermes session %s hit a provider timeout after %.0fs of a %ss budget; keeping the failure",
+                    agent_session_id,
+                    elapsed,
+                    timeout,
+                )
                 raise
             LOG.warning(
                 "Hermes session %s exceeded its %ss budget; returning the partial transcript",

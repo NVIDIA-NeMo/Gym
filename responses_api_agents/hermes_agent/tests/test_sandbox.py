@@ -1214,11 +1214,14 @@ _CAPTURED_TRANSCRIPT = {
 }
 
 
-async def test_supervisor_overrun_with_a_captured_transcript_is_a_partial_response(agent, state):
-    """Even when the supervisor itself misses the deadline, a captured transcript is graded, not a 500."""
+async def test_supervisor_overrun_with_a_captured_transcript_is_a_partial_response(agent, state, monkeypatch):
+    """Even when the supervisor itself misses the deadline, a captured transcript is graded, not a 500,
+    once the wall clock shows the agent budget was really used up."""
     state.execute = AsyncMock(side_effect=TimeoutError("Hermes sandbox supervisor exceeded its execution deadline"))
     state.session.artifacts = _CAPTURED_TRANSCRIPT
     body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={AGENT_TIMEOUT_METADATA_KEY: "900.0"})
+    clock = iter([0.0, 901.0])
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
 
     result = await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
 
@@ -1229,6 +1232,34 @@ async def test_supervisor_overrun_with_a_captured_transcript_is_a_partial_respon
     assert result.response.metadata["hermes_error_type"] == "TimeoutError"
     assistant = [item for item in result.response.output if getattr(item, "role", None) == "assistant"]
     assert [item.content[0].text for item in assistant] == ["Half done"]
+
+
+async def test_early_provider_timeout_with_a_transcript_stays_a_failure(agent, state, monkeypatch):
+    """A provider TimeoutError long before the agent deadline is a transport failure, even with a saved
+    transcript: nothing says the agent ran out of time, so it is not a gradable wall_time outcome."""
+    state.execute = AsyncMock(side_effect=TimeoutError("Hermes sandbox supervisor exceeded its execution deadline"))
+    state.session.artifacts = _CAPTURED_TRANSCRIPT
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={AGENT_TIMEOUT_METADATA_KEY: "900.0"})
+    clock = iter([0.0, 12.0])
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+    with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
+        await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
+
+
+async def test_runner_recorded_interruption_is_deadline_evidence(agent, state, monkeypatch):
+    """The supervisor stopped Hermes at the deadline and the runner wrote an interrupted transcript; the
+    provider's own timeout then fired early. The runner's record is enough evidence."""
+    state.execute = AsyncMock(side_effect=TimeoutError("deadline"))
+    state.session.artifacts = {"result": {**_CAPTURED_TRANSCRIPT["result"], "completed": False, "interrupted": True}}
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={AGENT_TIMEOUT_METADATA_KEY: "900.0"})
+    clock = iter([0.0, 3.0])
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+    result = await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
+
+    assert result.response.metadata["stop_reason"] == "wall_time"
+    assert result.response.metadata["hermes_error_type"] == "TimeoutError"
 
 
 @pytest.mark.parametrize("artifacts", [None, {"result": "garbled"}])
@@ -1242,10 +1273,12 @@ async def test_supervisor_overrun_without_a_transcript_stays_a_failure(agent, st
         await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
 
 
-async def test_timed_out_activation_is_served_not_raised(agent, state):
+async def test_timed_out_activation_is_served_not_raised(agent, state, monkeypatch):
     """The HTTP route returns the partial response; the environment server must not see a failure."""
     state.execute = AsyncMock(side_effect=TimeoutError("deadline"))
     state.session.artifacts = _CAPTURED_TRANSCRIPT
+    clock = iter([0.0, 901.0])
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
     agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={AGENT_TIMEOUT_METADATA_KEY: "900.0"})
 
@@ -1338,7 +1371,7 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
     monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
     monkeypatch.setattr(module, "create_provider", lambda config: AsyncMock())
-    monkeypatch.setattr(module.shutil, "which", lambda name: "/test/uv")
+    monkeypatch.setattr("nemo_gym.agent_utils.uv_bootstrap.shutil.which", lambda name: "/test/uv")
     ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
     failed = SimpleNamespace(return_code=1, stdout="", stderr="installer failed")
     # Prepare paths, detect a missing runtime, probe the architecture for uv, fail installation, then
