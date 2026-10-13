@@ -22,23 +22,23 @@ Verification runs in the `evalplus` resource server (shared with
 
 ```bash
 # Prepare benchmark data
-ng_prepare_benchmark "+config_paths=[benchmarks/mbpp/config.yaml]"
+gym eval prepare --benchmark mbpp
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/mbpp/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark mbpp
 
 # Collecting rollouts. The +prompt_config= override is required because
 # the prepared JSONL stores raw `question` rows (no `responses_create_params.input`);
-# ng_collect_rollouts does not pick up the `prompt_config:` field on the dataset
-# entry in config.yaml the way ng_run does.
-ng_collect_rollouts \
-    +agent_name=mbpp_evalplus_simple_agent \
-    +input_jsonl_fpath=benchmarks/mbpp/data/mbpp_benchmark.jsonl \
-    +prompt_config=benchmarks/mbpp/prompts/default.yaml \
-    +output_jsonl_fpath=results/mbpp_rollouts.jsonl \
-    +num_repeats=4
+# gym eval run --no-serve does not pick up the `prompt_config:` field on the dataset
+# entry in config.yaml the way gym env start does.
+gym eval run --no-serve \
+    --agent mbpp_evalplus_simple_agent \
+    --input benchmarks/mbpp/data/mbpp_benchmark.jsonl \
+    --output results/mbpp_rollouts.jsonl \
+    --num-repeats 4 \
+    --prompt-config benchmarks/mbpp/prompts/default.yaml
 ```
 
 Start vLLM with `--reasoning-parser <name>` (e.g. `deepseek_r1` for

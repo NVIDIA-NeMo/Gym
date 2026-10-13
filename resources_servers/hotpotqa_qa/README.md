@@ -30,19 +30,19 @@ pass@k for each channel.
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/hotpotqa_qa/configs/hotpotqa_qa.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type openai_model \
+    --resources-server hotpotqa_qa
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=hotpotqa_qa_simple_agent \
-    +input_jsonl_fpath=resources_servers/hotpotqa_qa/data/example.jsonl \
-    +output_jsonl_fpath=results/hotpotqa_qa_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent hotpotqa_qa_simple_agent \
+    --input resources_servers/hotpotqa_qa/data/example.jsonl \
+    --output results/hotpotqa_qa_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 # Licensing information

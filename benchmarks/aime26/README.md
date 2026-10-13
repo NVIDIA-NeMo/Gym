@@ -5,22 +5,23 @@ AIME 2026 (American Invitational Mathematics Examination) — 30 competition mat
 ## Prepare data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/aime26/config.yaml]"
+gym eval prepare --benchmark aime26
 ```
 
 ## Run servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/aime26/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark aime26
 ```
 
 ## Collect rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=aime26_math_with_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/aime26/data/aime26_benchmark.jsonl \
-    +output_jsonl_fpath=results/aime26_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent aime26_math_with_judge_simple_agent \
+    --input benchmarks/aime26/data/aime26_benchmark.jsonl \
+    --output results/aime26_rollouts.jsonl \
+    --num-repeats 4
 ```

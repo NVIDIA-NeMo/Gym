@@ -1,0 +1,161 @@
+{
+  "benchmark": "cvdp",
+  "model": "nemotron_3_super",
+  "extraction_models": [
+    "extractor_model_a",
+    "extractor_model_b",
+    "extractor_model_c"
+  ],
+  "anchor_facts": [
+    {
+      "id": "B1",
+      "fact": "Nearly nine out of ten syntax errors concentrate in a single CID category (lint/QoR improvement tasks), caused by the model introducing inline variable declarations inside procedural blocks that the open-source simulator rejects, revealing a systematic toolchain-awareness failure.",
+      "difficulty": "medium",
+      "mean_score": 4.33
+    },
+    {
+      "id": "B2",
+      "fact": "In flaky dot-product tasks, the difference between passing and failing rollouts is whether the model correctly separates sequential state updates (registered outputs with latency counters) from combinational next-state logic \u2014 passing rollouts use always_ff for output timing while failing rollouts conflate sequential and combinational assignments.",
+      "difficulty": "high",
+      "mean_score": 4.33
+    },
+    {
+      "id": "B3",
+      "fact": "Roughly 4% of simulation mismatches are AttributeError failures where the testbench cannot find expected signals in the model's RTL, indicating port/signal naming mismatches rather than logic errors \u2014 the model uses different names than the testbench expects.",
+      "difficulty": "high",
+      "mean_score": 4.17
+    },
+    {
+      "id": "B4",
+      "fact": "Most syntax failures trace back to one repeated pattern: introducing procedural-scope declarations and other advanced SystemVerilog constructs that the benchmark toolchain does not accept.",
+      "difficulty": "high",
+      "mean_score": 4.17
+    },
+    {
+      "id": "B5",
+      "fact": "Syntax errors are highly concentrated in the Lint/QoR Improvement category.",
+      "difficulty": "medium",
+      "mean_score": 4.0
+    },
+    {
+      "id": "B6",
+      "fact": "Parse failures are extremely rare (well under 1% of rollouts) and concentrate in just two tasks from the same topic (elevator control), suggesting a narrow, topic-specific failure to produce extractable Verilog rather than a systemic output formatting issue.",
+      "difficulty": "high",
+      "mean_score": 4.0
+    },
+    {
+      "id": "B7",
+      "fact": "Across every category and difficulty slice, failing attempts are longer and use substantially more generation budget than passing attempts, so errors correlate with overextended incorrect implementations rather than under-generation.",
+      "difficulty": "medium",
+      "mean_score": 4.0
+    },
+    {
+      "id": "B8",
+      "fact": "Syntax failures are highly concentrated in the optimization/lint-oriented category, revealing that code-modification tasks trigger a distinct toolchain-compatibility failure mode not seen broadly elsewhere.",
+      "difficulty": "medium",
+      "mean_score": 3.83
+    },
+    {
+      "id": "B9",
+      "fact": "That optimization/lint category uniquely suffers from a dual-validator trap: the model often introduces code that is rejected either by the simulator parser or by lint checks, so attempted 'improvements' frequently worsen compliance.",
+      "difficulty": "high",
+      "mean_score": 3.83
+    },
+    {
+      "id": "B10",
+      "fact": "All lint-check failures occur exclusively in the Lint/QoR Improvement category, meaning the model often introduces new lint violations when attempting to fix existing ones.",
+      "difficulty": "medium",
+      "mean_score": 3.67
+    },
+    {
+      "id": "B11",
+      "fact": "The code completion category (cid002) has the highest always-fail rate of any CID (roughly 60%), making it the weakest task type despite being the most straightforward code generation task.",
+      "difficulty": "medium",
+      "mean_score": 3.67
+    },
+    {
+      "id": "B12",
+      "fact": "Timeout failures concentrate in a small number of tasks (roughly a dozen), with two tasks timing out on all five rollouts and several others timing out on three or more, suggesting these represent specific design patterns (like non-terminating FSMs) rather than random failures.",
+      "difficulty": "high",
+      "mean_score": 3.67
+    },
+    {
+      "id": "B13",
+      "fact": "The weakest category is code completion rather than design-from-spec or bug-fixing, suggesting the model struggles more when it must infer and preserve partially given structure than when it can synthesize a fresh design plan.",
+      "difficulty": "medium",
+      "mean_score": 3.67
+    },
+    {
+      "id": "B14",
+      "fact": "Errors indicating unknown or high-impedance signal propagation are significantly more prevalent in flaky tasks than in always-fail tasks, suggesting non-deterministic signal initialization is a key driver of inconsistency.",
+      "difficulty": "high",
+      "mean_score": 3.5
+    },
+    {
+      "id": "B15",
+      "fact": "In a representative sorting task, the model implements the correct sorting algorithm but reverses the bit-packing order when mapping the internal array to the flattened output bus \u2014 a correct-algorithm, wrong-interface failure pattern where the computation is right but the output formatting is wrong.",
+      "difficulty": "high",
+      "mean_score": 3.5
+    },
+    {
+      "id": "B16",
+      "fact": "A recurring subset of simulation failures are actually interface mismatches surfaced as missing-signal access errors, showing that some 'logic' failures come from naming or hierarchy divergence from the expected DUT contract.",
+      "difficulty": "high",
+      "mean_score": 3.5
+    },
+    {
+      "id": "B17",
+      "fact": "The root cause of most syntax errors is the model introducing SystemVerilog constructs, like inline variable declarations inside procedural blocks, that the specific open-source toolchain rejects.",
+      "difficulty": "high",
+      "mean_score": 3.33
+    },
+    {
+      "id": "B18",
+      "fact": "Median execution time is slightly lower for failing rollouts than passing ones, because many logic failures are caught quickly by the first test assertion, despite a few long timeouts skewing the mean.",
+      "difficulty": "medium",
+      "mean_score": 3.33
+    },
+    {
+      "id": "B19",
+      "fact": "The consistency gap between the oracle ceiling (best-of-five) and actual pass@1 is roughly 19 percentage points \u2014 nearly as large as the base pass rate itself \u2014 indicating that almost as much performance is lost to inconsistency as to missing capability.",
+      "difficulty": "medium",
+      "mean_score": 3.33
+    },
+    {
+      "id": "B20",
+      "fact": "All output was produced through the normal code output channel \u2014 zero rollouts fell back to reasoning-verbatim or reasoning-parsed paths, meaning the model reliably generates text through its primary output channel even when the content is wrong.",
+      "difficulty": "medium",
+      "mean_score": 3.33
+    },
+    {
+      "id": "B21",
+      "fact": "Control & FSM tasks have the lowest pass rate of any domain (around 13%), with timeout failures also concentrating in this domain, suggesting the model generates FSMs with incorrect termination conditions that produce non-halting simulations.",
+      "difficulty": "medium",
+      "mean_score": 3.33
+    },
+    {
+      "id": "B22",
+      "fact": "ValueError failures (X/Z propagation) are roughly 2.5 times more prevalent in flaky task failures than in always-fail task failures, suggesting that non-deterministic signal initialization is a key driver of inconsistency \u2014 the model sometimes gets reset logic right and sometimes doesn't.",
+      "difficulty": "high",
+      "mean_score": 3.33
+    },
+    {
+      "id": "B23",
+      "fact": "Bug fixing tasks (cid016) lead all CID categories in pass rate (approaching 38%), suggesting the model performs better when given buggy code to fix than when generating or completing code from scratch.",
+      "difficulty": "medium",
+      "mean_score": 3.33
+    },
+    {
+      "id": "B24",
+      "fact": "On a protocol task (APB GPIO controller), the model correctly implements the bus interface, register map, and basic I/O (passing roughly 4 out of 10 sub-tests) but fails on interrupt generation logic requiring multi-register, multi-condition reasoning about edge/level detection and read-to-clear behavior.",
+      "difficulty": "high",
+      "mean_score": 3.33
+    },
+    {
+      "id": "B25",
+      "fact": "About 3% of simulation mismatches involve ValueError from X/Z propagation to outputs, typically caused by incomplete reset logic leaving registers uninitialized or undriven signals in the design.",
+      "difficulty": "high",
+      "mean_score": 3.33
+    }
+  ]
+}

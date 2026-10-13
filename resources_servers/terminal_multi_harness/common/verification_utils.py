@@ -68,6 +68,14 @@ class StepRewardCategory(StrEnum):
     TODOWRITE_EMPTY_TODOS = "The todowrite tool call does not contain a non-empty todos list"
     EXPECTED_TOOL_CALL = "A tool call that matches the expected tool call was found"
     EXPECTED_TOOL_CALL_BATCH = "A tool-call batch that matches the expected batch was found"
+    WEB_SEARCH_QUERY_SIMILARITY_BELOW_THRESHOLD = "The web_search query similarity is below threshold"
+    WEB_SEARCH_MISSING_QUERY = "The web_search tool call does not contain a query argument"
+    FETCH_WEB_PAGE_MISSING_URL = "The fetch_web_page tool call does not contain a url argument"
+    FETCH_WEB_PAGE_URLS_DO_NOT_MATCH = "The fetch_web_page urls do not match the expected urls"
+    FINISH_MISSING_REASON = "The finish tool call does not contain a reason argument"
+    FINISH_MISSING_PATHS = "The finish tool call does not contain a paths argument"
+    FINISH_REASON_SIMILARITY_BELOW_THRESHOLD = "The finish reason similarity is below threshold"
+    FINISH_PATHS_DO_NOT_MATCH = "The finish paths do not match the expected paths"
 
 
 class ActionComparisonResult(BaseModel):
@@ -163,6 +171,10 @@ class ActionComparator(BaseModel):
         actual_arguments = actual_arguments_result.arguments
         assert expected_arguments is not None
         assert actual_arguments is not None
+
+        actual_tool_schema = declared_tool_schemas.get(actual_tool_call.name)
+        if actual_tool_schema is not None:
+            self.coerce_json_string_arguments(actual_arguments, actual_tool_schema)
 
         schema_validation_result = self.validate_against_declared_tool_schema(
             tool_name=actual_tool_call.name,
@@ -491,7 +503,31 @@ class ActionComparator(BaseModel):
                             actual_arguments=actual_arguments,
                             keys=("subagent_type",),
                         )
-
+            case "stirrup":
+                match tool_name:
+                    case "code_exec":
+                        return self.compare_exec_command(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                            threshold_override=threshold_override,
+                        )
+                    case "web_search":
+                        return self.compare_web_search(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                            threshold_override=threshold_override,
+                        )
+                    case "fetch_web_page":
+                        return self.compare_fetch_web_page(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                        )
+                    case "finish":
+                        return self.compare_finish(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                            threshold_override=threshold_override,
+                        )
         return None
 
     def compare_read(
@@ -639,6 +675,141 @@ class ActionComparator(BaseModel):
             category=StepRewardCategory.EXPECTED_TOOL_CALL,
         )
 
+    def compare_web_search(
+        self,
+        expected_arguments: dict[str, Any],
+        actual_arguments: dict[str, Any],
+        threshold_override: float | None = None,
+    ):
+        actual_query = actual_arguments.get("query")
+        expected_query = expected_arguments.get("query")
+        if not actual_query or not isinstance(actual_query, str):
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.WEB_SEARCH_MISSING_QUERY,
+            )
+
+        if not expected_query or not isinstance(expected_query, str):
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.WEB_SEARCH_MISSING_QUERY,
+            )
+
+        normalized_expected_query = self.normalize_web_text(expected_query)
+        normalized_actual_query = self.normalize_web_text(actual_query)
+        similarity_score = SequenceMatcher(
+            None,
+            normalized_expected_query,
+            normalized_actual_query,
+        ).ratio()
+        threshold = self.get_string_similarity_threshold(threshold_override)
+
+        if similarity_score < threshold:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.WEB_SEARCH_QUERY_SIMILARITY_BELOW_THRESHOLD,
+                similarity_score=similarity_score,
+            )
+
+        return ActionComparisonResult(
+            matches=True,
+            category=StepRewardCategory.EXPECTED_TOOL_CALL,
+            similarity_score=similarity_score,
+        )
+
+    def compare_fetch_web_page(
+        self,
+        expected_arguments: dict[str, Any],
+        actual_arguments: dict[str, Any],
+    ):
+        actual_url = actual_arguments.get("url")
+        expected_url = expected_arguments.get("url")
+        if not actual_url or not isinstance(actual_url, str):
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.FETCH_WEB_PAGE_MISSING_URL,
+            )
+
+        if not expected_url or not isinstance(expected_url, str):
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.FETCH_WEB_PAGE_MISSING_URL,
+            )
+
+        normalized_expected_url = self.normalize_web_text(expected_url)
+        normalized_actual_url = self.normalize_web_text(actual_url)
+        if normalized_expected_url != normalized_actual_url:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.FETCH_WEB_PAGE_URLS_DO_NOT_MATCH,
+            )
+
+        return ActionComparisonResult(
+            matches=True,
+            category=StepRewardCategory.EXPECTED_TOOL_CALL,
+        )
+
+    def compare_finish(
+        self,
+        expected_arguments: dict[str, Any],
+        actual_arguments: dict[str, Any],
+        threshold_override: float | None = None,
+    ):
+        actual_reason = actual_arguments.get("reason")
+        expected_reason = expected_arguments.get("reason")
+        if not actual_reason or not isinstance(actual_reason, str):
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.FINISH_MISSING_REASON,
+            )
+
+        if not expected_reason or not isinstance(expected_reason, str):
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.FINISH_MISSING_REASON,
+            )
+
+        actual_paths = actual_arguments.get("paths")
+        expected_paths = expected_arguments.get("paths")
+        if not self.is_list_of_strings(actual_paths) or len(actual_paths) == 0:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.FINISH_MISSING_PATHS,
+            )
+        if not self.is_list_of_strings(expected_paths) or len(expected_paths) == 0:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.FINISH_MISSING_PATHS,
+            )
+
+        if self.normalize_paths(actual_paths) != self.normalize_paths(expected_paths):
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.FINISH_PATHS_DO_NOT_MATCH,
+            )
+
+        normalized_reason = self.normalize_web_text(actual_reason)
+        normalized_expected_reason = self.normalize_web_text(expected_reason)
+        reason_similarity_score = SequenceMatcher(
+            None,
+            normalized_reason,
+            normalized_expected_reason,
+        ).ratio()
+        threshold = self.get_string_similarity_threshold(threshold_override)
+
+        if reason_similarity_score < threshold:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.FINISH_REASON_SIMILARITY_BELOW_THRESHOLD,
+                similarity_score=reason_similarity_score,
+            )
+
+        return ActionComparisonResult(
+            matches=True,
+            category=StepRewardCategory.EXPECTED_TOOL_CALL,
+            similarity_score=reason_similarity_score,
+        )
+
     def decode_arguments(self, arguments: str) -> "DecodedArgumentsResult":
         try:
             decoded_arguments = json.loads(arguments)
@@ -649,6 +820,45 @@ class ActionComparator(BaseModel):
             return DecodedArgumentsResult(category=StepRewardCategory.ARGUMENTS_NOT_OBJECT)
 
         return DecodedArgumentsResult(arguments=decoded_arguments)
+
+    def coerce_json_string_arguments(
+        self,
+        arguments: dict[str, Any],
+        tool_schema: dict[str, Any],
+    ) -> None:
+        """Coerce stringified JSON values to their declared types in-place.
+
+        LLM tool calls often stringify nested structures (e.g. returning
+        ``paths`` as ``"[\"/tmp/a.xlsx\"]"`` instead of an actual array).
+        When a top-level property is declared as ``array`` or ``object`` but
+        the provided value is a ``str`` that parses as that type, replace it
+        with the parsed value so downstream schema validation and comparison
+        work on the intended structure.
+        """
+        properties = tool_schema.get("properties")
+        if not isinstance(properties, dict):
+            return
+
+        for property_name, property_schema in properties.items():
+            if property_name not in arguments:
+                continue
+            if not isinstance(property_schema, dict):
+                continue
+
+            declared_type = property_schema.get("type")
+            value = arguments[property_name]
+            if not isinstance(value, str):
+                continue
+
+            try:
+                parsed_value = json.loads(value)
+            except (JSONDecodeError, UnicodeDecodeError):
+                continue
+
+            if declared_type == "array" and isinstance(parsed_value, list):
+                arguments[property_name] = parsed_value
+            elif declared_type == "object" and isinstance(parsed_value, dict):
+                arguments[property_name] = parsed_value
 
     def validate_against_declared_tool_schema(
         self,
@@ -710,6 +920,8 @@ class ActionComparator(BaseModel):
                 return (call.name, normalized_arguments)
             case "opencode":
                 return (call.name, normalized_arguments)
+            case "stirrup":
+                return (call.name, normalized_arguments)
             case _:
                 return (call.name, normalized_arguments)
 
@@ -726,6 +938,15 @@ class ActionComparator(BaseModel):
 
     def normalize_command_text(self, command_text: str) -> str:
         return command_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    def normalize_web_text(self, text: str) -> str:
+        return text.lower().strip()
+
+    def normalize_paths(self, paths: list[str]) -> list[str]:
+        return sorted(path.strip() for path in paths)
+
+    def is_list_of_strings(self, value: Any) -> bool:
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
     def is_non_empty_value(self, value: Any) -> bool:
         if value is None:

@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
@@ -87,6 +88,24 @@ class TestGymnasiumServer:
         env = _make_env(_TerminatingEnv)
         routes = {r.path for r in env.setup_webserver().routes}
         assert {"/reset", "/step", "/aggregate_metrics"}.issubset(routes)
+
+    def test_rollout_prefixed_reset_and_step(self):
+        client = TestClient(_make_env(_TerminatingEnv).setup_webserver())
+        reset = client.post(
+            "/ng-rollout/4-2/reset",
+            json={"responses_create_params": {"input": []}},
+        )
+        assert reset.status_code == 200
+
+        step = client.post(
+            "/ng-rollout/4-2/step",
+            json={
+                "responses_create_params": {"input": []},
+                "response": _make_response("x").model_dump(mode="json"),
+            },
+        )
+        assert step.status_code == 200
+        assert step.json()["terminated"] is True
 
     def test_verify_raises(self):
         env = _make_env(_TerminatingEnv)

@@ -34,9 +34,9 @@ ensure_bird_sql()
 ### Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/bird_sql/configs/bird_sql.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --resources-server bird_sql
 ```
 
 Requires `policy_base_url` / `policy_api_key` / `policy_model_name` in
@@ -45,11 +45,11 @@ Requires `policy_base_url` / `policy_api_key` / `policy_model_name` in
 ### Collecting rollouts (5-example smoke test)
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=bird_sql_simple_agent \
-    +input_jsonl_fpath=resources_servers/bird_sql/data/example.jsonl \
-    +output_jsonl_fpath=results/bird_sql_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent bird_sql_simple_agent \
+    --input resources_servers/bird_sql/data/example.jsonl \
+    --output results/bird_sql_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 For a full BIRD dev run, see `benchmarks/birdbench/README.md`.

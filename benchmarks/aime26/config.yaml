@@ -16,5 +16,12 @@ aime26_math_with_judge_simple_agent:
       - name: aime26
         type: benchmark
         jsonl_fpath: benchmarks/aime26/data/aime26_benchmark.jsonl
-        prompt_config: benchmarks/aime26/prompts/default.yaml
+        prompt_config: benchmarks/prompts/generic/math.yaml
         prepare_script: benchmarks/aime26/prepare.py
+
+aime26_math_with_judge_environment_server:
+  _inherit_from: math_with_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: aime26_math_with_judge_simple_agent

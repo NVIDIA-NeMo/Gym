@@ -1,0 +1,13 @@
+ns_tools_wikipedia:
+  resources_servers:
+    ns_tools_wikipedia:
+      entrypoint: app.py
+      default_verifier: math_with_judge
+      verifiers: {}
+      nemo_skills_tools:
+        - nemo_skills.mcp.servers.wikipedia_tool.WikipediaSearchTool
+      domain: agent
+      verified: false
+      description: NeMo Skills Wikipedia article search and retrieval tool
+      value: Enable encyclopedia lookup and retrieval through NeMo Skills MCP tools
+

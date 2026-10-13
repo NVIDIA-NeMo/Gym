@@ -31,3 +31,11 @@ bird_sql_simple_agent:
           type: example
           jsonl_fpath: resources_servers/bird_sql/data/example.jsonl
           license: Creative Commons Attribution-ShareAlike 4.0 International
+
+bird_sql_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: bird_sql_simple_agent

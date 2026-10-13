@@ -26,9 +26,110 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import os
+import random
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
+
+from resources_servers.gdpval.judge_panel import ResolvedJudge, merge_create_kwargs, sample_judge
+
+
+# Marks metadata the SCORER produced on failure. Keyed separately from a
+# plain "error" field because on the success path the metadata IS the judge's
+# own parsed JSON, and a judge that emits its own "error" must not be discarded.
+SCORING_ERROR_KEY = "scoring_error"
+
+# Errors that cannot succeed when the same judge request is retried unchanged.
+# This is shared by rubric and comparison scoring so inner retry policy and the
+# outer rollout failure router cannot disagree about deterministic payload or
+# context failures.
+PERMANENT_JUDGE_ERROR_MARKERS = (
+    "request size is too large",
+    "request size budget exhausted",
+    "request body is too large",
+    "request entity too large",
+    "payload too large",
+    "content length limit exceeded",
+    "http 413",
+    "error code: 413",
+    "status code: 413",
+    "contextwindowexceeded",
+    "context window exceeded",
+    "maximum context length",
+    "maximum number of tokens allowed",
+    "input is too long",
+    "too many tokens",
+)
+
+# Throttle signals veto a permanent classification: provider 429 bodies often
+# contain permanent-sounding phrases ("you have sent too many tokens this
+# minute") yet succeed on retry. Misclassifying a throttle as permanent stamps
+# the trial terminal and silently drops the task from the benchmark.
+THROTTLE_ERROR_MARKERS = (
+    "http 429",
+    "error code: 429",
+    "status code: 429",
+    "too many requests",
+    "rate limit",
+    "rate-limit",
+    "retry-after",
+    "retry after",
+)
+
+# Transient judge failures worth retrying with backoff. Model-server proxies surface
+# upstream errors as 500s whose text carries the original status and body.
+RUBRIC_RETRYABLE_ERROR_MARKERS = ("429", "502", "503", "504", "rate", "too many requests", "bad gateway")
+
+# Per-request rubric judge timeout; the SDK retry is disabled (max_retries=0).
+# The SDK default is 600s with 2 silent retries, so one slow request (a
+# multi-page PDF rasterised to images) burns 30 minutes and then surfaces as a
+# bare transient 500 that never mentions a timeout. Retries do not help: a
+# request too slow once is too slow three times. Comparison mode has its own
+# default (300 s, ``comparison.JUDGE_REQUEST_TIMEOUT_SECONDS``) under the same
+# environment variable.
+JUDGE_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS", "1800"))
+
+
+def is_permanent_judge_error(error: BaseException | str) -> bool:
+    """Whether retrying the same judge request is guaranteed to fail again."""
+
+    if isinstance(error, str):
+        lowered = error.lower()
+        if any(marker in lowered for marker in THROTTLE_ERROR_MARKERS):
+            return False
+        return any(marker in lowered for marker in PERMANENT_JUDGE_ERROR_MARKERS)
+
+    parts: list[str] = []
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        parts.append(str(current))
+        statuses = {getattr(current, "status", None), getattr(current, "status_code", None)}
+        if 429 in statuses:
+            return False
+        if 413 in statuses:
+            return True
+        for attr in ("response_content", "body"):
+            value = getattr(current, attr, None)
+            if isinstance(value, bytes):
+                parts.append(value.decode("utf-8", errors="replace"))
+            elif value is not None:
+                parts.append(str(value))
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+
+    text = "\n".join(parts).lower()
+    if any(marker in text for marker in THROTTLE_ERROR_MARKERS):
+        return False
+    return any(marker in text for marker in PERMANENT_JUDGE_ERROR_MARKERS)
 
 
 # ---------------------------------------------------------------------------
@@ -83,16 +184,69 @@ def _score_from_truncated_json(text: str) -> float:
     return max(0.0, min(1.0, sum(scores) / len(scores)))
 
 
+_BINARY_SCORE_KEYS = ("overall_score", "total_score", "score", "average_score", "final_score")
+
+
+def _coerce_usable_score(value: Any) -> float | None:
+    """Return a finite numeric judge score, or ``None`` for unusable values."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return score if math.isfinite(score) else None
+
+
+def _extract_binary_score(result: Any) -> tuple[float | None, str | None, list[float]]:
+    """Extract a binary-rubric score without inventing zeros for missing fields."""
+    if not isinstance(result, dict):
+        return None, None, []
+
+    for key in _BINARY_SCORE_KEYS:
+        score = _coerce_usable_score(result.get(key))
+        if score is not None:
+            return score, key, []
+
+    criteria_scores = result.get("criteria_scores")
+    if not isinstance(criteria_scores, list):
+        return None, None, []
+    scores = [
+        score
+        for criterion in criteria_scores
+        if isinstance(criterion, dict)
+        for score in [_coerce_usable_score(criterion.get("score"))]
+        if score is not None
+    ]
+    if not scores:
+        return None, None, []
+    return sum(scores) / len(scores), "criteria_scores", scores
+
+
+def _no_score_metadata(
+    result: Any,
+    *,
+    judge_name: str,
+    raw_response_text: str,
+    include_raw_responses: bool,
+) -> dict:
+    """Preserve a parsed reply while tagging it as lacking a usable score."""
+    metadata = dict(result) if isinstance(result, dict) else {"parsed_response": result}
+    metadata[SCORING_ERROR_KEY] = "no_score_in_response"
+    metadata["judge_name"] = judge_name
+    if include_raw_responses:
+        metadata["raw_responses"] = [raw_response_text]
+    return metadata
+
+
 async def score_with_rubric(
     deliverable_text: str,
     rubric_json: Any,
     rubric_pretty: str,
     task_prompt: str,
     judge_prompt_template: str,
-    model_base_url: str,
-    model_name: str,
-    api_key: str = "dummy",
-    create_overrides: dict | None = None,
+    judges: list[ResolvedJudge],
+    rng: Optional[random.Random] = None,
     include_raw_responses: bool = False,
 ) -> tuple[float, dict | None]:
     """Score a deliverable against a rubric using an LLM judge.
@@ -101,11 +255,14 @@ async def score_with_rubric(
     and *judge_response* is the parsed JSON dict from the judge (or ``None``
     on failure).
 
-    *create_overrides* is merged into the kwargs passed to
-    ``client.chat.completions.create``; user-supplied keys win over defaults.
-    Use it to bump ``max_tokens`` (default 8192), tweak ``temperature``, etc.
+    One member of *judges* is sampled for this scoring call (see
+    ``judge_panel.sample_judge``); its ``create_overrides`` (reasoning settings,
+    ``max_tokens``, etc.) are merged into ``client.chat.completions.create``.
+    Pass *rng* (a seeded ``random.Random``) for reproducible selection.
     """
     from openai import AsyncOpenAI
+
+    judge = sample_judge(judges, rng or random.Random())
 
     rubric_str = rubric_pretty if rubric_pretty else json.dumps(rubric_json, indent=2)
 
@@ -116,7 +273,12 @@ async def score_with_rubric(
         deliverable_text=deliverable_text,
     )
 
-    client = AsyncOpenAI(base_url=model_base_url, api_key=api_key)
+    client = AsyncOpenAI(
+        base_url=judge.base_url,
+        api_key=judge.api_key,
+        timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
 
     max_retries = 5
     base_delay = 2.0
@@ -125,25 +287,28 @@ async def score_with_rubric(
         response = None
         for attempt in range(max_retries + 1):
             try:
-                create_kwargs: dict = {
-                    "model": model_name,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are an expert evaluator. You must respond with valid JSON only.",
-                        },
-                        {"role": "user", "content": judge_prompt},
-                    ],
-                    "temperature": 0.1,
-                    "max_tokens": 8192,
-                }
-                if create_overrides:
-                    create_kwargs.update(create_overrides)
+                create_kwargs: dict = merge_create_kwargs(
+                    {
+                        "model": judge.model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are an expert evaluator. You must respond with valid JSON only.",
+                            },
+                            {"role": "user", "content": judge_prompt},
+                        ],
+                        "temperature": 0.1,
+                        "max_tokens": 65535,
+                    },
+                    judge.create_overrides,
+                )
                 response = await client.chat.completions.create(**create_kwargs)
                 break
             except Exception as retry_err:
+                if is_permanent_judge_error(retry_err):
+                    raise
                 err_str = str(retry_err)
-                is_retryable = "429" in err_str or "503" in err_str or "504" in err_str or "rate" in err_str.lower()
+                is_retryable = any(marker in err_str.lower() for marker in RUBRIC_RETRYABLE_ERROR_MARKERS)
                 if is_retryable and attempt < max_retries:
                     delay = base_delay * (2**attempt) + asyncio.get_event_loop().time() % 1
                     print(
@@ -182,34 +347,37 @@ async def score_with_rubric(
         except json.JSONDecodeError:
             score = _score_from_truncated_json(response_text)
             print(f"Rubric JSON was truncated, computed partial score: {score}", flush=True)
-            return score, None
+            # A salvage, not a judgement: criteria the judge never emitted are
+            # simply absent, so the number is biased low. Tag it so the caller
+            # can flag the row instead of averaging it in as a real score.
+            return score, {SCORING_ERROR_KEY: "truncated_json", "partial_score": score}
 
-        print(f"Rubric judge parsed keys: {list(result.keys())}", flush=True)
-        if "criteria_scores" in result:
-            scores = [c.get("score", 0) for c in result["criteria_scores"] if isinstance(c, dict)]
-            print(f"Criteria scores: {scores}", flush=True)
-            print(f"Criteria count: {len(scores)}, mean: {sum(scores) / len(scores) if scores else 0}", flush=True)
-
-        score = None
-        for key in ["overall_score", "total_score", "score", "average_score", "final_score"]:
-            if key in result:
-                score = float(result[key])
-                print(f"Found score under key '{key}': {score}", flush=True)
-                break
-
-        if score is None and "criteria_scores" in result:
-            scores = [float(c.get("score", 0)) for c in result["criteria_scores"] if isinstance(c, dict)]
-            if scores:
-                score = sum(scores) / len(scores)
-                print(f"No overall_score key found, computed mean of criteria: {score}", flush=True)
+        print(
+            f"Rubric judge parsed keys: {list(result.keys()) if isinstance(result, dict) else '<non-object JSON>'}",
+            flush=True,
+        )
+        score, score_source, criteria_scores = _extract_binary_score(result)
+        if criteria_scores:
+            print(f"Criteria scores: {criteria_scores}", flush=True)
+        if score_source in _BINARY_SCORE_KEYS:
+            print(f"Found score under key '{score_source}': {score}", flush=True)
+        elif score_source == "criteria_scores":
+            print(f"No overall score key found, computed mean of criteria: {score}", flush=True)
 
         if score is None:
             print(f"Could not extract score. Full result: {json.dumps(result)[:1000]}", flush=True)
-            score = 0.0
+            return 0.0, _no_score_metadata(
+                result,
+                judge_name=judge.name,
+                raw_response_text=raw_response_text,
+                include_raw_responses=include_raw_responses,
+            )
 
-        print(f"Rubric final score: {score}", flush=True)
-        if include_raw_responses and isinstance(result, dict):
-            result["raw_responses"] = [raw_response_text]
+        print(f"Rubric final score: {score} (judge: {judge.name})", flush=True)
+        if isinstance(result, dict):
+            result["judge_name"] = judge.name
+            if include_raw_responses:
+                result["raw_responses"] = [raw_response_text]
         return max(0.0, min(1.0, score)), result
 
     except Exception as e:
@@ -217,6 +385,8 @@ async def score_with_rubric(
 
         print(f"Rubric scoring failed: {e}", flush=True)
         traceback.print_exc()
+        if is_permanent_judge_error(e):
+            raise
         return 0.0, None
 
 
@@ -226,10 +396,8 @@ async def score_with_rubric_visual(
     rubric_pretty: str,
     task_prompt: str,
     judge_prompt_template: str,
-    model_base_url: str,
-    model_name: str,
-    api_key: str = "dummy",
-    create_overrides: dict | None = None,
+    judges: list[ResolvedJudge],
+    rng: Optional[random.Random] = None,
     include_raw_responses: bool = False,
 ) -> tuple[float, dict | None]:
     """Score deliverables visually using a multimodal judge (e.g., Gemini 3 Pro).
@@ -240,13 +408,15 @@ async def score_with_rubric_visual(
     *deliverable_content_blocks* is a list of OpenAI-compatible content blocks
     (text and image_url) produced by ``file_reader.convert_deliverables_to_content_blocks()``.
 
-    *create_overrides* is merged into the kwargs passed to
-    ``client.chat.completions.create``; user-supplied keys win over defaults.
-    Use it to bump ``max_tokens`` (default 8192), tweak ``temperature``, etc.
+    One member of *judges* is sampled for this scoring call; its
+    ``create_overrides`` are merged into ``client.chat.completions.create``.
+    Pass *rng* (a seeded ``random.Random``) for reproducible selection.
 
     Returns ``(score, judge_response)`` — same contract as ``score_with_rubric``.
     """
     from openai import AsyncOpenAI
+
+    judge = sample_judge(judges, rng or random.Random())
 
     rubric_str = rubric_pretty if rubric_pretty else json.dumps(rubric_json, indent=2)
 
@@ -261,7 +431,12 @@ async def score_with_rubric_visual(
     content: list[dict] = [{"type": "text", "text": judge_text}]
     content.extend(deliverable_content_blocks)
 
-    client = AsyncOpenAI(base_url=model_base_url, api_key=api_key)
+    client = AsyncOpenAI(
+        base_url=judge.base_url,
+        api_key=judge.api_key,
+        timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
 
     max_retries = 5
     base_delay = 2.0
@@ -270,25 +445,28 @@ async def score_with_rubric_visual(
         response = None
         for attempt in range(max_retries + 1):
             try:
-                create_kwargs: dict = {
-                    "model": model_name,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are an expert evaluator. You must respond with valid JSON only.",
-                        },
-                        {"role": "user", "content": content},
-                    ],
-                    "temperature": 0.1,
-                    "max_tokens": 8192,
-                }
-                if create_overrides:
-                    create_kwargs.update(create_overrides)
+                create_kwargs: dict = merge_create_kwargs(
+                    {
+                        "model": judge.model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are an expert evaluator. You must respond with valid JSON only.",
+                            },
+                            {"role": "user", "content": content},
+                        ],
+                        "temperature": 0.1,
+                        "max_tokens": 65535,
+                    },
+                    judge.create_overrides,
+                )
                 response = await client.chat.completions.create(**create_kwargs)
                 break
             except Exception as retry_err:
+                if is_permanent_judge_error(retry_err):
+                    raise
                 err_str = str(retry_err)
-                is_retryable = "429" in err_str or "503" in err_str or "504" in err_str or "rate" in err_str.lower()
+                is_retryable = any(marker in err_str.lower() for marker in RUBRIC_RETRYABLE_ERROR_MARKERS)
                 if is_retryable and attempt < max_retries:
                     delay = base_delay * (2**attempt) + asyncio.get_event_loop().time() % 1
                     print(
@@ -318,33 +496,37 @@ async def score_with_rubric_visual(
         except json.JSONDecodeError:
             score = _score_from_truncated_json(response_text)
             print(f"Visual judge JSON was truncated, computed partial score: {score}", flush=True)
-            return score, None
+            # A salvage, not a judgement: criteria the judge never emitted are
+            # simply absent, so the number is biased low. Tag it so the caller
+            # can flag the row instead of averaging it in as a real score.
+            return score, {SCORING_ERROR_KEY: "truncated_json", "partial_score": score}
 
-        print(f"Visual judge parsed keys: {list(result.keys())}", flush=True)
-        if "criteria_scores" in result:
-            scores = [c.get("score", 0) for c in result["criteria_scores"] if isinstance(c, dict)]
-            print(f"Criteria scores: {scores}", flush=True)
-
-        score = None
-        for key in ["overall_score", "total_score", "score", "average_score", "final_score"]:
-            if key in result:
-                score = float(result[key])
-                print(f"Found score under key '{key}': {score}", flush=True)
-                break
-
-        if score is None and "criteria_scores" in result:
-            scores = [float(c.get("score", 0)) for c in result["criteria_scores"] if isinstance(c, dict)]
-            if scores:
-                score = sum(scores) / len(scores)
-                print(f"No overall_score key found, computed mean of criteria: {score}", flush=True)
+        print(
+            f"Visual judge parsed keys: {list(result.keys()) if isinstance(result, dict) else '<non-object JSON>'}",
+            flush=True,
+        )
+        score, score_source, criteria_scores = _extract_binary_score(result)
+        if criteria_scores:
+            print(f"Criteria scores: {criteria_scores}", flush=True)
+        if score_source in _BINARY_SCORE_KEYS:
+            print(f"Found score under key '{score_source}': {score}", flush=True)
+        elif score_source == "criteria_scores":
+            print(f"No overall score key found, computed mean of criteria: {score}", flush=True)
 
         if score is None:
             print(f"Could not extract score. Full result: {json.dumps(result)[:1000]}", flush=True)
-            score = 0.0
+            return 0.0, _no_score_metadata(
+                result,
+                judge_name=judge.name,
+                raw_response_text=raw_response_text,
+                include_raw_responses=include_raw_responses,
+            )
 
-        print(f"Visual judge final score: {score}", flush=True)
-        if include_raw_responses and isinstance(result, dict):
-            result["raw_responses"] = [raw_response_text]
+        print(f"Visual judge final score: {score} (judge: {judge.name})", flush=True)
+        if isinstance(result, dict):
+            result["judge_name"] = judge.name
+            if include_raw_responses:
+                result["raw_responses"] = [raw_response_text]
         return max(0.0, min(1.0, score)), result
 
     except Exception as e:
@@ -352,6 +534,8 @@ async def score_with_rubric_visual(
 
         print(f"Visual rubric scoring failed: {e}", flush=True)
         traceback.print_exc()
+        if is_permanent_judge_error(e):
+            raise
         return 0.0, None
 
 
@@ -365,9 +549,8 @@ async def score_with_rubric_structured(
     rubric_json: Any,
     rubric_pretty: str,
     task_prompt: str,
-    model_base_url: str,
-    model_name: str,
-    api_key: str = "dummy",
+    judges: list[ResolvedJudge],
+    rng: Optional[random.Random] = None,
     num_trials: int = 2,
     formatting_retries: int = 3,
     deliverable_content_blocks: list[dict] | None = None,
@@ -378,11 +561,29 @@ async def score_with_rubric_structured(
     Uses ``FINAL_SCORE[x] out of MAX_POSSIBLE_SCORE[y]`` tags for reliable
     parsing.  Runs *num_trials* scoring rounds (each with up to
     *formatting_retries* retries on parse failure) and averages the results.
+    A judge is sampled from *judges* per trial ("sample between the judges"),
+    so the averaged score pools the panel; pass *rng* for reproducibility.
 
     Returns ``(normalized_score, metadata)`` where *normalized_score* is in
     [0, 1] and *metadata* contains per-trial scores and percentages.
     """
     from openai import AsyncOpenAI
+
+    rng = rng or random.Random()
+    # One AsyncOpenAI client per distinct upstream (base_url, api_key), reused
+    # across trials that sample the same judge.
+    client_cache: dict[tuple[str, str], Any] = {}
+
+    def _client_for(judge: ResolvedJudge) -> Any:
+        key = (judge.base_url, judge.api_key)
+        if key not in client_cache:
+            client_cache[key] = AsyncOpenAI(
+                base_url=judge.base_url,
+                api_key=judge.api_key,
+                timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+                max_retries=0,
+            )
+        return client_cache[key]
 
     # Compute max possible score from rubric. Different upstream formats name
     # the per-criterion point field differently — accept either ``score`` or
@@ -394,7 +595,7 @@ async def score_with_rubric_structured(
         for key in ("score", "weight"):
             v = item.get(key)
             if isinstance(v, (int, float)):
-                return v
+                return max(v, 0)
         return 0
 
     if isinstance(rubric_json, str):
@@ -430,29 +631,31 @@ async def score_with_rubric_structured(
 
     messages = [{"role": "user", "content": content}]
 
-    client = AsyncOpenAI(base_url=model_base_url, api_key=api_key)
-
     scores: list[float] = []
     max_scores: list[float] = []
     percentages: list[float] = []
     trial_responses: list[str] = []
+    trial_judges: list[str] = []
 
     for trial in range(num_trials):
         trial_num = trial + 1
         parsed_ok = False
+        judge = sample_judge(judges, rng)
+        client = _client_for(judge)
+        create_kwargs = merge_create_kwargs(
+            {"model": judge.model, "messages": messages, "temperature": 0.3, "max_tokens": 65535},
+            judge.create_overrides,
+        )
 
         for retry in range(formatting_retries):
             try:
-                response = await client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    temperature=0.3,
-                    max_tokens=65535,
-                )
+                response = await client.chat.completions.create(**create_kwargs)
                 resp_text = (response.choices[0].message.content or "").strip()
             except Exception as e:
+                if is_permanent_judge_error(e):
+                    raise
                 err_str = str(e).lower()
-                is_retryable = any(m in err_str for m in ("429", "503", "504", "rate", "timeout"))
+                is_retryable = any(m in err_str for m in (*RUBRIC_RETRYABLE_ERROR_MARKERS, "timeout"))
                 if is_retryable and retry < formatting_retries - 1:
                     delay = 5.0 * (2**retry)
                     print(
@@ -479,6 +682,7 @@ async def score_with_rubric_structured(
                 max_scores.append(parsed_max)
                 percentages.append((score / parsed_max) * 100 if parsed_max > 0 else 0)
                 trial_responses.append(resp_text)
+                trial_judges.append(judge.name)
                 parsed_ok = True
                 print(
                     f"[structured-rubric] trial {trial_num}: score={score}/{parsed_max} ({percentages[-1]:.1f}%)",
@@ -497,7 +701,11 @@ async def score_with_rubric_structured(
 
     if not scores:
         print("[structured-rubric] no valid scores from any trial", flush=True)
-        no_valid_metadata: dict = {"error": "no_valid_scores", "num_trials": num_trials}
+        no_valid_metadata: dict = {
+            "error": "no_valid_scores",  # pre-existing key, read by operators
+            SCORING_ERROR_KEY: "no_valid_scores",
+            "num_trials": num_trials,
+        }
         if include_raw_responses:
             no_valid_metadata["raw_responses"] = trial_responses
         return 0.0, no_valid_metadata
@@ -520,6 +728,7 @@ async def score_with_rubric_structured(
         "max_possible_score": effective_max,
         "num_trials_completed": len(scores),
         "num_trials_requested": num_trials,
+        "trial_judges": trial_judges,
     }
     if include_raw_responses:
         metadata["raw_responses"] = trial_responses

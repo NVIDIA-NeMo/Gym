@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - responses_api_agents/opencode_agent/configs/permissions/default.yaml
+
+# Agent sessions run in a sandbox; unseeded requests run the local CLI.
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      num_workers: 1
+      resources_server: null
+      model: ${policy_model_name}
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      # Set this to the actual model context window; it is metadata, not an output-token limit.
+      context_window: 262144
+      timeout: 10800
+      sandbox_install_timeout_seconds: 600
+      session_close_timeout_seconds: 60
+      session_close_retry_window_seconds: 300
+
+      opencode_config:
+        tools:
+          bash: true
+          edit: true
+          read: true
+          glob: true
+          grep: true
+          write: true
+          apply_patch: true
+          webfetch: false
+          websearch: false
+          task: true
+          skill: false
+          todowrite: true
+
+      datasets: []

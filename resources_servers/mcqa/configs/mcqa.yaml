@@ -31,7 +31,10 @@ mcqa_simple_agent:
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/mcqa/data/validation.jsonl
-        huggingface_identifier:
+        # Unified dataset source. `type` selects the backend; here the split
+        # is pulled from the HuggingFace Hub. `artifact_fpath` is optional for huggingface sources.
+        source:
+          type: huggingface
           repo_id: nvidia/Nemotron-RL-knowledge-mcqa
         license: Apache 2.0
       - name: example
@@ -40,3 +43,11 @@ mcqa_simple_agent:
       - name: example_with_template_metadata
         type: example
         jsonl_fpath: resources_servers/mcqa/data/example_with_template_metadata.jsonl
+
+mcqa_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: mcqa_simple_agent

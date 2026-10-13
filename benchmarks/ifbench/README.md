@@ -14,22 +14,23 @@ The `ifbench` resources server clones the AllenAI IFBench repo from GitHub on fi
 ## Prepare data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/ifbench/config.yaml]"
+gym eval prepare --benchmark ifbench
 ```
 
 ## Run
 
 ```bash
-ng_e2e_collect_rollouts \
-    "+config_paths=[benchmarks/ifbench/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
-    ++output_jsonl_fpath=results/benchmarks/ifbench.jsonl \
+gym eval run \
+    --benchmark ifbench \
+    --model-type vllm_model \
+    --output results/benchmarks/ifbench.jsonl \
+    --split benchmark \
+    --model-url <> \
+    --model-api-key <> \
+    --model <> \
+    --resume \
     ++overwrite_metrics_conflicts=true \
-    ++split=benchmark \
-    ++resume_from_cache=true \
-    ++reuse_existing_data_preparation=true \
-    ++policy_base_url=<> \
-    ++policy_api_key=<> \
-    ++policy_model_name=<>
+    ++reuse_existing_data_preparation=true
 ```
 
 ## No internet access

@@ -28,19 +28,19 @@ reward = 0.2 * render_score + 0.8 * key_validation_score
 
 ### Running servers
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/structeval/configs/structeval_nonrenderable.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+    --model-type vllm_model \
+    --resources-server structeval/structeval_nonrenderable
 ```
 
 ### Collecting rollouts
 ```bash
-ng_collect_rollouts \
-    +agent_name=structeval_nonrenderable_simple_agent \
-    +input_jsonl_fpath=resources_servers/structeval/data/structeval_nonrenderable_train.jsonl \
-    +output_jsonl_fpath=results/structeval_nonrenderable.jsonl \
-    +resume_from_cache=True \
-    +num_samples_in_parallel=256
+gym eval run --no-serve \
+    --agent structeval_nonrenderable_simple_agent \
+    --input resources_servers/structeval/data/structeval_nonrenderable_train.jsonl \
+    --output results/structeval_nonrenderable.jsonl \
+    --concurrency 256 \
+    --resume
 ```
 
 ## Data Preparation
@@ -56,7 +56,7 @@ python resources_servers/structeval/misc/prepare_data.py \
 
 ## Testing
 ```bash
-ng_test +entrypoint=resources_servers/structeval
+gym env test --resources-server structeval
 ```
 
 ## Licensing
@@ -65,7 +65,7 @@ Server code: Apache 2.0 (NVIDIA)
 
 Data: Apache 2.0 (derived from [TIGER-Lab/StructEval](https://huggingface.co/datasets/TIGER-Lab/StructEval), originally MIT License)
 
-Evaluation logic adapted from [StructEval](https://github.com/TIGER-Lab/StructEval) (Apache 2.0, TIGER-Lab)
+Evaluation logic adapted from [StructEval](https://tiger-ai-lab.github.io/StructEval/) (Apache 2.0, TIGER-Lab)
 
 Dependencies:
 - nemo_gym: Apache 2.0

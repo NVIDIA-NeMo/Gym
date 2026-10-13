@@ -77,32 +77,33 @@ server.
 Using a local Nemotron 3 model with `local_vllm_model`:
 
 ```bash
-config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,responses_api_models/local_vllm_model/configs/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.yaml,resources_servers/gpqa_diamond/configs/gpqa_diamond.yaml"
-ng_run "+config_paths=[${config_paths}]" \
+gym env start \
+    --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
+    --model-type local_vllm_model/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+    --resources-server gpqa_diamond \
     '++policy_model=${inherit_from:NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}' \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=gpqa_diamond \
-    "++NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.responses_api_models.local_vllm_model.vllm_serve_kwargs.mamba_ssm_cache_dtype=float32" \
-    "++NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.responses_api_models.local_vllm_model.vllm_serve_kwargs.enable_prefix_caching=False"
+    ++NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.responses_api_models.local_vllm_model.vllm_serve_kwargs.mamba_ssm_cache_dtype=float32 \
+    ++NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.responses_api_models.local_vllm_model.vllm_serve_kwargs.enable_prefix_caching=False
 ```
 
 Generic example with `openai_model`:
 
 ```bash
-config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/gpqa_diamond/configs/gpqa_diamond.yaml"
-
-ng_run "+config_paths=[$config_paths]" \
+gym env start \
+    --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
+    --model-type openai_model \
+    --resources-server gpqa_diamond \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=gpqa_diamond
 
-ng_collect_rollouts \
-    +agent_name=simple_agent \
-    +input_jsonl_fpath=resources_servers/gpqa_diamond/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/gpqa_diamond/data/example_rollouts.jsonl \
-    +limit=3
+gym eval run --no-serve \
+    --agent simple_agent \
+    --input resources_servers/gpqa_diamond/data/example.jsonl \
+    --output resources_servers/gpqa_diamond/data/example_rollouts.jsonl \
+    --limit 3
 ```
 
-`ng_collect_rollouts` also writes sidecar files next to `output_jsonl_fpath`, matching
+`gym eval run` also writes sidecar files next to the `--output` file, matching
 the same pattern as `test_rollouts*`:
 
 - `*_materialized_inputs.jsonl`

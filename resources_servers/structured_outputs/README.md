@@ -55,37 +55,37 @@ text-output and tool-call variants is in
 The following command runs the text-output JSON config with the simple agent and
 an OpenAI model:
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml, \
-resources_servers/structured_outputs/configs/structured_outputs_json.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type openai_model \
+    --resources-server structured_outputs/structured_outputs_json
 ```
 
 Then, text-output rollouts can be collected using a command such as:
 ```bash
-ng_collect_rollouts \
-    +agent_name=structured_outputs_simple_agent \
-    +input_jsonl_fpath=resources_servers/structured_outputs/data/structured_outputs_260309_nano_v3_sdg_json_yaml_xml_val.jsonl \
-    +output_jsonl_fpath=results/example_structured_outputs_json.jsonl \
-    +resume_from_cache=True \
-    +num_samples_in_parallel=256
+gym eval run --no-serve \
+    --agent structured_outputs_simple_agent \
+    --input resources_servers/structured_outputs/data/structured_outputs_260309_nano_v3_sdg_json_yaml_xml_val.jsonl \
+    --output results/example_structured_outputs_json.jsonl \
+    --concurrency 256 \
+    --resume
 ```
 
 For v4 tool-call structured outputs, use `structured_outputs_v4.yaml` and the
 v4 simple agent. The config routes through a non-executing agent because the
 emitted function call is the final answer, not an action to execute:
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/structured_outputs/configs/structured_outputs_v4.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+    --model-type vllm_model \
+    --resources-server structured_outputs/structured_outputs_v4
 ```
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=structured_outputs_v4_simple_agent \
-    +input_jsonl_fpath=resources_servers/structured_outputs/data/structured_outputs_v4_tool_call.jsonl \
-    +output_jsonl_fpath=results/example_structured_outputs_v4_tool_call.jsonl \
-    +resume_from_cache=True \
-    +num_samples_in_parallel=256
+gym eval run --no-serve \
+    --agent structured_outputs_v4_simple_agent \
+    --input resources_servers/structured_outputs/data/structured_outputs_v4_tool_call.jsonl \
+    --output results/example_structured_outputs_v4_tool_call.jsonl \
+    --concurrency 256 \
+    --resume
 ```
 
 You can see breakdown of results from the rollout file using the provided breakdown_metrics file.
@@ -98,32 +98,33 @@ python resources_servers/structured_outputs/misc/breakdown_rollouts_metrics.py \
 ### Version 1 [251027] (JSON only)
 You can prepare the data for training with:
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/structured_outputs/configs/structured_outputs_json.yaml"
-ng_prepare_data "+config_paths=[${config_paths}]" \
-    +output_dirpath=data/structured_outputs \
-    +mode=train_preparation +should_download=true
+gym dataset collate \
+    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    --resources-server structured_outputs/structured_outputs_json \
+    --output-dir data/structured_outputs \
+    --mode train_preparation \
+    --download
 ```
 
 ### Version 2 [260310] (JSON, YAML, XML)
 ```bash
 # prepare
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
-resources_servers/structured_outputs/configs/structured_outputs_json_yaml_xml_v1.yaml"
-ng_prepare_data "+config_paths=[${config_paths}]" \
-    +output_dirpath=data/structured_outputs/ \
-    +mode=train_preparation \
-    +should_download=true
+gym dataset collate \
+    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --resources-server structured_outputs/structured_outputs_json_yaml_xml_v1 \
+    --output-dir data/structured_outputs/ \
+    --mode train_preparation \
+    --download
 ```
 
 ### Version 3 [260409] (JSON, YAML, XML, TOML, CSV)
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
-resources_servers/structured_outputs/configs/structured_outputs_v3.yaml"
-ng_prepare_data "+config_paths=[${config_paths}]" \
-    +output_dirpath=data/structured_outputs_v3/ \
-    +mode=train_preparation \
-    +should_download=true
+gym dataset collate \
+    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --resources-server structured_outputs/structured_outputs_v3 \
+    --output-dir data/structured_outputs_v3/ \
+    --mode train_preparation \
+    --download
 ```
 
 ### Version 4 [260424] (Tool-call structured outputs)
@@ -139,12 +140,12 @@ The uploaded GitLab dataset is:
 
 Prepare the v4 training data with:
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
-resources_servers/structured_outputs/configs/structured_outputs_v4.yaml"
-ng_prepare_data "+config_paths=[${config_paths}]" \
-    +output_dirpath=data/structured_outputs_v4_tool_call/ \
-    +mode=train_preparation \
-    +should_download=true
+gym dataset collate \
+    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --resources-server structured_outputs/structured_outputs_v4 \
+    --output-dir data/structured_outputs_v4_tool_call/ \
+    --mode train_preparation \
+    --download
 ```
 
 The v4 config wires the train dataset to
@@ -166,7 +167,7 @@ Generation details and CLI examples are in
 
 # Testing
 ```
-ng_test +entrypoint=resources_servers/structured_outputs
+gym env test --resources-server structured_outputs
 ```
 
 # Licensing information

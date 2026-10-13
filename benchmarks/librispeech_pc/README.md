@@ -8,7 +8,7 @@ which provides the WER scoring.
 ## Splits
 
 This benchmark exposes the `test_clean` split (~2.4k utterances).
-`ng_prepare_benchmark` enforces one benchmark dataset per agent, so the
+`gym eval prepare` enforces one benchmark dataset per agent, so the
 harder `test_other` split is left for a sibling benchmark dir as a future
 PR. `prepare.py` accepts `--splits test-other` on the command line and
 writes a separate `librispeech_pc_test_other.jsonl` if you want to
@@ -17,12 +17,15 @@ evaluate against that split via a custom config.
 ## Audio handling
 
 Audio WAVs are downloaded by `prepare.py`, base64-encoded, and stored on
-`responses_create_params.metadata.audio_url`. `vllm_model`'s audio
-sidechannel reads that field and splices an `audio_url` content block
-into the user message before forwarding to vLLM Chat Completions. The
-Responses API content union has no audio variant, so audio cannot ride
-in `input.content` directly — the metadata sidechannel is the workaround
-until the schema is extended.
+`responses_create_params.metadata.audio_data`. The `vllm_model` adapter
+removes that metadata field and splices an `audio_url` content block into
+the user message before forwarding it to vLLM Chat Completions.
+
+This benchmark requires an audio-capable vLLM endpoint. The
+`--model-type vllm_model` flag selects the Gym adapter; it does not launch
+vLLM or change `policy_base_url`. Set `--model-url` to the vLLM server rather than
+`https://api.openai.com/v1`. OpenAI Chat Completions uses `input_audio`,
+while this adapter emits vLLM's `audio_url` content block.
 
 ## Prompt
 
@@ -34,7 +37,7 @@ row.
 ## Prepare benchmark data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/librispeech_pc/config.yaml]"
+gym eval prepare --benchmark librispeech_pc
 ```
 
 Downloads OpenSLR-145 manifests and OpenSLR-12 test-clean audio
@@ -43,18 +46,20 @@ and writes the JSONL into `benchmarks/librispeech_pc/data/`.
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/librispeech_pc/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --model-url http://<vllm-host>:<port>/v1 \
+    --model <audio-capable-model> \
+    --benchmark librispeech_pc
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=librispeech_pc_asr_with_pc_simple_agent \
-    +output_jsonl_fpath=results/librispeech_pc_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent librispeech_pc_asr_with_pc_simple_agent \
+    --output results/librispeech_pc_rollouts.jsonl \
+    --num-repeats 4
 ```
 
 ## Verification

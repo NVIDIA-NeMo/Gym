@@ -1,0 +1,4 @@
+-e nemo-gym[dev] @ ../../
+huggingface-hub
+rdkit==2025.9.6
+safe-mol==0.2.1

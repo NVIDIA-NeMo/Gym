@@ -69,7 +69,7 @@ policy_model_name: Qwen/Qwen3-VL-8B-Thinking
 Run the following from the NeMo Gym repo root in a separate virtual environment configured with `vllm`:
 
 ```bash
-uv venv --python 3.12 --seed
+uv venv --python 3.13.14 --seed
 source .venv/bin/activate
 uv pip install hf_transfer datasets vllm --torch-backend=auto
 
@@ -91,22 +91,23 @@ vllm serve \
 
 ### Launch servers
 ```bash
-config_paths="resources_servers/newton_bench/configs/newton_bench.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+    --resources-server newton_bench \
+    --model-type vllm_model
 ```
 
 ### Collect rollouts
 ```bash
-ng_collect_rollouts \
-    +agent_name=newton_bench_simple_agent \
-    +input_jsonl_fpath=resources_servers/newton_bench/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/newton_bench/data/example_rollouts.jsonl \
-    +limit=5
+gym eval run --no-serve \
+    --agent newton_bench_simple_agent \
+    --input resources_servers/newton_bench/data/example.jsonl \
+    --output resources_servers/newton_bench/data/example_rollouts.jsonl \
+    --limit 5
 ```
 
 ## Running Tests
 ```bash
-ng_test +entrypoint=resources_servers/newton_bench
+gym env test --resources-server newton_bench
 ```
 
 ## Qwen/Qwen3-VL-8B-Thinking Evaluation Summary

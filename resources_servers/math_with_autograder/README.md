@@ -35,8 +35,10 @@ existing math_with_judge consumers.
 ## Run servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/math_with_autograder/configs/math_with_autograder.yaml,resources_servers/math_with_autograder/configs/judge_gptoss20b.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --resources-server math_with_autograder \
+    --resources-server math_with_autograder/judge_gptoss20b
 ```
 
 The bundled `judge_gptoss20b.yaml` wires the autograder judge to
@@ -47,11 +49,11 @@ swap to a different OpenAI-compatible endpoint.
 ## Collect rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=math_with_autograder_simple_agent \
-    +input_jsonl_fpath=resources_servers/math_with_autograder/data/example.jsonl \
-    +output_jsonl_fpath=results/math_with_autograder_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent math_with_autograder_simple_agent \
+    --input resources_servers/math_with_autograder/data/example.jsonl \
+    --output results/math_with_autograder_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 ## Metrics

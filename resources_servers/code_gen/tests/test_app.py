@@ -25,6 +25,7 @@ from app import (
     CompCodingVerifyResponse,
 )
 from fastapi.testclient import TestClient
+from lcb_integration.testing_util import MockStdinWithBuffer
 from pydantic import ValidationError
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
@@ -50,8 +51,12 @@ class TestApp:
             server_client=MagicMock(spec=ServerClient),
         )
         app = server.setup_webserver()
-        with TestClient(app) as client:
-            yield client
+        try:
+            with TestClient(app) as client:
+                yield client
+        finally:
+            # Stop the local Ray cluster this fixture started instead of leaving it to interpreter exit.
+            ray.shutdown()
 
     async def test_verify_pass_via_response(self, code_gen_resources_server_client: TestClient) -> None:
         # Assistant returns a python code block that squares the input
@@ -357,3 +362,11 @@ class TestGetKeyMetrics:
         # Should NOT have stat suffixes or no_answer
         assert not any("std_dev" in k for k in km)
         assert not any("no_answer" in k for k in km)
+
+
+class TestTestingUtil:
+    def test_mock_stdin_supports_iteration(self) -> None:
+        mock_stdin = MockStdinWithBuffer("first\nsecond\n")
+        assert iter(mock_stdin) is mock_stdin
+        assert next(mock_stdin) == "first\n"
+        assert list(mock_stdin) == ["second\n"]

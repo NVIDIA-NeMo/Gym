@@ -4,7 +4,7 @@ harbor_agent:
       # Python module entrypoint loaded by NeMo Gym.
       entrypoint: app.py
       domain: agent
-      description: Harbor integration for ageng harnesses and environments.
+      description: Harbor integration for agent harnesses and environments.
       value: Improve models in popular agentic environments supported by Harbor such as Terminus2.
       # Max concurrent requests handled by this agent server process.
       concurrency: 50
@@ -72,3 +72,11 @@ harbor_agent:
 
       # Output root directory for Harbor job artifacts.
       harbor_jobs_dir: "/path/to/Gym/responses_api_agents/harbor_agent/jobs"
+
+harbor_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: harbor_agent

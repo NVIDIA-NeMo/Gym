@@ -206,51 +206,60 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
             )
 
     async def end_session(self, request: Request) -> ExecutePythonResponse:
-        sid = request.session[SESSION_ID_KEY]
-        if sid in self._sessions:
-            self._sessions[sid].close()
-            del self._sessions[sid]
+        session_id = request.session[SESSION_ID_KEY]
+        self._cleanup_session(session_id)
         return ExecutePythonResponse(success=True, stdout="", stderr="")
 
-    async def verify(self, body: PythonMathVerifyRequest) -> PythonMathVerifyResponse:
-        expected = body.expected_result
+    async def verify(self, request: Request, body: PythonMathVerifyRequest) -> PythonMathVerifyResponse:
+        session_id = request.session[SESSION_ID_KEY]
 
-        # Extract actual answer from final assistant message
-        actual = None
-        for output in reversed(body.response.output):
-            if output.type == "message" and output.role == "assistant":
-                text_content = ""
-                for content in output.content:
-                    if content.type == "output_text":
-                        text_content += content.text
+        try:
+            expected = body.expected_result
 
-                actual = _extract_boxed_answer(text_content)
-                if actual is not None:
-                    break
-
-        # Fallback: the model may print the boxed answer inside executed code,
-        # so search tool output (stdout) as well.
-        if actual is None:
+            # Extract actual answer from final assistant message
+            actual = None
             for output in reversed(body.response.output):
-                if output.type == "function_call_output":
-                    try:
-                        tool_resp = json.loads(output.output)
-                        stdout_text = tool_resp.get("stdout", "")
-                    except (json.JSONDecodeError, AttributeError):
-                        stdout_text = output.output
-                    actual = _extract_boxed_answer(stdout_text)
+                if output.type == "message" and output.role == "assistant":
+                    text_content = ""
+                    for content in output.content:
+                        if content.type == "output_text":
+                            text_content += content.text
+
+                    actual = _extract_boxed_answer(text_content)
                     if actual is not None:
                         break
 
-        accuracy = _answers_match(actual, expected)
-        reward = 1.0 if accuracy else 0.0
+            # Fallback: the model may print the boxed answer inside executed code,
+            # so search tool output (stdout) as well.
+            if actual is None:
+                for output in reversed(body.response.output):
+                    if output.type == "function_call_output":
+                        try:
+                            tool_resp = json.loads(output.output)
+                            stdout_text = tool_resp.get("stdout", "")
+                        except (json.JSONDecodeError, AttributeError):
+                            stdout_text = output.output
+                        actual = _extract_boxed_answer(stdout_text)
+                        if actual is not None:
+                            break
 
-        return PythonMathVerifyResponse(
-            **body.model_dump(),
-            reward=reward,
-            extracted_answer=actual,
-            accuracy=accuracy,
-        )
+            accuracy = _answers_match(actual, expected)
+            reward = 1.0 if accuracy else 0.0
+
+            return PythonMathVerifyResponse(
+                **body.model_dump(),
+                reward=reward,
+                extracted_answer=actual,
+                accuracy=accuracy,
+            )
+        finally:
+            self._cleanup_session(session_id)
+
+    def _cleanup_session(self, session_id: str) -> None:
+        """Clean up subprocess for the given session."""
+        if session_id in self._sessions:
+            self._sessions[session_id].close()
+            del self._sessions[session_id]
 
 
 def _normalize_answer(s: str) -> str:

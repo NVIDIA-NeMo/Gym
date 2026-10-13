@@ -1,0 +1,36 @@
+# Competitive Coding Resources Server
+
+### Overview
+Verifies competitive programming solutions by executing submitted code against unit tests. The server consumes agent trajectories and returns a reward based on whether the assistant's code produces the correct outputs for given test inputs.
+
+The dataset is in preparation and the example data can be found in `data/example.jsonl`.
+
+### Input schema
+- `responses_create_params`: OpenAI Responses create params
+  - Use only a user message with the problem statement and instructions (e.g., "You are an expert competitive programmer...").
+- `verifier_metadata` (required):
+  - `unit_tests` (required): dict with `inputs` and `outputs` arrays containing test cases.
+    - `inputs`: list of strings representing stdin input for each test case
+    - `outputs`: list of strings representing expected stdout output for each test case
+
+**Notes**
+- All test cases must pass for a solution to receive a reward of 1.0
+- Failed test cases result in a reward of 0.0 with detailed error information
+
+### Test execution (for now)
+We use the LiveCodeBench execution code.
+
+### Example of rollouts and usage
+Create an `env.yaml` file in the Gym root directory to specify the model endpoint and credentials. See [documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml) for details.
+```bash
+# Running the server
+gym env start --environment code_gen --model-type openai_model
+
+# Collect rollouts from example problems
+gym eval run --no-serve --agent code_gen_simple_agent \
+    --input environments/code_gen/data/example.jsonl \
+    --output environments/code_gen/data/example_rollouts.jsonl
+```
+
+## Licensing information
+Apache 2.0

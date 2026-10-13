@@ -26,7 +26,7 @@ Solve the following math problem. Make sure to put the answer (and only answer) 
 ## Data preparation
 
 ```bash
-ng_prepare_benchmark '+config_paths=[benchmarks/apex_shortlist/config.yaml]'
+gym eval prepare --benchmark apex_shortlist
 ```
 
 Writes `data/apex_shortlist_benchmark.jsonl` with one row per problem:
@@ -35,17 +35,27 @@ Writes `data/apex_shortlist_benchmark.jsonl` with one row per problem:
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/apex_shortlist/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark apex_shortlist
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=apex_shortlist_math_with_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/apex_shortlist/data/apex_shortlist_benchmark.jsonl \
-    +output_jsonl_fpath=results/apex_shortlist_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent apex_shortlist_math_with_judge_simple_agent \
+    --input benchmarks/apex_shortlist/data/apex_shortlist_benchmark.jsonl \
+    --output results/apex_shortlist_rollouts.jsonl \
+    --num-repeats 4
 ```
+
+## Sandboxed agents
+
+Use `--benchmark apex_shortlist/opencode` or `apex_shortlist/pi` for Python tools
+without search. These presets preserve the standard boxed-answer prompt and
+symbolic grading, with 16 dataset repeats per question.
+Keep collection repeats at one.
+
+See the shared [OpenCode and Pi setup guide](../../responses_api_agents/opencode_sandboxed_agent/README.md#offline-scientific-evaluation-with-opencode-or-pi)
+for images, credentials, network policies, token limits, and failure handling.

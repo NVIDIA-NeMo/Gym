@@ -8,7 +8,7 @@ ground-truth SQL against the per-db_id SQLite file, compare result sets via
 
 SQL execution uses ``asyncio.to_thread`` rather than Ray remote tasks.
 When this resource server runs alongside a Ray-coordinated multi-node DP
-vLLM (Gym's ``ng_run`` attaches to the same Ray cluster), the vLLM engines
+vLLM (``gym env start`` attaches to the same Ray cluster), the vLLM engines
 consume the Ray slots and ``@ray.remote`` sqlite tasks sit in the scheduler
 queue past the per-query timeout, get cancelled, and every rollout reports
 ``gold_execution_error``. SQLite queries are fast and self-contained — no
@@ -46,15 +46,18 @@ async def execute_sqlite_async(
     sql: str,
     semaphore: asyncio.Semaphore,
     timeout_s: float = 30.0,
+    raise_on_timeout: bool = False,
 ) -> Optional[ResultSet]:
     """Execute SQL asynchronously in a worker thread, bounded by semaphore.
 
-    Returns ``None`` on timeout or query exception.
+    Returns ``None`` on timeout (unless ``raise_on_timeout`` is True) or query exception.
     """
     async with semaphore:
         try:
             return await asyncio.wait_for(asyncio.to_thread(execute_sqlite, db_path, sql), timeout=timeout_s)
         except asyncio.TimeoutError:
+            if raise_on_timeout:
+                raise
             return None
 
 
@@ -78,11 +81,17 @@ async def execute_and_compare(
     timeout_s: float = 30.0,
 ) -> tuple[bool, Optional[ResultSet], Optional[ResultSet], Optional[str]]:
     """Execute both queries and compare. Returns (match, gold, pred, error_tag)."""
-    gold_rows = await execute_sqlite_async(db_path, gold_sql, semaphore, timeout_s)
+    try:
+        gold_rows = await execute_sqlite_async(db_path, gold_sql, semaphore, timeout_s, raise_on_timeout=True)
+    except asyncio.TimeoutError:
+        return False, None, None, "gold_sql_timeout"
     if gold_rows is None:
         return False, None, None, "gold_sql_error"
 
-    pred_rows = await execute_sqlite_async(db_path, pred_sql, semaphore, timeout_s)
+    try:
+        pred_rows = await execute_sqlite_async(db_path, pred_sql, semaphore, timeout_s, raise_on_timeout=True)
+    except asyncio.TimeoutError:
+        return False, gold_rows, None, "pred_sql_timeout"
     if pred_rows is None:
         return False, gold_rows, None, "pred_sql_error"
 

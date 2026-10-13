@@ -9,13 +9,15 @@ Please note that agents such as parallel thinking which produce non-monotonicall
 ## Quick Start
 
 ```bash
-ng_run "+config_paths=[resources_servers/reasoning_gym/configs/reflection_agent.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --resources-server reasoning_gym/reflection_agent \
+    --model-type vllm_model
 ```
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=reasoning_gym_reflection_agent \
-    +input_jsonl_fpath=resources_servers/reasoning_gym/data/example.jsonl \
-    +output_jsonl_fpath=example_rollouts.jsonl \
-    +limit=1
+gym eval run --no-serve \
+    --agent reasoning_gym_reflection_agent \
+    --input resources_servers/reasoning_gym/data/example.jsonl \
+    --output example_rollouts.jsonl \
+    --limit 1
 ```

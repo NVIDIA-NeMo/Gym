@@ -9,17 +9,17 @@ python resources_servers/xlam_fc/generate_dataset.py
 ```
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/xlam_fc/configs/xlam_fc.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --resources-server xlam_fc
 ```
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=xlam_fc_simple_agent \
-    +input_jsonl_fpath=resources_servers/xlam_fc/data/train.jsonl \
-    +output_jsonl_fpath=results/xlam_fc_trajectory_collection.jsonl \
-    +limit=10
+gym eval run --no-serve \
+    --agent xlam_fc_simple_agent \
+    --input resources_servers/xlam_fc/data/train.jsonl \
+    --output results/xlam_fc_trajectory_collection.jsonl \
+    --limit 10
 ```
 
 ## Licensing

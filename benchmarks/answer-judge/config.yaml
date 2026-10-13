@@ -17,6 +17,13 @@ answer_judge_math_proof_judgement_simple_agent:
         - name: answer-judge
           type: benchmark
           jsonl_fpath: benchmarks/answer-judge/data/answer-judge_benchmark.jsonl
-          prompt_config: benchmarks/prompts/math_answer_judge.yaml
+          prompt_config: benchmarks/prompts/judge/math.yaml
           prepare_script: benchmarks/answer-judge/prepare.py
           num_repeats: 1
+
+answer_judge_math_proof_judgement_environment_server:
+  _inherit_from: math_proof_judgement_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: answer_judge_math_proof_judgement_simple_agent

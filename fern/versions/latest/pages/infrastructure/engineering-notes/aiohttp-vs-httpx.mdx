@@ -36,6 +36,6 @@ In the end, we decided to swap our HTTP backend from httpx to aiohttp since we h
 Here are some GitHub issues related to this problem. They did not help too much, but they did validate our solution to use aiohttp as an async HTTP backend instead:
 
 - [openai-python issue 1596](https://github.com/openai/openai-python/issues/1596)
-- [httpx issue 3215](https://github.com/encode/httpx/issues/3215#issuecomment-2220795088)
+- [httpx issue 3215](https://web.archive.org/web/20240909220655/https://github.com/encode/httpx/issues/3215) (upstream issue has since been deleted; archived snapshot)
 
 If you are using AsyncOpenAI client with a parallelism &gt;32, you may also want to check if this kind of inefficiency also affects your setup.

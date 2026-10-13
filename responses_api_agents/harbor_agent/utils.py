@@ -77,7 +77,7 @@ class HarborAgentUtils:
             "truncation": "disabled",
             "usage": {
                 "input_tokens": 0,
-                "input_tokens_details": {"cached_tokens": 0},
+                "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
                 "output_tokens": 0,
                 "output_tokens_details": {"reasoning_tokens": 0},
                 "total_tokens": 0,
@@ -184,7 +184,9 @@ class HarborAgentUtils:
 
         return {
             "input_tokens": input_tokens,
-            "input_tokens_details": {"cached_tokens": cached_tokens},
+            # cache_write_tokens is required by openai>=2.40 InputTokensDetails;
+            # vLLM backends do not report cache writes.
+            "input_tokens_details": {"cached_tokens": cached_tokens, "cache_write_tokens": 0},
             "output_tokens": output_tokens,
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": input_tokens + output_tokens,
@@ -338,6 +340,12 @@ class HarborAgentUtils:
             prompt_token_ids = metrics.get("prompt_token_ids")
             completion_token_ids = metrics.get("completion_token_ids")
             logprobs = metrics.get("logprobs")
+            metrics_extra = metrics.get("extra") or {}
+            if not isinstance(metrics_extra, dict):
+                metrics_extra = {}
+            routed_experts = metrics.get("routed_experts")
+            if routed_experts is None:
+                routed_experts = metrics_extra.get("routed_experts")
             has_token_details = prompt_token_ids or completion_token_ids or logprobs
 
             if has_token_details:
@@ -350,6 +358,7 @@ class HarborAgentUtils:
                     prompt_token_ids=prompt_token_ids or [],
                     generation_token_ids=completion_token_ids or [],
                     generation_log_probs=logprobs or [],
+                    routed_experts=routed_experts,
                 )
             else:
                 message = NeMoGymResponseOutputMessage(

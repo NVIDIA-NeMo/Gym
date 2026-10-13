@@ -25,11 +25,15 @@ Notes:
 
 ### Grading modes
 - `strict_single_letter_boxed` (default)
-  - Requires exactly one uppercase letter inside a LaTeX box: `\boxed{...}`
-  - Example it accepts: `Final: \boxed{ [C] }`
+  - Extracts a single uppercase answer letter from inside a LaTeX box: `\boxed{...}`
+  - Uses the LAST `\boxed{...}` in the output so chain-of-thought intermediate boxes are skipped, e.g. `\boxed{C} ... \boxed{E}` resolves to `E`
+  - Tolerates a `\text{...}` wrapper around the content, e.g. `\boxed{\text{E}}` and `\boxed{\text{E: <option text>}}`
+  - Tolerates a leading answer letter followed by a label delimiter (`:`, `)`, `.`, `-`) with trailing option text ignored, e.g. `\boxed{E: A polygenic risk score...}`
+  - Tolerates non-letter padding around a bare letter, e.g. `Final: \boxed{ [C] }`
+  - Does NOT match bare option text without a leading letter (that is `lenient_boxed`'s job), so `\boxed{A polygenic risk score...}` is not treated as answer A
 - `lenient_boxed`
   - First tries strict boxed letter.
-  - If none, it looks ONLY inside the first `\boxed{...}` and tries to match the option text (normalized, case/whitespace-insensitive). Returns the corresponding letter only if exactly one option matches.
+  - If none, it looks ONLY inside the last `\boxed{...}` and tries to match the option text (normalized, case/whitespace-insensitive). Returns the corresponding letter only if exactly one option matches.
   - Example: `options = [{"A": "Circle"}, {"B": "Square}]`. This will match either `\boxed{Square}` or `\boxed{B}`
 - `lenient_answer_colon`
   - Extracts content after `Answer:` (case-insensitive).
@@ -111,28 +115,27 @@ For datasets with custom prompt formats, you can optionally use `template_metada
 
 **Standard format (with `grading_mode`):**
 ```bash
-config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/mcqa/configs/mcqa.yaml"
-
-
-ng_run "+config_paths=[$config_paths]" \
+gym env start \
+    --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
+    --model-type openai_model \
+    --resources-server mcqa \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=mcqa
 
-ng_collect_rollouts \
-    +agent_name=simple_agent \
-    +input_jsonl_fpath=data/MCQA_filtered_decontaminated.jsonl \
-    +output_jsonl_fpath=data/MCQA_filtered_decontaminated_samples_rollouts.jsonl +limit=5
+gym eval run --no-serve \
+    --agent simple_agent \
+    --input data/MCQA_filtered_decontaminated.jsonl \
+    --output data/MCQA_filtered_decontaminated_samples_rollouts.jsonl \
+    --limit 5
 ```
 
 **With template_metadata (custom regex):**
 ```bash
 # Using example file with 5 different custom prompt formats
-ng_collect_rollouts \
-    +agent_name=simple_agent \
-    +input_jsonl_fpath=resources_servers/mcqa/data/example_with_template_metadata.jsonl \
-    +output_jsonl_fpath=resources_servers/mcqa/data/example_rollouts_with_template_metadata.jsonl \
-    +limit=5
+gym eval run --no-serve \
+    --agent simple_agent \
+    --input resources_servers/mcqa/data/example_with_template_metadata.jsonl \
+    --output resources_servers/mcqa/data/example_rollouts_with_template_metadata.jsonl \
+    --limit 5
 ```
 
 Rollout example

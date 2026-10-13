@@ -69,13 +69,19 @@ class GenRMStrategyConfig(BaseModel):
     comparisons of multiple candidate responses.
 
     Attributes:
-        agent_names: Agent names that should use GenRM comparison (e.g., ["genrm_simple_agent"])
+        agent_names: Agent names that should use GenRM comparison
+            (e.g., ["genrm_simple_agent", "genrm_simple_agent_reasoning_off"])
         num_generations_per_prompt: Number of responses to generate and compare per prompt
         genrm_compare_server_name: Name of the genrm_compare resources server
         policy_model_server_name: Name of the policy model to generate responses
     """
 
-    agent_names: List[str] = Field(default_factory=lambda: ["genrm_simple_agent"])
+    agent_names: List[str] = Field(
+        default_factory=lambda: [
+            "genrm_simple_agent",
+            "genrm_simple_agent_reasoning_off",
+        ]
+    )
     num_generations_per_prompt: int = 16
     genrm_compare_server_name: str = "genrm_compare"
     policy_model_server_name: str = "policy_model"

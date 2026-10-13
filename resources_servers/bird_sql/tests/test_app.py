@@ -17,13 +17,11 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from resources_servers.bird_sql.app import (
-    _NO_ANSWER_FILLER,
     BirdSqlResourcesServer,
     BirdSqlResourcesServerConfig,
     BirdSqlVerifyRequest,
     FailureCode,
     extract_sql_from_response,
-    has_sql_codeblock,
 )
 from resources_servers.bird_sql.eval_utils import (
     execute_and_compare,
@@ -119,14 +117,13 @@ def server_with_mocked_dbs(tmp_path, monkeypatch):
 
 
 class TestExtractSqlFromResponse:
-    def test_empty_returns_filler(self):
-        # "SELECT 1" no-op filler whenever extraction fails.
-        assert extract_sql_from_response("") == _NO_ANSWER_FILLER
-        assert extract_sql_from_response(None) == _NO_ANSWER_FILLER
+    def test_empty_returns_none(self):
+        assert extract_sql_from_response("") is None
+        assert extract_sql_from_response(None) is None
 
-    def test_no_codeblock_returns_filler(self):
+    def test_no_codeblock_returns_none(self):
         # Raw SQL without ```sql fences is NOT extracted — CODEBLOCK mode only.
-        assert extract_sql_from_response("SELECT * FROM t;") == _NO_ANSWER_FILLER
+        assert extract_sql_from_response("SELECT * FROM t;") is None
 
     def test_single_codeblock(self):
         text = "Let me think...\n```sql\nSELECT * FROM t\n```"
@@ -136,46 +133,45 @@ class TestExtractSqlFromResponse:
         text = "```sql\nSELECT 1\n```\nthen\n```sql\nSELECT 2\n```"
         assert extract_sql_from_response(text) == "SELECT 2"
 
-    def test_inline_block_comment_stripped(self):
+    def test_inline_block_comment_not_stripped(self):
+        # SQLite's parser ignores comments natively, so we no longer strip them
+        # (stripping was the source of a bug that ate whole SQL statements).
         text = "```sql\nSELECT 1 /* inline */ FROM t\n```"
-        assert extract_sql_from_response(text) == "SELECT 1 FROM t"
+        assert extract_sql_from_response(text) == "SELECT 1 /* inline */ FROM t"
 
-    def test_line_comment_eats_to_eos(self):
-        # Comment-strip uses DOTALL and no MULTILINE, so `--.*?$` consumes to
-        # end-of-string: a `--`-style comment inside the block swallows the
-        # rest. Execution then fails on the empty SQL and the reward is 0.
+    def test_line_comment_preserved_on_own_line(self):
+        # Only leading/trailing whitespace is trimmed; internal newlines are
+        # preserved so a `--` comment can't merge onto the same line as the
+        # SQL that follows it (which would silently comment out everything).
         text = "```sql\n-- comment\nSELECT 1 FROM t\n```"
-        assert extract_sql_from_response(text) == ""
+        assert extract_sql_from_response(text) == "-- comment\nSELECT 1 FROM t"
 
     def test_strips_leading_bold_header(self):
-        # The `^\*\*.*\*\*` anchor requires ** at position 0 after whitespace
-        # collapse, so no space-before-** either.
         text = "```sql**Answer** SELECT 1 FROM t```"
         assert extract_sql_from_response(text) == "SELECT 1 FROM t"
 
-    def test_bold_header_not_stripped_when_preceded_by_whitespace(self):
-        # A newline before ** pushes it past position 0, so the bold marker
-        # survives the strip.
+    def test_strips_leading_bold_header_preceded_by_whitespace(self):
+        # Leading/trailing whitespace is trimmed before the bold-header check,
+        # so a newline before ** no longer lets the header escape stripping.
         text = "```sql\n**Answer** SELECT 1 FROM t\n```"
-        assert extract_sql_from_response(text) == "**Answer** SELECT 1 FROM t"
+        assert extract_sql_from_response(text) == "SELECT 1 FROM t"
 
     def test_requires_alpha_inside_block(self):
         # The extraction regex requires at least one a-z letter inside the fenced block.
         text = "```sql\n12345\n```"
-        assert extract_sql_from_response(text) == _NO_ANSWER_FILLER
+        assert extract_sql_from_response(text) is None
 
+    def test_fence_tag_case_insensitive(self):
+        # The ```sql fence tag itself is matched case-insensitively, but the
+        # captured SQL content's case is left untouched.
+        text = "```SQL\nSELECT Name FROM Students\n```"
+        assert extract_sql_from_response(text) == "SELECT Name FROM Students"
 
-class TestHasSqlCodeblock:
-    def test_present(self):
-        assert has_sql_codeblock("```sql\nSELECT 1\n```") is True
-
-    def test_absent(self):
-        assert has_sql_codeblock("just prose") is False
-        assert has_sql_codeblock("") is False
-        assert has_sql_codeblock(None) is False
-
-    def test_requires_letter(self):
-        assert has_sql_codeblock("```sql\n12345\n```") is False
+    def test_fence_tag_requires_word_boundary(self):
+        # Case-insensitivity must not also match unrelated tags that merely start with
+        # "sql" (```SQLite, ```sqlalchemy, ...).
+        assert extract_sql_from_response("```SQLite\nSELECT 1\n```") is None
+        assert extract_sql_from_response("```sqlalchemy\nSELECT 1\n```") is None
 
 
 # ---------------------------------------------------------------------------
@@ -308,43 +304,75 @@ async def test_execute_and_compare_gold_error(monkeypatch):
     assert match is False and err == "gold_sql_error" and gold is None and pred is None
 
 
+@pytest.mark.asyncio
+async def test_execute_and_compare_pred_timeout(monkeypatch):
+    import time
+
+    def slow_execute(db_path, sql):
+        if "SLOW" in sql:
+            time.sleep(10)
+        return [(1,)]
+
+    monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_sqlite", slow_execute)
+    sem = asyncio.Semaphore(4)
+    match, gold, pred, err = await execute_and_compare(
+        Path("/x.sqlite"), gold_sql="SELECT 1", pred_sql="SELECT SLOW", semaphore=sem, timeout_s=0.05
+    )
+    assert match is False and err == "pred_sql_timeout" and gold == [(1,)] and pred is None
+
+
+@pytest.mark.asyncio
+async def test_execute_and_compare_gold_timeout(monkeypatch):
+    import time
+
+    def slow_execute(db_path, sql):
+        if "SLOW" in sql:
+            time.sleep(10)
+        return [(1,)]
+
+    monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_sqlite", slow_execute)
+    sem = asyncio.Semaphore(4)
+    match, gold, pred, err = await execute_and_compare(
+        Path("/x.sqlite"), gold_sql="SELECT SLOW", pred_sql="SELECT 1", semaphore=sem, timeout_s=0.05
+    )
+    assert match is False and err == "gold_sql_timeout" and gold is None and pred is None
+
+
 # ---------------------------------------------------------------------------
 # BirdSqlResourcesServer.verify end-to-end (mock execute_and_compare)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_verify_no_codeblock_filler_runs(server_with_mocked_dbs, monkeypatch):
-    """No ```sql``` block → "SELECT 1" filler, which executes and mismatches
-    almost any GT. NO_SQL_EXTRACTED is still recorded as a diagnostic flag."""
+async def test_verify_no_codeblock_skips_execution(server_with_mocked_dbs, monkeypatch):
+    """No ```sql``` block -> hard 0, no execution attempted (no query to run)."""
 
-    async def fake(*, pred_sql, gold_sql, **_kw):
-        assert pred_sql == _NO_ANSWER_FILLER
-        return False, [(42,)], [(1,)], None
+    async def fail_if_called(**_kw):
+        raise AssertionError("execute_and_compare should not be called when no SQL was extracted")
 
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fail_if_called)
 
     body = _make_verify_request("the model produced only prose, no SQL fence")
     resp = await server_with_mocked_dbs.verify(body)
     assert resp.reward == 0.0
     assert resp.execution_match is False
     assert resp.had_codeblock is False
-    assert resp.extracted_sql == _NO_ANSWER_FILLER
+    assert resp.extracted_sql is None
     assert resp.failure_reason == FailureCode.NO_SQL_EXTRACTED
 
 
 @pytest.mark.asyncio
-async def test_verify_empty_response_filler_runs(server_with_mocked_dbs, monkeypatch):
-    async def fake(*, pred_sql, **_kw):
-        assert pred_sql == _NO_ANSWER_FILLER
-        return False, [(42,)], [(1,)], None
+async def test_verify_empty_response_skips_execution(server_with_mocked_dbs, monkeypatch):
+    async def fail_if_called(**_kw):
+        raise AssertionError("execute_and_compare should not be called when no SQL was extracted")
 
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fail_if_called)
 
     body = _make_verify_request("")
     resp = await server_with_mocked_dbs.verify(body)
     assert resp.reward == 0.0
     assert resp.had_codeblock is False
+    assert resp.extracted_sql is None
     assert resp.failure_reason == FailureCode.NO_SQL_EXTRACTED
 
 
@@ -376,7 +404,7 @@ async def test_verify_mismatch_with_codeblock(server_with_mocked_dbs, monkeypatc
     assert resp.reward == 0.0
     assert resp.execution_match is False
     assert resp.had_codeblock is True
-    assert resp.failure_reason == FailureCode.EXECUTION_ERROR
+    assert resp.failure_reason == FailureCode.RESULT_MISMATCH
 
 
 @pytest.mark.asyncio
@@ -393,6 +421,19 @@ async def test_verify_pred_sql_error_with_codeblock(server_with_mocked_dbs, monk
 
 
 @pytest.mark.asyncio
+async def test_verify_pred_sql_timeout_with_codeblock(server_with_mocked_dbs, monkeypatch):
+    async def fake(**_kw):
+        return False, [(1,)], None, "pred_sql_timeout"
+
+    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+
+    body = _make_verify_request("```sql\nSLOW SQL\n```")
+    resp = await server_with_mocked_dbs.verify(body)
+    assert resp.reward == 0.0
+    assert resp.failure_reason == FailureCode.EXECUTION_TIMEOUT
+
+
+@pytest.mark.asyncio
 async def test_verify_gold_sql_error(server_with_mocked_dbs, monkeypatch):
     async def fake(**_kw):
         return False, None, None, "gold_sql_error"
@@ -403,6 +444,19 @@ async def test_verify_gold_sql_error(server_with_mocked_dbs, monkeypatch):
     resp = await server_with_mocked_dbs.verify(body)
     assert resp.reward == 0.0
     assert resp.failure_reason == FailureCode.GOLD_EXECUTION_ERROR
+
+
+@pytest.mark.asyncio
+async def test_verify_gold_sql_timeout(server_with_mocked_dbs, monkeypatch):
+    async def fake(**_kw):
+        return False, None, None, "gold_sql_timeout"
+
+    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+
+    body = _make_verify_request("```sql\nSELECT 1\n```")
+    resp = await server_with_mocked_dbs.verify(body)
+    assert resp.reward == 0.0
+    assert resp.failure_reason == FailureCode.GOLD_EXECUTION_TIMEOUT
 
 
 @pytest.mark.asyncio

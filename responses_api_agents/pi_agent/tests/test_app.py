@@ -1,0 +1,850 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import asyncio
+import json
+import shutil
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+import yaml
+from fastapi import Request
+
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputMessage,
+)
+from nemo_gym.rollout_observability import AgentInvocation, ContextCompactionObservation, ToolCallObservation
+from nemo_gym.server_utils import ServerClient
+from responses_api_agents.pi_agent.app import (
+    PiAgent,
+    PiAgentConfig,
+    PiAgentRunRequest,
+    ResourcesServerRef,
+    _build_pi_observations,
+    _extract_instruction,
+    _read_pi_stdout,
+    parse_pi_events,
+)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node is required for the Pi extension")
+@pytest.mark.parametrize("filename", ["test_gym_mcp.mjs", "test_remaining_context.mjs", "test_bash_timeout.mjs"])
+def test_gym_extensions(filename):
+    result = subprocess.run(
+        ["node", "--test", str(Path(__file__).with_name(filename))],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _config(**kwargs) -> PiAgentConfig:
+    return PiAgentConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="",
+        resources_server=ResourcesServerRef(type="resources_servers", name=""),
+        **kwargs,
+    )
+
+
+def _make_agent(**kwargs) -> PiAgent:
+    return PiAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+
+
+def _msg_end(role, content, **extra) -> str:
+    return json.dumps({"type": "message_end", "message": {"role": role, "content": content, **extra}})
+
+
+def _records(bundle, record_type):
+    return [record for record in bundle.records if isinstance(record, record_type)]
+
+
+class TestSanity:
+    def test_config_defaults(self) -> None:
+        cfg = _config()
+        assert cfg.concurrency == 8
+        assert cfg.command == "pi"
+        assert cfg.command_parts == ["pi"]
+
+    def test_semaphore_initialized(self) -> None:
+        agent = _make_agent(concurrency=4)
+        assert agent.sem._value == 4
+
+
+@pytest.mark.parametrize("with_scope", [True, False], ids=["anyswe-anyterminal", "harness-agent"])
+async def test_legacy_runner_request_preserves_configured_pi_controls(with_scope: bool) -> None:
+    # AnySWE/AnyTerminal pass sampling fields in both config and the request;
+    # HarnessAgent forwards the entire Responses body using a scope-less request.
+    agent = _make_agent(model="configured-model", max_output_tokens=128, system_prompt="config")
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"role": "user", "content": "fix the code"}],
+        model="caller-model",
+        max_output_tokens=128,
+        temperature=0.7,
+        top_p=0.8,
+        metadata={"instance_id": "example"},
+    )
+    original = body.model_dump()
+    request = Request({"type": "http", "path_params": {}}) if with_scope else SimpleNamespace(path_params={})
+    items, usage = parse_pi_events(
+        _msg_end("assistant", [{"type": "text", "text": "fixed"}], usage={"input": 2, "output": 1})
+    )
+    with patch.object(agent, "_run_pi", AsyncMock(return_value=(items, usage, "configured-model", []))) as run:
+        result = await agent.responses(request, body)
+
+    run.assert_awaited_once_with("fix the code", "config", rollout_id=None, collect_observations=False)
+    assert result.output[0].content[0].text == "fixed"
+    assert result.model == "configured-model"
+    assert result.usage.total_tokens == 3
+    assert agent.config.max_output_tokens == 128
+    assert body.model_dump() == original
+
+
+class TestLocalRuntimeSetup:
+    @pytest.mark.parametrize("timed_out, collect", [(False, True), (True, True), (True, False)])
+    async def test_local_exit_preserves_events_and_removes_workspace(self, tmp_path, timed_out, collect) -> None:
+        agent = _make_agent(
+            workspace_root=str(tmp_path),
+            timeout=1,
+            thinking="high",
+            model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        )
+        process = MagicMock(returncode=None if timed_out else 0)
+        process.stdout, process.stderr = asyncio.StreamReader(), asyncio.StreamReader()
+        event = _msg_end("assistant", [{"type": "text", "text": "partial"}], usage={"input": 2, "output": 1})
+        process.stdout.feed_data(event.encode())
+        exited = asyncio.Event()
+
+        def finish():
+            process.returncode = -9 if timed_out else 0
+            process.stdout.feed_eof()
+            process.stderr.feed_eof()
+            exited.set()
+
+        async def communicate():
+            await exited.wait()
+            return b"", b""
+
+        process.kill.side_effect = finish
+        process.wait = AsyncMock(side_effect=exited.wait)
+        process.communicate = AsyncMock(side_effect=communicate)
+        if not timed_out:
+            finish()
+        module = "responses_api_agents.pi_agent.app"
+        with (
+            patch(f"{module}.ensure_pi"),
+            patch.object(agent, "_resolve_model_base_url", return_value="http://model.example:9000"),
+            patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)) as spawn,
+        ):
+            items, usage, _, events = await agent._run_pi("task", "system rules", collect_observations=collect)
+        assert process.kill.call_count == int(timed_out)
+        assert not list(tmp_path.iterdir())
+        assert "--thinking" in spawn.call_args.args and "system rules" in spawn.call_args.args
+        expected_events = [json.loads(event)] if collect else []
+        if collect and timed_out:
+            expected_events.append({"type": "_ng_process_exit", "timed_out": True})
+        assert [event for _, event in events] == expected_events
+        if timed_out:
+            assert items == [] and usage == {"input_tokens": 0, "output_tokens": 0}
+        else:
+            assert items[0].content[0].text == "partial"
+            assert usage == {"input_tokens": 2, "output_tokens": 1}
+
+    def test_startup_does_not_install_host_pi(self) -> None:
+        with patch("responses_api_agents.pi_agent.app.ensure_pi") as install:
+            agent = PiAgent(config=_config(concurrency=4), server_client=MagicMock(spec=ServerClient))
+        install.assert_not_called()
+        assert agent.sem._value == 4
+
+    async def test_local_calls_install_once_before_subprocess(self, tmp_path) -> None:
+        agent = _make_agent(workspace_root=str(tmp_path), pi_version="0.80.2")
+        process = MagicMock(returncode=0)
+        output = _msg_end("assistant", [{"type": "text", "text": "done"}]).encode()
+        process.communicate = AsyncMock(return_value=(output, b""))
+        module = "responses_api_agents.pi_agent.app"
+        with (
+            patch(f"{module}.ensure_pi") as install,
+            patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)) as spawn,
+        ):
+
+            async def launch(*args, **kwargs):
+                install.assert_called_once_with("0.80.2")
+                return process
+
+            spawn.side_effect = launch
+            # These consumers construct Request without session middleware.
+            # Their direct-call contract must still work with lazy installation.
+            responses = await asyncio.gather(
+                agent.responses(
+                    Request({"type": "http", "path_params": {}}),
+                    NeMoGymResponseCreateParamsNonStreaming(input="first"),
+                ),
+                agent.responses(
+                    Request({"type": "http", "path_params": {}}),
+                    NeMoGymResponseCreateParamsNonStreaming(input="second"),
+                ),
+            )
+            install.assert_called_once_with("0.80.2")
+            assert spawn.await_count == 2
+            assert all(response.output[0].content[0].text == "done" for response in responses)
+
+    async def test_failed_local_setup_can_retry(self, tmp_path) -> None:
+        agent = _make_agent(workspace_root=str(tmp_path))
+        module = "responses_api_agents.pi_agent.app"
+        process = MagicMock(returncode=0)
+        process.communicate = AsyncMock(return_value=(b"", b""))
+        with (
+            patch(f"{module}.ensure_pi", side_effect=[RuntimeError("npm unavailable"), None]) as install,
+            patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)) as spawn,
+        ):
+            with pytest.raises(RuntimeError, match="npm unavailable"):
+                await agent._run_pi("task", None, collect_observations=False)
+            spawn.assert_not_awaited()
+            await agent._run_pi("task", None, collect_observations=False)
+            assert install.call_count == 2
+            spawn.assert_awaited_once()
+
+    async def test_cancelled_caller_does_not_cancel_shared_install(self, tmp_path) -> None:
+        agent = _make_agent(workspace_root=str(tmp_path))
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def install(*args):
+            started.set()
+            await release.wait()
+
+        module = "responses_api_agents.pi_agent.app"
+        process = MagicMock(returncode=0)
+        process.communicate = AsyncMock(return_value=(b"", b""))
+        with (
+            patch(f"{module}.asyncio.to_thread", AsyncMock(side_effect=install)) as setup,
+            patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)) as spawn,
+        ):
+            first = asyncio.create_task(agent._run_pi("first", None, collect_observations=False))
+            await asyncio.wait_for(started.wait(), timeout=2)
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            assert not agent._local_setup_task.done()
+            spawn.assert_not_awaited()
+            release.set()
+            await asyncio.wait_for(agent._run_pi("second", None, collect_observations=False), timeout=2)
+            setup.assert_awaited_once()
+            spawn.assert_awaited_once()
+
+
+class TestExtractInstruction:
+    def test_user_only(self) -> None:
+        user, system = _extract_instruction([NeMoGymEasyInputMessage(role="user", content="hello")])
+        assert user == "hello"
+        assert system is None
+
+    def test_system_plus_user(self) -> None:
+        items = [
+            NeMoGymEasyInputMessage(role="system", content="be concise"),
+            NeMoGymEasyInputMessage(role="user", content="hi"),
+        ]
+        user, system = _extract_instruction(items)
+        assert user == "hi"
+        assert system == "be concise"
+
+    def test_empty(self) -> None:
+        user, system = _extract_instruction([])
+        assert user == ""
+        assert system is None
+
+
+class TestParsePiEvents:
+    def test_inline_reasoning_is_separate_from_solution(self) -> None:
+        solution = "```python\nprint(42)\n```"
+        line = _msg_end(
+            "assistant",
+            [{"type": "text", "text": f"<think>Check the result.</think>{solution}"}],
+            usage={"input": 100, "output": 20},
+        )
+        items, usage = parse_pi_events(line)
+        assert [item.type for item in items] == ["reasoning", "message"]
+        assert items[0].summary[0].text == "Check the result."
+        assert items[1].content[0].text == solution
+        assert usage == {"input_tokens": 100, "output_tokens": 20}
+
+    def test_empty(self) -> None:
+        items, usage = parse_pi_events("")
+        assert items == []
+        assert usage == {"input_tokens": 0, "output_tokens": 0}
+
+    def test_assistant_text_and_usage(self) -> None:
+        line = _msg_end(
+            "assistant",
+            [{"type": "text", "text": "the answer is 4"}],
+            usage={"input": 100, "output": 20, "cacheRead": 5},
+        )
+        items, usage = parse_pi_events(line)
+        assert len(items) == 1
+        assert isinstance(items[0], NeMoGymResponseOutputMessage)
+        assert items[0].content[0].text == "the answer is 4"
+        assert usage["input_tokens"] == 105
+        assert usage["output_tokens"] == 20
+
+    def test_user_messages_ignored(self) -> None:
+        line = _msg_end("user", [{"type": "text", "text": "hi"}])
+        assert parse_pi_events(line)[0] == []
+
+    def test_non_message_end_events_ignored(self) -> None:
+        line = json.dumps({"type": "message_update", "message": {"role": "assistant", "content": []}})
+        assert parse_pi_events(line)[0] == []
+
+    def test_tool_call_and_result(self) -> None:
+        lines = "\n".join(
+            [
+                _msg_end(
+                    "assistant", [{"type": "toolCall", "id": "c1", "name": "bash", "arguments": {"command": "echo 6"}}]
+                ),
+                _msg_end("toolResult", [{"type": "text", "text": "6\n"}], toolCallId="c1", toolName="bash"),
+                _msg_end("assistant", [{"type": "text", "text": "answer is 6"}]),
+            ]
+        )
+        items, _ = parse_pi_events(lines)
+        assert isinstance(items[0], NeMoGymResponseFunctionToolCall)
+        assert items[0].name == "bash"
+        assert json.loads(items[0].arguments)["command"] == "echo 6"
+        assert isinstance(items[1], NeMoGymFunctionCallOutput)
+        assert items[1].call_id == "c1"
+        assert "6" in items[1].output
+        assert isinstance(items[2], NeMoGymResponseOutputMessage)
+
+    def test_malformed_lines_skipped(self) -> None:
+        line = (
+            b'\n\xff\nnot-json\nnull\n[]\n{"type":"message_end","message":"log"}\n'
+            b'{"type":"message_end","message":{"role":"assistant","content":null}}\n'
+            + _msg_end("assistant", [{"type": "text", "text": "ok"}], usage="unavailable").encode()
+        )
+        items, usage = parse_pi_events(line)
+        assert len(items) == 1
+        assert items[0].content[0].text == "ok"
+        assert usage == {"input_tokens": 0, "output_tokens": 0}
+
+
+class TestEnv:
+    def test_env_passthrough(self) -> None:
+        agent = _make_agent(env={"NVIDIA_API_KEY": "k", "EMPTY": ""})
+        env = agent._env(Path("/tmp/h"))
+        assert env["NVIDIA_API_KEY"] == "k"
+        assert env["HOME"] == "/tmp/h"
+        assert "EMPTY" not in env
+
+
+@pytest.mark.parametrize("with_mcp", [False, True])
+@pytest.mark.parametrize("remaining_context", [False, True])
+@pytest.mark.parametrize("bash_timeout", [None, 120])
+async def test_run_stages_private_mcp_config_and_cleans_workspace(tmp_path, with_mcp, remaining_context, bash_timeout):
+    servers = {"search": {"url": "https://tools.test/mcp", "headers": {"X-Session": "private-token"}}}
+    agent = _make_agent(
+        workspace_root=str(tmp_path),
+        mcp_servers=servers if with_mcp else {},
+        output_token_policy="remaining_context" if remaining_context else "fixed",
+        auto_compaction=not remaining_context,
+        bash_timeout=bash_timeout,
+    )
+    homes = []
+
+    async def launch(*cmd, **kwargs):
+        home = Path(kwargs["env"]["HOME"])
+        homes.append(home)
+        assert "private-token" not in " ".join(cmd)
+        assert json.loads((home / ".pi" / "agent" / "settings.json").read_text()) == {
+            "compaction": {"enabled": not remaining_context},
+            "httpIdleTimeoutMs": agent.config.timeout * 1000,
+            "retry": {"provider": {"timeoutMs": agent.config.timeout * 1000}},
+        }
+        extensions = [Path(cmd[i + 1]).name for i, arg in enumerate(cmd) if arg == "--extension"]
+        assert ("remaining-context.mjs" in extensions) is remaining_context
+        assert ("bash-timeout.mjs" in extensions) is (bash_timeout is not None)
+        if bash_timeout is not None:
+            assert kwargs["env"]["NEMO_GYM_PI_BASH_TIMEOUT"] == str(bash_timeout)
+        if with_mcp:
+            path = Path(kwargs["env"]["NEMO_GYM_PI_MCP_CONFIG"])
+            assert path.stat().st_mode & 0o777 == 0o600
+            assert json.loads(path.read_text())["search"]["headers"] == servers["search"]["headers"]
+            assert Path(cmd[cmd.index("--extension") + 1]).is_file()
+        else:
+            assert "gym_mcp.mjs" not in extensions
+        stdout = asyncio.StreamReader()
+        stdout.feed_data((_msg_end("assistant", [{"type": "text", "text": "done"}]) + "\n").encode())
+        stdout.feed_eof()
+        return SimpleNamespace(
+            stdout=stdout,
+            stderr=SimpleNamespace(read=AsyncMock(return_value=b"")),
+            wait=AsyncMock(return_value=0),
+            returncode=0,
+        )
+
+    with patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", side_effect=launch):
+        items, _, _, _ = await agent._run_pi("task", None)
+    assert items[0].content[0].text == "done"
+    assert homes and all(not home.exists() for home in homes)
+
+
+class TestModelServer:
+    def test_builds_pi_provider_config(self) -> None:
+        models_config = {"providers": {"custom": {"baseUrl": "https://example.test"}}}
+        agent = _make_agent(
+            model="Qwen3.6-35B-A3B",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            models_config=models_config,
+        )
+        with patch.object(
+            PiAgent,
+            "resolve_model_base_url",
+            return_value="http://model/ng-rollout/1-2/v1",
+        ) as resolve:
+            config = agent._build_models_config("1-2")
+
+        provider = config["providers"]["nemo"]
+        assert agent._effective_model() == "nemo/Qwen3.6-35B-A3B"
+        assert provider["baseUrl"] == "http://model/ng-rollout/1-2/v1"
+        assert provider["headers"] == {"x-session-id": "1-2"}
+        assert provider["models"][0]["id"] == "Qwen3.6-35B-A3B"
+        assert provider["models"][0]["maxTokens"] == 131072
+        assert agent.config.models_config == models_config
+        resolve.assert_called_once_with("policy_model", "1-2")
+
+    def test_preserves_explicit_provider_without_model_server(self) -> None:
+        config = {"providers": {"custom": {"baseUrl": "https://example.test"}}}
+        agent = _make_agent(models_config=config)
+        assert agent._effective_model() == agent.config.model
+        assert agent._build_models_config() == config
+
+
+class TestRolloutObservability:
+    def test_incomplete_tool_and_compaction_events_preserve_unknowns(self) -> None:
+        events = [
+            (1.0, {"type": "compaction_end", "result": {"tokensBefore": -1}}),
+            (2.0, {"type": "tool_execution_end", "toolCallId": "orphan"}),
+            (3.0, {"type": "compaction_end"}),
+            (4.0, {"type": "compaction_start", "reason": "overflow"}),
+        ]
+        bundle = _build_pi_observations(events, "rollout-1", None, [])
+        [tool] = _records(bundle, ToolCallObservation)
+        assert tool.status == "unknown" and tool.started_at is None and tool.duration_ms is None
+        compactions = _records(bundle, ContextCompactionObservation)
+        assert [item.outcome for item in compactions] == ["completed", "unknown", "unknown"]
+        assert all(item.tokens_before is None and item.tokens_after is None for item in compactions)
+        assert all(item.summary is None and item.first_kept_item_id is None for item in compactions)
+        assert {
+            "tool_outcome_unavailable",
+            "compaction_start_unavailable",
+            "compaction_result_unavailable",
+            "compaction_tokens_before_unavailable",
+            "compaction_summary_unavailable",
+            "compaction_boundary_unavailable",
+            "compaction_tokens_after_unavailable",
+            "compaction_outcome_unavailable",
+            "compaction_after_model_call_unavailable",
+        } <= {gap.code for gap in bundle.gaps}
+
+    async def test_reads_and_timestamps_json_events(self) -> None:
+        stream = asyncio.StreamReader()
+        stream.feed_data(b'{"type":"tool_execution_start","toolCallId":"a"}\nnot-json\n')
+        stream.feed_eof()
+
+        with patch("responses_api_agents.pi_agent.app.time", side_effect=[10.0, 11.0]):
+            stdout, events = await _read_pi_stdout(stream)
+
+        assert stdout.endswith("not-json\n")
+        assert events == [(10.0, {"type": "tool_execution_start", "toolCallId": "a"})]
+
+    async def test_reads_json_events_larger_than_streamreader_line_limit(self) -> None:
+        event = {"type": "message_end", "message": {"role": "assistant", "content": "x" * 70_000}}
+        payload = (json.dumps(event) + "\n").encode()
+        stream = asyncio.StreamReader()
+        stream.feed_data(payload)
+        stream.feed_eof()
+
+        stdout, events = await _read_pi_stdout(stream)
+
+        assert stdout.encode() == payload
+        assert events[0][1] == event
+
+    def test_exact_model_calls_parallel_tools_and_compaction(self) -> None:
+        assistant = {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "responseId": "resp-upstream-1",
+                "content": [
+                    {"type": "toolCall", "id": "a", "name": "read", "arguments": {}},
+                    {"type": "toolCall", "id": "b", "name": "bash", "arguments": {}},
+                ],
+            },
+        }
+        final_assistant = {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "responseId": "resp-upstream-2",
+                "content": [{"type": "text", "text": "done"}],
+            },
+        }
+        events = [
+            (1.0, assistant),
+            (2.0, {"type": "tool_execution_start", "toolCallId": "a", "toolName": "read"}),
+            (3.0, {"type": "tool_execution_start", "toolCallId": "b", "toolName": "bash"}),
+            (4.0, {"type": "tool_execution_end", "toolCallId": "b", "toolName": "bash", "isError": True}),
+            (5.0, {"type": "tool_execution_end", "toolCallId": "a", "toolName": "read", "isError": False}),
+            (6.0, {"type": "compaction_start", "reason": "threshold"}),
+            (
+                7.0,
+                {
+                    "type": "compaction_end",
+                    "reason": "threshold",
+                    "result": {
+                        "summary": "condensed history",
+                        "firstKeptEntryId": "entry-7",
+                        "tokensBefore": 150_000,
+                        "estimatedTokensAfter": 32_000,
+                    },
+                    "aborted": False,
+                },
+            ),
+            (8.0, final_assistant),
+        ]
+        stdout = "\n".join(json.dumps(event) for _, event in events)
+        items, _ = parse_pi_events(stdout)
+        model_ref = ModelServerRef(type="responses_api_models", name="policy")
+
+        bundle = _build_pi_observations(events, "rollout-1", model_ref, items)
+
+        [invocation] = _records(bundle, AgentInvocation)
+        assert invocation.model_calls[0].response_id == "resp-upstream-1"
+        assert invocation.model_calls[0].model_ref == model_ref
+        timings = {tool.tool_call_id: tool for tool in _records(bundle, ToolCallObservation)}
+        assert (
+            timings["a"].started_at < timings["b"].started_at < timings["b"].completed_at < timings["a"].completed_at
+        )
+        assert timings["a"].duration_ms == 3000
+        assert timings["b"].duration_ms == 1000
+        assert all(tool.timing_source == "harness" for tool in timings.values())
+        assert timings["a"].status == "completed"
+        assert timings["b"].status == "failed"
+        assert timings["b"].error_type is None
+        [compaction] = _records(bundle, ContextCompactionObservation)
+        assert compaction.trigger == "threshold"
+        assert compaction.tokens_before == 150_000
+        assert compaction.tokens_after == 32_000
+        assert compaction.outcome == "completed"
+        assert compaction.summary == "condensed history"
+        assert compaction.first_kept_item_id == "entry-7"
+        assert compaction.before_model_call is not None
+        assert compaction.after_model_call is not None
+        assert compaction.before_model_call.response_id == "resp-upstream-1"
+        assert compaction.after_model_call.response_id == "resp-upstream-2"
+        assert {gap.code for gap in bundle.gaps} == {
+            "invocation_outcome_unavailable",
+            "subagent_hierarchy_unavailable",
+        }
+
+    def test_invalid_tool_interval_keeps_only_valid_timing(self) -> None:
+        events = [
+            (2.0, {"type": "tool_execution_start", "toolCallId": "call-1"}),
+            (1.0, {"type": "tool_execution_end", "toolCallId": "call-1", "isError": False}),
+        ]
+
+        bundle = _build_pi_observations(events, "rollout-1", None, [])
+
+        [tool] = _records(bundle, ToolCallObservation)
+        assert tool.started_at is None
+        assert tool.completed_at == 1.0
+        assert tool.duration_ms is None
+        assert any(gap.code == "tool_timing_unavailable" and gap.detail == "call-1" for gap in bundle.gaps)
+
+    def test_compaction_outcome_uses_pi_status(self) -> None:
+        events = [
+            (1.0, {"type": "compaction_start", "reason": "manual"}),
+            (2.0, {"type": "compaction_end", "reason": "manual", "result": None, "aborted": True}),
+            (3.0, {"type": "compaction_start", "reason": "overflow"}),
+            (
+                4.0,
+                {
+                    "type": "compaction_end",
+                    "reason": "overflow",
+                    "result": None,
+                    "aborted": False,
+                    "errorMessage": "quota",
+                },
+            ),
+        ]
+
+        compactions = _records(
+            _build_pi_observations(events, "rollout-1", None, []),
+            ContextCompactionObservation,
+        )
+
+        assert [item.outcome for item in compactions] == ["aborted", "failed"]
+
+    @pytest.mark.parametrize(
+        ("stop_reason", "expected"),
+        [
+            ("stop", "completed"),
+            ("error", "failed"),
+            ("aborted", "incomplete"),
+            ("length", "incomplete"),
+            (None, "unknown"),
+            ("toolUse", "unknown"),
+        ],
+    )
+    def test_agent_end_sets_invocation_status(self, stop_reason, expected) -> None:
+        message = {"role": "assistant"}
+        if stop_reason is not None:
+            message["stopReason"] = stop_reason
+        bundle = _build_pi_observations(
+            [(1.0, {"type": "agent_end", "messages": [message]})],
+            "rollout-1",
+            None,
+            [],
+        )
+
+        [invocation] = _records(bundle, AgentInvocation)
+        assert invocation.status == expected
+        assert any(gap.code == "invocation_outcome_unavailable" for gap in bundle.gaps) is (expected == "unknown")
+
+    def test_compaction_join_does_not_skip_unjoinable_model_call(self) -> None:
+        model_ref = ModelServerRef(type="responses_api_models", name="policy")
+        events = [
+            (1.0, {"type": "message_end", "message": {"role": "assistant", "responseId": "resp-1"}}),
+            (2.0, {"type": "compaction_start", "reason": "threshold"}),
+            (3.0, {"type": "compaction_end", "reason": "threshold", "result": None, "aborted": True}),
+            (4.0, {"type": "message_end", "message": {"role": "assistant"}}),
+            (5.0, {"type": "message_end", "message": {"role": "assistant", "responseId": "resp-3"}}),
+        ]
+
+        [compaction] = _records(
+            _build_pi_observations(events, "rollout-1", model_ref, []),
+            ContextCompactionObservation,
+        )
+
+        assert compaction.before_model_call is not None
+        assert compaction.before_model_call.response_id == "resp-1"
+        assert compaction.after_model_call is None
+
+    def test_reports_only_missing_evidence(self) -> None:
+        items, _ = parse_pi_events(_msg_end("assistant", [{"type": "toolCall", "id": "c1", "name": "bash"}]))
+        bundle = _build_pi_observations([], "rollout-1", None, items)
+
+        assert {gap.code for gap in bundle.gaps} == {
+            "invocation_outcome_unavailable",
+            "model_call_ownership_unavailable",
+            "subagent_hierarchy_unavailable",
+            "tool_timing_unavailable",
+        }
+        assert _records(bundle, ContextCompactionObservation) == []
+
+    def test_episode_preserves_response_and_observations(self) -> None:
+        event = {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "responseId": "resp-upstream-1",
+                "content": [{"type": "text", "text": "done"}],
+            },
+        }
+        items, usage = parse_pi_events(json.dumps(event))
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy"),
+            system_prompt="configured system",
+        )
+        agent._run_pi = AsyncMock(return_value=(items, usage, "model", [(1.0, event)]))
+
+        episode = asyncio.run(
+            agent._create_episode(
+                NeMoGymResponseCreateParamsNonStreaming(
+                    input=[
+                        NeMoGymEasyInputMessage(role="system", content="request system"),
+                        NeMoGymEasyInputMessage(role="user", content="old question"),
+                        NeMoGymEasyInputMessage(role="assistant", content="old answer"),
+                        NeMoGymEasyInputMessage(role="user", content="solve"),
+                    ]
+                ),
+                rollout_id="1-2",
+            )
+        )
+
+        assert agent._run_pi.await_args.kwargs["rollout_id"] == "1-2"
+        assert agent._run_pi.await_args.args == ("solve", "configured system\n\nrequest system")
+        assert episode.response.output == items
+        [invocation] = _records(episode.observations, AgentInvocation)
+        assert invocation.conversation == [
+            NeMoGymEasyInputMessage(role="system", content="configured system\n\nrequest system"),
+            NeMoGymEasyInputMessage(role="user", content="solve"),
+            *items,
+        ]
+        assert invocation.model_calls[0].response_id == "resp-upstream-1"
+        assert "no_sandbox_runtime" in {gap.code for gap in episode.observations.gaps}
+
+    def test_padding_is_not_reported_as_agent_evidence(self) -> None:
+        agent = _make_agent()
+        agent._run_pi = AsyncMock(return_value=([], {"input_tokens": 0, "output_tokens": 0}, "model", []))
+
+        episode = asyncio.run(agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="solve")))
+
+        assert episode.response.output
+        [invocation] = _records(episode.observations, AgentInvocation)
+        assert invocation.conversation == [NeMoGymEasyInputMessage(role="user", content="solve")]
+        assert "agent_transcript_unavailable" in {gap.code for gap in episode.observations.gaps}
+
+    def test_partial_events_survive_empty_scoring_output(self) -> None:
+        event = {"type": "tool_execution_start", "toolCallId": "call-1", "toolName": "bash"}
+        agent = _make_agent()
+        agent._run_pi = AsyncMock(return_value=([], {"input_tokens": 0, "output_tokens": 0}, "model", [(1.0, event)]))
+
+        episode = asyncio.run(agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="solve")))
+
+        [tool] = _records(episode.observations, ToolCallObservation)
+        assert tool.tool_call_id == "call-1"
+        assert tool.status == "incomplete"
+
+    def test_run_uses_prefixed_response_boundary(self) -> None:
+        agent = _make_agent()
+        agent.server_client.global_config_dict = {"observability_enabled": True}
+        agent._run_pi = AsyncMock(return_value=([], {"input_tokens": 0, "output_tokens": 0}, "model", []))
+
+        def response(payload):
+            result = MagicMock(ok=True, cookies={})
+            result.read = AsyncMock(return_value=json.dumps(payload).encode())
+            return result
+
+        async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+            if url_path.endswith("/v1/responses"):
+                agent_response = await agent.responses(MagicMock(path_params={"rollout_id": "1-2"}), json)
+                return response(agent_response.model_dump(mode="json"))
+            if url_path == "/verify":
+                return response(json | {"reward": 1.0})
+            return response({})
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        body = PiAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": "solve"},
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 2,
+            }
+        )
+
+        result = asyncio.run(agent.run(MagicMock(cookies={}), body))
+
+        assert result.ng_agent_observations is not None
+        assert agent.server_client.post.await_args_list[1].kwargs["url_path"] == "/ng-rollout/1-2/v1/responses"
+        assert agent._run_pi.await_args.kwargs["rollout_id"] == "1-2"
+        verify_json = agent.server_client.post.await_args_list[2].kwargs["json"]
+        assert "_ng_agent_observations" not in verify_json["response"]
+
+    def test_prefixed_responses_preserves_observations_through_fastapi(self) -> None:
+        from fastapi.testclient import TestClient
+
+        agent = _make_agent()
+        agent._run_pi = AsyncMock(return_value=([], {"input_tokens": 0, "output_tokens": 0}, "model", []))
+
+        response = TestClient(agent.setup_webserver()).post(
+            "/ng-rollout/1-2/v1/responses",
+            json={"input": "solve"},
+        )
+
+        assert response.status_code == 200
+        observations = response.json()["_ng_agent_observations"]
+        assert observations["source"] == "pi"
+        assert observations["records"][0]["invocation_id"] == "1-2"
+
+
+class TestConfigYaml:
+    def test_module_parses(self) -> None:
+        app_path = Path(__file__).resolve().parent.parent / "app.py"
+        compile(app_path.read_text(), str(app_path), "exec")
+
+    def test_default_config_uses_gym_model_server(self) -> None:
+        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "pi_agent.yaml"
+        data = yaml.safe_load(cfg_path.read_text())
+        assert "pi_agent" in data
+        inner = data["pi_agent"]["responses_api_agents"]["pi_agent"]
+        assert inner["entrypoint"] == "app.py"
+        config = PiAgentConfig(name="pi_agent", host="localhost", port=8000, **{**inner, "model": "test-model"})
+        assert config.resources_server is None
+        assert config.model_server == ModelServerRef(type="responses_api_models", name="policy_model")
+        assert config.num_workers == 1
+        assert config.pi_version == "0.80.2"
+
+
+@pytest.mark.parametrize(
+    "process_event,expected",
+    [
+        ({"type": "_ng_process_exit", "return_code": 1}, "failed"),
+        ({"type": "_ng_process_exit", "timed_out": True}, "incomplete"),
+    ],
+)
+def test_process_failure_overrides_partial_answer_status(process_event, expected):
+    events = [
+        (1.0, {"type": "agent_end", "messages": [{"role": "assistant", "stopReason": "stop"}]}),
+        (2.0, process_event),
+    ]
+    bundle = _build_pi_observations(events, "run-1", None, [])
+    invocations = _records(bundle, AgentInvocation)
+    assert invocations[0].status == expected
+
+
+@pytest.mark.parametrize("collect_observations", [False, True])
+async def test_mcp_setup_exit_is_request_failure_and_cleans_workspace(tmp_path, collect_observations):
+    agent = _make_agent(workspace_root=str(tmp_path), mcp_servers={"search": {"url": "http://tools.test/mcp"}})
+    stdout = asyncio.StreamReader()
+    stdout.feed_eof()
+    process = SimpleNamespace(
+        stdout=stdout,
+        stderr=SimpleNamespace(read=AsyncMock(return_value=b"setup failed")),
+        wait=AsyncMock(return_value=78),
+        communicate=AsyncMock(return_value=(b"", b"setup failed")),
+        returncode=78,
+    )
+    with patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", AsyncMock(return_value=process)):
+        with pytest.raises(RuntimeError, match="Required Gym MCP"):
+            await agent._run_pi("task", None, collect_observations=collect_observations)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("correlated", [False, True])
+def test_failed_model_attempt_uses_transport_ownership_when_correlated(correlated: bool) -> None:
+    bundle = _build_pi_observations(
+        [(1.0, {"type": "message_end", "message": {"role": "assistant", "stopReason": "error"}})],
+        "rollout",
+        ModelServerRef(type="responses_api_models", name="policy"),
+        [],
+        capture_correlated=correlated,
+    )
+    assert any(g.code == "model_call_ownership_unavailable" for g in bundle.gaps) is not correlated
+    assert _records(bundle, AgentInvocation)[0].invocation_id == "rollout"
+
+
+def test_uncorrelated_pi_provider_has_no_invocation_header() -> None:
+    agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy"))
+    with patch.object(PiAgent, "resolve_model_base_url", return_value="http://model/v1"):
+        assert "headers" not in agent._build_models_config()["providers"]["nemo"]

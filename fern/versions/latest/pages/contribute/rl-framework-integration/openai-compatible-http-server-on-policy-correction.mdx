@@ -13,6 +13,7 @@ This page covers:
 1. **Preliminaries**: Understanding HTTP request lifecycles and rollout structure
 2. **Problems**: Three causes of train-generation mismatch
 3. **Solutions**: Token ID fixes implemented in the generation server
+4. **Data interface**: How token IDs cross the boundary between NeMo Gym and the training framework
 
 ## Preliminaries
 
@@ -165,7 +166,37 @@ The fix finds the position of the correct EOS token ID in `template_token_ids` a
 
 For Problem 3, disable reasoning truncation across turns using the chat template. Handling non-monotonic history during training remains an open research question.
 
+## Data Interface
+
+The on-policy token ID fix depends on `model_prefix_token_ids` — the exact token IDs the model was prompted with and sampled on previous calls. This section describes how those token IDs cross the boundary between NeMo Gym and the training framework, and the single rule that keeps them consistent across turns.
+
+### What the model server returns
+
+When NeMo Gym runs against a training-enabled model server (`return_token_id_information: true`, provided by `vllm_model_for_training.yaml`), every model response carries three additional fields on its output items:
+
+| Field | Meaning |
+| --- | --- |
+| `prompt_token_ids` | The exact token IDs the model was prompted with for this call. |
+| `generation_token_ids` | The token IDs the model sampled on this call. |
+| `generation_log_probs` | The log probability the sampling policy assigned to each generated token. |
+
+These fields attach to the final output item of each model call, and `generation_token_ids` covers that call's entire generation. Environment-produced items, such as tool-call outputs, carry no token IDs because the model did not generate them. For the field definitions and the configuration flag that enables them, see [VLLMModel](/model-server/vllm).
+
+### Message-level token IDs are the single source of truth
+
+A multi-step or multi-turn rollout sends the accumulated history back to the model on every call. To stay on-policy (Problems 1 and 2), the framework must reconstruct each new prompt from the token IDs the model actually emitted on prior calls — not from a re-tokenization of their de-tokenized text.
+
+NeMo Gym carries those token IDs forward **on the messages themselves**: the three fields returned on one call's output item are sent back, unchanged, on that same message in the next call's request. The on-policy fix then derives `model_prefix_token_ids` directly from these message-level fields. This is the entire interface contract — token IDs are produced once, by the model server, and propagated turn-to-turn on the message they belong to.
+
+An agent harness or custom client integrating with the framework is responsible for passing these three fields through unchanged, both on the messages it sends in subsequent requests and on the responses it returns.
+
+<Warning>
+Do not construct prompt or prefix token IDs yourself and inject them out of band (for example, as a separate top-level request field). The framework reconstructs the prefix from the message-level token IDs described above; a separately supplied prefix is a second, competing source of truth that can silently diverge from the message history or be dropped as the request is validated and forwarded. Forward the model server's per-message token IDs unchanged and let the framework build the prefix from them.
+</Warning>
+
+For guidance on propagating these fields when building an environment or a custom client, see [Integrate External Environments](/environment-tutorials/integrate-external-environments) and [Create a New Environment](/contribute/environments/new-environment).
+
 ## Related Topics
 
-- [Generation Backend And Openai Compatible Http Server](/latest/contribute/rl-framework-integration/generation-backend-and-openai-compatible-http-server) - Generation backend requirements
-- [Gym Integration Footprint And Form Factor](/latest/contribute/rl-framework-integration/gym-integration-footprint-and-form-factor) - Full integration component breakdown
+- [Generation Backend And Openai Compatible Http Server](/contribute/rl-framework-integration/generation-backend-and-openai-compatible-http-server) - Generation backend requirements
+- [Gym Integration Footprint And Form Factor](/contribute/rl-framework-integration/gym-integration-footprint-and-form-factor) - Full integration component breakdown

@@ -55,20 +55,18 @@ Notes:
 
 **Standard format (with `grading_mode`):**
 ```bash
-config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/swerl_llm_judge/configs/swerl_llm_judge.yaml"
+gym env start \
+    --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
+    --model-type openai_model \
+    --resources-server swerl_llm_judge
 
-
-ng_run "+config_paths=[$config_paths]" 
-
-ng_collect_rollouts \
-    +agent_name=swerl_llm_judge_simple_agent \
-    +input_jsonl_fpath=resources_servers/swerl_llm_judge/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/swerl_llm_judge/data/example_rollouts.jsonl \
-    +num_repeats=1 \
-    +num_samples_in_parallel=5 \
-    +responses_create_params.max_output_tokens=4096
+gym eval run --no-serve \
+    --agent swerl_llm_judge_simple_agent \
+    --input resources_servers/swerl_llm_judge/data/example.jsonl \
+    --output resources_servers/swerl_llm_judge/data/example_rollouts.jsonl \
+    --num-repeats 1 \
+    --concurrency 5 \
+    --max-output-tokens 4096
 
 ```
 
@@ -177,6 +175,9 @@ Rollout example
 }
 
 ```
+
+> Empty `*_tokens_per_turn` arrays are placeholders, not zero-token turns. See the
+> [trajectory capability matrix](https://docs.nvidia.com/nemo/gym/main/reference/trajectory-capabilities).
 
 ### Implementation notes
 - The server extracts the last assistant message's text from the Responses output.

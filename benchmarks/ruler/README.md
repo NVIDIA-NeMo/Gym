@@ -1,26 +1,44 @@
 # Prerequisites
-Please ensure that you have git-lfs installed!
+Please ensure that you have git-lfs installed (used to fetch the `cwe` task corpus)!
 
 Linux: `apt update && apt install -y git-lfs`
 
 # Prepare data
+Prepares RULER at 1M context (13 tasks x 100 samples) with an answer-prefix assistant turn:
 ```bash
-config_paths="benchmarks/ruler/config_nemotron_3_256k.yaml"
-ng_prepare_benchmark "+config_paths=[$config_paths]"
+gym eval prepare --benchmark ruler
 ```
+
+# Serve the model
+RULER at 1M context needs a vLLM endpoint served with a large `--max-model-len` (>= the prepared
+context length plus room to generate). Thinking is disabled for the eval, so serve **without** a
+`--reasoning-parser`:
+```bash
+vllm serve <model> \
+    --served-model-name <served-model-name> \
+    --tensor-parallel-size 8 \
+    --port <port> \
+    --max-model-len 1300000 \
+    --gpu-memory-utilization 0.8 \
+    --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+    --compilation-config '{"pass_config": {"fuse_allreduce_rms": false}}' \
+    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
+```
+`--tensor-parallel-size` (and multi-node) depends on the model size and hardware. The benchmark
+config enables `continue_final_assistant_message` and `chat_template_kwargs.enable_thinking=false`
+on the model server, so the model continues the answer-prefix turn and emits the answer directly.
 
 # Run
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/ruler/config_nemotron_3_256k.yaml"
-ng_e2e_collect_rollouts \
-    "+config_paths=[${config_paths}]" \
-    ++output_jsonl_fpath=results/benchmarks/ruler.jsonl \
+gym eval run \
+    --model-type vllm_model \
+    --benchmark ruler \
+    --output results/benchmarks/ruler.jsonl \
+    --split benchmark \
+    --model-url <endpoint-served-above>/v1 \
+    --model-api-key <> \
+    --model <served-model-name> \
+    --resume \
     ++overwrite_metrics_conflicts=true \
-    ++split=benchmark \
-    ++resume_from_cache=true \
-    ++reuse_existing_data_preparation=true \
-    ++policy_base_url=<> \
-    ++policy_api_key=<> \
-    ++policy_model_name=<>
+    ++reuse_existing_data_preparation=true
 ```

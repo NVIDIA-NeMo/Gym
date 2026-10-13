@@ -30,20 +30,18 @@ policy_model_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 ```
 cd Gym/
 
-# ARC-AGI-1
+# Clone ARC-AGI-1 and ARC-AGI-2 into the Gym root
 git clone https://github.com/fchollet/ARC-AGI
+git clone https://github.com/arcprize/ARC-AGI-2
+
 cd resources_servers/arc_agi
 python3 create_dataset.py
-
-# ARC-AGI-2
-git clone https://github.com/arcprize/ARC-AGI-2
-cd resources_servers/arc_agi
 python3 create_dataset.py --version 2
+cd ../..
 ```
 
 ### Install Gym:
 ```
-cd Gym/ 
 uv venv 
 source .venv/bin/activate
 uv sync 
@@ -51,7 +49,9 @@ uv sync
 
 ### Start ARC-AGI environment (we can reuse the same one for ARC-AGI-1 and 2):
 ```bash
-ng_run "+config_paths=[resources_servers/arc_agi/configs/arc_agi.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --resources-server arc_agi \
+    --model-type vllm_model
 ```
 
 
@@ -59,12 +59,18 @@ ng_run "+config_paths=[resources_servers/arc_agi/configs/arc_agi.yaml,responses_
 
 ARC-AGI-1 example rollouts:
 ```bash
-ng_collect_rollouts +agent_name=arc_agi_simple_agent +input_jsonl_fpath=resources_servers/arc_agi/data/example_1.jsonl +output_jsonl_fpath=resources_servers/arc_agi/data/example_1_rollouts.jsonl
+gym eval run --no-serve \
+    --agent arc_agi_simple_agent \
+    --input resources_servers/arc_agi/data/example_1.jsonl \
+    --output resources_servers/arc_agi/data/example_1_rollouts.jsonl
 ```
 
 ARC-AGI-2 example rollouts:
 ```bash
-ng_collect_rollouts +agent_name=arc_agi_simple_agent +input_jsonl_fpath=resources_servers/arc_agi/data/example_2.jsonl +output_jsonl_fpath=resources_servers/arc_agi/data/example_2_rollouts.jsonl
+gym eval run --no-serve \
+    --agent arc_agi_simple_agent \
+    --input resources_servers/arc_agi/data/example_2.jsonl \
+    --output resources_servers/arc_agi/data/example_2_rollouts.jsonl
 ```
 
-For training, see the [docs](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/nemo-rl-grpo/index.html).
+For training, see the [docs](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials/nemo-rl-grpo).

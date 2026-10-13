@@ -1,0 +1,5 @@
+{"instance_id": "terminal_bench::gpt2-codegolf", "responses_create_params": {"input": []}, "agent_ref": {"name": "harbor_agent"}}
+{"instance_id": "terminal_bench::llm-inference-batching-scheduler", "responses_create_params": {"input": []}, "agent_ref": {"name": "harbor_agent"}}
+{"instance_id": "terminal_bench::break-filter-js-from-html", "responses_create_params": {"input": []}, "agent_ref": {"name": "harbor_agent"}}
+{"instance_id": "terminal_bench::reshard-c4-data", "responses_create_params": {"input": []}, "agent_ref": {"name": "harbor_agent"}}
+{"instance_id": "terminal_bench::write-compressor", "responses_create_params": {"input": []}, "agent_ref": {"name": "harbor_agent"}}

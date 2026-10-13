@@ -1,0 +1,301 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import importlib.metadata
+import os
+import re
+import shlex
+import sys
+from os import environ
+from pathlib import Path
+from subprocess import Popen
+from sys import stderr, stdout
+from typing import IO, Any, Mapping
+
+from omegaconf import DictConfig
+
+from nemo_gym import PARENT_DIR
+from nemo_gym.global_config import (
+    HEAD_SERVER_CONSTRAINTS_KEY_NAME,
+    HEAD_SERVER_DEPS_KEY_NAME,
+    NEMO_GYM_LOG_DIR_KEY_NAME,
+    PIP_INSTALL_VERBOSE_KEY_NAME,
+    PYTHON_VERSION_KEY_NAME,
+    SKIP_VENV_IF_PRESENT_KEY_NAME,
+    UV_CACHE_DIR_KEY_NAME,
+    UV_LOCK_TIMEOUT_KEY_NAME,
+    UV_PIP_SET_PYTHON_KEY_NAME,
+    UV_VENV_DIR_KEY_NAME,
+    get_global_config_dict,
+)
+
+
+def _get_nemo_gym_install_flags() -> str:
+    """
+    Build uv pip install flags for nemo-gym in sub-venvs.
+
+    Supports:
+    - Pre-release versions via NEMO_GYM_ALLOW_PRERELEASE=true
+    - Custom PyPI indexes via UV_INDEX_URL, UV_EXTRA_INDEX_URL, UV_INDEX_STRATEGY
+    - Auto-detection of parent venv version for consistency
+
+    Returns:
+        String of flags to add to 'uv pip install nemo-gym'
+        Example: "--pre --index-url https://test.pypi.org/simple/ ==0.2.1rc0"
+    """
+    flags = ""
+
+    # 1. Pre-release flag
+    allow_prerelease = os.getenv("NEMO_GYM_ALLOW_PRERELEASE", "").lower() == "true"
+    if allow_prerelease:
+        flags += "--pre "
+        # When pre-releases are enabled, also use unsafe-best-match strategy if not already set
+        if not os.getenv("UV_INDEX_STRATEGY"):
+            flags += "--index-strategy unsafe-best-match "
+        # Pin fastapi<1.0 to avoid broken test.pypi package
+        flags += "'fastapi<1.0' "
+
+    # 2. Index URLs (respects uv's standard env vars)
+    index_url = os.getenv("UV_INDEX_URL")
+    if index_url:
+        flags += f"--index-url {index_url} "
+
+    extra_index_url = os.getenv("UV_EXTRA_INDEX_URL")
+    if extra_index_url:
+        flags += f"--extra-index-url {extra_index_url} "
+
+    # Explicit index strategy (overrides auto-set above)
+    index_strategy = os.getenv("UV_INDEX_STRATEGY")
+    if index_strategy:
+        flags += f"--index-strategy {index_strategy} "
+
+    return flags
+
+
+# A requirements line that installs Gym from the checkout root, e.g. `-e nemo-gym[dev,sandbox] @ ../../`.
+_LOCAL_NEMO_GYM_REQUIREMENT_RE = re.compile(
+    r"^\s*(?:-e\s+)?nemo[-_]gym\s*(?:\[(?P<extras>[^\]]*)\])?\s*@\s*\.\./\.\./?\s*(?:#.*)?$"
+)
+
+
+def _local_nemo_gym_extras(requirements_fpath: Path) -> str:
+    """The extras a server requests on its local Gym requirement, formatted as `[a,b]`, or "" for none.
+
+    Installs from PyPI replace the server's `nemo-gym[...] @ ../../` line with a `nemo-gym` requirement, so
+    its extras must be carried over or their dependencies are never installed.
+    """
+    extras: list[str] = []
+    for line in requirements_fpath.read_text().splitlines():
+        match = _LOCAL_NEMO_GYM_REQUIREMENT_RE.match(line)
+        if match is None or not match.group("extras"):
+            continue
+        for extra in match.group("extras").split(","):
+            extra = extra.strip()
+            if extra and extra not in extras:
+                extras.append(extra)
+    return f"[{','.join(extras)}]" if extras else ""
+
+
+def _get_nemo_gym_version_spec(is_editable_install: bool) -> str:
+    """
+    Detect nemo-gym version from parent venv and return version specifier.
+
+    Args:
+        is_editable_install: Whether nemo-gym is installed in editable mode in parent venv
+
+    Returns:
+        Version specifier string (e.g., "==0.2.1rc0") or empty string
+    """
+    # Don't pin version for editable installs (development mode)
+    if is_editable_install:
+        return ""
+
+    try:
+        parent_version = importlib.metadata.version("nemo-gym")
+        # Pin to exact version for consistency between parent and sub-venvs
+        return f"=={parent_version}"
+    except importlib.metadata.PackageNotFoundError:
+        # nemo-gym not installed in parent venv (shouldn't happen, but be safe)
+        return ""
+
+
+def get_venv_path(dir_path: Path, global_config_dict: DictConfig) -> Path:
+    """Resolve the venv a server runs from: ``uv_venv_dir/<type>/<name>/.venv``, else ``<server dir>/.venv``.
+
+    Callers need this to launch a server with the venv's own interpreter rather than trusting whatever
+    ``bin/activate`` puts on PATH. A venv copied or moved after creation keeps the *original* prefix
+    hard-coded in ``bin/activate``, so sourcing it silently hands the server a different interpreter than
+    the one ``uv_venv_dir`` asked for.
+    """
+    root_venv_path = Path(global_config_dict[UV_VENV_DIR_KEY_NAME])
+    if root_venv_path.resolve() != PARENT_DIR.resolve():
+        return Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
+    return (dir_path / ".venv").absolute()
+
+
+def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
+    head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
+    # Pins applied only to packages a server installs anyway, e.g. the parent's exact Ray version.
+    head_server_constraints = global_config_dict.get(HEAD_SERVER_CONSTRAINTS_KEY_NAME) or []
+    constraint_flag = (
+        f"-c <(printf '%s\\n' {' '.join(shlex.quote(c) for c in head_server_constraints)}) "
+        if head_server_constraints
+        else ""
+    )
+
+    venv_path = get_venv_path(dir_path, global_config_dict)
+
+    python_version = shlex.quote(global_config_dict[PYTHON_VERSION_KEY_NAME])
+    uv_venv_cmd = f"uv venv --seed --allow-existing --python {python_version} {shlex.quote(str(venv_path))}"
+
+    venv_python_fpath = venv_path / "bin/python"
+    venv_activate_fpath = venv_path / "bin/activate"
+    skip_venv_if_present = global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME]
+    should_skip_venv_setup = bool(skip_venv_if_present) and venv_python_fpath.exists() and venv_activate_fpath.exists()
+    activate_cmd = f"source {shlex.quote(str(venv_activate_fpath))}"
+    if should_skip_venv_setup:
+        # Reuse existing environments, including prebuilt venvs without Gym's
+        # completion marker or writable setup-lock directories.
+        return f"cd {shlex.quote(str(dir_path))} && {activate_cmd}"
+
+    # explicitly set python path if specified. In Google colab, gym env start fails due to uv pip install falls back to system python (/usr) without this and errors.
+    # not needed for most clusters. should be safe in all scenarios, but only minimally tested outside of colab.
+    # see discussion and examples here: https://github.com/NVIDIA-NeMo/Gym/pull/526#issuecomment-3676230383
+    uv_pip_set_python = global_config_dict.get(UV_PIP_SET_PYTHON_KEY_NAME, False)
+    uv_pip_python_flag = f"--python {shlex.quote(str(venv_python_fpath))} " if uv_pip_set_python else ""
+
+    verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
+
+    # Servers sit two levels below the repo root, or three when nested (e.g. conversational_tool_use/simulation).
+    is_editable_install = any((dir_path.resolve() / up / "pyproject.toml").exists() for up in ("../..", "../../.."))
+
+    try:
+        has_pyproject_toml = (dir_path / "pyproject.toml").exists()
+        has_requirements_txt = (dir_path / "requirements.txt").exists()
+        if has_pyproject_toml and has_requirements_txt:
+            raise RuntimeError(
+                f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
+            )
+        elif has_pyproject_toml:
+            if is_editable_install:
+                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}{constraint_flag}'-e .' {" ".join(head_server_deps)}"""
+            else:
+                # install nemo-gym from pypi instead of relative path in pyproject.toml
+                # with support for pre-releases, custom indexes, and version pinning
+                install_flags = _get_nemo_gym_install_flags()
+                version_spec = _get_nemo_gym_version_spec(is_editable_install)
+                install_cmd = (
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}{constraint_flag}nemo-gym{version_spec} && """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{constraint_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
+                )
+        elif has_requirements_txt:
+            has_overrides_txt = (dir_path / "overrides.txt").exists()
+            override_flag = "--override overrides.txt " if has_overrides_txt else ""
+            if is_editable_install:
+                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}{constraint_flag}{override_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+            else:
+                # install nemo-gym from pypi instead of relative path in requirements.txt
+                # with support for pre-releases, custom indexes, and version pinning
+                install_flags = _get_nemo_gym_install_flags()
+                version_spec = _get_nemo_gym_version_spec(is_editable_install)
+                extras = _local_nemo_gym_extras(dir_path / "requirements.txt")
+                install_cmd = (
+                    f"""(echo 'nemo-gym{extras}{version_spec}' && grep -v -F '../..' requirements.txt) | """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}{constraint_flag}{override_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
+                )
+        else:
+            raise RuntimeError(
+                f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}"
+            )
+
+        prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
+        install_command = f"{uv_venv_cmd}{prefix_cmd} && {activate_cmd} && {install_cmd}{prefix_cmd}"
+
+    except RuntimeError as error:
+        if not skip_venv_if_present:
+            raise
+        # A ready environment needs no manifest. Fail only if the locked
+        # readiness check determines that installation is required.
+        install_command = f"printf '%s\\n' {shlex.quote(str(error))} >&2; exit 1"
+
+    # When setup is needed, serialize installers and recheck readiness under
+    # the lock in case another server completes installation before this one.
+    setup_command = [
+        sys.executable,
+        str(Path(__file__).with_name("_venv_setup.py")),
+        "--venv",
+        str(venv_path),
+        "--command",
+        install_command,
+    ]
+    if skip_venv_if_present:
+        setup_command.append("--skip-if-ready")
+
+    return f"cd {shlex.quote(str(dir_path))} && {shlex.join(setup_command)} && {activate_cmd}"
+
+
+def run_command(
+    command: str,
+    working_dir_path: Path,
+    server_name: str = "",
+    project_root: Path | None = None,
+    *,
+    global_config_dict: DictConfig | None = None,
+    stdout_target: IO[Any] | None = None,
+    stderr_target: IO[Any] | None = None,
+    extra_env: Mapping[str, str] | None = None,
+) -> Popen:
+    if global_config_dict is None:
+        global_config_dict = get_global_config_dict()
+
+    work_dir = f"{working_dir_path.absolute()}"
+    custom_env = environ.copy()
+    if extra_env is not None:
+        custom_env.update(extra_env)
+    # The server dir on PYTHONPATH lets `import app` work. When a caller passes `project_root` (the
+    # dir containing resources_servers/, responses_api_agents/, ...), it's added so generated
+    # `resources_servers.<name>.app`-style imports resolve from outside a repo checkout — opt-in, so
+    # this generic helper doesn't bake a layout assumption in for its other callers.
+    py_path_entries = [work_dir]
+    if project_root is not None:
+        py_path_entries.append(f"{project_root.absolute()}")
+    existing_py_path = custom_env.get("PYTHONPATH")
+    if existing_py_path:
+        py_path_entries.append(existing_py_path)
+    custom_env["PYTHONPATH"] = ":".join(py_path_entries)
+
+    custom_env["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+    # Servers start concurrently and contend for the lock on that shared cache, so the wait has to
+    # cover a cold install of the slowest one rather than uv's 300s default.
+    uv_lock_timeout = global_config_dict.get(UV_LOCK_TIMEOUT_KEY_NAME)
+    if uv_lock_timeout is not None:
+        custom_env["UV_LOCK_TIMEOUT"] = str(uv_lock_timeout)
+
+    log_dir = global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME)
+    if log_dir:
+        safe_name = (server_name or working_dir_path.name).replace("/", "_")
+        log_path = Path(log_dir) / f"{safe_name}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        command = f"set -o pipefail; ({command}) 2>&1 | tee -a {log_path}"
+
+    redirect_stdout = stdout if stdout_target is None else stdout_target
+    redirect_stderr = stderr if stderr_target is None else stderr_target
+    return Popen(
+        command,
+        executable="/bin/bash",
+        shell=True,
+        env=custom_env,
+        stdout=redirect_stdout,
+        stderr=redirect_stderr,
+    )

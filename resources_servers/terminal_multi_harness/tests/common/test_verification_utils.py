@@ -281,6 +281,63 @@ def build_declared_tools() -> list[dict]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "code_exec",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "cmd": {"type": "string"},
+                    },
+                    "required": ["cmd"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fetch_web_page",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                    },
+                    "required": ["url"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "finish",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {"type": "string"},
+                        "paths": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["reason", "paths"],
+                    "additionalProperties": False,
+                },
+            },
+        },
     ]
 
 
@@ -1344,3 +1401,199 @@ class TestActionComparator:
         )
         assert comparison_result.matches is False
         assert comparison_result.category == StepRewardCategory.EXEC_COMMAND_CMD_SIMILARITY_BELOW_THRESHOLD
+
+    def test_compare_stirrup_web_search_matches_after_normalization(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="web_search",
+                arguments=json.dumps({"query": "Python async tutorial"}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="web_search",
+                arguments=json.dumps({"query": "   python async tutorial   "}),
+            ),
+            declared_tools=declared_tools,
+            harness="stirrup",
+        )
+        assert comparison_result.matches is True
+        assert comparison_result.category == StepRewardCategory.EXPECTED_TOOL_CALL
+        assert comparison_result.similarity_score == approx(1.0)
+
+    def test_compare_stirrup_web_search_rejects_below_threshold(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="web_search",
+                arguments=json.dumps({"query": "Python async tutorial"}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="web_search",
+                arguments=json.dumps({"query": "best pizza recipe"}),
+            ),
+            declared_tools=declared_tools,
+            harness="stirrup",
+        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.WEB_SEARCH_QUERY_SIMILARITY_BELOW_THRESHOLD
+
+    def test_compare_stirrup_fetch_web_page_matches_after_normalization(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="fetch_web_page",
+                arguments=json.dumps({"url": "https://Example.COM/Docs"}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="fetch_web_page",
+                arguments=json.dumps({"url": "  https://example.com/docs  "}),
+            ),
+            declared_tools=declared_tools,
+            harness="stirrup",
+        )
+        assert comparison_result.matches is True
+        assert comparison_result.category == StepRewardCategory.EXPECTED_TOOL_CALL
+
+    def test_compare_stirrup_fetch_web_page_rejects_url_mismatch(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="fetch_web_page",
+                arguments=json.dumps({"url": "https://example.com/a"}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="fetch_web_page",
+                arguments=json.dumps({"url": "https://example.com/b"}),
+            ),
+            declared_tools=declared_tools,
+            harness="stirrup",
+        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.FETCH_WEB_PAGE_URLS_DO_NOT_MATCH
+
+    def test_compare_stirrup_finish_matches_similar_reason_and_paths_regardless_of_order(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="finish",
+                arguments=json.dumps(
+                    {
+                        "reason": "Task completed successfully",
+                        "paths": ["/repo/a.txt", "/repo/b.txt"],
+                    }
+                ),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="finish",
+                arguments=json.dumps(
+                    {
+                        "reason": "  TASK COMPLETED SUCCESSFULLY  ",
+                        "paths": ["  /repo/b.txt  ", "/repo/a.txt"],
+                    }
+                ),
+            ),
+            declared_tools=declared_tools,
+            harness="stirrup",
+        )
+        assert comparison_result.matches is True
+        assert comparison_result.category == StepRewardCategory.EXPECTED_TOOL_CALL
+        assert comparison_result.similarity_score == approx(1.0)
+
+    def test_compare_stirrup_finish_rejects_dissimilar_reason(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="finish",
+                arguments=json.dumps({"reason": "Task completed successfully", "paths": ["/repo/answer.txt"]}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="finish",
+                arguments=json.dumps({"reason": "unable to proceed", "paths": ["/repo/answer.txt"]}),
+            ),
+            declared_tools=declared_tools,
+            harness="stirrup",
+        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.FINISH_REASON_SIMILARITY_BELOW_THRESHOLD
+
+    def test_compare_stirrup_finish_rejects_paths_mismatch(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="finish",
+                arguments=json.dumps(
+                    {"reason": "Task completed successfully", "paths": ["/repo/a.txt", "/repo/b.txt"]}
+                ),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="finish",
+                arguments=json.dumps(
+                    {"reason": "Task completed successfully", "paths": ["/repo/a.txt", "/repo/other.txt"]}
+                ),
+            ),
+            declared_tools=declared_tools,
+            harness="stirrup",
+        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.FINISH_PATHS_DO_NOT_MATCH
+
+    def test_compare_stirrup_finish_matches_when_paths_is_stringified_json_array(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        # Mirrors real-world case: model emits `paths` as a JSON-encoded string
+        # (e.g. "[\"/tmp/a.xlsx\"]") rather than a real array. The coercion step
+        # should parse it before schema validation so the call still passes.
+        path = "/tmp/local_exec_env_knn06tmi/LF_Specific_Performance_Model.xlsx"
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="finish",
+                arguments=json.dumps({"reason": "Task completed successfully", "paths": [path]}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="finish",
+                arguments=json.dumps({"reason": "Task completed successfully", "paths": json.dumps([path])}),
+            ),
+            declared_tools=declared_tools,
+            harness="stirrup",
+        )
+        assert comparison_result.matches is True
+        assert comparison_result.category == StepRewardCategory.EXPECTED_TOOL_CALL

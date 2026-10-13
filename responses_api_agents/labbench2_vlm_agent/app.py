@@ -25,6 +25,7 @@ for figqa2/tableqa2). Non-protocol rows always use the image path when
 """
 
 from pathlib import Path
+from typing import Any
 
 from fastapi import Request
 from pydantic import Field
@@ -54,7 +55,7 @@ class LabbenchVLMAgentConfig(SimpleAgentConfig):
     )
     strip_images_from_output: bool = Field(
         default=True,
-        description="Remove base64 input_image blocks from the rollout output to keep files small.",
+        description="Remove base64 input_image blocks from serialized rollout artifacts.",
     )
 
 
@@ -68,16 +69,34 @@ def _effective_media_mode(agent_media_mode: str, verifier_metadata: dict | None)
 
 
 def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyResponse:
-    """Remove input_image blocks from responses_create_params in the output.
+    """Remove input_image blocks from the serialized rollout result.
 
     Operates on a dict dump to avoid Pydantic model mutation/serialization issues,
     then re-validates into the response model.
     """
-    data = result.model_dump()
-    for msg in data.get("responses_create_params", {}).get("input", []):
-        content = msg.get("content")
-        if isinstance(content, list):
-            msg["content"] = [b for b in content if b.get("type") != "input_image"]
+
+    removed_image = False
+
+    def scrub(value: Any) -> Any:
+        nonlocal removed_image
+        if isinstance(value, list):
+            cleaned = []
+            for item in value:
+                if isinstance(item, dict) and item.get("type") == "input_image":
+                    removed_image = True
+                    continue
+                cleaned.append(scrub(item))
+            return cleaned
+        if isinstance(value, dict):
+            return {key: scrub(item) for key, item in value.items()}
+        return value
+
+    data = scrub(result.model_dump(mode="json"))
+    if removed_image:
+        for key in ("ng_trajectory", "ng_agent_observations"):
+            observations = data.get(key)
+            if isinstance(observations, dict):
+                observations.setdefault("gaps", []).append({"code": "multimodal_history_redacted"})
     return SimpleAgentVerifyResponse.model_validate(data)
 
 

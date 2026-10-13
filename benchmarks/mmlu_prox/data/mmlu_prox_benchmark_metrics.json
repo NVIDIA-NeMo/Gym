@@ -3,8 +3,8 @@
     "type": "benchmark",
     "jsonl_fpath": "benchmarks/mmlu_prox/data/mmlu_prox_benchmark.jsonl",
     "prepare_script": "benchmarks/mmlu_prox/prepare.py",
-    "prompt_config": "benchmarks/mmlu_prox/prompts/default.yaml",
-    "num_repeats": 8,
+    "prompt_config": "benchmarks/prompts/generic/default.yaml",
+    "num_repeats": 1,
     "Number of examples": 0,
     "Number of tools": {
         "Total # non-null values": 0,

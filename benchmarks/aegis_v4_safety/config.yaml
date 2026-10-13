@@ -1,0 +1,30 @@
+config_paths:
+- resources_servers/aegis_v4_safety/configs/aegis_v4_safety.yaml
+- resources_servers/aegis_v4_safety/configs/aegis_v4_model.yaml
+
+aegis_v4_safety_benchmark_resources_server:
+  _inherit_from: aegis_v4_safety
+  resources_servers:
+    aegis_v4_safety: {}
+
+aegis_v4_safety_benchmark_simple_agent:
+  _inherit_from: aegis_v4_safety_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: aegis_v4_safety_benchmark_resources_server
+      datasets:
+      - name: aegis_v4_safety
+        type: benchmark
+        jsonl_fpath: benchmarks/aegis_v4_safety/data/aegis_v4_safety_benchmark.jsonl
+        prompt_config: benchmarks/aegis_v4_safety/prompt.yaml
+        prepare_script: benchmarks/aegis_v4_safety/prepare.py
+        num_repeats: 1
+        license: Apache 2.0
+
+aegis_v4_safety_benchmark_environment_server:
+  _inherit_from: aegis_v4_safety_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: aegis_v4_safety_benchmark_simple_agent

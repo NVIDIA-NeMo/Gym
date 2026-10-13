@@ -12,17 +12,17 @@ applies Skills' renames (`answer` -> `expected_answer`, `question` ->
 
 ```bash
 # Prepare benchmark data
-ng_prepare_benchmark "+config_paths=[benchmarks/hendrycks_math/config.yaml]"
+gym eval prepare --benchmark hendrycks_math
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/hendrycks_math/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark hendrycks_math
 
 # Collecting rollouts
-ng_collect_rollouts \
-    +agent_name=hendrycks_math_math_with_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/hendrycks_math/data/hendrycks_math_benchmark.jsonl \
-    +output_jsonl_fpath=results/hendrycks_math_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent hendrycks_math_math_with_judge_simple_agent \
+    --input benchmarks/hendrycks_math/data/hendrycks_math_benchmark.jsonl \
+    --output results/hendrycks_math_rollouts.jsonl \
+    --num-repeats 4
 ```

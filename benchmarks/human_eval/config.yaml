@@ -17,6 +17,13 @@ human_eval_evalplus_simple_agent:
       - name: human_eval
         type: benchmark
         jsonl_fpath: benchmarks/human_eval/data/human_eval_benchmark.jsonl
-        prompt_config: benchmarks/human_eval/prompts/default.yaml
+        prompt_config: benchmarks/prompts/generic/codegen.yaml
         prepare_script: benchmarks/human_eval/prepare.py
         license: MIT
+
+human_eval_evalplus_environment_server:
+  _inherit_from: evalplus_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: human_eval_evalplus_simple_agent

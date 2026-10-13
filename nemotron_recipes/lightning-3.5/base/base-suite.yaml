@@ -1,0 +1,207 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+#
+# Base (pretraining) suite for NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16, run
+# against an EXISTING OpenAI-compatible endpoint. Nothing is deployed by this config.
+#
+# For the variant that deploys its own local vLLM, use
+# `base-suite.yaml` instead.
+#
+# How to use:
+#
+# 1. copy this file locally or clone the repository
+# 2. point target.api_endpoint.url at your endpoint's /v1/completions route and set
+#    model_id to the name it serves
+# 3. export POLICY_API_KEY (endpoint auth) and HF_TOKEN (tokenizer + datasets)
+#
+#    POLICY_API_KEY is whatever bearer token your endpoint expects. A self-hosted
+#    vLLM usually needs no real key, so any placeholder works. For NVIDIA-hosted
+#    endpoints use a personal API key in the `nvapi-...` form — a legacy base64 NGC key
+#    authenticates management calls but returns 401 on invocation, which reads like a
+#    broken endpoint rather than a wrong credential.
+# 4. run `nemo-evaluator-launcher run --config path/to/base-suite.yaml`
+#
+# ─── ENDPOINT REQUIREMENTS — READ BEFORE RUNNING ─────────────────────────────
+#
+# This is a BASE model, so the suite drives the COMPLETIONS API, not chat. A chat
+# endpoint is not a substitute: the base model has no chat template, and wrapping the
+# prompts in one changes what is being measured.
+#
+# 9 of the 21 tasks are multiple-choice and scored by log-likelihood. They send:
+#
+#     {"prompt": ..., "max_tokens": 1, "logprobs": 1, "echo": true,
+#      "temperature": 0, "seed": 1234}
+#
+# so the endpoint MUST honour `echo: true` together with `logprobs`. Many hosted
+# inference services accept the request but silently ignore `echo`, which yields wrong
+# scores rather than an error — verify before trusting results. Self-hosted vLLM
+# supports both (see the serve command below).
+#
+#   Need echo + logprobs   : adlr_arc_challenge_llama_25_shot, adlr_commonsense_qa_7_shot,
+#                            adlr_global_mmlu_lite_5_shot, adlr_race,
+#                            adlr_winogrande_5_shot, hellaswag, openbookqa, piqa,
+#                            social_iqa
+#   Plain completions only : adlr_agieval_en_cot, adlr_gpqa_diamond_cot_5_shot,
+#                            adlr_gsm8k_cot_8_shot, adlr_humaneval_greedy,
+#                            adlr_humaneval_sampled, adlr_math_500_4_shot_sampled,
+#                            adlr_mbpp_sanitized_3_shot_greedy,
+#                            adlr_mbpp_sanitized_3_shot_sampled,
+#                            adlr_mgsm_native_cot_8_shot, adlr_minerva_math_nemo_4_shot,
+#                            adlr_mmlu, adlr_mmlu_pro_5_shot_base
+#
+# If your endpoint cannot do echo+logprobs, run only the second group with `-t <task>`.
+#
+# ─── SELF-HOSTING THE ENDPOINT ───────────────────────────────────────────────
+#
+# The following serve command is the one this suite was validated with (4x GPU node,
+# TP=4, container vllm/vllm-openai:v0.19.1-cu130):
+#
+#   vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16 \
+#     --tensor-parallel-size=4 --pipeline-parallel-size=1 --data-parallel-size=1 \
+#     --port 8000 --served-model-name nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16 \
+#     --trust-remote-code --gpu-memory-utilization 0.9 --max-num-seqs 512 \
+#     --no-enable-prefix-caching --enable-log-requests \
+#     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
+#
+# The model is ~31.6B params in BF16 (~62 GB of weights) and declares
+# max_position_embeddings 262144. TP=4 is what was validated; smaller TP works if the
+# weights and KV cache fit.
+#
+# ⚠️  WARNING:
+#     Always run full evaluations (without limit_samples) for actual benchmark results.
+#     Using a subset of samples is solely for testing configuration and setup.
+#     Results from such test runs should NEVER be used to compare models or
+#     report benchmark performance.
+defaults:
+  - execution: local
+  - deployment: none
+  - _self_
+
+execution:
+  output_dir: NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16-endpoint
+  # Caching datasets/tokenizer across runs is optional but recommended.
+  # mounts:
+  #   evaluation:
+  #     ./hf_cache: /root/.cache/huggingface
+
+# ─── FILL THESE IN ───────────────────────────────────────────────────────────
+#
+# url      the /v1/completions route of your endpoint. Examples:
+#            self-hosted vLLM   http://localhost:8000/v1/completions
+#            hosted service     https://<host>/v1/completions
+#          It must be the COMPLETIONS route, not chat — see the note above.
+#
+# model_id the name your endpoint SERVES. This is often NOT the Hub repo id: a hosted
+#          deployment may serve it under a short name such as
+#          `nemotron-3.5-lightning-30b-a3b-base`, while a self-hosted vLLM started with
+#          `--served-model-name nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16`
+#          serves it under that. Query `GET /v1/models` on your endpoint if unsure.
+#          The `tokenizer` under evaluation.extra stays the Hub id either way — it is
+#          fetched from the Hub, not from the endpoint.
+target:
+  api_endpoint:
+    url: https://<your-endpoint>/v1/completions
+    model_id: <your-model-id>
+    api_key_name: POLICY_API_KEY  # pragma: allowlist secret
+    type: completions
+
+evaluation:
+  env_vars:
+    HF_TOKEN: host:HF_TOKEN
+    TRUST_REMOTE_CODE: lit:1
+  nemo_evaluator_config:
+    config:
+      required_capabilities: []
+      params:
+        max_retries: 5
+        parallelism: 32  # raise if your endpoint tolerates more concurrency
+        request_timeout: 3600
+        temperature: 0.01
+        # limit_samples: 10 # uncomment to limit number of samples for quick testing
+        extra:
+          # Tokenizer is pulled from the Hub even though the model is remote.
+          tokenizer: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16
+          tokenizer_backend: huggingface
+          model_trust_remote_code: true
+
+  tasks:
+    # General Knowledge
+    - name: adlr_mmlu
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    - name: adlr_mmlu_pro_5_shot_base
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    - name: adlr_agieval_en_cot
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    - name: adlr_gpqa_diamond_cot_5_shot
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    # Math
+    - name: adlr_gsm8k_cot_8_shot
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    # NOTE: adlr_minerva_math_nemo_4_shot currently fails on the 26.03 container —
+    #       see the "Known issue" section of the README.
+    - name: adlr_minerva_math_nemo_4_shot
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    - name: adlr_math_500_4_shot_sampled
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+      nemo_evaluator_config:
+        target:
+          api_endpoint:
+            adapter_config:
+              # NOTE: Disable caching for tasks that repeat requests with the same seed (i.e. sampled).
+              #       Also, lm-eval has its own caching
+              use_caching: false
+    # Code
+    - name: adlr_humaneval_greedy
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    - name: adlr_humaneval_sampled
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+      nemo_evaluator_config:
+        target:
+          api_endpoint:
+            adapter_config:
+              use_caching: false
+    - name: adlr_mbpp_sanitized_3_shot_greedy
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    - name: adlr_mbpp_sanitized_3_shot_sampled
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+      nemo_evaluator_config:
+        target:
+          api_endpoint:
+            adapter_config:
+              use_caching: false
+    # Commonsense Understanding  (all of these need echo + logprobs)
+    - name: adlr_commonsense_qa_7_shot
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    - name: adlr_arc_challenge_llama_25_shot
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    - name: hellaswag
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    - name: openbookqa
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    - name: piqa
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    - name: social_iqa
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    - name: adlr_winogrande_5_shot
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    # Reading comprehension  (needs echo + logprobs)
+    - name: adlr_race
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    # Multilingual
+    - name: adlr_global_mmlu_lite_5_shot  # needs echo + logprobs
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    - name: adlr_mgsm_native_cot_8_shot
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03

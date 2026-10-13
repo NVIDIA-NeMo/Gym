@@ -83,7 +83,7 @@ Edge cases:
 
 Recommended generation parameters for benchmarking:
 ```bash
-ng_collect_rollouts ... "+responses_create_params={temperature: 1.0, top_p: 0.95, max_output_tokens: 32768}"
+gym eval run --no-serve ... --temperature 1.0 --top-p 0.95 --max-output-tokens 32768
 ```
 Note: some models (e.g., Anthropic via Bedrock) do not allow `temperature` and `top_p` together.
 In that case, drop `top_p`. Use `temperature: 0.0` for deterministic/reproducible runs.
@@ -100,16 +100,18 @@ contrast_privacy
 ### Example usage
 ```bash
 # For chat completions endpoints (vLLM, NIM, etc.):
-ng_run "+config_paths=[resources_servers/xstest/configs/xstest.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --resources-server xstest \
+    --model-type vllm_model
 
 # For OpenAI Responses API endpoints:
-# ng_run "+config_paths=[resources_servers/xstest/configs/xstest.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+# gym env start --resources-server xstest --model-type openai_model
 
-ng_collect_rollouts \
-    +agent_name=xstest_simple_agent \
-    +input_jsonl_fpath=resources_servers/xstest/data/example.jsonl \
-    +output_jsonl_fpath=results/xstest_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent xstest_simple_agent \
+    --input resources_servers/xstest/data/example.jsonl \
+    --output results/xstest_rollouts.jsonl \
+    --num-repeats 1
 
 # Aggregate results
 python resources_servers/xstest/scripts/aggregate_results.py \

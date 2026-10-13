@@ -32,46 +32,168 @@ and size ``max_completion_tokens`` as::
 
     context_window − tokenized(messages) − completion_token_buffer
 
-clamped to a minimum of ``_MIN_COMPLETION_TOKENS``.  On the response
+raised toward a configurable minimum (historically 1,024 tokens), subject to
+the hard cap. Estimated remaining context is also a strict bound when the
+tokenizer successfully renders the complete prompt; approximate fallbacks keep
+the configured floor because they can substantially overcount retained reasoning. On the response
 side, we replicate Stirrup parsing but do *not* raise on
 ``finish_reason=length`` — the agent loop will either terminate when the
 model invokes the ``finish`` tool or exhaust ``max_turns``, yielding a
 clean timeout instead of a crash.
 
 ``model_id`` selects the HuggingFace tokenizer (or local checkpoint path).
-When unset, a conservative character-count fallback is used.
+When unset, an approximate character-count fallback is used.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from time import perf_counter
 from typing import Any, Optional
 
+import stirrup.core.agent as _stirrup_agent_mod
+from pydantic import ValidationError as _PydanticValidationError
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
-from stirrup.clients.utils import to_openai_messages, to_openai_tools
+from stirrup.clients.utils import to_openai_tools
+from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
     Reasoning,
-    SystemMessage,
     TokenUsage,
     Tool,
     ToolCall,
-    ToolMessage,
-    UserMessage,
 )
+
+from nemo_gym.openai_utils import NeMoGymChatCompletionMessageParam
+from responses_api_agents.stirrup_agent.stirrup_utils import to_provider_openai_messages
 
 
 LOGGER = logging.getLogger(__name__)
 
-# Floor for per-call max_completion_tokens.  Below this the model basically
-# cannot produce a useful answer — treat as a hard minimum.
+
+# Monkey-patch stirrup.core.agent.Agent.run_tool to surface pydantic
+# ValidationError detail into the ToolResult content. Upstream stirrup
+# returns the bare string "Tool arguments are not valid", hiding the
+# pydantic error detail (e.g., "paths: Input should be a valid list,
+# input_type=str"). Without that detail the agent has no signal to
+# self-correct and just retries the same broken shape forever.
+#
+# Observed on DSv4-Pro GDPVal r5/r7: the model emitted `paths` as a JSON
+# string literal ("[]") instead of a JSON array ([]). All ~660 finish
+# attempts in r5 failed with the same bare-string error; the agent
+# never learned what was wrong.
+def _install_tool_arg_error_surfacing() -> None:
+    _orig_run_tool = _stirrup_agent_mod.Agent.run_tool
+    if getattr(_orig_run_tool, "_gym_surfacing_patched", False):
+        return
+
+    async def run_tool_with_error_surfacing(self, tool_call, run_metadata):
+        result_msg = await _orig_run_tool(self, tool_call, run_metadata)
+        if (not getattr(result_msg, "args_was_valid", True)) and result_msg.content == "Tool arguments are not valid":
+            # Mirror upstream stirrup's lookup: self._active_tools is the {name: Tool}
+            # dict built from self._tools filtered by isinstance(Tool). Looking up
+            # via the dict avoids iterating self._tools which mixes Tool instances
+            # with provider objects (e.g. ApptainerCodeExecToolProvider) that don't
+            # have a .name attribute and crash a naive `t.name` lookup.
+            tool = self._active_tools.get(tool_call.name)
+            if tool is not None:
+                args = tool_call.arguments if tool_call.arguments and tool_call.arguments.strip() else "{}"
+                try:
+                    tool.parameters.model_validate_json(args)
+                except _PydanticValidationError as exc:
+                    errors_str = "; ".join(
+                        f"{'.'.join(str(p) for p in e['loc']) or '<root>'}: {e['msg']} (type={e.get('type', '?')})"
+                        for e in exc.errors()
+                    )
+                    args_preview = (tool_call.arguments or "")[:500]
+                    detailed = (
+                        f"Tool arguments are not valid: {errors_str}. "
+                        f"Submitted arguments (first 500 chars): {args_preview!r}"
+                    )
+                    result_msg = result_msg.model_copy(update={"content": detailed})
+                except Exception:
+                    pass
+        return result_msg
+
+    run_tool_with_error_surfacing._gym_surfacing_patched = True
+    _stirrup_agent_mod.Agent.run_tool = run_tool_with_error_surfacing
+
+
+_install_tool_arg_error_surfacing()
+
+
+# Replace stirrup's SIMPLE_FINISH_TOOL with a coercing variant whose
+# FinishParams accepts `paths` as a JSON-encoded string and normalizes to
+# list[str]. vLLM 0.20.0's --tool-call-parser deepseek_v4 forwards DSv4's
+# string="false" args as JSON strings (the unwrap landed upstream in vLLM
+# PR #41801, merged 2026-05-06, but the wedu image predates the merge).
+# See responses_api_agents/stirrup_agent/finish_tool_coercing.py for the
+# coerced schema. The override happens at module-import time so any Agent
+# constructed after this point picks up the coercing variant via the
+# default-arg path in stirrup.core.agent.Agent.__init__.
+def _install_coercing_finish_tool() -> None:
+    import stirrup.tools as _tools_mod
+    import stirrup.tools.finish as _finish_mod
+
+    if getattr(_finish_mod.SIMPLE_FINISH_TOOL, "_gym_coercing_finish_patched", False):
+        return
+
+    from responses_api_agents.stirrup_agent.finish_tool_coercing import (
+        COERCING_FINISH_TOOL,
+    )
+
+    # Tag for idempotency.
+    setattr(COERCING_FINISH_TOOL, "_gym_coercing_finish_patched", True)
+
+    # Patch the canonical binding plus every place stirrup or its callers
+    # captured a reference via `from ... import SIMPLE_FINISH_TOOL`.
+    _finish_mod.SIMPLE_FINISH_TOOL = COERCING_FINISH_TOOL
+    if hasattr(_tools_mod, "SIMPLE_FINISH_TOOL"):
+        _tools_mod.SIMPLE_FINISH_TOOL = COERCING_FINISH_TOOL
+    if hasattr(_stirrup_agent_mod, "SIMPLE_FINISH_TOOL"):
+        _stirrup_agent_mod.SIMPLE_FINISH_TOOL = COERCING_FINISH_TOOL
+
+
+_install_coercing_finish_tool()
+
+# Target floor for per-call max_completion_tokens. Below this the model usually
+# cannot produce a useful answer. The hard cap always takes precedence; exact
+# tokenizer estimates also enforce remaining context as a strict bound.
 _MIN_COMPLETION_TOKENS = 1024
 
 # Hard cap on per-call max_completion_tokens.  Oversized completion budgets
 # on long-context servers can degrade output quality for reasoning models.
 _DEFAULT_MAX_COMPLETION_TOKENS_CAP = 64000
+
+# ---------------------------------------------------------------------------
+# Thinking-overrun recovery
+#
+# Measured on a 200-task GDPVal run (GLM-5.2 FP8, 27.4 M output tokens across
+# 10,448 calls): 68 calls burned the entire 64 k completion budget emitting a
+# ``<think>`` block and returned *no tool call*.  That is 28.5 h of decode —
+# 15.8% of all model time — spent on turns that advanced their task zero steps.
+#
+# The failure is sticky rather than isolated.  Those 68 calls form 33 runs, 18
+# of them longer than one turn (run lengths 1x15, 2x6, 3x9, 4x1, 5x2), because
+# Stirrup answers a tool-call-less turn with a generic "Please continue the
+# task" — which invites the model straight back into another unbounded think.
+#
+# Shrinking the budget on the retry is the obvious fix and it is wrong: of the
+# 26 turns that *did* recover with a tool call, the median emitted 34,653
+# tokens (max 61,551) because the model dumps the whole deliverable at once.
+# Clamping the budget would convert recoveries into truncated tool calls.
+#
+# So the retry keeps its full token budget and instead removes the thing that
+# overran: thinking is disabled for that one turn and a short instruction says
+# the previous turn was discarded.  Costs nothing when no overrun happens.
+_TRUNCATION_RECOVERY_NUDGE = (
+    "SYSTEM NOTICE: your previous response hit the output token limit before it "
+    "produced a tool call, so it was discarded and none of that reasoning was "
+    "saved. Do not start that analysis over. Act now on what you already know: "
+    "respond with a tool call and keep any preamble to a few sentences."
+)
 
 
 def _load_tokenizer(model_id: Optional[str]):
@@ -102,19 +224,6 @@ def _load_tokenizer(model_id: Optional[str]):
     return None
 
 
-def _format_for_chat_template(m: ChatMessage) -> dict[str, str]:
-    """Render a Stirrup ChatMessage into the OpenAI chat-template dict shape."""
-    if isinstance(m, UserMessage):
-        return {"role": "user", "content": m.content or ""}
-    if isinstance(m, SystemMessage):
-        return {"role": "system", "content": m.content or ""}
-    if isinstance(m, ToolMessage):
-        return {"role": "tool", "content": m.content or ""}
-    # AssistantMessage and any other — best-effort to text.
-    content = getattr(m, "content", "") or ""
-    return {"role": "assistant", "content": content if isinstance(content, str) else str(content)}
-
-
 class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
     """ChatCompletionsClient that sizes max_completion_tokens per call and
     does not raise on a length-finish response."""
@@ -128,14 +237,28 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         top_p: float = 0.95,
         enable_thinking: bool = True,
         max_completion_tokens_cap: int = _DEFAULT_MAX_COMPLETION_TOKENS_CAP,
+        min_completion_tokens: int = _MIN_COMPLETION_TOKENS,
+        prompt_estimator_truncate_history_thinking: Optional[bool] = None,
+        truncation_recovery: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
+        if max_completion_tokens_cap < 1:
+            raise ValueError("max_completion_tokens_cap must be at least 1")
+        if min_completion_tokens < 1:
+            raise ValueError("min_completion_tokens must be at least 1")
         self._completion_token_buffer = completion_token_buffer
         self._temperature = temperature
         self._top_p = top_p
         self._enable_thinking = enable_thinking
         self._max_completion_tokens_cap = max_completion_tokens_cap
+        self._min_completion_tokens = min_completion_tokens
+        self._prompt_estimator_truncate_history_thinking = prompt_estimator_truncate_history_thinking
+        self._truncation_recovery = truncation_recovery
+        # Set when the previous call exhausted its completion budget without
+        # emitting a tool call; consumed by the very next generate().
+        self._recover_from_truncation = False
+        self._truncation_overruns = 0
         self._tokenizer = _load_tokenizer(model_id)
         if model_id and self._tokenizer is None:
             LOGGER.warning(
@@ -147,17 +270,147 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
     # Token counting
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _truncate_prior_assistant_text_for_estimate(content: str, *, has_tool_calls: bool) -> str:
+        """Mirror Nemotron's historical-assistant rendering for one text value."""
+        # The template first inserts an empty reasoning block when neither tag
+        # is present. This matters for both its normal and tool-call branches.
+        if "<think>" not in content and "</think>" not in content:
+            content = f"<think></think>{content}"
+
+        if has_tool_calls:
+            if not content.strip():
+                return "<think></think>"
+            if "</think>" in content:
+                content = content.rsplit("</think>", 1)[-1]
+            elif "<think>" in content:
+                content = content.split("<think>", 1)[0]
+            return f"<think></think>{content}"
+
+        if "<think>" in content and "</think>" in content:
+            content = f"<think></think>{content.rsplit('</think>', 1)[-1]}"
+        return content.strip()
+
+    def _messages_for_estimator_count(
+        self,
+        messages: list[NeMoGymChatCompletionMessageParam],
+    ) -> list[NeMoGymChatCompletionMessageParam]:
+        """Return the history shape rendered by Nemotron's truncation mode.
+
+        This is estimator-only: it never changes the retained trajectory or
+        request. Tool calls and every other serialized field stay intact.
+        """
+        if self._prompt_estimator_truncate_history_thinking is not True:
+            return messages
+
+        last_user_index = max(
+            (index for index, message in enumerate(messages) if message.get("role") == "user"),
+            default=-1,
+        )
+        if last_user_index < 0:
+            return messages
+
+        counted_messages: list[NeMoGymChatCompletionMessageParam] = []
+        for index, message in enumerate(messages):
+            if index >= last_user_index or message.get("role") != "assistant":
+                counted_messages.append(message)
+                continue
+
+            content = message.get("content")
+            estimated_content: Any = content
+            has_tool_calls = bool(message.get("tool_calls"))
+            if isinstance(content, str):
+                estimated_content = self._truncate_prior_assistant_text_for_estimate(
+                    content,
+                    has_tool_calls=has_tool_calls,
+                )
+            elif isinstance(content, list):
+                estimated_parts = []
+                changed = False
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        estimated_text = self._truncate_prior_assistant_text_for_estimate(
+                            part["text"],
+                            has_tool_calls=has_tool_calls,
+                        )
+                        if estimated_text != part["text"]:
+                            part = {**part, "text": estimated_text}
+                            changed = True
+                    estimated_parts.append(part)
+                if changed:
+                    estimated_content = estimated_parts
+
+            if estimated_content is content or estimated_content == content:
+                counted_messages.append(message)
+            else:
+                counted_messages.append({**message, "content": estimated_content})
+        return counted_messages
+
+    def _messages_for_template_count(
+        self,
+        messages: list[NeMoGymChatCompletionMessageParam],
+    ) -> list[NeMoGymChatCompletionMessageParam]:
+        """Mirror vLLM's tool-argument decoding before template rendering.
+
+        OpenAI history carries ``function.arguments`` as a JSON string, while
+        Nemotron's Jinja template iterates it as a mapping. vLLM decodes that
+        field before rendering; HuggingFace ``apply_chat_template`` does not.
+        Keep this as a fallback template-input variant so templates that
+        natively accept OpenAI's string representation retain their existing
+        behavior. The provider payload is never mutated.
+        """
+        normalized_messages: list[NeMoGymChatCompletionMessageParam] = []
+        messages_changed = False
+        for message in messages:
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                normalized_messages.append(message)
+                continue
+
+            normalized_calls = []
+            changed = False
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    normalized_calls.append(tool_call)
+                    continue
+                function = tool_call.get("function")
+                if not isinstance(function, dict) or not isinstance(function.get("arguments"), str):
+                    normalized_calls.append(tool_call)
+                    continue
+                try:
+                    arguments = json.loads(function["arguments"])
+                except json.JSONDecodeError:
+                    normalized_calls.append(tool_call)
+                    continue
+                if not isinstance(arguments, dict):
+                    normalized_calls.append(tool_call)
+                    continue
+                normalized_calls.append({**tool_call, "function": {**function, "arguments": arguments}})
+                changed = True
+
+            normalized_messages.append({**message, "tool_calls": normalized_calls} if changed else message)
+            messages_changed = messages_changed or changed
+        return normalized_messages if messages_changed else messages
+
     def _count_input_tokens(
         self,
-        messages: list[ChatMessage],
+        messages: list[NeMoGymChatCompletionMessageParam],
         tools: Optional[dict[str, Tool]] = None,
     ) -> int:
+        """Return the best available prompt-token estimate."""
+        return self._count_input_tokens_with_confidence(messages, tools)[0]
+
+    def _count_input_tokens_with_confidence(
+        self,
+        messages: list[NeMoGymChatCompletionMessageParam],
+        tools: Optional[dict[str, Tool]] = None,
+    ) -> tuple[int, bool]:
         """Estimate the full prompt token count the server will see.
 
-        We use Stirrup's own ``to_openai_messages``/``to_openai_tools``
-        converters to produce the exact payload that gets serialised to the
-        wire, then run the chat template over it.  This catches assistant
-        ``tool_calls``, multimodal content blocks, and tool-schema injection.
+        ``messages`` must already be serialized for the provider. This keeps
+        token accounting aligned with the exact payload sent on the wire,
+        including assistant ``tool_calls``, multimodal content blocks, and
+        tool-schema injection.
 
         Counting strategy (in order, best -> worst):
 
@@ -166,30 +419,30 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         2. ``tokenizer.apply_chat_template(messages)`` + tokenise the tool
            JSON blob separately — still captures assistant ``tool_calls``
            via the chat template.
-        3. Tokenise the JSON of ``to_openai_messages(..)`` and the tools
-           blob — rough but serialises everything.
+        3. Tokenise the JSON of the serialized messages and tools blob —
+           rough but serialises everything.
         4. Character-count fallback when no tokenizer is present.
+
+        Returns ``(count, exact_template_render)``. Only a successful render of
+        the complete prompt is exact enough to impose a hard context bound.
+        JSON and character fallbacks remain useful for budget sizing, but must
+        not turn an approximate over-count into a false context-overflow error.
 
         Any residual gap is absorbed by ``completion_token_buffer``.
         """
         import json as _json
 
         if self._tokenizer is None:
-            # Pure character-count fallback.
-            formatted = [_format_for_chat_template(m) for m in messages]
-            total = sum(len(f.get("content") or "") for f in formatted) // 3
+            # Pure character-count fallback. Count the complete serialized
+            # payload, including assistant tool-call names and arguments.
+            counted_messages = self._messages_for_estimator_count(messages)
+            total = len(_json.dumps(counted_messages, ensure_ascii=False)) // 3
             if tools:
                 try:
                     total += len(_json.dumps(to_openai_tools(tools))) // 3
                 except Exception:
                     pass
-            return total
-
-        try:
-            oai_messages = to_openai_messages(messages)
-        except Exception as exc:
-            LOGGER.warning(f"to_openai_messages failed ({exc}); falling back to legacy formatting.")
-            oai_messages = [_format_for_chat_template(m) for m in messages]
+            return total, False
 
         oai_tools = None
         if tools:
@@ -199,62 +452,111 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
                 LOGGER.warning(f"to_openai_tools failed ({exc}).")
 
         # Strategy 1: apply_chat_template with tools=
+        template_kwargs: dict[str, Any] = {}
+        if self._prompt_estimator_truncate_history_thinking is not None:
+            template_kwargs["truncate_history_thinking"] = self._prompt_estimator_truncate_history_thinking
+        normalized_template_messages = self._messages_for_template_count(messages)
+        template_message_variants = [messages]
+        if normalized_template_messages is not messages:
+            template_message_variants.append(normalized_template_messages)
         if oai_tools is not None:
-            try:
-                text = self._tokenizer.apply_chat_template(
-                    oai_messages, tools=oai_tools, tokenize=False, add_generation_prompt=True
-                )
-                return len(self._tokenizer(text, add_special_tokens=False)["input_ids"])
-            except Exception as exc:
-                LOGGER.debug(f"apply_chat_template(tools=) unsupported ({exc}); trying separate tool count.")
+            last_template_error = None
+            for template_messages in template_message_variants:
+                try:
+                    text = self._tokenizer.apply_chat_template(
+                        template_messages,
+                        tools=oai_tools,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        **template_kwargs,
+                    )
+                    return len(self._tokenizer(text, add_special_tokens=False)["input_ids"]), True
+                except Exception as exc:
+                    last_template_error = exc
+            LOGGER.debug(
+                "apply_chat_template(tools=) unsupported (%s); trying separate tool count.",
+                last_template_error,
+            )
 
         # Strategy 2: apply_chat_template on messages only + separate tool JSON count
-        try:
-            text = self._tokenizer.apply_chat_template(oai_messages, tokenize=False, add_generation_prompt=True)
-            total = len(self._tokenizer(text, add_special_tokens=False)["input_ids"])
-            if oai_tools is not None:
-                total += len(self._tokenizer(_json.dumps(oai_tools), add_special_tokens=False)["input_ids"])
-            return total
-        except Exception as exc:
-            LOGGER.warning(f"apply_chat_template(messages) failed ({exc}); falling back to JSON count.")
+        last_template_error = None
+        for template_messages in template_message_variants:
+            try:
+                text = self._tokenizer.apply_chat_template(
+                    template_messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    **template_kwargs,
+                )
+                total = len(self._tokenizer(text, add_special_tokens=False)["input_ids"])
+                if oai_tools is not None:
+                    total += len(self._tokenizer(_json.dumps(oai_tools), add_special_tokens=False)["input_ids"])
+                # With no tools this is the complete rendered prompt. When tools
+                # exist, tokenizing their JSON separately does not reproduce the
+                # template's wrappers or token boundaries and remains approximate.
+                return total, oai_tools is None
+            except Exception as exc:
+                last_template_error = exc
+        LOGGER.warning("apply_chat_template(messages) failed (%s); falling back to JSON count.", last_template_error)
 
         # Strategy 3: tokenise the full JSON payload
         try:
-            blob = _json.dumps(oai_messages)
+            counted_messages = self._messages_for_estimator_count(messages)
+            blob = _json.dumps(counted_messages)
             total = len(self._tokenizer(blob, add_special_tokens=False)["input_ids"])
             if oai_tools is not None:
                 total += len(self._tokenizer(_json.dumps(oai_tools), add_special_tokens=False)["input_ids"])
-            return total
+            return total, False
         except Exception as exc:
             LOGGER.warning(f"JSON tokenisation failed ({exc}); falling back to character count.")
 
         # Strategy 4: character count
-        formatted = [_format_for_chat_template(m) for m in messages]
-        total = sum(len(f.get("content") or "") for f in formatted) // 3
-        return total
+        counted_messages = self._messages_for_estimator_count(messages)
+        total = len(_json.dumps(counted_messages, ensure_ascii=False)) // 3
+        return total, False
 
     async def generate(
         self,
         messages: list[ChatMessage],
         tools: dict[str, Tool],
     ) -> AssistantMessage:
-        input_tokens = self._count_input_tokens(messages, tools)
+        provider_messages = to_provider_openai_messages(messages)
+
+        # Recovery turn: the previous call spent its whole completion budget
+        # thinking and never reached a tool call. Steer this one turn — thinking
+        # off, explicit instruction — but leave the token budget alone, because
+        # the recovery itself is usually a large single-shot deliverable write.
+        # The nudge is transient: it is sent to the server but never enters the
+        # agent's message history, so trajectories stay clean.
+        recovering = self._recover_from_truncation and self._truncation_recovery
+        self._recover_from_truncation = False
+        if recovering:
+            provider_messages = [*provider_messages, {"role": "user", "content": _TRUNCATION_RECOVERY_NUDGE}]
+
+        input_tokens, exact_template_render = self._count_input_tokens_with_confidence(provider_messages, tools)
         context_window = self._max_tokens
+        estimated_remaining_context = context_window - input_tokens
+        if exact_template_render and estimated_remaining_context <= 0:
+            raise ContextOverflowError(
+                f"Estimated prompt ({input_tokens} tokens) leaves no room in the {context_window}-token context window"
+            )
         dynamic_max = max(
-            context_window - input_tokens - self._completion_token_buffer,
-            _MIN_COMPLETION_TOKENS,
+            estimated_remaining_context - self._completion_token_buffer,
+            self._min_completion_tokens,
         )
         capped_max = min(dynamic_max, self._max_completion_tokens_cap)
+        if exact_template_render:
+            capped_max = min(capped_max, estimated_remaining_context)
 
         # ``self._kwargs`` is spread last so explicit per-request kwargs override
         # the agent-level defaults.
         request_kwargs: dict[str, Any] = {
             "model": self._model,
-            "messages": to_openai_messages(messages),
+            "messages": provider_messages,
             "temperature": self._temperature,
             "top_p": self._top_p,
             "max_completion_tokens": capped_max,
-            "extra_body": {"chat_template_kwargs": {"enable_thinking": self._enable_thinking}},
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": self._enable_thinking and not recovering}},
             **self._kwargs,
         }
         if tools:
@@ -319,6 +621,10 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         reasoning: Optional[Reasoning] = None
         if hasattr(msg, "reasoning_content") and msg.reasoning_content:
             reasoning = Reasoning(content=msg.reasoning_content)
+        elif hasattr(msg, "reasoning") and msg.reasoning:
+            # vLLM >= 0.16.0 emits `reasoning` (Responses-API convention) instead of
+            # `reasoning_content`; e.g. DeepSeek-V4's `--reasoning-parser deepseek_v4`.
+            reasoning = Reasoning(content=msg.reasoning)
 
         tool_calls = [
             ToolCall(
@@ -328,6 +634,37 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
             )
             for tc in (msg.tool_calls or [])
         ]
+
+        # A call that exhausted its completion budget without a schema-valid
+        # tool call advanced the task by nothing. Parser-truncated calls often
+        # surface as ``code_exec({})``; treating their mere presence as progress
+        # creates a sticky invalid-call loop.
+        usable_tool_call = False
+        for tool_call in tool_calls:
+            tool = tools.get(tool_call.name)
+            if tool is None:
+                # We cannot safely validate an unknown provider-specific tool,
+                # so preserve the historical assumption that it made progress.
+                usable_tool_call = True
+                break
+            try:
+                tool.parameters.model_validate_json(tool_call.arguments or "{}")
+            except _PydanticValidationError:
+                continue
+            usable_tool_call = True
+            break
+
+        if choice.finish_reason in ("length", "max_tokens") and not usable_tool_call:
+            self._truncation_overruns += 1
+            self._recover_from_truncation = True
+            LOGGER.warning(
+                "completion budget (%d tokens) exhausted with no usable tool call [overrun #%d]; %s",
+                capped_max,
+                self._truncation_overruns,
+                "next turn will run with thinking disabled"
+                if self._truncation_recovery
+                else "truncation_recovery is off, retrying unchanged",
+            )
 
         return AssistantMessage(
             reasoning=reasoning,

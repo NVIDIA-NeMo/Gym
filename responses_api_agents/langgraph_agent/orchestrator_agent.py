@@ -24,7 +24,7 @@ Graph: decompose -> dispatch (loop per subtask) -> synthesize -> END
 import re
 from typing import Annotated, List, TypedDict
 
-from app import LangGraphAgentAdapter, LangGraphAgentConfig
+from app import LangGraphAgentAdapter, LangGraphAgentConfig, response_output_items
 from fastapi import Request
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, StateGraph
@@ -82,6 +82,7 @@ class OrchestratorVerifyResponse(BaseVerifyResponse):
 class OrchestratorState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     policy_outputs: list
+    policy_usages: list
     cookies: dict
     request_body: NeMoGymResponseCreateParamsNonStreaming
     last_policy_response: NeMoGymResponse
@@ -101,7 +102,7 @@ class OrchestratorAgent(LangGraphAgentAdapter):
 
     async def _call_model(self, state, prompt):
         input_messages = [NeMoGymEasyInputMessage(role="user", content=prompt)]
-        request_body = state["request_body"].model_copy(update={"input": input_messages + state["policy_outputs"]})
+        request_body = state["request_body"].model_copy(update={"input": input_messages})
         resp = await self.server_client.post(
             server_name=self.config.model_server.name,
             url_path="/v1/responses",
@@ -132,6 +133,7 @@ class OrchestratorAgent(LangGraphAgentAdapter):
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
                 "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
+                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
                 "cookies": cookies,
                 "last_policy_response": policy_response,
                 "request_body": state["request_body"],
@@ -154,6 +156,7 @@ class OrchestratorAgent(LangGraphAgentAdapter):
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
                 "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
+                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
                 "cookies": cookies,
                 "last_policy_response": policy_response,
                 "request_body": state["request_body"],
@@ -176,6 +179,7 @@ class OrchestratorAgent(LangGraphAgentAdapter):
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
                 "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
+                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
                 "cookies": cookies,
                 "last_policy_response": policy_response,
                 "request_body": state["request_body"],
@@ -210,6 +214,7 @@ class OrchestratorAgent(LangGraphAgentAdapter):
         return {
             "messages": [HumanMessage(content=task)],
             "policy_outputs": [],
+            "policy_usages": [],
             "cookies": cookies,
             "request_body": body,
             "last_policy_response": None,
@@ -220,7 +225,7 @@ class OrchestratorAgent(LangGraphAgentAdapter):
         }
 
     def extract_outputs(self, final_state: dict) -> list:
-        return final_state["policy_outputs"]
+        return response_output_items(final_state["policy_outputs"])
 
     async def run(self, request: Request, body: OrchestratorRunRequest) -> OrchestratorVerifyResponse:
         cookies = request.cookies

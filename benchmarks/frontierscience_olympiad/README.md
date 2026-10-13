@@ -36,20 +36,20 @@ example, the original Skills configuration uses `o3-mini-2025-01-31` via
 
 ```bash
 # Prepare benchmark data (downloads from HuggingFace)
-ng_prepare_benchmark "+config_paths=[benchmarks/frontierscience_olympiad/config.yaml]"
+gym eval prepare --benchmark frontierscience_olympiad
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/frontierscience_olympiad/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark frontierscience_olympiad
 
 # Collecting rollouts (4 rollouts per task, matching Skills' default)
-ng_collect_rollouts \
-    +agent_name=frontierscience_olympiad_frontierscience_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/frontierscience_olympiad/data/frontierscience_olympiad_benchmark.jsonl \
-    +prompt_config=benchmarks/frontierscience_olympiad/prompts/default.yaml \
-    +output_jsonl_fpath=results/frontierscience_olympiad_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent frontierscience_olympiad_frontierscience_judge_simple_agent \
+    --input benchmarks/frontierscience_olympiad/data/frontierscience_olympiad_benchmark.jsonl \
+    --prompt-config benchmarks/frontierscience_olympiad/prompts/default.yaml \
+    --output results/frontierscience_olympiad_rollouts.jsonl \
+    --num-repeats 4
 ```
 
 For Nemotron-3-Nano and other reasoning models, start vLLM with

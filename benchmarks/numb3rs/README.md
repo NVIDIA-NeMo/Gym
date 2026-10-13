@@ -54,7 +54,7 @@ row.
 ## Prepare benchmark data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/numb3rs/config.yaml]"
+gym eval prepare --benchmark numb3rs
 ```
 
 Downloads `nvidia/Numb3rs` (split=`test`), iterates the 12 categories,
@@ -64,18 +64,18 @@ combined `benchmarks/numb3rs/data/numb3rs_benchmark.jsonl`.
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/numb3rs/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark numb3rs
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=numb3rs_asr_with_pc_simple_agent \
-    +output_jsonl_fpath=results/numb3rs_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent numb3rs_asr_with_pc_simple_agent \
+    --output results/numb3rs_rollouts.jsonl \
+    --num-repeats 4
 ```
 
 ## Verification

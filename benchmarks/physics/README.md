@@ -12,7 +12,7 @@ expression, list, set, or option label.
 ## Prepare data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/physics/config.yaml]"
+gym eval prepare --benchmark physics
 ```
 
 `prepare.py` downloads the dataset, applies the same flatten-and-`\boxed{}`
@@ -24,9 +24,9 @@ transformation Skills uses for the multi-part answers, and writes
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/physics/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark physics
 ```
 
 > Reasoning-model note: start the policy vLLM server with
@@ -37,11 +37,11 @@ ng_run "+config_paths=[$config_paths]"
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=physics_physics_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/physics/data/physics_benchmark.jsonl \
-    +output_jsonl_fpath=results/physics_rollouts.jsonl \
-    +num_repeats=4 \
+gym eval run --no-serve \
+    --agent physics_physics_judge_simple_agent \
+    --input benchmarks/physics/data/physics_benchmark.jsonl \
+    --output results/physics_rollouts.jsonl \
+    --num-repeats 4 \
     +num_repeats_add_seed=true
 ```
 

@@ -37,23 +37,23 @@ holds only the dataset definition + prompt + prepare script.
 ```bash
 # Prepare benchmark data (downloads all three default splits;
 # default benchmark variant is random_span)
-ng_prepare_benchmark "+config_paths=[benchmarks/human_eval_infilling/config.yaml]"
+gym eval prepare --benchmark human_eval_infilling
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/human_eval_infilling/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark human_eval_infilling
 
 # Collecting rollouts. The +prompt_config= override is required because
 # the prepared JSONL stores raw rows (no `responses_create_params.input`);
-# ng_collect_rollouts does not pick up the `prompt_config:` field on the
-# dataset entry in config.yaml the way ng_run does.
-ng_collect_rollouts \
-    +agent_name=human_eval_infilling_simple_agent \
-    +input_jsonl_fpath=benchmarks/human_eval_infilling/data/random_span.jsonl \
-    +prompt_config=benchmarks/human_eval_infilling/prompts/default.yaml \
-    +output_jsonl_fpath=results/human_eval_infilling_rollouts.jsonl \
-    +num_repeats=1
+# gym eval run --no-serve does not pick up the `prompt_config:` field on the
+# dataset entry in config.yaml the way gym env start does.
+gym eval run --no-serve \
+    --agent human_eval_infilling_simple_agent \
+    --input benchmarks/human_eval_infilling/data/random_span.jsonl \
+    --prompt-config benchmarks/human_eval_infilling/prompts/default.yaml \
+    --output results/human_eval_infilling_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 ### Other splits
@@ -62,13 +62,13 @@ To benchmark a different split, point the resource server at it via the
 config and feed the matching prepared JSONL:
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=human_eval_infilling_simple_agent \
-    '++policy_model.resources_servers.code_fim.split=single_line' \
-    +input_jsonl_fpath=benchmarks/human_eval_infilling/data/single_line.jsonl \
-    +prompt_config=benchmarks/human_eval_infilling/prompts/default.yaml \
-    +output_jsonl_fpath=results/human_eval_infilling_single_line_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent human_eval_infilling_simple_agent \
+    --input benchmarks/human_eval_infilling/data/single_line.jsonl \
+    --prompt-config benchmarks/human_eval_infilling/prompts/default.yaml \
+    --output results/human_eval_infilling_single_line_rollouts.jsonl \
+    --num-repeats 1 \
+    '++policy_model.resources_servers.code_fim.split=single_line'
 ```
 
 Start vLLM with `--reasoning-parser <name>` (e.g. `deepseek_r1` for

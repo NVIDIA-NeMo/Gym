@@ -1,0 +1,15 @@
+# shared prompt for longmt (long machine translation) benchmarks.
+user: |
+  You are a professional translator.
+  Your task is to translate a long document from {source_lang_name} to {target_lang_name}.
+  Preserve the paragraph structure and ordering of the source text and keep the translation approximately aligned at the sentence level.
+  You may merge, split, or slightly reorder sentences, but you must keep the translation structurally close to the source.
+
+  Output only the translation, using only {target_lang_name}.
+  Do not ask questions. 
+  Do not add a preamble.
+  Do not add commentary.
+  Do not stop until the whole document is translated.
+
+  Source document:
+  {text}

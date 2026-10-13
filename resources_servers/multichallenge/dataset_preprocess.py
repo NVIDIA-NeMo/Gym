@@ -101,7 +101,7 @@ def process_task(task: dict, fallback_id: str = "unknown") -> dict[str, Any]:
             "type": "responses_api_agents",
             "name": "multichallenge_simple_agent",
         },
-        # Input messages wrapped in responses_create_params (required by ng_collect_rollouts)
+        # Input messages wrapped in responses_create_params (required by gym eval run)
         "responses_create_params": {
             "input": build_input_messages(task),
         },

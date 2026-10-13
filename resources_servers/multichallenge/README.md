@@ -6,17 +6,18 @@ Evaluates model responses on the **MultiChallenge** benchmark using an LLM judge
 
 ```bash
 # 1. Run unit tests
-ng_test +entrypoint=resources_servers/multichallenge
+gym env test --resources-server multichallenge
 
 # 2. Start servers (in terminal 1)
-config_paths="resources_servers/multichallenge/configs/multichallenge.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+  --resources-server multichallenge \
+  --model-type vllm_model
 
 # 3. Collect rollouts on example data (in terminal 2)
-ng_collect_rollouts \
-  +agent_name=multichallenge_simple_agent \
-  +input_jsonl_fpath=resources_servers/multichallenge/data/example.jsonl \
-  +output_jsonl_fpath=/tmp/multichallenge_rollouts.jsonl
+gym eval run --no-serve \
+  --agent multichallenge_simple_agent \
+  --input resources_servers/multichallenge/data/example.jsonl \
+  --output /tmp/multichallenge_rollouts.jsonl
 ```
 
 ## Overview
@@ -40,10 +41,10 @@ The `data/example.jsonl` file contains 3 synthetic tasks ready to use:
 
 ```bash
 # No preprocessing needed - just run
-ng_collect_rollouts \
-  +agent_name=multichallenge_simple_agent \
-  +input_jsonl_fpath=resources_servers/multichallenge/data/example.jsonl \
-  +output_jsonl_fpath=/tmp/test_rollouts.jsonl
+gym eval run --no-serve \
+  --agent multichallenge_simple_agent \
+  --input resources_servers/multichallenge/data/example.jsonl \
+  --output /tmp/test_rollouts.jsonl
 ```
 
 ### Option B: Full Dataset Setup
@@ -76,10 +77,10 @@ ng_collect_rollouts \
 
 2. **Run on full dataset**:
    ```bash
-   ng_collect_rollouts \
-     +agent_name=multichallenge_simple_agent \
-     +input_jsonl_fpath=resources_servers/multichallenge/data/advanced.jsonl \
-     +output_jsonl_fpath=/tmp/advanced_rollouts.jsonl
+   gym eval run --no-serve \
+     --agent multichallenge_simple_agent \
+     --input resources_servers/multichallenge/data/advanced.jsonl \
+     --output /tmp/advanced_rollouts.jsonl
    ```
 
 ## Testing
@@ -88,7 +89,7 @@ ng_collect_rollouts \
 
 ```bash
 # Run all unit tests
-ng_test +entrypoint=resources_servers/multichallenge
+gym env test --resources-server multichallenge
 
 # Or run directly with pytest for more detail
 cd resources_servers/multichallenge
@@ -105,17 +106,18 @@ Tests cover:
 
 1. **Start servers**:
    ```bash
-   config_paths="resources_servers/multichallenge/configs/multichallenge.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
-   ng_run "+config_paths=[${config_paths}]"
+   gym env start \
+     --resources-server multichallenge \
+     --model-type vllm_model
    ```
 
 2. **In another terminal, run on example data**:
    ```bash
-   ng_collect_rollouts \
-     +agent_name=multichallenge_simple_agent \
-     +input_jsonl_fpath=resources_servers/multichallenge/data/example.jsonl \
-     +output_jsonl_fpath=/tmp/multichallenge_rollouts.jsonl \
-     +limit=3
+   gym eval run --no-serve \
+     --agent multichallenge_simple_agent \
+     --input resources_servers/multichallenge/data/example.jsonl \
+     --output /tmp/multichallenge_rollouts.jsonl \
+     --limit 3
    ```
 
 3. **View results**:
@@ -240,7 +242,7 @@ Each line contains:
 Key transformations:
 - `thinking` role messages are excluded from input
 - `context` is pre-formatted for the LLM judge
-- `responses_create_params` wraps input for `ng_collect_rollouts`
+- `responses_create_params` wraps input for `gym eval run`
 
 ## File Structure
 

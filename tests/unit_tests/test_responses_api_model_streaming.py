@@ -1,0 +1,1251 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Tests for the streaming Responses dialect on ``SimpleResponsesAPIModel``.
+
+Every Gym model server's ``/v1/responses`` accepts the wire dialect streaming harnesses
+(e.g. the Codex CLI) speak: ``stream: true`` plus extra bookkeeping fields and ``namespace``
+tool specs. The request is sanitized onto the strict params model and the complete response
+is re-emitted as a synthesized SSE event stream. Non-streaming requests keep the historical
+strict-validation behavior.
+"""
+
+import json
+from time import time
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
+
+import pytest
+from aiohttp import ClientResponseError
+from fastapi import Body, HTTPException, Request
+from fastapi.testclient import TestClient
+from pydantic import TypeAdapter, ValidationError
+
+from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
+from nemo_gym.openai_utils import (
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputItem,
+)
+from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.responses_streaming import (
+    flatten_namespace_tools,
+    sanitize_streaming_responses_body,
+    synthesize_responses_failure_sse,
+    synthesize_responses_sse,
+    validate_streaming_responses_params,
+)
+from nemo_gym.server_utils import ServerClient
+
+
+def _build_response(output: list) -> NeMoGymResponse:
+    return NeMoGymResponse(
+        id=f"resp_{uuid4().hex}",
+        created_at=int(time()),
+        model="downstream-model",
+        object="response",
+        output=output,
+        tool_choice="auto",
+        parallel_tool_calls=True,
+        tools=[],
+        usage={
+            "input_tokens": 7,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 3,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 10,
+        },
+    )
+
+
+def _message_item(text: str) -> dict:
+    return {
+        "type": "message",
+        "id": f"msg_{uuid4().hex}",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+
+
+def _function_call_item(name: str) -> dict:
+    return {
+        "type": "function_call",
+        "id": "fc_1",
+        "call_id": "call_1",
+        "name": name,
+        "arguments": "{}",
+        "status": "completed",
+    }
+
+
+# Provide one minimal valid payload for each item type in ``NeMoGymResponseInputItem``.
+# Key payloads by type tag so the fixture coverage test can detect missing entries.
+ITEM_FIXTURES: dict[str, dict] = {
+    # Items the model generates.
+    "message": {
+        "type": "message",
+        "id": "msg_1",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "hello", "annotations": []}],
+    },
+    "reasoning": {
+        "type": "reasoning",
+        "id": "rs_1",
+        "status": "completed",
+        "summary": [{"type": "summary_text", "text": "thinking"}],
+    },
+    "function_call": {
+        "type": "function_call",
+        "id": "fc_1",
+        "call_id": "call_1",
+        "name": "get_weather",
+        "arguments": "{}",
+        "status": "completed",
+    },
+    "web_search_call": {
+        "type": "web_search_call",
+        "id": "ws_1",
+        "status": "completed",
+        "action": {"type": "search", "query": "weather"},
+    },
+    "file_search_call": {
+        "type": "file_search_call",
+        "id": "fs_1",
+        "status": "completed",
+        "queries": ["report"],
+    },
+    "computer_call": {
+        "type": "computer_call",
+        "id": "cu_1",
+        "call_id": "call_cu_1",
+        "status": "completed",
+        "action": {"type": "screenshot"},
+        "pending_safety_checks": [],
+    },
+    "custom_tool_call": {
+        "type": "custom_tool_call",
+        "id": "ct_1",
+        "call_id": "call_ct_1",
+        "name": "my_tool",
+        "input": "payload",
+    },
+    "local_shell_call": {
+        "type": "local_shell_call",
+        "id": "ls_1",
+        "call_id": "call_ls_1",
+        "status": "completed",
+        "action": {
+            "type": "exec",
+            "command": ["ls", "-la"],
+            "env": {},
+        },
+    },
+    "image_generation_call": {
+        "type": "image_generation_call",
+        "id": "ig_1",
+        "status": "completed",
+        "result": None,
+    },
+    "code_interpreter_call": {
+        "type": "code_interpreter_call",
+        "id": "ci_1",
+        "status": "completed",
+        "code": "print(1)",
+        "container_id": "cntr_1",
+        "outputs": None,
+    },
+    "mcp_call": {
+        "type": "mcp_call",
+        "id": "mcp_1",
+        "name": "search",
+        "arguments": "{}",
+        "server_label": "my_server",
+    },
+    "mcp_list_tools": {
+        "type": "mcp_list_tools",
+        "id": "mlt_1",
+        "server_label": "my_server",
+        "tools": [],
+    },
+    "mcp_approval_request": {
+        "type": "mcp_approval_request",
+        "id": "mar_1",
+        "name": "search",
+        "arguments": "{}",
+        "server_label": "my_server",
+    },
+    "shell_call": {
+        "type": "shell_call",
+        "id": "sh_1",
+        "call_id": "call_sh_1",
+        "status": "completed",
+        "action": {"type": "exec", "commands": ["ls -la"], "timeout_ms": 5000},
+    },
+    "apply_patch_call": {
+        "type": "apply_patch_call",
+        "id": "ap_1",
+        "call_id": "call_ap_1",
+        "status": "completed",
+        "operation": {"type": "create_file", "path": "a.py", "diff": "+print(1)"},
+    },
+    "tool_search_call": {
+        "type": "tool_search_call",
+        "id": "ts_1",
+        "arguments": {},
+        "execution": "server",
+        "status": "completed",
+    },
+    # Client-supplied tool results and approvals.
+    "function_call_output": {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "sunny",
+        "status": "completed",
+    },
+    "computer_call_output": {
+        "type": "computer_call_output",
+        "call_id": "call_cu_1",
+        "output": {"type": "computer_screenshot", "image_url": "data:image/png;base64,x"},
+    },
+    "custom_tool_call_output": {
+        "type": "custom_tool_call_output",
+        "call_id": "call_ct_1",
+        "output": "tool result",
+    },
+    "local_shell_call_output": {
+        "type": "local_shell_call_output",
+        "id": "lso_1",
+        "output": "total 0",
+    },
+    "mcp_approval_response": {
+        "type": "mcp_approval_response",
+        "approval_request_id": "mar_1",
+        "approve": True,
+    },
+    "shell_call_output": {
+        "type": "shell_call_output",
+        "id": "sho_1",
+        "call_id": "call_sh_1",
+        "status": "completed",
+        "output": [],
+    },
+    "apply_patch_call_output": {
+        "type": "apply_patch_call_output",
+        "id": "apo_1",
+        "call_id": "call_ap_1",
+        "status": "completed",
+    },
+    "tool_search_output": {
+        "type": "tool_search_output",
+        "id": "tso_1",
+        "execution": "server",
+        "status": "completed",
+        "tools": [],
+    },
+    "compaction_trigger": {
+        "type": "compaction_trigger",
+    },
+    "additional_tools": {
+        "type": "additional_tools",
+        "id": "at_1",
+        "role": "developer",
+        "tools": [],
+    },
+    # Context-compaction records.
+    "compaction": {
+        "type": "compaction",
+        "id": "cmp_1",
+        "encrypted_content": "opaque",
+    },
+}
+
+
+# These Responses item types have no Chat Completions representation.
+# ``ResponsesConverter.responses_to_chat_completion_create_params`` raises ``NotImplementedError`` for them.
+#
+# ``openai_model`` passes Responses requests through without conversion.
+# ``vllm_model`` and ``inference_provider`` convert requests to Chat Completions.
+CHAT_INCONVERTIBLE_TYPES = frozenset(
+    {
+        "code_interpreter_call",
+        "computer_call",
+        "custom_tool_call",
+        "file_search_call",
+        "image_generation_call",
+        "local_shell_call",
+        "mcp_approval_request",
+        "mcp_call",
+        "mcp_list_tools",
+        "web_search_call",
+        # Tool calls, tool results, and compaction records have no chat-message form.
+        "apply_patch_call",
+        "apply_patch_call_output",
+        "compaction",
+        "shell_call",
+        "shell_call_output",
+        "tool_search_call",
+        "tool_search_output",
+        # Client-supplied results, approvals, and tool definitions have no chat-message form.
+        "computer_call_output",
+        "custom_tool_call_output",
+        "local_shell_call_output",
+        "mcp_approval_response",
+        "compaction_trigger",
+        "additional_tools",
+    }
+)
+
+
+NAMESPACE_TOOL = {
+    "type": "namespace",
+    "name": "mcp__weather",
+    "description": "Tools in the mcp__weather namespace.",
+    "tools": [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get the weather.",
+            "strict": False,
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+        }
+    ],
+}
+
+
+class TestSanitizeStreamingBody:
+    @pytest.mark.parametrize("missing_id", [False, True])
+    @pytest.mark.parametrize("missing_annotations", [False, True])
+    def test_codex_compacted_message_replay_keeps_text_and_order(self, missing_id, missing_annotations) -> None:
+        text = "Summary line 1\n\n  Keep indentation, Unicode 雪, and literal \\n.\n"
+        message = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text}],
+        }
+        if not missing_id:
+            message["id"] = "msg_original"
+        if not missing_annotations:
+            message["content"][0]["annotations"] = []
+        body = {
+            "stream": True,
+            "input": [
+                {"role": "user", "content": "before"},
+                message,
+                {"role": "user", "content": "after"},
+            ],
+        }
+        original = json.loads(json.dumps(body))
+        cleaned, _ = sanitize_streaming_responses_body(body)
+        assert len(cleaned["input"]) == 3
+        actual = cleaned["input"][1]
+        assert actual == {**message, "id": actual["id"], "content": [{**message["content"][0], "annotations": []}]}
+        assert actual["id"].startswith("msg_") if missing_id else actual["id"] == "msg_original"
+        assert body == original
+        params = validate_streaming_responses_params(cleaned)
+        converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
+            params
+        )
+        assert converted.messages == [
+            {"role": "user", "content": "before"},
+            {"role": "assistant", "content": text},
+            {"role": "user", "content": "after"},
+        ]
+
+    @pytest.mark.parametrize("phase", ["commentary", "final_answer"])
+    def test_message_replay_keeps_supplied_id_annotations_and_phase(self, phase) -> None:
+        message = _message_item("Keep every character.\n")
+        message["phase"] = phase
+        message["content"][0]["annotations"] = [
+            {"type": "url_citation", "start_index": 0, "end_index": 4, "title": "Source", "url": "https://example.com"}
+        ]
+        cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [message]})
+        assert cleaned["input"] == [message]
+        params = validate_streaming_responses_params(cleaned)
+        actual = params.input[0].model_dump(mode="json", exclude_none=True)
+        assert actual == message
+        # Chat cannot express phase; preserving it must keep that explicit error.
+        with pytest.raises(NotImplementedError, match="phase has no Chat Completions representation"):
+            ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(params)
+
+    @pytest.mark.parametrize("provided_id", [None, "rs_original"])
+    def test_codex_reasoning_replay_survives_validation_and_chat_conversion(self, provided_id) -> None:
+        summary = "Inspect /app/arithmetic.py, fix multiply, and run Python checks.\n"
+        reasoning = {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": summary}],
+            "content": None,
+            "encrypted_content": None,
+        }
+        if provided_id is not None:
+            reasoning["id"] = provided_id
+        call = _function_call_item("exec_command")
+        result = {"type": "function_call_output", "call_id": call["call_id"], "output": "6"}
+        body = {"stream": True, "input": [{"role": "user", "content": "fix multiply"}, reasoning, call, result]}
+        original = json.loads(json.dumps(body))
+        cleaned, _ = sanitize_streaming_responses_body(body)
+        item_id = cleaned["input"][1]["id"]
+        assert item_id == provided_id if provided_id is not None else item_id.startswith("rs_")
+        assert cleaned["input"][1] == {**reasoning, "id": item_id}
+        assert body == original
+        params = validate_streaming_responses_params(cleaned)
+        assert params.input[1].summary[0].text == summary
+        converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
+            params
+        )
+        assert [message["role"] for message in converted.messages] == ["user", "assistant", "tool"]
+        assert converted.messages[1]["content"] == f"<think>{summary}</think>"
+        assert converted.messages[1]["tool_calls"][0]["id"] == call["call_id"]
+        assert converted.messages[1]["tool_calls"][0]["function"] == {
+            "name": call["name"],
+            "arguments": call["arguments"],
+        }
+        assert converted.messages[2] == {"role": "tool", "tool_call_id": call["call_id"], "content": "6"}
+
+    def test_reasoning_content_remains_available_for_responses_backends(self) -> None:
+        reasoning = {
+            "type": "reasoning",
+            "summary": [],
+            "content": [{"type": "reasoning_text", "text": "Known reasoning text"}],
+            "encrypted_content": "opaque-content",
+        }
+        cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [reasoning]})
+        params = validate_streaming_responses_params(cleaned)
+        actual = params.input[0].model_dump(mode="json")
+        assert actual == {**reasoning, "id": actual["id"]}
+
+    def test_drops_unknown_top_level_fields(self) -> None:
+        cleaned, _ = sanitize_streaming_responses_body(
+            {"input": [], "stream": True, "client_metadata": {"x": 1}, "prompt_cache_key": "abc", "store": False}
+        )
+        # `prompt_cache_key` is part of the request schema and survives.
+        # `client_metadata` is not part of the schema and is removed.
+        assert set(cleaned) == {"input", "store", "prompt_cache_key"}
+        # the cleaned body validates against the strict params model
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_keeps_replayed_assistant_message_without_annotations(self) -> None:
+        # A client replaying an output message it received may omit the annotations list (the
+        # Codex CLI does); the item must survive as the assistant turn it is, not be dropped.
+        item = {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Let me inspect the workload first."}],
+        }
+        cleaned, _ = sanitize_streaming_responses_body({"input": [item], "stream": True})
+        assert cleaned["input"] == [{**item, "content": [{**item["content"][0], "annotations": []}]}]
+        assert "annotations" not in item["content"][0]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_flattens_namespace_tools(self) -> None:
+        flat, ns_map = flatten_namespace_tools([NAMESPACE_TOOL])
+        assert len(flat) == 1
+        assert flat[0]["type"] == "function"
+        assert flat[0]["name"] == "mcp__weather__get_weather"
+        assert ns_map == {"mcp__weather__get_weather": ("mcp__weather", "get_weather")}
+
+    def test_sanitize_keeps_function_tools_and_flattens_namespaces(self) -> None:
+        function_tool = {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a command.",
+            "strict": False,
+            "parameters": {"type": "object", "properties": {}},
+        }
+        cleaned, ns_map = sanitize_streaming_responses_body(
+            {"input": [], "stream": True, "tools": [function_tool, NAMESPACE_TOOL]}
+        )
+        names = [t["name"] for t in cleaned["tools"]]
+        assert names == ["exec_command", "mcp__weather__get_weather"]
+        assert "mcp__weather__get_weather" in ns_map
+        params = NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+        assert len(params.tools) == 2
+
+    def test_drops_unsupported_tool_specs(self) -> None:
+        cleaned, _ = sanitize_streaming_responses_body(
+            {"input": [], "stream": True, "tools": [{"type": "totally_unknown_tool_kind", "config": 1}]}
+        )
+        assert cleaned["tools"] == []
+
+    HOSTED_TOOL_BODY = {
+        "input": [],
+        "stream": True,
+        "tools": [
+            {"type": "web_search"},
+            {"type": "function", "name": "exec_command", "parameters": {"type": "object"}, "strict": False},
+        ],
+    }
+
+    def test_keeps_hosted_tools_by_default(self) -> None:
+        # A hosted tool spec is a valid Responses tool, so it reaches a provider that serves it.
+        cleaned, _ = sanitize_streaming_responses_body(self.HOSTED_TOOL_BODY)
+
+        assert [tool["type"] for tool in cleaned["tools"]] == ["web_search", "function"]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_drops_hosted_tools_when_asked(self) -> None:
+        # Only the provider executes a hosted tool. With the switch on it is dropped, so a backend
+        # that serves none of them offers the model only the tools the client executes.
+        cleaned, _ = sanitize_streaming_responses_body(self.HOSTED_TOOL_BODY, drop_hosted_tools=True)
+
+        assert [tool["type"] for tool in cleaned["tools"]] == ["function"]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_drops_hosted_tools_keeps_custom_tools(self) -> None:
+        """The two tool switches are independent: a client-executed custom tool is not hosted."""
+        body = {
+            "input": [],
+            "stream": True,
+            "tools": [
+                {"type": "web_search"},
+                {"type": "custom", "name": "apply_patch", "description": "Apply a patch."},
+            ],
+        }
+
+        cleaned, _ = sanitize_streaming_responses_body(body, drop_hosted_tools=True)
+
+        assert [tool["type"] for tool in cleaned["tools"]] == ["custom"]
+
+    def test_drops_custom_tools_only_when_asked(self) -> None:
+        # A free-form custom tool converts to a Chat Completions custom tool, which a backend
+        # that expresses function tools only refuses; with the switch on it is dropped and the
+        # functions stay, and by default it is kept for backends that support it.
+        body = {
+            "input": [],
+            "stream": True,
+            "tools": [
+                {"type": "custom", "name": "apply_patch", "description": "Apply a patch."},
+                {"type": "function", "name": "exec_command", "parameters": {"type": "object"}, "strict": False},
+            ],
+        }
+        cleaned, _ = sanitize_streaming_responses_body(body, drop_custom_tools=True)
+        assert [tool["type"] for tool in cleaned["tools"]] == ["function"]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+        kept, _ = sanitize_streaming_responses_body(body)
+        assert [tool["type"] for tool in kept["tools"]] == ["custom", "function"]
+
+    def test_rewrites_namespaced_calls_in_input_history(self) -> None:
+        cleaned, _ = sanitize_streaming_responses_body(
+            {
+                "stream": True,
+                "input": [
+                    {
+                        "type": "function_call",
+                        "namespace": "mcp__weather",
+                        "name": "get_weather",
+                        "arguments": "{}",
+                        "call_id": "call_1",
+                    },
+                    {"type": "function_call_output", "call_id": "call_1", "output": "sunny"},
+                ],
+            }
+        )
+        call = cleaned["input"][0]
+        assert call["name"] == "mcp__weather__get_weather"
+        assert "namespace" not in call
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_drops_unsupported_input_items(self) -> None:
+        # Codex's code_mode interleaves an `additional_tools` carrier item into the input history;
+        # the Gym input union has no representation for it, so it is dropped item-by-item.
+        cleaned, _ = sanitize_streaming_responses_body(
+            {
+                "stream": True,
+                "input": [
+                    {"type": "additional_tools", "role": "developer", "tools": [{"type": "custom", "name": "exec"}]},
+                    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                ],
+            }
+        )
+        assert [i["type"] for i in cleaned["input"]] == ["message"]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_additional_tools_carrier_functions_hoisted_into_tools(self) -> None:
+        # Codex's code mode ships tools inside an `additional_tools` input item; plain and
+        # namespaced function tools are hoisted into `tools`, non-function tools are dropped.
+        cleaned, ns_map = sanitize_streaming_responses_body(
+            {
+                "stream": True,
+                "input": [
+                    {
+                        "type": "additional_tools",
+                        "role": "developer",
+                        "tools": [
+                            {"type": "custom", "name": "exec", "description": "JS orchestrator", "format": {}},
+                            {
+                                "type": "function",
+                                "name": "wait",
+                                "description": "Wait.",
+                                "strict": False,
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                            NAMESPACE_TOOL,
+                        ],
+                    },
+                    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                ],
+            }
+        )
+        names = [t["name"] for t in cleaned["tools"]]
+        assert "wait" in names
+        assert "mcp__weather__get_weather" in names
+        assert "exec" not in names
+        assert [i.get("type") for i in cleaned["input"]] == ["message"]
+        assert "mcp__weather__get_weather" in ns_map
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_hoists_leading_developer_messages_into_instructions(self) -> None:
+        # Codex may open with several developer messages and no `instructions`; strict chat
+        # backends admit a single leading system message, so they are hoisted into instructions.
+        cleaned, _ = sanitize_streaming_responses_body(
+            {
+                "stream": True,
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": "You are Codex."}],
+                    },
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": "<permissions>"}],
+                    },
+                    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                ],
+            }
+        )
+        assert cleaned["instructions"] == "You are Codex.\n\n<permissions>"
+        assert [i["role"] for i in cleaned["input"]] == ["user"]
+
+    def test_hoisting_prepends_existing_instructions(self) -> None:
+        cleaned, _ = sanitize_streaming_responses_body(
+            {
+                "stream": True,
+                "instructions": "base instructions",
+                "input": [
+                    {"type": "message", "role": "developer", "content": "perms"},
+                    {"type": "message", "role": "user", "content": "hi"},
+                ],
+            }
+        )
+        assert cleaned["instructions"] == "base instructions\n\nperms"
+
+    def test_mid_conversation_developer_messages_not_hoisted(self) -> None:
+        cleaned, _ = sanitize_streaming_responses_body(
+            {
+                "stream": True,
+                "input": [
+                    {"type": "message", "role": "user", "content": "hi"},
+                    {"type": "message", "role": "developer", "content": "mid-run steer"},
+                ],
+            }
+        )
+        assert "instructions" not in cleaned
+        assert [i["role"] for i in cleaned["input"]] == ["user", "developer"]
+
+    def test_does_not_mutate_caller_body(self) -> None:
+        body = {"input": [], "stream": True, "tools": [NAMESPACE_TOOL]}
+        sanitize_streaming_responses_body(body)
+        assert body["tools"] == [NAMESPACE_TOOL]
+        assert body["stream"] is True
+
+
+class TestValidateStreamingParams:
+    def test_prunes_nested_extra_fields(self) -> None:
+        # Drop unknown nested fields so the remaining request can validate.
+        # Use an unsupported field name so schema additions do not change the test.
+        params = validate_streaming_responses_params(
+            {"input": [], "reasoning": {"effort": "medium", "not_a_real_reasoning_field": "x"}}
+        )
+        assert params.reasoning == {"effort": "medium"}
+
+    def test_reasoning_context_is_forwarded_now_that_the_sdk_models_it(self) -> None:
+        # The SDK models `reasoning.context`, so the sanitizer preserves it.
+        params = validate_streaming_responses_params(
+            {"input": [], "reasoning": {"effort": "medium", "context": "all_turns"}}
+        )
+        assert params.reasoning == {"effort": "medium", "context": "all_turns"}
+
+    def test_unfixable_errors_still_raise(self) -> None:
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            validate_streaming_responses_params({"input": [], "temperature": "not-a-number"})
+
+
+class TestSynthesizeSSE:
+    def _events(self, sse_text: str) -> list[dict]:
+        events = []
+        for block in sse_text.split("\n\n"):
+            for line in block.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line[len("data: ") :]))
+        return events
+
+    def test_event_sequence(self) -> None:
+        response = _build_response([_message_item("hello")]).model_dump(mode="json")
+        events = self._events("".join(synthesize_responses_sse(response)))
+        assert [e["type"] for e in events] == ["response.created", "response.output_item.done", "response.completed"]
+        assert events[0]["response"]["status"] == "in_progress"
+        assert events[0]["response"]["output"] == []
+        assert events[1]["output_index"] == 0
+        assert events[1]["item"]["content"][0]["text"] == "hello"
+        completed = events[2]["response"]
+        assert completed["id"] == response["id"]
+        assert completed["usage"]["input_tokens"] == 7
+        assert len(completed["output"]) == 1
+
+    @pytest.mark.parametrize(
+        "status,details,error",
+        [
+            ("incomplete", {"reason": "max_output_tokens"}, None),
+            ("incomplete", {"reason": "content_filter"}, None),
+            ("failed", None, {"code": "server_error", "message": "Backend failed"}),
+        ],
+    )
+    def test_unsuccessful_terminal_preserves_partial_reasoning_and_usage(self, status, details, error) -> None:
+        partial = {**_message_item("Partial answer"), "status": "incomplete"}
+        response = _build_response([ITEM_FIXTURES["reasoning"], partial]).model_dump(mode="json")
+        response.update(status=status, incomplete_details=details, error=error)
+        original = json.loads(json.dumps(response))
+        events = self._events("".join(synthesize_responses_sse(response)))
+        assert [event["type"] for event in events] == [
+            "response.created",
+            "response.output_item.done",
+            "response.output_item.done",
+            f"response.{status}",
+        ]
+        assert events[1]["item"] == response["output"][0]
+        assert events[2]["item"]["status"] == "incomplete"
+        assert events[-1]["response"] == response
+        assert response == original
+
+    @pytest.mark.parametrize(
+        "details,expected",
+        [
+            (
+                {"input_tokens_details": {"cached_tokens": None}, "output_tokens_details": {"reasoning_tokens": None}},
+                {},
+            ),
+            ({"input_tokens_details": None, "output_tokens_details": None}, {}),
+            ({"input_tokens_details": {}, "output_tokens_details": {}}, {}),
+            (
+                {"input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": None}},
+                {"input_tokens_details": {"cached_tokens": 0}},
+            ),
+            (
+                {"input_tokens_details": {"cached_tokens": 4}, "output_tokens_details": {"reasoning_tokens": 2}},
+                {"input_tokens_details": {"cached_tokens": 4}, "output_tokens_details": {"reasoning_tokens": 2}},
+            ),
+        ],
+    )
+    def test_unknown_usage_details_use_wire_defaults_without_mutating_internal_counts(self, details, expected) -> None:
+        response = _build_response(
+            [ITEM_FIXTURES["reasoning"], _function_call_item("exec_command"), _message_item("done")]
+        ).model_dump(mode="json")
+        response["usage"].update(details)
+        original = json.loads(json.dumps(response))
+        events = self._events("".join(synthesize_responses_sse(response)))
+        expected_usage = {
+            "input_tokens": 7,
+            "output_tokens": 3,
+            "total_tokens": 10,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+            **expected,
+        }
+        assert events[0]["response"]["usage"] == expected_usage
+        assert events[-1]["response"]["usage"] == expected_usage
+        assert events[-1]["response"]["output"] == response["output"]
+        assert [event["item"] for event in events if event["type"] == "response.output_item.done"] == response[
+            "output"
+        ]
+        assert response == original
+
+    @pytest.mark.parametrize("usage", [None, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}])
+    def test_usage_without_details_is_preserved(self, usage) -> None:
+        response = _build_response([_message_item("done")]).model_dump(mode="json")
+        response["usage"] = usage
+        events = self._events("".join(synthesize_responses_sse(response)))
+        expected = (
+            usage
+            if usage is None
+            else {
+                **usage,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            }
+        )
+        assert events[-1]["response"]["usage"] == expected
+
+    def test_unknown_usage_details_are_integers_on_the_wire(self) -> None:
+        # Gym keeps an unreported cache/reasoning breakdown as None to tell unknown from zero, but
+        # the Responses wire schema types these counts as integers; a strict client (the Codex CLI)
+        # fails to parse a null in response.completed and re-sends the request.
+        response = _build_response([_message_item("hello")]).model_dump(mode="json")
+        response["usage"]["input_tokens_details"] = {"cached_tokens": None}
+        response["usage"]["output_tokens_details"] = None
+        events = self._events("".join(synthesize_responses_sse(response)))
+        for event in (events[0], events[-1]):
+            usage = event["response"]["usage"]
+            assert usage["input_tokens_details"]["cached_tokens"] == 0
+            assert usage["output_tokens_details"]["reasoning_tokens"] == 0
+            assert usage["input_tokens"] == 7
+
+    def test_namespaced_call_names_restored(self) -> None:
+        response = _build_response([_function_call_item("mcp__weather__get_weather")]).model_dump(mode="json")
+        ns_map = {"mcp__weather__get_weather": ("mcp__weather", "get_weather")}
+        events = self._events("".join(synthesize_responses_sse(response, ns_map)))
+        item = events[1]["item"]
+        assert item["namespace"] == "mcp__weather"
+        assert item["name"] == "get_weather"
+        # the terminal envelope carries the same rewritten item
+        assert events[2]["response"]["output"][0]["name"] == "get_weather"
+
+    def test_unmapped_calls_left_alone(self) -> None:
+        response = _build_response([_function_call_item("exec_command")]).model_dump(mode="json")
+        events = self._events("".join(synthesize_responses_sse(response, {"other__tool": ("other", "tool")})))
+        assert events[1]["item"]["name"] == "exec_command"
+        # Unmapped calls retain an unset `namespace` field.
+        assert events[1]["item"]["namespace"] is None
+
+    def test_failure_stream_is_terminal_response_failed(self) -> None:
+        events = self._events("".join(synthesize_responses_failure_sse("boom", code="server_error")))
+        assert [e["type"] for e in events] == ["response.created", "response.failed"]
+        failed = events[-1]["response"]
+        assert failed["status"] == "failed"
+        assert failed["error"] == {"code": "server_error", "message": "boom"}
+        assert failed["output"] == []
+
+
+# The streaming sanitizer intentionally removes these input item types.
+# The transcript preservation check excludes them.
+# For `additional_tools`, the sanitizer moves function definitions into `tools`.
+STREAMING_CONSUMED_TYPES = frozenset({"additional_tools"})
+
+
+def test_no_dead_entries_in_streaming_consumed_types() -> None:
+    """Require a fixture for every consumed item type.
+
+    The transcript test is parametrized over ``ITEM_FIXTURES``.
+    An entry without a fixture would not be tested.
+    """
+    suspicious = sorted(STREAMING_CONSUMED_TYPES - set(ITEM_FIXTURES))
+    assert not suspicious, (
+        f"{suspicious} are in STREAMING_CONSUMED_TYPES but have no fixture, so nothing checks that "
+        f"the sanitizer consumes them. Either the tag is a typo, or the type left the union."
+    )
+
+
+class _EchoModel(SimpleResponsesAPIModel):
+    """Fake model server capturing the params its responses() receives."""
+
+    config: BaseResponsesAPIModelConfig
+    last_params: object = None
+    model_config = {"arbitrary_types_allowed": True}
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        object.__setattr__(self, "last_params", body)
+        output = [_message_item("hi")]
+        if body.tools:
+            output.insert(0, _function_call_item(body.tools[0].get("name", "")))
+        return _build_response(output)
+
+    async def chat_completions(
+        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        raise NotImplementedError
+
+
+class _RequestAwareEchoModel(_EchoModel):
+    saw_request: bool = False
+
+    async def responses(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
+        object.__setattr__(self, "saw_request", isinstance(request, Request))
+        return await super().responses(body)
+
+
+class _FailingModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        raise RuntimeError("backend exploded")
+
+
+class _IncompleteModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        response = _build_response([ITEM_FIXTURES["reasoning"]]).model_dump(mode="json")
+        response.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+        return NeMoGymResponse.model_validate(response)
+
+
+class _HTTPErrorModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        raise HTTPException(status_code=400, detail={"error": {"code": "context_length_exceeded"}})
+
+
+def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
+    server = model_cls(
+        config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name=""),
+        server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+    )
+    return TestClient(server.setup_webserver()), server
+
+
+class TestResponsesDispatchRoute:
+    @pytest.mark.parametrize("phase", ["commentary", "final_answer"])
+    def test_streaming_message_keeps_id_annotations_and_phase(self, phase) -> None:
+        client, server = _client(_EchoModel)
+        message = _message_item("Keep this exact replay.\n")
+        message["phase"] = phase
+        message["content"][0]["annotations"] = [
+            {"type": "url_citation", "start_index": 0, "end_index": 4, "title": "Source", "url": "https://example.com"}
+        ]
+        response = client.post("/v1/responses", json={"stream": True, "input": [message]})
+        assert response.status_code == 200
+        assert "event: response.completed" in response.text
+        assert server.last_params.input[0].model_dump(mode="json", exclude_none=True) == message
+
+    @pytest.mark.parametrize(
+        "changes",
+        [
+            {"id": None},
+            {"id": []},
+            {"content": [{"type": "output_text", "text": "keep", "annotations": None}]},
+            {"content": [{"type": "output_text", "text": None}]},
+            {"content": [{"type": "output_text"}]},
+            {"content": [{"type": "unknown", "text": "keep"}]},
+            {"phase": "unknown"},
+            {"status": "unknown"},
+            {"role": "developer", "content": [{"type": "input_text", "text": None}]},
+            {"role": "user", "content": None},
+        ],
+    )
+    def test_malformed_streaming_message_fails_before_backend(self, changes) -> None:
+        client, server = _client(_EchoModel)
+        message = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "keep"}]}
+        response = client.post("/v1/responses", json={"stream": True, "input": [{**message, **changes}]})
+        assert response.status_code == 422
+        assert server.last_params is None
+        assert response.json()["detail"][0]["loc"][0] == "body"
+
+    def test_streaming_model_length_limit_is_not_a_completed_event(self) -> None:
+        client, _ = _client(_IncompleteModel)
+        response = client.post("/v1/responses", json={"stream": True, "input": "task"})
+        assert response.status_code == 200
+        assert "event: response.completed" not in response.text
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        assert events[-1]["type"] == "response.incomplete"
+        terminal = events[-1]["response"]
+        assert terminal["status"] == "incomplete"
+        assert terminal["incomplete_details"] == {"reason": "max_output_tokens"}
+        assert terminal["usage"]["total_tokens"] == 10
+        assert terminal["output"][0]["summary"][0]["text"] == "thinking"
+
+    def test_streaming_codex_reasoning_replay_keeps_history(self) -> None:
+        client, server = _client(_EchoModel)
+        reasoning = {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "Inspect multiply"}],
+            "content": None,
+            "encrypted_content": None,
+        }
+        response = client.post("/v1/responses", json={"stream": True, "input": [reasoning]})
+        assert response.status_code == 200
+        assert len(server.last_params.input) == 1
+        assert server.last_params.input[0].summary[0].text == "Inspect multiply"
+        assert server.last_params.input[0].id.startswith("rs_")
+
+    @pytest.mark.parametrize(
+        "reasoning",
+        [
+            {"summary": None},
+            {},
+            {"summary": [{"type": "unknown", "text": "Do not drop this"}]},
+            {"summary": [], "id": None},
+            {"summary": [], "content": ["Do not drop this"]},
+            {"summary": [], "encrypted_content": {"opaque": "Do not drop this"}},
+        ],
+    )
+    def test_malformed_streaming_reasoning_fails_before_backend(self, reasoning) -> None:
+        client, server = _client(_EchoModel)
+        response = client.post("/v1/responses", json={"stream": True, "input": [{"type": "reasoning", **reasoning}]})
+        assert response.status_code == 422
+        assert server.last_params is None
+        assert response.json()["detail"][0]["loc"][0] == "body"
+
+    def test_non_streaming_request_returns_plain_json(self) -> None:
+        client, server = _client(_EchoModel)
+        resp = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hi"}]})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
+        assert resp.json()["output"][-1]["content"][0]["text"] == "hi"
+        assert server.last_params.input[0].content == "hi"
+
+    def test_non_streaming_request_still_validates_strictly(self) -> None:
+        client, _ = _client(_EchoModel)
+        resp = client.post("/v1/responses", json={"input": [], "client_metadata": {"x": 1}})
+        assert resp.status_code == 422
+        assert resp.json()["detail"][0]["loc"][0] == "body"
+
+    def test_streaming_request_returns_synthesized_sse(self) -> None:
+        client, server = _client(_EchoModel)
+        resp = client.post(
+            "/v1/responses",
+            json={
+                "stream": True,
+                "client_metadata": {"cli": "codex"},
+                "prompt_cache_key": "abc",
+                "input": [{"role": "user", "content": "hi"}],
+                "tools": [NAMESPACE_TOOL],
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        assert "event: response.completed" in resp.text
+        # the server saw sanitized params: flattened tools, no bookkeeping fields
+        assert server.last_params.tools[0]["name"] == "mcp__weather__get_weather"
+        # and the synthesized items restore the namespaced call shape
+        done_events = [line for line in resp.text.splitlines() if '"response.output_item.done"' in line]
+        first_item = json.loads(done_events[0][len("data: ") :])["item"]
+        assert first_item["namespace"] == "mcp__weather"
+        assert first_item["name"] == "get_weather"
+
+    def test_streaming_request_aware_signature(self) -> None:
+        client, server = _client(_RequestAwareEchoModel)
+        resp = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
+        assert resp.status_code == 200
+        assert server.saw_request is True
+
+    def test_streaming_invalid_body_is_422(self) -> None:
+        client, _ = _client(_EchoModel)
+        resp = client.post("/v1/responses", json={"stream": True})  # no input at all
+        assert resp.status_code == 422
+
+    def test_streaming_backend_error_yields_response_failed(self) -> None:
+        # Non-HTTP failures retain the terminal response.failed fallback.
+        client, _ = _client(_FailingModel)
+        resp = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        assert "event: response.failed" in resp.text
+        assert "event: response.completed" not in resp.text
+        failed = [line for line in resp.text.splitlines() if line.startswith("data: ") and "response.failed" in line]
+        payload = json.loads(failed[0][len("data: ") :])
+        assert payload["response"]["status"] == "failed"
+        assert "backend exploded" in payload["response"]["error"]["message"]
+
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize(
+        "status,content_type,content",
+        [
+            (400, "application/json", b'{"error":{"code":"context_length_exceeded"}}'),
+            (429, "application/json", b'{"error":{"code":"rate_limit_exceeded"}}'),
+            (502, "text/plain", b"Upstream unavailable"),
+        ],
+    )
+    def test_upstream_http_error_is_preserved_before_stream_starts(
+        self, stream: bool, status: int, content_type: str, content: bytes
+    ) -> None:
+        error = ClientResponseError(
+            MagicMock(), (), status=status, message="upstream failed", headers={"Content-Type": content_type}
+        )
+        error.response_content = content
+        with patch.object(_EchoModel, "responses", AsyncMock(side_effect=error)):
+            client, _ = _client(_EchoModel)
+            response = client.post("/v1/responses", json={"input": "task", "stream": stream})
+        assert response.status_code == status
+        assert response.headers["content-type"].split(";")[0] == content_type
+        assert response.content == content
+
+    def test_streaming_http_exception_keeps_its_status(self) -> None:
+        # An HTTPException is a status the server chose to return; it is raised before the
+        # stream is committed, so it is not converted into a response.failed event.
+        client, _ = _client(_HTTPErrorModel)
+        resp = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
+        assert resp.status_code == 400
+        assert resp.json() == {"detail": {"error": {"code": "context_length_exceeded"}}}
+
+    def test_non_streaming_backend_error_still_raises(self) -> None:
+        # Without the streaming contract, a backend failure is a normal exception (HTTP 500), not a
+        # synthesized response.failed — only the stream path swallows it into a terminal event.
+        client, _ = _client(_FailingModel)
+        with pytest.raises(RuntimeError, match="backend exploded"):
+            client.post("/v1/responses", json={"input": [{"role": "user", "content": "hi"}]})
+
+
+class TestUnionItemTypesThroughDispatch:
+    """Verify item handling on streaming and non-streaming dispatch paths.
+
+    A plain JSON request validates strictly.
+    A ``stream: true`` request goes through ``sanitize_streaming_responses_body`` first.
+    The sanitizer validates each input item separately.
+    It drops invalid items with a warning.
+    This behavior allows unknown harness data without rejecting the entire request.
+    """
+
+    _ADAPTER = TypeAdapter(NeMoGymResponseInputItem)
+
+    @staticmethod
+    def _union_tags() -> set[str]:
+        """The ``type`` tags NeMoGymResponseInputItem accepts."""
+        from typing import Annotated, Literal, get_args, get_origin
+
+        def unwrap(annotation):
+            while get_origin(annotation) is Annotated:
+                annotation = get_args(annotation)[0]
+            return annotation
+
+        tags: set[str] = set()
+        for member in (unwrap(a) for a in get_args(unwrap(NeMoGymResponseInputItem))):
+            field = getattr(member, "model_fields", {}).get("type")
+            if field is None:
+                continue
+            annotation = field.annotation
+            if get_origin(annotation) is Literal:
+                tags.update(str(v) for v in get_args(annotation))
+        return tags
+
+    def test_every_union_tag_has_a_fixture(self) -> None:
+        """Require a fixture for every union member."""
+        missing = sorted(self._union_tags() - set(ITEM_FIXTURES))
+        assert not missing, (
+            f"NeMoGymResponseInputItem accepts {missing} but ITEM_FIXTURES has no payload for "
+            f"them, so the tests below skip those types. Add a minimal valid payload."
+        )
+
+    @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
+    def test_fixture_is_a_valid_union_member(self, tag: str) -> None:
+        """Require every fixture to validate as a union member."""
+        try:
+            self._ADAPTER.validate_python(ITEM_FIXTURES[tag])
+        except ValidationError as exc:  # pragma: no cover - only on a bad fixture
+            pytest.fail(f"ITEM_FIXTURES[{tag!r}] does not validate against the union: {exc}")
+
+    @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
+    def test_streaming_does_not_drop_representable_items(self, tag: str) -> None:
+        """Preserve each representable item in the transcript sent to the backend."""
+        client, server = _client(_EchoModel)
+        history = [
+            {"role": "user", "content": "first turn"},
+            ITEM_FIXTURES[tag],
+            {"role": "user", "content": "second turn"},
+        ]
+        response = client.post("/v1/responses", json={"input": history, "stream": True})
+        assert response.status_code == 200
+
+        seen = server.last_params.input
+        if tag in STREAMING_CONSUMED_TYPES:
+            assert len(seen) == len(history) - 1, (
+                f"{tag!r} is declared as consumed by the sanitizer, but it survived the streaming "
+                f"path. Remove it from STREAMING_CONSUMED_TYPES."
+            )
+            return
+        assert len(seen) == len(history), (
+            f"a {tag!r} item was dropped from the streaming transcript: sent {len(history)} input "
+            f"items, backend received {len(seen)}. Check the warning from "
+            f"sanitize_streaming_responses_body."
+        )
+        assert getattr(seen[1], "type", None) == tag
+
+    @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
+    def test_both_dispatch_paths_accept_representable_items(self, tag: str) -> None:
+        """Streamed and non-streamed agree for every type Gym can represent."""
+        client, _ = _client(_EchoModel)
+        body = {"input": [{"role": "user", "content": "hi"}, ITEM_FIXTURES[tag]]}
+
+        non_streaming = client.post("/v1/responses", json=body)
+        streaming = client.post("/v1/responses", json={**body, "stream": True})
+
+        assert non_streaming.status_code == 200, (
+            f"{tag!r} is in the union but the non-streaming path rejected it: {non_streaming.text[:400]}"
+        )
+        assert streaming.status_code == 200
+
+    def test_unrepresentable_input_item_is_dropped_when_streaming_and_rejected_otherwise(self) -> None:
+        """Verify the different handling of unrepresentable input items.
+
+        Non-streaming requests reject an item type with no union member.
+        Streaming requests drop the item.
+        """
+        client, server = _client(_EchoModel)
+        unknown = {"type": "definitely_not_a_responses_item_type", "id": "x_1"}
+        body = {"input": [{"role": "user", "content": "hi"}, unknown]}
+
+        assert client.post("/v1/responses", json=body).status_code == 422
+
+        streaming = client.post("/v1/responses", json={**body, "stream": True})
+        assert streaming.status_code == 200
+        assert len(server.last_params.input) == 1, "the unknown item should have been dropped"
+
+    @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
+    def test_union_type_is_chat_convertible_or_declared_inconvertible(self, tag: str) -> None:
+        """Classify each union type by whether Chat Completions can represent it.
+
+        The union says what Gym can carry.
+        The converter supports a subset of those item types.
+        Unsupported types raise ``NotImplementedError`` during conversion.
+        """
+        converter = ResponsesConverter(return_token_id_information=False)
+        params = NeMoGymResponseCreateParamsNonStreaming(input=[ITEM_FIXTURES[tag]])
+        try:
+            converter.responses_to_chat_completion_create_params(params)
+            convertible = True
+        except NotImplementedError:
+            convertible = False
+
+        if tag in CHAT_INCONVERTIBLE_TYPES:
+            assert not convertible, (
+                f"{tag!r} is listed in CHAT_INCONVERTIBLE_TYPES but the chat converter now handles "
+                f"it. Remove it from that list."
+            )
+        else:
+            assert convertible, (
+                f"{tag!r} is in the Gym union but responses_to_chat_completion_create_params "
+                f"raises NotImplementedError for it, so a model server that downconverts to Chat "
+                f"Completions (vllm_model, inference_provider) fails mid-rollout on it.\n"
+                f"Fix: add a `case {tag!r}` to responses_to_chat_completion_create_params, or add "
+                f"{tag!r} to CHAT_INCONVERTIBLE_TYPES to declare it Responses-only."
+            )
+
+    @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
+    def test_params_survive_a_dump_and_revalidate(self, tag: str) -> None:
+        """Require accepted parameters to validate again after ``model_dump``.
+
+        Servers forward a request by re-validating ``**body.model_dump()``.
+        SDK models and their corresponding ``*Param`` types may accept different values.
+        Re-validation must accept every value emitted by the first validation.
+        """
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[ITEM_FIXTURES[tag]],
+            tools=[{"type": "function", "name": "f", "parameters": {}, "strict": None}],
+        )
+        dumped = params.model_dump()
+        try:
+            NeMoGymResponseCreateParamsNonStreaming(**dumped)
+        except ValidationError as exc:
+            pytest.fail(
+                f"a {tag!r} item survives validation but not a dump/re-validate round trip: {exc.errors()[:2]}"
+            )
+
+    def test_chat_inconvertible_list_has_no_stale_entries(self) -> None:
+        """Require each type unsupported by Chat Completions to belong to the input union."""
+        stale = sorted(CHAT_INCONVERTIBLE_TYPES - self._union_tags())
+        assert not stale, f"CHAT_INCONVERTIBLE_TYPES names types the union does not accept: {stale}"

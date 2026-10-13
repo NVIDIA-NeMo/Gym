@@ -32,19 +32,19 @@ For each verification request, the agent's JSON output is validated through mult
 The following command can be used to run this resources server, along with the simple agent and a policy model:
 
 ```bash
-config_paths="resources_servers/terminus_judge/configs/terminus_judge.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-
-ng_run "+config_paths=[$config_paths]" \
+gym env start \
+  --resources-server terminus_judge \
+  --model-type openai_model \
   +terminus_judge_resources_server.resources_servers.terminus_judge.judge_responses_create_params.max_output_tokens=512
 ```
 
 Then, rollouts can be collected using a command such as the following:
 
 ```bash
-ng_collect_rollouts +agent_name=terminus_judge_simple_agent \
-    +input_jsonl_fpath=resources_servers/terminus_judge/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/terminus_judge/example_rollouts.jsonl
+gym eval run --no-serve \
+    --agent terminus_judge_simple_agent \
+    --input resources_servers/terminus_judge/data/example.jsonl \
+    --output resources_servers/terminus_judge/example_rollouts.jsonl
 ```
 
 ## Expected Data Format

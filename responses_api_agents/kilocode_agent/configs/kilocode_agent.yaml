@@ -1,0 +1,42 @@
+kilocode_agent:
+  responses_api_agents:
+    kilocode_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      # Kilo's model calls go through this Gym model server, so they are captured and the backend is
+      # swappable (vLLM, OpenAI, an inference provider) without touching this config. The agent
+      # registers `model` under a `nemo` provider pointed at the server. To call a provider directly
+      # instead, set this to null and declare the provider in kilo_config (see README).
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Environment-specific; declared here so configs that _inherit_from this one can override it.
+      datasets: null
+      concurrency: 8
+      command: kilo
+      model: ${policy_model_name}
+      openai_api_key: ""
+      openai_base_url: null
+      env: {}
+      workspace_root: outputs/kilocode_agent/workspaces
+      repo_dir: null
+      thinking: false
+      system_prompt: null
+      setup_timeout: 900
+      timeout: 900
+      extra_args: []
+      # written to kilo.json in the run dir (OpenCode-compatible config schema)
+      kilo_config:
+        permission:
+          bash: allow
+          edit: allow
+          webfetch: allow
+      # Sized for a 32k-window model server. Raise both together for a larger one; raising
+      # max_output_tokens past what the window leaves after kilo's ~10k-token system prompt makes runs
+      # come back empty (see README).
+      context_window: 32768
+      max_output_tokens: 8192
+      reasoning_field: reasoning_content
+      kilo_version: 7.4.15

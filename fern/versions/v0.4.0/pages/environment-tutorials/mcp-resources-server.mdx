@@ -1,0 +1,244 @@
+---
+title: "MCP Resources Server"
+description: "Expose tools to an agent over the Model Context Protocol (MCP) and verify their use, with a runnable Claude Code example"
+position: 5
+---
+import { NavButton } from "../../../../components/NavButton";
+
+This tutorial shows how to expose environment tools over the **Model Context Protocol (MCP)** so that an MCP-native agent — such as Claude Code — can discover and call them, while the Resources Server still owns verification. The pattern is: **MCP tool implementations + a `verify()` function = a Resources Server.**
+
+<NavButton href="/environment-tutorials/stateful-environment" label="Stateful Environment" direction="prev" />
+
+---
+
+## Two ways to combine MCP with a Resources Server
+
+There are two distinct integration shapes, and they need different amounts of plumbing:
+
+| Flow | When | What you build |
+|---|---|---|
+| **Gym-owned MCP server** | You want the tools *and* their verification to live in Gym, with per-rollout session isolation | Subclass `MCPResourcesServer` — Gym mounts a Streamable-HTTP MCP endpoint at `/mcp` on the same app as `/seed_session` and `/verify` |
+| **Existing / external MCP server** | The MCP server already runs outside Gym (a third-party or shared service) | Point the agent at it directly with a static `mcp_config`; write a plain `SimpleResourcesServer.verify()` that scores the resulting trajectory |
+
+The rest of this page builds the **Gym-owned** flow (the one that needs new infrastructure) and then explains the **external** flow at the end.
+
+<Info>
+**Why a Gym-owned MCP server at all?** Mounting the MCP endpoint inside the Resources Server lets a tool call be bound to the *same per-rollout session* as `/seed_session` and `/verify`. That is what makes "was this tool actually used in this episode?" a verifiable, isolated question. An external MCP server can't offer that — Gym can't observe its calls — so external-server verification has to work off the agent's trajectory instead.
+</Info>
+
+---
+
+## What You'll Build
+
+A weather environment with a single MCP tool, `get_weather(city)`. The agent must call the tool and then answer with exactly the sentence the tool returned. The Resources Server rewards the rollout only if the tool was called **in this session** and the final answer contains the returned sentence.
+
+### Episode Flow
+
+```text
+Goal
+  - Learn MCP tool usage bound to a Gym session: call an MCP tool, then answer using its result.
+
+Inputs
+  - seed input: expected_city (e.g., "Paris")
+
+Flow (the MCP endpoint and /verify share one session_id)
+  1) Agent -> ResourcesServer POST /seed_session {"verifier_metadata": {"expected_city": "Paris"}}
+     - returns hidden MCP metadata: a per-rollout X-NeMo-Gym-Session-Token bound to this session_id
+  2) Agent writes a per-rollout mcp_config and launches Claude Code with --mcp-config
+  3) Claude Code -> ResourcesServer POST /mcp  (tools/call get_weather, carrying the token header)
+     - the tool resolves the token back to session_id and records the call
+  4) Agent -> ResourcesServer POST /verify {"verifier_metadata": {"expected_city": "Paris"}, "response": ...}
+     - reward = 1.0 iff the tool was called in this session AND the answer contains the sentence
+```
+
+---
+
+## Implementation
+
+The base class `MCPResourcesServer` (in `nemo_gym/base_resources_server.py`) mounts the MCP endpoint and manages the per-rollout token. You write a **`@gym_tool` method** (your tool), a `seed_session()` that returns the MCP metadata so the agent can connect, and a `verify()` that scores the rollout.
+
+**File ([`resources_servers/example_mcp_weather/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_mcp_weather/app.py)):**
+
+```python
+# simplified
+from typing import Any, Optional
+
+from fastapi import Request
+from pydantic import ConfigDict, Field
+
+from nemo_gym.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    MCPResourcesServer,
+    MCPServerMetadata,
+    gym_tool,
+)
+from nemo_gym.server_utils import SESSION_ID_KEY
+
+
+def _weather_sentence(city: str) -> str:
+    return f"The weather in {city} is sunny and 72 F."
+
+
+class ExampleMCPWeatherResourcesServerConfig(BaseResourcesServerConfig):
+    pass
+
+
+class ExampleMCPWeatherSeedSessionRequest(BaseSeedSessionRequest):
+    model_config = ConfigDict(extra="allow")
+    # Task ground truth travels in verifier_metadata, e.g. {"expected_city": "Paris"}.
+    verifier_metadata: Optional[dict[str, Any]] = None
+
+
+# seed_session returns the MCP metadata under the `mcp` key
+class ExampleMCPWeatherSeedSessionResponse(BaseSeedSessionResponse):
+    mcp: MCPServerMetadata
+
+
+class ExampleMCPWeatherVerifyRequest(BaseVerifyRequest):
+    model_config = ConfigDict(extra="allow")
+    verifier_metadata: Optional[dict[str, Any]] = None
+
+
+class ExampleMCPWeatherResourcesServer(MCPResourcesServer):
+    config: ExampleMCPWeatherResourcesServerConfig
+    session_id_to_state: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+    async def seed_session(
+        self, request: Request, body: ExampleMCPWeatherSeedSessionRequest
+    ) -> ExampleMCPWeatherSeedSessionResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        expected_city = (body.verifier_metadata or {}).get("expected_city", "Paris")
+        self.session_id_to_state[session_id] = {"expected_city": expected_city, "weather_calls": []}
+        # build_mcp_session_metadata() mints a per-rollout token bound to this session_id
+        return ExampleMCPWeatherSeedSessionResponse(mcp=self.build_mcp_session_metadata(request))
+
+    # Decorate a method with @gym_tool and it is auto-registered as an MCP tool named `get_weather`.
+    # Declare a `session_id: str` param to receive the Gym session; it is injected from the per-rollout
+    # token and hidden from the tool's input schema, so the model only sees `city`.
+    @gym_tool
+    def get_weather(self, session_id: str, city: str) -> str:
+        """Get a deterministic weather report for a city."""
+        state = self.session_id_to_state.setdefault(session_id, {"weather_calls": []})
+        weather = _weather_sentence(city)
+        state["weather_calls"].append({"city": city, "weather": weather})
+        return weather
+
+    async def verify(
+        self, request: Request, body: ExampleMCPWeatherVerifyRequest
+    ) -> BaseVerifyResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        state = self.session_id_to_state.get(session_id, {"weather_calls": []})
+        expected_city_value = (body.verifier_metadata or {}).get("expected_city", "Paris")
+        expected_city = expected_city_value.casefold()
+        expected = _weather_sentence(expected_city_value)
+        # reward iff the tool was called for this city in this session AND the final answer repeats it
+        # (match case-insensitively, so a correct call/answer that used different casing still counts)
+        tool_called = any(str(c.get("city", "")).casefold() == expected_city for c in state["weather_calls"])
+        final_text = _extract_assistant_text(body)  # join the assistant message text from body.response
+        reward = float(tool_called and expected.casefold() in final_text.casefold())
+        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+
+
+if __name__ == "__main__":
+    ExampleMCPWeatherResourcesServer.run_webserver()
+```
+
+### Key Pattern
+
+Writing a tool is just decorating a method:
+
+1. **`@gym_tool`** — mark a method and the base class auto-registers it as an MCP tool (name = method name), mounted at `/mcp` (Streamable HTTP). The MCP input schema is derived from the method's typed parameters. To receive the Gym session, declare a **`session_id: str`** parameter — it is injected from the per-rollout token and **hidden** from the tool's input schema (the model only sees the real args). Omit it for a stateless tool. A missing/invalid token raises `MCPSessionError`, which — because MCP runs over JSON-RPC — FastMCP surfaces to the client as a tool error (`isError: true`) on an HTTP 200 response, not an HTTP status code. Both sync and async methods work. Tool names may not collide with reserved endpoints (`verify`, `seed_session`, `aggregate_metrics`, `mcp`), and a tool must **not** take a `request` parameter (there is no FastAPI `Request` on the MCP path — use `session_id`).
+2. **`build_mcp_session_metadata(request)`** — call this from `seed_session` and return it under the response's `mcp` key. It mints the one-time `X-NeMo-Gym-Session-Token` bound to the current `session_id`.
+
+> Need full control (e.g. a hand-written `@mcp.tool()` with custom schema)? Override `register_mcp_tools(self, mcp)` — call `super().register_mcp_tools(mcp)` first to keep the auto-registered `@gym_tool` ones.
+
+<Note>
+`MCPResourcesServer` disables the MCP SDK's default DNS-rebinding protection (`TransportSecuritySettings(enable_dns_rebinding_protection=False)`). That protection only accepts loopback `Host` headers and returns HTTP `421` otherwise — which would break multi-node / `use_absolute_ip=True` deployments where the agent reaches the server by a routable host. The endpoint is instead protected by the per-rollout session token. You don't need to set this yourself; the base class handles it.
+</Note>
+
+---
+
+## Wiring the agent (Claude Code)
+
+The [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) reads the `mcp` metadata from `/seed_session`, writes a per-rollout `gym_mcp_config.json`, and launches Claude Code with `--mcp-config`. The generated config looks like:
+
+```json
+{
+  "mcpServers": {
+    "example_mcp_weather": {
+      "type": "http",
+      "url": "http://<resources-server-host>:<port>/mcp",
+      "headers": { "X-NeMo-Gym-Session-Token": "<per-rollout-token>" }
+    }
+  }
+}
+```
+
+A minimal config (`resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml`) wires the server and the agent together:
+
+```yaml
+example_mcp_weather:
+  resources_servers:
+    example_mcp_weather:
+      entrypoint: app.py
+      domain: agent
+
+example_mcp_weather_claude_code_agent:
+  responses_api_agents:
+    claude_code_agent:
+      entrypoint: app.py
+      resources_server: { type: resources_servers, name: example_mcp_weather }
+      model: claude-sonnet-4-6
+      anthropic_api_key: ${anthropic_api_key}
+      datasets:
+        - { name: example, type: example, jsonl_fpath: resources_servers/example_mcp_weather/data/example.jsonl }
+```
+
+### Run it
+
+Put your key in a repo-root `env.yaml` (the config above interpolates `${anthropic_api_key}`):
+
+```yaml
+anthropic_api_key: sk-ant-...
+```
+
+Then start the servers:
+
+```bash
+gym env start --config resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml
+```
+
+Then collect rollouts against the `example` dataset and reward-profile as in the [quickstart](/get-started/quickstart). A correct rollout shows Claude Code calling `mcp__example_mcp_weather__get_weather` and a `reward` of `1.0`.
+
+<Tip>
+To watch the MCP round-trip without a full `gym env start`, start the Resources Server on its own and drive `/seed_session → /mcp tools/call → /verify` directly (a `requests.Session` preserves the session cookie). This is also the fastest way to confirm the endpoint is reachable from another host.
+</Tip>
+
+---
+
+## Pointing at an existing / external MCP server
+
+If the MCP server already runs outside Gym, the agent talks to it **directly** — you do not need an `MCPResourcesServer`. Give the agent a static `mcp_config` pointing at the external server, and write a plain `SimpleResourcesServer.verify()` that scores the agent's trajectory:
+
+```yaml
+my_external_mcp_agent:
+  responses_api_agents:
+    claude_code_agent:
+      entrypoint: app.py
+      resources_server: { type: resources_servers, name: my_verifier }   # a SimpleResourcesServer with verify()
+      mcp_config: /abs/path/to/external_mcp_config.json                  # static config passed via --mcp-config
+```
+
+Things to know about this flow:
+
+- **No cookie/session entanglement.** Gym's session cookie flows only between the agent server and the Resources Server (`/seed_session` ↔ `/verify`). The agent-to-external-MCP connection is a separate channel with its own auth (whatever `headers` you put in the static config). They don't interfere.
+- **Verify off the trajectory.** Gym can't observe the external server's calls, so `verify()` must score the `function_call` / `function_call_output` items in the agent's Responses-API output — not server-side session state.
+- **Static + per-rollout compose.** When both are present, the agent merges your static `mcp_config` with the per-rollout Gym-owned entry, so a single rollout can use external tools *and* a Gym-owned MCP server at once. If a static server happens to share the **same name** as the Gym resources server, the per-rollout Gym entry takes precedence and overwrites it.
+
+---
+
+<NavButton href="/environment-tutorials/real-world-environment" label="Real-World Environment" direction="next" />
