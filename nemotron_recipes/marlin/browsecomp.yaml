@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# BrowseComp (web-browsing agent): all 1266 questions, one sample each. The model searches
+# the web through Exa, reads the pages it finds and answers; a judge model (GLM-5.1) compares
+# the answer with the reference. Reported: mean/reward, the fraction judged correct.
+#
+#   nemotron_recipes/marlin/run.sh browsecomp
+#
+# Set in .env: EXA_API_KEY, JUDGE_API_KEY
+#
+# Needs an Exa API key (EXA_API_KEY; env.yaml -> exa_api_key) and the judge endpoint in
+# env.yaml (judge_base_url, judge_api_key) serving GLM-5.1 on Chat Completions. The run uses
+# Exa's "deep" search, which costs more per query than its default; the published run made
+# about 33 searches per question. run.sh first sources browsecomp.setup.sh.
+
+# Gym commit the published number was produced with; run.sh pins to it.
+gym_commit: 0a287243543020c1cc23f76f6004fcf3c83fc4a9
+benchmark_config: benchmarks/browsecomp/config.yaml
+
+# Judge: GLM-5.1, the benchmark's own judge, on your endpoint. Set browsecomp_judge_model_name
+# in env.yaml only if your provider serves it under a different id.
+judge_model:
+  responses_api_models:
+    vllm_model:
+      base_url: ${judge_base_url}
+      api_key: ${judge_api_key}
+      model: ${oc.select:browsecomp_judge_model_name,zai-org/GLM-5.1}
+
+browsecomp_benchmark_resources_server:
+  resources_servers:
+    browsecomp_advanced_harness:
+      exa_api_key: ${oc.select:exa_api_key,null}
+      # Exa's multi-step research search, as the published run used (Gym's default is auto).
+      exa_search_type: deep
+      # Domains search skips: the NVIDIA opt-out registry the published run used (same 47
+      # domains). Absolute path from browsecomp.setup.sh: the server runs in its own directory.
+      exclude_domains_file_path: ${oc.env:BROWSECOMP_EXCLUDE_DOMAINS}
+
+browsecomp_benchmark_agent:
+  responses_api_agents:
+    browsecomp_agent:
+      # Counts prompt tokens through vLLM's /tokenize before each call; off, as in the
+      # published run, so any OpenAI-compatible endpoint works.
+      save_model_call_using_vllm_tokenize_endpoint: false

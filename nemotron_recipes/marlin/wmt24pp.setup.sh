@@ -16,12 +16,13 @@
 # Sourced by run.sh before `gym eval prepare`. Gym runs the xCOMET-XXL scorer as Ray workers
 # and expects a separate scoring machine; these lines let it score on this machine's GPUs.
 
-# GPUs for xCOMET-XXL: those in CUDA_VISIBLE_DEVICES if set, else every GPU with 60 GB free.
+# GPUs for xCOMET-XXL: those in CUDA_VISIBLE_DEVICES if set, else every GPU with 75 GB free
+# (list GPUs with less in CUDA_VISIBLE_DEVICES to use them).
 if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
   CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=uuid,memory.free --format=csv,noheader,nounits \
-    | awk -F', ' '$2 >= 60000 {print $1}' | paste -sd, -)
+    | awk -F', ' '$2 >= 75000 {print $1}' | paste -sd, -)
   [ -n "$CUDA_VISIBLE_DEVICES" ] || {
-    echo "wmt24pp: no GPU with 60 GB free for xCOMET-XXL; set CUDA_VISIBLE_DEVICES" >&2; exit 1; }
+    echo "wmt24pp: no GPU with 75 GB free for xCOMET-XXL; set CUDA_VISIBLE_DEVICES" >&2; exit 1; }
   export CUDA_VISIBLE_DEVICES
 fi
 echo "wmt24pp: xCOMET-XXL scores on CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"

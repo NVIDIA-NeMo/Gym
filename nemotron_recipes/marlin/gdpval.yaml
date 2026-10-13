@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# GDPval-AA v2 (agentic): 220 real-world work tasks (reports, spreadsheets, slide decks, ...).
+# The model works as Gym's Stirrup agent, up to 250 turns per task, in a sandbox where it can run
+# code, read and write files and search the web; its result is a set of files, the deliverable.
+#
+#   nemotron_recipes/marlin/run.sh gdpval
+#
+# Set in .env: TAVILY_API_KEY, JUDGE_API_KEY
+#
+# Two ways to score (gdpval.setup.sh picks one):
+#   * rubric (default): judges score each deliverable against the task's rubric. Needs no
+#     reference deliverables, but it is not the published metric.
+#   * comparison (the published metric): judges compare each deliverable with a reference
+#     model's deliverable for the same task, and an ELO is fitted against references of known
+#     rating, in two stages (first all references on 45 tasks, then the 4 nearest on all 220).
+#     Set GDPVAL_REFS to a directory with one subdirectory of reference deliverables per
+#     reference model, named as in gdpval.setup.sh (<GDPVAL_REFS>/<name>/task_<id>/...). You
+#     generate them yourself by running each reference model through this benchmark with
+#     EXECUTE_ONLY=true and an absolute PERSIST_DELIVERABLES_DIR. The published number is
+#     comparison/stage_1/eval_elo (the last stage).
+#
+# Needs, beyond env.yaml and .env (details: reproducibility.md, "GDPval-AA v2"):
+#   * Root, or a container where you are root: the sandbox starts with --home /root, and the
+#     scoring server apt-installs LibreOffice on startup to convert Office files for the judges.
+#   * Apptainer, and the sandbox image built from Gym's definition at this commit (several GB,
+#     tens of minutes), from the Gym repo root after run.sh has pinned it once:
+#       (cd responses_api_agents/stirrup_agent/containers && \
+#        apptainer build --fakeroot "$PWD/gdpval.sif" gdpval.def)
+#     then export GDPVAL_CONTAINER_PATH=<path to gdpval.sif>. On aarch64, five pinned packages
+#     that ship only x86_64 wheels are left out (see gdpval_aa_v2_arm64_exclusions.txt).
+#   * TAVILY_API_KEY for the agent's web search: one key, or '[key1,key2]' to rotate.
+#   * One judge endpoint (judge_base_url, judge_api_key in env.yaml) that serves all three
+#     panel judges below on <judge_base_url>/chat/completions; one is sampled per judge call.
+#     If it names them differently, set gdpval_judge_gpt_model, gdpval_judge_gemini_model and
+#     gdpval_judge_claude_model in env.yaml.
+#
+# PARALLEL sets both Gym's and the agent's concurrency (the published run used 220; 32 by
+# default). A full comparison run takes hours and makes about a thousand judge calls.
+# LIMIT works in rubric mode; a comparison run needs every stage's tasks.
+#
+# The dataset is not pinned to a revision: Gym loads the latest openai/gdpval, which had 220
+# tasks when the published number was produced.
+
+# Gym commit the published number was produced with; run.sh pins to it. It is on the branch of
+# Gym pull request #3333, not on main: run.sh fetches it by its id.
+gym_commit: df3e201d942f6397def1ec8c10037d29115fcbbd
+# Gym benchmark config this recipe builds on.
+benchmark_config: benchmarks/gdpval/config.yaml
+
+gdpval_judge_model:
+  responses_api_models:
+    openai_model:
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${oc.select:gdpval_judge_gemini_model,gemini-3.1-pro-preview}
+      # As in the published run.
+      max_concurrent_requests: 10
+
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      # The published run's panel. It also set handles_audio_video on Gemini, which is not a
+      # field at this commit and was ignored, so no judge read audio or video natively (the
+      # benchmark default lets Gemini read both). Lists are replaced, not merged.
+      judge_panel:
+      - name: gpt-5.5
+        model: ${oc.select:gdpval_judge_gpt_model,gpt-5.5}
+        create_params_overrides: {reasoning_effort: medium}
+      - name: gemini-3.1-pro
+        model: ${oc.select:gdpval_judge_gemini_model,gemini-3.1-pro-preview}
+        create_params_overrides: {extra_body: {reasoning_effort: high}}
+      - name: claude-opus-4.8
+        model: ${oc.select:gdpval_judge_claude_model,claude-opus-4-8}
+        create_params_overrides: {extra_body: {thinking: {type: enabled}}}
+      # Reproducible judge sampling, as in the published run (default: per-task only).
+      judge_sampling_seed: 42
+      num_comparison_trials: 4
+      persist_raw_judge_responses: true
+      preconvert_max_concurrent: 30
+
+gdpval_stirrup_agent:
+  responses_api_agents:
+    stirrup_agent:
+      agent_max_turns: 250
+      tavily_api_key: ${oc.env:TAVILY_API_KEY,null}
+
+# Two-stage ELO for comparison mode (gdpval.setup.sh enables it), as in the published run.
+multistage:
+  enabled: false
+  retry_inprocess: true
+  stages:
+  - num_tasks: 45
+    partial_completion:
+      min_success_fraction: 0.9
+      min_per_reference_success_fraction: 0.5
+      min_successful_rows_per_reference: 1
+      waivable_failure_classes: [timeout_exceeded, transient]
+      tolerate_unresolved: true
+  - num_tasks: 220
+    num_models: 4

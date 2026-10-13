@@ -17,6 +17,8 @@
 #
 #   nemotron_recipes/marlin/run.sh gpqa
 #
+# Set in .env: HF_TOKEN
+#
 # Needs HF_TOKEN (gated dataset; accept the terms on the Hub first).
 
 # Gym commit the published number was produced with; run.sh pins to it.

@@ -18,6 +18,8 @@
 #
 #   nemotron_recipes/marlin/run.sh apex-shortlist
 #
+# Set in .env: nothing beyond the shared keys (see .env.example).
+#
 # The dataset is not pinned to a revision: Gym loads the latest MathArena/apex-shortlist,
 # which had 47 problems when the published number was produced. A different problem count
 # means a different problem set.

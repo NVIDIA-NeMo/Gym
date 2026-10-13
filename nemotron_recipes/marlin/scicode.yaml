@@ -18,19 +18,11 @@
 # Reported: subtask accuracy (sub-steps that pass) and problem accuracy (problems whose
 # sub-steps all pass).
 #
-#   nemotron_recipes/marlin/run.sh scicode
+# Needs SciCode's ~1 GB test_data.h5, pointed at by TEST_DATA (reproducibility.md, "SciCode"):
 #
-# Needs SciCode's test_data.h5 (~1 GB): the reference values the test cases compare against.
-# Gym does not download it. Get it from the official SciCode Google Drive folder
-# (https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR) and save it as
-# benchmarks/scicode/data/test_data.h5 under the Gym repo root, e.g. from the repo root:
+#   TEST_DATA=/path/to/test_data.h5 nemotron_recipes/marlin/run.sh scicode
 #
-#   uv run --with gdown gdown --folder \
-#       https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR -O benchmarks/scicode/data
-#   sha256sum benchmarks/scicode/data/test_data.h5
-#   # 48b0272a88b17dbd29777c217e1b4fb2b019b92e11cc2add847409db9541b890
-#
-# Without the file the scoring server stops at startup.
+# Set in .env: TEST_DATA
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: e446e4f415b9cde0e95bb813c85e9e3e23f5d893
@@ -54,6 +46,9 @@ scicode_benchmark_agent:
 scicode_benchmark_resources_server:
   resources_servers:
     scicode:
+      # The numeric reference values the test cases are checked against (scicode.setup.sh
+      # checks the file is readable).
+      test_data_fpath: ${oc.env:TEST_DATA}
       # Each sub-step's code may run for up to 300 s against its test cases (default 30 s).
       timeout_secs: 300
 

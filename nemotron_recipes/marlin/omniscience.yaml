@@ -20,6 +20,8 @@
 #
 #   nemotron_recipes/marlin/run.sh omniscience
 #
+# Set in .env: JUDGE_API_KEY
+#
 # Needs the judge endpoint in env.yaml (judge_base_url, judge_api_key) and JUDGE_API_KEY in
 # your shell. The endpoint must serve gpt-5.6-luna on <judge_base_url>/chat/completions and
 # accept Gym's judge request as it is: max_tokens 32768, temperature 0.0 and top_p 1.0 next

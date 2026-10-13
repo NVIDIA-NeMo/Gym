@@ -19,6 +19,8 @@
 #
 #   nemotron_recipes/marlin/run.sh hle
 #
+# Set in .env: HF_TOKEN, JUDGE_API_KEY
+#
 # Needs HF_TOKEN (gated dataset; accept the terms on the Hub first), the judge endpoint in
 # env.yaml (judge_base_url, judge_api_key) and JUDGE_API_KEY in your shell; the endpoint
 # must serve gpt-5.6-luna on the Responses API (Gym posts to <judge_base_url>/responses).

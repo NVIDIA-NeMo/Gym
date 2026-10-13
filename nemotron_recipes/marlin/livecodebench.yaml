@@ -18,6 +18,8 @@
 # rollout scores 1 only if every test passes.
 #
 #   nemotron_recipes/marlin/run.sh livecodebench
+#
+# Set in .env: nothing beyond the shared keys (see .env.example).
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d

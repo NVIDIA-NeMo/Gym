@@ -20,10 +20,12 @@
 #
 #   nemotron_recipes/marlin/run.sh swebench-multilingual
 #
+# Set in .env: OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY, OPENCODE_DIR
+#
 # Runs in OpenSandbox, the sandbox the published run used (NVIDIA's hosted instance), self-hosted
-# on your machine: README.md has the setup, including the firewall rule it needs. Serve the model
-# with --enable-auto-tool-choice --tool-call-parser qwen3_coder as well as
-# --reasoning-parser nemotron_v3.
+# on your machine: reproducibility.md has the setup. Serve the model with
+# --enable-auto-tool-choice --tool-call-parser qwen3_coder as well as --reasoning-parser
+# nemotron_v3.
 
 gym_commit: 1e668906d2e69a9e8ee9aaafc60050a4025d9688
 benchmark_config:
@@ -52,3 +54,20 @@ default_host: 172.17.0.1
 # Tasks at once; PARALLEL overrides it. Each task is a container on your machine, so this stays
 # low. The published run used 1024 on NVIDIA's cluster.
 num_samples_in_parallel: 16
+
+# OpenCode comes from your own copy (OPENCODE_DIR in .env; reproducibility.md has the download),
+# as in the published run, not downloaded inside each task container: many task images have no
+# curl. Both folders are mounted read-only into every sandbox.
+swebench_multilingual_opencode_resources_server:
+  resources_servers:
+    swebench:
+      sandbox_config:
+        provider_options:
+          volumes:
+            - {name: opencode, host: {path: "${oc.env:OPENCODE_DIR}"}, mount_path: /opt/opencode, read_only: true}
+            - {name: recipes, host: {path: "${oc.env:RECIPES_DIR}"}, mount_path: /opt/recipes, read_only: true}
+swebench_multilingual_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      remote_opencode_install_script_path: /opt/recipes/install-opencode.sh
+      remote_opencode_binary_path: /opt/opencode/glibc/opencode

@@ -19,9 +19,12 @@
 #
 #   nemotron_recipes/marlin/run.sh wmt24pp
 #
-# Scoring runs xCOMET-XXL (43 GB) on this machine's GPUs, one copy per GPU: about 60 GB free per
-# GPU (80 GB GPUs). It uses the GPUs in CUDA_VISIBLE_DEVICES, or every GPU with that much free
-# memory if it is unset. On Slurm it is set to all your job's GPUs, so point it at the GPUs vLLM does not use.
+# Set in .env: HF_TOKEN
+#
+# Scoring runs xCOMET-XXL on this machine's GPUs, one copy per GPU: 43 GB of weights plus room
+# for the batch (comet_batch_size below). By default it uses every GPU with 75 GB free; to
+# include GPUs with less, list the GPUs to use in CUDA_VISIBLE_DEVICES. On Slurm it is set to
+# all your job's GPUs, so point it at the GPUs vLLM does not use.
 # run.sh first sources wmt24pp.setup.sh, which sets this up and downloads the model once (gated
 # on the Hugging Face Hub: accept its terms, and set HF_TOKEN).
 
@@ -40,8 +43,8 @@ wmt24pp_wmt_translation_resources_server:
   resources_servers:
     wmt_translation:
       compute_comet: true
-      # Translations per scoring call. The published run used 128 on 186 GB GPUs; 16 needs about
-      # 53 GB per GPU instead of 140 GB and gives the same scores, only more slowly.
+      # Translations per scoring call: changes memory per GPU, not scores. The published run
+      # used 128; lower it if scoring runs out of memory.
       comet_batch_size: 16
       # The published run turned the per-answer language check off (benchmark default: CLD2).
       language_consistency_backend: null

@@ -20,9 +20,11 @@
 #
 #   nemotron_recipes/marlin/run.sh critpt
 #
+# Set in .env: ARTIFICIAL_ANALYSIS_API_KEY
+#
 # Needs ARTIFICIAL_ANALYSIS_API_KEY (https://artificialanalysis.ai/documentation#critpt-api):
-# one key, or '[key1,key2]' to switch keys when one hits its rate limit. A full run makes 5
-# grading calls, and AA limits each key per day (10 calls per 24 h on the free tier).
+# one key, or '[key1,key2]' to switch keys when one is rate-limited. A full run makes 5
+# grading calls.
 #
 # Serve the model with a context length (--max-model-len) that fits the prompt plus 245,760
 # output tokens: each turn asks for that many. vLLM rejects a turn that does not fit the

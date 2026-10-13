@@ -19,6 +19,8 @@
 #
 #   nemotron_recipes/marlin/run.sh ifbench
 #
+# Set in .env: nothing beyond the shared keys (see .env.example).
+#
 # The dataset is not pinned to a revision: Gym downloads IFBench_test.jsonl from the main
 # branch of github.com/allenai/IFBench, which had 300 prompts when the published number was
 # produced. A different prompt count means a different prompt set.

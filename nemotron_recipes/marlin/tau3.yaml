@@ -20,6 +20,8 @@
 #
 #   nemotron_recipes/marlin/run.sh tau3
 #
+# Set in .env: SIM_KEY
+#
 # Needs the simulator endpoint in env.yaml (judge_base_url, user_simulator_api_key) and
 # SIM_KEY in your shell; the endpoint must serve gpt-5.4-mini-2026-03-17 on
 # <judge_base_url>/chat/completions. Gym builds the tau2 agent's venv on the first run.

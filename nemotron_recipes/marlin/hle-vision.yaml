@@ -19,6 +19,8 @@
 #
 #   nemotron_recipes/marlin/run.sh hle-vision
 #
+# Set in .env: HF_TOKEN, JUDGE_API_KEY
+#
 # The dataset is not pinned: Gym loads the latest cais/hle test split (2500 questions when the
 # published number was produced).
 

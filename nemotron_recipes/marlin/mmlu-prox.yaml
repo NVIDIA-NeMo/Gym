@@ -20,6 +20,8 @@
 #
 #   nemotron_recipes/marlin/run.sh mmlu-prox
 #
+# Set in .env: nothing beyond the shared keys (see .env.example).
+#
 # The dataset is not pinned to a revision: Gym loads the latest li-lab/MMLU-ProX, which had
 # 117,590 questions for these languages when the published number was produced.
 

@@ -20,5 +20,5 @@ OSWORLD_VM_DIR="${OSWORLD_VM_DIR:-$PWD/docker_vm_data}"
 VM_DIR="$OSWORLD_VM_DIR" bash benchmarks/osworld/tools/prepare_osworld_vm.sh
 export OSWORLD_VM_PATH="$OSWORLD_VM_DIR/Ubuntu.qcow2"
 # Absolute paths for osworld.yaml: the agent server runs in its own directory.
-export OSWORLD_TASKS="$PWD/benchmarks/osworld/data/test_nogdrive.jsonl"
+export OSWORLD_TASKS="$PWD/$RECIPES/osworld_tasks.jsonl"
 export OSWORLD_SETUP_CACHE="$PWD/benchmarks/osworld/.cache/setup"

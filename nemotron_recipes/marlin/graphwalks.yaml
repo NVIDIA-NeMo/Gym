@@ -20,6 +20,8 @@
 #
 #   nemotron_recipes/marlin/run.sh graphwalks
 #
+# Set in .env: nothing beyond the shared keys (see .env.example).
+#
 # run.sh first sources graphwalks.setup.sh, which installs the tokenizer packages prepare
 # needs.
 #

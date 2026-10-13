@@ -28,14 +28,17 @@
 #
 # Results land in ./results/<recipe>. Run without arguments to list the recipes.
 #
-# The pin overwrites and deletes tracked files (never the recipes), so commit or stash your
-# work first; `git restore . && uv sync` puts your checkout back. Set PIN_GYM=0 to run
-# against your current checkout instead, or GYM_PIN=<sha> to use a different commit.
+# The pin overwrites and deletes files (never the recipes) and changes your venv, so run the
+# recipes from a separate copy of Gym (a fresh clone, or `git worktree add`), one recipe at a
+# time per copy. Set PIN_GYM=0 to run against your current checkout instead, or
+# GYM_PIN=<sha> to use a different commit.
 
 set -euo pipefail
 
 RECIPES=nemotron_recipes/marlin
 [ -d "$RECIPES" ] || { echo "run this from the Gym repo root" >&2; exit 1; }
+# Absolute path, for recipes that mount files from here into their sandboxes (SWE-bench).
+export RECIPES_DIR="$PWD/$RECIPES"
 
 BENCH="${1:-}"
 if [ -z "$BENCH" ]; then

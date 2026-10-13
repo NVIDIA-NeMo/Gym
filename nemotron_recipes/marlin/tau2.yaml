@@ -18,6 +18,8 @@
 #
 #   nemotron_recipes/marlin/run.sh tau2
 #
+# Set in .env: SIM_KEY
+#
 # Needs the simulator endpoint in env.yaml (judge_base_url, user_simulator_api_key) and SIM_KEY in
 # your shell; the endpoint must serve Qwen3-235B-A22B-Instruct-2507-FP8 on
 # <judge_base_url>/chat/completions. Gym installs the tau2 code and data from

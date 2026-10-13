@@ -20,6 +20,8 @@
 #
 #   nemotron_recipes/marlin/run.sh aa-lcr
 #
+# Set in .env: JUDGE_API_KEY
+#
 # Needs the judge endpoint in env.yaml (judge_base_url, judge_api_key) and JUDGE_API_KEY in
 # your shell; the endpoint must serve gpt-5.6-luna through the OpenAI Responses API
 # (<judge_base_url>/responses). The benchmark config pins the dataset
