@@ -203,6 +203,18 @@ def sanitize_streaming_responses_body(
                 # Supply only that missing identifier; retain malformed reasoning
                 # for strict request validation instead of losing model history.
                 item.setdefault("id", f"rs_{uuid4().hex}")
+                # Port of 43c21135: replayed reasoning may lack ``summary``; the Chat downconversion
+                # reads reasoning text from ``summary`` only, so fill it from reasoning_text content.
+                if item.get("summary") is None:
+                    item["summary"] = []
+                if not item["summary"] and isinstance(item.get("content"), list):
+                    texts = [
+                        part.get("text")
+                        for part in item["content"]
+                        if isinstance(part, dict) and part.get("type") == "reasoning_text" and part.get("text")
+                    ]
+                    if texts:
+                        item["summary"] = [{"type": "summary_text", "text": "\n".join(texts)}]
                 kept_items.append(item)
                 continue
             if isinstance(item, dict) and item.get("type") == "function_call" and item.get("namespace"):
