@@ -251,10 +251,15 @@ class SandboxSession[Artifacts]:
         except Exception as error:
             if not self.owns_sandbox and not isinstance(error, HarnessTerminationError):
                 raise
-            # A negative receipt is final: retrying cannot confirm termination.
-            # Never capture it as a successful run, but release the borrowed
-            # client so Resources can perform authoritative sandbox teardown.
-            LOG.exception("%s harness termination failed; leaving teardown to the sandbox owner", self.harness)
+            if self.owns_sandbox:
+                LOG.exception("%s session finalization failed; stopping owned sandbox", self.harness)
+            else:
+                # A negative receipt is final: retrying cannot confirm termination.
+                # Release the borrowed client so Resources can tear down the sandbox.
+                LOG.exception(
+                    "%s harness termination unconfirmed; releasing borrowed session for Resources teardown",
+                    self.harness,
+                )
             if not self._capture_attempted:
                 self.capture_error = error
         if self.owns_sandbox:

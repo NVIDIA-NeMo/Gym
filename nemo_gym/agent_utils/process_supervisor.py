@@ -132,6 +132,10 @@ def _supervise(
             if process is not None:
                 # Natural wrapper exit can also leave foreground tool children
                 # running. Stop the whole group before capture or verification.
+                # Compatibility: `server &` or `nohup` may leave task services
+                # in this group, so they can be killed before verification.
+                # Audit real service-launching tasks before assuming compatibility;
+                # controls with explicitly detached services do not cover this case.
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
