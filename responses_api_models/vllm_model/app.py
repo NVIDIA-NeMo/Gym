@@ -31,12 +31,12 @@ from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.base_responses_api_model import (
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
-    CONTEXT_OVERFLOW_ERROR_ATTRIBUTE,
-    CONTEXT_OVERFLOW_ERROR_CODE_ATTRIBUTE,
+    PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
     BaseResponsesAPIModelConfig,
     Body,
     SimpleResponsesAPIModel,
     context_overflow_error_fields,
+    is_propagated_refusal,
     start_model_execution,
 )
 from nemo_gym.openai_utils import (
@@ -133,18 +133,18 @@ def _is_context_length_error(error: ClientResponseError) -> bool:
 
 
 def _mark_propagated_overflow(error: ClientResponseError) -> None:
-    """Mark a length refusal the server propagates, and choose the envelope code for it.
+    """Mark a length refusal the server propagates, with the envelope code chosen for it.
 
     A body that names the context window gets OpenAI's ``context_length_exceeded``, which tells
     an OpenAI-compatible harness to compact its history and retry. A body that only names the
     output-token parameter gets no code: compaction would not help, so the harness sees an
-    ordinary invalid request with the engine's own message.
+    ordinary invalid request with the engine's own message. The attribute's presence is the mark,
+    so the ``None`` code marks the error all the same.
     """
     message = error.response_content.decode(errors="replace")
-    setattr(error, CONTEXT_OVERFLOW_ERROR_ATTRIBUTE, True)
     setattr(
         error,
-        CONTEXT_OVERFLOW_ERROR_CODE_ATTRIBUTE,
+        PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
         CONTEXT_LENGTH_EXCEEDED_ERROR_CODE if _names_context_window(message) else None,
     )
 
@@ -465,7 +465,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         # marked length refusal is let through to the middleware below, which answers with
         # OpenAI's envelope instead: vLLM's body carries the integer code 400, which
         # OpenAI-compatible harnesses cannot match against "context_length_exceeded".
-        return not getattr(error, CONTEXT_OVERFLOW_ERROR_ATTRIBUTE, False)
+        return not is_propagated_refusal(error)
 
     def setup_exception_middleware(self, app) -> None:
         @app.middleware("http")
@@ -473,7 +473,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             try:
                 return await call_next(request)
             except ClientResponseError as error:
-                if getattr(error, CONTEXT_OVERFLOW_ERROR_ATTRIBUTE, False):
+                if is_propagated_refusal(error):
                     # The engine's message and param are preserved verbatim inside OpenAI's error
                     # envelope; the code says whether compacting the prompt is the remedy.
                     message, code, param = context_overflow_error_fields(error)
