@@ -73,7 +73,8 @@ def test_prepare_writes_pinned_rows_without_agent_ref(local_data_dir: Path, monk
 
     def fake_load_dataset(repo: str, **kwargs: object) -> FakeDataset:
         calls.append((repo, kwargs))
-        return FakeDataset([{"context": {"bytes": b"RIFF"}, "instruction": "Answer it.", "answer": "42"}] * 3)
+        answer = {"text": ["42"], "audio": None}  # Spoken-MQA's answer shape
+        return FakeDataset([{"context": {"bytes": b"RIFF"}, "instruction": "Answer it.", "answer": answer}] * 3)
 
     monkeypatch.setattr(datasets, "load_dataset", fake_load_dataset)
 

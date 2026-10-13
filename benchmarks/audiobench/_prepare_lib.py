@@ -13,7 +13,7 @@ dataset comes out the same shape regardless of upstream-row column
 naming variations:
 
   ``instruction`` ← cfg.instruction || row.instruction || row.text || "Process the audio."
-  ``answer``      ← row.answer || row.reference || ""
+  ``answer``      ← row.reference || row.answer || ""  (``{"text": [...]}`` answers are unwrapped)
   ``audio_col``   ← row.context || row.audio
 """
 
@@ -66,6 +66,15 @@ def _write_audio(audio_dict: Any, out_path: Path, sample_idx: int) -> Path:
     )
 
 
+def _answer_text(answer: Any) -> str:
+    """Return a reference answer as text; Spoken-MQA stores it as ``{"text": ["731"], "audio": None}``."""
+    if isinstance(answer, dict):
+        answer = answer.get("text", "")
+    if isinstance(answer, list):
+        answer = " ".join(str(part) for part in answer)
+    return str(answer)
+
+
 def _iter_dataset_rows(slug: str, cfg: DatasetSpec, *, max_samples: int | None, audio_prefix: str) -> Iterable[dict]:
     """Download one HF sub-dataset at its pinned revision and yield Gym-shaped rows.
 
@@ -101,7 +110,7 @@ def _iter_dataset_rows(slug: str, cfg: DatasetSpec, *, max_samples: int | None, 
         _write_audio(audio, AUDIO_DIR / audio_filename, idx)
 
         instruction = cfg.get("instruction") or sample.get("instruction") or sample.get("text") or "Process the audio."
-        expected_answer = sample.get("answer", sample.get("reference", ""))
+        expected_answer = _answer_text(sample.get("reference", sample.get("answer", "")))
         # `question` is what the audiobench judge sees in its rating prompt
         # (alongside the model's generation and the reference answer). For
         # audiobench rows it's the spoken-content transcription
