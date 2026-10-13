@@ -143,18 +143,23 @@ def job_config(
         agents["title"] = {"disable": True}
     # Delegation. OpenCode's primary agent owns a `task` tool that starts a child
     # session (mode: subagent) with its own context. Without subagents the tool is
-    # denied so a rollout stays one session; with them the configured `general`
-    # child shares the parent's turn limit and permissions except for an explicit
-    # `task` deny (depth one), as in the reference subagent-training harness.
+    # denied so a rollout stays one session. In subagent mode every non-task
+    # permission is explicit ``allow``: OpenCode 1.14.39's non-interactive CLI
+    # auto-replies only to permission requests owned by the root session, so an
+    # ``ask`` from a child otherwise leaves the child and its waiting parent
+    # deadlocked until Harbor's wall-clock timeout. Only ``general`` is exposed as
+    # a child, matching the reference harness, and its explicit task denial is the
+    # depth-one boundary.
     if subagents_enabled:
-        opencode_config["permission"] = {"task": "allow"}
+        opencode_config["permission"] = {"*": "allow", "task": "allow"}
         if delegation_prompt is not None:
             agents.setdefault("build", {})["prompt"] = delegation_prompt
         agents["general"] = {
             "mode": "subagent",
-            "permission": {"task": "deny"},
+            "permission": {"*": "allow", "task": "deny"},
             **({"steps": max_turns} if max_turns is not None else {}),
         }
+        agents["explore"] = {"disable": True}
     else:
         opencode_config["permission"] = {"task": "deny"}
     if agents:

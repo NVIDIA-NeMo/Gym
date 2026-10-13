@@ -464,8 +464,13 @@ def test_job_config_subagent_mode_configures_depth_one_children(tmp_path):
         delegation_prompt=prompt,
     )
     opencode = cfg["agents"][0]["kwargs"]["opencode_config"]
-    assert opencode["permission"]["task"] == "allow"
-    assert opencode["agent"]["general"] == {"mode": "subagent", "permission": {"task": "deny"}, "steps": 32}
+    assert opencode["permission"] == {"*": "allow", "task": "allow"}
+    assert opencode["agent"]["general"] == {
+        "mode": "subagent",
+        "permission": {"*": "allow", "task": "deny"},
+        "steps": 32,
+    }
+    assert opencode["agent"]["explore"] == {"disable": True}
     assert opencode["agent"]["build"] == {"steps": 32, "prompt": prompt}
 
 
