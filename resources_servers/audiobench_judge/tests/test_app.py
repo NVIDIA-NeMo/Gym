@@ -445,3 +445,13 @@ def test_generate_example_data_main_writes_rows(tmp_path: Path, monkeypatch: pyt
     monkeypatch.setattr("sys.argv", ["generate_example_data.py", "--out", str(out_path)])
     main()
     assert out_path.read_text() == EXAMPLE_DATA_PATH.read_text()
+
+
+async def test_verifier_fixture() -> None:
+    from nemo_gym.verifier_fixture import exercise_verifier_fixture
+    from resources_servers.audiobench_judge.app import VERIFIER_FIXTURE
+
+    results = await exercise_verifier_fixture(
+        VERIFIER_FIXTURE, reward_range=(0.0, 1.0), higher_is_better=True, determinism="stochastic"
+    )
+    assert {result.kind for result in results} == {"full_reward", "zero_reward", "malformed"}

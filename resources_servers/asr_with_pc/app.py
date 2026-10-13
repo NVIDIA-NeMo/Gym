@@ -34,6 +34,7 @@ overridden per row via the verify request body's ``task_type`` field.
 """
 
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 import numpy as np
@@ -46,6 +47,8 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
+from nemo_gym.verifier_fixture import VerifierFixture
+from resources_servers.asr_with_pc.verifier_fixture import create_server
 
 
 # Hallucination detection: chars/min above this rate signal repetition/hallucination.
@@ -639,6 +642,13 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
             key["bleu"] = agent_metrics[f"corpus_bleu@k={max(bleu_ks)}"]
 
         return key
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=create_server,
+    request_model=ASRWithPCVerifyRequest,
+    cases_path=Path(__file__).parent / "tests" / "verifier_cases.jsonl",
+)
 
 
 if __name__ == "__main__":

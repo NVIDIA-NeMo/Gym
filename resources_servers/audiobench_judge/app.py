@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional
 
 import yaml
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -53,6 +53,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
+from nemo_gym.verifier_fixture import VerifierFixture
+from resources_servers.audiobench_judge.verifier_fixture import create_server, invoke_with_fixed_judge
 
 
 _DEFAULT_JUDGE_PROMPT_PATH = str(Path(__file__).parent / "prompts" / "judge.yaml")
@@ -136,6 +138,9 @@ class AudioBenchJudgeConfig(BaseResourcesServerConfig):
 
 
 class AudioBenchJudgeRunRequest(BaseRunRequest):
+    # Open like TaskData: provenance and metrics fields (sample_id, subset_for_metrics, ...) ride along.
+    model_config = ConfigDict(extra="allow")
+
     question: str
     expected_answer: str
 
@@ -325,6 +330,14 @@ class AudioBenchJudgeResourcesServer(SimpleResourcesServer):
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]"))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", exclude_names=["no_answer"]))
         return key
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=create_server,
+    request_model=AudioBenchJudgeVerifyRequest,
+    cases_path=Path(__file__).parent / "tests" / "verifier_cases.jsonl",
+    invoke=invoke_with_fixed_judge,
+)
 
 
 if __name__ == "__main__":

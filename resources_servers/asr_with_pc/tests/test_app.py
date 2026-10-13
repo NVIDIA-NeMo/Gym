@@ -816,3 +816,13 @@ class TestAudiobenchMetrics:
         metrics = server.compute_metrics(tasks)
         assert metrics["spoken_mqa_long_digit/pass@1[avg-of-1]/accuracy"] == pytest.approx(100.0)
         assert metrics["spoken_mqa_multi_step_reasoning/pass@1[avg-of-1]/accuracy"] == pytest.approx(0.0)
+
+
+async def test_verifier_fixture() -> None:
+    from nemo_gym.verifier_fixture import exercise_verifier_fixture
+    from resources_servers.asr_with_pc.app import VERIFIER_FIXTURE
+
+    results = await exercise_verifier_fixture(
+        VERIFIER_FIXTURE, reward_range=(0.0, 1.0), higher_is_better=True, determinism="stochastic"
+    )
+    assert {result.kind for result in results} == {"full_reward", "zero_reward", "malformed"}
