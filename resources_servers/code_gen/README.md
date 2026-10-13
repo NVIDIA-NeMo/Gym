@@ -18,7 +18,46 @@ The dataset is in preparation and the example data can be found in `data/example
 - Failed test cases result in a reward of 0.0 with detailed error information
 
 ### Test execution (for now)
-We use the LiveCodeBench execution code.
+We use the LiveCodeBench execution code. By default each candidate runs in a child process on a Ray
+worker, limited by the harness itself: a per-test alarm of `unit_test_timeout_secs`, an overall
+deadline of `(unit_test_timeout_secs + 1) * num_tests + 5` seconds, 4 GiB `RLIMIT_DATA` and
+`RLIMIT_STACK`, and disabled destructive builtins.
+
+### Running unit tests in a sandbox
+Set `sandbox_provider` to run each verification in a fresh sandbox from any
+[sandbox provider](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox) instead. The
+server uploads `sandbox_runner.py` together with the unchanged harness above, so the same limits
+apply inside the sandbox; the sandbox only has to be large enough not to undercut them.
+
+1. Build and push the runtime image. It uses the same uv-managed CPython build and numpy version
+   as this server's environment; with per-test time limits, a slower interpreter build turns
+   borderline passes into failures:
+
+   ```bash
+   docker build --platform linux/amd64 -t <registry>/code-gen-verifier:<tag> resources_servers/code_gen/sandbox_image
+   docker push <registry>/code-gen-verifier:<tag>
+   ```
+
+2. Add a provider config and enable the sandbox path:
+
+   ```bash
+   export CODE_GEN_SANDBOX_IMAGE=<registry>/code-gen-verifier:<tag>
+   gym env start \
+       --config resources_servers/code_gen/configs/code_gen.yaml \
+       --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+       ++code_gen.resources_servers.code_gen.sandbox_provider=sandbox
+   ```
+
+   `num_processes` then caps concurrent sandboxes. The default `sandbox_config` uses 1 CPU, as a Ray
+   task does, and 6 GiB of memory, above the 4 GiB `RLIMIT_DATA`, so a memory-hungry candidate
+   fails its test instead of getting the whole sandbox killed. The default
+   `sandbox_config.provider_options.network_policy` denies all egress, so candidate code cannot
+   reach the network.
+
+A failure of the sandbox itself, not of the candidate, returns `mask_sample: true` with
+`failure_kind` set to `provider_unavailable` (the sandbox could not start) or `verifier_error` (the
+runner failed or produced no valid result), and `failure_reason` holding the details. Masked
+samples are excluded from metrics and from training.
 
 ### Example of rollouts and usage
 
