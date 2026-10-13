@@ -156,6 +156,16 @@ class MiniSWESandboxEnvironment:
             cwd=exec_cwd,
             user=self.config.user,
         )
+        if getattr(result, "error_type", None) is not None:
+            # error_type marks a runtime sentinel, not a process exit code: the
+            # command timed out, the transport failed, or the sandbox is gone.
+            # As an observation it ends in a silent zero score, so end the
+            # rollout with an error instead.
+            status = self._sandbox.status()
+            raise RuntimeError(
+                f"sandbox exec failed ({result.error_type}), sandbox is {status.value}: "
+                f"{result.stderr or result.stdout or 'no output'}"
+            )
         output = "\n".join(part for part in (result.stdout, result.stderr) if part)
         response = {
             "output": output,

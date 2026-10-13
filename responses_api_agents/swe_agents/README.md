@@ -674,7 +674,10 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
 3. The agent hit `swebench_agent_timeout` (wall-clock) regardless of `resolved`.
 4. The memory watchdog killed the **agent** container (OOM).
 5. The memory watchdog killed the **eval** container (OOM).
-6. The OpenHands runtime server died under the agent (`runtime_died`) — an infrastructure failure, not a policy outcome.
+6. The evaluator failed before its startup marker (`eval_launch_failed`); no reward was measured.
+7. The OpenHands runtime server died before the agent's time budget (`runtime_died`). A death at or after
+   `swebench_agent_timeout` stays in `other`, since the timeout wrapper itself can kill the runtime.
+   The existing `agent_timed_out` masking policy remains unchanged.
 
 Agent error strings are bucketed by `_classify_agent_error`:
 
