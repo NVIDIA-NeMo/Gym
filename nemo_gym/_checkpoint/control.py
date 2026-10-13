@@ -526,6 +526,7 @@ class _Write:
     # The manifest it published and the size of its records file in bytes.
     task: Optional["asyncio.Task[tuple[dict[str, Any], int]]"] = None
     cleanup: Optional["asyncio.Task[None]"] = None
+    park: Optional["asyncio.Task[None]"] = None
     # Stopped by resume: the writer stops before its next record and never publishes the manifest.
     stop: WriteStop = field(default_factory=WriteStop)
 
@@ -865,9 +866,13 @@ class ParticipantControlPlane:
                 write.cleanup = _background(self._delete_unscoped(request.episode_ids))
             await _within(request, lambda: asyncio.shield(write.cleanup))
             if request.stop:
-                # The checkpoint is durable; what the stopped process leaves running is a cost, not a loss.
+                # This participant's records are durable; what the stopped process leaves running is a cost,
+                # not a loss. Like the cleanup, the park outlives a deadline: the process is stopping anyway,
+                # so the kills run to completion even when the controller stops waiting.
+                if write.park is None or _failed(write.park):
+                    write.park = _background(self.participant.park_exported(records))
                 try:
-                    await _within(request, lambda: self.participant.park_exported(records))
+                    await _within(request, lambda: asyncio.shield(write.park))
                 except Exception:
                     LOGGER.warning(
                         "checkpoint %s: parking the exported state for the stop failed",
