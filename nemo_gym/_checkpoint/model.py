@@ -14,7 +14,8 @@ but its response is held until resume unless it had started before admission clo
 A call whose response the client has not received is *undelivered*:
 the agent that issued it is still at the boundary it recorded before the call,
 so the checkpoint leaves the call's ledger rows out and the restored agent re-issues it.
-Prepare therefore never waits for a generation to finish; only a response already streaming must finish sending.
+Prepare therefore never waits for a generation to finish; only a response already delivering answer data must finish sending.
+Headers and the dispatch's SSE keepalive comments do not deliver an answer and leave the call checkpointable.
 
 With generation cuts enabled,
 prepare also asks each inference worker to stage the prefix every undelivered call has generated so far.
@@ -59,6 +60,7 @@ from nemo_gym._checkpoint.generation_cut import (
     GenerationCutPrefixAck,
     GenerationCutReceipt,
 )
+from nemo_gym.chat_streaming import SSE_KEEPALIVE
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.token_id_capture.fingerprint import conversation_digest
@@ -856,10 +858,23 @@ class PolicyAdmissionMiddleware:
             return
 
         ticket = self.gate.enter(capture_key or "")
+        event_stream = False
 
         async def gated_send(message: dict[str, Any]) -> None:
+            nonlocal event_stream
             if message["type"] == "http.response.start":
-                await self.gate.deliver_response(ticket)
+                event_stream = any(
+                    name.lower() == b"content-type" and value.split(b";", 1)[0].strip().lower() == b"text/event-stream"
+                    for name, value in message.get("headers", [])
+                )
+            elif message["type"] == "http.response.body" and not ticket.response_started:
+                body = message.get("body", b"")
+                # Headers and liveness comments can precede backend completion. Treating them as
+                # delivered output would make prepare wait on a call whose terminal token write is
+                # blocked by the framework's snapshot fence. Gate only the first answer chunk;
+                # after it starts, all remaining chunks must drain even while admission is closed.
+                if body and not (event_stream and body == SSE_KEEPALIVE):
+                    await self.gate.deliver_response(ticket)
             await send(message)
 
         token = _CURRENT_TICKET.set(ticket)

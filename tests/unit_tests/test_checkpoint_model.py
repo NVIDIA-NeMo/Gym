@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import json
 import os
 import time
 from collections.abc import Callable
@@ -30,6 +31,7 @@ from nemo_gym._checkpoint.model import (
     attach_capture_context,
     import_model_records,
     ledger_removal_refusal,
+    note_generation_backend,
 )
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_correlation import RolloutContextMiddleware, current_rollout_id
@@ -140,6 +142,151 @@ async def test_started_stream_drains_before_prepare_is_ready_and_new_calls_wait_
     assert streamed.content == b"first last"
     assert prepared["phase"] == "prepared" and prepared["report"]["counts"]["inflight"] == 0
     assert reopened.json()["phase"] == "idle" and participant.gate.accepting
+
+
+@pytest.mark.parametrize(
+    "content_type", [b"application/json", b"text/event-stream; charset=utf-8", b"TEXT/EVENT-STREAM"]
+)
+async def test_headers_and_empty_bodies_pass_without_starting_an_answer(content_type: bytes) -> None:
+    participant = PolicyModelParticipant()
+    controller = ParticipantControlPlane(participant, instance_name="policy", lease_grace_seconds=60)
+    headers_sent, answer_ready, answer_attempted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    sent = []
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"Content-Type", content_type)]})
+        await send({"type": "http.response.body", "body": b"", "more_body": True})
+        headers_sent.set()
+        await answer_ready.wait()
+        answer_attempted.set()
+        await send({"type": "http.response.body", "body": b"answer", "more_body": False})
+
+    async def send(message):
+        sent.append(message)
+
+    call = asyncio.create_task(
+        PolicyAdmissionMiddleware(app, participant.gate)(
+            {"type": "http", "path": "/ng-rollout/r/v1/chat/completions"}, None, send
+        )
+    )
+    try:
+        await asyncio.wait_for(headers_sent.wait(), timeout=5)
+        assert [message["type"] for message in sent] == ["http.response.start", "http.response.body"]
+        prepared = await asyncio.wait_for(controller.prepare(CheckpointRequest(**control())), timeout=5)
+        assert prepared["phase"] == "prepared"
+        assert prepared["report"]["counts"]["held"] == 1
+        answer_ready.set()
+        await asyncio.wait_for(answer_attempted.wait(), timeout=5)
+        assert not call.done()
+        assert len(sent) == 2
+        assert participant.readiness().ready
+        await controller.resume(CheckpointRequest(**control()))
+        await asyncio.wait_for(call, timeout=5)
+        assert sent[-1]["body"] == b"answer"
+    finally:
+        await controller.resume(CheckpointRequest(**control()))
+        call.cancel()
+        await asyncio.gather(call, return_exceptions=True)
+
+
+async def test_keepalive_stream_is_cut_and_holds_model_output_until_resume(tmp_path: Path) -> None:
+    """An SSE connection opened before backend completion must not deadlock checkpoint preparation."""
+    ledger = FileLineageStore(tmp_path / "ledger")
+    request_cut, requests = _cutting_worker()
+    participant = PolicyModelParticipant(ledger, server_name="policy", cut_requester=request_cut)
+    controller = ParticipantControlPlane(participant, instance_name="policy", lease_grace_seconds=60)
+    backend_done, keepalive_sent, answer_attempted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    sent = []
+
+    async def app(scope, receive, send):
+        attach_capture_context(
+            CaptureContext(rollout_id="r", model_call_id="c1", token_sink=None, request_items=[USER_1])
+        )
+        note_generation_backend("http://worker-0/v1")
+        await send(
+            {"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/event-stream")]}
+        )
+        await send({"type": "http.response.body", "body": b": keep-alive\n\n", "more_body": True})
+        keepalive_sent.set()
+        await backend_done.wait()
+        # Liveness comments must still pass while the checkpoint holds the actual answer.
+        await send({"type": "http.response.body", "body": b": keep-alive\n\n", "more_body": True})
+        answer_attempted.set()
+        await send({"type": "http.response.body", "body": b'data: {"answer":"done"}\n\n', "more_body": True})
+        await send({"type": "http.response.body", "body": b"data: [DONE]\n\n", "more_body": False})
+
+    async def send(message):
+        sent.append(message)
+
+    call = asyncio.create_task(
+        PolicyAdmissionMiddleware(app, participant.gate)(
+            {"type": "http", "path": "/ng-rollout/r/v1/chat/completions"}, None, send
+        )
+    )
+    try:
+        await asyncio.wait_for(keepalive_sent.wait(), timeout=1)
+        prepared = await asyncio.wait_for(controller.prepare(CheckpointRequest(**control())), timeout=1)
+        assert prepared["phase"] == "prepared"
+        assert prepared["report"]["counts"] == {"inflight": 1, "held": 1, "cut": 1, "cut_failed": 0, "cut_skipped": 0}
+        assert requests[0][1].active_prefixes[0].model_call_id == "c1"
+        backend_done.set()
+        await asyncio.wait_for(answer_attempted.wait(), timeout=1)
+        assert [m.get("body") for m in sent] == [None, b": keep-alive\n\n", b": keep-alive\n\n"]
+        assert participant.readiness().ready
+        commit = await controller.commit(_commit_request("c1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
+        assert commit["manifest"]["record_count"] == 1
+        records = (tmp_path / "ckpt/gym/model/policy" / commit["manifest"]["records_file"]).read_text()
+        assert json.loads(records.splitlines()[0])["generation_cuts"][0]["continuation"]["prefix_token_count"] == 3
+        await controller.resume(CheckpointRequest(**control()))
+        await asyncio.wait_for(call, timeout=1)
+        assert sent[-2]["body"] == b'data: {"answer":"done"}\n\n'
+        assert sent[-1]["body"] == b"data: [DONE]\n\n"
+        assert not participant.gate.tickets
+    finally:
+        await controller.resume(CheckpointRequest(**control()))
+        call.cancel()
+        await asyncio.gather(call, return_exceptions=True)
+
+
+async def test_started_sse_model_output_finishes_while_admission_is_closed() -> None:
+    participant = PolicyModelParticipant()
+    controller = ParticipantControlPlane(participant, instance_name="policy", lease_grace_seconds=60)
+    first_sent, finish = asyncio.Event(), asyncio.Event()
+    sent = []
+
+    async def app(scope, receive, send):
+        await send(
+            {"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/event-stream")]}
+        )
+        await send({"type": "http.response.body", "body": b"data: first\n\n", "more_body": True})
+        first_sent.set()
+        await finish.wait()
+        await send({"type": "http.response.body", "body": b"data: last\n\n", "more_body": False})
+
+    async def send(message):
+        sent.append(message)
+
+    call = asyncio.create_task(
+        PolicyAdmissionMiddleware(app, participant.gate)(
+            {"type": "http", "path": "/ng-rollout/r/v1/chat/completions"}, None, send
+        )
+    )
+    try:
+        await asyncio.wait_for(first_sent.wait(), timeout=1)
+        prepare = asyncio.create_task(controller.prepare(CheckpointRequest(**control())))
+        await wait_until(lambda: not participant.gate.accepting)
+        assert not prepare.done()
+        assert participant.readiness().blockers == ["r"]
+        finish.set()
+        await asyncio.wait_for(call, timeout=1)
+        prepared = await asyncio.wait_for(prepare, timeout=1)
+        assert prepared["phase"] == "prepared"
+        assert sent[-1]["body"] == b"data: last\n\n"
+        assert participant.readiness().ready
+    finally:
+        await controller.resume(CheckpointRequest(**control()))
+        call.cancel()
+        await asyncio.gather(call, return_exceptions=True)
 
 
 async def test_a_call_waiting_for_admission_is_refused_once_its_attempt_is_retired() -> None:

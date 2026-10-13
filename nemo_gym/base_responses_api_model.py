@@ -67,7 +67,7 @@ from nemo_gym._checkpoint.model_workers import (
 )
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
+from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -124,7 +124,7 @@ from nemo_gym.token_id_capture.store import make_token_store
 logger = logging.getLogger(__name__)
 
 _CHAT_KEEPALIVE_SECONDS = 15.0
-_SSE_KEEPALIVE = b": keep-alive\n\n"
+_SSE_KEEPALIVE = SSE_KEEPALIVE
 
 
 # Stateless; shared by every model server's default /v1/messages handler.
