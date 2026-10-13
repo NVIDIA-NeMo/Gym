@@ -96,6 +96,9 @@ def needs_environment_server(instance: dict) -> bool:
         and resources_server is None
     ):
         return False
+    # Stirrup runs only in native sessions and has no /run for a legacy relay to call.
+    if agent_type == "stirrup_agent":
+        return False
     return bool(agent.get("entrypoint") or instance.get("_inherit_from"))
 
 

@@ -42,7 +42,6 @@ DIRECT_RAY_COMPONENTS = {
         "mini_swe_agent",
         "mini_swe_agent_2",
         "osworld_agent",
-        "stirrup_agent",
         "swe_agents",
     },
     "responses_api_models": {"local_vllm_model"},
