@@ -119,7 +119,7 @@ from nemo_gym.token_id_capture.config import NonGeneratingRequest, token_id_capt
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
 from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolver
-from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.token_id_capture.records import CONTEXT_OVERFLOW_CALL_REASON, UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -1627,7 +1627,7 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         await ledger.record_failure(
             context.rollout_id,
             context.model_call_id,
-            UNCOMMITTED_CALL_REASON,
+            CONTEXT_OVERFLOW_CALL_REASON if context.context_overflow else UNCOMMITTED_CALL_REASON,
         )
     except Exception:
         logger.exception(

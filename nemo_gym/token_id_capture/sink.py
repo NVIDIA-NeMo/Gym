@@ -89,6 +89,8 @@ class CaptureContext:
     model: str = ""
     # ``commit_entry`` sets this after another capture path records the call.
     committed: bool = False
+    # The model server turned this call away for exceeding the context window.
+    context_overflow: bool = False
     # Store resolved continuations as parent-relative suffixes.
     delta_records: bool = False
     # This records the model server's intent to request prefix supply.

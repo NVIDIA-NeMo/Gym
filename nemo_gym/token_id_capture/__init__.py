@@ -78,6 +78,7 @@ from nemo_gym.token_id_capture.protocols import (
     installed_token_source,
 )
 from nemo_gym.token_id_capture.records import (
+    CONTEXT_OVERFLOW_CALL_REASON,
     TOKEN_ENTRY_MIN_SCHEMA_VERSION,
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
     TOKEN_FIELDS,
@@ -146,6 +147,7 @@ __all__ = [
     "CaptureContext",
     "NG_CAPTURE_FIELD",
     "NG_COMMIT_COORDS_FIELD",
+    "CONTEXT_OVERFLOW_CALL_REASON",
     "UNCOMMITTED_CALL_REASON",
     "UNRESOLVED_PARENT_REASON",
     "set_token_sink",

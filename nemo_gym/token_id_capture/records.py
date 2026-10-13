@@ -70,6 +70,8 @@ UNRESOLVED_PARENT_REASON = "unresolved_parent"
 # The call was admitted but finished without worker commit coordinates.
 # Written by the capture middleware.
 UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
+# Like UNCOMMITTED_CALL_REASON, but the model server rejected the call as over the context window.
+CONTEXT_OVERFLOW_CALL_REASON = "context_overflow"
 # A committed ledger row lacks the served response id that terminal attribution joins on.
 LEDGER_ROW_MISSING_RESPONSE_ID_REASON = "ledger_row_missing_response_id"
 # A committed ledger row lacks the chain or cumulative digest that verification anchors on.

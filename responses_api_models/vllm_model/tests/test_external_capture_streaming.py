@@ -18,7 +18,7 @@ from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.token_id_capture.adapters.vllm import VLLMCaptureAdapter
 from nemo_gym.token_id_capture.lineage import FileLineageStore
-from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.token_id_capture.records import CONTEXT_OVERFLOW_CALL_REASON, UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.sink import current_capture_context
 from nemo_gym.token_id_capture.staging import resolve_terminal, select_terminal_call
 from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
@@ -361,7 +361,8 @@ async def test_synthetic_completion_leaves_call_uncommitted(
     manifest = RolloutManifest.model_validate(await h.ledger.manifest("r1"))
     assert len(manifest.records) == int(prior_call)
     assert len(h.worker.records) == int(prior_call)
-    assert [failure.reason for failure in manifest.failures] == [UNCOMMITTED_CALL_REASON]
+    expected_reason = CONTEXT_OVERFLOW_CALL_REASON if trigger == "overflow" else UNCOMMITTED_CALL_REASON
+    assert [failure.reason for failure in manifest.failures] == [expected_reason]
     selection = select_terminal_call(manifest.records)
     if prior_call:
         record = manifest.records[0]

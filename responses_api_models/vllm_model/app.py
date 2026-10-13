@@ -1230,6 +1230,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             result_content_str = e.response_content.decode(errors="replace")
             if _is_context_length_error(e):
                 execution["error_category"] = "context_length_exceeded"
+                if (context := current_capture_context()) is not None:
+                    context.context_overflow = True
                 if self.config.propagate_context_overflow_errors:
                     _mark_propagated_overflow(e)
                     raise
@@ -1578,6 +1580,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             result_content_str = e.response_content.decode(errors="replace")
             if _is_context_length_error(e):
                 execution["error_category"] = "context_length_exceeded"
+                if (context := current_capture_context()) is not None:
+                    context.context_overflow = True
                 if self.config.propagate_context_overflow_errors:
                     _mark_propagated_overflow(e)
                     raise
