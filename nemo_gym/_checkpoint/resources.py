@@ -38,7 +38,7 @@ A seed already in flight holds up prepare, so a session always matches the envir
 import asyncio
 import logging
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, Literal, Optional, Protocol
 
 from pydantic import JsonValue
@@ -119,7 +119,12 @@ class ResourcesParticipant(CheckpointParticipant):
     record_model = ResourcesSessionRecord
 
     def __init__(
-        self, hooks: ResourcesSessionHooks, mode: ResourcesCheckpointMode, *, verify_mode: StepMode = "wait"
+        self,
+        hooks: ResourcesSessionHooks,
+        mode: ResourcesCheckpointMode,
+        *,
+        verify_mode: StepMode = "wait",
+        replayable_paths: Iterable[str] = (),
     ) -> None:
         super().__init__()
         self.hooks = hooks
@@ -128,7 +133,9 @@ class ResourcesParticipant(CheckpointParticipant):
         # Requests the checkpoint does not wait for:
         # a verification the server declared replayable does not change checkpointed state.
         # A seed is waited for, so the session matches the environment's boundary.
-        self.replayable_paths = {"/verify"} if verify_mode == "replay" else set()
+        self.replayable_paths = set(replayable_paths)
+        if verify_mode == "replay":
+            self.replayable_paths.add("/verify")
         self.accepting = True
         self._open = asyncio.Event()
         self._open.set()

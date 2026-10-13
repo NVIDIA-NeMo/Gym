@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 import anyio
 from fastapi import Request
 from pydantic import ValidationError
-from pytest import MonkeyPatch, fixture, mark, raises
+from pytest import CaptureFixture, MonkeyPatch, fixture, mark, raises
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
@@ -676,6 +676,7 @@ class TestOpenCodeSandboxedAgent:
         database_name: str,
         snapshot_failure: str | None,
         collect_observations: bool,
+        capsys: CaptureFixture[str],
     ) -> None:
         class Response:
             ok = True
@@ -791,7 +792,7 @@ class TestOpenCodeSandboxedAgent:
                 SimpleNamespace(stdout='[{"id": "root"}]', stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
                 SimpleNamespace(
-                    stdout="",
+                    stdout="OpenCode SQLite snapshot command failed" if snapshot_failure else "",
                     stderr="snapshot failed" if snapshot_failure else "",
                     return_code=1 if snapshot_failure == "exit" else 0,
                     error_type="execution_failed" if snapshot_failure == "execution" else None,
@@ -881,6 +882,10 @@ class TestOpenCodeSandboxedAgent:
         assert snapshot["env"] == sandbox.exec.await_args_list[1].kwargs["env"]
         assert snapshot["timeout_s"] == server.config.sandbox_timeout
         if snapshot_failure:
+            diagnostics = capsys.readouterr().err
+            assert "OpenCode SQLite snapshot command failed" in diagnostics
+            assert "snapshot failed" in diagnostics and "destination=" in diagnostics
+            assert "OPENCODE_CONFIG_CONTENT" not in diagnostics
             # Snapshot failures must preserve the export but leave ownership unobserved.
             assert not TrajectoryRecord.model_validate(result.ng_trajectory).turns
             assert "observation_capture_failed" in {gap.code for gap in result.ng_agent_observations.gaps}

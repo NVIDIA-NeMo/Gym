@@ -13,16 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import sys
 from collections.abc import Mapping
 from glob import glob
 from pathlib import Path
+from shlex import quote
 from shutil import rmtree
 from time import monotonic, time
 from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
+from uuid import uuid4
 
-from fastapi import Request
+from anyio import CancelScope
+from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field, JsonValue, PrivateAttr
 from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST, TestSpec
@@ -37,6 +41,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.judge import judge_failsafe
 from nemo_gym.rollout_observability import SandboxObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSessionCheckpointer, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import SandboxAccess
@@ -44,6 +49,7 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.sandbox.providers.base import SandboxProvider
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
@@ -105,6 +111,15 @@ class SWEBenchInstanceRequest(BaseModel):
 
 class SWEBenchVerifyRequest(SWEBenchInstanceRequest, BaseVerifyRequest):
     pass
+
+
+class SWEBenchPreparedVerifyRequest(SWEBenchVerifyRequest):
+    # Required even for an empty diff: this route never falls back to reading a live sandbox.
+    model_patch: str
+
+
+class SWEBenchPreparedPatch(BaseModel):
+    model_patch: str
 
 
 class SWEBenchVerifyResponse(BaseVerifyResponse):
@@ -214,7 +229,8 @@ class DockerContainer(BaseModel):
 
     async def cleanup(self) -> None:
         try:
-            await self._inner_container.stop()
+            with CancelScope(shield=True):
+                await self._inner_container.stop()
         except Exception as exc:
             self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
             print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
@@ -259,10 +275,74 @@ class SwebenchResourcesServer(SimpleResourcesServer):
     # A partial-rollout checkpoint snapshots those sandboxes and a restore forks them from the snapshots; see
     # nemo_gym.sandbox.checkpoint.
     checkpoint_mode: ClassVar[str] = "exported"
+    checkpoint_replayable_paths: ClassVar[tuple[str, ...]] = ("/verify_prepared",)
     _provider: Optional[SandboxProvider] = PrivateAttr(default=None)
     _sandboxes: Optional[SandboxSessionCheckpointer] = PrivateAttr(default=None)
     # The repository checkout directory of each session's sandbox, for borrowers and the patch extraction.
     _workdirs: Dict[str, str] = PrivateAttr(default_factory=dict)
+    # Needed only if a prepare response is lost after the original sandbox was released. The agent's wait
+    # step holds checkpoint preparation until it receives the patch and records it in its verify boundary.
+    _prepared_patches: Dict[str, str] = PrivateAttr(default_factory=dict)
+    _prepare_locks: Dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/prepare_verify")(self.prepare_verify)
+        app.post("/verify_prepared")(
+            traced_verify_endpoint(
+                judge_failsafe(self.verify_prepared),
+                static_attributes={"nemo.gym.server.name": self.config.name},
+            )
+        )
+        return app
+
+    async def prepare_verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchPreparedPatch:
+        """Capture the generated diff and release the original sandbox before checkpointable verification.
+
+        The caller must run this as a wait step, then checkpoint the returned patch in its episode boundary.
+        Retries with the same session receive the captured patch even after its sandbox has stopped.
+        """
+        session_id = request.session[SESSION_ID_KEY]
+        async with self._prepare_locks.setdefault(session_id, asyncio.Lock()):
+            result = await self._prepare_verification_patch(session_id, body)
+        # The sandbox session has ended; continuation now lives in the agent's saved patch, not resources.
+        self.checkpoint_session_ended(request)
+        return result
+
+    async def _prepare_verification_patch(self, session_id: str, body: SWEBenchVerifyRequest) -> SWEBenchPreparedPatch:
+        """Serialize capture/release retries for one session."""
+        if session_id not in self._prepared_patches:
+            if self.config.is_verifying_golden_patch:
+                model_patch = body.patch
+            else:
+                original = self._checkpointer().get(session_id)
+                workdir = self._workdirs.get(session_id)
+                if workdir is None:
+                    location = await original.exec("pwd")
+                    if location.return_code != 0 or location.error_type:
+                        raise RuntimeError("Failed to locate the agent sandbox workdir for patch capture")
+                    workdir = (location.stdout or "").strip()
+                    if not workdir:
+                        raise RuntimeError("Agent sandbox returned an empty workdir for patch capture")
+                captured = await original.exec(f"cd {quote(workdir)} && git --no-pager diff")
+                if captured.return_code != 0 or captured.error_type:
+                    raise RuntimeError(
+                        f"Failed to capture the generated patch: return_code={captured.return_code}, "
+                        f"error_type={captured.error_type}, stderr={captured.stderr!r}"
+                    )
+                model_patch = captured.stdout or ""
+            self._prepared_patches[session_id] = model_patch
+        await self._release_agent_sandbox(session_id)
+        return SWEBenchPreparedPatch(model_patch=self._prepared_patches[session_id])
+
+    async def verify_prepared(self, request: Request, body: SWEBenchPreparedVerifyRequest) -> SWEBenchVerifyResponse:
+        """Verify the checkpointed patch in a fresh sandbox, without reading or changing an agent sandbox."""
+        # A cold restore needs only body.model_patch; the response-loss cache is not checkpoint state.
+        self._prepared_patches.pop(request.session[SESSION_ID_KEY], None)
+        self._prepare_locks.pop(request.session[SESSION_ID_KEY], None)
+        result = await self._evaluate_patch(request, body, body.model_patch)
+        self.checkpoint_session_ended(request)
+        return result
 
     def _sandbox_provider(self) -> SandboxProvider:
         """The provider every sandbox of this server shares; built from the config on first use."""
@@ -393,6 +473,8 @@ Stderr:
         # The attempt's snapshots stay: a retained checkpoint may still restore it. The sweep reclaims them.
         await self._checkpointer().stop(session_id)
         self._workdirs.pop(session_id, None)
+        self._prepared_patches.pop(session_id, None)
+        self._prepare_locks.pop(session_id, None)
 
     async def park_session_states(self, session_ids: List[str]) -> None:
         if self._sandboxes is not None:
@@ -410,10 +492,11 @@ Stderr:
         return await sandboxes.access(session_id, provider_config_ref=self.config.sandbox_provider, workdir=workdir)
 
     async def _release_agent_sandbox(self, session_id: str) -> None:
-        """Stop the agent's sandbox and delete its snapshots once the patch is extracted; the episode is over, so
-        a failure is logged."""
+        """Stop the agent's sandbox once the patch is extracted, retaining snapshots for saved checkpoints."""
         try:
-            await self._checkpointer().stop(session_id, forget_snapshots=True)
+            # A retained checkpoint can precede this verification, even after the live episode finishes.
+            # Only the checkpoint-aware sweep knows when these snapshots are no longer needed.
+            await self._checkpointer().stop(session_id)
         except Exception:
             print("Failed to stop original sandbox", format_exc(), file=sys.stderr)
         self._workdirs.pop(session_id, None)
@@ -440,12 +523,6 @@ Stderr:
         5. Restrict number of turns - same as interleaved thinking, we could add in Responses API model proxy
         """
 
-        test_spec = self._make_test_spec(body)
-
-        verifier_sandbox_lifecycle_started_at = monotonic()
-        eval_sandbox = await self._create_sandbox(test_spec)
-        eval_sandbox_start_time_taken = monotonic() - verifier_sandbox_lifecycle_started_at
-
         model_patch = ""
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
@@ -455,32 +532,51 @@ Stderr:
                 original_sandbox = self._checkpointer().get(session_id)
                 if original_sandbox is None:
                     raise KeyError(f"session {session_id!r} has no sandbox")
-                original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
-                model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
+                original_workdir = self._workdirs.get(session_id)
+                if original_workdir is None:
+                    original_workdir = (await original_sandbox.exec("pwd")).stdout.strip()
+                model_patch_result = await original_sandbox.exec(
+                    f"cd {quote(original_workdir)} && git --no-pager diff"
+                )
                 model_patch = model_patch_result.stdout
             except Exception:
                 print("Failed to extract patch from container", format_exc(), file=sys.stderr)
             await self._release_agent_sandbox(session_id)
 
-        run_id = request.session[SESSION_ID_KEY]
+        return await self._evaluate_patch(request, body, model_patch)
+
+    async def _evaluate_patch(
+        self, request: Request, body: SWEBenchVerifyRequest, model_patch: str
+    ) -> SWEBenchVerifyResponse:
+        test_spec = self._make_test_spec(body)
+        verifier_sandbox_lifecycle_started_at = monotonic()
+        eval_sandbox = await self._create_sandbox(test_spec)
+        eval_sandbox_start_time_taken = monotonic() - verifier_sandbox_lifecycle_started_at
+        # A surviving request and a restored replay must not share files or logger state.
+        run_id = f"{request.session[SESSION_ID_KEY]}-{uuid4().hex}"
         mock_container = DockerContainer(id=run_id, instance_id=test_spec.instance_id)
         mock_container._inner_container = eval_sandbox
 
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
         start_time = time()
-        res = await run_instance(
-            test_spec=test_spec,
-            pred={
-                "instance_id": test_spec.instance_id,
-                "model_patch": model_patch,
-            },
-            rm_image=False,
-            force_rebuild=False,
-            client=mock_container,
-            run_id=run_id,
-            timeout=self.config.evaluation_timeout,
-            rewrite_reports=False,
-        )
+        try:
+            res = await run_instance(
+                test_spec=test_spec,
+                pred={
+                    "instance_id": test_spec.instance_id,
+                    "model_patch": model_patch,
+                },
+                rm_image=False,
+                force_rebuild=False,
+                client=mock_container,
+                run_id=run_id,
+                timeout=self.config.evaluation_timeout,
+                rewrite_reports=False,
+            )
+        finally:
+            # run_instance normally cleans up. Also cover failure/cancellation before its cleanup starts.
+            if eval_sandbox.handle is not None:
+                await mock_container.cleanup()
         patch_verification_time_taken = time() - start_time
         verifier_sandbox_wall_time_s = monotonic() - verifier_sandbox_lifecycle_started_at
 
@@ -506,7 +602,7 @@ Stderr:
             log_dir = ""
 
         return SWEBenchVerifyResponse(
-            **body.model_dump(),
+            **body.model_dump(exclude={"model_patch"}),
             # run_instance returns "completed"; the response field is "evaluation_completed".
             evaluation_completed=res["completed"] and mock_container._sandbox_error_type is None,
             resolved=res["resolved"],

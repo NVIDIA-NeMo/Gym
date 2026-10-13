@@ -190,3 +190,20 @@ Use an immutable base digest for published deployments. No API credentials, mode
 checkpoints, benchmark questions or reference answers belong in either image.
 Validate real Python and MCP rollouts, network isolation, and sandbox cleanup before
 promoting a new image.
+
+## Replayable SWE verification
+
+For SWE rollout checkpointing, `prepare_verification: true` captures the generated
+patch through the resources server's `/prepare_verify` route before starting tests.
+Patch capture and release of the original sandbox run as a checkpoint `wait` step.
+The agent then saves the patch, including an empty diff, in its verification boundary
+and calls `/verify_prepared` as a `replay` step. Checkpointing can proceed while tests
+run; recovery grades the saved patch in a fresh sandbox without reopening OpenCode.
+The resources server retains old sandbox snapshots for checkpoints taken before
+patch capture. Prepared verification requires a patch and never reads the original
+sandbox. Each test attempt has its own log directory and cleans up on cancellation.
+
+This option defaults to false and requires both routes on the resources server.
+The existing `/verify` path continues to wait for verification to finish. Older
+checkpoints without a prepared patch can still use that path, or prepare their patch
+from the restored sandbox when this option is enabled.

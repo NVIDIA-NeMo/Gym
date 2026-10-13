@@ -107,12 +107,13 @@ async def verify_agent_response(
     cookies: Mapping[str, str],
     *,
     force_zero_reward: bool,
+    verify_path: str = "/verify",
 ) -> dict[str, Any]:
     """Let the verifier own score fields, retaining failed generations for inspection."""
     grading_response = response.model_copy(update={"output": []}) if force_zero_reward else response
     verified = await client.post(
         server_name=server.name,
-        url_path="/verify",
+        url_path=verify_path,
         cookies=cookies,
         json=body.model_dump(mode="json") | {"response": grading_response.model_dump(mode="json")},
     )

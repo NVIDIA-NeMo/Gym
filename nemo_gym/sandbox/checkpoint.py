@@ -17,10 +17,10 @@ changing once the episode continues, and never a paused state, which the backend
 - After a crash, :meth:`~SandboxSessionCheckpointer.restore` rebuilds each session's sandbox in a fresh process
   from its snapshot (a fork), whatever happened to the live sandbox since. It validates every state first and
   installs all or nothing, as the participant hooks require. The superseded sandbox is stopped, best effort.
-- :meth:`~SandboxSessionCheckpointer.stop` frees a session's sandbox. When the episode is over (verified or
-  closed) it also deletes the snapshots this process took of it: a finished episode is never restored. A retired
-  attempt keeps its snapshots, because a retained checkpoint may still restore it; the operator sweep
-  (``nemo_gym.sandbox.providers.opensandbox.snapshots --retain-from``) deletes what no retained checkpoint names.
+- :meth:`~SandboxSessionCheckpointer.stop` frees a session's sandbox and keeps its snapshots. A retained
+  checkpoint may precede the episode's completion, so even a finished episode can be restored from that cut.
+  The operator sweep (``nemo_gym.sandbox.providers.opensandbox.snapshots --retain-from``) deletes what no retained
+  checkpoint names. Explicit snapshot deletion is only safe once no retained checkpoint references them.
 """
 
 import asyncio
@@ -94,7 +94,7 @@ def spec_from_json(data: Mapping[str, Any]) -> SandboxSpec:
 class _Entry:
     sandbox: AsyncSandbox
     spec: SandboxSpec
-    # Every snapshot this process took of the sandbox, deleted when the episode is over.
+    # Every snapshot this process took of the sandbox; outlives the episode while a checkpoint references it.
     snapshot_ids: list[str] = field(default_factory=list)
 
 
@@ -184,11 +184,26 @@ class SandboxSessionCheckpointer:
             descriptor = await entry.sandbox.serialize()
         else:
             descriptor = {"sandbox_id": handle.sandbox_id}
+        queued_at = time.monotonic()
         async with self._semaphore:
+            snapshot_started = time.monotonic()
+            LOGGER.info(
+                "sandbox checkpoint snapshot started: session_id=%s sandbox_id=%s queue_seconds=%.2f",
+                session_id,
+                handle.sandbox_id,
+                snapshot_started - queued_at,
+            )
             try:
                 snapshot_id = await self._provider.snapshot(handle, name=f"ng-{session_id[:16]}-{int(time.time())}")
             except Exception as error:
                 raise SandboxCheckpointError(session_id, f"could not be snapshotted: {error}") from error
+        LOGGER.info(
+            "sandbox checkpoint snapshot ready: session_id=%s snapshot_id=%s snapshot_seconds=%.2f queue_seconds=%.2f",
+            session_id,
+            snapshot_id,
+            time.monotonic() - snapshot_started,
+            snapshot_started - queued_at,
+        )
         entry.snapshot_ids.append(snapshot_id)
         state = SandboxCheckpointState(
             provider_name=handle.provider_name,
@@ -261,7 +276,7 @@ class SandboxSessionCheckpointer:
             raise failures[0]
         for session_id, sandbox in created.items():
             state, spec = parsed[session_id]
-            # The fork inherits the snapshot it came from, so the episode's end deletes that one too.
+            # Keep the source snapshot with the fork for explicit cleanup after checkpoint retention ends.
             self._entries[session_id] = _Entry(sandbox=sandbox, spec=spec, snapshot_ids=[state.snapshot_id])
         # The crashed process's sandboxes are superseded: nothing continues them. Best effort, in parallel.
         await asyncio.gather(*(self._stop_superseded(session_id, state) for session_id, (state, _) in parsed.items()))
@@ -318,8 +333,9 @@ class SandboxSessionCheckpointer:
         """Stop and forget a session's sandbox; a no-op for a session without one, so a retire may repeat it.
 
         If the stop fails the session stays tracked, so a retried retire stops it again. With
-        ``forget_snapshots``, for an episode that is over, the snapshots this process took of the sandbox are
-        deleted too, best effort: a snapshot that outlives its episode is only storage, which the sweep reclaims.
+        ``forget_snapshots`` explicitly deletes its snapshots, best effort. The caller must ensure no retained
+        checkpoint references them; completing or retiring a live episode alone does not prove that. Normally
+        leave them for the checkpoint-aware sweep, which reclaims snapshots once their checkpoints are pruned.
         """
         entry = self._entries.get(session_id)
         if entry is None:

@@ -18,7 +18,7 @@ import json
 import sqlite3
 import sys
 from asyncio import Semaphore
-from contextlib import AbstractAsyncContextManager, nullcontext
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -449,6 +449,8 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: Optional[int] = Field(default=None)
     preinstalled_opencode: bool = False
     execution_failure_reward_zero: bool = False
+    # Requires resources /prepare_verify and /verify_prepared: checkpoint the patch before replayable tests.
+    prepare_verification: bool = False
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
     network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
@@ -1083,7 +1085,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     timeout_s=self.config.sandbox_timeout,
                 )
                 if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:
-                    raise RuntimeError(f"OpenCode database snapshot failed: {snapshot_result.stderr}")
+                    # Background execution combines command streams in stdout; stderr may contain only status.
+                    raise RuntimeError(
+                        "OpenCode database snapshot failed: "
+                        f"destination={snapshot_remote_fpath!r}, "
+                        f"return_code={snapshot_result.return_code}, error_type={snapshot_result.error_type}; "
+                        f"stdout={str(snapshot_result.stdout or '')[-4096:]!r}; "
+                        f"stderr={str(snapshot_result.stderr or '')[-4096:]!r}"
+                    )
                 await sandbox.download(snapshot_remote_fpath, observations_local_fpath)
                 if session_id is not None:
                     child_messages = await asyncio.to_thread(
@@ -1271,14 +1280,24 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     async def run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
     ) -> OpenCodeSandboxedAgentVerifyResponse:
-        async with self._sem:
-            participant = self.checkpoint_participant
-            if participant is None:
+        participant = self.checkpoint_participant
+        if participant is None:
+            async with self._sem:
                 return await self._run(request, body, legacy_run=None)
-            episode_id = EpisodeId.from_capture_key(require_rollout(self.rollout_id_from_run(body)))
-            async with participant.legacy_run(
-                f"{_LEGACY_SESSION_PREFIX}{episode_id.rollout_id}", episode_id
-            ) as legacy_run:
+
+        episode_id = EpisodeId.from_capture_key(require_rollout(self.rollout_id_from_run(body)))
+        async with participant.legacy_run(
+            f"{_LEGACY_SESSION_PREFIX}{episode_id.rollout_id}", episode_id
+        ) as legacy_run:
+            boundary = legacy_run.continuation or {"next": "seed"}
+            await legacy_run.boundary(boundary)
+            # Queued runs must be exported too: parked runs retain their slots, so prepare cannot wait for
+            # the queue to drain. Acquiring a process-local slot is safe to replay from this boundary.
+            async with AsyncExitStack() as slot:
+                async with legacy_run.step("replay"):
+                    await slot.enter_async_context(self._sem)
+                # A slot may become available while admission is closed. Park before doing any task work.
+                await legacy_run.boundary(boundary)
                 return await self._run(request, body, legacy_run=legacy_run)
 
     async def _run(
@@ -1398,6 +1417,29 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             if stage == "return":
                 response_dict = dict(continuation["result"])
             else:
+                prepared_patch = continuation.get("prepared_patch")
+                if prepared_patch is not None and not isinstance(prepared_patch, str):
+                    raise ValueError("checkpoint prepared_patch must be a string")
+                if prepared_patch is None and self.config.prepare_verification:
+                    # Extraction/release changes the resources session: prepare waits for this short step.
+                    # The resources server caches the patch for retries of a response lost after release.
+                    async with step("wait"):
+                        prepared = await self.server_client.post(
+                            server_name=self.config.resources_server.name,
+                            url_path="/prepare_verify",
+                            json=body.model_dump(mode="json") | {"response": response_json},
+                            cookies=cookies,
+                        )
+                        await raise_for_status(prepared)
+                        prepared_patch = (await prepared.json())["model_patch"]
+                        if not isinstance(prepared_patch, str):
+                            raise ValueError("prepared verification requires a string model_patch")
+                verify_body = body
+                verify_path = "/verify"
+                if prepared_patch is not None:
+                    verify_body = body.model_copy(update={"model_patch": prepared_patch})
+                    verify_path = "/verify_prepared"
+                    verify_mode = "replay"
                 await boundary(
                     {
                         "next": "verify",
@@ -1407,17 +1449,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         "run_result": run_result,
                         "observations": observations.model_dump(mode="json") if observations is not None else None,
                         "trajectory": trajectory.model_dump(mode="json") if trajectory is not None else None,
+                        "prepared_patch": prepared_patch,
                     }
                 )
                 async with step(verify_mode):
                     response_dict = await verify_agent_response(
                         self.server_client,
                         self.config.resources_server,
-                        body,
+                        verify_body,
                         response,
                         cookies,
                         force_zero_reward=self.config.execution_failure_reward_zero
                         and run_result.get("opencode_failed", False),
+                        verify_path=verify_path,
                     )
                 # Record the result so a restore never runs a state-changing verification twice.
                 await boundary({"next": "return", "result": response_dict, "run_result": run_result})

@@ -206,13 +206,68 @@ async def test_a_commit_snapshots_the_agents_sandbox_and_leaves_it_running(
     state = SandboxCheckpointState.model_validate(record["state"]["sandbox"])
     assert state.descriptor["sandbox_id"] == "sb-1" and state.snapshot_id == "snap-2"
     assert record["state"]["workdir"] == "/testbed"
-    # Verify extracted the patch from the agent's sandbox, graded in a fresh one, stopped the agent's, and deleted
-    # the snapshots of it: the episode is over.
+    # Verification frees the live sandbox, but the checkpoint can still restore the earlier unfinished episode.
     assert verified.status_code == 200, verified.text
     assert verified.json()["model_patch"] == "diff --git a/f b/f\n+fixed\n" and verified.json()["reward"] == 1
     assert len(ops(provider, "create")) == 2, "the only new sandbox is the verifier's"
-    assert provider.boxes["sb-1"]["state"] == "stopped" and provider.snapshots == {}
+    assert provider.boxes["sb-1"]["state"] == "stopped" and state.snapshot_id in provider.snapshots
+    assert ops(provider, "delete_snapshot") == []
     assert "sb-1" not in server._checkpointer().session_ids
+
+
+@pytest.mark.parametrize("checkpoint_index", [0, 1], ids=["older-cut", "latest-cut"])
+async def test_verification_keeps_retained_snapshots_restorable_after_the_live_episode_finishes(
+    provider: SnapshotProvider, tmp_path: Path, checkpoint_index: int
+) -> None:
+    server, client = make_server()
+    checkpoints = [tmp_path / "c1", tmp_path / "c2"]
+    async with client:
+        seed = await client.post("/ng-rollout/r-a1/seed_session", json=SEED)
+        assert seed.status_code == 200, seed.text
+        sandbox_id = seed.json()["sandbox_handle"]
+        expected_commands = []
+        for index, checkpoint_dir in enumerate(checkpoints):
+            provider.boxes[sandbox_id]["commands"].append(f"edit before checkpoint {index}")
+            expected_commands.append(list(provider.boxes[sandbox_id]["commands"]))
+            checkpoint_id = f"c{index + 1}"
+            prepared = await client.post(
+                "/ng-control/v1/checkpoint/prepare", json=control(checkpoint_id), headers=AUTH
+            )
+            assert prepared.status_code == 200, prepared.text
+            committed = await client.post(
+                "/ng-control/v1/checkpoint/commit",
+                json=control(checkpoint_id, checkpoint_dir=str(checkpoint_dir)),
+                headers=AUTH,
+            )
+            assert committed.status_code == 200, committed.text
+            await client.post("/ng-control/v1/checkpoint/resume", json=control(checkpoint_id), headers=AUTH)
+        cookies = dict(client.cookies)
+        provider.boxes[sandbox_id]["commands"].append("edit after both checkpoints")
+        finished = await client.post("/verify", json=VERIFY)
+        assert finished.status_code == 200 and finished.json()["reward"] == 1, finished.text
+
+    assert provider.boxes[sandbox_id]["state"] == "stopped"
+    assert server._checkpointer().session_ids == [] and server._workdirs == {}
+
+    fresh_server, fresh = make_server()
+    async with fresh:
+        fresh.cookies.update(cookies)
+        restored = await fresh.post(
+            "/ng-control/v1/checkpoint/restore",
+            json=control("restore", checkpoint_dir=str(checkpoints[checkpoint_index]), episode_ids=SCOPE),
+            headers=AUTH,
+        )
+        assert restored.status_code == 200, restored.text
+        await fresh.post("/ng-control/v1/checkpoint/resume", json=control("restore"), headers=AUTH)
+        reseeded = await fresh.post("/ng-rollout/r-a2/seed_session", json=SEED)
+        assert reseeded.status_code == 200, reseeded.text
+        fork = reseeded.json()["sandbox_handle"]
+        assert provider.boxes[fork]["commands"] == expected_commands[checkpoint_index]
+        finished_again = await fresh.post("/verify", json=VERIFY)
+        assert finished_again.status_code == 200 and finished_again.json()["reward"] == 1, finished_again.text
+
+    assert provider.boxes[fork]["state"] == "stopped" and fresh_server._checkpointer().session_ids == []
+    assert len(provider.snapshots) == 2 and ops(provider, "delete_snapshot") == []
 
 
 async def test_a_fresh_server_forks_the_snapshot_and_the_replacement_reseeds_into_the_fork(

@@ -92,6 +92,38 @@ class FakeResourcesServer:
         raise AssertionError(url_path)
 
 
+class PreparedResourcesServer(FakeResourcesServer):
+    """Preparation releases the original sandbox; tests can be blocked independently."""
+
+    def __init__(self, patch: str, *, block_preparation: bool = False, block_verification: bool = False) -> None:
+        super().__init__()
+        self.patch = patch
+        self.preparing = asyncio.Event()
+        self.prepared = asyncio.Event()
+        self.verifying = asyncio.Event()
+        self.verified = asyncio.Event()
+        self.verified_patches: list[str] = []
+        if not block_preparation:
+            self.prepared.set()
+        if not block_verification:
+            self.verified.set()
+
+    async def post(self, *, url_path: str, json: Any = None, **kwargs: Any):
+        if url_path == "/prepare_verify":
+            self.calls.append(url_path)
+            self.preparing.set()
+            await self.prepared.wait()
+            self.sandbox_running = False
+            return FakeResponse({"model_patch": self.patch})
+        if url_path == "/verify_prepared":
+            self.calls.append(url_path)
+            self.verified_patches.append(json["model_patch"])
+            self.verifying.set()
+            await self.verified.wait()
+            return FakeResponse({**json, "reward": 1.0})
+        return await super().post(url_path=url_path, json=json, **kwargs)
+
+
 class FakeSandbox:
     """OpenCode runs until interrupted; everything else answers at once."""
 
@@ -141,7 +173,9 @@ class FakeSandbox:
         self.disconnected += 1
 
 
-def make_agent(tmp_path: Path, resources: FakeResourcesServer) -> OpenCodeSandboxedAgent:
+def make_agent(
+    tmp_path: Path, resources: FakeResourcesServer, *, concurrency: int | None = None
+) -> OpenCodeSandboxedAgent:
     config = OpenCodeSandboxedAgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -156,6 +190,7 @@ def make_agent(tmp_path: Path, resources: FakeResourcesServer) -> OpenCodeSandbo
         sandbox_timeout=600,
         opencode_max_context_window=1000,
         artifacts_dir=str(tmp_path / "artifacts"),
+        concurrency=concurrency,
     )
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
@@ -247,6 +282,114 @@ async def test_a_checkpoint_interrupts_opencode_and_the_resume_continues_the_ses
     assert result.reward == 1.0 and sandbox.stopped, "the episode finished and the sandbox was stopped"
 
 
+@pytest.mark.parametrize("restore", [False, True], ids=["live-resume", "cold-restore"])
+async def test_a_queued_run_is_checkpointed_before_it_gets_a_concurrency_slot(tmp_path: Path, restore: bool) -> None:
+    resources = FakeResourcesServer()
+    agent = make_agent(tmp_path, resources, concurrency=1)
+    participant = agent.checkpoint_participant
+    active_sandbox = FakeSandbox(resources)
+    queued_sandbox = FakeSandbox(resources, finish_runs_after=0)
+    agent._start_sandbox = AsyncMock(side_effect=[active_sandbox, active_sandbox, queued_sandbox])
+    tasks = [asyncio.create_task(agent.run(make_request("active-session", {}), body_for("active")))]
+    try:
+        await asyncio.wait_for(active_sandbox.started.wait(), 5)
+        tasks.append(asyncio.create_task(agent.run(make_request("queued-session", {}), body_for("queued"))))
+        await wait_until(lambda: "run:queued" in participant.legacy_episodes.keys())
+        assert resources.calls == ["/seed_session"], "the queued run has not created a sandbox"
+
+        await participant.close_admission(CLOSE)
+        await wait_until(lambda: participant.readiness().ready)
+        records = await participant.export(None)
+        assert {record.episode_id.rollout_id for record in records} == {"active", "queued"}
+        queued_record = next(record for record in records if record.episode_id.rollout_id == "queued")
+        assert queued_record.episode == {"next": "seed"}
+        assert not tasks[1].done() and not queued_sandbox.started.is_set()
+
+        if restore:
+            for task in tasks:
+                task.cancel()
+            # The upstream episode protocol holds failed replay-step cleanup until checkpoint resume.
+            # The exported record above is already the restore point; release the old test handlers to drain.
+            await participant.open_admission()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            replacement_resources = FakeResourcesServer()
+            replacement = make_agent(tmp_path / "replacement", replacement_resources, concurrency=1)
+            replacement_sandbox = FakeSandbox(replacement_resources, finish_runs_after=0)
+            replacement._start_sandbox = AsyncMock(return_value=replacement_sandbox)
+            await replacement.checkpoint_participant.install([queued_record], [queued_record.episode_id])
+            await replacement.checkpoint_participant.open_admission()
+            result = await asyncio.wait_for(
+                replacement.run(make_request("replacement-session", {}), body_for("queued", attempt=1)), 10
+            )
+            assert result.reward == 1.0 and replacement_sandbox.stopped
+            assert replacement_resources.calls == ["/seed_session", "/verify"]
+        else:
+            await participant.open_admission()
+            results = await asyncio.wait_for(asyncio.gather(*tasks), 10)
+            assert [result.reward for result in results] == [1.0, 1.0]
+            assert queued_sandbox.started.is_set() and queued_sandbox.stopped
+    finally:
+        for task in tasks:
+            task.cancel()
+        await participant.open_admission()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_cancelling_a_queued_run_removes_its_checkpoint_record_without_releasing_another_runs_slot(
+    tmp_path: Path,
+) -> None:
+    resources = FakeResourcesServer()
+    agent = make_agent(tmp_path, resources, concurrency=1)
+    participant = agent.checkpoint_participant
+    sandbox = FakeSandbox(resources)
+    agent._start_sandbox = AsyncMock(return_value=sandbox)
+    tasks = [asyncio.create_task(agent.run(make_request("active-session", {}), body_for("active")))]
+    try:
+        await asyncio.wait_for(sandbox.started.wait(), 5)
+        queued = asyncio.create_task(agent.run(make_request("queued-session", {}), body_for("queued")))
+        tasks.append(queued)
+        await wait_until(lambda: "run:queued" in participant.legacy_episodes.keys())
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        assert "run:queued" not in participant.legacy_episodes.keys()
+        assert agent._sem.locked(), "cancelling a waiter must not release the active run's slot"
+        assert agent._start_sandbox.await_count == 1
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_a_slot_released_during_checkpointing_does_not_start_the_queued_task_before_resume(
+    tmp_path: Path,
+) -> None:
+    resources = FakeResourcesServer()
+    agent = make_agent(tmp_path, resources, concurrency=1)
+    participant = agent.checkpoint_participant
+    sandbox = FakeSandbox(resources, finish_runs_after=0)
+    agent._start_sandbox = AsyncMock(return_value=sandbox)
+    await agent._sem.acquire()
+    queued = asyncio.create_task(agent.run(make_request("queued-session", {}), body_for("queued")))
+    try:
+        await wait_until(lambda: "run:queued" in participant.legacy_episodes.keys())
+        await participant.close_admission(CLOSE)
+        assert participant.readiness().ready
+        agent._sem.release()
+        await wait_until(lambda: agent._sem.locked())
+        [record] = await participant.export(None)
+        assert record.episode == {"next": "seed"}
+        assert participant.readiness().ready and not queued.done()
+        assert resources.calls == [], "acquiring a slot must not seed a sandbox while the checkpoint is closed"
+        await participant.open_admission()
+        result = await asyncio.wait_for(queued, 10)
+        assert result.reward == 1.0 and sandbox.stopped
+        assert not agent._sem.locked(), "the finished run must release its slot"
+    finally:
+        queued.cancel()
+        await asyncio.gather(queued, return_exceptions=True)
+
+
 async def test_a_replacement_attempt_continues_from_the_opencode_boundary_without_reseeding(tmp_path: Path) -> None:
     resources = FakeResourcesServer()
     # The resources server restored the session by forking the checkpoint's snapshot under a new id.
@@ -335,6 +478,68 @@ async def test_without_checkpointing_the_run_is_unchanged(tmp_path: Path) -> Non
     assert "--continue" not in launch
     assert resources.calls == ["/seed_session", "/verify"]
     assert result.reward == 1.0 and sandbox.stopped
+
+
+@pytest.mark.parametrize("patch", ["diff --git a/f b/f\n+fixed\n", ""])
+async def test_verification_cut_carries_the_patch_and_restores_without_opening_or_reseeding_a_sandbox(
+    tmp_path: Path, patch: str
+) -> None:
+    resources = PreparedResourcesServer(patch, block_verification=True)
+    agent = make_agent(tmp_path, resources)
+    agent.config.prepare_verification = True
+    sandbox = FakeSandbox(resources, finish_runs_after=0)
+    agent._start_sandbox = AsyncMock(return_value=sandbox)
+    participant = agent.checkpoint_participant
+    pending = asyncio.create_task(agent.run(make_request("agent-session", {}), body_for("r")))
+    try:
+        await asyncio.wait_for(resources.verifying.wait(), 5)
+        assert not resources.sandbox_running
+        await participant.close_admission(CLOSE)
+        assert participant.readiness().ready, "a replayable test must not block checkpoint preparation"
+        [record] = await participant.export(None)
+        assert record.episode["next"] == "verify"
+        assert record.episode["verify_mode"] == "replay" and record.episode["prepared_patch"] == patch
+        assert not pending.done()
+    finally:
+        pending.cancel()
+        await participant.open_admission()
+        await asyncio.gather(pending, return_exceptions=True)
+
+    replacement_resources = PreparedResourcesServer(patch)
+    replacement_resources.sandbox_running = False
+    replacement = make_agent(tmp_path / "restored", replacement_resources)
+    # A saved prepared patch is authoritative even if the opt-in has since been disabled.
+    assert not replacement.config.prepare_verification
+    replacement._start_sandbox = AsyncMock(side_effect=AssertionError("the original sandbox is gone"))
+    await replacement.checkpoint_participant.install([record], [record.episode_id])
+    await replacement.checkpoint_participant.open_admission()
+    result = await asyncio.wait_for(replacement.run(make_request("restored-session", {}), body_for("r", attempt=1)), 5)
+    assert result.reward == 1.0
+    assert replacement_resources.calls == ["/verify_prepared"]
+    assert replacement_resources.verified_patches == resources.verified_patches == [patch]
+    replacement._start_sandbox.assert_not_awaited()
+
+
+async def test_checkpoint_preparation_waits_until_the_patch_has_been_received_and_recorded(tmp_path: Path) -> None:
+    resources = PreparedResourcesServer("diff", block_preparation=True, block_verification=True)
+    agent = make_agent(tmp_path, resources)
+    agent.config.prepare_verification = True
+    agent._start_sandbox = AsyncMock(return_value=FakeSandbox(resources, finish_runs_after=0))
+    participant = agent.checkpoint_participant
+    pending = asyncio.create_task(agent.run(make_request("agent-session", {}), body_for("r")))
+    try:
+        await asyncio.wait_for(resources.preparing.wait(), 5)
+        await participant.close_admission(CLOSE)
+        assert not participant.readiness().ready, "extraction/release is a wait step, not a replay step"
+        resources.prepared.set()
+        await wait_until(lambda: participant.readiness().ready)
+        [record] = await participant.export(None)
+        assert record.episode["prepared_patch"] == "diff" and record.episode["next"] == "verify"
+        assert not resources.verifying.is_set(), "tests start only after the saved boundary resumes"
+    finally:
+        pending.cancel()
+        await participant.open_admission()
+        await asyncio.gather(pending, return_exceptions=True)
 
 
 async def test_a_replacement_from_the_return_boundary_returns_the_stored_result_without_regrading(

@@ -102,7 +102,16 @@ def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
 
 # Tool names that would collide with the resources server's own endpoints if advertised over MCP.
 RESERVED_MCP_TOOL_NAMES = frozenset(
-    {"verify", "seed_session", "close_session", "sandbox_access", "aggregate_metrics", "mcp"}
+    {
+        "verify",
+        "prepare_verify",
+        "verify_prepared",
+        "seed_session",
+        "close_session",
+        "sandbox_access",
+        "aggregate_metrics",
+        "mcp",
+    }
 )
 
 
@@ -284,6 +293,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     # and does not change checkpointed session state, so a checkpoint need not wait for it.
     # Callers learn it from the /seed_session reply.
     checkpoint_verify: ClassVar[StepMode] = "wait"
+    # Audited additional routes whose immutable inputs make them safe to repeat after a crash.
+    checkpoint_replayable_paths: ClassVar[tuple[str, ...]] = ()
     _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
     _mcp_token_serializer: Any = PrivateAttr(default=None)
 
@@ -328,7 +339,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 raise ValueError(
                     f"{type(self).__name__} declares checkpoint_mode='exported' but does not implement {missing}"
                 )
-        participant = ResourcesParticipant(self, self.checkpoint_mode, verify_mode=self.checkpoint_verify)
+        participant = ResourcesParticipant(
+            self,
+            self.checkpoint_mode,
+            verify_mode=self.checkpoint_verify,
+            replayable_paths=self.checkpoint_replayable_paths,
+        )
         self._checkpoint = participant
         install_server_participant(
             app,
