@@ -1526,9 +1526,12 @@ Found global config dict yaml:
             default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
 
         with open_dict(global_config_dict):
-            # Head server defaults, filled per key so a config may pin just one.
-            head_server = global_config_dict.get(HEAD_SERVER_KEY_NAME) or {}
-            if not isinstance(head_server, Mapping):
+            # Head server defaults, filled per key so a config may pin just one. Only an absent or null block means
+            # "all defaults"; any other non-mapping (incl. false, 0, "" and []) is malformed.
+            head_server = global_config_dict.get(HEAD_SERVER_KEY_NAME)
+            if head_server is None:
+                head_server = {}
+            elif not isinstance(head_server, Mapping):
                 raise HeadServerConfigMalformedError(
                     f"""'{HEAD_SERVER_KEY_NAME}' must be a mapping of `host` and `port`. Got: {head_server!r}.
 Set the keys individually, in a config or as overrides, e.g.:

@@ -2144,11 +2144,22 @@ class TestConfigLoadErrors:
         assert isinstance(exc_info.value, ValueError)  # same compat contract as the rest of the family
         assert isinstance(exc_info.value.__cause__, ValidationError)  # `from e` keeps the pydantic detail
 
-    def test_parse_scalar_head_server_raises_actionable_error(self) -> None:
-        # `++head_server=foo` used to die with an AttributeError on the block's first `.get`.
+    @mark.parametrize(
+        ("head_server", "shown_as"),
+        [
+            ("foo", "'foo'"),  # `++head_server=foo` used to die with an AttributeError on the block's first `.get`
+            # Falsy non-mappings are malformed too, not "absent": they must not fall back to the defaults.
+            (False, "False"),
+            (0, "0"),
+            ("", "''"),
+            ([], "[]"),
+        ],
+        ids=["scalar", "false", "zero", "empty-string", "empty-list"],
+    )
+    def test_parse_non_mapping_head_server_raises_actionable_error(self, head_server: object, shown_as: str) -> None:
         parser = GlobalConfigDictParser()
         parse_config = GlobalConfigDictParserConfig(
-            initial_global_config_dict=DictConfig({"head_server": "foo"}),
+            initial_global_config_dict=DictConfig({"head_server": head_server}),
             skip_load_from_cli=True,
             skip_load_from_dotenv=True,
         )
@@ -2156,8 +2167,23 @@ class TestConfigLoadErrors:
             parser.parse(parse_config)
 
         message = str(exc_info.value)
-        assert "'foo'" in message
+        assert "must be a mapping" in message
+        assert f"Got: {shown_as}." in message
         assert "++head_server.port=" in message
+
+    def test_parse_null_head_server_takes_the_defaults(self) -> None:
+        # `head_server: null` is the one non-mapping that means "not configured".
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig({"head_server": None}),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+
+        parsed = parser.parse(parse_config)
+
+        assert parsed["head_server"] == {"host": "127.0.0.1", "port": DEFAULT_HEAD_SERVER_PORT}
+        assert parsed["disallowed_ports"] == [DEFAULT_HEAD_SERVER_PORT]
 
     def test_parse_keeps_a_head_server_value_pydantic_can_coerce(self) -> None:
         # The check is deliberately lax and validate-only: a quoted port in existing YAML keeps working, and the
