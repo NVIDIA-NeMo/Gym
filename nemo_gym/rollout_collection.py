@@ -24,7 +24,7 @@ import time
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict, deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
@@ -2130,6 +2130,12 @@ class _BoundedCompletionIterator:
         self._progress.close()
 
 
+def _select_task_rows(raw_rows: List[Tuple[int, str, Dict]], task_ids: Sequence[str]) -> List[Tuple[int, str, Dict]]:
+    """Keep the first row of each selected task, in input order (see ``select_tasks``)."""
+    keep = select_tasks([row for _, _, row in raw_rows], task_ids)
+    return [raw_rows[index] for index in keep]
+
+
 class RolloutCollectionHelper(BaseModel):
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
@@ -2159,8 +2165,7 @@ class RolloutCollectionHelper(BaseModel):
         _reject_attempt_qualified_rollout_ids([row for _, _, row in raw_rows], _input_path)
 
         if config.task_ids is not None:
-            keep = select_tasks([row for _, _, row in raw_rows], config.task_ids)
-            raw_rows = [raw_rows[index] for index in keep]
+            raw_rows = _select_task_rows(raw_rows, config.task_ids)
             print(f"Selected {len(raw_rows)} task(s)")
 
         # Validate and apply prompt config before per-row processing
@@ -2179,6 +2184,7 @@ class RolloutCollectionHelper(BaseModel):
         num_repeats: Union[int, Dict[str, int]] = 1,
         num_repeats_add_seed: Union[bool, Dict[str, bool]] = False,
         global_config_dict: Optional[DictConfig] = None,
+        task_ids: Optional[Sequence[str]] = None,
     ) -> List[Dict]:
         """Apply run-level routing and repetition to caller-held rows.
 
@@ -2189,8 +2195,9 @@ class RolloutCollectionHelper(BaseModel):
 
         Pass ``global_config_dict`` (the merged config) to also resolve task_source-only rows to
         their agents here; leave it None to defer that to ``run_examples``, which does it against
-        the head server's config. Input rows are not mutated; the expanded, stamped copies are
-        returned.
+        the head server's config. Pass ``task_ids`` to keep only those tasks, selected as
+        ``gym eval run --task-ids`` selects them: by the id stored in each row, each task once
+        before repetition. Input rows are not mutated; the expanded, stamped copies are returned.
         """
         config = RolloutCollectionConfig(
             input_jsonl_fpath="<in-memory>",
@@ -2199,11 +2206,14 @@ class RolloutCollectionHelper(BaseModel):
             fan_out=fan_out,
             num_repeats=num_repeats,
             num_repeats_add_seed=num_repeats_add_seed,
+            task_ids=task_ids,
         )
         raw_rows = [
             (idx, orjson.dumps(row, option=orjson.OPT_SORT_KEYS).decode(), row.copy())
             for idx, row in enumerate(examples)
         ]
+        if config.task_ids is not None:
+            raw_rows = _select_task_rows(raw_rows, config.task_ids)
         rows = self._preprocess_raw_rows(raw_rows, config)
         if global_config_dict is not None:
             self.resolve_task_sources(rows, global_config_dict)
