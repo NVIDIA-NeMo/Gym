@@ -161,15 +161,16 @@ def test_sandbox_model_url_preserves_remote_hostname_and_port():
     assert url == "http://model-host:8000"
 
 
-def test_sandbox_model_url_prefers_backend_base_url_and_strips_v1():
+def test_sandbox_model_url_uses_gym_model_server_not_backend_and_strips_v1():
     agent = _make_agent(model_server={"type": "responses_api_models", "name": "policy_model"})
     agent.server_client.global_config_dict = MagicMock()
+    agent.server_client._build_server_base_url = MagicMock(return_value="http://model-server:8000/v1")
     with patch(
         "responses_api_agents.harness_agent.app.get_first_server_config_dict",
         return_value={"base_url": "http://vllm-node:9000/v1"},
     ):
         url = agent._sandbox_model_url(MagicMock())
-    assert url == "http://vllm-node:9000"
+    assert url == "http://model-server:8000"
 
 
 @pytest.mark.parametrize("hostname", ["sandbox-gateway", "localhost"])
@@ -193,11 +194,12 @@ def test_sandbox_model_url_preserves_training_rollout_prefix():
     agent = _make_agent()
     agent.server_client.global_config_dict = MagicMock()
     request = SimpleNamespace(path_params={}, url=SimpleNamespace(path="/run"))
+    agent.server_client._build_server_base_url = MagicMock(return_value="http://model:8000")
     token = _RUN_CONTEXT.set({"url_prefix": "/ng-rollout/rollout-1/training-token-capture"})
     try:
         with patch(
             "responses_api_agents.harness_agent.app.get_first_server_config_dict",
-            return_value={"base_url": "http://model:8000/v1"},
+            return_value={"base_url": "http://vllm-node:9000/v1"},
         ):
             url = agent._sandbox_model_url(request)
     finally:

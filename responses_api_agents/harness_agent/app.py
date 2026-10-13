@@ -115,9 +115,7 @@ def _rollout_stats(response: dict[str, Any], failed: bool, seconds: float) -> di
         "harness_failed": float(failed),
         "harness_seconds": seconds,
         "harness_tool_calls": float(len(calls)),
-        "harness_subagent_calls": float(
-            sum(1 for c in calls if str(c.get("name") or "").lower() in _SUBAGENT_TOOLS)
-        ),
+        "harness_subagent_calls": float(sum(1 for c in calls if str(c.get("name") or "").lower() in _SUBAGENT_TOOLS)),
         "harness_assistant_messages": float(
             sum(1 for item in output if isinstance(item, dict) and item.get("type") == "message")
         ),

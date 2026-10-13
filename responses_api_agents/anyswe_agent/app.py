@@ -72,7 +72,11 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
 
 
 def _model_url_for_rollout(model_url: str, rollout_id: Optional[str], token_capture: bool = False) -> str:
-    return apply_rollout_prefix(model_url, rollout_id, token_capture=token_capture) if model_url and rollout_id else model_url
+    return (
+        apply_rollout_prefix(model_url, rollout_id, token_capture=token_capture)
+        if model_url and rollout_id
+        else model_url
+    )
 
 
 def _model_name(params: "AnySweInstanceConfig") -> str:
@@ -144,7 +148,12 @@ def _classify_agent_error(error: str) -> Optional[str]:
     return "other" if text.strip() else None
 
 
-_CONTEXT_OVERFLOW_SIGNALS = ("maximum context length", "max_model_len", "input length exceeds", "context length exceeded")
+_CONTEXT_OVERFLOW_SIGNALS = (
+    "maximum context length",
+    "max_model_len",
+    "input length exceeds",
+    "context length exceeded",
+)
 
 
 def _is_context_overflow(agent_error_kind: Optional[str], agent_error: str) -> bool:
@@ -552,7 +561,10 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             image=params.container,
             ttl_s=config.pop(
                 "ttl_s",
-                params.swebench_agent_timeout + params.swebench_tests_timeout + params.agent_runtime_fetch_timeout_s + 600,
+                params.swebench_agent_timeout
+                + params.swebench_tests_timeout
+                + params.agent_runtime_fetch_timeout_s
+                + 600,
             ),
             ready_timeout_s=config.pop("ready_timeout_s", 1200),
             workdir=config.pop("workdir", _repo_dir(params.problem_info)),

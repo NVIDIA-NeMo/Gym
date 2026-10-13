@@ -70,7 +70,9 @@ def _agent_bin_dir(deps_dir: str, agent_module: str) -> str:
 _TESTBED_VENV_BINS = ("/testbed/.venv/bin", "/opt/miniconda3/envs/testbed/bin")
 
 
-def _agent_path(agent_bin_dir: str, inherited_path: str, testbed_venv_bins: tuple[str, ...] = _TESTBED_VENV_BINS) -> str:
+def _agent_path(
+    agent_bin_dir: str, inherited_path: str, testbed_venv_bins: tuple[str, ...] = _TESTBED_VENV_BINS
+) -> str:
     """PATH for the coding agent: the harness executable, then the task's own virtualenv, then the image PATH.
 
     Task images that ship ``/testbed/.venv`` expect ``python``, ``pip`` and ``pytest`` to come from it. Without

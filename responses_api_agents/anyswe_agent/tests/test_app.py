@@ -36,10 +36,10 @@ from responses_api_agents.anyswe_agent.app import (
     SWEBenchMetrics,
     _classify_agent_error,
     _dataset_family,
+    _is_context_overflow,
     _model_url_for_rollout,
     _r2e_resolved,
     _safe_config_json,
-    _is_context_overflow,
     _should_mask_sample,
 )
 from responses_api_agents.anyswe_agent.prepare import _to_gym_row
@@ -161,6 +161,7 @@ class TestSandboxAPI:
             sandbox_default_metadata={"sandbox-api": "opensandbox-sdk"},
             swebench_agent_timeout=100,
             swebench_tests_timeout=200,
+            agent_runtime_fetch_timeout_s=600,
             instance_id="astropy__astropy-12907",
             container="image:tag",
             problem_info={},

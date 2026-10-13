@@ -269,8 +269,12 @@ def _debug_unresolved(messages: list[dict], fingerprint: str, nodes: list) -> No
             "fingerprint_found": bool(nodes),
             "n_messages": len(messages),
             "candidates": [
-                {"context_len": n.context_len, "digest_match": n.context_len and len(messages) >= n.context_len
-                 and conversation_digest(messages[: n.context_len]) == n.context_digest}
+                {
+                    "context_len": n.context_len,
+                    "digest_match": n.context_len
+                    and len(messages) >= n.context_len
+                    and conversation_digest(messages[: n.context_len]) == n.context_digest,
+                }
                 for n in nodes
             ],
             "messages": messages,
