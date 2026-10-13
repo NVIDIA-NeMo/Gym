@@ -394,3 +394,4 @@ row["_ng_rollout_id"] = f"step{step}.{task_index}-{rollout_index}"
 ```
 
 The id may contain letters, digits, dots, dashes, and underscores, and it must begin with a letter or digit.
+It must not end with `-a` followed by a positive number, such as `-a2`: that suffix names an attempt of a rollout, and rollout collection rejects dataset rows that use it.
