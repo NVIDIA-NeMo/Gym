@@ -279,6 +279,12 @@ file as `judge_failed`, and `gym eval reverify --judge-failed-only` judges it
 again. In comparison mode a judging failure is a retryable environment-server
 failure, which `--resume` dispatches again.
 
+To collect deliverables without judging them, for example for a reference set,
+set `++gdpval_resources_server.resources_servers.gdpval.judge_deliverables=false`.
+`/verify` still persists each deliverable, then returns `reward: 0.0` with
+`mask_sample: true`, so the rows stay in the output with their
+`deliverables_dir` and aggregation skips them.
+
 ### Full run as a single stage
 
 The default (no `multistage.*`) is unchanged: all tasks vs. all references (each

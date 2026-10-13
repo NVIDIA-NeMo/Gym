@@ -163,6 +163,24 @@ def test_a_finished_task_is_persisted_with_its_files_and_references(server, root
     assert len(stopped) == 1
 
 
+def test_unjudged_deliverables_are_persisted_and_masked(server, root, tmp_path, monkeypatch):
+    async def no_judge(**_kwargs):
+        raise AssertionError("judge_deliverables=false must not call a judge")
+
+    monkeypatch.setattr("resources_servers.gdpval.scoring.score_with_rubric", no_judge)
+    server.config.judge_deliverables = False
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed(tmp_path))
+    (root / "report.md").write_text("the report")
+    client.post("/finish", json={"reason": "done", "paths": ["report.md"]})
+
+    verified = _verify(client, rubric_json=[{"criterion": "clarity", "score": 1}])
+
+    assert (verified["reward"], verified["mask_sample"]) == (0.0, True)
+    assert verified["judge_response"] is None
+    assert (Path(verified["deliverables_dir"]) / "report.md").read_text() == "the report"
+
+
 @pytest.mark.parametrize(
     "paths, persisted",
     [
