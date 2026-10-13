@@ -2597,8 +2597,22 @@ class _SnapshottingSandbox(FakeSandbox):
         return SimpleNamespace(id="snap-1", status=SimpleNamespace(state="Creating"))
 
 
+def _snapshot_handle() -> SandboxHandle:
+    return SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=_SnapshottingSandbox("sb-1"))
+
+
+async def test_snapshot_starts_through_the_sdk_and_returns_the_id_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _management(monkeypatch, [_ManagementResponse(200, {})])
+    _SnapshottingSandbox.snapshot_names = []
+
+    assert await _snapshot_provider().snapshot(_snapshot_handle(), name="ng-s1") == "snap-1"
+
+    assert _SnapshottingSandbox.snapshot_names == ["ng-s1"]
+    assert calls == [], "starting a snapshot does not wait for it"
+
+
 @pytest.mark.parametrize("tls_verify", [False, True])
-def test_snapshot_creates_through_the_sdk_and_waits_until_the_management_api_reports_ready(
+async def test_wait_snapshot_ready_polls_the_management_api_until_ready(
     monkeypatch: pytest.MonkeyPatch, tls_verify: bool
 ) -> None:
     calls = _management(
@@ -2608,16 +2622,13 @@ def test_snapshot_creates_through_the_sdk_and_waits_until_the_management_api_rep
             _ManagementResponse(200, {"id": "snap-1", "status": {"state": "Ready"}}),
         ],
     )
-    _SnapshottingSandbox.snapshot_names = []
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"domain": "cell.example", "api_key": "k", "protocol": "https", "tls_verify": tls_verify},
         create={"connect_poll_s": 0.01},
     )
-    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=_SnapshottingSandbox("sb-1"))
 
-    assert asyncio.run(provider.snapshot(handle, name="ng-s1")) == "snap-1"
+    await provider.wait_snapshot_ready("snap-1")
 
-    assert _SnapshottingSandbox.snapshot_names == ["ng-s1"]
     assert [call["method"] for call in calls] == ["GET", "GET"], "polled until Ready"
     assert {call["url"] for call in calls} == {"https://cell.example/v1/snapshots/snap-1"}
     assert calls[0]["headers"] == {"OPEN-SANDBOX-API-KEY": "k"}
@@ -2625,46 +2636,74 @@ def test_snapshot_creates_through_the_sdk_and_waits_until_the_management_api_rep
     assert all((call.get("ssl") is False) == (not tls_verify) for call in calls)
 
 
-def test_a_failed_snapshot_raises_with_the_servers_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_wait_snapshot_ready_reads_a_top_level_state_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    _management(monkeypatch, [_ManagementResponse(200, {"id": "snap-1", "state": "READY"})])
+    await _snapshot_provider().wait_snapshot_ready("snap-1")
+
+
+async def test_a_failed_snapshot_raises_with_the_servers_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     _management(
         monkeypatch,
         [_ManagementResponse(200, {"id": "snap-1", "status": {"state": "Failed", "message": "registry push failed"}})],
     )
-    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=_SnapshottingSandbox("sb-1"))
-
-    with pytest.raises(RuntimeError, match="snapshot 'snap-1' of sandbox 'sb-1' failed: registry push failed"):
-        asyncio.run(_snapshot_provider().snapshot(handle))
+    with pytest.raises(RuntimeError, match="snapshot 'snap-1' failed: registry push failed"):
+        await _snapshot_provider().wait_snapshot_ready("snap-1")
 
 
-def test_a_snapshot_that_is_not_ready_in_time_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_snapshot_that_is_not_ready_in_time_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     _management(monkeypatch, [_ManagementResponse(200, {"id": "snap-1", "status": {"state": "Creating"}})])
-    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=_SnapshottingSandbox("sb-1"))
-
-    with pytest.raises(TimeoutError, match="snapshot 'snap-1' of sandbox 'sb-1' to be ready after 0.05s"):
-        asyncio.run(_snapshot_provider(snapshot_timeout_s=0.05).snapshot(handle))
+    with pytest.raises(TimeoutError, match="snapshot 'snap-1' to be ready after 0.05s"):
+        await _snapshot_provider(snapshot_timeout_s=0.05).wait_snapshot_ready("snap-1")
 
 
-def test_a_snapshot_lookup_error_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_snapshot_lookup_error_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     _management(monkeypatch, [_ManagementResponse(500, {})])
-    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=_SnapshottingSandbox("sb-1"))
-
     with pytest.raises(RuntimeError, match="lookup failed -> HTTP 500"):
-        asyncio.run(_snapshot_provider().snapshot(handle))
+        await _snapshot_provider().wait_snapshot_ready("snap-1")
 
 
-def test_delete_snapshot_tolerates_a_snapshot_that_is_already_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+class _TextResponse(_ManagementResponse):
+    async def json(self, content_type: object = None) -> Any:
+        raise ValueError("not JSON")
+
+
+@pytest.mark.parametrize(
+    ("response", "detail"),
+    [
+        (_TextResponse(200, None), "a body that is not JSON"),
+        (_ManagementResponse(200, ["not", "an", "object"]), "a body that is not a JSON object"),
+        (_ManagementResponse(200, {"id": "snap-1"}), "returned no state"),
+    ],
+)
+async def test_a_lookup_answer_without_a_state_fails_at_once_instead_of_polling_until_the_timeout(
+    monkeypatch: pytest.MonkeyPatch, response: _ManagementResponse, detail: str
+) -> None:
+    calls = _management(monkeypatch, [response])
+    with pytest.raises(RuntimeError, match=detail):
+        await _snapshot_provider(snapshot_timeout_s=5).wait_snapshot_ready("snap-1")
+    assert len(calls) == 1
+
+
+async def test_delete_snapshot_tolerates_a_snapshot_that_is_already_gone(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _management(monkeypatch, [_ManagementResponse(404, {"code": "SNAPSHOT::NOT_FOUND"})])
 
-    asyncio.run(_snapshot_provider().delete_snapshot("snap-1"))
+    await _snapshot_provider().delete_snapshot("snap-1")
 
     [call] = calls
     assert call["method"] == "DELETE" and call["url"] == "https://cell.example/v1/snapshots/snap-1"
 
     _management(monkeypatch, [_ManagementResponse(500, {})])
     with pytest.raises(RuntimeError, match="snapshot 'snap-1' delete failed -> HTTP 500"):
-        asyncio.run(_snapshot_provider().delete_snapshot("snap-1"))
+        await _snapshot_provider().delete_snapshot("snap-1")
+
+
+async def test_snapshot_operations_require_a_domain() -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"api_key": "k"}, create={"connect_poll_s": 0.01})
+    with pytest.raises(RuntimeError, match="require connection.domain"):
+        await provider.delete_snapshot("snap-1")
 
 
 def test_snapshot_timeout_is_validated() -> None:
     with pytest.raises(ValueError, match="operations.snapshot_timeout_s must be > 0"):
         _snapshot_provider(snapshot_timeout_s=0)
+    assert opensandbox_provider.OpenSandboxOperationConfig().snapshot_timeout_s == 240.0

@@ -2045,3 +2045,60 @@ async def test_an_export_that_outlives_its_commit_and_then_fails_is_final_for_it
     assert late.json()["error"]["code"] == "deadline_exceeded"
     assert retried.status_code == 409 and retried.json()["error"]["code"] == "export_failed"
     assert len(exports) == 1 and not (tmp_path / "gym").exists()
+
+
+class ParkingParticipant(FakeParticipant):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parked: list[list[Record]] = []
+        self.fail_park = False
+        self.park_gate: Optional[asyncio.Event] = None
+        self.park_done = asyncio.Event()
+
+    async def park_exported(self, records: list[Record]) -> None:
+        self.parked.append(records)
+        if self.park_gate is not None:
+            await self.park_gate.wait()
+        self.park_done.set()
+        if self.fail_park:
+            raise RuntimeError("park failed")
+
+
+@pytest.mark.parametrize("fail_park", [False, True])
+async def test_a_commit_with_stop_parks_the_exported_records_after_the_write(tmp_path: Path, fail_park: bool) -> None:
+    participant = ParkingParticipant()
+    participant.fail_park = fail_park
+    participant.executions["r"] = {"parked": True, "value": 7}
+    async with make_client(participant) as client:
+        await client.post("/ng-control/v1/checkpoint/prepare", json=body())
+        plain = await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path / "a")))
+        parked_after_plain_commit = list(participant.parked)
+        await client.post("/ng-control/v1/checkpoint/resume", json=body())
+        await client.post("/ng-control/v1/checkpoint/prepare", json=body("ckpt-2"))
+        stopping = await client.post(
+            "/ng-control/v1/checkpoint/commit", json=body("ckpt-2", checkpoint_dir=str(tmp_path / "b"), stop=True)
+        )
+
+    assert plain.status_code == 200, plain.text
+    assert parked_after_plain_commit == [], "a commit the controller resumes after parks nothing"
+    assert stopping.status_code == 200, stopping.text
+    assert stopping.json()["phase"] == "committed", "a park failure is logged, not returned"
+    [records] = participant.parked
+    assert [(record.episode_id.rollout_id, record.value) for record in records] == [("r", 7)]
+    assert (tmp_path / "b").exists(), "the write is durable before the park, whatever the park does"
+
+
+async def test_a_park_that_outlives_the_commit_deadline_runs_to_completion(tmp_path: Path) -> None:
+    participant = ParkingParticipant()
+    participant.park_gate = asyncio.Event()
+    participant.executions["r"] = {"parked": True, "value": 7}
+    async with make_client(participant) as client:
+        await client.post("/ng-control/v1/checkpoint/prepare", json=body())
+        stopping = await client.post(
+            "/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path), timeout=0.3, stop=True)
+        )
+        assert stopping.status_code == 200, stopping.text
+        assert stopping.json()["phase"] == "committed"
+        assert not participant.park_done.is_set(), "the deadline passed while the park was still running"
+        participant.park_gate.set()
+        await asyncio.wait_for(participant.park_done.wait(), timeout=2)

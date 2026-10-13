@@ -12,15 +12,20 @@ changing once the episode continues, and never a paused state, which the backend
 - At commit, :meth:`~SandboxSessionCheckpointer.export` snapshots every live session's sandbox and waits until
   each snapshot is ready. The sandbox keeps running; the episode continues in it after the resume. A snapshot
   that fails or does not become ready in time fails the commit, and the controller keeps its previous checkpoint.
+  The participant's prepare guarantees no tool call is in flight when ``export`` runs, so the snapshot is
+  consistent: the owner must not call it while a sandbox is in use.
 - When the controller stops after a commit (a preemption, for example), :meth:`~SandboxSessionCheckpointer.park`
   frees the compute the exported sandboxes hold, as ``on_stop`` says. Gym then exits holding nothing.
 - After a crash, :meth:`~SandboxSessionCheckpointer.restore` rebuilds each session's sandbox in a fresh process
   from its snapshot (a fork), whatever happened to the live sandbox since. It validates every state first and
-  installs all or nothing, as the participant hooks require. The superseded sandbox is stopped, best effort.
+  installs all or nothing, as the participant hooks require. The superseded sandboxes are stopped afterwards,
+  best effort and off the restore's critical path.
 - :meth:`~SandboxSessionCheckpointer.stop` frees a session's sandbox. When the episode is over (verified or
-  closed) it also deletes the snapshots this process took of it: a finished episode is never restored. A retired
-  attempt keeps its snapshots, because a retained checkpoint may still restore it; the operator sweep
-  (``nemo_gym.sandbox.providers.opensandbox.snapshots --retain-from``) deletes what no retained checkpoint names.
+  closed) it also marks the snapshots this process knows of it for deletion; they are deleted once the next
+  ``export`` succeeds, because only then is there a checkpoint that no longer names them. A retired attempt
+  keeps its snapshots, because a retained checkpoint may still restore it. Gym does not yet reclaim those, nor
+  the snapshots of a process that died before its next export: a checkpoint-aware sweep is a follow-up; until
+  then an operator deletes them with ``nemo_gym.sandbox.providers.opensandbox.snapshots`` by id.
 """
 
 import asyncio
@@ -31,7 +36,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.api import AsyncSandbox
@@ -53,12 +58,20 @@ OnStop = Literal["kill", "none"]
 FORK_NOT_FOUND_RETRIES = 4
 FORK_NOT_FOUND_BACKOFF_S = 5.0
 
+# Spec entries a fork never reads: the snapshot replaces the image, and with it the registry credentials.
+_UNRESTORED_PROVIDER_OPTIONS = ("image_auth", "snapshot_id")
+
 
 class SandboxCheckpointState(BaseModel):
     """What a restore needs to rebuild one session's sandbox as of a checkpoint: its snapshot and its spec.
 
+    ``snapshot_id`` is the snapshot a restore forks; ``snapshot_ids`` are all the snapshots this process has
+    taken of the session's sandbox so far, so that the fork can delete them when the episode ends.
     ``descriptor`` names the sandbox the snapshot was taken from, so a restore can stop it; it is never restored
     in place. ``snapshot_at`` is the Unix time the snapshot became ready.
+
+    ``spec`` is written as the fork needs it, which includes the sandbox environment (``env``) in plain text:
+    a checkpoint directory holds whatever the sandboxes were started with.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -66,6 +79,7 @@ class SandboxCheckpointState(BaseModel):
     provider_name: str
     descriptor: dict[str, JsonValue]
     snapshot_id: str
+    snapshot_ids: list[str] = Field(default_factory=list)
     spec: dict[str, JsonValue]
     snapshot_at: float
 
@@ -79,14 +93,28 @@ class SandboxCheckpointError(RuntimeError):
 
 
 def spec_to_json(spec: SandboxSpec) -> dict[str, JsonValue]:
-    """Serialize a spec for a checkpoint record. Files were uploaded at creation; a snapshot already has them."""
+    """Serialize a spec for a checkpoint record, leaving out what a fork never reads.
+
+    Files were uploaded at creation and the snapshot has them; the snapshot also replaces the image, so the
+    image and its registry credentials (``provider_options["image_auth"]``) are dropped too.
+    """
     data = dataclasses.asdict(spec)
-    data["ports"] = list(spec.ports)
+    data["image"] = None
     data["files"] = {}
+    data["ports"] = list(spec.ports)
+    options = dict(data["provider_options"])
+    for key in _UNRESTORED_PROVIDER_OPTIONS:
+        options.pop(key, None)
+    data["provider_options"] = options
     return data
 
 
 def spec_from_json(data: Mapping[str, Any]) -> SandboxSpec:
+    """Rebuild a spec from a checkpoint record written by :func:`spec_to_json`.
+
+    Raises ``TypeError`` for a key the current :class:`SandboxSpec` does not know and ``ValueError`` for an
+    invalid ``resources`` or ``ports`` value; a restore reports either as an invalid checkpoint state.
+    """
     return SandboxSpec(**data)
 
 
@@ -94,7 +122,7 @@ def spec_from_json(data: Mapping[str, Any]) -> SandboxSpec:
 class _Entry:
     sandbox: AsyncSandbox
     spec: SandboxSpec
-    # Every snapshot this process took of the sandbox, deleted when the episode is over.
+    # Every snapshot this process knows of the sandbox, marked for deletion when the episode is over.
     snapshot_ids: list[str] = field(default_factory=list)
 
 
@@ -114,16 +142,27 @@ class SandboxSessionCheckpointer:
         self._semaphore = asyncio.Semaphore(parallelism)
         self._on_stop: OnStop = on_stop
         self._entries: dict[str, _Entry] = {}
+        # Snapshots of finished episodes, deleted once the next export succeeds (see ``stop``).
+        self._pending_deletions: list[str] = []
+        self._background: set[asyncio.Task[None]] = set()
 
     @property
     def provider(self) -> SandboxProvider:
+        """The shared provider every tracked sandbox was created with."""
         return self._provider
 
     @property
     def session_ids(self) -> list[str]:
+        """The sessions that currently have a sandbox, including one whose stop failed and awaits a retry."""
         return list(self._entries)
 
+    @property
+    def pending_snapshot_deletions(self) -> list[str]:
+        """Snapshots of finished episodes that the next successful ``export`` deletes."""
+        return list(self._pending_deletions)
+
     def __contains__(self, session_id: object) -> bool:
+        """Whether ``session_id`` currently has a sandbox."""
         return session_id in self._entries
 
     def get(self, session_id: str) -> Optional[AsyncSandbox]:
@@ -132,9 +171,21 @@ class SandboxSessionCheckpointer:
         return entry.sandbox if entry is not None else None
 
     def add(self, session_id: str, sandbox: AsyncSandbox, spec: SandboxSpec) -> None:
-        """Track a sandbox the server created itself; ``spec`` is what a restore re-creates it from."""
+        """Track a sandbox the server created itself; ``spec`` is what a restore re-creates it from.
+
+        The sandbox must run on this checkpointer's provider without owning it
+        (``AsyncSandbox(checkpointer.provider, spec, owns_provider=False)``): the provider is shared by every
+        session, and a sandbox that owned it would close it for all of them when stopped.
+        """
         if session_id in self._entries:
             raise ValueError(f"session {session_id!r} already has a sandbox")
+        if sandbox.owns_provider:
+            raise ValueError(
+                f"the sandbox of session {session_id!r} owns its provider; create it with owns_provider=False "
+                "on the checkpointer's provider"
+            )
+        if sandbox.provider is not self._provider:
+            raise ValueError(f"the sandbox of session {session_id!r} is not on the checkpointer's provider")
         self._entries[session_id] = _Entry(sandbox=sandbox, spec=spec)
 
     async def create(self, session_id: str, spec: SandboxSpec) -> AsyncSandbox:
@@ -160,16 +211,30 @@ class SandboxSessionCheckpointer:
         connection = DirectSandboxConnection(provider_config_ref=provider_config_ref, descriptor=descriptor)
         return SandboxAccess(connection=connection, workdir=workdir)
 
+    async def settle(self) -> None:
+        """Wait for the best-effort work a restore left running, such as stopping superseded sandboxes."""
+        while self._background:
+            await asyncio.gather(*self._background, return_exceptions=True)
+
     # -- commit -------------------------------------------------------------------------------------------------
 
     async def export(self, session_ids: Iterable[str]) -> dict[str, JsonValue]:
         """Snapshot each session's sandbox and return its checkpoint state; leaves out sessions no longer held.
 
-        Raises :class:`SandboxCheckpointError` if a snapshot fails or is not ready in time, which fails the
-        commit. Every sandbox keeps running; snapshots already taken are orphans for the sweep.
+        Every snapshot is awaited before the result or the first failure is returned, so each one is recorded
+        on its session. Raises :class:`SandboxCheckpointError` if a snapshot fails or is not ready in time,
+        which fails the commit; every sandbox keeps running. On success, the snapshots of episodes that ended
+        since the previous export are deleted: the checkpoint this export feeds no longer names them.
         """
-        exported = await asyncio.gather(*(self._export_one(session_id) for session_id in session_ids))
-        return {session_id: state for session_id, state in exported if state is not None}
+        outcomes = await asyncio.gather(
+            *(self._export_one(session_id) for session_id in session_ids), return_exceptions=True
+        )
+        failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
+        if failures:
+            raise failures[0]
+        states = {session_id: state for session_id, state in outcomes if state is not None}
+        await self._delete_pending_snapshots()
+        return states
 
     async def _export_one(self, session_id: str) -> tuple[str, Optional[dict[str, JsonValue]]]:
         entry = self._entries.get(session_id)
@@ -189,11 +254,20 @@ class SandboxSessionCheckpointer:
                 snapshot_id = await self._provider.snapshot(handle, name=f"ng-{session_id[:16]}-{int(time.time())}")
             except Exception as error:
                 raise SandboxCheckpointError(session_id, f"could not be snapshotted: {error}") from error
-        entry.snapshot_ids.append(snapshot_id)
+            # Recorded before the wait: a snapshot that fails, times out, or outlives a cancelled export exists
+            # on the backend all the same, and the episode's end must find it.
+            entry.snapshot_ids.append(snapshot_id)
+            try:
+                await self._provider.wait_snapshot_ready(snapshot_id)
+            except Exception as error:
+                raise SandboxCheckpointError(
+                    session_id, f"snapshot {snapshot_id!r} did not become ready: {error}"
+                ) from error
         state = SandboxCheckpointState(
             provider_name=handle.provider_name,
             descriptor=descriptor,
             snapshot_id=snapshot_id,
+            snapshot_ids=list(entry.snapshot_ids),
             spec=spec_to_json(entry.spec),
             snapshot_at=time.time(),
         )
@@ -202,8 +276,9 @@ class SandboxSessionCheckpointer:
     async def park(self, session_ids: Iterable[str]) -> None:
         """Free what the exported sandboxes hold, as ``on_stop`` says; for a commit the controller stops after.
 
-        The checkpoint is already durable, so a failure is logged and the sandbox runs out its TTL. The sessions
-        are forgotten either way: nothing in this process continues them.
+        This participant's records are durable by now, so a failure is logged and the sandbox runs out its TTL.
+        With ``kill`` the sessions are forgotten whether or not the stop succeeded: nothing in this process
+        continues them. With ``none`` nothing changes.
         """
         if self._on_stop == "none":
             return
@@ -226,7 +301,9 @@ class SandboxSessionCheckpointer:
         """Rebuild every session's sandbox from its snapshot, all or nothing.
 
         Every state is validated before the backend is touched. If any sandbox cannot be rebuilt, the ones this
-        call created are stopped and :class:`SandboxCheckpointError` names the session.
+        call created are stopped and :class:`SandboxCheckpointError` names the session. Once the forks are in
+        place the crashed process's sandboxes are stopped in the background, best effort; a failure there is
+        logged and the sandbox runs out its TTL.
         """
         provider_name = self._provider_name()
         parsed: dict[str, tuple[SandboxCheckpointState, SandboxSpec]] = {}
@@ -261,10 +338,12 @@ class SandboxSessionCheckpointer:
             raise failures[0]
         for session_id, sandbox in created.items():
             state, spec = parsed[session_id]
-            # The fork inherits the snapshot it came from, so the episode's end deletes that one too.
-            self._entries[session_id] = _Entry(sandbox=sandbox, spec=spec, snapshot_ids=[state.snapshot_id])
-        # The crashed process's sandboxes are superseded: nothing continues them. Best effort, in parallel.
-        await asyncio.gather(*(self._stop_superseded(session_id, state) for session_id, (state, _) in parsed.items()))
+            # The fork inherits every snapshot of the session, so the episode's end deletes them all.
+            snapshot_ids = list(dict.fromkeys([*state.snapshot_ids, state.snapshot_id]))
+            self._entries[session_id] = _Entry(sandbox=sandbox, spec=spec, snapshot_ids=snapshot_ids)
+        # The crashed process's sandboxes are superseded: nothing continues them. Off the critical path: the
+        # install is deadline-bound and the forks are already in place.
+        self._spawn(self._stop_superseded_all(parsed))
 
     async def _fork(
         self, session_id: str, state: SandboxCheckpointState, spec: SandboxSpec, created: dict[str, AsyncSandbox]
@@ -277,28 +356,31 @@ class SandboxSessionCheckpointer:
             provider_options={**spec.provider_options, "snapshot_id": state.snapshot_id},
         )
         sandbox = AsyncSandbox(self._provider, fork_spec, owns_provider=False)
-        async with self._semaphore:
-            for attempt in range(FORK_NOT_FOUND_RETRIES + 1):
-                try:
+        for attempt in range(FORK_NOT_FOUND_RETRIES + 1):
+            try:
+                async with self._semaphore:
                     await sandbox.start()
-                    break
-                except Exception as error:
-                    # A snapshot store that is not fully shared across replicas answers "not found" from the
-                    # replicas that did not make the snapshot; a later request may land on one that did.
-                    if "NOT_FOUND" in repr(error) and attempt < FORK_NOT_FOUND_RETRIES:
-                        LOGGER.warning(
-                            "snapshot %s of session %s not found on attempt %d; retrying in %.0fs",
-                            state.snapshot_id,
-                            session_id,
-                            attempt + 1,
-                            FORK_NOT_FOUND_BACKOFF_S,
-                        )
-                        await asyncio.sleep(FORK_NOT_FOUND_BACKOFF_S)
-                        continue
-                    raise SandboxCheckpointError(
-                        session_id, f"could not be re-created from snapshot {state.snapshot_id!r}: {error}"
-                    ) from error
+                break
+            except Exception as error:
+                # A snapshot store that is not fully shared across replicas answers "not found" from the
+                # replicas that did not make the snapshot; a later request may land on one that did.
+                if "NOT_FOUND" in repr(error) and attempt < FORK_NOT_FOUND_RETRIES:
+                    LOGGER.warning(
+                        "snapshot %s of session %s not found on attempt %d; retrying in %.0fs",
+                        state.snapshot_id,
+                        session_id,
+                        attempt + 1,
+                        FORK_NOT_FOUND_BACKOFF_S,
+                    )
+                    await asyncio.sleep(FORK_NOT_FOUND_BACKOFF_S)
+                    continue
+                raise SandboxCheckpointError(
+                    session_id, f"could not be re-created from snapshot {state.snapshot_id!r}: {error}"
+                ) from error
         created[session_id] = sandbox
+
+    async def _stop_superseded_all(self, parsed: Mapping[str, tuple[SandboxCheckpointState, SandboxSpec]]) -> None:
+        await asyncio.gather(*(self._stop_superseded(session_id, state) for session_id, (state, _) in parsed.items()))
 
     async def _stop_superseded(self, session_id: str, state: SandboxCheckpointState) -> None:
         if not isinstance(self._provider, ConnectableProvider):
@@ -312,28 +394,42 @@ class SandboxSessionCheckpointer:
             # Already gone (parked at the stop, or reaped by its TTL), or unreachable: the sweep covers it.
             LOGGER.info("superseded sandbox %s of session %s was not stopped: %r", sandbox_id, session_id, error)
 
+    def _spawn(self, operation: Any) -> None:
+        task: asyncio.Task[None] = asyncio.ensure_future(operation)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
     # -- release ------------------------------------------------------------------------------------------------
 
     async def stop(self, session_id: str, *, forget_snapshots: bool = False) -> None:
         """Stop and forget a session's sandbox; a no-op for a session without one, so a retire may repeat it.
 
         If the stop fails the session stays tracked, so a retried retire stops it again. With
-        ``forget_snapshots``, for an episode that is over, the snapshots this process took of the sandbox are
-        deleted too, best effort: a snapshot that outlives its episode is only storage, which the sweep reclaims.
+        ``forget_snapshots``, for an episode that is over, the snapshots this process knows of the sandbox are
+        marked for deletion; the next successful ``export`` deletes them, once a checkpoint exists that no
+        longer names them. Deleting them here would race the controller, which may still write the episode's
+        result after this call returns and would otherwise restore it from a snapshot that is gone.
         """
         entry = self._entries.get(session_id)
         if entry is None:
             return
         await self._stop_sandbox(entry.sandbox)
         self._entries.pop(session_id, None)
-        if forget_snapshots and entry.snapshot_ids and isinstance(self._provider, SupportsSandboxSnapshot):
-            outcomes = await asyncio.gather(
-                *(self._provider.delete_snapshot(snapshot_id) for snapshot_id in entry.snapshot_ids),
-                return_exceptions=True,
-            )
-            for snapshot_id, outcome in zip(entry.snapshot_ids, outcomes):
-                if isinstance(outcome, BaseException):
-                    LOGGER.warning("snapshot %s of session %s was not deleted: %r", snapshot_id, session_id, outcome)
+        if forget_snapshots:
+            self._pending_deletions.extend(entry.snapshot_ids)
+            entry.snapshot_ids = []
+
+    async def _delete_pending_snapshots(self) -> None:
+        pending, self._pending_deletions = list(dict.fromkeys(self._pending_deletions)), []
+        if not pending or not isinstance(self._provider, SupportsSandboxSnapshot):
+            return
+        outcomes = await asyncio.gather(
+            *(self._provider.delete_snapshot(snapshot_id) for snapshot_id in pending), return_exceptions=True
+        )
+        for snapshot_id, outcome in zip(pending, outcomes):
+            if isinstance(outcome, BaseException):
+                # Only storage: the sweep reclaims it.
+                LOGGER.warning("snapshot %s of a finished episode was not deleted: %r", snapshot_id, outcome)
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox) -> None:
         async with self._semaphore:

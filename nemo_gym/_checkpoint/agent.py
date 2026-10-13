@@ -94,14 +94,6 @@ class LegacyRun:
         the episode never holds up a checkpoint, is never exported, and starts over from its input after a crash."""
         await self._steps.mark_restart(self._key)
 
-    def park_requested(self) -> asyncio.Event:
-        """Set while a checkpoint has closed admission and is waiting for this run to reach a boundary.
-
-        A ``wait`` step that may run for a long time, such as a harness running in a sandbox, can await this
-        alongside its work and stop the work at a safe point; the boundary it then records parks the run.
-        """
-        return self._steps.park_requested
-
 
 @dataclass(frozen=True)
 class RestoredAgentSession:
@@ -432,8 +424,11 @@ class AgentSessionParticipant(CheckpointParticipant):
             session.resume.set()
 
     async def park_exported(self, records: list[CheckpointRecord]) -> None:
+        park = getattr(self.hooks, "park_agent_sessions", None)
+        if park is None:  # the hook is optional: an agent whose sessions hold nothing outside the process
+            return
         keys = [record.session_key for record in records if isinstance(record, AgentSessionRecord)]
-        await self.hooks.park_agent_sessions([key for key in keys if key in self._sessions])
+        await park([key for key in keys if key in self._sessions])
 
     def readiness(self) -> PrepareReport:
         legacy_blockers = {
