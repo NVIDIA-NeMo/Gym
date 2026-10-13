@@ -400,7 +400,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # threshold, reset now and skip the (otherwise wasted) generation.
             # (ported from gym-gitlab b66e37c6)
             if self.config.save_model_call_using_vllm_tokenize_endpoint:
-                pre_prompt_tokens = await self._count_prompt_tokens(new_body)
+                try:
+                    pre_prompt_tokens = await _before_deadline(deadline, self._count_prompt_tokens(new_body))
+                except _RolloutDeadline:
+                    print(f"[browsecomp][timeout][{qid}] step={step} in=tokenize", flush=True)
+                    timed_out = True
+                    break
                 if (
                     reset_threshold
                     and pre_prompt_tokens > reset_threshold
@@ -450,29 +455,37 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         for n in range(self.config.context_reset_keep_rounds, -1, -1):
                             cand = self._extract_last_rounds(new_outputs, n=n)
                             cand_body = body.model_copy(update={"input": body.input + cand})
-                            if await self._count_prompt_tokens(cand_body) <= reset_threshold:
+                            try:
+                                cand_tokens = await _before_deadline(deadline, self._count_prompt_tokens(cand_body))
+                            except _RolloutDeadline:
+                                print(f"[browsecomp][timeout][{qid}] step={step} in=tokenize", flush=True)
+                                timed_out = True
+                                break
+                            if cand_tokens <= reset_threshold:
                                 chosen = cand
                                 break
+                        if timed_out:
+                            break
                         new_outputs = chosen if chosen is not None else []
                         continue
 
-            try:
-                model_response = await _before_deadline(
-                    deadline,
-                    self.server_client.post(
-                        server_name=self.config.model_server.name,
-                        url_path=self.url_path_for_request("/v1/responses", request),
-                        json=new_body,
-                        cookies=model_server_cookies,
-                    ),
+            async def _model_call():
+                response = await self.server_client.post(
+                    server_name=self.config.model_server.name,
+                    url_path=self.url_path_for_request("/v1/responses", request),
+                    json=new_body,
+                    cookies=model_server_cookies,
                 )
+                # We raise for status here since we expect model calls to always work.
+                await raise_for_status(response)
+                return response, await get_response_json(response)
+
+            try:
+                model_response, model_response_json = await _before_deadline(deadline, _model_call())
             except _RolloutDeadline:
                 print(f"[browsecomp][timeout][{qid}] step={step} in=model_call", flush=True)
                 timed_out = True
                 break
-            # We raise for status here since we expect model calls to always work.
-            await raise_for_status(model_response)
-            model_response_json = await get_response_json(model_response)
             model_server_cookies = model_response.cookies
             try:
                 model_response = NeMoGymResponse.model_validate(model_response_json)
@@ -583,24 +596,24 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                             "system prompt across context resets." % len(progress_board)
                         )
                 else:
-                    try:
-                        api_response = await _before_deadline(
-                            deadline,
-                            self.server_client.post(
-                                server_name=self.config.resources_server.name,
-                                url_path=f"/{output_function_call.name}",
-                                json=tool_args,
-                                cookies=resources_server_cookies,
-                            ),
+
+                    async def _tool_call():
+                        response = await self.server_client.post(
+                            server_name=self.config.resources_server.name,
+                            url_path=f"/{output_function_call.name}",
+                            json=tool_args,
+                            cookies=resources_server_cookies,
                         )
+                        return response, (await response.content.read()).decode()
+
+                    try:
+                        api_response, tool_output = await _before_deadline(deadline, _tool_call())
                     except _RolloutDeadline:
                         print(f"[browsecomp][timeout][{qid}] step={step} in=tool_call", flush=True)
                         timed_out = True
                         break
                     # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
                     resources_server_cookies = api_response.cookies
-
-                    tool_output = (await api_response.content.read()).decode()
                     # reference-harness parity: the resources server wraps every tool result in a one-field
                     # JSON envelope ({"results_string": "..."}), which JSON-escapes newlines — the
                     # model then sees a single escaped line instead of raw multi-line text. This was

@@ -525,8 +525,8 @@ class TestRolloutTimeout:
         result = await agent.responses(request_mock, response_mock, body)
 
         assert result.timed_out is True
-        # A zero budget cuts the very first model call.
-        assert agent.server_client.post.call_count == 1
+        # A zero budget expires before the first model call is sent.
+        assert agent.server_client.post.call_count == 0
 
     async def _hanging_call(self, agent, hang_on_call: int) -> NeMoGymResponse:
         fn_call = _make_fn_call("search", call_id="c1", args={"queries": ["q"]})
@@ -593,3 +593,45 @@ class TestRolloutTimeout:
 
     def test_default_has_no_timeout(self) -> None:
         assert _make_config().rollout_timeout_s is None
+
+
+class TestDeadlineCoversBodyAndTokenize:
+    async def test_stalled_model_body_hits_the_deadline(self) -> None:
+        agent = BrowsecompAgent(config=_make_config(rollout_timeout_s=0.2), server_client=MagicMock(spec=ServerClient))
+        http = MagicMock()
+        http.ok = True
+        http.status = 200
+        http.cookies = {}
+
+        async def _stall():
+            await asyncio.Event().wait()
+
+        http.read = AsyncMock(side_effect=_stall)
+        agent.server_client.post = AsyncMock(return_value=http)
+        request_mock = MagicMock()
+        request_mock.cookies = {}
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q?"}])
+
+        result = await asyncio.wait_for(agent.responses(request_mock, MagicMock(), body), timeout=5)
+
+        assert result.timed_out is True
+
+    async def test_stalled_tokenize_hits_the_deadline(self) -> None:
+        agent = BrowsecompAgent(
+            config=_make_config(rollout_timeout_s=0.2, save_model_call_using_vllm_tokenize_endpoint=True),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        async def _stall(_body):
+            await asyncio.Event().wait()
+
+        agent._count_prompt_tokens = _stall
+        agent.server_client.post = AsyncMock()
+        request_mock = MagicMock()
+        request_mock.cookies = {}
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q?"}])
+
+        result = await asyncio.wait_for(agent.responses(request_mock, MagicMock(), body), timeout=5)
+
+        assert result.timed_out is True
+        assert agent.server_client.post.call_count == 0
