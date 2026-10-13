@@ -24,6 +24,7 @@ from resources_servers.vision2code.evaluation import (
     aggregate_rating,
     build_rater_user_content,
     build_render_failure_rating,
+    rating_to_reward,
     system_prompt,
 )
 from resources_servers.vision2code.prepare import Reference, read_reference
@@ -39,6 +40,7 @@ class Vision2CodeConfig(BaseResourcesServerConfig):
     sandbox_provider: dict[str, dict] = Field(default_factory=lambda: {"enroot": {}})
     execution_timeout: float = Field(default=60, gt=0)
     render_concurrency: int = Field(default=4, ge=1)
+    reward_power: float = Field(default=2.0, ge=1, allow_inf_nan=False)
     artifact_dir: str = "artifacts/vision2code"
 
     @model_validator(mode="after")
@@ -70,6 +72,7 @@ class Vision2CodeVerifyResponse(BaseVerifyResponse):
     verifier_metadata: Reference
     render: RenderResult | None = None
     rubric_result: dict[str, JsonValue] | None = None
+    reward_power: float = 2.0
     judge_diagnostics: dict[str, JsonValue] = Field(default_factory=dict)
     artifacts: dict[str, str] = Field(default_factory=dict)
     timings: dict[str, float] = Field(default_factory=dict)
@@ -114,7 +117,9 @@ class Vision2CodeServer(SimpleResourcesServer):
         # when an existing rollout is submitted for reverification.
         derived = set(Vision2CodeVerifyResponse.model_fields) - set(Vision2CodeVerifyRequest.model_fields)
         result = Vision2CodeVerifyResponse(
-            **body.model_dump(exclude=derived | {"_ng_failure_class", "_ng_failure_judge_error"}), reward=0.0
+            **body.model_dump(exclude=derived | {"_ng_failure_class", "_ng_failure_judge_error"}),
+            reward=0.0,
+            reward_power=self.config.reward_power,
         )
         instance = result.model_extra.get("instance_config")
         if isinstance(instance, dict):
@@ -207,7 +212,9 @@ class Vision2CodeServer(SimpleResourcesServer):
                 reference_image_path=str(reference_path),
                 candidate_image_path=str(candidate),
             )
-            result.reward = result.rubric_result["final_rating_0_to_5"] / 5.0
+            result.reward = rating_to_reward(
+                result.rubric_result["final_rating_0_to_5"], power=self.config.reward_power
+            )
             return result
         except asyncio.CancelledError:
             mask_failure(result, kind="cancelled", reason=f"Cancelled during {stage}")

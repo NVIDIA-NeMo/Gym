@@ -191,18 +191,37 @@ evaluation should cover each rubric with independently selected policy and judge
 ## Results and artifacts
 
 `POST /verify` takes the normal Gym response and task row, and returns `reward`,
-`render`, `rubric_result`, `judge_diagnostics`, `artifacts`, and `timings` alongside
-the normal Gym fields. Reward is `final_rating_0_to_5 / 5.0`; the upstream category
+`render`, `rubric_result`, `reward_power`, `judge_diagnostics`, `artifacts`, and `timings` alongside
+the normal Gym fields. Reward is `(final_rating_0_to_5 / 5.0) ** reward_power`,
+with **`reward_power: 2.0` by default**. Shaping is applied after rubric caps and
+rounding, including for the generic rubric. The upstream category
 weights, decimal rounding, critical-category caps, EEE background treatment, and
 blank-image inspection are preserved. Sparse whitespace is diagnostic only.
 Generic scoring preserves upstream behavior: an equal-weight mean, with no
 critical-category or automatic blank-image caps. Image inspection is still
 recorded; failed renders receive zero under every rubric.
 
+The squared curve reduces partial credit while preserving zero and full reward:
+
+| Final rubric rating | Linear reward (`reward_power: 1`) | Default reward (`reward_power: 2`) |
+| --- | --- | --- |
+| 1 / 5 | 0.20 | 0.04 |
+| 2 / 5 | 0.40 | 0.16 |
+| 3 / 5 | 0.60 | 0.36 |
+| 4 / 5 | 0.80 | 0.64 |
+| 5 / 5 | 1.00 | 1.00 |
+
+Set `vision2code.resources_servers.vision2code.reward_power=1` to reproduce the
+previous linear rewards, or use a larger finite power for stronger penalties.
+Powers below 1 are rejected. Version 0.2.0 changes the default reward curve;
+compare raw `rubric_result.final_rating_0_to_5` when evaluating runs with different
+powers. Saved results record the power used. Judge prompts and raw rubric scores
+are unchanged, and the renderer image does not need rebuilding.
+
 | Outcome | Reward | Masked | Judge called |
 | --- | --- | --- | --- |
-| Valid PNG | rubric rating / 5 | no | yes |
-| Valid blank PNG | dataset blank cap applies; generic uses judge scores | no | yes |
+| Valid PNG | `(rubric rating / 5) ** reward_power` | no | yes |
+| Valid blank PNG | dataset blank cap, then shaping; generic uses judge scores, then shaping | no | yes |
 | Code error, timeout, missing/invalid PNG | 0 | no | no |
 | Sandbox/transfer/isolation failure | 0 placeholder | yes | no |
 | Judge transport or malformed/invalid score | 0 placeholder | yes | attempted |
