@@ -87,11 +87,21 @@ The TB2.1 case is scoped to the linked #3902 implementation. Its [close handler]
 
 Both policies keep the Resources session API and the agent's borrowed `SandboxAccess` contract unchanged. Keep the decision to reuse a sandbox or create a fresh verifier in Resources; an agent swap must preserve the benchmark's ownership and verification policy. Final Resources close is still required even when verification has already released the original sandbox.
 
+For an existing benchmark, preserve its verification protocol. For a new benchmark, reuse the task sandbox when scoring depends on its final state, including changes beyond an exported artifact. Use a fresh verifier when the contract is to apply an exported artifact, such as a patch, to a clean baseline and score it there.
+
 ### Configure an experiment
 
 The following evaluation example pairs SWE-bench Pro with Hermes. Use a current Gym checkout with the native-session adapters, Gym's development environment, and the benchmark's preparation dependencies installed. Save these four files under `experiments/onboarding/` and run commands from the repository root; `config_paths` entries are relative to that root.
 
 First, configure a running vLLM-compatible model endpoint and an OpenSandbox deployment. Export `POLICY_BASE_URL`, `POLICY_API_KEY`, `POLICY_MODEL_NAME`, `OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`, and `GYM_HOST` in the shell used below. `GYM_HOST` must be a bindable address of the Gym host that the task sandboxes can reach; loopback or `0.0.0.0` is not a remote callback address. The sandbox must reach the Gym Model Server's allocated port, and the Gym Model Server must reach the upstream endpoint. Keep credentials outside committed YAML.
+
+On Linux, run this on the Gym node to discover a candidate IPv4 address:
+
+```bash
+export GYM_HOST="$(getent ahostsv4 "$(hostname -f)" | awk 'NR==1 {print $1}')"
+```
+
+Use the result only if it is a local interface address reachable from the task sandboxes. If resolution returns no address, or the host has multiple interfaces with different sandbox routing, set `GYM_HOST` explicitly to the appropriate address. Hostname resolution alone does not verify connectivity.
 
 ```yaml
 # experiments/onboarding/model-provider.yaml
