@@ -189,21 +189,28 @@ def test_inventory_uses_paths_relative_to_the_checkout(tmp_path: Path) -> None:
     assert [(node.name, expected) for _path, node, expected in declarations] == [("ExampleServer", False)]
 
 
-def test_shipped_server_classes_declare_ray_usage() -> None:
+def test_only_ray_servers_declare_ray_enabled_true() -> None:
+    # ray_enabled defaults to False, so only servers that use Ray declare it, and they must declare True on the
+    # class their entrypoint runs. Other servers may leave it undeclared.
     problems: list[str] = []
     declarations = _server_class_declarations()
     assert declarations
-    for path, class_node, expected in declarations:
-        actual = _declared_ray_enabled(class_node)
-        if actual is None:
-            key = (str(path.relative_to(PARENT_DIR)), class_node.name)
-            actual = INHERITED_RAY_DECLARATIONS.get(key)
-        if actual is not expected:
+    for path, class_node, uses_ray in declarations:
+        declared = _declared_ray_enabled(class_node)
+        if declared is None:
+            declared = INHERITED_RAY_DECLARATIONS.get((str(path.relative_to(PARENT_DIR)), class_node.name))
+        if uses_ray and declared is not True:
             problems.append(
-                f"{path.relative_to(PARENT_DIR)}:{class_node.name} expected ray_enabled = {expected}, got {actual}"
+                f"{path.relative_to(PARENT_DIR)}:{class_node.name} uses Ray but doesn't declare ray_enabled = True"
+            )
+        if not uses_ray and declared is True:
+            problems.append(
+                f"{path.relative_to(PARENT_DIR)}:{class_node.name} declares ray_enabled = True but doesn't use Ray"
             )
 
-    assert not problems, "Shipped server classes must declare Ray usage:\n" + "\n".join(problems)
+    assert not problems, "Server classes must declare ray_enabled = True exactly when they use Ray:\n" + "\n".join(
+        problems
+    )
 
 
 @pytest.mark.parametrize(
@@ -267,7 +274,7 @@ def test_entrypoint_detection_matches_shipped_server_declarations() -> None:
     mismatches = [
         f"{path.relative_to(PARENT_DIR)}: expected {expected}"
         for path, expected in expected_by_path.items()
-        if entrypoint_ray_enabled(path) is not expected
+        if (entrypoint_ray_enabled(path) is True) is not expected
     ]
     assert not mismatches, "Orchestrator Ray detection disagrees with shipped declarations:\n" + "\n".join(mismatches)
 

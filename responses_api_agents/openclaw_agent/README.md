@@ -44,8 +44,16 @@ Session install/close timeouts default to 600/60 seconds.
 - `command`: the OpenClaw command, split on spaces so a multi-word launcher works (e.g. `npx openclaw`)
 - `model`: `<provider>/<model-name>` (see Model id)
 - `model_server`: optional Gym model server used to generate the provider entry
-- `context_window`: context limit for a generated model entry
-- `max_output_tokens`: output limit for a generated model entry
+- `context_window`: context limit for a generated model entry. Set it to the model server's maximum
+  context length (`max_model_len` for vLLM). OpenClaw uses it to lower a call's requested output when
+  the input is long, to decide when to compact (summarize) the conversation, and to cap long tool
+  results, so changing it can change rollouts. When unset, OpenClaw 2026.6.11 assumes 200,000 tokens,
+  and on a server with a smaller limit, long episodes can send requests the server rejects. Gym's
+  `vllm_model` turns each rejection into an empty reply by default; OpenClaw does not see that as a
+  context overflow, so it does not compact, and the run ends early.
+- `max_output_tokens`: most output tokens OpenClaw requests per call for a generated model entry; it
+  requests less when its estimate of the input leaves less room in `context_window`. When unset,
+  OpenClaw 2026.6.11 uses 8,192.
 - `workspace_root`: where per-request workspaces are created and deleted
 - `openclaw_agent_id`: passed to `--agent`
 - `thinking`: passed to `--thinking` (off, low, medium, high, ...)
@@ -201,10 +209,12 @@ Sandbox request support is deliberately explicit:
   This includes `metadata.extra_body.seed` added by `num_repeats_add_seed`; disable that option
   for sandbox sessions. Request `metadata.chat_template_kwargs` is also rejected; configure it
   on the Gym model server instead.
-  The configured `max_output_tokens` is written as `maxTokens` of the generated model entry, so it
-  is the per-call output limit OpenClaw requests; when unset, OpenClaw's own default applies. Model
-  metadata does not prove an effective inference limit: verify it against the captured requests on
-  the Gym model server. An episode-wide token budget is not implemented.
+  To limit output, set the agent config field `max_output_tokens` instead. It is written as
+  `maxTokens` of the generated model entry, so it is the most output OpenClaw requests per call. Set
+  `context_window` as well (see [Config fields](#config-fields)); a `max_output_tokens` that is not
+  positive or exceeds `context_window` is rejected. Model metadata does not prove an effective
+  inference limit: verify it against the captured requests on the Gym model server. An episode-wide
+  token budget is not implemented.
 - Custom command, environment, OpenClaw config, Node path, extra arguments, and agent-ID overrides
   are rejected for sandbox sessions. Existing callers without an agent-session cookie retain the
   local CLI behavior and configuration. Both paths now include request `instructions` in the

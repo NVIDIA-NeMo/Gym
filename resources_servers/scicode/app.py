@@ -106,7 +106,6 @@ class ScicodeVerifyResponse(BaseVerifyResponse):
 
 
 class ScicodeResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ScicodeResourcesServerConfig
     _resolved_test_data_path: Optional[str] = PrivateAttr(default=None)
     _resolved_grading_interpreters: Optional[List[tuple[str, str]]] = PrivateAttr(default=None)
