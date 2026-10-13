@@ -60,6 +60,55 @@ class TestFernDocsLinks(unittest.TestCase):
         self.assertNotIn("Currently, only `claude_code_agent`", guide)
         self.assertIn("/main/observability/rollout-evidence", guide)
 
+    def test_model_call_capture_config_table_gives_the_capture_dir_no_default(self):
+        guide = read("fern/versions/latest/pages/model-server/model-call-capture.mdx")
+        row = next(line for line in guide.splitlines() if line.startswith("| `model_call_capture_dir` |"))
+        _, _, _, default, description, _ = row.split("|")
+
+        self.assertEqual("—", default.strip())
+        self.assertIn("Required when `observability_enabled` is true.", description)
+
+    def test_model_call_capture_links_global_config_fields_to_the_configuration_reference(self):
+        guide = read("fern/versions/latest/pages/model-server/model-call-capture.mdx")
+        section = guide[guide.index("## Configure capture") : guide.index("## If you build a custom agent")]
+
+        self.assertIn("](/main/reference/configuration)", section)
+
+    def test_model_call_capture_gives_each_routing_helper_a_table_row(self):
+        guide = read("fern/versions/latest/pages/model-server/model-call-capture.mdx")
+        section = guide[guide.index("## If you build a custom agent") : guide.index("## Add agent-side evidence")]
+
+        for helper in ("url_path_for_run", "url_path_for_request", "base_url_for_run", "rollout_id_from_run"):
+            with self.subTest(helper=helper):
+                self.assertRegex(section, rf"(?m)^\| `{helper}\(")
+
+    def test_model_call_capture_title_matches_every_link_that_names_the_page(self):
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        guide = read("fern/versions/latest/pages/model-server/model-call-capture.mdx")
+        labels = {
+            (path.relative_to(pages).as_posix(), label)
+            for path in pages.rglob("*.mdx")
+            for label in re.findall(r"\[([^\]]+)\]\((?:/main)?/model-server/model-call-capture[)#]", path.read_text())
+            if label.lower() == "model-call capture"
+        }
+
+        self.assertIn('title: "Model-Call Capture"', guide)
+        self.assertTrue(labels)
+        # Mid-sentence prose may use the lowercase common noun; a label that names the page uses its title.
+        self.assertEqual(
+            set(), {item for item in labels if item[1] not in ("Model-Call Capture", "model-call capture")}
+        )
+
+    def test_latest_docs_explain_kill_shaped_failures_in_plain_language(self):
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        jargon = sorted(
+            path.relative_to(pages).as_posix() for path in pages.rglob("*.mdx") if "kill-shaped" in path.read_text()
+        )
+        metrics = " ".join(read("fern/versions/latest/pages/observability/metrics.mdx").split())
+
+        self.assertEqual([], jargon)
+        self.assertIn("a Slurm SIGTERM, a dead Ray actor, or an out-of-memory kill", metrics)
+
     def test_observability_index_routes_both_observability_families(self):
         overview = read("fern/versions/latest/pages/observability/index.mdx")
 
@@ -136,11 +185,16 @@ class TestFernDocsLinks(unittest.TestCase):
         self.assertIn("/main/observability/configuration", guide)
 
     def test_model_server_index_links_model_call_capture(self):
-        for version in ("latest", "v0.5.0", "v0.5.1"):
+        # Versioned folders are frozen GA snapshots and keep the title they shipped with.
+        for version, title in (
+            ("latest", "Model-Call Capture"),
+            ("v0.5.0", "Model-call capture"),
+            ("v0.5.1", "Model-call capture"),
+        ):
             with self.subTest(version=version):
                 index = read(f"fern/versions/{version}/pages/model-server/index.mdx")
 
-                self.assertIn('<Card title="Model-call capture" href="/model-server/model-call-capture">', index)
+                self.assertIn(f'<Card title="{title}" href="/model-server/model-call-capture">', index)
 
     def test_development_setup_uses_supported_cold_start_docs_command(self):
         guide = read("fern/versions/latest/pages/contribute/development-setup.mdx")

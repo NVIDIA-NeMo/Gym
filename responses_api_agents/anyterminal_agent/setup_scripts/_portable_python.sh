@@ -7,7 +7,15 @@ export PYTHONNOUSERSITE=1
 
 PYTHON_VERSION="${PYTHON_VERSION:-3.13.14}"
 PBS_RELEASE="${PBS_RELEASE:-20260805}"
-ARCH="${ARCH:-x86_64-unknown-linux-gnu}"
+# python-build-standalone target; defaults to the host architecture. Override ARCH to prepare a bundle for
+# images of a different architecture.
+if [ -z "${ARCH:-}" ]; then
+    case "$(uname -m)" in
+        x86_64) ARCH="x86_64-unknown-linux-gnu" ;;
+        aarch64 | arm64) ARCH="aarch64-unknown-linux-gnu" ;;
+        *) echo "unsupported portable python architecture: $(uname -m)" >&2; exit 1 ;;
+    esac
+fi
 
 install_portable_python() {
     if [ -x "$DEPS_DIR/bin/python3" ]; then

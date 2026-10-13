@@ -52,9 +52,10 @@ Coverage comes from the output files, not this counter.
 
 `nemo.gym.rollout.outcome` is `scored` (written to the main output, masked and forced-zero
 results included), `failed` (written to the failures sidecar), or `omitted` (a no-persist
-result, such as a kill-shaped failure, written to neither). Rows drained by the dispatch budget
-never ran and are not counted. Every point carries `nemo.gym.rollout.dispatch.name`, the
-environment server or, when rows name none, the agent. Attempts with a failure class also carry
+result written to neither, such as a `kill_shaped` failure: a Slurm SIGTERM, a dead Ray actor, or
+an out-of-memory kill). Rows drained by the dispatch budget never ran and are not counted. Every
+point carries `nemo.gym.rollout.dispatch.name`, the environment server or, when rows name none, the
+agent. Attempts with a failure class also carry
 `nemo.gym.failure_class`, `nemo.gym.failure_kind` (a registered or `<server>:<kind>` namespaced
 kind, otherwise `unregistered`) and `nemo.gym.failure_type` (the exception class name). Free-text
 failure reasons never become attributes.

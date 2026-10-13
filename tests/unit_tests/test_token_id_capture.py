@@ -2248,9 +2248,7 @@ def test_a_changed_tool_schema_breaks_the_link():
     assert (
         lineage.resolve(with_search + [{"role": "user", "content": "next"}]).status == ParentResolutionStatus.RESOLVED
     )
-    assert (
-        lineage.resolve(with_bash + [{"role": "user", "content": "next"}]).status == ParentResolutionStatus.ROOT
-    )
+    assert lineage.resolve(with_bash + [{"role": "user", "content": "next"}]).status == ParentResolutionStatus.ROOT
 
 
 def test_the_envelope_does_not_change_the_lookup_key():
