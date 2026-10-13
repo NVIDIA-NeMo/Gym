@@ -58,11 +58,3 @@ judge_model:
       model: ${oc.env:VISION2CODE_JUDGE_MODEL}
       return_token_id_information: false
       uses_reasoning_parser: false
-
-vision2code_environment_server:
-  environment_servers:
-    legacy_agent:
-      entrypoint: app.py
-      agent_server:
-        type: responses_api_agents
-        name: vision2code_simple_agent

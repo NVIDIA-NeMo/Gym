@@ -25,5 +25,4 @@ datasets:
     num_repeats: 1
 state: none
 sandbox: enroot
-prompt_source: prepared
 lifecycle: active
