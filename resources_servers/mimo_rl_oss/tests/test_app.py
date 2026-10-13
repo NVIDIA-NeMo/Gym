@@ -13,6 +13,7 @@
 # limitations under the License.
 import base64
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from mimoagent.environments.datasets import DATASET_REGISTRY
@@ -109,3 +110,57 @@ def test_webdev_rubric_is_pinned() -> None:
 def test_terminal_bench_out_of_range_reward_is_masked() -> None:
     _, _, extra = TerminalBenchEnvironment(FakeEnv("5.0\n"), _instance())._do_calculate_reward()
     assert extra["error_category"] == "testbed_corrupted"
+
+
+PREPARE_WRAPPERS = {
+    "resources_servers.mimo_rl_oss.prepare_code": "code",
+    "resources_servers.mimo_rl_oss.prepare_cyber": "cyber",
+    "resources_servers.mimo_rl_oss.prepare_terminal_bench": "terminal_bench",
+    "resources_servers.mimo_rl_oss.prepare_webdev": "webdev",
+    "resources_servers.mimo_rl_oss.prepare_general_agent": "general_agent",
+    "resources_servers.mimo_music.prepare": "music",
+}
+
+
+def test_prepare_scripts_import_without_mimoagent() -> None:
+    import subprocess
+    import sys
+
+    imports = "; ".join(f"import {m}" for m in PREPARE_WRAPPERS)
+    subprocess.run([sys.executable, "-c", f"import sys; sys.modules['mimoagent'] = None; {imports}"], check=True)
+
+
+def test_prepare_wrappers_write_the_configured_jsonl(monkeypatch, tmp_path) -> None:
+    import importlib
+
+    import yaml
+
+    from resources_servers.mimo_rl_oss import prepare
+
+    repo = Path(__file__).parents[3]
+    configured = {}
+
+    def collect(node):
+        if isinstance(node, dict):
+            for d in node.get("datasets") or []:
+                if d.get("prepare_script"):
+                    configured[d["prepare_script"].removesuffix(".py").replace("/", ".")] = repo / d["jsonl_fpath"]
+            for value in node.values():
+                collect(value)
+        elif isinstance(node, list):
+            for value in node:
+                collect(value)
+
+    for cfg in ("mimo_rl_oss/configs/mimo_rl_oss.yaml", "mimo_music/configs/mimo_music.yaml"):
+        collect(yaml.safe_load((repo / "resources_servers" / cfg).read_text()))
+    assert set(configured) == set(PREPARE_WRAPPERS)
+    for module, subset in PREPARE_WRAPPERS.items():
+        assert prepare.output_path(subset) == configured[module]
+
+    monkeypatch.setattr(prepare, "convert", lambda subset, image_map: [{"subset": subset}])
+    monkeypatch.setattr(prepare, "_image_map", dict)
+    monkeypatch.setattr(prepare, "OUT_DIR", tmp_path / "rl")
+    monkeypatch.setattr(prepare, "MUSIC_DIR", tmp_path / "music")
+    for module, subset in PREPARE_WRAPPERS.items():
+        out = importlib.import_module(module).prepare()
+        assert out == prepare.output_path(subset) and json.loads(out.read_text()) == {"subset": subset}

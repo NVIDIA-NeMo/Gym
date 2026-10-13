@@ -20,20 +20,6 @@ from resources_servers.mimo_rl_oss.webdev.eval_mode import grade_eval
 
 os.environ.setdefault("WEBDEV_GRADE_HTTP", "1")
 
-DELIVERY_INSTRUCTIONS = """Build the website the user asks for, then DELIVER it to {cwd}/dist/: opening {cwd}/dist/index.html \
-in a browser must show the finished site. Always produce a working website and don't ask the user to confirm details.
-
-- Develop however you like under {cwd}. Only {cwd}/dist/ is delivered, so a build step must put its static \
-output there.
-- The entry point MUST be exactly {cwd}/dist/index.html with <!DOCTYPE html>, and everything it needs (scripts, \
-styles, images, fonts) must sit under {cwd}/dist/, referenced by paths relative to the dist/ root.
-- Tailwind CSS via CDN (<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>) and/or inline \
-<style> is fine.
-
-Build a website for the following request:
-
-{task}"""
-
 
 class WebdevEnvironment(DatasetEnvironment):
     REPO_PATH = "/workspace"

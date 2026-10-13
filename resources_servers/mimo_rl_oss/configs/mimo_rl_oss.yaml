@@ -56,27 +56,27 @@ mimo_rl_oss_agent:
       - name: code
         type: train
         jsonl_fpath: resources_servers/mimo_rl_oss/data/code.jsonl
-        prepare_script: resources_servers/mimo_rl_oss/prepare.py
+        prepare_script: resources_servers/mimo_rl_oss/prepare_code.py
         license: Apache 2.0
       - name: cyber
         type: train
         jsonl_fpath: resources_servers/mimo_rl_oss/data/cyber.jsonl
-        prepare_script: resources_servers/mimo_rl_oss/prepare.py
+        prepare_script: resources_servers/mimo_rl_oss/prepare_cyber.py
         license: Apache 2.0
       - name: terminal_bench
         type: train
         jsonl_fpath: resources_servers/mimo_rl_oss/data/terminal_bench.jsonl
-        prepare_script: resources_servers/mimo_rl_oss/prepare.py
+        prepare_script: resources_servers/mimo_rl_oss/prepare_terminal_bench.py
         license: Apache 2.0
       - name: webdev
         type: train
         jsonl_fpath: resources_servers/mimo_rl_oss/data/webdev.jsonl
-        prepare_script: resources_servers/mimo_rl_oss/prepare.py
+        prepare_script: resources_servers/mimo_rl_oss/prepare_webdev.py
         license: Apache 2.0
       - name: general_agent
         type: train
         jsonl_fpath: resources_servers/mimo_rl_oss/data/general_agent.jsonl
-        prepare_script: resources_servers/mimo_rl_oss/prepare.py
+        prepare_script: resources_servers/mimo_rl_oss/prepare_general_agent.py
         license: Apache 2.0
 mimo_rl_oss_environment_server:
   environment_servers:

@@ -5,6 +5,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,7 +20,7 @@ from pathlib import Path
 import pandas as pd
 from huggingface_hub import hf_hub_download
 
-from resources_servers.mimo_rl_oss.webdev.environment import DELIVERY_INSTRUCTIONS
+from resources_servers.mimo_rl_oss.webdev.prompts import DELIVERY_INSTRUCTIONS
 
 
 REPO = "XiaomiMiMo/MiMo-V2.6-RL-oss"
@@ -72,21 +73,37 @@ def convert(subset: str, image_map: dict[str, str]) -> list[dict]:
     return rows
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--subsets", nargs="+", default=list(FILES))
-    args = parser.parse_args()
+def _image_map() -> dict[str, str]:
     image_map = {}
     for line in Path(_download("image-mapping.jsonl")).read_text().splitlines():
         entry = json.loads(line)
         image_map[entry["dataset_image"]] = entry["dockerhub_image"]
+    return image_map
+
+
+def output_path(subset: str) -> Path:
+    return MUSIC_DIR / "train.jsonl" if subset == "music" else OUT_DIR / f"{subset}.jsonl"
+
+
+def prepare_subset(subset: str, image_map: dict[str, str] | None = None) -> Path:
+    if image_map is None and subset != "music":
+        image_map = _image_map()
+    rows = convert(subset, image_map or {})
+    out = output_path(subset)
+    out.parent.mkdir(exist_ok=True)
+    with open(out, "w") as f:
+        f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+    print(f"{subset}: {len(rows)} rows -> {out}")
+    return out
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--subsets", nargs="+", default=list(FILES))
+    args = parser.parse_args()
+    image_map = _image_map()
     for subset in args.subsets:
-        rows = convert(subset, image_map)
-        out = MUSIC_DIR / "train.jsonl" if subset == "music" else OUT_DIR / f"{subset}.jsonl"
-        out.parent.mkdir(exist_ok=True)
-        with open(out, "w") as f:
-            f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
-        print(f"{subset}: {len(rows)} rows -> {out}")
+        prepare_subset(subset, image_map)
 
 
 if __name__ == "__main__":
