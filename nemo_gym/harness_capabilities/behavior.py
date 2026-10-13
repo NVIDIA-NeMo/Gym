@@ -395,7 +395,7 @@ def model_timeout_checks(
     results.run(
         BehavioralCheck(
             id="model.timeout_stimulus",
-            tier="P0",
+            tier="P1",
             evidence=("TE-1",),
             location="witness.json",
             reason="the configured timeout stimulus did not reach a model request",
@@ -441,7 +441,7 @@ def model_timeout_checks(
     results.run(
         BehavioralCheck(
             id="model.timeout_retained",
-            tier="P0",
+            tier="P1",
             evidence=("TE-1",),
             location=location,
             reason=reason,

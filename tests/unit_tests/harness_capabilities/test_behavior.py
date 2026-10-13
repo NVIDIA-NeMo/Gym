@@ -163,6 +163,7 @@ def test_timeout_recording_does_not_require_retry_or_verification(kind, mutation
         call["response_metadata"]["error_category"] = "stream_truncated"
     checks = model_timeout_checks(witness, record, timeout_kind=kind, fingerprint=fingerprint)
     assert {c["id"] for c in checks} == {"model.timeout_stimulus", "model.timeout_retained"}
+    assert all(c["tier"] == "P1" for c in checks)
     assert checks[0]["status"] == "pass"
     expected = "pass" if mutation is None or (kind == "harness_deadline" and mutation == "partial_stream") else "fail"
     assert checks[1]["status"] == expected

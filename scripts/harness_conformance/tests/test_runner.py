@@ -512,6 +512,13 @@ def test_server_timeout_response_is_retained_without_requiring_retry(tmp_path, d
     assert result["health_report"] is None
     assert {c["id"] for c in result["checks"]} == {"model.timeout_stimulus", "model.timeout_retained"}
     assert not probe.finished and not probe.verifications
+    assert all(c["tier"] == "P1" for c in result["checks"])
+    # Missing timeout evidence stays a visible failure without blocking P0.
+    (tmp_path / "rollouts_failures.jsonl").write_text(json.dumps({"ng_trajectory": {}}) + "\n")
+    result = inspect_episode(scenario, tmp_path, {"returncode": 1, "timed_out": False})
+    assert result["verdict"] == "fulfilled"
+    assert result["behavioral_status"] == "fail"
+    assert next(c for c in result["checks"] if c["id"] == "model.timeout_retained")["status"] == "fail"
 
 
 @pytest.mark.parametrize("harness", HARNESSES)

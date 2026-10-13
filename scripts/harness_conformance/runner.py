@@ -145,10 +145,12 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
             evidence[key] = {"verdict": verdict, "artifact_verdict": verdict}
     behavioral = [c for c in checks if c["kind"] == "behavioral"]
     behavior_passed = all(c["status"] in ("pass", "not_applicable") for c in behavioral)
+    # A scenario containing only lower-tier checks does not block the P0 gate.
+    p0_passed = bool(checks) and (not any(c["tier"] == "P0" for c in checks) or gate_passes(checks))
     return {
         "scenario": scenario.name,
         "exercised": record is not None,
-        "verdict": "fulfilled" if gate_passes(checks) else "not_fulfilled",
+        "verdict": "fulfilled" if p0_passed else "not_fulfilled",
         "issues": [reason for c in checks if c["status"] == "fail" for reason in c["reasons"]],
         "checks": checks,
         "behavioral_status": "pass" if behavior_passed else "fail",

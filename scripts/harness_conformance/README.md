@@ -128,7 +128,7 @@ argument schema advertised by the harness. Unsupported tool protocols are
 reported as exercise failures.
 
 The two timeout scenarios run only `model.timeout_stimulus` and
-`model.timeout_retained`. They impose no retry, recovery, grade or health verdict
+`model.timeout_retained`, both P1. Their failures do not block the P0 verdict. They impose no retry, recovery, grade or health verdict
 and do not qualify the full TE-1 contract.
 Later requests can succeed if the harness retries; retry policy is unchanged.
 Evidence may be in the normal rollout or the failure row, never repaired from
