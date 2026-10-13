@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 import asyncio
 import json
 import logging
@@ -16,6 +18,7 @@ from starlette.responses import JSONResponse
 
 from bbh_mcp.jupyter import JupyterClient, JupyterServer
 from bbh_mcp.tool_utils import RUBRIC_SCORE_PROMPT
+
 
 logger = logging.getLogger(__name__)
 

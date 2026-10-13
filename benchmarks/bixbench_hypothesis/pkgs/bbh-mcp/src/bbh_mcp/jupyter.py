@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 import asyncio
 import inspect
 import json
@@ -16,6 +18,7 @@ import nbformat
 from websockets.asyncio.client import connect
 
 from bbh_mcp.tool_utils import list_dir_tool
+
 
 logger = logging.getLogger(__name__)
 
