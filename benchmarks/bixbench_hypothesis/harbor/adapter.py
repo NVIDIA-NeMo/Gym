@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 import json
 import shutil
 from collections.abc import Callable, Iterator
@@ -18,7 +20,7 @@ class BBHTask:
     answer: bool
     hypothesis: str
     id: str
-    input_data_path: str
+    input_data_path: str | Path
     max_points: int
     nb_primary_language: str
     protocol: str
@@ -32,8 +34,8 @@ class BBHTask:
         while self.input_data_path.suffix:
             self.input_data_path = self.input_data_path.with_suffix("")
 
-        if isinstance(self.capsules_dir, str) and Path(self.capsules_dir).is_dir():
-            self.capsules_dir = Path(self.capsules_dir)
+        if not str(self.capsules_dir).startswith("hf://buckets"):
+            self.capsules_dir = Path(self.capsules_dir).expanduser()
 
     @classmethod
     def from_hf(cls, dataset: Dataset, capsules_dir: str | Path) -> Iterator["BBHTask"]:
@@ -41,7 +43,7 @@ class BBHTask:
             yield cls(**record, capsules_dir=capsules_dir)
 
     def to_json(self) -> dict[str, object]:
-        excluded = {"capsules_dir", "timeout"}
+        excluded = {"capsules_dir"}
         result = {}
         for fld in fields(self):
             if fld.name in excluded:
@@ -53,11 +55,11 @@ class BBHTask:
         return result
 
     @property
-    def language(self):
+    def language(self) -> str:
         return self.nb_primary_language.lower()
 
     @property
-    def capsule(self) -> Callable[[str | Path], Path | None]:
+    def capsule(self) -> Callable[[str | Path], None]:
         if str(self.capsules_dir).startswith("hf://buckets"):
             capsule_folder = f"{self.capsules_dir}/CapsuleData-{self.id}"
         else:
@@ -180,7 +182,7 @@ class HarborBBH:
     """Docker image for task execution."""
 
     output_dir: Annotated[str | Path, tyro.conf.arg(aliases=["-o"])]
-    """Directory for generated Harbor tasks under a folder named <split>."""
+    """Directory for generated Harbor tasks."""
 
     data_dir: Annotated[str | Path, tyro.conf.arg(aliases=["-d"])] = "EdisonScientific/bixbench_hypothesis"
     """HuggingFace repo ID or path to benchmark data directory."""
@@ -208,20 +210,40 @@ class HarborBBH:
     def write(self):
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        converted = 0
+        gym_rows: list[str] = []
+        for task in tqdm(self.tasks, desc="bbh"):
+            if self.limit is not None and len(gym_rows) >= self.limit:
+                break
+
+            task.write(self.output_dir, force=self.overwrite)
+            gym_rows.append(json.dumps(task.gym_input) + "\n")
 
         with (self.output_dir / "gym.jsonl").open("w") as gym_file:
-            for task in tqdm(self.tasks, desc="bbh"):
-                if self.limit is not None and converted >= self.limit:
-                    break
+            gym_file.writelines(gym_rows)
 
-                task.write(self.output_dir, force=self.overwrite)
+        print(f"Adapted {len(gym_rows)} tasks to {self.output_dir}")
 
-                gym_file.write(json.dumps(task.gym_input) + "\n")
 
-                converted += 1
-
-        print(f"Adapted {converted} tasks to {self.output_dir}")
+def prepare(
+    *,
+    output_dir: str | Path,
+    docker_image: str,
+    data_dir: str | Path = "EdisonScientific/bixbench_hypothesis",
+    capsules_dir: str | Path = "hf://buckets/EdisonScientific/bixbench-hypothesis-capsules",
+    limit: int | None = None,
+    overwrite: bool = False,
+) -> Path:
+    """Prepare Harbor tasks and return their Gym JSONL index path."""
+    benchmark = HarborBBH(
+        docker_image=docker_image,
+        output_dir=output_dir,
+        data_dir=data_dir,
+        capsules_dir=capsules_dir,
+        limit=limit,
+        overwrite=overwrite,
+    )
+    benchmark.write()
+    return Path(benchmark.output_dir) / "gym.jsonl"
 
 
 if __name__ == "__main__":
