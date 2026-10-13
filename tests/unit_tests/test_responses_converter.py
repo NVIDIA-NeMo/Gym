@@ -1508,6 +1508,41 @@ def test_chat_completion_to_response_envelope_id(
     assert response.id == expected_id
 
 
+@pytest.mark.parametrize(
+    ("provider_tier", "request_tier", "expected_tier"),
+    [
+        ("on-demand", None, "on-demand"),
+        ("on-demand", "default", "on-demand"),
+        (None, "priority", "priority"),
+        (None, None, None),
+    ],
+)
+def test_chat_completion_to_response_service_tier(
+    converter: ResponsesConverter, provider_tier: str | None, request_tier: str | None, expected_tier: str | None
+) -> None:
+    response = converter.chat_completion_to_response(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+            model="test-model", input="hello", service_tier=request_tier
+        ),
+        chat_completion=NeMoGymChatCompletion(
+            id="chatcmpl-tier",
+            created=0,
+            model="test-model",
+            object="chat.completion",
+            service_tier=provider_tier,
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content="hi"),
+                )
+            ],
+        ),
+    )
+
+    assert response.service_tier == expected_tier
+
+
 def test_chat_completion_to_response_preserves_unknown_usage_details(converter: ResponsesConverter):
     response = converter.chat_completion_to_response(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(model="", input="hello"),
