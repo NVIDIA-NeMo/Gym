@@ -99,7 +99,6 @@ def mask_failure(result: Vision2CodeVerifyResponse, *, kind: str, reason: str) -
 
 
 class Vision2CodeServer(SimpleResourcesServer):
-    ray_enabled = False
     config: Vision2CodeConfig
     _render_slots: asyncio.Semaphore = PrivateAttr()
 

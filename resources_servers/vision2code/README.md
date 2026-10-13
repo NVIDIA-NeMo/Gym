@@ -22,6 +22,28 @@ The catalog entry is [environments/vision2code](../../environments/vision2code/m
 It declares a continuous reward in `[0, 1]` and stochastic judging. `verified: false`
 and `experimental: true` remain set until broader baselining and maintainer review.
 
+## NeMo RL compatible base
+
+This branch adds Vision2Code to Gym commit
+`c004bce8068eaa35690be8705d3e263be10581e8`. Core code, `pyproject.toml`, and
+`uv.lock` retain that base, including locked Ray **2.56.1** and the training
+capture fixes already present there. The environment uses the base's normal
+Ray startup and manifest schema. The composition uses `simple_agent` directly;
+the later `legacy_agent` environment-server wrapper is not present in this base.
+
+Use `uv sync --frozen --extra dev` for the root environment. Gym's per-server
+`uv pip install` setup resolves dependencies separately from the root lockfile;
+keep those processes on the same Ray version as the NeMo RL cluster:
+
+```bash
+printf 'ray==2.56.1\n' > /tmp/vision2code-ray-constraint.txt
+export UV_CONSTRAINT=/tmp/vision2code-ray-constraint.txt
+```
+
+Set this before `gym env start`. If reusing existing server venvs with
+`+skip_venv_if_present=true`, first install `ray[default]==2.56.1` into each
+venv for `vision2code`, `simple_agent`, and `vllm_model`.
+
 ## Prepare tasks
 
 Run commands from the Gym repository root, using Gym's Python environment with
