@@ -1,4 +1,5 @@
-# Stand-alone stirrup_agent config. Stirrup runs only in agent sessions, in a sandbox the resources server lends it;
+# Stand-alone stirrup_agent config. Stirrup runs only in agent sessions, in a sandbox the resources server lends it or
+# one it starts from sandbox_provider;
 # benchmarks/gdpval/config.yaml composes it with the GDPVal resources server.
 stirrup_agent:
   responses_api_agents:
@@ -12,6 +13,8 @@ stirrup_agent:
       temperature: 1.0
       # Request tools that end the episode; null uses Stirrup's own finish tool.
       finish_tool_names: null
+      sandbox_provider: null
+      sandbox_config: {}
       sandbox_install_timeout_seconds: 900
       sandbox_runner_timeout_seconds: 12600
       session_close_timeout_seconds: 30

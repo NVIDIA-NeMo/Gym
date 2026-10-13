@@ -8,8 +8,9 @@ It is benchmark-agnostic: the task prompt, the task tools and the sandbox come f
 
 Stirrup runs only in agent sessions, seeded by an environment server with these grants:
 
-- `sandbox_access`: the task sandbox, owned by the resources server. At seed, the agent installs the server's Stirrup
-  version in a venv outside the working directory and stages `sandbox_runner.py` with the modules it imports.
+- `sandbox_access`: the task sandbox, owned by the resources server. Without it, the agent starts its own sandbox from
+  `sandbox_provider` and `sandbox_config`. At seed, the agent installs the server's Stirrup version in a venv outside
+  the working directory and stages `sandbox_runner.py` with the modules it imports.
 - At most one `direct_http` tool access: the resources server's routes and the session cookies. A request with `tools`
   needs it.
 

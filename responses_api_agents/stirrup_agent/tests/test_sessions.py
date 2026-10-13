@@ -187,8 +187,8 @@ def test_a_remote_sandbox_needs_a_model_server_address_it_can_reach(client, monk
         _seed(client, sandbox_access=_sandbox_access(), tool_accesses=[_TOOL_ACCESS])
 
 
-def test_a_session_without_a_sandbox_is_rejected(client):
-    with pytest.raises(ValueError, match="requires sandbox access"):
+def test_a_session_without_a_sandbox_or_a_provider_is_rejected(client):
+    with pytest.raises(ValueError, match="requires sandbox_access or a configured sandbox_provider"):
         _seed(client, tool_accesses=[_TOOL_ACCESS])
 
 
@@ -223,6 +223,37 @@ def test_an_episode_without_tools_needs_no_tool_access(agent, client, root, monk
         "finish",
     ]
     assert (root / "report.txt").read_text() == "done\n"
+
+
+def test_without_a_lent_sandbox_or_tools_the_agent_starts_its_own_sandbox(agent, root, monkeypatch):
+    agent.config.sandbox_provider = "sandbox"
+    agent.config.sandbox_config = {"workdir": str(root)}
+    agent.config.finish_tool_names = None
+    client = TestClient(agent.setup_webserver())
+    model = _ModelServer(
+        [
+            _call("code_exec", json.dumps({"cmd": "echo done > report.txt"})),
+            _call("finish", json.dumps({"reason": "done", "paths": ["report.txt"]})),
+        ]
+    )
+    monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: model.base_url)
+    try:
+        seeded = _seed(client)
+        response = client.post(
+            f"/ng-rollout/{_EPISODE.capture_key}/v1/responses", json={"input": "Write the report.", "model": "policy"}
+        )
+        closed = _close(client)
+    finally:
+        model.close()
+
+    assert seeded.status_code == 200
+    assert response.status_code == 200, response.text
+    assert [item["name"] for item in response.json()["output"] if item["type"] == "function_call"] == [
+        "code_exec",
+        "finish",
+    ]
+    (invocation,) = closed.json()["agent_observations"]["records"][:1]
+    assert invocation["status"] == "completed"
 
 
 def test_request_tools_without_a_tool_access_are_rejected(client, root):
