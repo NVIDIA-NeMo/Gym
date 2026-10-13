@@ -70,7 +70,11 @@ from typing import AbstractSet, Any, Awaitable, Callable, Dict, List, Mapping, O
 
 import orjson
 
-from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record, model_call_capture_dirs_from_config
+from nemo_gym.base_responses_api_model import (
+    clear_model_call_captures_for_rollouts,
+    merge_model_call_capture_into_record,
+    model_call_capture_dirs_from_config,
+)
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -2520,6 +2524,7 @@ async def run_e2e_multistage(
         remaining_budget_s = None
         if dispatch_budget_s is not None:
             remaining_budget_s = max(0.0, dispatch_budget_s - (time.monotonic() - dispatch_started_at))
+        clear_model_call_captures_for_rollouts(rows, capture_dirs)
         for future in helper._run_examples_with_metadata(
             rows,
             semaphore=semaphore,

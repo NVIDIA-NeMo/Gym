@@ -28,6 +28,7 @@ from omegaconf import OmegaConf
 
 import nemo_gym.rollout_collection as rollout_collection_module
 import resources_servers.gdpval.multistage_orchestrator as multistage_module
+from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -3787,11 +3788,16 @@ class TestCachedDeliverableReuse:
             },
         }
 
+        # A capture left by an earlier run under the same rollout id must not be merged.
+        stale_capture = CaptureStore(tmp_path / "capture")
+        stale_capture.record(maybe_rollout_id_from_run_body(_materialized_rows(["t0"])[0]), {"stale": True})
+
         await run_e2e_multistage(config, global_config)
 
         (row,) = [json.loads(line) for line in (tmp_path / "rollouts.jsonl").read_text().splitlines()]
         assert row["ng_trajectory"]["task_id"] == "t0"
         assert row["ng_model_call_capture"]["rollout_id"] == maybe_rollout_id_from_run_body(row)
+        assert row["ng_model_call_capture"]["calls"] == []
 
     def test_a_row_is_verified_by_the_resources_server_its_environment_server_binds(self) -> None:
         row = {AGENT_REF_KEY_NAME: {"name": "gdpval_stirrup_agent"}}
