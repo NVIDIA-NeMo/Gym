@@ -361,7 +361,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     """Turn a ``BaseEpisodeResponse`` into the rollout record the collector stores.
 
     A handled ``failure`` becomes a failures-sidecar row, so resume retries a non-terminal one and
-    never a terminal one. A ``result`` is stored as the Environment Server returned it; the collector
+    never a terminal one. Its typed envelope is retained alongside the collector's summary fields.
+    A ``result`` is stored as the Environment Server returned it; the collector
     adds only its own ``_ng_*`` keys, so any Environment Server type can be collected without the
     collector knowing its result fields.
 
@@ -381,6 +382,7 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
             NG_TERMINAL_KEY: bool(failure.get("terminal", False)),
             "_ng_failure_message": failure.get("failure_reason"),
+            "_ng_episode_failure": dict(failure),
         }
         if failure.get("stage") is not None:
             record["_ng_failure_stage"] = failure["stage"]
@@ -392,7 +394,7 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     result = response.get("result")
     if not isinstance(result, Mapping):
         raise ValueError(f"environment server reply for task {task_id!r} carries a non-object result: {result!r}")
-    reserved = sorted(key for key in result if _is_collector_key(key))
+    reserved = sorted(key for key in result if _is_collector_key(key) and key != NG_TRAJECTORY_KEY)
     if reserved:
         raise ValueError(
             f"environment server result for task {task_id!r} uses keys reserved for rollout collection: {reserved}"
@@ -746,6 +748,7 @@ def _rollout_for_export(result: dict[str, Any]) -> dict[str, Any]:
     """Return an exporter view without the complete trajectory or raw capture payloads."""
     sanitized = dict(result)
     sanitized.pop(NG_TRAJECTORY_KEY, None)
+    sanitized.pop("_ng_episode_failure", None)
     sanitized.pop("ng_model_call_capture", None)
     capture = result.get("ng_model_call_capture")
     if isinstance(capture, dict):
@@ -1852,7 +1855,7 @@ def _counted_failure_row(row: Dict[str, Any]) -> Dict[str, Any]:
     scored = {
         k: v
         for k, v in row.items()
-        if not k.startswith("_ng_failure_") and k not in ("failure_kind", "failure_reason")
+        if not k.startswith("_ng_failure_") and k not in ("failure_kind", "failure_reason", "_ng_episode_failure")
     }
     # This metrics-only copy honors the explicit denominator policy. The original
     # answer, failure diagnostics, and training mask remain untouched in the sidecar.

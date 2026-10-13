@@ -957,6 +957,7 @@ class TestRolloutCollection:
         result = {
             "response": {"output": "existing rollout content"},
             "ng_trajectory": {"invocations": [{"conversation": ["trajectory secret"]}]},
+            "_ng_episode_failure": {"agent_close": {"trajectory": {"conversation": ["failure secret"]}}},
             "ng_model_call_capture": {
                 "calls": [
                     {
@@ -973,10 +974,12 @@ class TestRolloutCollection:
         sanitized = _rollout_for_export(result)
 
         assert "ng_trajectory" not in sanitized
+        assert "_ng_episode_failure" not in sanitized
         assert sanitized["ng_model_call_capture"]["calls"] == [{"model_call_id": "model-1"}]
         assert sanitized["response"] == result["response"]
         assert result["ng_model_call_capture"]["calls"][0]["request"] == {"input": "request secret"}
         assert "ng_trajectory" in result
+        assert "_ng_episode_failure" in result
         malformed = (
             {"ng_model_call_capture": "secret"},
             {"ng_model_call_capture": {"calls": {"request": "secret"}}},
@@ -2037,6 +2040,7 @@ class TestRolloutCollection:
                 ROLLOUT_INDEX_KEY_NAME: 0,
                 NG_FAILURE_CLASS_KEY: failure_class,
                 "_ng_failure_http_status": 500,
+                "_ng_episode_failure": {"dependency_error": {"status_code": 500}},
             }
             return row if reward is None else {**row, "reward": reward}
 
@@ -2069,9 +2073,11 @@ class TestRolloutCollection:
         scoreless = next(row for row in rows if row[TASK_INDEX_KEY_NAME] == 2)
         assert scoreless["reward"] == 0.0
         assert not any(key.startswith("_ng_failure_") for key in scoreless)
+        assert "_ng_episode_failure" not in scoreless
         sidecar = [orjson.loads(line) for line in failures_fpath.read_bytes().splitlines()]
         assert "reward" not in sidecar[3]
         assert sidecar[3]["_ng_failure_http_status"] == 500
+        assert sidecar[3]["_ng_episode_failure"]["dependency_error"]["status_code"] == 500
 
     def test_missing_rollout_rows_counted_as_zero_covers_only_what_produced_nothing(self, tmp_path: Path) -> None:
         """A materialized rollout with no row anywhere is the one case no failure class reaches."""
@@ -9194,11 +9200,20 @@ class TestEnvironmentServerRouting:
         assert "reward" not in nested
         assert nested["verification"] == {"reward": 1.0}
 
-    def test_episode_result_may_not_use_collector_keys(self) -> None:
-        reply = self._native_identity("a") | {"result": {"reward": 1.0, "ng_trajectory": {}}}
+    @pytest.mark.parametrize("key", ["ng_perf", "_ng_task_id"])
+    def test_episode_result_may_not_use_collector_keys(self, key: str) -> None:
+        reply = self._native_identity("a") | {"result": {"reward": 1.0, key: {}}}
 
-        with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_trajectory'\]"):
+        with pytest.raises(ValueError, match="reserved for rollout collection"):
             nemo_gym.rollout_collection._episode_record(reply)
+
+    def test_episode_result_preserves_producer_trajectory_for_validation(self) -> None:
+        trajectory = {"gaps": [{"code": "model_call_ownership_unavailable"}]}
+        reply = self._native_identity("a") | {"result": {"reward": 1.0, "ng_trajectory": trajectory}}
+
+        record = nemo_gym.rollout_collection._episode_record(reply)
+
+        assert record["ng_trajectory"] == trajectory
 
     def test_episode_detection_needs_object_identities_and_an_object_failure(self) -> None:
         """An agent reply echoing identity fields as strings is not an episode reply; a bad failure is an error."""
