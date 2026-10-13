@@ -56,6 +56,7 @@ def job_config(
     subagents_enabled: bool = False,
     subagent_max_depth: int = 1,
     subagent_max_active: int | None = None,
+    delegation_prompt: str | None = None,
 ) -> dict:
     """Create a single-attempt Harbor job using OpenCode's compatible provider.
 
@@ -73,7 +74,9 @@ def job_config(
     (``None`` keeps OpenCode's defaults: both on). Training with NeMo-RL token
     capture sets them explicitly: compaction on for framework-owned context
     reconstruction, both off for an append-only context. ``disable_title`` drops
-    OpenCode's side model call that names the session.
+    OpenCode's side model call that names the session. ``delegation_prompt`` adds
+    a run-level instruction to the primary agent without modifying the pinned
+    benchmark prompt; it is valid only when the subagent tool is enabled.
     """
     if not 0 < output_tokens < context_tokens:
         raise ValueError("Output token limit must be positive and smaller than context")
@@ -117,6 +120,12 @@ def job_config(
         raise ValueError(f"Unknown training mode: {training_mode!r} (expected one of {TRAINING_MODES})")
     if training_mode is not None and (training_mode == "subagent") != subagents_enabled:
         raise ValueError("Fixed training mode and subagent tool configuration disagree")
+    if delegation_prompt is not None:
+        delegation_prompt = delegation_prompt.strip()
+        if not delegation_prompt:
+            raise ValueError("Delegation prompt must not be empty")
+        if not subagents_enabled:
+            raise ValueError("Delegation prompt requires subagents")
     if subagents_enabled:
         if subagent_max_depth != 1:
             raise ValueError("Subagent training requires depth-one delegation (subagent_max_depth=1)")
@@ -136,6 +145,8 @@ def job_config(
     # `task` deny (depth one), as in the reference subagent-training harness.
     if subagents_enabled:
         opencode_config["permission"] = {"task": "allow"}
+        if delegation_prompt is not None:
+            agents.setdefault("build", {})["prompt"] = delegation_prompt
         agents["general"] = {
             "mode": "subagent",
             "permission": {"task": "deny"},
@@ -306,9 +317,18 @@ def main() -> None:
     parser.add_argument("--compaction-prune", choices=("true", "false"), default=None)
     parser.add_argument("--disable-title", action="store_true")
     parser.add_argument("--training-mode", choices=TRAINING_MODES, default=None)
-    parser.add_argument("--subagents", action="store_true", help="Enable OpenCode's task tool (depth-one `general` children)")
+    parser.add_argument(
+        "--subagents",
+        action="store_true",
+        help="Enable OpenCode's task tool (depth-one `general` children)",
+    )
     parser.add_argument("--subagent-max-depth", type=int, default=1)
     parser.add_argument("--subagent-max-active", type=int, default=None)
+    parser.add_argument(
+        "--delegation-prompt",
+        default=None,
+        help="Primary-agent instruction encouraging useful delegation (subagent mode only)",
+    )
     args = parser.parse_args()
     if importlib.metadata.version("harbor") != "0.6.6":
         raise RuntimeError("AgenticVBench requires upstream harbor==0.6.6")
@@ -356,6 +376,7 @@ def main() -> None:
             subagents_enabled=args.subagents,
             subagent_max_depth=args.subagent_max_depth,
             subagent_max_active=args.subagent_max_active,
+            delegation_prompt=args.delegation_prompt,
         )
     )
     config_path = args.output / "harbor_job.json"

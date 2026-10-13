@@ -169,6 +169,7 @@ async def test_cancelled_http_wait_does_not_cancel_episode(
 @pytest.mark.asyncio
 async def test_policy_server_endpoint_and_served_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app, "get_server_url", lambda name: f"http://10.0.0.9:6100/{name}")
+    delegation_prompt = "You may delegate suitable subtasks."
     agent = make_agent(
         tmp_path,
         monkeypatch,
@@ -177,6 +178,9 @@ async def test_policy_server_endpoint_and_served_model(tmp_path: Path, monkeypat
         model_id=None,
         output_root=None,
         model_server={"type": "responses_api_models", "name": "policy_model"},
+        opencode_training_mode="subagent",
+        opencode_subagents_enabled=True,
+        opencode_delegation_prompt=delegation_prompt,
     )
     endpoint, model = agent._model_endpoint(request())
     assert endpoint == "http://10.0.0.9:6100/policy_model/v1"
@@ -203,6 +207,9 @@ async def test_policy_server_endpoint_and_served_model(tmp_path: Path, monkeypat
     assert command[command.index("--backend") + 1] == "podman"
     assert command[command.index("--judge-protocol") + 1] == "nvinference-hybrid"
     assert command[command.index("--verifier-timeout-multiplier") + 1] == "3.0"
+    assert command[command.index("--training-mode") + 1] == "subagent"
+    assert "--subagents" in command
+    assert command[command.index("--delegation-prompt") + 1] == delegation_prompt
     assert "--max-turns" not in command
     assert verified.reward == 1
     assert verified.equal_family_reward == pytest.approx(25 / 18)
@@ -418,4 +425,12 @@ def test_training_config_resolves_from_environment(monkeypatch: pytest.MonkeyPat
     assert config.opencode_disable_title is True and config.train_compaction_summaries is True
     assert config.model_context_tokens == 20480 and config.model_output_capability_tokens == 4096
     assert config.max_turns == 12 and config.backend == "remote" and config.judge_protocol == "nvinference-hybrid"
+    assert config.opencode_delegation_prompt is None
     assert config.benchmark_root is None and config.credentials_file is None
+    monkeypatch.setenv("AGENTIC_VBENCH_DELEGATION_PROMPT", "You may delegate suitable subtasks.")
+    prompted = OmegaConf.to_container(
+        OmegaConf.load(Path(__file__).parents[1] / "configs/agentic_vbench_train.yaml"), resolve=True
+    )
+    assert prompted["agentic_vbench_agent"]["responses_api_agents"]["agentic_vbench_agent"][
+        "opencode_delegation_prompt"
+    ] == "You may delegate suitable subtasks."

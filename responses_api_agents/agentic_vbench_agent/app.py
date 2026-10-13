@@ -106,6 +106,9 @@ class AgenticVBenchConfig(BaseResponsesAPIAgentConfig):
     opencode_subagents_enabled: bool = False
     opencode_subagent_max_depth: int = 1
     opencode_subagent_max_active: int | None = None
+    # Optional primary-agent instruction used by the dedicated subagent-training
+    # recipe. It does not alter the benchmark prompt or verifier metadata.
+    opencode_delegation_prompt: str | None = None
     # Address the task container uses to reach this server's capture proxy; derived
     # from the route to the policy server when unset.
     capture_proxy_host: str | None = None
@@ -341,6 +344,8 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 command.extend(["--subagents", "--subagent-max-depth", str(self.config.opencode_subagent_max_depth)])
             if self.config.opencode_subagent_max_active is not None:
                 command.extend(["--subagent-max-active", str(self.config.opencode_subagent_max_active)])
+            if self.config.opencode_delegation_prompt is not None:
+                command.extend(["--delegation-prompt", self.config.opencode_delegation_prompt])
             try:
                 exit_code = await run_process(command, output, runtime, self._env)
             except asyncio.CancelledError:
