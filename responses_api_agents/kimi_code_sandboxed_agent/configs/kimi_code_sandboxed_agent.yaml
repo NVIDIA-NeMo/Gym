@@ -38,7 +38,7 @@ kimi_code_sandboxed_agent:
         image: python:3.13-bookworm
         ttl_s: 9000
         ready_timeout_s: 1200
-        workdir: /workspace
+        workdir: /tmp
         entrypoint: [sleep, infinity]
         resources:
           cpu: 2
