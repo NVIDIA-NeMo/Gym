@@ -140,7 +140,8 @@ PYTHONPATH=resources_servers/mcqa:. pytest --import-mode=importlib \
   tests/unit_tests/test_milu_1_5_grading.py \
   tests/unit_tests/test_milu_1_5_reference_grading.py \
   tests/unit_tests/test_milu_1_5_rescore.py \
-  resources_servers/mcqa/tests
+  resources_servers/mcqa/tests \
+  responses_api_models/vllm_model/tests/test_milu_1_5.py
 ruff check benchmarks/indic/milu_1_5 resources_servers/mcqa/app.py
 ruff format --check benchmarks/indic/milu_1_5 resources_servers/mcqa/app.py
 ```
@@ -148,7 +149,9 @@ ruff format --check benchmarks/indic/milu_1_5 resources_servers/mcqa/app.py
 Tests cover prompt rendering, label mapping, subset stability, local and pinned
 download preparation, checksum/count guards, native benchmark discovery, and
 reference extraction edge cases, including stop-string forwarding through the
-agent request schema and chat adapter. Failure tests check that preparation errors
+agent request schema and chat adapter in the vLLM server suite. Keeping server
+integration tests in their owning suite prevents partial server imports from
+distorting the separate core coverage report. Failure tests check that preparation errors
 after partial serialization preserve the previous output and clean temporary files.
 
 Dual-score tests additionally cover ambiguous/incorrect answers, normalization,

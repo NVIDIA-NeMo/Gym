@@ -3,18 +3,13 @@
 
 import hashlib
 import json
-from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from starlette.requests import Request
 
 from benchmarks.indic.milu_1_5 import prepare as module
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.server_utils import ServerClient
-from responses_api_agents.simple_agent.app import SimpleAgentRunRequest
-from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
 def source(question="कौन?", **extra):
@@ -49,28 +44,10 @@ def test_prompt_and_answer_preserve_reference_format():
             ),
         }
     ]
-    # Validate the exact agent request and its serialized chat-completions body.
-    request = SimpleAgentRunRequest.model_validate(result)
-    model = VLLMModel(
-        config=VLLMModelConfig(
-            host="127.0.0.1",
-            port=12345,
-            entrypoint="app.py",
-            name="test",
-            base_url="http://unused/v1",
-            api_key="dummy",  # pragma: allowlist secret
-            model="test",
-            return_token_id_information=False,
-            uses_reasoning_parser=True,
-        ),
-        server_client=MagicMock(spec=ServerClient),
-    )
-    chat = model.get_converter().responses_to_chat_completion_create_params(request.responses_create_params)
-    body = model._preprocess_chat_completion_create_params(
-        Request({"type": "http", "headers": []}), chat.model_dump(exclude_unset=True)
-    )
-    assert body["stop"] == ["</s>", "<|im_end|>", "<eos>"]
-    assert body["messages"][0]["content"] == result["responses_create_params"]["input"][0]["content"]
+    # Server serialization belongs to the vLLM server suite, alongside its implementation tests.
+    assert json.loads(result["responses_create_params"]["metadata"]["extra_body"]) == {
+        "stop": ["</s>", "<|im_end|>", "<eos>"]
+    }
     assert "input" not in row["responses_create_params"]
     assert row["options"] == [{"A": "एक "}, {"B": "दो"}, {"C": "तीन"}, {"D": "चार"}]
     assert row["expected_answer"] == "B"
