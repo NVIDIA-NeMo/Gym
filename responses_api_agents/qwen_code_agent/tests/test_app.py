@@ -129,7 +129,7 @@ def agent(tmp_path, monkeypatch):
 
     async def exec_(command, **kwargs):
         if "--version" in command:
-            return SimpleNamespace(return_code=0, error_type=None, stdout="0.25.1\n", stderr="")
+            return SimpleNamespace(return_code=0, error_type=None, stdout="tar: warning\n0.25.1\n", stderr="")
         return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
 
     async def download(remote, local):
