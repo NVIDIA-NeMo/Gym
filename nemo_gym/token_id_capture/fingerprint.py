@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from typing import Any
 
 import orjson
@@ -51,6 +52,36 @@ _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
 _INSTRUCTION_ROLES = frozenset({"system", "developer"})
 
+# What identifies a tool call in the lineage hashes.
+#
+# "full" (default): call id, tool name and canonical arguments, so any rewrite
+# of a served call breaks the chain. "id": the call id alone. OpenCode keeps a
+# served call's id but rewrites a call the model got wrong (unknown tool,
+# arguments that fail validation) into its own ``invalid`` placeholder when it
+# echoes the history, so under "full" that turn can never resolve its parent
+# and the rest of the rollout is masked. In OpenCode RL runs that was 2-4% of
+# rollouts per step, all of them the rollouts in which the model made a
+# tool-call mistake, which is exactly the behaviour training must see. The
+# mode is part of the hash domain, so entries written under one mode never
+# match lookups made under the other.
+_TOOL_CALL_IDENTITY_ENV = "NEMO_GYM_TOKEN_CAPTURE_TOOL_CALL_IDENTITY"
+_TOOL_CALL_IDENTITIES = ("full", "id")
+_TOOL_CALL_IDENTITY = os.environ.get(_TOOL_CALL_IDENTITY_ENV, "full").strip().lower() or "full"
+if _TOOL_CALL_IDENTITY not in _TOOL_CALL_IDENTITIES:
+    raise ValueError(f"{_TOOL_CALL_IDENTITY_ENV} must be one of {_TOOL_CALL_IDENTITIES}, got {_TOOL_CALL_IDENTITY!r}")
+
+
+def _domain(base: bytes) -> bytes:
+    """Hash domain for the active tool-call identity mode."""
+    if _TOOL_CALL_IDENTITY == "full":
+        return base
+    return base + b"|tool-call-identity=" + _TOOL_CALL_IDENTITY.encode("ascii")
+
+
+def tool_call_identity() -> str:
+    """The active tool-call identity mode (``"full"`` or ``"id"``)."""
+    return _TOOL_CALL_IDENTITY
+
 
 def assistant_fingerprint(messages: list[dict]) -> str:
     """Fingerprint the model-authored turns of a request, in order.
@@ -59,7 +90,7 @@ def assistant_fingerprint(messages: list[dict]) -> str:
     User and tool content is excluded from the lookup key.
     Dialect-specific tool-call shapes normalize to the same hash input.
     """
-    hasher = hashlib.sha256(_FINGERPRINT_DOMAIN)
+    hasher = hashlib.sha256(_domain(_FINGERPRINT_DOMAIN))
     count = 0
     for message in messages or []:
         if not isinstance(message, dict):
@@ -72,8 +103,9 @@ def assistant_fingerprint(messages: list[dict]) -> str:
             _update_field(hasher, b"\x01", payload)
         for call_id, name, arguments in _tools_of(message):
             _update_field(hasher, b"\x02", call_id)
-            _update_field(hasher, b"\x03", name)
-            _update_field(hasher, b"\x04", arguments)
+            if _TOOL_CALL_IDENTITY == "full":
+                _update_field(hasher, b"\x03", name)
+                _update_field(hasher, b"\x04", arguments)
     if count == 0:
         return ""
     return hasher.hexdigest()
@@ -92,7 +124,7 @@ def conversation_digest(messages: list[dict]) -> str:
     conversation. Reusing the parent's tokens then serves the instruction text
     the model actually saw, which is what training needs.
     """
-    hasher = hashlib.sha256(_CONTEXT_DOMAIN)
+    hasher = hashlib.sha256(_domain(_CONTEXT_DOMAIN))
     for message in messages or []:
         if not isinstance(message, dict):
             raise ValueError(f"request item is not an object: {type(message).__name__}")
@@ -105,8 +137,9 @@ def conversation_digest(messages: list[dict]) -> str:
             _update_field(hasher, b"\x02", payload)
         for call_id, name, arguments in _tools_of(message):
             _update_field(hasher, b"\x03", call_id)
-            _update_field(hasher, b"\x04", name)
-            _update_field(hasher, b"\x05", arguments)
+            if _TOOL_CALL_IDENTITY == "full":
+                _update_field(hasher, b"\x04", name)
+                _update_field(hasher, b"\x05", arguments)
         # Include tool results.
         # Summarizing, redacting, or truncating a result changes the request context.
         for call_id, output in _tool_results_of(message):
