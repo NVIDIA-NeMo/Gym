@@ -1,0 +1,4 @@
+# Prepared training JSONL (golden patch + expected statuses for every supported instance). Regenerate with prepare_r2e_gym.py.
+*.jsonl
+!example.jsonl
+!example_rollouts.jsonl

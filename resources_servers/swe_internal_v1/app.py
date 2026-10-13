@@ -143,7 +143,6 @@ class SweInternalV1VerifyResponse(BaseVerifyResponse):
 
 class SweInternalV1ResourcesServer(SimpleResourcesServer):
     config: SweInternalV1ResourcesServerConfig
-    ray_enabled = False
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)

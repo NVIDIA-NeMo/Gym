@@ -33,7 +33,8 @@ fatal and end the episode. `retry_empty_completions: N` re-issues the same
 upstream request up to N extra times when this happens; the first response with
 visible output (or the last attempt) is returned. Responses cut off by the
 token limit (`finish_reason: "length"`, `status: "incomplete"`) are returned as
-is. The default, 0, disables the retry.
+is, as are refusals, content-filtered completions, and failed Responses results.
+The default, 0, disables the retry.
 
 Each empty-completion retry uses the configured upstream retry policy and
 releases its provider slot between attempts. With `upstream_max_num_tries: 1`,

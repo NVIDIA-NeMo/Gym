@@ -13,14 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import json
 import logging
 import random
 from contextlib import asynccontextmanager, nullcontext
 from typing import Any, Awaitable, Callable, Dict, Literal, Optional, TypeVar
 
 from aiohttp import ClientResponseError
-from fastapi import HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from nemo_gym.base_responses_api_model import (
@@ -55,19 +53,6 @@ class UpstreamRetriesExhaustedError(RuntimeError):
         super().__init__(f"Upstream provider request failed after {attempts} attempts")
         self.status = getattr(last_error, "status", None)
         self.response_content = getattr(last_error, "response_content", None)
-
-
-def _upstream_error_detail(error: ClientResponseError) -> Any:
-    """Return the provider's error body, parsed as JSON when possible, for a propagated status."""
-    content = getattr(error, "response_content", None)
-    if not content:
-        return f"Upstream provider request failed with HTTP {error.status}"
-    if isinstance(content, bytes):
-        content = content.decode(errors="replace")
-    try:
-        return json.loads(content)
-    except ValueError:
-        return content
 
 
 class UpstreamRetryPolicy(BaseModel):
@@ -243,8 +228,11 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
 
 
 class SimpleModelServer(SimpleResponsesAPIModel):
-    ray_enabled = False
     config: SimpleModelServerConfig
+
+    def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:
+        # OpenAI and subclasses such as LiteLLM retain their opt-in HTTP policy.
+        return error.status in self.config.propagate_upstream_http_status_codes
 
     def model_post_init(self, context):
         self._client = NeMoGymAsyncOpenAI(
@@ -349,19 +337,6 @@ class SimpleModelServer(SimpleResponsesAPIModel):
 
         raise UpstreamRetriesExhaustedError(retry_policy.max_attempts, last_error) from last_error
 
-    async def _serve_upstream(self, operation: Callable[[], Awaitable[ResponseT]]) -> ResponseT:
-        """Call the provider under the retry policy and propagate configured HTTP statuses."""
-        try:
-            return await self._call_upstream(operation)
-        except ClientResponseError as exc:
-            if exc.status in self.config.propagate_upstream_http_status_codes:
-                # Preserve the provider status and error body across the model-server hop.
-                # Otherwise SimpleServer's generic exception middleware turns this into
-                # HTTP 500 and an outer caller may retry a request that the provider
-                # rejected immediately.
-                raise HTTPException(status_code=exc.status, detail=_upstream_error_detail(exc)) from exc
-            raise
-
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.openai_model
@@ -387,7 +362,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
                 }
             return NeMoGymResponse.model_validate(response_dict)
 
-        response = await self._serve_upstream(create_and_validate)
+        response = await self._call_upstream(create_and_validate)
         for attempt in range(self.config.retry_empty_completions):
             if not _response_is_empty(response.model_dump()):
                 break
@@ -396,7 +371,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
                 attempt + 1,
                 self.config.retry_empty_completions,
             )
-            response = await self._serve_upstream(create_and_validate)
+            response = await self._call_upstream(create_and_validate)
         return response
 
     async def chat_completions(
@@ -409,7 +384,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             response_dict = await self._client.create_chat_completion(**body_dict)
             return NeMoGymChatCompletion.model_validate(response_dict)
 
-        response = await self._serve_upstream(create_and_validate)
+        response = await self._call_upstream(create_and_validate)
         for attempt in range(self.config.retry_empty_completions):
             if not _chat_completion_is_empty(response.model_dump()):
                 break
@@ -418,7 +393,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
                 attempt + 1,
                 self.config.retry_empty_completions,
             )
-            response = await self._serve_upstream(create_and_validate)
+            response = await self._call_upstream(create_and_validate)
         return response
 
 
@@ -434,16 +409,21 @@ def _chat_completion_is_empty(response_dict: Dict[str, Any]) -> bool:
     if not choices:
         return False
     choice = choices[0] or {}
-    if choice.get("finish_reason") == "length":
-        return False  # truncated by the token budget; a retry would hit the same limit
+    if choice.get("finish_reason") != "stop":
+        return False  # preserve truncations, filtering, and other terminal outcomes
     message = choice.get("message") or {}
-    return not _has_text(message.get("content")) and not message.get("tool_calls") and not message.get("function_call")
+    return (
+        not _has_text(message.get("content"))
+        and not _has_text(message.get("refusal"))
+        and not message.get("tool_calls")
+        and not message.get("function_call")
+    )
 
 
 def _response_is_empty(response_dict: Dict[str, Any]) -> bool:
     """True when a completed response's output has no tool call and no non-empty message text."""
-    if response_dict.get("status") == "incomplete":
-        return False  # truncated by the token budget; a retry would hit the same limit
+    if response_dict.get("status") not in (None, "completed") or response_dict.get("error"):
+        return False  # do not resample terminal failures or token-budget truncations
     output = response_dict.get("output")
     if not isinstance(output, list):
         return False

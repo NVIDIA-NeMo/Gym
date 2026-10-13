@@ -1004,6 +1004,20 @@ COMMANDS = {
         summary="Prepare benchmark data and dump it to disk.",
         flags=(CONFIG, BENCHMARK, SEARCH_DIR),
     ),
+    "eval plan": Command(
+        target="nemo_gym.cli.eval:plan_benchmark",
+        summary="Prepare one benchmark and write its task list (stable ids, digests) to a plan file.",
+        flags=(
+            CONFIG,
+            BENCHMARK,
+            SEARCH_DIR,
+            _value_flag("out", "plan_output_fpath", "Plan file to write.", quote=True),
+            _comma_list_flag(
+                "task-ids", "plan_task_ids", "Only plan these task ids (comma-separated).", metavar="ID[,ID...]"
+            ),
+            _bool_flag("schema", "print_plan_schema", "Print the plan file's JSON Schema and exit."),
+        ),
+    ),
     "eval run": Command(
         target=_eval_run,
         summary="Collate data, start servers, and collect rollouts.",

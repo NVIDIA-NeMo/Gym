@@ -907,6 +907,8 @@ class MLFlowConfig(ExporterConfig):
     mlflow_tracking_token: Optional[str] = None
     mlflow_experiment_name: Optional[str] = None
     mlflow_run_name: Optional[str] = None
+    mlflow_run_description: Optional[str] = None
+    mlflow_run_tags: Dict[str, str] = Field(default_factory=dict)
 
     @property
     def is_available(self) -> bool:
