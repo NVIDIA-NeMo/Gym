@@ -15,7 +15,10 @@ over the older Docker/Singularity mini-SWE integration.
   - [Overview](#overview)
   - [Dataset Information](#dataset-information)
   - [Configuration](#configuration)
+    - [How sandboxes are configured](#how-sandboxes-are-configured)
     - [Agent Configuration](#agent-configuration)
+    - [Sandbox Provider Configuration](#sandbox-provider-configuration)
+    - [Advanced: multiple sandboxes](#advanced-multiple-sandboxes)
     - [Model Parameters](#model-parameters)
   - [Quick Start](#quick-start)
     - [Prerequisites](#prerequisites)
@@ -217,8 +220,10 @@ sandbox:                      # name referenced by the agent's sandbox_provider
       use_server_proxy: true
     create:
       request_timeout_s: 1200
-      timeout_s: 1200
-      skip_health_check: true
+      # Must exceed ready_timeout_s above: this bounds the whole create call,
+      # which includes the readiness wait.
+      timeout_s: 1500
+      skip_health_check: false
       retries: 10
       retry_delay_s: 5.0
       retry_max_delay_s: 90.0
@@ -356,7 +361,9 @@ uv sync --extra dev --extra sandbox
   current working directory, so from the repo root it points above the repo and
   fails with `... does not appear to be a Python project`.
 
-- Access to an OpenSandbox deployment reachable from the server process.
+- Access to an OpenSandbox deployment reachable from the server process. Follow
+  [OpenSandbox access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#setup)
+  for credentials, endpoint configuration, and resource limits.
 - A policy model endpoint compatible with `responses_api_models/vllm_model`.
 - SWE-bench task images available to OpenSandbox. The committed smoke rows are
   `subset: verified`, so they resolve to
@@ -368,7 +375,7 @@ uv sync --extra dev --extra sandbox
 Set the OpenSandbox API key:
 
 ```bash
-export OPENSANDBOX_API_KEY=<opensandbox-api-key>
+export OPENSANDBOX_API_KEY="<opensandbox-api-key>"
 ```
 
 Set the policy model endpoint in `env.yaml` or with equivalent CLI overrides:
@@ -484,6 +491,7 @@ The agent writes per-instance mini-swe-agent configs and result artifacts under
 Use the agent's `step_timeout` and `eval_timeout` config values or CLI overrides
 to bound tool and verification execution. If you launch from a custom
 Kubernetes wrapper, add any outer per-sample guard there.
+
 
 ## Running SWE-bench on ECS Fargate
 

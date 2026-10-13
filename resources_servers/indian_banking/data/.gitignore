@@ -1,0 +1,9 @@
+*train_prepare.jsonl
+*validation_prepare.jsonl
+*example_prepare.jsonl
+# Hosted on the Hugging Face dataset repo (NPCI/nemo-gym-indian-banking);
+# fetched locally, never committed.
+train.jsonl
+validation.jsonl
+db.json
+kb.json

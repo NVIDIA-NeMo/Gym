@@ -57,3 +57,11 @@ imo_proofbench_judge_simple_agent:
 judge_base_url: null
 judge_api_key: null
 judge_model_name: null
+
+imo_proofbench_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: imo_proofbench_judge_simple_agent

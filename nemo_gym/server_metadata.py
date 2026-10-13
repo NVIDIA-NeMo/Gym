@@ -60,5 +60,9 @@ def _visit_server(data: dict, server_type_key: str, level: int = 1) -> ServerMet
         for k, v in data.items():
             if level == 2 and k != server_type_key:
                 continue
+            # Skip keys that cannot contain a server block, e.g. a top-level `config_paths` list, so
+            # the walk reaches the server config instead of descending into the first key and giving up.
+            if not isinstance(v, dict):
+                continue
             return _visit_server(v, server_type_key, level + 1)
     return resource

@@ -72,18 +72,21 @@ async def run():
 
 ## Selecting and configuring the provider
 
-The provider config is a single-key mapping: `{"apptainer": {<kwargs>}}`. The kwargs are
-grouped into three optional sections, each of which accepts a plain mapping (e.g. from
-Hydra YAML) or the corresponding dataclass:
+The provider config is a single-key mapping: `{"apptainer": {<kwargs>}}`. `bin_path`
+optionally selects a directory containing a staged Apptainer installation. The remaining
+kwargs are grouped into three optional sections, each of which accepts a plain mapping
+(e.g. from Hydra YAML) or the corresponding dataclass:
 
 ```yaml
 # Provider config (the value passed as the sandbox provider)
 apptainer:
+  bin_path: /opt/apptainer/bin
   exec:
     fakeroot_for_root: true
     default_binds: ["/tmp"]
     extra_exec_args: ["--writable-tmpfs"]
     default_timeout_s: 180
+    timeout_grace_s: 15
     concurrency: 32
   create:
     mount_point: /sandbox
@@ -114,6 +117,7 @@ Settings for running commands (`apptainer exec`) and global provider behavior.
 | Field | Default | Meaning |
 |---|---|---|
 | `default_timeout_s` | `180` | Default per-command timeout when the caller doesn't pass one (`None` = no timeout). |
+| `timeout_grace_s` | `15` | Seconds to wait after sending `SIGTERM` on timeout before escalating to `SIGKILL` (`0` = immediate hard kill). |
 | `fakeroot_for_root` | `true` | When running as root, add `--fakeroot` (map the host user to root inside the container). |
 | `default_binds` | `[]` | Extra `--bind host:container` mounts added at instance start. |
 | `extra_exec_args` | `[]` | Extra raw flags appended to every `apptainer exec` (e.g. `--no-home`, `--writable-tmpfs`, `--contain`). |

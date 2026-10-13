@@ -17,7 +17,7 @@ import pytest
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.skills import (
-    _resolve_skills_path,
+    _resolve_under_cwd_or_install,
     hash_skill_dir,
     load_skill_directory,
     parse_skill_md,
@@ -173,10 +173,10 @@ class TestLoadSkillDirectory:
 
 class TestResolveSkillsPath:
     def test_absolute_path_unchanged(self, tmp_path):
-        assert _resolve_skills_path(str(tmp_path)) == tmp_path
+        assert _resolve_under_cwd_or_install(str(tmp_path)) == tmp_path
 
     def test_relative_resolves_to_parent_dir_when_absent_in_cwd(self):
-        resolved = _resolve_skills_path("definitely_not_a_real_skills_dir_xyz")
+        resolved = _resolve_under_cwd_or_install("definitely_not_a_real_skills_dir_xyz")
         assert resolved == PARENT_DIR / "definitely_not_a_real_skills_dir_xyz"
 
 

@@ -2,4 +2,5 @@
 
 Agent for Gymnasium-style environments based on `GymnasiumServer` resources servers. Drives the reset/step loop.
 
-See `docs/resources-server/gymnasium-api.md` for more details.
+See the [Build Verifiers](https://docs.nvidia.com/nemo/gym/main/build-verifiers)
+documentation for more details about `GymnasiumServer`.

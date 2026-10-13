@@ -285,7 +285,7 @@ Install the [GitHub CLI](https://cli.github.com/) (`gh`) v2.0 or later, the `gh 
 
 ```bash
 gh extension install github/gh-stack
-gh skill install github/gh-stack gh-stack   # vendored under .claude/skills/gh-stack/; this installs it for your agent
+gh skill install github/gh-stack gh-stack   # vendored under .agents/skills/gh-stack/; this installs it for your agent
 ```
 
 <Warning>
@@ -348,7 +348,7 @@ On a rebase conflict (exit code 3), resolve the listed files, `git add` them, th
 
 #### Command Reference
 
-The vendored skill (`.claude/skills/gh-stack/SKILL.md`) carries the full reference, exit codes, and non-interactive rules for agents.
+The vendored skill (`.agents/skills/gh-stack/SKILL.md`) carries the full reference, exit codes, and non-interactive rules for agents.
 
 | Task | Command |
 |------|---------|

@@ -12,8 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from pathlib import Path
 from unittest.mock import MagicMock
 
+import yaml
 from app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest
 
 from nemo_gym.openai_utils import NeMoGymResponse
@@ -541,7 +543,13 @@ class TestApp:
         assert result.extracted_answer == "B"
 
 
-def _make_verify_request(text: str, expected: str = "B", grading_mode: str = "strict_single_letter_boxed"):
+def _make_verify_request(
+    text: str,
+    expected: str = "B",
+    grading_mode: str = "strict_single_letter_boxed",
+    option_letters: str = "ABCD",
+    template_metadata: dict | None = None,
+):
     """Helper to build a MCQAVerifyRequest with proper schema."""
     response = NeMoGymResponse(
         id="resp_test",
@@ -564,9 +572,10 @@ def _make_verify_request(text: str, expected: str = "B", grading_mode: str = "st
     return MCQAVerifyRequest(
         responses_create_params={"input": [{"role": "user", "content": "Q?"}]},
         response=response,
-        options=[{"A": "opt1"}, {"B": "opt2"}, {"C": "opt3"}, {"D": "opt4"}],
+        options=[{letter: f"opt{letter}"} for letter in option_letters],
         expected_answer=expected,
         grading_mode=grading_mode,
+        template_metadata=template_metadata,
     )
 
 
@@ -653,12 +662,282 @@ class TestGradingModeAnswerColonMD:
         assert result.extracted_answer == "A"
         assert result.reward == 1.0
 
+    async def test_leading_letter_answer(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Answer: B because C is not valid", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    async def test_repeated_letter_answer(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Answer: B/B", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    async def test_wrapped_answers(self) -> None:
+        server = self._make_server()
+        cases = [
+            ("Answer: $D$", "D", "ABCD"),
+            ("Answer: (D)", "D", "ABCD"),
+            (r"\boxed{\text{Answer: G}}", "G", "ABCDEFGHIJ"),
+        ]
+        for text, expected, option_letters in cases:
+            body = _make_verify_request(text=text, expected=expected, option_letters=option_letters)
+            result = await server.verify(body)
+            assert result.extracted_answer == expected, text
+            assert result.reward == 1.0, text
+
+    async def test_unextractable_answer(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Answer: unknown", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_disallowed_answer(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Answer: G", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_ambiguous_answer_lists(self) -> None:
+        server = self._make_server()
+        cases = [
+            ("Answer: A/B/C", "A", "ABCD"),
+            ("Answer: B/I", "B", "ABCDEFGHIJ"),
+            ("**Answer: D/H**", "D", "ABCDEFGHIJ"),
+            ("Answer: A or B", "A", "ABCD"),
+            ("Answer: A and B", "A", "ABCD"),
+            ("Answer: A, B", "A", "ABCD"),
+        ]
+        for text, expected, option_letters in cases:
+            body = _make_verify_request(text=text, expected=expected, option_letters=option_letters)
+            result = await server.verify(body)
+            assert result.extracted_answer is None, text
+            assert result.reward == 0.0, text
+
+    async def test_rightmost_answer_match(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Answer: A\nAnswer: B", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    async def test_invalid_rightmost_answer_fallback(self) -> None:
+        server = self._make_server()
+        for invalid_payload in ["unknown", "G", "A/B/C"]:
+            body = _make_verify_request(text=f"Answer: B\nAnswer: {invalid_payload}", expected="B")
+            result = await server.verify(body)
+            assert result.extracted_answer == "B", invalid_payload
+            assert result.reward == 1.0, invalid_payload
+
     async def test_no_answer_pattern(self) -> None:
         server = self._make_server()
         body = _make_verify_request(text="I think it might be B but I'm not sure", expected="B")
         result = await server.verify(body)
         assert result.extracted_answer is None
         assert result.reward == 0.0
+
+    async def test_answer_prefix_requires_metadata(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="the answer is (C).", expected="C")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_strict_boxed_final_fallback_is_row_scoped(self) -> None:
+        server = self._make_server()
+        without_prefix = _make_verify_request(
+            text=r"\boxed{H}",
+            expected="H",
+            option_letters="ABCDEFGHIJ",
+        )
+        result = await server.verify(without_prefix)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+        with_prefix = _make_verify_request(
+            text=r"\boxed{H}",
+            expected="H",
+            option_letters="ABCDEFGHIJ",
+            template_metadata={
+                "output_regex": r"NEVER_MATCH_([A-Z])",
+                "answer_prefix": "answer is",
+            },
+        )
+        result = await server.verify(with_prefix)
+        assert result.extracted_answer == "H"
+        assert result.reward == 1.0
+
+    async def test_multilingual_closing_phrases(self) -> None:
+        server = self._make_server()
+        cases = [
+            ("The answer is (C).", "answer is", "C"),
+            ("Answer is (D).", "answer is", "D"),
+            ("Die Antwort ist (D).", "Die Antwort ist", "D"),
+            ("La respuesta es (A).", "La respuesta es", "A"),
+            ("La réponse est (B).", "La réponse est", "B"),
+            ("La risposta è (C).", "La risposta è", "C"),
+            ("答えは（C）です。", "答えは", "C"),
+            ("答案是 (F)", "答案是", "F"),
+            ("답은 (G)입니다", "답은", "G"),
+            ("A resposta é (H)", "A resposta é", "H"),
+            ("उत्तर है (I)", "उत्तर है", "I"),
+        ]
+        for text, answer_prefix, expected in cases:
+            body = _make_verify_request(
+                text=text,
+                expected=expected,
+                option_letters="ABCDEFGHIJ",
+                template_metadata={
+                    "output_regex": r"NEVER_MATCH_([A-Z])",
+                    "answer_prefix": answer_prefix,
+                },
+            )
+            result = await server.verify(body)
+            assert result.extracted_answer == expected, text
+            assert result.reward == 1.0, text
+
+    async def test_terminal_localized_answer_labels(self) -> None:
+        server = self._make_server()
+        cases = [
+            ("বাংলায় ব্যাখ্যা।\n\nউত্তর: C", "C"),
+            ("ગુજરાતીમાં સમજૂતી.\n\n**જવાબ: B**", "B"),
+            ("हिंदी में व्याख्या।\n\n**उत्तर:** D।", "D"),
+            ("ಕನ್ನಡದಲ್ಲಿ ವಿವರಣೆ.\n\nಉತ್ತರ: A", "A"),
+            ("தமிழில் விளக்கம்.\n\nபதில்：C。", "C"),
+            ("اردو میں وضاحت۔\n\nجواب: B", "B"),
+            ("উত্তৰ: B", "B"),
+            ("ഉത്തരം: B", "B"),
+            ("ଉତ୍ତର: B", "B"),
+            ("ਉੱਤਰ: B", "B"),
+            ("उत्तरम्: B", "B"),
+            ("उत्तरं: B", "B"),
+            ("விடை: B", "B"),
+            ("సమాధానం: B", "B"),
+        ]
+        for text, expected in cases:
+            body = _make_verify_request(
+                text=text, expected=expected, template_metadata={"allow_localized_answer_labels": True}
+            )
+            result = await server.verify(body)
+            assert result.extracted_answer == expected, text
+            assert result.reward == 1.0, text
+
+    async def test_localized_fallback_is_explicitly_row_scoped(self) -> None:
+        server = self._make_server()
+        for metadata in (
+            None,
+            {},
+            {"allow_localized_answer_labels": False},
+            {"allow_localized_answer_labels": "true"},
+        ):
+            body = _make_verify_request(text="উত্তর: B", expected="B", template_metadata=metadata)
+            result = await server.verify(body)
+            assert result.extracted_answer is None
+            assert result.reward == 0.0
+
+    async def test_localized_fallback_rejects_non_answer_labels(self) -> None:
+        server = self._make_server()
+        for text in ("Eliminated option: B", "(A): B", "Candidate: B", "Excluded choice: B", "My arbitrary label: B"):
+            for enabled in (False, True):
+                body = _make_verify_request(
+                    text=text, expected="B", template_metadata={"allow_localized_answer_labels": enabled}
+                )
+                result = await server.verify(body)
+                assert result.extracted_answer is None, text
+                assert result.reward == 0.0, text
+
+    async def test_localized_fallback_preserves_existing_boxed_precedence(self) -> None:
+        server = self._make_server()
+        for suffix in ("Eliminated option: B", "(A): B", "উত্তর: B"):
+            for enabled in (False, True):
+                body = _make_verify_request(
+                    text="\\boxed{C}\n" + suffix,
+                    expected="C",
+                    template_metadata={"answer_prefix": "answer is", "allow_localized_answer_labels": enabled},
+                )
+                result = await server.verify(body)
+                assert result.extracted_answer == "C", suffix
+                assert result.reward == 1.0, suffix
+
+    async def test_existing_benchmark_consumers_keep_their_scores(self) -> None:
+        root = Path(__file__).resolve().parents[3]
+        for benchmark in ("gpqa", "mmlu_pro", "supergpqa", "mmlu_prox"):
+            config = yaml.safe_load((root / "benchmarks" / benchmark / "config.yaml").read_text())
+            verifiers = [
+                value["resources_servers"]["mcqa"]
+                for value in config.values()
+                if isinstance(value, dict) and "resources_servers" in value and "mcqa" in value["resources_servers"]
+            ]
+            assert len(verifiers) == 1, benchmark
+            server = self._make_server(verifiers[0]["grading_mode"])
+            assert verifiers[0]["grading_mode"] == "lenient_answer_colon_md"
+            for text, expected, prefix, prediction in (
+                ("Eliminated option: B", "B", None, None),
+                ("(A): B", "B", None, None),
+                ("উত্তর: B", "B", None, None),
+                ("**Answer: B**", "B", None, "B"),
+                ("\\boxed{C}\nEliminated option: B", "C", "answer is", "C"),
+                ("\\boxed{C}\nউত্তর: B", "C", "answer is", "C"),
+            ):
+                body = _make_verify_request(
+                    text=text, expected=expected, template_metadata={"answer_prefix": prefix} if prefix else None
+                )
+                result = await server.verify(body)
+                assert result.extracted_answer == prediction, (benchmark, text)
+                assert result.reward == float(prediction == expected), (benchmark, text)
+
+    async def test_terminal_localized_answer_rejects_unsafe_shapes(self) -> None:
+        server = self._make_server()
+        cases = [
+            "উত্তর: A/B",
+            "A: B",
+            "উত্তর: B because C is wrong",
+            "উত্তর: B\nআরও ব্যাখ্যা",
+            "A: option text",
+        ]
+        for text in cases:
+            body = _make_verify_request(
+                text=text, expected="B", template_metadata={"allow_localized_answer_labels": True}
+            )
+            result = await server.verify(body)
+            assert result.extracted_answer is None, text
+            assert result.reward == 0.0, text
+
+    async def test_multilingual_ambiguous_list_rejected(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(
+            text="答えは A/D/E/F です。",
+            expected="A",
+            option_letters="ABCDEFGHIJ",
+            template_metadata={
+                "output_regex": r"NEVER_MATCH_([A-Z])",
+                "answer_prefix": "答えは",
+            },
+        )
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_prox_regex_miss_falls_back_to_payload_parser(self) -> None:
+        """Old spaced Japanese regex misses fullwidth parens; md fallback recovers."""
+        server = self._make_server()
+        body = _make_verify_request(
+            text="段階的に考える。答えは（C）です。",
+            expected="C",
+            option_letters="ABCDEFGHIJ",
+            template_metadata={
+                "output_regex": r"答えは \(?([ABCDEFGHIJ])\)? です",
+                "answer_prefix": "答えは",
+            },
+        )
+        result = await server.verify(body)
+        assert result.extracted_answer == "C"
+        assert result.reward == 1.0
 
 
 class TestComputeMetrics:

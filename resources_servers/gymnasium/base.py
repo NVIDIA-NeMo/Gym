@@ -26,6 +26,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
+from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -79,6 +80,7 @@ class GymnasiumServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
         self.setup_session_middleware(app)
+        app.add_middleware(RolloutContextMiddleware)
         app.post("/reset")(self._reset_endpoint)
         app.post("/step")(self._step_endpoint)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
@@ -105,6 +107,10 @@ class GymnasiumServer(SimpleResourcesServer):
     ) -> tuple[Optional[str], float, bool, bool, dict]: ...
 
     async def close_session(self, session_id: Optional[str]) -> None:
+        self._cleanup_session(session_id)
+
+    def _cleanup_session(self, session_id: Optional[str]) -> None:
+        """Release state owned by a session. Safe to call repeatedly."""
         self.session_state.pop(session_id, None)
 
     @staticmethod

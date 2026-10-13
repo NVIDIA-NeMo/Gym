@@ -30,7 +30,7 @@ The main helper commands are `blade_toolkit.py validate`, `blade_toolkit.py extr
 
 ## Prerequisites
 
-Collect rollout artifacts for the benchmark you want to analyze. For a quick source of rollout data, first complete [Evaluate EvalPlus](/evaluation-tutorials/evalplus), then repeat the run with a second model or harness.
+Collect rollout artifacts for the benchmark you want to analyze. For a quick source of rollout data, first complete [Evaluate EvalPlus](/tutorials/evaluation-tutorials/evalplus), then repeat the run with a second model or harness.
 
 A complete BLADE-ready package should include at least two scored rollout files with comparable task sets. One rollout file is enough to draft the skill and report, but full validation will fail the rollout-data check until there are two scored runs.
 
@@ -137,7 +137,7 @@ Anchor facts are concrete, non-guessable findings that the BLADE judge can use t
 Use the local helper to draft them:
 
 ```bash
-tool=".codex/skills/nemo-gym-blade-analysis/scripts/blade_toolkit.py"
+tool=".agents/skills/nemo-gym-blade-analysis/scripts/blade_toolkit.py"
 
 uv run python "${tool}" extract-anchor-facts \
   --golden "${benchmark_dir}/golden_reports/model_a_golden_report.md" \
@@ -211,7 +211,7 @@ Before marking the benchmark BLADE-ready:
 Review how benchmark analysis skills fit into the evaluation workflow.
 </Card>
 
-<Card title="Evaluate EvalPlus" href="/evaluation-tutorials/evalplus">
+<Card title="Evaluate EvalPlus" href="/tutorials/evaluation-tutorials/evalplus">
 Collect a small rollout artifact set to use as tutorial input.
 </Card>
 

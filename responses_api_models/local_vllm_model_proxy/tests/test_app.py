@@ -33,7 +33,9 @@ class TestApp:
             uses_reasoning_parser=True,
             model_server={"type": "responses_api_models", "name": "dummy ref"},
         )
-        return LocalVLLMModelProxyServer(config=config, server_client=MagicMock(spec=ServerClient))
+        return LocalVLLMModelProxyServer(
+            config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={})
+        )
 
     def test_sanity(self) -> None:
         self._setup_server()
@@ -45,7 +47,7 @@ class TestApp:
         monkeypatch.setattr(responses_api_models.local_vllm_model_proxy.app, "sleep", sleep_mock)
 
         server.server_client.poll_for_status.side_effect = ["error", "error", "success"]
-        server.server_client.global_config_dict = None
+        server.server_client.global_config_dict = {}
 
         get_first_server_config_dict_mock = MagicMock()
         monkeypatch.setattr(

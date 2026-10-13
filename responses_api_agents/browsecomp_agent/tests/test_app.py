@@ -384,7 +384,7 @@ class TestApp:
         assert json.loads(lines[0])["reset_steps"] == [2]
         assert len(lines) == 1 + len(body.input) + len(result.output)
 
-    # ---- _last_message_text (bc_frankie last-message retry parity) ----
+    # ---- _last_message_text (the reference harness last-message retry parity) ----
 
     def test_last_message_text_returns_final_answer(self) -> None:
         resp = NeMoGymResponse.model_validate(_make_model_response([_make_msg("Exact Answer: Paris")]))
@@ -420,7 +420,7 @@ class TestApp:
         assert BrowsecompAgent._last_message_text(resp) == "Exact Answer: Paris"
 
     def test_last_message_text_skips_empty_message(self) -> None:
-        """An empty-content trailing message is skipped (mirrors bc_frankie's truthy-content check)."""
+        """An empty-content trailing message is skipped (mirrors the reference harness's truthy-content check)."""
         resp = NeMoGymResponse.model_validate(
             _make_model_response([_make_msg("real answer", msg_id="m1"), _make_msg("", msg_id="m2")])
         )
@@ -478,3 +478,20 @@ class TestApp:
 
         assert agent.server_client.post.call_count == 4  # retry fired -> attempt 1 + verify
         assert result.reward == 1.0
+
+
+def test_prompt_tokens_from_tokenize_response_shapes():
+    """/tokenize responses differ across vLLM versions -- accept both."""
+    from responses_api_agents.browsecomp_agent.app import _prompt_tokens_from_tokenize_response
+
+    # Mainstream vLLM >=0.19.1: explicit count, no token list.
+    assert _prompt_tokens_from_tokenize_response({"count": 123, "max_model_len": 131072}) == 123
+    # Older builds: token id list only.
+    assert _prompt_tokens_from_tokenize_response({"tokens": [1, 2, 3]}) == 3
+    # Count wins when both are present.
+    assert _prompt_tokens_from_tokenize_response({"count": 5, "tokens": [1]}) == 5
+    # Neither -> loud failure.
+    import pytest
+
+    with pytest.raises(KeyError):
+        _prompt_tokens_from_tokenize_response({"max_model_len": 131072})

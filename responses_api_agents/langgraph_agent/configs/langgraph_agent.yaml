@@ -1,0 +1,16 @@
+langgraph_agent:
+  responses_api_agents:
+    langgraph_agent:
+      # This directory ships four distinct agents, selected by entrypoint. There is no default, so pick
+      # a flavor rather than setting this by hand:
+      #   --agent langgraph_agent/orchestrator_agent
+      #   --agent langgraph_agent/parallel_thinking_agent
+      #   --agent langgraph_agent/reflection_agent
+      #   --agent langgraph_agent/rewoo_agent
+      entrypoint: ???
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model

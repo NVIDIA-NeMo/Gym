@@ -1,0 +1,814 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import asyncio
+import base64
+import dataclasses
+import hashlib
+import json
+import re
+import shlex
+import shutil
+import tarfile
+import tempfile
+import time
+import uuid
+from asyncio import Semaphore
+from pathlib import Path
+from subprocess import Popen
+from traceback import format_exc
+from typing import Any, Dict, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from nemo_gym import PARENT_DIR
+from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import get_first_server_config_dict
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxResources, SandboxSpec
+from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.server_utils import apply_rollout_prefix
+
+
+class SWEBenchMetrics(BaseModel):
+    resolved: Optional[bool] = None
+    patch_exists: Optional[bool] = None
+    model_patch: Optional[str] = None
+
+    agent_timed_out: Optional[bool] = None
+    agent_error_kind: Optional[str] = None
+    eval_timed_out: Optional[bool] = None
+    error_kind: Optional[str] = None
+    mask_sample: Optional[bool] = None
+
+    agent_run_time: Optional[float] = None
+
+
+class AnySweRunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
+
+
+def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
+    existing = {k: v for k, v in json.loads(metrics_fpath.read_text()).items() if v is not None}
+    update = {k: v for k, v in update_dict.items() if v is not None}
+    metrics_fpath.write_text(json.dumps(existing | update))
+
+
+def _model_url_for_rollout(model_url: str, rollout_id: Optional[str]) -> str:
+    return apply_rollout_prefix(model_url, rollout_id) if model_url and rollout_id else model_url
+
+
+def _model_name(params: "AnySweInstanceConfig") -> str:
+    """The model name the harness is given and the response reports.
+
+    ``model`` is optional in a ``/run`` body (rows from ``prepare.py`` omit it), but ``NeMoGymResponse.model`` is a
+    required string. Both places use the same fallback so the reported name is the one the harness actually sent.
+    """
+    return params.body.model or "model"
+
+
+def _safe_config_json(params: "AnySweInstanceConfig", indent: Optional[int] = None) -> str:
+    def redact(value: Any, key: str = "") -> Any:
+        normalized = key.lower()
+        if (
+            any(s in normalized for s in ("api_key", "apikey", "secret", "password"))
+            or normalized == "token"
+            or normalized.endswith("_token")
+        ):
+            return "***"
+        if isinstance(value, dict):
+            return {k: redact(v, k) for k, v in value.items()}
+        if isinstance(value, list):
+            return [redact(v) for v in value]
+        return value
+
+    d = json.loads(params.model_dump_json())
+    d.pop("agent_runtime_source", None)
+    d.pop("agent_deps_url", None)
+    return json.dumps(redact(d), indent=indent)
+
+
+def _resolve_sandbox_provider(sandbox_provider: str | Dict[str, Any], named_configs: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve the provider config; Apptainer sandboxes always start with ``--no-home``.
+
+    By default ``apptainer instance start`` bind-mounts the invoking user's home into every instance. When the Gym
+    server runs as root, the usual case inside a training container, that home is ``/root``, so the server's ``/root``
+    replaces the task image's ``/root`` in every sandbox on the node. Task images keep toolchains there: R2E-Gym
+    images symlink ``/testbed/.venv/bin/python`` into ``/root/.local/share/uv/python/...``, which then dangles for
+    both the agent and the grader ("No such file or directory"). Files the agent or grader writes under ``/root`` also
+    land in the server's home and are visible to every other sandbox on the node. anyswe never needs the host home
+    (the agent runs with ``HOME=/sandbox/home``), so ``--no-home`` is added to ``create.extra_start_args``. Other
+    providers are returned unchanged.
+    """
+    provider = resolve_provider_config(sandbox_provider, named_configs)
+    if "apptainer" not in provider:
+        return provider
+    apptainer = dict(provider["apptainer"] or {})
+    create = apptainer.get("create") or {}
+    if dataclasses.is_dataclass(create):
+        create = dataclasses.asdict(create)
+    create = dict(create)
+    start_args = list(create.get("extra_start_args") or [])
+    if "--no-home" not in start_args:
+        start_args.append("--no-home")
+    create["extra_start_args"] = start_args
+    apptainer["create"] = create
+    return {"apptainer": apptainer}
+
+
+def _classify_agent_error(error: str) -> Optional[str]:
+    text = error.lower()
+    if "maximum iteration" in text or "max iterations" in text or "max_turns" in text:
+        return "max_iteration"
+    if "contextwindow" in text or "context window" in text:
+        return "context_window"
+    if "stuck in a loop" in text:
+        return "stuck_in_loop"
+    return "other" if text.strip() else None
+
+
+def _should_mask_sample(
+    resolved: bool,
+    agent_error_kind: Optional[str],
+    agent_timed_out: bool,
+    error_kind: Optional[str],
+) -> bool:
+    return bool(
+        (resolved and agent_error_kind in ("max_iteration", "context_window"))
+        or agent_timed_out
+        or error_kind in ("eval_timeout", "sandbox")
+    )
+
+
+def _dataset_family(dataset_name: str) -> str:
+    if "R2E-Gym" in dataset_name:
+        return "r2e"
+    if "SWE-bench_Multilingual" in dataset_name:
+        return "swebench_multilingual"
+    return "swebench"
+
+
+def _as_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        try:
+            return list(json.loads(value))
+        except json.JSONDecodeError:
+            return [value] if value else []
+    return list(value or [])
+
+
+def _r2e_resolved(instance: Dict[str, Any], log: str) -> bool:
+    statuses: Dict[str, str] = {}
+    for line in log.splitlines():
+        fields = line.strip().replace(" - ", " ").split()
+        if len(fields) > 1 and fields[0] in ("PASSED", "FAILED", "ERROR", "XFAIL", "SKIPPED"):
+            statuses[fields[1]] = fields[0]
+    required = _as_list(instance.get("FAIL_TO_PASS") or instance.get("fail_to_pass"))
+    required += _as_list(instance.get("PASS_TO_PASS") or instance.get("pass_to_pass"))
+    return bool(required) and all(statuses.get(test) == "PASSED" for test in required)
+
+
+class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
+    model_server: Optional[ModelServerRef] = None
+
+    agent_server_module: str = Field(
+        description="Import path to the agent module, e.g. responses_api_agents.hermes_agent.app"
+    )
+    agent_server_class: str = Field(description="Agent class name, e.g. HermesAgent")
+    agent_config_class: str = Field(description="Agent config class name, e.g. HermesAgentConfig")
+    agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
+
+    container_formatter: str | list[str] = Field(
+        description=(
+            "Task image template, formatted with the row's instance_id. Either an OCI image "
+            "(e.g. swebench/sweb.eval.x86_64.{instance_id}) or one or more local Apptainer .sif path templates "
+            "(e.g. /images/r2e_gym/{instance_id}.sif). A .sif template takes precedence over the row's image."
+        )
+    )
+    sandbox_provider: str | Dict[str, Any] = "sandbox"
+    sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
+    sandbox_model_base_url: Optional[str] = None
+    agent_runtime_source: str = "baked"
+    swebench_tests_timeout: int = 1800
+    swebench_agent_timeout: int = 2700
+    concurrency: int = 256
+
+
+class AnySweServerConfig(BaseModel):
+    run_session_id: str
+    base_results_dir: Path
+    model_server_url: str
+    agent_deps_archive: Optional[Path] = None
+    agent_deps_url: Optional[str] = None
+    resolved_sandbox_provider: Dict[str, Any]
+    sandbox_default_metadata: Dict[str, Any]
+
+
+class AnySweInstanceConfig(AnySweAgentConfig, AnySweServerConfig):
+    problem_info: Dict[str, Any]
+    body: NeMoGymResponseCreateParamsNonStreaming
+    persistent_dir: Path
+    metrics_fpath: Path
+    container: str
+    mask_sample: bool = False
+
+    @property
+    def instance_id(self) -> str:
+        return self.problem_info["instance_id"]
+
+
+class AnySweVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
+    instance_config: Dict[str, Any]
+
+    # `SWEBenchMetrics` declares `mask_sample` too, to parse the metrics file where the key
+    # may be absent, and it wins the MRO. Restate the contract field so a consumer reading
+    # this response's schema sees the contract's type, default and description.
+    mask_sample: bool = BaseVerifyResponse.model_fields["mask_sample"]
+
+
+def _pack_runtime(deps_dir: Path, archive_path: Path) -> None:
+    """Atomically (re)write the runtime archive.
+
+    Several servers may rebuild the archive from one checkout at once. Each writes its own temp file, so one
+    process's ``replace()`` never finds its file already moved by another; the last writer wins.
+    """
+    temporary = archive_path.with_name(f"{archive_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with tarfile.open(temporary, "w:gz", compresslevel=1) as archive:
+            archive.add(deps_dir, arcname=".")
+        temporary.replace(archive_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+class GymAgentHarnessProcessor(BaseModel):
+    config: Any
+
+    @property
+    def _agent_key(self) -> str:
+        return self.config.agent_server_module.split(".")[-2]
+
+    def _recipe(self) -> str:
+        """Hash of everything that goes into the runtime bundle; a change triggers a rebuild."""
+        scripts = Path(__file__).parent / "setup_scripts"
+        sources = (
+            scripts / f"{self._agent_key}_deps.sh",
+            scripts / "_portable_python.sh",
+            PARENT_DIR / "responses_api_agents" / self._agent_key / "requirements.txt",
+            *sorted((PARENT_DIR / "responses_api_agents" / self._agent_key).glob("*.py")),
+            # The bundle carries its own copy of nemo_gym, so library changes must rebuild it too.
+            *sorted((PARENT_DIR / "nemo_gym").rglob("*.py")),
+            PARENT_DIR / "pyproject.toml",
+        )
+        return hashlib.sha256(b"".join(path.read_bytes() for path in sources if path.exists())).hexdigest()
+
+    def setup(self) -> Path:
+        deps_dir = Path(__file__).parent / f"anyswe_{self._agent_key}_deps"
+        sentinel = deps_dir / ".installed"
+        script = Path(__file__).parent / "setup_scripts" / f"{self._agent_key}_deps.sh"
+        recipe = self._recipe()
+        if sentinel.exists() and sentinel.read_text().strip() == recipe:
+            return deps_dir
+
+        lock = deps_dir.parent / f".{deps_dir.name}.lockdir"
+        while True:
+            try:
+                lock.mkdir(exist_ok=False)
+                break
+            except FileExistsError:
+                if time.time() - lock.stat().st_mtime > 3600:
+                    shutil.rmtree(lock, ignore_errors=True)
+                else:
+                    time.sleep(5)
+
+        try:
+            if sentinel.exists() and sentinel.read_text().strip() == recipe:
+                return deps_dir
+            if not script.exists():
+                raise ValueError(f"missing agent runtime setup script: {script}")
+            deps_dir.mkdir(parents=True, exist_ok=True)
+            proc = Popen(f"DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}", shell=True)
+            if proc.wait() != 0:
+                raise RuntimeError(f"agent runtime setup failed: {script}")
+            sentinel.write_text(recipe)
+            return deps_dir
+        finally:
+            shutil.rmtree(lock, ignore_errors=True)
+
+    def write_runner(self) -> None:
+        cfg: AnySweInstanceConfig = self.config
+
+        (cfg.persistent_dir / "instruction.txt").write_text(cfg.problem_info.get("problem_statement", ""))
+        runner = Path(__file__).with_name("agent_runner.py").read_text()
+        (cfg.persistent_dir / "agent_runner.py").write_text(runner)
+
+
+class AnySweAgent(SimpleResponsesAPIAgent):
+    """Runs a Gym agent in each task container."""
+
+    config: AnySweAgentConfig
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    _sem: Optional[Semaphore] = None
+    _server: Optional[AnySweServerConfig] = None
+
+    def model_post_init(self, context: Any) -> None:
+        self._sem = Semaphore(self.config.concurrency)
+
+        model_url = self.config.sandbox_model_base_url or ""
+        if self.config.model_server is not None:
+            model_cfg = get_first_server_config_dict(
+                self.server_client.global_config_dict, self.config.model_server.name
+            )
+            if not model_url:
+                model_url = self.server_client._build_server_base_url(model_cfg)
+
+        workspace = Path(__file__).parent
+        agent_deps_archive = None
+        agent_deps_url = None
+        if self.config.agent_runtime_source == "auto":
+            agent_deps_dir = GymAgentHarnessProcessor(config=self.config).setup()
+            agent_deps_archive = workspace / f".{agent_deps_dir.name}.tar.gz"
+            sentinel = agent_deps_dir / ".installed"
+            if not agent_deps_archive.exists() or agent_deps_archive.stat().st_mtime < sentinel.stat().st_mtime:
+                _pack_runtime(agent_deps_dir, agent_deps_archive)
+        elif self.config.agent_runtime_source != "baked":
+            if "://" in self.config.agent_runtime_source:
+                agent_deps_url = self.config.agent_runtime_source
+            else:
+                agent_deps_archive = Path(self.config.agent_runtime_source).expanduser()
+                if not agent_deps_archive.is_file():
+                    raise ValueError(f"agent runtime archive not found: {agent_deps_archive}")
+        session_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+
+        self._server = AnySweServerConfig(
+            run_session_id=session_id,
+            base_results_dir=workspace / f"anyswe_results_{session_id}",
+            model_server_url=model_url,
+            agent_deps_archive=agent_deps_archive,
+            agent_deps_url=agent_deps_url,
+            resolved_sandbox_provider=_resolve_sandbox_provider(
+                self.config.sandbox_provider, self.server_client.global_config_dict
+            ),
+            sandbox_default_metadata=resolve_provider_metadata(
+                self.config.sandbox_provider, self.server_client.global_config_dict
+            ),
+        )
+        super().model_post_init(context)
+
+    @staticmethod
+    def _sif_candidates(instance_id: str, dataset_name: str) -> list[str]:
+        """Image names to try for one instance, following swe_agents' naming conventions.
+
+        The raw id first, then R2E-Gym's ``<repo>_final_<hash>``, then the ``__`` to ``_1776_`` / ``_s_``
+        rewrites (original case, then lowercase).
+        """
+        candidates = [instance_id]
+        if "R2E-Gym" in dataset_name:
+            candidates.append(re.sub(r"[^_]+__([^-]+)-", lambda m: m.group(1).lower() + "_final_", instance_id))
+        for replacement in ("_1776_", "_s_"):
+            replaced = instance_id.replace("__", replacement)
+            candidates.extend([replaced, replaced.lower()])
+        return list(dict.fromkeys(candidates))
+
+    @classmethod
+    def _sandbox_sif(cls, problem_info: Dict[str, Any], formatters: list[str]) -> str:
+        # Exact names only: a glob such as "{instance_id}*.sif" would resolve psf__requests-1142 to
+        # psf__requests-11420.sif. Put any fixed prefix or suffix in the template instead.
+        instance_id = problem_info["instance_id"]
+        candidates = cls._sif_candidates(instance_id, str(problem_info.get("dataset_name", "")))
+        tried = [formatter.format(instance_id=candidate) for formatter in formatters for candidate in candidates]
+        for path in tried:
+            if Path(path).exists():
+                return path
+        raise FileNotFoundError(f"no .sif image found for instance {instance_id!r}; tried {tried}")
+
+    @classmethod
+    def _sandbox_image(cls, problem_info: Dict[str, Any]) -> str:
+        instance = problem_info.get("instance_dict", {})
+        instance = json.loads(instance) if isinstance(instance, str) else instance
+        formatters = problem_info.get("container_formatter") or []
+        formatters = [formatters] if isinstance(formatters, str) else list(formatters)
+        explicit_sif = problem_info.get("sif_path") or instance.get("sif_path")
+        if explicit_sif:
+            if not Path(str(explicit_sif)).exists():
+                raise FileNotFoundError(f"sif_path does not exist: {explicit_sif}")
+            return str(explicit_sif)
+        # Local .sif images win over the row's image, so rollouts never pull it from a registry.
+        sif_formatters = [formatter for formatter in formatters if formatter.endswith(".sif")]
+        if sif_formatters:
+            return cls._sandbox_sif(problem_info, sif_formatters)
+        explicit_image = problem_info.get("image") or instance.get("image") or instance.get("docker_image")
+        if explicit_image:
+            return str(explicit_image).removeprefix("docker://")
+        if not formatters:
+            raise ValueError("container_formatter is required when the row carries no image")
+        formatter = formatters[0].removeprefix("docker://")
+        instance_id = problem_info["instance_id"].replace("__", "_1776_").lower()
+        image = formatter.format(instance_id=instance_id)
+        if ":" not in image.rsplit("/", 1)[-1]:
+            image += ":latest"
+        return image
+
+    @staticmethod
+    def _sandbox_spec(
+        params: AnySweInstanceConfig,
+        *,
+        files: Optional[Dict[str, str]] = None,
+    ) -> SandboxSpec:
+        config = dict(params.sandbox_spec)
+        provider_options = dict(config.pop("provider_options", {}))
+        metadata = {
+            **params.sandbox_default_metadata,
+            **config.pop("metadata", {}),
+            "nemo_gym_agent": "anyswe_agent",
+            "instance_id": params.instance_id[:63],
+        }
+        return SandboxSpec(
+            image=params.container,
+            ttl_s=config.pop("ttl_s", params.swebench_agent_timeout + params.swebench_tests_timeout + 600),
+            ready_timeout_s=config.pop("ready_timeout_s", 1200),
+            workdir=config.pop("workdir", "/testbed"),
+            env=config.pop("env", {}),
+            files=files or {},
+            metadata=metadata,
+            resources=SandboxResources.from_mapping(config.pop("resources", {})),
+            entrypoint=config.pop("entrypoint", None),
+            provider_options=provider_options,
+        )
+
+    @staticmethod
+    def _sandbox_agent_env(params: AnySweInstanceConfig) -> Dict[str, str]:
+        sampling = {
+            key: getattr(params.body, key)
+            for key in ("temperature", "top_p", "max_output_tokens")
+            if getattr(params.body, key, None) is not None
+        }
+        model_name = _model_name(params)
+        return {
+            "NGSWE_MODEL_NAME": model_name,
+            "NGSWE_MODEL_URL": params.model_server_url,
+            "NGSWE_AGENT_MODULE": params.agent_server_module,
+            "NGSWE_AGENT_CLASS": params.agent_server_class,
+            "NGSWE_AGENT_CONFIG_CLASS": params.agent_config_class,
+            "NGSWE_AGENT_KWARGS_B64": base64.b64encode(json.dumps(params.agent_kwargs).encode()).decode(),
+            "NGSWE_SAMPLING_B64": base64.b64encode(json.dumps(sampling).encode()).decode(),
+        }
+
+    @staticmethod
+    def _instance_dict(params: AnySweInstanceConfig) -> Dict[str, Any]:
+        value = params.problem_info["instance_dict"]
+        return json.loads(value) if isinstance(value, str) else dict(value)
+
+    @staticmethod
+    def _apply_patch_script() -> str:
+        return (
+            "cd /testbed && "
+            "if git apply --verbose /root/patch.diff || "
+            "git apply --verbose --reject /root/patch.diff || "
+            "patch --batch --fuzz=5 -p1 -i /root/patch.diff; then "
+            "echo '>>>>> Applied Patch'; else "
+            "echo '>>>>> Patch Apply Failed'; exit 1; fi\n"
+        )
+
+    @staticmethod
+    def _stage_patch(params: AnySweInstanceConfig, patch: bytes) -> Path:
+        """Write the patch, byte for byte plus the trailing newline ``git apply`` wants, for ``sandbox.upload``.
+
+        ``SandboxSpec.files`` holds text, so a diff of a CRLF or non-UTF-8 file would not survive it unchanged.
+        """
+        staged = params.persistent_dir / "patch.apply.diff"
+        staged.write_bytes(patch if patch.endswith(b"\n") else patch + b"\n")
+        return staged
+
+    async def _grade_sandbox_patch(self, params: AnySweInstanceConfig, patch: bytes) -> tuple[bool, Optional[str]]:
+        if _dataset_family(params.problem_info.get("dataset_name", "")) == "r2e":
+            return await self._grade_r2e_patch(params, patch)
+
+        from swebench.harness.grading import get_eval_report
+        from swebench.harness.test_spec.test_spec import make_test_spec
+
+        instance = self._instance_dict(params)
+        test_spec = make_test_spec(instance, namespace="swebench")
+        eval_script = (
+            'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n' + self._apply_patch_script() + test_spec.eval_script
+        )
+        spec = self._sandbox_spec(params, files={"/tmp/anyswe_eval.sh": eval_script})
+        sandbox = AsyncSandbox(params.resolved_sandbox_provider, spec)
+        try:
+            await sandbox.start()
+            await sandbox.upload(self._stage_patch(params, patch), "/root/patch.diff")
+            result = await sandbox.exec(
+                "bash /tmp/anyswe_eval.sh",
+                cwd="/testbed",
+                timeout_s=params.swebench_tests_timeout,
+                user="root",
+            )
+        finally:
+            await sandbox.stop()
+
+        if result.error_type in ("timeout", "sandbox"):
+            return False, "eval_timeout" if result.error_type == "timeout" else "sandbox"
+
+        log = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        with tempfile.NamedTemporaryFile("w", suffix=".log") as log_file:
+            log_file.write(log)
+            log_file.flush()
+            prediction = {
+                "instance_id": params.instance_id,
+                "model_name_or_path": params.body.model or "anyswe",
+                "model_patch": patch.decode("utf-8", errors="replace"),
+            }
+            report = get_eval_report(test_spec, prediction, log_file.name, include_tests_status=True)[
+                params.instance_id
+            ]
+        return bool(report["resolved"]), None
+
+    async def _grade_r2e_patch(self, params: AnySweInstanceConfig, patch: bytes) -> tuple[bool, Optional[str]]:
+        instance = self._instance_dict(params)
+        eval_script = instance.get("eval_script") or params.problem_info.get("eval_script")
+        if not eval_script:
+            eval_script = (
+                "if [ -f /run_tests.sh ]; then bash /run_tests.sh; "
+                "elif [ -f /testbed/run_tests.sh ]; then bash /testbed/run_tests.sh; "
+                "elif [ -f /root/run_tests.sh ]; then bash /root/run_tests.sh; "
+                "else echo 'R2E eval script not found'; exit 127; fi"
+            )
+        script = 'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n' + self._apply_patch_script() + str(eval_script)
+        spec = self._sandbox_spec(params, files={"/tmp/anyswe_eval.sh": script})
+        sandbox = AsyncSandbox(params.resolved_sandbox_provider, spec)
+        try:
+            await sandbox.start()
+            await sandbox.upload(self._stage_patch(params, patch), "/root/patch.diff")
+            result = await sandbox.exec(
+                "bash /tmp/anyswe_eval.sh",
+                cwd="/testbed",
+                timeout_s=params.swebench_tests_timeout,
+                user="root",
+            )
+        finally:
+            await sandbox.stop()
+
+        if result.error_type in ("timeout", "sandbox"):
+            return False, "eval_timeout" if result.error_type == "timeout" else "sandbox"
+
+        log = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        return _r2e_resolved(instance, log), None
+
+    async def _run_agent_in_sandbox(self, params: AnySweInstanceConfig) -> NeMoGymResponse:
+        files = {
+            "/trajectories_mount/instruction.txt": (params.persistent_dir / "instruction.txt").read_text(),
+            "/trajectories_mount/agent_runner.py": (params.persistent_dir / "agent_runner.py").read_text(),
+        }
+        spec = self._sandbox_spec(
+            params,
+            files=files,
+        )
+        result = None
+        sandbox_failed = False
+        sandbox = AsyncSandbox(params.resolved_sandbox_provider, spec)
+        started = time.time()
+        try:
+            await sandbox.start()
+            await sandbox.exec(
+                "mkdir -p /agent_deps_mount /sandbox/home /sandbox/tmp /trajectories_mount",
+                timeout_s=30,
+                user="root",
+            )
+            external_runtime = params.agent_deps_archive is not None or params.agent_deps_url is not None
+            if params.agent_deps_archive is not None:
+                await sandbox.upload(params.agent_deps_archive, "/sandbox/anyswe_agent_deps.tar.gz")
+            elif params.agent_deps_url is not None:
+                runtime_url = shlex.quote(params.agent_deps_url)
+                python_fetch = shlex.quote(
+                    "import urllib.request; "
+                    f"urllib.request.urlretrieve({params.agent_deps_url!r}, '/sandbox/anyswe_agent_deps.tar.gz')"
+                )
+                fetched = await sandbox.exec(
+                    "if command -v curl >/dev/null 2>&1; then "
+                    f"curl -fsSL -o /sandbox/anyswe_agent_deps.tar.gz {runtime_url}; "
+                    "elif command -v wget >/dev/null 2>&1; then "
+                    f"wget -qO /sandbox/anyswe_agent_deps.tar.gz {runtime_url}; "
+                    "elif command -v python3 >/dev/null 2>&1; then "
+                    f"python3 -c {python_fetch}; "
+                    "else echo 'runtime download requires curl, wget, or python3' >&2; exit 127; fi",
+                    timeout_s=600,
+                    user="root",
+                )
+                if fetched.return_code != 0:
+                    raise RuntimeError(f"agent runtime fetch failed: {(fetched.stderr or '')[:300]}")
+            else:
+                runtime = await sandbox.exec("test -x /agent_deps_mount/bin/python", timeout_s=30, user="root")
+                if runtime.return_code != 0:
+                    raise RuntimeError("task image does not contain /agent_deps_mount/bin/python")
+            if external_runtime:
+                unpacked = await sandbox.exec(
+                    "mkdir -p /sandbox/agent_deps_runtime && "
+                    "tar -xzf /sandbox/anyswe_agent_deps.tar.gz -C /sandbox/agent_deps_runtime && "
+                    "rm -f /sandbox/anyswe_agent_deps.tar.gz",
+                    timeout_s=600,
+                    user="root",
+                )
+                if unpacked.return_code != 0:
+                    raise RuntimeError(f"agent runtime extraction failed: {(unpacked.stderr or '')[:300]}")
+            if _dataset_family(params.problem_info.get("dataset_name", "")) == "r2e":
+                await sandbox.exec(
+                    "rm -rf /r2e_tests /root/r2e_tests /testbed/r2e_tests; "
+                    "for f in /run_tests.sh /root/run_tests.sh /testbed/run_tests.sh; do "
+                    'if grep -qs r2e_tests "$f"; then rm -f "$f"; fi; done',
+                    timeout_s=30,
+                    user="root",
+                )
+            runtime_dir = "/sandbox/agent_deps_runtime" if external_runtime else "/agent_deps_mount"
+            agent_env = self._sandbox_agent_env(params)
+            agent_env["NGSWE_AGENT_DEPS_DIR"] = runtime_dir
+            # -I ignores the task image's PYTHONPATH and user site, which can otherwise shadow the runtime's own
+            # packages (for example a numpy or pandas checkout on PYTHONPATH breaks the runner's imports).
+            command = f"HOME=/sandbox/home TMPDIR=/sandbox/tmp {runtime_dir}/bin/python -I /trajectories_mount/agent_runner.py"
+            result = await sandbox.exec(
+                command,
+                cwd="/testbed",
+                env=agent_env,
+                timeout_s=params.swebench_agent_timeout,
+                user="root",
+            )
+            for remote, local in (
+                ("/trajectories_mount/response.json", params.persistent_dir / "response.json"),
+                ("/trajectories_mount/patch.diff", params.persistent_dir / "patch.diff"),
+            ):
+                exists = await sandbox.exec(f"test -f {shlex.quote(remote)}", timeout_s=30, user="root")
+                if exists.return_code == 0:
+                    await sandbox.download(remote, local)
+        except Exception as exc:
+            sandbox_failed = True
+            update_metrics(
+                params.metrics_fpath,
+                {
+                    "resolved": False,
+                    "patch_exists": False,
+                    "error_kind": "sandbox",
+                    "mask_sample": True,
+                    "agent_run_time": time.time() - started,
+                },
+            )
+            (params.persistent_dir / "sandbox_error.txt").write_text(repr(exc))
+        finally:
+            await sandbox.stop()
+
+        patch_path = params.persistent_dir / "patch.diff"
+        # Grading gets the exact bytes; the decoded text is for metrics only.
+        patch_bytes = patch_path.read_bytes() if patch_path.exists() else b""
+        patch = patch_bytes.decode("utf-8", errors="replace")
+        response_path = params.persistent_dir / "response.json"
+        saved = NeMoGymResponse.model_validate_json(response_path.read_text()) if response_path.exists() else None
+
+        agent_error = ""
+        agent_timed_out = False
+        error_kind = "sandbox" if sandbox_failed else None
+        if result is not None:
+            (params.persistent_dir / "agent_result.json").write_text(
+                json.dumps(
+                    {
+                        "return_code": result.return_code,
+                        "error_type": result.error_type,
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                    }
+                )
+            )
+            agent_error = "\n".join(part for part in (result.stdout, result.stderr) if part)
+            agent_timed_out = result.error_type == "timeout"
+            if result.error_type == "sandbox":
+                error_kind = "sandbox"
+        if saved is not None:
+            agent_error += saved.model_dump_json()
+        agent_error_kind = _classify_agent_error(agent_error)
+
+        resolved = False
+        if patch.strip() and error_kind is None:
+            try:
+                resolved, error_kind = await self._grade_sandbox_patch(params, patch_bytes)
+            except SandboxCreateError as exc:
+                error_kind = "sandbox"
+                (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
+            except (asyncio.TimeoutError, TimeoutError) as exc:
+                error_kind = "eval_timeout"
+                (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
+            except Exception as exc:
+                (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
+
+        eval_timed_out = error_kind == "eval_timeout"
+        mask_sample = _should_mask_sample(resolved, agent_error_kind, agent_timed_out, error_kind)
+        update_metrics(
+            params.metrics_fpath,
+            {
+                "resolved": resolved,
+                "patch_exists": bool(patch.strip()),
+                "model_patch": patch or None,
+                "agent_timed_out": agent_timed_out,
+                "agent_error_kind": agent_error_kind,
+                "eval_timed_out": eval_timed_out,
+                "error_kind": error_kind,
+                "mask_sample": mask_sample,
+                "agent_run_time": time.time() - started,
+            },
+        )
+
+        return NeMoGymResponse(
+            id=f"anyswe-{params.instance_id}",
+            created_at=int(time.time()),
+            model=_model_name(params),
+            object="response",
+            output=saved.output if saved is not None else [],
+            parallel_tool_calls=params.body.parallel_tool_calls,
+            tool_choice=params.body.tool_choice,
+            tools=(saved.tools or []) if saved is not None else [],
+            usage=saved.usage if saved is not None else None,
+            metadata={
+                "input": json.dumps([]),
+                "metrics": params.metrics_fpath.read_text(),
+                "instance_config": _safe_config_json(params),
+            },
+        )
+
+    def _setup_params(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: Optional[str] = None
+    ) -> AnySweInstanceConfig:
+        problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
+        instance_id = problem_info.get("instance_id", "unknown")
+        persistent_dir = self._server.base_results_dir / (
+            f"{instance_id}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+        )
+        persistent_dir.mkdir(parents=True, exist_ok=True)
+        server_config = self._server.model_dump()
+        if not self.config.sandbox_model_base_url:
+            server_config["model_server_url"] = _model_url_for_rollout(server_config["model_server_url"], rollout_id)
+        params = AnySweInstanceConfig(
+            **self.config.model_dump(),
+            **server_config,
+            problem_info=problem_info,
+            body=body,
+            persistent_dir=persistent_dir,
+            metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
+            container=self._sandbox_image(problem_info),
+        )
+        params.metrics_fpath.write_text("{}")
+        GymAgentHarnessProcessor(config=params).write_runner()
+        return params
+
+    async def _responses(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: Optional[str] = None
+    ) -> NeMoGymResponse:
+        params = self._setup_params(body, rollout_id)
+        (params.persistent_dir / "params.json").write_text(_safe_config_json(params, indent=2))
+        try:
+            return await self._run_agent_in_sandbox(params)
+        except Exception:
+            traceback_path = params.persistent_dir / "traceback.err"
+            traceback_path.write_text(format_exc())
+            print(f"[{params.instance_id}] exception: see {traceback_path}", flush=True)
+            raise
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        return await self._responses(body)
+
+    async def run(self, body: AnySweRunRequest) -> AnySweVerifyResponse:
+        async with self._sem:
+            response = await self._responses(body.responses_create_params, self.rollout_id_from_run(body))
+
+            meta, response.metadata = response.metadata, None
+            metrics = SWEBenchMetrics.model_validate_json(meta["metrics"])
+
+            instance_config = AnySweInstanceConfig.model_validate_json(meta["instance_config"])
+
+            # `_should_mask_sample` writes the decision to the metrics file, so the metrics
+            # are the one source. Mirror it onto the compatibility `instance_config` field,
+            # which keeps its default here, and pass it once at the top level.
+            mask_sample = bool(metrics.mask_sample)
+            instance_config.mask_sample = mask_sample
+
+            return AnySweVerifyResponse(
+                responses_create_params=body.responses_create_params.model_dump()
+                | {"input": json.loads(meta["input"]), "tools": [t.model_dump() for t in (response.tools or [])]},
+                response=response,
+                reward=1.0 if metrics.resolved else 0.0,
+                mask_sample=mask_sample,
+                **metrics.model_dump(exclude={"mask_sample"}),
+                instance_config=instance_config.model_dump(),
+            )
+
+
+if __name__ == "__main__":
+    AnySweAgent.run_webserver()

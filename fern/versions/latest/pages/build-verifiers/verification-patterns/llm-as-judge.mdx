@@ -1,7 +1,7 @@
 ---
 title: "LLM-as-Judge"
 description: "Prompt an LLM to evaluate the agent's output against rubrics, instructions, or reference answers."
-position: 2
+position: 3
 ---
 import { NavButton } from "../../../../../components/NavButton";
 
@@ -326,9 +326,43 @@ async def verify(self, body):
     )
 ```
 
-The `_request_judge` helper handles HTTP errors and JSON parsing gracefully — on failure it returns `(None, error_message)` instead of raising, so `verify()` can map that to `reward_if_unclear` rather than crashing the server.
+In this server the `_request_judge` helper handles HTTP errors and JSON parsing gracefully — on failure it returns `(None, error_message)` instead of raising, so `verify()` maps that to `reward_if_unclear` rather than crashing. That folds two different outcomes into one reward: a judge that answered unparseably, and a judge call that never landed. New servers should keep them apart — see [Judge Call Failures](#judge-call-failures) below.
 
 Other servers apply the same pattern with domain-specific variations. For example, [`multichallenge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/multichallenge) runs one judge call **per rubric item** using `asyncio.gather`, and [`equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_llm_judge) adds an optional **swap pass** to detect positional bias.
+
+---
+
+## Judge Call Failures
+
+A judge that fails to answer is not a model that answered wrongly. Make judge calls with `call_judge`, which posts, checks the HTTP status, and parses the reply:
+
+```python
+from nemo_gym.judge import call_judge
+
+judge_response = await call_judge(
+    self.server_client,
+    server_name=self.config.judge_model_server.name,
+    url_path="/v1/responses",          # or "/v1/chat/completions"
+    json=responses_create_params,
+    response_model=NeMoGymResponse,    # or NeMoGymChatCompletion
+)
+```
+
+Any failure in that call — transport, timeout, 401, 500, malformed body — raises `JudgeError`. Every `/verify` is wrapped by `judge_failsafe`, which turns a `JudgeError` into a row that is:
+
+- written to `<output>_failures.jsonl` instead of `output.jsonl`
+- excluded from the aggregate, which is computed only over the rows in `output.jsonl`
+- retried on resume
+
+Wrap the **call**, not the scoring around it: `reraise_judge_errors` relabels every exception it sees, so covering a whole `verify()` would file ordinary bugs as judge failures.
+
+| Outcome | What to do |
+|---|---|
+| Call failed (transport, timeout, HTTP error) | `call_judge` raises `JudgeError` for you |
+| Call `call_judge` can't express (external SDK, own timeout) | wrap it in `reraise_judge_errors` |
+| Judge answered, verdict unparseable | a real score — map it to `reward_if_unclear` |
+| Judge answered with nothing | your call; `raise JudgeError(...)` if an empty verdict is meaningless |
+| Bug in your own scoring code | let it raise |
 
 ---
 

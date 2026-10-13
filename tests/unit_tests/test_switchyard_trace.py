@@ -135,6 +135,41 @@ class TestReconstruction:
         assert len(trace.input_items) == 2
         assert len(trace.output_items) == 1
 
+    @pytest.mark.parametrize("record_count", [1, 2])
+    @pytest.mark.parametrize("prefill_kind", ["text", "tool"])
+    def test_prefilled_assistant_history_remains_input(self, prefill_kind, record_count) -> None:
+        records = _two_call_records()[:record_count]
+        if prefill_kind == "text":
+            prefill = [
+                {"role": "assistant", "content": "Earlier answer."},
+                {"role": "user", "content": "Continue fixing the bug."},
+            ]
+        else:
+            prefill = [
+                {"role": "assistant", "tool_calls": [TOOL_CALL | {"id": "prefilled_call"}]},
+                {"role": "tool", "tool_call_id": "prefilled_call", "content": "Earlier edit result."},
+                {"role": "user", "content": "Continue fixing the bug."},
+            ]
+        for record in records:
+            record["messages"][2:2] = prefill
+
+        trace = _reconstruct(_envelope(records))
+
+        assert len(trace.input_items) == 2 + len(prefill)
+        if prefill_kind == "text":
+            assert trace.input_items[2].content[0].text == "Earlier answer."
+        else:
+            assert trace.input_items[2].call_id == "prefilled_call"
+            assert trace.input_items[3].call_id == "prefilled_call"
+        assert trace.input_items[-1].content == "Continue fixing the bug."
+        assert all(getattr(item, "generation_token_ids", None) is None for item in trace.input_items)
+        assert len(trace.output_items) == (1 if record_count == 1 else 3)
+        assert trace.output_items[0].call_id == "call_1"
+        assert trace.output_items[0].prompt_token_ids == TRIPLE_0["prompt_token_ids"]
+        assert trace.output_items[0].generation_token_ids == TRIPLE_0["generation_token_ids"]
+        if record_count == 2:
+            assert trace.output_items[-1].generation_token_ids == TRIPLE_1["generation_token_ids"]
+
     def test_divergent_history_rejected(self) -> None:
         records = _two_call_records()
         records[1]["messages"][1]["content"] = [{"type": "text", "text": "Fix a DIFFERENT bug."}]

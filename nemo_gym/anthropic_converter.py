@@ -382,7 +382,7 @@ class AnthropicConverter:
                 items.append(
                     NeMoGymFunctionCallOutput(
                         call_id=block["tool_use_id"],
-                        output=self._anthropic_tool_result_content_to_text(block.get("content", "")),
+                        output=self._anthropic_tool_result_content(block.get("content", "")),
                         type="function_call_output",
                     )
                 )
@@ -416,18 +416,23 @@ class AnthropicConverter:
             "detail": "auto",
         }
 
-    def _anthropic_tool_result_content_to_text(self, content: Any) -> str:
+    def _anthropic_tool_result_content(self, content: Any) -> Any:
         if isinstance(content, str):
             return content
-        texts = []
+        if all(block.get("type") == "text" for block in content):
+            return "\n".join(block.get("text", "") for block in content)
+
+        parts = []
         for block in content:
             if block.get("type") == "text":
-                texts.append(block.get("text", ""))
+                parts.append({"type": "input_text", "text": block.get("text", "")})
+            elif block.get("type") == "image":
+                parts.append(self._anthropic_image_to_input_part(block))
             else:
                 raise NotImplementedError(
                     f"Unsupported Anthropic tool_result content block for ingress: {block.get('type')}"
                 )
-        return "\n".join(texts)
+        return parts
 
     def _anthropic_tools_to_responses(self, tools: Any) -> List[Dict[str, Any]]:
         if not tools:
@@ -495,7 +500,11 @@ class AnthropicConverter:
         usage = response.usage.model_dump() if response.usage is not None else None
         message = NeMoGymAnthropicMessage.model_validate(
             {
-                "id": f"msg_{uuid4().hex}",
+                # Reuse the Responses envelope id instead of minting a new one.
+                # Token capture records the inner response's id.
+                # A client can then prove which served response it kept by possessing this id.
+                # A minted id here would break that join for the Messages dialect.
+                "id": str(getattr(response, "id", "") or "") or f"msg_{uuid4().hex}",
                 "type": "message",
                 "role": "assistant",
                 "model": model,
@@ -808,10 +817,8 @@ class AnthropicConverter:
         output_tokens = usage.get("output_tokens", 0)
         return NeMoGymResponseUsage(
             input_tokens=input_tokens,
-            input_tokens_details=NeMoGymResponseInputTokensDetails(
-                cached_tokens=usage.get("cache_read_input_tokens", 0)
-            ),
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage.get("cache_read_input_tokens")),
             output_tokens=output_tokens,
-            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
             total_tokens=input_tokens + output_tokens,
         )

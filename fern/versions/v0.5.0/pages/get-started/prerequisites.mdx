@@ -1,0 +1,43 @@
+---
+title: "Prerequisites"
+description: "What you need to install and run NeMo Gym."
+position: 1
+---
+
+What you need to install and run NeMo Gym.
+
+<Note>
+Individual environments may have additional requirements (e.g., GPU for local vLLM inference, specific compilers, or external tools). Check the environment's documentation for details.
+</Note>
+
+## Hardware Requirements
+
+| Component | Minimum | Notes |
+|-----------|---------|-------|
+| CPU | Any modern x86\_64 or ARM64 |  |
+| RAM | 8 GB | 16 GB+ recommended |
+| GPU | None | Required only for local inference or RL training |
+
+## Software Requirements
+
+| Component | Requirement |
+|-----------|-------------|
+| OS | Linux (Ubuntu 20.04+), macOS (11.0+), or Windows (WSL2) |
+| Python | 3.12 or higher |
+| [uv](https://docs.astral.sh/uv/getting-started/installation/) | Latest recommended |
+
+## Quickstart Requirements
+
+The default quickstart uses OpenAI and requires an OpenAI API key with sufficient usage quota.
+
+To use another backend, review [Configure Models](/model-server) and adapt the quickstart to use a supported hosted provider or a local model. Local inference may require a GPU.
+
+## Next Steps
+
+<Cards>
+
+<Card title="Installation" href="/get-started/installation">
+Install NeMo Gym and verify your setup.
+</Card>
+
+</Cards>

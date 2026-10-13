@@ -322,6 +322,40 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _build_command_script(self, cmd: str, timeout: int, stderr_name: str, marker: str) -> tuple[str, int]:
+        """Build the line fed to the long-lived shell, plus the asyncio timeout.
+
+        Extracted so the shell-state semantics are testable without a cluster.
+        Three things here mean NO shell state survives between tool calls, and
+        the GDPval prompt must keep saying so:
+
+          1. every call is prefixed with ``cd <working_dir>``, so a ``cd`` from
+             a previous call is overwritten before this one runs;
+          2. the command runs inside ``bash -c``;
+          3. which is itself wrapped in a ``( ... )`` subshell.
+
+        Files persist -- it is the same filesystem -- but directories, exported
+        variables, shell functions and aliases do not.
+
+        The GNU ``timeout`` wrapper is what makes (2) true, and it exists so a
+        hung command is killed by the OS. Without it a stuck command blocks the
+        shared stdin/stdout stream and every later command times out with it,
+        including the git-diff in ``__aexit__``.
+        """
+        if self._has_timeout_cmd and timeout > 0:
+            wrapped_cmd = f"timeout -k 10 {timeout} bash -c {shlex.quote(cmd)}"
+            asyncio_timeout = timeout + 30
+        else:
+            wrapped_cmd = cmd
+            asyncio_timeout = timeout
+
+        script = (
+            f"cd {self._working_dir} && "
+            f"( {wrapped_cmd} ) 2>{IO_MOUNT_DEST}/{stderr_name}; "
+            f"_rc=$?; echo ''; echo '{marker}:'$_rc\n"
+        )
+        return script, asyncio_timeout
+
     async def _exec(
         self,
         cmd: str,
@@ -345,22 +379,7 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
         stderr_name = f".stderr_{marker}"
         stderr_path = self._temp_dir / stderr_name if self._temp_dir else None
 
-        # Wrap the command with GNU `timeout` so that a hung command is
-        # killed by the OS.  Without this, a stuck command blocks the
-        # shared bash stdin/stdout stream and ALL subsequent commands
-        # (including the git-diff in __aexit__) time out as well.
-        if self._has_timeout_cmd and timeout > 0:
-            wrapped_cmd = f"timeout -k 10 {timeout} bash -c {shlex.quote(cmd)}"
-            asyncio_timeout = timeout + 30
-        else:
-            wrapped_cmd = cmd
-            asyncio_timeout = timeout
-
-        script = (
-            f"cd {self._working_dir} && "
-            f"( {wrapped_cmd} ) 2>{IO_MOUNT_DEST}/{stderr_name}; "
-            f"_rc=$?; echo ''; echo '{marker}:'$_rc\n"
-        )
+        script, asyncio_timeout = self._build_command_script(cmd, timeout, stderr_name, marker)
 
         self._process.stdin.write(script.encode())
         await self._process.stdin.drain()

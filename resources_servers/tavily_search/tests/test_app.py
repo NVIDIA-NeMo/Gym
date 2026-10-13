@@ -16,6 +16,7 @@ import os
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call
 
+import orjson
 from pytest import approx, fixture
 
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -144,7 +145,7 @@ class TestApp:
         assert "raw content" not in joined
 
     def test_postprocess_search_results_with_answer(self, server: TavilySearchResourcesServer) -> None:
-        """Test that _postprocess_search_results returns just the answer when present."""
+        """Aggregate answers cannot be attributed to allowed URLs and must be discarded."""
         raw_results = {
             "answer": "The capital of France is Paris.",
             "results": [
@@ -153,10 +154,9 @@ class TestApp:
         }
         formatted = server._postprocess_search_results(raw_results)
         joined = "".join(formatted)
-        assert "Search Answer" in joined
-        assert "The capital of France is Paris." in joined
-        # Individual results should NOT be shown
-        assert "[1]" not in joined
+        assert "Search Answer" not in joined
+        assert "The capital of France is Paris." not in joined
+        assert "[1]" in joined
 
     # ---- web_search ----
 
@@ -186,6 +186,8 @@ class TestApp:
             max_results=10,
             exclude_domains=["blacklisteddomain.com"],
             search_depth="advanced",
+            include_answer=False,
+            include_raw_content=False,
         )
         assert expected_call_args == actual_call_args
 
@@ -289,6 +291,7 @@ class TestApp:
 
         post_mock = MagicMock()
         post_mock.json = AsyncMock(return_value=self._create_judge_response("correct: yes"))
+        post_mock.read = AsyncMock(return_value=orjson.dumps(post_mock.json.return_value))
         server_client.post = AsyncMock(return_value=post_mock)
 
         req = TavilySearchVerifyRequest(
@@ -311,6 +314,7 @@ class TestApp:
 
         post_mock = MagicMock()
         post_mock.json = AsyncMock(return_value=self._create_judge_response("correct: no"))
+        post_mock.read = AsyncMock(return_value=orjson.dumps(post_mock.json.return_value))
         server_client.post = AsyncMock(return_value=post_mock)
 
         req = TavilySearchVerifyRequest(

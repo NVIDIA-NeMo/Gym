@@ -50,9 +50,9 @@ from typing import Any, ClassVar, Optional
 
 from pydantic import Field
 
+from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
-from nemo_gym.server_utils import get_response_json
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
@@ -143,12 +143,13 @@ class MathWithAutograderResourcesServer(LibraryJudgeMathResourcesServer):
             NeMoGymEasyInputMessage(role=msg["role"], content=msg["content"]) for msg in message_dicts
         ]
 
-        response = await self.server_client.post(
+        judge_response = await call_judge(
+            self.server_client,
             server_name=config.judge_model_server.name,
             url_path="/v1/responses",
             json=responses_create_params,
+            response_model=NeMoGymResponse,
         )
-        judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
         judge_evaluation = JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
 
         # Match the parent's "unparseable -> not equal" invariant.

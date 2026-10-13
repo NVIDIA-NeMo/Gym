@@ -10,17 +10,14 @@ anyterminal_claude_code:
       agent_server_class: ClaudeCodeAgent
       agent_config_class: ClaudeCodeAgentConfig
       agent_kwargs:
-        model: aws/anthropic/bedrock-claude-opus-4-8
-        anthropic_api_key: ${anthropic_api_key}
-        anthropic_base_url: https://inference-api.nvidia.com
+        model: ${policy_model_name}
+        anthropic_api_key: ${policy_api_key}
+        anthropic_base_url: ${policy_base_url}
         timeout: 12500 # Max task timeout in Terminal Bench is 12000 seconds
         max_turns: null # Unlimited turns
 
-      # Path to pre-built Apptainer SIF files produced by prepare.py --sif-dir.
-      # If omitted, Apptainer will pull docker:// images at runtime (requires internet).
-      tb_sif_dir: null
+      container_formatter: "docker://{docker_image}"
 
-      apptainer_memory_limit_mb: 32768
       concurrency: 6
 
       # Claude Code calls anthropic_base_url directly (no Gym model server).
@@ -29,3 +26,11 @@ anyterminal_claude_code:
         - name: example
           type: example
           jsonl_fpath: responses_api_agents/anyterminal_agent/data/terminal_bench.jsonl
+
+anyterminal_claude_code_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: anyterminal_claude_code

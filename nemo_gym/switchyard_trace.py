@@ -31,7 +31,7 @@ from typing import Any, Dict, List, NamedTuple
 
 from openai.types.responses.function_tool import FunctionTool
 
-from nemo_gym.responses_converter import ResponsesConverter, split_responses_input_output_items
+from nemo_gym.responses_converter import ResponsesConverter
 
 
 SWITCHYARD_SCHEMA_VERSION = 1
@@ -106,9 +106,7 @@ def reconstruct_switchyard_rollout(envelope: Any, session_id: str, converter: Re
     for i, record in enumerate(records):
         _validate_record(record, i, session_id, record_uuids)
         if record["prompt_token_ids"][: len(token_history)] != token_history:
-            raise SwitchyardTraceError(
-                f"record {i} prompt_token_ids do not extend the prior prompt+generation tokens"
-            )
+            raise SwitchyardTraceError(f"record {i} prompt_token_ids do not extend the prior prompt+generation tokens")
         token_history = record["prompt_token_ids"] + record["generation_token_ids"]
         if record["model"] != model:
             raise SwitchyardTraceError(f"record {i} model {record['model']!r} != session model {model!r}")
@@ -146,8 +144,14 @@ def reconstruct_switchyard_rollout(envelope: Any, session_id: str, converter: Re
         )
         record_uuids.append(record["uuid"])
 
-    items = converter.chat_completions_messages_to_responses_items(annotated)
-    input_items, output_items = split_responses_input_output_items(items)
+    # The first captured call's prompt defines the input boundary. A resumed
+    # run can already contain assistant/tool turns in that prompt; splitting at
+    # the first assistant item would incorrectly train on that uncaptured past.
+    # Convert each side separately because one chat message can produce several
+    # Responses items (for example, parallel tool calls).
+    prompt_message_count = len(first["messages"]) - 1
+    input_items = converter.chat_completions_messages_to_responses_items(annotated[:prompt_message_count])
+    output_items = converter.chat_completions_messages_to_responses_items(annotated[prompt_message_count:])
 
     return SwitchyardTrace(
         input_items=input_items,

@@ -1,0 +1,31 @@
+name: polymath
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: PolyMath multilingual math benchmark with weighted (difficulty) and per-language
+  metrics
+modality: text
+licensing: unknown
+authors:
+- gwarmstrong
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: polymath
+agent_server: simple_agent
+datasets:
+- name: polymath
+  type: benchmark
+  jsonl_fpath: benchmarks/polymath/data/polymath_benchmark.jsonl
+  prepare_script: benchmarks/polymath/prepare.py
+  prompt_config: benchmarks/prompts/generic/default.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/generic/default.yaml
+lifecycle: active

@@ -11,6 +11,7 @@ The assistant must:
 The conversations in the dataset are generated using personas from the [nvidia/Nemotron-Personas-USA dataset](https://huggingface.co/datasets/nvidia/Nemotron-Personas-USA) on Hugging Face.
 
 # Example usage
+Create an `env.yaml` file in the Gym root directory to specifying `policy_base_url`, `policy_model_name`, and `policy_api_key`. See [documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml) for details.
 
 ## Running servers
 The following is an example command for running this resources server along with an OpenAI model:
@@ -20,14 +21,13 @@ gym env start --environment calendar_v2 --model-type openai_model
 ```
 
 ## Collecting rollouts
-Create an `env.yaml` file in the Gym root directory to specifying `policy_base_url`, `policy_model_name`, and `policy_api_key`. See [documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml) for details.
 Rollouts can be collected using the example dataset as follows:
 
 ```bash
 gym eval run --no-serve \
     --agent calendar_simple_agent \
-    --input data/example.jsonl \
-    --output environments/calendar_v2/data/example.jsonl \
+    --input environments/calendar_v2/data/example.jsonl \
+    --output results/example_rollouts.jsonl \
     --limit 5
 ```
 

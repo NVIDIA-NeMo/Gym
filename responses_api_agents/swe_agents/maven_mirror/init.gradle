@@ -9,6 +9,30 @@
 
 def MIRROR_URL = 'https://maven-central.storage-download.googleapis.com/maven2/'
 
+// Plugin Portal proxies many implementation artifacts from Maven Central.
+// Configure this before settings/plugin resolution, so Central-hosted plugin
+// artifacts prefer the mirror instead of Plugin Portal's Maven Central redirect.
+gradle.beforeSettings { settings ->
+    settings.pluginManagement.repositories {
+        maven {
+            name = 'GoogleMavenCentralMirror'
+            url = uri(MIRROR_URL)
+        }
+
+        // Keep this for plugin-marker artifacts not published to Maven Central.
+        gradlePluginPortal {
+            // Plugin Portal's Gradle module metadata redirects some plugin
+            // implementation artifacts to Maven Central, which is rate
+            // limited in the sandbox. Its POM/artifact endpoints stay on
+            // plugins-artifacts.gradle.org.
+            metadataSources {
+                mavenPom()
+                artifact()
+            }
+        }
+    }
+}
+
 def mavenCentralPrefixes = [
     'https://repo.maven.apache.org/maven2',
     'https://repo1.maven.org/maven2',

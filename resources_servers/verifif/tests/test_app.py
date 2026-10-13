@@ -16,11 +16,15 @@
 """Unit tests for the VerifIF Resource Server."""
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from nemo_gym.base_resources_server import NeMoGymResponse
+from nemo_gym.judge import JudgeError
 from nemo_gym.server_utils import ServerClient
 from resources_servers.verifif.app import (
+    LLMJudgeItem,
     TuringVIFResourcesServer,
     TuringVIFResourcesServerConfig,
     TuringVIFVerifyRequest,
@@ -118,6 +122,22 @@ class TestTuringVIFApp:
             name="",
         )
         TuringVIFResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_judge_transport_failure_raises_judge_error(self) -> None:
+        """A judge call that errors makes verify raise JudgeError, which
+        judge_failsafe routes to the failures sidecar instead of the fallback verdict."""
+        server = self._create_server()
+        server._judge_llm_api_call_async = AsyncMock(side_effect=RuntimeError("judge timeout"))
+        request = self._create_real_request(
+            instructions=[],
+            response_content="A polite answer.",
+            llm_judge=[
+                LLMJudgeItem(uid=1, content="Is the response polite?", source="user", is_misalignment_check=False)
+            ],
+        )
+
+        with pytest.raises(JudgeError, match="judge timeout"):
+            asyncio.run(server.verify(request))
 
     def test_validator_imports(self) -> None:
         """Test that VIF validators can be imported."""

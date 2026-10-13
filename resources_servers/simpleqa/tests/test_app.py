@@ -14,8 +14,10 @@
 # limitations under the License.
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 from pytest import approx, fixture
 
+from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -192,11 +194,16 @@ class TestSimpleQAServer:
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         )
 
+    async def test_reverify_mode(self, config: SimpleQAConfig) -> None:
+        resources_server = SimpleQAServer(config=config, server_client=MagicMock(spec=ServerClient))
+        assert await resources_server.get_reverify_mode() == ReverifyMode.STATELESS
+
     async def test_verify_correct(self, config: SimpleQAConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         server = SimpleQAServer(config=config, server_client=server_mock)
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=_make_judge_response_dict("A"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         request = SimpleQAVerifyRequest(
@@ -218,6 +225,7 @@ class TestSimpleQAServer:
         server = SimpleQAServer(config=config, server_client=server_mock)
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=_make_judge_response_dict("B"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         request = SimpleQAVerifyRequest(
@@ -237,6 +245,7 @@ class TestSimpleQAServer:
         server = SimpleQAServer(config=config, server_client=server_mock)
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=_make_judge_response_dict("C"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         request = SimpleQAVerifyRequest(
@@ -259,6 +268,7 @@ class TestSimpleQAServer:
         server = SimpleQAServer(config=config, server_client=server_mock)
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=_make_judge_response_dict("A"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         request = SimpleQAVerifyRequest(
@@ -278,6 +288,7 @@ class TestSimpleQAServer:
         server = SimpleQAServer(config=config, server_client=server_mock)
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=_make_chat_response_dict("A"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         request = SimpleQAVerifyRequest(
@@ -298,6 +309,7 @@ class TestSimpleQAServer:
         server = SimpleQAServer(config=config, server_client=server_mock)
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=_make_judge_response_dict("A"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         request = SimpleQAVerifyRequest(
@@ -322,6 +334,7 @@ class TestSimpleQAServer:
         response_mock.json = AsyncMock(
             return_value=_make_judge_response_dict("Garbled output with no recognizable grade")
         )
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         request = SimpleQAVerifyRequest(

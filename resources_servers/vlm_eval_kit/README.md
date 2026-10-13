@@ -21,7 +21,7 @@
 |OCRBench|OCRBench|N/A|1000|785|776|772|
 |MMVet|MMVet|gpt-4-turbo|TODO|66.9|TODO|TODO|
 
-\* There is roughly 12% of samples in the original repo repro that ended up being judged using GPT 3.5 that we don't get in our reproduction. If we assume we implement judging correctly, reproduction score would be 62.6 + 12 = 74.6% which is accetable error margin.
+\* There is roughly 12% of samples in the original repo repro that ended up being judged using GPT 3.5 that we don't get in our reproduction. If we assume we implement judging correctly, reproduction score would be 62.6 + 12 = 74.6% which is acceptable error margin.
 
 ## Installation details
 Rather than using decord, we use decord2 which is compatible with MacOS.
@@ -31,7 +31,7 @@ Rather than using decord, we use decord2 which is compatible with MacOS.
 git clone https://github.com/open-compass/VLMEvalKit
 cd VLMEvalKit
 
-uv venv --python 3.12 --seed
+uv venv --python 3.13.14 --seed
 source .venv/bin/activate
 uv pip install '-e .' rouge
 

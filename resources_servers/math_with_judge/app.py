@@ -31,19 +31,22 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import call_judge, normalize_math_judge_verdict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.server_utils import get_response_json
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     should_use_judge: bool = True
@@ -70,6 +73,25 @@ class LibraryJudgeMathVerifyResponse(BaseVerifyResponse):
     extracted_answer: Optional[str]
     library_reward: float
     judge_evaluations: Optional[list[JudgeEvaluation]]
+
+
+def _extract_last_boxed_answer(response: str) -> Optional[str]:
+    r"""Extract the exact contents of the last complete ``\boxed{...}``."""
+    boxed_start = response.rfind("\\boxed{")
+    if boxed_start < 0:
+        return None
+
+    content_start = boxed_start + len("\\boxed{")
+    brace_depth = 1
+    for index in range(content_start, len(response)):
+        if response[index] == "{":
+            brace_depth += 1
+        elif response[index] == "}":
+            brace_depth -= 1
+            if brace_depth == 0:
+                return response[content_start:index]
+
+    return None
 
 
 def _run_math_verify(
@@ -184,12 +206,9 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 assistant_responses.append(content_item.text)
 
         combined_response = "".join(assistant_responses)
-        (
-            reward,
-            extracted_answer,
-            library_reward,
-            judge_evaluations,
-        ) = await self._verify_answer(body.question, body.expected_answer, combined_response)
+        reward, extracted_answer, library_reward, judge_evaluations = await self._verify_answer(
+            body.question, body.expected_answer, combined_response
+        )
         return LibraryJudgeMathVerifyResponse(
             **body.model_dump(),
             reward=reward,
@@ -207,14 +226,17 @@ Example output: "My final verdict is different [[A!=B]]"."""
         specified question in comparison with the specified expected answer.
         """
 
+        boxed_answer = _extract_last_boxed_answer(generated_answer)
+        if boxed_answer is None or not boxed_answer.strip():
+            return 0.0, None, 0.0, None
+
         library_reward, extracted_answer = await self._verify_answer_with_library_async(
             expected_answer, generated_answer
         )
         if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
-        judge_answer = extracted_answer if extracted_answer else generated_answer
-        judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, judge_answer)
+        judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, boxed_answer)
         return judge_reward, extracted_answer, library_reward, judge_evaluations
 
     @classmethod
@@ -345,12 +367,13 @@ Example output: "My final verdict is different [[A!=B]]"."""
             ),
         ]
 
-        response = await self.server_client.post(
+        judge_response = await call_judge(
+            self.server_client,
             server_name=config.judge_model_server.name,
             url_path="/v1/responses",
             json=responses_create_params,
+            response_model=NeMoGymResponse,
         )
-        judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
         judge_evaluation = JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
 
         # Currently, for all the cases in which the response from the LLM judge
@@ -365,23 +388,10 @@ Example output: "My final verdict is different [[A!=B]]"."""
         if last_content.type != "output_text":
             return False, judge_evaluation
 
-        output_text = last_content.text
-        equal_choice_position = output_text.find(self.JUDGE_EQUAL_LABEL)
-        not_equal_choice_position = output_text.find(self.JUDGE_NOT_EQUAL_LABEL)
-
-        # The first label that appears in the text is used for the evaluation.
-        if equal_choice_position < 0:
-            if not_equal_choice_position < 0:
-                return False, judge_evaluation
-            else:
-                return False, judge_evaluation
-        else:
-            if not_equal_choice_position < 0:
-                return True, judge_evaluation
-            elif equal_choice_position < not_equal_choice_position:
-                return True, judge_evaluation
-            else:
-                return False, judge_evaluation
+        output_text = normalize_math_judge_verdict(last_content.text)
+        equal_choice_position = output_text.rfind(self.JUDGE_EQUAL_LABEL)
+        not_equal_choice_position = output_text.rfind(self.JUDGE_NOT_EQUAL_LABEL)
+        return equal_choice_position > not_equal_choice_position, judge_evaluation
 
     # ──────────────────────────────────────────────────────────
     # Aggregate metrics overrides
@@ -421,3 +431,5 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
 if __name__ == "__main__":
     LibraryJudgeMathResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = LibraryJudgeMathResourcesServer.run_webserver()  # noqa: F401

@@ -12,20 +12,38 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from glob import glob
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from omegaconf import OmegaConf
 from yaml import safe_load
 
-from nemo_gym.cli.eval import _benchmark_domain, _fuzzy_matches, list_benchmarks, prepare_benchmark
+import nemo_gym.global_config
+from benchmarks.lmarena_v2 import prepare as lmarena_prepare
+from nemo_gym.cli.eval import list_benchmarks, prepare_benchmark
 
 
 def _mock_global_config(config: dict = None):
     """Return an OmegaConf config without CLI/file parsing."""
     return OmegaConf.create(config or {})
+
+
+def test_pinchbench_tavily_key_is_derived_from_environment() -> None:
+    repo_root = Path(__file__).parents[2]
+    benchmark = safe_load((repo_root / "benchmarks/pinchbench/config.yaml").read_text())
+    agent = safe_load((repo_root / "responses_api_agents/pinchbench/configs/pinchbench.yaml").read_text())
+
+    assert benchmark["tavily_api_key"] == "${oc.env:PINCHBENCH_TAVILY_API_KEY,null}"
+    assert agent["pinchbench_agent"]["responses_api_agents"]["pinchbench"]["tavily_api_key"] == ("${tavily_api_key}")
+
+
+@pytest.fixture(autouse=True)
+def _mock_port_allocation(monkeypatch):
+    """Keep benchmark-discovery tests independent of socket availability."""
+    monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", lambda **_: 12345)
 
 
 class TestListBenchmarks:
@@ -34,10 +52,12 @@ class TestListBenchmarks:
             list_benchmarks()
         assert "aime24" in capsys.readouterr().out
 
-    def test_discovers_by_type_benchmark_not_filename(self, tmp_path, capsys) -> None:
+    def test_discovers_by_type_benchmark_not_filename(self, tmp_path) -> None:
         # Discovery is content-based (a `type: benchmark` dataset), not filename-based: any yaml that
         # declares such a dataset is a candidate (e.g. tau2's `configs/tau2.yaml`), and yamls that don't
         # are skipped — regardless of filename.
+        from nemo_gym.benchmarks import _benchmark_config_paths
+
         (tmp_path / "standard").mkdir()
         (tmp_path / "standard" / "config.yaml").write_text("x:\n  datasets:\n  - type: benchmark\n")
         (tmp_path / "flavored" / "configs").mkdir(parents=True)
@@ -45,25 +65,92 @@ class TestListBenchmarks:
         (tmp_path / "notbench").mkdir()
         (tmp_path / "notbench" / "config.yaml").write_text("x:\n  prompt_config: hi.yaml\n")  # no benchmark dataset
 
-        captured = {}
+        found = {str(p.relative_to(tmp_path)) for p in _benchmark_config_paths(tmp_path)}
+        assert found == {"standard/config.yaml", "flavored/configs/myflavor.yaml"}
 
-        def fake_load(paths):
-            captured["paths"] = {str(p.relative_to(tmp_path)) for p in paths}
-            return {}
+    def test_prefilter_rejects_the_benchmarks_manifest(self, tmp_path) -> None:
+        # A benchmark's manifest.yaml mirrors the config's `type: benchmark` dataset, so by content it would
+        # read as a second config of the same benchmark; it is catalog metadata and is rejected by name.
+        from nemo_gym.benchmarks import _benchmark_config_paths, _is_benchmark_config
 
-        with (
-            patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config()),
-            patch("nemo_gym.cli.eval.BENCHMARKS_DIR", tmp_path),
-            patch("nemo_gym.cli.eval._load_benchmarks_from_config_paths", side_effect=fake_load),
-        ):
-            list_benchmarks()
+        (tmp_path / "bench").mkdir()
+        (tmp_path / "bench" / "config.yaml").write_text("x:\n  datasets:\n  - name: bench\n    type: benchmark\n")
+        manifest = tmp_path / "bench" / "manifest.yaml"
+        manifest.write_text("name: bench\nkind: benchmark\ndatasets:\n- name: bench\n  type: benchmark\n")
 
-        assert captured["paths"] == {"standard/config.yaml", "flavored/configs/myflavor.yaml"}
+        assert _is_benchmark_config(manifest) is False
+        found = {str(p.relative_to(tmp_path)) for p in _benchmark_config_paths(tmp_path)}
+        assert found == {"bench/config.yaml"}
+
+    def test_config_paths_exclude_repo_manifests_but_include_executable_config(self) -> None:
+        from nemo_gym.benchmarks import _benchmark_config_paths
+
+        benchmark_dir = Path(__file__).parents[2] / "benchmarks" / "aime24"
+        manifest_path = benchmark_dir / "manifest.yaml"
+        config_path = benchmark_dir / "config.yaml"
+        manifest = safe_load(manifest_path.read_text())
+        config = safe_load(config_path.read_text())
+        assert manifest["datasets"][0]["type"] == "benchmark"
+        agent_config = config["aime24_math_with_judge_simple_agent"]["responses_api_agents"]["simple_agent"]
+        assert agent_config["datasets"][0]["type"] == "benchmark"
+
+        found = _benchmark_config_paths(benchmark_dir)
+
+        assert config_path in found
+        assert manifest_path not in found
+
+    @pytest.mark.parametrize(
+        ("text", "is_benchmark"),
+        [
+            pytest.param('x:\n  datasets:\n  - type: "benchmark"\n', True, id="double_quoted"),
+            pytest.param("x:\n  datasets:\n  - type: 'benchmark'\n", True, id="single_quoted"),
+            pytest.param("x:\n  datasets:\n  - type : benchmark\n", True, id="space_before_colon"),
+            pytest.param("x:\n  datasets:\n  - type: benchmark  # the dataset kind\n", True, id="inline_comment"),
+            pytest.param("x:\n  datasets: [{name: a, type: benchmark}]\n", True, id="flow_style"),
+            pytest.param("x:\n  datasets:\n  - type: benchmark_suite\n", False, id="longer_token"),
+            pytest.param("x:\n  # NOTE: a type: benchmark dataset would go here\n", False, id="only_in_comment"),
+        ],
+    )
+    def test_prefilter_matches_type_benchmark_across_yaml_formatting(self, tmp_path, text, is_benchmark) -> None:
+        # The prefilter parses each file, so any YAML spelling of a `type: benchmark` dataset is found
+        # (quotes, spacing, flow style) while lookalikes that aren't that value (a longer token, or the
+        # string only inside a comment) are rejected.
+        from nemo_gym.benchmarks import _is_benchmark_config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(text)
+        assert _is_benchmark_config(config_path) is is_benchmark
+
+    def test_prefilter_rejects_a_multi_benchmark_suite(self, tmp_path) -> None:
+        # A config declaring several benchmark datasets is an eval suite: it has no single name, agent, or
+        # repeat count, so it is not a valid `--benchmark` argument and must not reach the catalog.
+        from nemo_gym.benchmarks import _benchmark_config_paths
+
+        (tmp_path / "single").mkdir()
+        (tmp_path / "single" / "config.yaml").write_text("x:\n  datasets:\n  - name: a\n    type: benchmark\n")
+        (tmp_path / "suite").mkdir()
+        (tmp_path / "suite" / "config.yaml").write_text(
+            "x:\n  datasets:\n  - name: a\n    type: benchmark\ny:\n  datasets:\n  - name: b\n    type: benchmark\n"
+        )
+
+        found = {str(p.relative_to(tmp_path)) for p in _benchmark_config_paths(tmp_path)}
+        assert found == {"single/config.yaml"}
+
+    def test_prefilter_keeps_unparseable_yaml_as_candidate(self, tmp_path) -> None:
+        # A file we can't parse can't be classified, so it is kept as a candidate for the resolve step to
+        # diagnose rather than silently dropped.
+        from nemo_gym.benchmarks import _benchmark_config_paths
+
+        (tmp_path / "broken").mkdir()
+        (tmp_path / "broken" / "config.yaml").write_text("x:\n  - : : not valid yaml : :\n")
+
+        found = {p.relative_to(tmp_path).parts[0] for p in _benchmark_config_paths(tmp_path)}
+        assert "broken" in found
 
     def test_no_benchmarks(self, capsys) -> None:
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config()),
-            patch("nemo_gym.cli.eval._load_benchmarks_from_config_paths", return_value={}),
+            patch("nemo_gym.cli.eval.discover_benchmarks", return_value={}),
         ):
             list_benchmarks()
         assert "No benchmarks found" in capsys.readouterr().out
@@ -71,15 +158,22 @@ class TestListBenchmarks:
     def test_json_output(self, capsys) -> None:
         import json
 
-        bench = MagicMock(agent_name="my_agent", num_repeats=4)
+        bench = MagicMock(agent_name="my_agent", num_repeats=4, environment_server=None)
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config({"json": True})),
-            patch("nemo_gym.cli.eval._load_benchmarks_from_config_paths", return_value={"my_bench": bench}),
-            patch("nemo_gym.cli.eval._benchmark_domain", return_value="math"),
+            patch("nemo_gym.cli.eval.discover_benchmarks", return_value={"my_bench": bench}),
+            patch("nemo_gym.cli.eval.read_config_metadata", return_value=("math", "a description")),
         ):
             list_benchmarks()
         assert json.loads(capsys.readouterr().out) == [
-            {"name": "my_bench", "agent_name": "my_agent", "domain": "math", "num_repeats": 4}
+            {
+                "name": "my_bench",
+                "agent_name": "my_agent",
+                "environment_server": None,
+                "domain": "math",
+                "num_repeats": 4,
+                "description": "a description",
+            }
         ]
 
     def test_json_output_empty(self, capsys) -> None:
@@ -87,17 +181,66 @@ class TestListBenchmarks:
 
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config({"json": True})),
-            patch("nemo_gym.cli.eval._load_benchmarks_from_config_paths", return_value={}),
+            patch("nemo_gym.cli.eval.discover_benchmarks", return_value={}),
         ):
             list_benchmarks()
         assert json.loads(capsys.readouterr().out) == []
 
+    def test_inspect_benchmark_by_name(self, capsys) -> None:
+        bench = MagicMock(agent_name="my_agent", num_repeats=8, environment_server=None)
+        bench.path = Path("benchmarks/aime24/config.yaml")
+        bench.dataset.jsonl_fpath = Path("benchmarks/aime24/data/aime24.jsonl")
+        bench.dataset.prepare_script = Path("benchmarks/aime24/prepare.py")
+        with (
+            patch(
+                "nemo_gym.cli.eval.get_global_config_dict",
+                return_value=_mock_global_config({"component_name": "aime24"}),
+            ),
+            patch("nemo_gym.cli.eval.discover_benchmarks", return_value={"aime24": bench}),
+            patch("nemo_gym.cli.eval.read_config_metadata", return_value=("math", "AIME desc")),
+        ):
+            list_benchmarks()
+        out = capsys.readouterr().out
+        assert "The aime24 benchmark (domain: math)" in out and "AIME desc" in out
+        assert "agent: my_agent" in out and "num repeats: 8" in out
+        assert "gym eval prepare --benchmark aime24" in out
+        assert "gym eval run --benchmark aime24 --model-type vllm_model" in out
 
-class TestLoadBenchmarksFromConfigPaths:
-    def test_skips_configs_that_fail_to_resolve_with_warning(self, capsys) -> None:
+    def test_inspect_unknown_benchmark_exits(self, capsys) -> None:
+        with (
+            patch(
+                "nemo_gym.cli.eval.get_global_config_dict",
+                return_value=_mock_global_config({"component_name": "aim24"}),
+            ),
+            patch("nemo_gym.cli.eval.discover_benchmarks", return_value={"aime24": MagicMock()}),
+        ):
+            with pytest.raises(SystemExit):
+                list_benchmarks()
+        out = capsys.readouterr().out
+        assert "Unknown benchmark 'aim24'" in out and "aime24" in out
+
+    def test_inspect_shows_absolute_config_path(self, capsys) -> None:
+        # Real discovery: the config line must be the config's absolute path, not a cwd-relative one.
+        from nemo_gym.benchmarks import BENCHMARKS_DIR
+
+        expected = (BENCHMARKS_DIR / "aime24" / "config.yaml").resolve()
+        with patch(
+            "nemo_gym.cli.eval.get_global_config_dict",
+            return_value=_mock_global_config({"component_name": "aime24"}),
+        ):
+            list_benchmarks()
+        assert f"config: {expected}" in capsys.readouterr().out
+
+
+class TestDiscoverBenchmarksInDir:
+    def test_skips_configs_that_fail_to_resolve_with_warning(self, tmp_path: Path, capsys) -> None:
         # A candidate that still can't be resolved even with tolerance (e.g. a multi-benchmark suite) must
         # be skipped with a warning — not crash the whole listing, and not vanish silently.
-        from nemo_gym.benchmarks import BenchmarkConfig, _load_benchmarks_from_config_paths
+        from nemo_gym.benchmarks import BenchmarkConfig, _discover_benchmarks_in_dir
+
+        for name in ("bad", "good"):
+            (tmp_path / name).mkdir()
+            (tmp_path / name / "config.yaml").write_text("x:\n  datasets:\n  - type: benchmark\n")
 
         good = MagicMock()
         good.name = "good_bench"
@@ -105,94 +248,151 @@ class TestLoadBenchmarksFromConfigPaths:
         # Listing must resolve tolerantly (it scans files with no runtime context), so it opts out of strict.
         def fake_from_config_path(path, *, strict=True):
             assert strict is False
-            if Path(path).name == "bad.yaml":
+            if Path(path).parent.name == "bad":
                 raise RuntimeError("cannot resolve without runtime values")
             return good
 
         with patch.object(BenchmarkConfig, "from_config_path", side_effect=fake_from_config_path):
-            result = _load_benchmarks_from_config_paths([Path("bad.yaml"), Path("good.yaml")])
+            result = _discover_benchmarks_in_dir(tmp_path)
 
-        assert set(result) == {"good_bench"}
+        # The surviving benchmark is keyed by its config name (path under the dir, sans `.yaml`), not `dataset.name`.
+        assert set(result) == {"good"}
         err = capsys.readouterr().err
-        assert "Warning" in err and "bad.yaml" in err
+        assert "Warning" in err and "bad" in err
+
+    def test_suite_resolving_to_many_benchmarks_is_skipped_not_aliased(self, tmp_path: Path, capsys) -> None:
+        # Resolving `config_paths` can surface several benchmark datasets even when the file itself declares
+        # one. Reporting the first would publish the suite under another benchmark's name, agent, and repeat
+        # count, so `--benchmark <suite>` would silently run that other benchmark instead.
+        from nemo_gym.benchmarks import BenchmarkConfig
+
+        # Chains two real benchmarks the way `benchmarks/nemotron_3.5_super/` chains its eval suite.
+        suite = tmp_path / "suite.yaml"
+        suite.write_text("config_paths:\n- benchmarks/gpqa/config.yaml\n- benchmarks/aime24/config.yaml\n")
+
+        assert BenchmarkConfig.from_config_path(suite, strict=False) is None
+        err = capsys.readouterr().err
+        assert "2 benchmark datasets" in err and "eval suite" in err
+
+    @pytest.mark.parametrize(
+        ("suite_name", "expected_config_paths", "expected_concurrency"),
+        [
+            pytest.param(
+                "core_text.yaml",
+                [
+                    "benchmarks/tau2/configs/tau2.yaml",
+                    "benchmarks/tau2/configs/banking_bm25_grep_artificial_analysis.yaml",
+                    "benchmarks/scicode/config.yaml",
+                    "benchmarks/hle/config.yaml",
+                    "benchmarks/gpqa/config.yaml",
+                    "benchmarks/omniscience/config.yaml",
+                    "benchmarks/aalcr/config.yaml",
+                    "benchmarks/apex_shortlist/config.yaml",
+                    "benchmarks/lmarena_v2/config.yaml",
+                    "benchmarks/livecodebench/v6_2408_2505/cascade.yaml",
+                    "benchmarks/ifbench/config.yaml",
+                ],
+                512,
+                id="core_text",
+            ),
+            pytest.param(
+                "swebench_verified_multilingual.yaml",
+                [
+                    "benchmarks/swebench/verified/opencode.yaml",
+                    "benchmarks/swebench/multilingual/opencode.yaml",
+                ],
+                1024,
+                id="swebench_verified_multilingual",
+            ),
+        ],
+    )
+    def test_nemotron_3_5_super_suite_membership_and_defaults(
+        self,
+        suite_name: str,
+        expected_config_paths: list[str],
+        expected_concurrency: int,
+    ) -> None:
+        repo_root = Path(__file__).parents[2]
+        suite = safe_load((repo_root / "benchmarks/nemotron_3.5_super" / suite_name).read_text())
+
+        assert suite == {
+            "config_paths": expected_config_paths,
+            "num_samples_in_parallel": expected_concurrency,
+        }
+        assert "benchmarks/swebench/pro/opencode.yaml" not in suite["config_paths"]
+
+    @pytest.mark.parametrize(
+        ("suite_name", "expected_benchmark_count"),
+        [
+            pytest.param("core_text.yaml", 11, id="core_text"),
+            pytest.param("swebench_verified_multilingual.yaml", 2, id="swebench_verified_multilingual"),
+        ],
+    )
+    def test_nemotron_3_5_super_suite_resolves_every_member(
+        self, suite_name: str, expected_benchmark_count: int, capsys, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.benchmarks import BenchmarkConfig
+
+        monkeypatch.setattr(
+            nemo_gym.global_config,
+            "_nemo_gym_openai_requirement",
+            lambda: f"openai=={nemo_gym.global_config.openai_version}",
+        )
+        repo_root = Path(__file__).parents[2]
+        suite_path = repo_root / "benchmarks/nemotron_3.5_super" / suite_name
+
+        assert BenchmarkConfig.from_config_path(suite_path, strict=False) is None
+        err = capsys.readouterr().err
+        assert f"{expected_benchmark_count} benchmark datasets" in err
+        assert "eval suite" in err
 
     def test_every_repo_benchmark_appears_in_listing(self, capsys) -> None:
         # Every config that declares a `type: benchmark` dataset must surface as its own listing entry —
         # no silent drop from a name collision (the name-keyed dict is last-writer-wins) or a resolve
         # failure. Mirrors the content-based discovery in `list_benchmarks`.
-        from nemo_gym.benchmarks import BENCHMARKS_DIR, _load_benchmarks_from_config_paths
+        from nemo_gym.benchmarks import BENCHMARKS_DIR, _benchmark_config_paths, _discover_benchmarks_in_dir
 
-        config_paths = [BENCHMARKS_DIR / p for p in glob("**/*.yaml", root_dir=BENCHMARKS_DIR, recursive=True)]
-        config_paths = sorted(p for p in config_paths if "type: benchmark" in p.read_text(errors="ignore"))
+        config_paths = _benchmark_config_paths(BENCHMARKS_DIR)
         assert config_paths, "no benchmark configs discovered under BENCHMARKS_DIR"
 
-        benchmarks = _load_benchmarks_from_config_paths(config_paths)
+        benchmarks = _discover_benchmarks_in_dir(BENCHMARKS_DIR)
 
         assert len(benchmarks) == len(config_paths), (
             f"{len(config_paths)} benchmark config(s) discovered but only {len(benchmarks)} appear in the "
-            f"listing — a duplicate dataset name or resolve failure is hiding at least one.\n"
+            f"listing — a duplicate name or resolve failure is hiding at least one.\n"
             f"stderr:\n{capsys.readouterr().err}"
         )
 
 
-class TestTolerantInterpolationParse:
-    # Unset `???` values and unresolved `${...}` interpolations reference runtime-only values that aren't
-    # needed to identify a benchmark; listing fills them with a placeholder so the config still resolves.
-    def _resolve(self, d: dict):
-        from nemo_gym.benchmarks import _parse_no_environment_tolerating_unset_values
+class TestBenchmarkConfigName:
+    @pytest.mark.parametrize(
+        "rel, expected",
+        [
+            ("aime24/config.yaml", "aime24"),  # `<name>/config.yaml` shortens to `<name>`
+            ("tau2/configs/tau2.yaml", "tau2/configs/tau2"),  # a flavor keeps its full relative path
+            ("livecodebench/v5_2408_2502/config.yaml", "livecodebench/v5_2408_2502/config"),  # nested: no shorten
+        ],
+    )
+    def test_name_matches_the_benchmark_selector(self, rel: str, expected: str) -> None:
+        from nemo_gym.benchmarks import _benchmark_config_name
 
-        return _parse_no_environment_tolerating_unset_values(OmegaConf.create(d))
+        assert _benchmark_config_name(Path(rel)) == expected
 
-    @property
-    def _placeholder(self) -> str:
-        from nemo_gym.benchmarks import _UNSET_VALUE_PLACEHOLDER
+    def test_every_listed_token_round_trips_through_the_benchmark_selector(self) -> None:
+        # The point of keying by token: every value `gym list benchmarks` prints must resolve back to its own
+        # config via `--benchmark`, using the same `_asset_config_path` mapping the CLI uses. This covers the
+        # benchmarks whose `dataset.name` diverges from their on-disk path (e.g. tau2, livecodebench).
+        from nemo_gym.benchmarks import discover_benchmarks
+        from nemo_gym.cli.main import _asset_config_path
 
-        return _UNSET_VALUE_PLACEHOLDER
+        benchmarks = discover_benchmarks()
+        assert benchmarks, "no benchmarks discovered"
+        for token, bench in benchmarks.items():
+            resolved = Path(_asset_config_path("benchmark", token))
+            assert resolved.resolve() == bench.path.resolve(), f"token {token!r} does not select its own config"
 
-    def test_single_interpolation(self) -> None:
-        resolved = self._resolve({"foo": "${bar}"})
-        assert resolved["foo"] == self._placeholder
 
-    def test_single_missing_value(self) -> None:
-        resolved = self._resolve({"foo": "???"})
-        assert resolved["foo"] == self._placeholder
-
-    def test_mix(self) -> None:
-        # A mix across nested dicts: resolvable literals (incl. nested) pass through untouched, while an
-        # undefined `${...}` interpolation and unset `???` values (incl. nested) are filled with the
-        # placeholder.
-        resolved = self._resolve(
-            {
-                "name": "my_bench",
-                "num_repeats": 3,
-                "api_key": "${some_api_key}",
-                "server": {
-                    "endpoint": "https://example.com",
-                    "nested": {
-                        "enabled": True,
-                        "token": "???",
-                    },
-                },
-            }
-        )
-        # Correct key-value pairs are unmodified.
-        assert resolved["name"] == "my_bench"
-        assert resolved["num_repeats"] == 3
-        assert resolved["server"]["endpoint"] == "https://example.com"
-        assert resolved["server"]["nested"]["enabled"] is True
-        # Undefined `${...}` and unset `???` values are filled.
-        assert resolved["api_key"] == self._placeholder
-        assert resolved["server"]["nested"]["token"] == self._placeholder
-
-    def test_does_not_mutate_input(self) -> None:
-        from nemo_gym.benchmarks import _parse_no_environment_tolerating_unset_values
-
-        cfg = OmegaConf.create({"foo": "???", "bar": "${baz}"})
-        before = OmegaConf.to_container(cfg, resolve=False, throw_on_missing=False)
-        _parse_no_environment_tolerating_unset_values(cfg)
-        after = OmegaConf.to_container(cfg, resolve=False, throw_on_missing=False)
-        assert after == before == {"foo": "???", "bar": "${baz}"}
-
+class TestBenchmarkConfigStrictParsing:
     def test_strict_is_the_default_and_does_not_tolerate_unresolved_values(self) -> None:
         # The tolerance is listing-only: `from_initial_config_dict` defaults to strict, so other workflows
         # still get a hard error on an unresolved `${...}` rather than a silent placeholder.
@@ -211,60 +411,22 @@ class TestTolerantInterpolationParse:
         assert tolerated is None
 
 
-class TestFuzzyMatches:
-    def test_substring_matches(self) -> None:
-        assert _fuzzy_matches("math", "math_with_judge")
-
-    def test_token_typo_matches(self) -> None:
-        # `aimee` is a near-miss for the `aime` token in `aime24`.
-        assert _fuzzy_matches("aimee", "aime24")
-
-    def test_matches_against_agent_field(self) -> None:
-        assert _fuzzy_matches("judge", "aime24", "math_with_judge_agent")
-
-    def test_skips_empty_fields(self) -> None:
-        assert not _fuzzy_matches("math", "", None)
-
-    def test_no_match(self) -> None:
-        assert not _fuzzy_matches("zzznomatch", "aime24", "math_with_judge")
-
-
-class TestBenchmarkDomain:
-    def test_resolves_domain_from_real_config(self) -> None:
-        from nemo_gym.benchmarks import BENCHMARKS_DIR, BenchmarkConfig
-
-        bench = BenchmarkConfig.from_config_path(BENCHMARKS_DIR / "aime24" / "config.yaml")
-
-        assert _benchmark_domain(bench) == "math"
-
-    def test_resolves_domain_defined_on_agent(self, tmp_path: Path) -> None:
-        # `domain` can be declared on the agent (responses_api_agents.<agent>.domain) rather than on a
-        # resources server, as the tau2 config does.
-        config_path = tmp_path / "config.yaml"
-        config_path.write_text(
-            """tau2_agent:
-  responses_api_agents:
-    tau2:
-      entrypoint: app.py
-      domain: agent
-"""
-        )
-        bench = MagicMock()
-        bench.path = config_path
-
-        assert _benchmark_domain(bench) == "agent"
-
-
 class TestSearchBenchmarks:
     # Map each benchmark name to the `domain` its config would resolve to.
     DOMAINS = {
         "aime24": "math",
         "gpqa_diamond": "science",
     }
+    # Descriptions carry text found in neither the name nor the domain, so a match proves description is searched.
+    DESCRIPTIONS = {
+        "aime24": "Competition problems from the AIME.",
+        "gpqa_diamond": "Graduate-level questions written by PhD experts.",
+    }
 
     def _bench(self, key: str):
         bench = MagicMock(agent_name="my_agent", num_repeats=1)
-        bench.config_key = key  # let the patched _benchmark_domain find the right entry
+        bench.name = key  # `dataset.name`; also fuzzy-matched by `gym search`
+        bench.path = key  # the patched read_config_metadata keys off the path to find the domain
         return bench
 
     def _benchmarks(self) -> dict:
@@ -273,8 +435,11 @@ class TestSearchBenchmarks:
     def _run(self, query: str, benchmarks: dict, capsys) -> str:
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config({"query": query})),
-            patch("nemo_gym.cli.eval._load_benchmarks_from_config_paths", return_value=benchmarks),
-            patch("nemo_gym.cli.eval._benchmark_domain", side_effect=lambda b: self.DOMAINS[b.config_key]),
+            patch("nemo_gym.cli.eval.discover_benchmarks", return_value=benchmarks),
+            patch(
+                "nemo_gym.cli.eval.read_config_metadata",
+                side_effect=lambda path: (self.DOMAINS[path], self.DESCRIPTIONS[path]),
+            ),
         ):
             list_benchmarks()
         return capsys.readouterr().out
@@ -290,9 +455,15 @@ class TestSearchBenchmarks:
         assert "gpqa_diamond" in out
         assert "aime24" not in out
 
+    def test_query_matches_description(self, capsys) -> None:
+        # "PhD" only appears in gpqa's description, not its name/domain.
+        out = self._run("PhD", self._benchmarks(), capsys)
+        assert "gpqa_diamond" in out
+        assert "aime24" not in out
+
     def test_query_does_not_match_resource_server(self, capsys) -> None:
         # "judge" appears only in a resources server name, which is no longer searched:
-        # matching is restricted to the benchmark name and domain.
+        # matching is restricted to the benchmark name, domain, and description.
         assert "No benchmarks match 'judge'" in self._run("judge", self._benchmarks(), capsys)
 
     def test_query_no_match_message(self, capsys) -> None:
@@ -335,11 +506,116 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
         ):
             prepare_benchmark()
-            mock_module.prepare.assert_called_once()
+            mock_module.prepare.assert_called_once_with()
+
+    def test_calls_prepare_for_validation_dataset(self, tmp_path: Path) -> None:
+        prepare_script = tmp_path / "prepare.py"
+        prepare_script.write_text("")
+        output_path = tmp_path / "validation.jsonl"
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(f"""dummy_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: dummy_validation
+        type: validation
+        jsonl_fpath: {output_path}
+        prepare_script: {prepare_script}
+        license: Apache 2.0
+""")
+        mock_module = MagicMock()
+        mock_module.prepare.return_value = output_path
+
+        with (
+            patch(
+                "nemo_gym.cli.eval.get_global_config_dict",
+                return_value=_mock_global_config(
+                    {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
+                ),
+            ),
+            patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
+        ):
+            prepare_benchmark()
+
+        mock_module.prepare.assert_called_once_with()
+
+    def test_prepares_benchmark_and_validation_dataset_from_same_server(self, tmp_path: Path) -> None:
+        benchmark_script = tmp_path / "prepare_benchmark.py"
+        validation_script = tmp_path / "prepare_validation.py"
+        benchmark_script.write_text("")
+        validation_script.write_text("")
+        benchmark_output = tmp_path / "benchmark.jsonl"
+        validation_output = tmp_path / "validation.jsonl"
+        config = {
+            "dummy_agent": {
+                "responses_api_agents": {
+                    "simple_agent": {
+                        "datasets": [
+                            {
+                                "name": "dummy_benchmark",
+                                "type": "benchmark",
+                                "jsonl_fpath": str(benchmark_output),
+                                "prepare_script": str(benchmark_script),
+                            },
+                            {
+                                "name": "dummy_validation",
+                                "type": "validation",
+                                "jsonl_fpath": str(validation_output),
+                                "prepare_script": str(validation_script),
+                                "license": "Apache 2.0",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+        benchmark_module = MagicMock()
+        benchmark_module.prepare.return_value = benchmark_output
+        validation_module = MagicMock()
+        validation_module.prepare.return_value = validation_output
+
+        def import_prepare(module_path: str) -> MagicMock:
+            return validation_module if module_path.endswith("prepare_validation") else benchmark_module
+
+        with (
+            patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
+            patch("nemo_gym.cli.eval.importlib.import_module", side_effect=import_prepare),
+        ):
+            prepare_benchmark()
+
+        benchmark_module.prepare.assert_called_once_with()
+        validation_module.prepare.assert_called_once_with()
+
+    def test_forwards_prepare_script_args(self, tmp_path: Path) -> None:
+        bench_dir, config_path = self._make_bench_dir(tmp_path)
+
+        mock_module = MagicMock()
+        mock_module.prepare.return_value = tmp_path / "output.jsonl"
+
+        prepare_script_args = {
+            "model": "/path/to/checkpoint",
+            "length": 1048576,
+            "data_format": "default",
+        }
+        with (
+            patch(
+                "nemo_gym.cli.eval.get_global_config_dict",
+                return_value=_mock_global_config(
+                    {
+                        "config_paths": [str(config_path)],
+                        "prepare_script_args": prepare_script_args,
+                        **safe_load(config_path.read_text()),
+                    }
+                ),
+            ),
+            patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
+        ):
+            prepare_benchmark()
+
+        mock_module.prepare.assert_called_once_with(**prepare_script_args)
 
     def test_missing_prepare_py(self, tmp_path: Path, capsys) -> None:
         bench_dir, config_path = self._make_bench_dir(tmp_path)
@@ -352,13 +628,12 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
         ):
             with pytest.raises(SystemExit) as exc_info:
                 prepare_benchmark()
         assert exc_info.value.code == 1
         out = " ".join(capsys.readouterr().out.split())
-        assert "The following benchmarks are missing a valid prepare script" in out
+        assert "The following datasets are missing a valid prepare script" in out
 
     def test_missing_prepare_function(self, tmp_path: Path, capsys) -> None:
         bench_dir, config_path = self._make_bench_dir(tmp_path)
@@ -372,7 +647,6 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
         ):
             with pytest.raises(SystemExit) as exc_info:
@@ -382,18 +656,15 @@ class TestPrepareBenchmark:
         assert "Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config" in out
 
     def test_no_benchmark_in_config_paths(self, capsys) -> None:
-        with (
-            patch(
-                "nemo_gym.cli.eval.get_global_config_dict",
-                return_value=_mock_global_config({"config_paths": ["resources_servers/foo/configs/foo.yaml"]}),
-            ),
-            patch("nemo_gym.cli.eval._load_benchmarks_from_config_paths", return_value={}),
+        with patch(
+            "nemo_gym.cli.eval.get_global_config_dict",
+            return_value=_mock_global_config({"config_paths": ["resources_servers/foo/configs/foo.yaml"]}),
         ):
             with pytest.raises(SystemExit) as exc_info:
                 prepare_benchmark()
         assert exc_info.value.code == 1
         out = " ".join(capsys.readouterr().out.split())
-        assert "No benchmark config found" in out
+        assert "No preparable dataset config found" in out
 
     def test_no_benchmark_dataset_reports_inspected_instances(self, tmp_path: Path, capsys) -> None:
         # A server instance is present but declares no `benchmark` dataset; the error should name it
@@ -428,7 +699,6 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
         ):
             prepare_benchmark()
@@ -453,9 +723,650 @@ class TestPrepareBenchmark:
                     }
                 ),
             ),
-            patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
         ):
             prepare_benchmark()
 
         assert mock_module.prepare.call_count == 0
+
+    def _prepare_with_cached_file(self, tmp_path: Path, module: object, *, use_cache: bool = True) -> None:
+        bench_dir, config_path = self._make_bench_dir(tmp_path)
+        (tmp_path / "output.jsonl").write_text("cached rows")
+        config = {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
+        if use_cache:
+            config["use_cached_prepared_benchmarks"] = True
+        with (
+            patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
+            patch("nemo_gym.cli.eval.importlib.import_module", return_value=module),
+        ):
+            prepare_benchmark()
+
+    def test_cached_file_is_prepared_again_when_the_script_reports_it_stale(self, tmp_path: Path, capsys) -> None:
+        module = MagicMock()
+        module.prepare.return_value = tmp_path / "output.jsonl"
+        module.is_prepared_data_current.return_value = False
+
+        self._prepare_with_cached_file(tmp_path, module)
+
+        module.is_prepared_data_current.assert_called_once_with(tmp_path / "output.jsonl")
+        module.prepare.assert_called_once_with()
+        assert "is out of date" in " ".join(capsys.readouterr().out.split())
+
+    def test_cached_file_is_kept_when_the_script_reports_it_current(self, tmp_path: Path) -> None:
+        module = MagicMock()
+        module.is_prepared_data_current.return_value = True
+
+        self._prepare_with_cached_file(tmp_path, module)
+
+        module.is_prepared_data_current.assert_called_once_with(tmp_path / "output.jsonl")
+        assert module.prepare.call_count == 0
+
+    def test_staleness_check_is_not_consulted_without_the_cache_option(self, tmp_path: Path) -> None:
+        module = MagicMock()
+        module.prepare.return_value = tmp_path / "output.jsonl"
+
+        self._prepare_with_cached_file(tmp_path, module, use_cache=False)
+
+        assert module.is_prepared_data_current.call_count == 0
+        module.prepare.assert_called_once_with()
+
+    def test_cached_file_is_kept_when_the_script_has_no_staleness_check(self, tmp_path: Path) -> None:
+        module = SimpleNamespace(prepare=MagicMock())
+
+        self._prepare_with_cached_file(tmp_path, module)
+
+        assert module.prepare.call_count == 0
+
+    def test_cached_lmarena_file_without_generation_defaults_is_prepared_again(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Older prepared rows keep their own limits unless the cache check sends them back through prepare()."""
+        repo_root = Path(__file__).parents[2]
+        output = tmp_path / "lmarena_v2_validation.jsonl"
+        old_row = {"responses_create_params": {"input": [], "temperature": 0.2, "max_output_tokens": 65536}}
+        output.write_text(json.dumps(old_row) + "\n")
+
+        def fake_download(download_config) -> None:
+            Path(download_config.output_fpath).write_text(json.dumps(old_row) + "\n")
+
+        monkeypatch.chdir(repo_root)
+        monkeypatch.setattr(lmarena_prepare, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(lmarena_prepare, "OUTPUT_FPATH", output)
+        monkeypatch.setattr(lmarena_prepare, "download_jsonl_dataset", fake_download)
+        config = {
+            "use_cached_prepared_benchmarks": True,
+            "lmarena_agent": {
+                "responses_api_agents": {
+                    "simple_agent": {
+                        "datasets": [
+                            {
+                                "name": "lmarena_v2",
+                                "type": "benchmark",
+                                "jsonl_fpath": str(output),
+                                "prepare_script": "benchmarks/lmarena_v2/prepare.py",
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+
+        with patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)):
+            prepare_benchmark()
+
+        params = json.loads(output.read_text().splitlines()[0])["responses_create_params"]
+        assert {key: params[key] for key in lmarena_prepare.GENERATION_DEFAULTS} == lmarena_prepare.GENERATION_DEFAULTS
+        assert lmarena_prepare.is_prepared_data_current(output)
+
+    def test_two_declarations_resolving_to_one_agent_both_prepare(self, tmp_path: Path) -> None:
+        """Keying by resolved agent used to silently drop all but the last declaration."""
+        for suffix in ("a", "b"):
+            (tmp_path / f"prepare_{suffix}.py").write_text("")
+        config = {
+            "dummy_agent": {
+                "responses_api_agents": {
+                    "simple_agent": {
+                        "resources_server": {"type": "resources_servers", "name": "dummy_rs"},
+                        "datasets": [
+                            {
+                                "name": "bench_a",
+                                "type": "benchmark",
+                                "jsonl_fpath": str(tmp_path / "a.jsonl"),
+                                "prepare_script": str(tmp_path / "prepare_a.py"),
+                            }
+                        ],
+                    }
+                }
+            },
+            "dummy_rs": {
+                "resources_servers": {
+                    "impl": {
+                        "datasets": [
+                            {
+                                "name": "bench_b",
+                                "type": "benchmark",
+                                "jsonl_fpath": str(tmp_path / "b.jsonl"),
+                                "prepare_script": str(tmp_path / "prepare_b.py"),
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+
+        prepared: list[str] = []
+
+        def fake_import(module_path: str):
+            suffix = module_path[-1]
+            module = MagicMock()
+            module.prepare = lambda **kwargs: prepared.append(suffix) or tmp_path / f"{suffix}.jsonl"
+            return module
+
+        with (
+            patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
+            patch("nemo_gym.cli.eval.importlib.import_module", side_effect=fake_import),
+        ):
+            prepare_benchmark()
+
+        assert sorted(prepared) == ["a", "b"]
+
+
+class TestBenchmarkAgentResolution:
+    """Pins how a benchmark finds its agent (dataset-decoupling): explicit `agent:` pin >
+    declaring agent block > unique agent referencing the declaring resources server."""
+
+    def _benchmark_dataset(self, **extra):
+        return {
+            "name": "bench",
+            "type": "benchmark",
+            "jsonl_fpath": "data/bench.jsonl",
+            "prepare_script": "prepare.py",
+            **extra,
+        }
+
+    def _agent(self, rs_name):
+        return {
+            "responses_api_agents": {
+                "impl": {"entrypoint": "app.py", "resources_server": {"type": "resources_servers", "name": rs_name}}
+            }
+        }
+
+    def _environment_server(self, agent_name):
+        return {"environment_servers": {"legacy_agent": {"agent_server": {"name": agent_name}}}}
+
+    def _config(self, **top_level):
+        from nemo_gym.benchmarks import BenchmarkConfig
+
+        return BenchmarkConfig.from_initial_config_dict(
+            path=Path("bench/config.yaml"), initial_config_dict=OmegaConf.create(top_level), strict=False
+        )
+
+    def test_declaring_agent_block_still_wins_without_pin(self) -> None:
+        cfg = self._config(
+            my_agent={
+                "responses_api_agents": {"impl": {"entrypoint": "app.py", "datasets": [self._benchmark_dataset()]}}
+            },
+            **{"my_agent_environment_server": self._environment_server("my_agent")},
+        )
+        assert cfg.agent_name == "my_agent"
+
+    def test_agent_pin_on_agent_declared_dataset_must_name_the_declarer(self) -> None:
+        """Dispatch routes rows to the declaring agent, so a pin elsewhere would silently not apply."""
+        from nemo_gym.config_types import ConfigError
+
+        with pytest.raises(ConfigError, match="the pin would silently not apply"):
+            self._config(
+                my_agent={
+                    "responses_api_agents": {
+                        "impl": {"entrypoint": "app.py", "datasets": [self._benchmark_dataset(agent="other_agent")]}
+                    }
+                },
+                other_agent={"responses_api_agents": {"impl": {"entrypoint": "app.py"}}},
+                **{"my_agent_environment_server": self._environment_server("my_agent")},
+                **{"other_agent_environment_server": self._environment_server("other_agent")},
+            )
+
+    def test_redundant_agent_pin_naming_the_declarer_is_allowed(self) -> None:
+        cfg = self._config(
+            my_agent={
+                "responses_api_agents": {
+                    "impl": {"entrypoint": "app.py", "datasets": [self._benchmark_dataset(agent="my_agent")]}
+                }
+            },
+            **{"my_agent_environment_server": self._environment_server("my_agent")},
+        )
+        assert cfg.agent_name == "my_agent"
+
+    def test_rs_declared_dataset_resolves_via_unique_referencing_agent(self) -> None:
+        cfg = self._config(
+            my_rs={
+                "resources_servers": {
+                    "impl": {"entrypoint": "app.py", "domain": "other", "datasets": [self._benchmark_dataset()]}
+                }
+            },
+            my_agent=self._agent("my_rs"),
+            **{"my_agent_environment_server": self._environment_server("my_agent")},
+        )
+        assert cfg.agent_name == "my_agent"
+
+    def test_rs_declared_dataset_with_two_agents_requires_pin(self) -> None:
+        from nemo_gym.config_types import ConfigError
+
+        with pytest.raises(ConfigError, match="Pin the harness with an `agent:` key"):
+            self._config(
+                my_rs={
+                    "resources_servers": {
+                        "impl": {"entrypoint": "app.py", "domain": "other", "datasets": [self._benchmark_dataset()]}
+                    }
+                },
+                agent_a=self._agent("my_rs"),
+                agent_b=self._agent("my_rs"),
+                **{"agent_a_environment_server": self._environment_server("agent_a")},
+                **{"agent_b_environment_server": self._environment_server("agent_b")},
+            )
+
+    def test_rs_declared_dataset_with_pin_needs_no_inversion(self) -> None:
+        cfg = self._config(
+            my_rs={
+                "resources_servers": {
+                    "impl": {
+                        "entrypoint": "app.py",
+                        "domain": "other",
+                        "datasets": [self._benchmark_dataset(agent="agent_b")],
+                    }
+                }
+            },
+            agent_a=self._agent("my_rs"),
+            agent_b=self._agent("my_rs"),
+            **{"agent_a_environment_server": self._environment_server("agent_a")},
+            **{"agent_b_environment_server": self._environment_server("agent_b")},
+        )
+        assert cfg.agent_name == "agent_b"
+
+    def test_rs_declared_pin_must_reference_the_declaring_rs(self) -> None:
+        """A pin naming an agent wired to a different RS would list one agent and run another."""
+        from nemo_gym.config_types import ConfigError
+
+        with pytest.raises(ConfigError, match="no agent of that name references resources server 'my_rs'"):
+            self._config(
+                my_rs={
+                    "resources_servers": {
+                        "impl": {
+                            "entrypoint": "app.py",
+                            "domain": "other",
+                            "datasets": [self._benchmark_dataset(agent="agent_b")],
+                        }
+                    }
+                },
+                some_other_rs={"resources_servers": {"impl": {"entrypoint": "app.py", "domain": "other"}}},
+                agent_a=self._agent("my_rs"),
+                agent_b=self._agent("some_other_rs"),
+                **{"agent_a_environment_server": self._environment_server("agent_a")},
+                **{"agent_b_environment_server": self._environment_server("agent_b")},
+            )
+
+    def test_rs_declared_pin_naming_unknown_agent_errors(self) -> None:
+        from nemo_gym.config_types import ConfigError
+
+        with pytest.raises(ConfigError, match="pins agent 'ghost'"):
+            self._config(
+                my_rs={
+                    "resources_servers": {
+                        "impl": {
+                            "entrypoint": "app.py",
+                            "domain": "other",
+                            "datasets": [self._benchmark_dataset(agent="ghost")],
+                        }
+                    }
+                },
+                agent_a=self._agent("my_rs"),
+                **{"agent_a_environment_server": self._environment_server("agent_a")},
+            )
+
+
+class TestNativeTasksetBenchmark:
+    @pytest.fixture
+    def config(self, tmp_path):
+        prepare = tmp_path / "prepare.py"
+        prepare.touch()
+        return OmegaConf.create(
+            {
+                "environment_server_routes": {"swe:test": "environment"},
+                "resources": {
+                    "resources_servers": {
+                        "impl": {
+                            "entrypoint": "app.py",
+                            "domain": "coding",
+                            "datasets": [
+                                {
+                                    "name": "native",
+                                    "type": "benchmark",
+                                    "taskset": "swe:test",
+                                    "jsonl_fpath": str(tmp_path / "source.jsonl"),
+                                    "prepare_script": str(prepare),
+                                }
+                            ],
+                        }
+                    }
+                },
+                # No agent -> resources edge: the Environment Server owns the pairing.
+                "agent": {"responses_api_agents": {"impl": {"entrypoint": "app.py"}}},
+                "environment": {
+                    "environment_servers": {
+                        "single_agent_turn": {
+                            "entrypoint": "app.py",
+                            "agent_server": {"type": "responses_api_agents", "name": "agent"},
+                            "resources_server": {"type": "resources_servers", "name": "resources"},
+                        }
+                    }
+                },
+            }
+        )
+
+    def test_discover_prepare_collate_and_dispatch(self, config, tmp_path, monkeypatch):
+        import json
+
+        from nemo_gym.benchmarks import BenchmarkConfig
+        from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+        from nemo_gym.train_data_utils import TrainDataProcessor
+
+        benchmark = BenchmarkConfig.from_initial_config_dict(
+            path=tmp_path / "config.yaml",
+            initial_config_dict=config,
+            strict=False,
+        )
+        assert benchmark.agent_name == "agent"
+        assert benchmark.environment_server == "environment"
+        source = tmp_path / "source.jsonl"
+        row = {"instance_id": "task", "responses_create_params": {"input": "fix it"}, "answer": "expected"}
+
+        def prepare():
+            source.write_text(json.dumps(row) + "\n")
+            return source
+
+        module = MagicMock()
+        module.prepare.side_effect = prepare
+        monkeypatch.setattr("nemo_gym.cli.eval.get_global_config_dict", lambda **_: config)
+        with patch("nemo_gym.cli.eval.importlib.import_module", return_value=module):
+            prepare_benchmark()
+        module.prepare.assert_called_once_with()
+        original = source.read_bytes()
+        config.update({"mode": "train_preparation", "output_dirpath": str(tmp_path / "collated")})
+        TrainDataProcessor().run(config)
+        (loaded,) = RolloutCollectionHelper()._preprocess_rows_from_config(
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(tmp_path / "collated/benchmark.jsonl"),
+                output_jsonl_fpath="unused",
+                environment_server_routes={"swe:test": "environment"},
+            )
+        )
+        assert loaded["_ng_environment_server"] == "environment"
+        assert loaded["task_input"]["answer"] == "expected"
+        assert source.read_bytes() == original
+
+    @pytest.mark.parametrize(
+        "conflict, message",
+        [("agent", "pins agent 'other_agent'"), ("resources", "must bind declaring resources server")],
+    )
+    def test_collation_rejects_conflicting_route_before_writing(self, config, tmp_path, conflict, message):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.train_data_utils import TrainDataProcessor
+
+        source = tmp_path / "source.jsonl"
+        source.write_text('{"responses_create_params": {"input": "fix it"}}\n')
+        original = source.read_bytes()
+        if conflict == "agent":
+            config.other_agent = config.agent
+            config.resources.resources_servers.impl.datasets[0].agent = "other_agent"
+        else:
+            config.other_resources = config.resources
+            config.other_resources.resources_servers.impl.datasets = []
+            config.environment.environment_servers.single_agent_turn.resources_server.name = "other_resources"
+        output = tmp_path / "collated"
+        output.mkdir()
+        collated = output / "benchmark.jsonl"
+        collated.write_text("existing artifact\n")
+        config.update({"mode": "train_preparation", "output_dirpath": str(output)})
+
+        with pytest.raises(ConfigError, match=message):
+            TrainDataProcessor().run(config)
+
+        assert source.read_bytes() == original
+        assert collated.read_text() == "existing artifact\n"
+        assert not (tmp_path / "source_prepare.jsonl").exists()
+        assert not (tmp_path / "source_metrics.json").exists()
+
+    def test_native_route_resolves_the_servers_agent(self, config):
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        assert resolve_dataset_agent(config, "resources", taskset="swe:test") == "agent"
+
+    @pytest.mark.parametrize("pin", ["agent", "other"])
+    def test_native_route_rejects_any_pin(self, config, pin):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        # A taskset routes to its Environment Server; even a pin naming that server's agent is rejected.
+        with pytest.raises(ConfigError, match=f"pins agent '{pin}', but a taskset routes to Environment Server"):
+            resolve_dataset_agent(config, "resources", pin=pin, taskset="swe:test")
+
+    @pytest.mark.parametrize(
+        "change, message",
+        [
+            ({"environment_server_routes": {}}, "No Environment Server route"),
+            ({"environment_server_routes": {"swe:test": "agent"}}, "must name an Environment Server"),
+            (
+                {"environment": {"environment_servers": {"single_agent_turn": {"agent_server": {"name": "missing"}}}}},
+                "agent_server",
+            ),
+        ],
+    )
+    def test_invalid_native_route_never_falls_back(self, config, change, message):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        config.update(change)
+        with pytest.raises(ConfigError, match=message):
+            resolve_dataset_agent(config, "resources", taskset="swe:test")
+
+    def test_conflicting_pin_is_rejected(self, config):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        with pytest.raises(ConfigError, match="pins agent"):
+            resolve_dataset_agent(config, "resources", pin="other", taskset="swe:test")
+
+    def test_manifest_rejects_datasets_routed_to_different_agents(self, config):
+        from nemo_gym.environment.validation import EnvironmentValidationError, _resolve_dataset_owner_agent
+
+        datasets = config.resources.resources_servers.impl.datasets
+        datasets.append(dict(datasets[0], name="other", taskset="swe:other"))
+        config.other_agent = config.agent
+        config.other_environment = config.environment
+        config.other_environment.environment_servers.single_agent_turn.agent_server.name = "other_agent"
+        config.environment_server_routes["swe:other"] = "other_environment"
+        with pytest.raises(EnvironmentValidationError, match="route to different agents"):
+            _resolve_dataset_owner_agent(config, "resources")
+
+    def test_route_must_match_declaring_resources(self, config):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        config.environment.environment_servers.single_agent_turn.resources_server.name = "other"
+        with pytest.raises(ConfigError, match="must bind declaring resources server"):
+            resolve_dataset_agent(config, "resources", taskset="swe:test")
+
+    def test_agent_declared_taskset_must_route_to_that_agent(self, config):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        assert resolve_dataset_agent(config, "agent", taskset="swe:test") == "agent"
+        config.other = {"responses_api_agents": {"impl": {"entrypoint": "app.py"}}}
+        with pytest.raises(ConfigError, match="must route to its declaring agent"):
+            resolve_dataset_agent(config, "other", taskset="swe:test")
+
+    @pytest.fixture
+    def multi_agent_config(self, config):
+        config.user = {"responses_api_agents": {"impl": {"entrypoint": "app.py"}}}
+        server = config.environment.environment_servers.single_agent_turn
+        del server["agent_server"]
+        server.user_agent = {"type": "responses_api_agents", "name": "user"}
+        server.assistant_agent = {"type": "responses_api_agents", "name": "agent"}
+        return config
+
+    def test_multi_agent_route_resolves_without_a_pin(self, multi_agent_config):
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        # The server fronts two agents and names no agent_server, so no single agent is reported.
+        assert resolve_dataset_agent(multi_agent_config, "resources", taskset="swe:test") is None
+        multi_agent_config.environment.environment_servers.single_agent_turn.agent_server = {
+            "type": "responses_api_agents",
+            "name": "agent",
+        }
+        assert resolve_dataset_agent(multi_agent_config, "resources", taskset="swe:test") == "agent"
+
+    def test_multi_agent_route_rejects_a_pin(self, multi_agent_config):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        with pytest.raises(ConfigError, match="pins agent 'agent', but a taskset routes to Environment Server"):
+            resolve_dataset_agent(multi_agent_config, "resources", pin="agent", taskset="swe:test")
+
+    def test_multi_agent_route_accepts_a_declaring_participant(self, multi_agent_config):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        assert resolve_dataset_agent(multi_agent_config, "user", taskset="swe:test") == "user"
+        multi_agent_config.other = {"responses_api_agents": {"impl": {"entrypoint": "app.py"}}}
+        with pytest.raises(ConfigError, match="must route to its declaring agent"):
+            resolve_dataset_agent(multi_agent_config, "other", taskset="swe:test")
+
+    def test_multi_agent_route_rejects_a_reference_to_a_non_agent(self, multi_agent_config):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        multi_agent_config.environment.environment_servers.single_agent_turn.user_agent.name = "resources"
+        with pytest.raises(ConfigError, match="references 'resources', which is not an agent"):
+            resolve_dataset_agent(multi_agent_config, "resources", taskset="swe:test")
+
+    @pytest.mark.parametrize("dataset_type", ["benchmark", "example", "train"])
+    def test_collation_routes_a_multi_agent_taskset_of_any_type(self, multi_agent_config, tmp_path, dataset_type):
+        import json
+
+        from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+        from nemo_gym.train_data_utils import TrainDataProcessor
+
+        source = tmp_path / "source.jsonl"
+        rows = [{"instance_id": f"task-{index}", "answer": "expected"} for index in range(5)]
+        source.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        dataset = multi_agent_config.resources.resources_servers.impl.datasets[0]
+        if dataset_type != "benchmark":
+            dataset.type = dataset_type
+            del dataset["prepare_script"]
+            dataset.license = "Apache 2.0"
+        mode = "example_validation" if dataset_type == "example" else "train_preparation"
+        multi_agent_config.update({"mode": mode, "output_dirpath": str(tmp_path / "collated")})
+        TrainDataProcessor().run(multi_agent_config)
+        loaded = RolloutCollectionHelper()._preprocess_rows_from_config(
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(tmp_path / f"collated/{dataset_type}.jsonl"),
+                output_jsonl_fpath="unused",
+                environment_server_routes={"swe:test": "environment"},
+            )
+        )
+        assert {row["_ng_environment_server"] for row in loaded} == {"environment"}
+        assert loaded[0]["task_input"]["answer"] == "expected"
+
+    def test_listing_names_the_environment_server_without_a_single_agent(self, multi_agent_config, tmp_path):
+        from nemo_gym.benchmarks import BenchmarkConfig
+
+        benchmark = BenchmarkConfig.from_initial_config_dict(
+            path=tmp_path / "config.yaml", initial_config_dict=multi_agent_config, strict=False
+        )
+        assert benchmark.agent_name is None
+        assert benchmark.environment_server == "environment"
+
+    def test_manifest_cannot_describe_a_multi_agent_taskset(self, multi_agent_config):
+        from nemo_gym.environment.validation import EnvironmentValidationError, _resolve_dataset_owner_agent
+
+        with pytest.raises(EnvironmentValidationError, match="fronts several agents"):
+            _resolve_dataset_owner_agent(multi_agent_config, "resources")
+
+
+class TestAgentPinDiscoveryCollateRollout:
+    """The agent discovery resolves for a pinned benchmark is the agent rollout dispatch routes
+    its collated rows to (previously the pin was honored at discovery only)."""
+
+    def test_pin_survives_discovery_collate_and_rollout(self, tmp_path: Path, monkeypatch) -> None:
+        import json
+
+        from nemo_gym.benchmarks import BenchmarkConfig
+        from nemo_gym.config_types import maybe_get_server_instance_config
+        from nemo_gym.rollout_collection import RolloutCollectionHelper
+        from nemo_gym.train_data_utils import TrainDataProcessor
+
+        data_fpath = tmp_path / "bench.jsonl"
+        data_fpath.write_text(json.dumps({"responses_create_params": {"input": []}}) + "\n")
+        config = {
+            "shared_rs": {
+                "resources_servers": {
+                    "impl": {
+                        "entrypoint": "app.py",
+                        "domain": "other",
+                        "datasets": [
+                            {
+                                "name": "bench",
+                                "type": "benchmark",
+                                "jsonl_fpath": str(data_fpath),
+                                "prepare_script": "prepare.py",
+                                "agent": "agent_b",
+                            }
+                        ],
+                    }
+                }
+            },
+            "agent_a": {
+                "responses_api_agents": {
+                    "impl": {
+                        "entrypoint": "app.py",
+                        "resources_server": {"type": "resources_servers", "name": "shared_rs"},
+                    }
+                }
+            },
+            "agent_b": {
+                "responses_api_agents": {
+                    "impl": {
+                        "entrypoint": "app.py",
+                        "resources_server": {"type": "resources_servers", "name": "shared_rs"},
+                    }
+                }
+            },
+            "agent_a_environment_server": {
+                "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_a"}}}
+            },
+            "agent_b_environment_server": {
+                "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_b"}}}
+            },
+        }
+        config_dict = OmegaConf.create(config)
+
+        # 1. Discovery: two agents reference shared_rs; the pin picks agent_b.
+        bc = BenchmarkConfig.from_initial_config_dict(
+            path=Path("bench/config.yaml"), initial_config_dict=config_dict, strict=False
+        )
+        assert bc.agent_name == "agent_b"
+
+        # 2. Collate (real stamping): rows carry only task_source, never the pin or an agent_ref.
+        rs_instance, err = maybe_get_server_instance_config("shared_rs", config_dict["shared_rs"])
+        assert err is None, err
+        monkeypatch.chdir(tmp_path)
+        paths = TrainDataProcessor()._collate_samples_single_type(
+            type="benchmark", server_instance_configs=[rs_instance]
+        )
+        rows = [json.loads(line) for line in open(paths[0])]
+        assert rows[0]["task_source"] == "shared_rs"
+        assert "agent_ref" not in rows[0]
+
+        # 3. Rollout dispatch: resolution reads the pin back off the declaring instance.
+        RolloutCollectionHelper.resolve_task_sources(rows, config_dict)
+        assert rows[0]["agent_ref"] == {"name": bc.agent_name}

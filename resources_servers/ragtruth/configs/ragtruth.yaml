@@ -39,3 +39,11 @@ ragtruth_simple_agent:
         type: validation
         jsonl_fpath: resources_servers/ragtruth/data/test_data2txt.jsonl
         license: MIT
+
+ragtruth_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: ragtruth_simple_agent

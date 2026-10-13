@@ -1,0 +1,23 @@
+[project]
+name = "pocketshell"
+version = "0.1.0"
+description = "In-process, workspace-confined read-only shell for LLM agent harnesses (no subprocess, no sandbox)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+# `regex` gives PCRE-compatible lookaround/possessive support for `grep -P`.
+# Optional: without it, -P degrades to the stdlib `re` engine.
+pcre = ["regex>=2024.0.0"]
+dev = ["pytest>=8.0", "regex>=2024.0.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
