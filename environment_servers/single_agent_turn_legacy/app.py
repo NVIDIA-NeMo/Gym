@@ -72,13 +72,13 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
         if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
             raise ValueError(f"Invalid episode attempt: {attempt!r}")
-        base_identity_row = dict(row)
-        base_identity_row[ATTEMPT_INDEX_KEY_NAME] = 0
-        rollout_id = maybe_rollout_id_from_run_body(base_identity_row) or (
+        # Decode the identity the way the agent does.
+        # An explicit id may carry the attempt suffix itself, as a restored attempt does.
+        capture_key = maybe_rollout_id_from_run_body(row) or (
             f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
         )
         return SingleAgentTurnRequest(
-            episode_id=EpisodeId(rollout_id=rollout_id, attempt=attempt),
+            episode_id=EpisodeId.from_capture_key(capture_key),
             task=materialize_task(row, taskset=task_source),
         )
 
