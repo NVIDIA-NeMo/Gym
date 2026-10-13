@@ -130,6 +130,9 @@ def test_deepswe_runs_opencode_sessions_in_the_resources_sandbox(monkeypatch: py
     agent_config = _deepswe_agent_config(config)
     assert agent_config.timeout == 10800
     assert agent_config.max_output_tokens == agent_config.context_window == 262144
+    # The previous recipe graded runs that ended on an error and read the repository's AGENTS.md/CLAUDE.md.
+    assert agent_config.session_return_failed_runs is True
+    assert agent_config.session_project_config is True
     # Resources lends its no-network task sandbox; the agent never creates one.
     assert agent_config.sandbox_provider is None
     assert agent_config.opencode_config["permission"]["bash"]["*git fetch*"] == "deny"

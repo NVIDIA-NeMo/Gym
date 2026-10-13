@@ -73,25 +73,22 @@ settings map to that block as follows:
 | `remote_opencode_install_script_path`, `remote_opencode_binary_path` | `sandbox_runtime_binaries.glibc` (no install script) |
 | `remote_opencode_musl_binary_path` | `sandbox_runtime_binaries.musl` |
 | `opencode_config.permission` | Same command restrictions; `webfetch`, `websearch` and `skill` are disabled under `opencode_config.tools` |
+| `execution_failure_reward_zero: false` (a run that ended on an OpenCode error was still verified and graded normally) | `session_return_failed_runs: true`: the run is returned with status `failed` and its error, then verified and graded normally instead of retried |
+| OpenCode read the repository's `AGENTS.md` or `CLAUDE.md` and project config | `session_project_config: true` |
 | `datasets` | Unchanged, on this agent block |
 
 The session path does not support these previous controls, and the agent ignores them if they are set:
 
 - `opencode_model_call_timeout` (one hour per model request): model requests have no per-request deadline; the
   three-hour budget bounds the run.
-- `execution_failure_reward_zero` and verifying after an OpenCode error: a runtime or model error now fails the
-  episode before verification, and Gym records it as a failed rollout instead of a graded one. A run stopped by its
-  time budget is still verified.
 - Request-level `temperature` and `top_p`: configure sampling on the Gym model server.
 - `token_id_capture`, `debug`, `artifacts_dir` and `local_ripgrep_binary_path`. The transcript is returned in the
   rollout's agent observations instead of an export file. OpenCode downloads ripgrep on demand, so its `glob` and
   `grep` tools need a sandbox image that already provides `rg`, as before.
 
-The session path also changes what reaches the model. OpenCode replays earlier reasoning as `reasoning_content`.
-It also no longer adds the repository's top-level `AGENTS.md` or `CLAUDE.md` to its instructions; 20 of the 113 task
-repositories have one at their base commit. Instruction files below the top level are still attached when OpenCode
-reads files next to them. Scores from this recipe are therefore not directly comparable with scores from the previous
-recipe.
+Earlier reasoning reaches the model as before. Gym's vLLM model server returns it inside `<think>` tags in the
+assistant content, OpenCode sends that content back in later requests, and the model server moves it into the
+reasoning field before calling vLLM.
 
 As in upstream DeepSWE v1.1, the agent must commit its work. At verification time the resources server executes the
 task's pinned `[[verifier.collect]]` hook, which writes `git diff --binary <base_commit> HEAD` to

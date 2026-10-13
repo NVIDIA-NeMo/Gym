@@ -28,6 +28,10 @@ deepswe_opencode_agent:
       concurrency: 1024
       # Keep the previous benchmark's output budget: the whole context window.
       max_output_tokens: ${.context_window}
+      # As before, a run that ends on a model or runtime error is still verified and graded, not retried.
+      session_return_failed_runs: true
+      # As before, OpenCode reads the task repository's AGENTS.md or CLAUDE.md.
+      session_project_config: true
       datasets:
         - name: deepswe_v1_1
           type: benchmark
