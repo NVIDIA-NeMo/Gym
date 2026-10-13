@@ -271,6 +271,40 @@ def test_identical_retries_collapse_to_one_call():
     ]
     att = resolve_terminal(entries, _response([_assistant_item("same")]))
     assert att.attributed and att.model_call_id == "call_a" and att.method == "content_output"
+    # Neither serving recorded a finish reason, so the twins agree and the verdict stands.
+    assert att.finish_reason_resolved
+
+
+@pytest.mark.parametrize("cut_call", ["call_a", "call_b"])
+def test_identical_retries_with_different_finish_reasons_leave_the_verdict_unresolved(cut_call):
+    # The same tokens were served twice, once cut at the output budget and once complete (a
+    # retry under a larger budget). Content names the smaller call id, which says nothing about
+    # which serving the harness kept, so the chain is attributed but the finish reason is not,
+    # whichever twin was the cut one.
+    entries = [
+        _entry("call_a", [1, 2], [3, 4], text="same", finish_reason="length" if cut_call == "call_a" else "stop"),
+        _entry("call_b", [1, 2], [3, 4], text="same", finish_reason="length" if cut_call == "call_b" else "stop"),
+    ]
+    att = resolve_terminal(entries, _response([_assistant_item("same")]))
+    assert att.attributed and att.model_call_id == "call_a" and att.method == "content_output"
+    assert not att.finish_reason_resolved
+    assert "finish_reason_disagreement" in att.reason
+
+
+@pytest.mark.parametrize("witness", ["explicit", "response_id"])
+def test_a_witness_that_singles_out_one_twin_settles_its_finish_reason(witness):
+    # A gate seal, or possession of the served response id, names the serving the harness kept,
+    # so its finish reason stands even though a token-identical twin recorded a different one.
+    entries = [
+        _entry("call_a", [1, 2], [3, 4], text="same", response_id="resp_a", finish_reason="length"),
+        _entry("call_b", [1, 2], [3, 4], text="same", response_id="resp_b", finish_reason="stop"),
+    ]
+    if witness == "explicit":
+        att = resolve_terminal(entries, _response([_assistant_item("same")]), explicit_call_id="call_b")
+    else:
+        att = resolve_terminal(entries, _response([_assistant_item("same")], response_id="resp_b"))
+    assert att.model_call_id == "call_b" and att.method == witness
+    assert att.finish_reason_resolved and "finish_reason_disagreement" not in att.reason
 
 
 def test_divergent_final_retries_resolve_by_id_and_abstain_on_content():
@@ -610,6 +644,36 @@ def test_assemble_broken_terminal_chain_masks():
     )
     assert built["metrics"]["terminal_attribution"]["chain"] == "broken"
     assert built[MASK_SAMPLE_KEY] is True
+
+
+@pytest.mark.parametrize("cut_call", ["call_a", "call_b"])
+def test_assemble_withholds_the_truncation_verdict_when_identical_retries_disagree(cut_call):
+    # Two token-identical servings, one cut at the output budget. Content attribution picks the
+    # smaller call id, so without the finish-reason rule the delivered response would read
+    # incomplete or complete depending on which twin drew that id. The chain is delivered either
+    # way; the status stays unset either way.
+    entries = [
+        _entry("call_a", [1, 2], [3, 4], text="same", finish_reason="length" if cut_call == "call_a" else "stop"),
+        _entry("call_b", [1, 2], [3, 4], text="same", finish_reason="length" if cut_call == "call_b" else "stop"),
+    ]
+    built = _assemble("r", entries, "prefix_merging", "m", verified_response=_response([_assistant_item("same")]))
+    assert built[MASK_SAMPLE_KEY] is False
+    assert built["metrics"]["terminal_attribution"]["chain"] == "delivered"
+    assert "finish_reason_disagreement" in built["metrics"]["terminal_attribution"]["reason"]
+    rebuilt = built["rebuilt_response"]
+    assert "status" not in rebuilt and "incomplete_details" not in rebuilt
+
+
+def test_assemble_keeps_the_truncation_verdict_when_identical_retries_agree():
+    # Both servings stopped at the output budget, so the verdict does not depend on the call id.
+    entries = [
+        _entry("call_a", [1, 2], [3, 4], text="same", finish_reason="length"),
+        _entry("call_b", [1, 2], [3, 4], text="same", finish_reason="length"),
+    ]
+    built = _assemble("r", entries, "prefix_merging", "m", verified_response=_response([_assistant_item("same")]))
+    assert built[MASK_SAMPLE_KEY] is False
+    assert built["rebuilt_response"]["status"] == "incomplete"
+    assert built["rebuilt_response"]["incomplete_details"] == {"reason": "max_output_tokens"}
 
 
 # --- delivery end to end -------------------------------------------------------

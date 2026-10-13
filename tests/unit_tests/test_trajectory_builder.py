@@ -280,6 +280,15 @@ def test_projection_leaves_the_status_unset_for_other_finish_reasons(finish_reas
     assert "status" not in resp and "incomplete_details" not in resp
 
 
+def test_projection_withholds_the_verdict_when_the_finish_reason_is_unresolved():
+    # Terminal attribution reports an unresolved finish reason when the terminal call was chosen
+    # among token-identical retries that stopped for different reasons; the projection then leaves
+    # the status unset instead of reporting whichever twin drew the smaller call id.
+    out = prefix_merging([_entry("c1", [1, 2, 3], [10, 11], finish_reason="length")])
+    resp = project_main_chain_response("t0-r0", out, model="m", finish_reason_resolved=False)
+    assert "status" not in resp and "incomplete_details" not in resp
+
+
 def test_consumer_reads_store_and_builds(tmp_path):
     # The colocated consumer freezes the local store before building.
     store = TokenCaptureStore(tmp_path)

@@ -614,7 +614,9 @@ def project_chain_to_output_items(chain: Chain) -> list[dict]:
 _INCOMPLETE_REASON_BY_FINISH_REASON = {"length": "max_output_tokens", "content_filter": "content_filter"}
 
 
-def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = "") -> dict:
+def project_main_chain_response(
+    rollout_id: str, out: BuildOutput, model: str = "", *, finish_reason_resolved: bool = True
+) -> dict:
     """Rebuild the main chain as a Responses object whose output items are contiguous.
 
     The result is a Gym-native Responses payload.
@@ -627,7 +629,10 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
     (``max_output_tokens`` or ``content_filter``), the verdict the Responses converter gives a
     chat completion that ended the same way. The finish reason is recorded by the local capture
     path (``capture_tokens``); a call staged under worker custody carries none, so a chain built
-    from externally staged records reports no verdict.
+    from externally staged records reports no verdict. ``finish_reason_resolved=False`` withholds
+    the verdict as well: terminal attribution passes it when the terminal call was chosen among
+    token-identical retries that recorded different finish reasons, so the status would otherwise
+    depend on which twin drew the smaller call id.
     """
     if not out.chains:
         raise ValueError("capture produced no safe trainable chain")
@@ -652,7 +657,11 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
     # Only the terminal call decides: an earlier ``length`` stop did not end the delivered
     # chain, because a later call extended it. A complete ending, or an unrecorded finish
     # reason, leaves ``status`` unset.
-    incomplete_reason = _INCOMPLETE_REASON_BY_FINISH_REASON.get(mains[0].links[-1].entry.finish_reason)
+    incomplete_reason = (
+        _INCOMPLETE_REASON_BY_FINISH_REASON.get(mains[0].links[-1].entry.finish_reason)
+        if finish_reason_resolved
+        else None
+    )
     if incomplete_reason is not None:
         response["status"] = "incomplete"
         response["incomplete_details"] = {"reason": incomplete_reason}

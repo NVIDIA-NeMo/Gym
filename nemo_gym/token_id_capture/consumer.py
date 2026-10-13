@@ -136,7 +136,9 @@ def _assemble(
     try:
         for chain in out.chains:
             chain.validate()
-        response = project_main_chain_response(rollout_id, out, model=model)
+        response = project_main_chain_response(
+            rollout_id, out, model=model, finish_reason_resolved=attribution.finish_reason_resolved
+        )
         assert_prefix_contiguity(response)
     except (AssertionError, ValueError, KeyError, IndexError, TypeError) as error:
         logger.warning(

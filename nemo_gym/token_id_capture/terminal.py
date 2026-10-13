@@ -97,6 +97,14 @@ class TerminalAttribution:
     # The abstention/disagreement trail, kept on success and failure alike,
     # plus corroboration notes when several witnesses agreed.
     reason: str = ""
+    # Whether the named call's recorded finish reason is the kept serving's.
+    # Identical retries carry the same tokens, so any of them is the same
+    # delivered chain, but they can record different finish reasons (one cut
+    # at the output budget, a retry under a larger budget complete). When the
+    # call was chosen among such twins by call-id order alone and their finish
+    # reasons differ, the truncation verdict would depend on that order, so
+    # the consumer withholds it.
+    finish_reason_resolved: bool = True
 
     @property
     def attributed(self) -> bool:
@@ -122,11 +130,15 @@ def resolve_terminal(
     # Witnesses in precedence order for *naming* only (which call id and
     # method label an agreeing verdict reports) — never for outranking.
     witnesses: list[tuple[str, TokenEntry]] = []
+    # Calls a witness singled out as the one entry it matched, as opposed to
+    # one of several token-identical entries collapsed to the smallest call id.
+    identified: set[str] = set()
 
     if explicit_call_id:
         named = by_call_id.get(explicit_call_id)
         if named is not None:
             witnesses.append(("explicit", named))
+            identified.add(named.model_call_id)
         else:
             reasons.append("explicit_terminal_not_captured")
 
@@ -139,6 +151,8 @@ def resolve_terminal(
             reasons.append("declared_ambiguous" if declared_matches else "declared_terminal_not_captured")
             return TerminalAttribution(None, reason=",".join(reasons))
         witnesses.append(("declared", declared_winner))
+        if len(declared_matches) == 1:
+            identified.add(declared_winner.model_call_id)
 
     if isinstance(response, dict):
         response_id = str(response.get("id") or "")
@@ -148,16 +162,18 @@ def resolve_terminal(
                 winner = _collapse_identical(id_matches)
                 if winner is not None:
                     witnesses.append(("response_id", winner))
+                    if len(id_matches) == 1:
+                        identified.add(winner.model_call_id)
                 else:
                     reasons.append("response_id_ambiguous")
             else:
                 reasons.append("response_id_no_match")
         else:
             reasons.append("response_has_no_id")
-        item = _item_id_witness(entries, response, reasons)
+        item = _item_id_witness(entries, response, reasons, identified)
         if item is not None:
             witnesses.append(item)
-        content = _content_witness(entries, response, reasons)
+        content = _content_witness(entries, response, reasons, identified)
         if content is not None:
             witnesses.append(content)
     else:
@@ -178,10 +194,26 @@ def resolve_terminal(
     method, named = witnesses[0]
     if len(witnesses) > 1:
         reasons.append("corroborated_by=" + "+".join(other for other, _ in witnesses[1:]))
+    # Identical retries are one delivered chain but not necessarily one finish
+    # reason. The named call's reason settles the rebuilt response's status
+    # only when a witness singled that call out among its token-identical
+    # twins, or when the twins all recorded the same reason.
+    identity = _sequence_identity(named)
+    twins = [entry for entry in entries if _sequence_identity(entry) == identity]
+    finish_reason_resolved = named.model_call_id in identified or (
+        len({getattr(entry, "finish_reason", None) for entry in twins}) == 1
+    )
+    if not finish_reason_resolved:
+        reasons.append("finish_reason_disagreement")
     # The trail is kept even on success: a witness that abstained (e.g. a
     # duplicated response id) is a diagnosable defect even when another
     # witness attributes the rollout.
-    return TerminalAttribution(named.model_call_id, method=method, reason=",".join(reasons))
+    return TerminalAttribution(
+        named.model_call_id,
+        method=method,
+        reason=",".join(reasons),
+        finish_reason_resolved=finish_reason_resolved,
+    )
 
 
 def _is_custody_row(entry: TokenEntry) -> bool:
@@ -213,8 +245,9 @@ def _collapse_identical(candidates: list[TokenEntry]) -> TokenEntry | None:
 
     Identical retries produce entries whose sequences match; any of them
     yields the same delivered chain, so the smallest call id wins
-    deterministically. Candidates with different sequences are genuinely
-    ambiguous and collapse to ``None``.
+    deterministically (``resolve_terminal`` separately decides whether that
+    call's finish reason may stand for the group). Candidates with different
+    sequences are genuinely ambiguous and collapse to ``None``.
     """
     if not candidates:
         return None
@@ -289,7 +322,9 @@ def _entry_items_by_served_id(entry: TokenEntry) -> dict[str, tuple]:
     return keyed
 
 
-def _item_id_witness(entries: list[TokenEntry], response: dict, reasons: list[str]) -> tuple[str, TokenEntry] | None:
+def _item_id_witness(
+    entries: list[TokenEntry], response: dict, reasons: list[str], identified: set[str]
+) -> tuple[str, TokenEntry] | None:
     """The item-id witness: the served id of the response's last model-authored item.
 
     The model server assigns an id to every output item it returns. A harness
@@ -304,7 +339,9 @@ def _item_id_witness(entries: list[TokenEntry], response: dict, reasons: list[st
     message's content parts), so that a reused or colliding id cannot name a
     call whose output the transcript does not end with. An item whose id no
     entry recorded, such as a message the harness composed itself, abstains
-    rather than naming an earlier call.
+    rather than naming an earlier call. A call matched as the single entry is
+    added to ``identified``: the witness singled it out rather than collapsing
+    token-identical twins to the smallest call id.
     """
     output = response.get("output")
     if not isinstance(output, list):
@@ -345,10 +382,14 @@ def _item_id_witness(entries: list[TokenEntry], response: dict, reasons: list[st
     if winner is None:
         reasons.append("item_id_ambiguous")
         return None
+    if len(matches) == 1:
+        identified.add(winner.model_call_id)
     return ("item_id", winner)
 
 
-def _content_witness(entries: list[TokenEntry], response: dict, reasons: list[str]) -> tuple[str, TokenEntry] | None:
+def _content_witness(
+    entries: list[TokenEntry], response: dict, reasons: list[str], identified: set[str]
+) -> tuple[str, TokenEntry] | None:
     """The content witness: fingerprint the response's model-authored items.
 
     Three readings of one response are possible and must compete, not race. A
@@ -359,7 +400,8 @@ def _content_witness(entries: list[TokenEntry], response: dict, reasons: list[st
     terminal call's own output. The readings can name different calls — a
     first call's cumulative fingerprint IS its own-output fingerprint, because
     non-model turns never contribute — so candidates from all keys pool before
-    the ambiguity decision.
+    the ambiguity decision. A call matched as the single entry is added to
+    ``identified``, as in ``_item_id_witness``.
     """
     output = response.get("output")
     if not isinstance(output, list) or not output:
@@ -426,6 +468,8 @@ def _content_witness(entries: list[TokenEntry], response: dict, reasons: list[st
                 matches[entry.model_call_id] = entry
     winner = _collapse_identical(list(matches.values()))
     if winner is not None:
+        if len(matches) == 1:
+            identified.add(winner.model_call_id)
         if custody_hit:
             # Custody manifests label all three readings as one witness.
             return ("content", winner)
