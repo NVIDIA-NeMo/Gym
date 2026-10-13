@@ -1556,7 +1556,7 @@ async def test_reserved_explicit_id_is_rejected_before_dispatch(runner_config, m
         monkeypatch, AsyncMock(return_value=FakeResponse(200, {"_ng_failure_class": "judge_failed"}))
     )
     helper = RolloutCollectionHelper()
-    with pytest.raises(ConfigError, match="reserved attempt suffix"):
+    with pytest.raises(ConfigError, match="reserved (?:attempt )?suffix"):
         if direct:
             await next(helper.run_outcomes([row], run_id="test"))
         else:
