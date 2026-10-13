@@ -221,8 +221,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         if unsupported:
             raise ValueError(f"Stirrup does not support required MCP tool access: {', '.join(unsupported)}")
         direct_accesses = [access for access in accesses if isinstance(access, DirectHTTPToolAccess)]
-        if len(direct_accesses) != 1:
-            raise ValueError("Stirrup requires exactly one direct HTTP tool access")
+        if len(direct_accesses) > 1:
+            raise ValueError("Stirrup supports at most one direct HTTP tool access")
+        tool_access = direct_accesses[0] if direct_accesses else None
 
         provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
         try:
@@ -241,8 +242,8 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 session_dir=f"/tmp/nemo-gym-stirrup-sessions/{uuid4().hex}",
                 harness="Stirrup",
             ),
-            tool_access=direct_accesses[0],
-            resources_cookies=dict(direct_accesses[0].cookies),
+            tool_access=tool_access,
+            resources_cookies=dict(tool_access.cookies) if tool_access else {},
         )
         try:
             await state.install_runtime(timeout=self.config.sandbox_install_timeout_seconds)
@@ -267,6 +268,8 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     async def _run_sandbox_episode(
         self, body: NeMoGymResponseCreateParamsNonStreaming, state: StirrupSessionState
     ) -> NeMoGymResponse:
+        if body.tools and state.tool_access is None:
+            raise ValueError("The request has tools, but the session grants no tool access to call them")
         max_completion_tokens_cap = self.config.max_completion_tokens_cap
         if body.max_output_tokens is not None:
             max_completion_tokens_cap = min(max_completion_tokens_cap, body.max_output_tokens)
@@ -277,7 +280,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "instructions": params["instructions"],
             "tools": params["tools"],
             "finish_tool_names": self.config.finish_tool_names,
-            "tool_access": state.tool_access.model_dump(mode="json"),
+            "tool_access": state.tool_access.model_dump(mode="json") if state.tool_access else None,
             "workdir": state.session.workdir,
             "max_turns": self.config.agent_max_turns,
             "min_compaction_summary_words": self.config.min_compaction_summary_words,

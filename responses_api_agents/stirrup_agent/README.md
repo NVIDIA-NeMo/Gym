@@ -6,11 +6,12 @@ It is benchmark-agnostic: the task prompt, the task tools and the sandbox come f
 
 ## How it works
 
-Stirrup runs only in agent sessions, seeded by an environment server with two grants:
+Stirrup runs only in agent sessions, seeded by an environment server with these grants:
 
 - `sandbox_access`: the task sandbox, owned by the resources server. At seed, the agent installs the server's Stirrup
   version in a venv outside the working directory and stages `sandbox_runner.py` with the modules it imports.
-- One `direct_http` tool access: the resources server's routes and the session cookies.
+- At most one `direct_http` tool access: the resources server's routes and the session cookies. A request with `tools`
+  needs it.
 
 The activation (`/ng-rollout/<id>/v1/responses`) runs `sandbox_runner.py` in the sandbox under Gym's process
 supervisor. The runner builds Stirrup's messages from `responses_create_params.input` and gives the model:
