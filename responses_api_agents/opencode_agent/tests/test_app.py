@@ -131,7 +131,7 @@ class TestSanity:
 
 
 class TestTurnLimit:
-    def test_counts_only_completed_root_non_compaction_turns(self, tmp_path: Path) -> None:
+    def test_counts_completed_root_turns_including_compaction(self, tmp_path: Path) -> None:
         completed = {"role": "assistant", "agent": "build", "time": {"created": 1, "completed": 2}}
         db = _session_db(
             tmp_path,
@@ -149,7 +149,7 @@ class TestTurnLimit:
             sessions=[("root", None), ("child", "root")],
         )
 
-        assert _completed_root_model_turns(db) == 1
+        assert _completed_root_model_turns(db) == 2
 
     async def test_committed_turn_cap_terminates_without_timeout(self, tmp_path: Path) -> None:
         class Process:

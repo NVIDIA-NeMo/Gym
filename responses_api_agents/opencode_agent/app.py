@@ -127,7 +127,12 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 
 
 def _completed_root_model_turns(db_path: Path) -> int:
-    """Count committed, non-compaction model turns in the root OpenCode session."""
+    """Count committed model turns in the root OpenCode session.
+
+    OpenCode charges compaction summaries against its native ``steps`` budget.
+    Count them here as well so this hard limit cannot lag behind the native
+    budget and miss a build/compaction retry loop.
+    """
     if not db_path.is_file():
         return 0
     try:
@@ -153,8 +158,6 @@ def _completed_root_model_turns(db_path: Path) -> int:
         timestamp = message.get("time") if isinstance(message.get("time"), dict) else {}
         if (
             message.get("role") == "assistant"
-            and message.get("summary") is not True
-            and message.get("agent") != "compaction"
             and isinstance(timestamp.get("completed"), (int, float))
             and not isinstance(timestamp.get("completed"), bool)
         ):
