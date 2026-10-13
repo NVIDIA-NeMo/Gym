@@ -52,6 +52,7 @@ class SWEBenchMetrics(BaseModel):
     model_patch: Optional[str] = None
 
     agent_timed_out: Optional[bool] = None
+    context_overflow: Optional[bool] = None
     agent_error_kind: Optional[str] = None
     eval_timed_out: Optional[bool] = None
     error_kind: Optional[str] = None
@@ -143,15 +144,28 @@ def _classify_agent_error(error: str) -> Optional[str]:
     return "other" if text.strip() else None
 
 
+_CONTEXT_OVERFLOW_SIGNALS = ("maximum context length", "max_model_len", "input length exceeds", "context length exceeded")
+
+
+def _is_context_overflow(agent_error_kind: Optional[str], agent_error: str) -> bool:
+    text = agent_error.lower()
+    return agent_error_kind == "context_window" or any(signal in text for signal in _CONTEXT_OVERFLOW_SIGNALS)
+
+
 def _should_mask_sample(
     resolved: bool,
     agent_error_kind: Optional[str],
     agent_timed_out: bool,
     error_kind: Optional[str],
+    mask_context_overflow: bool = True,
+    mask_agent_timeouts: bool = True,
 ) -> bool:
+    # Infra failures (sandbox, eval_timeout) are always masked. With the flags off, context overflow and agent
+    # timeouts train with their graded reward, as model behavior.
+    masked_kinds = ("max_iteration", "context_window") if mask_context_overflow else ("max_iteration",)
     return bool(
-        (resolved and agent_error_kind in ("max_iteration", "context_window"))
-        or agent_timed_out
+        (resolved and agent_error_kind in masked_kinds)
+        or (mask_agent_timeouts and agent_timed_out)
         or error_kind in ("eval_timeout", "sandbox")
     )
 
@@ -274,6 +288,9 @@ class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     swebench_tests_timeout: int = 1800
     swebench_agent_timeout: int = 2700
     concurrency: int = 256
+    # Defaults keep the original masking. False trains these rollouts with their graded reward (normally 0).
+    mask_context_overflow: bool = True
+    mask_agent_timeouts: bool = True
 
 
 class AnySweServerConfig(BaseModel):
@@ -867,7 +884,14 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
 
         eval_timed_out = error_kind == "eval_timeout"
-        mask_sample = _should_mask_sample(resolved, agent_error_kind, agent_timed_out, error_kind)
+        mask_sample = _should_mask_sample(
+            resolved,
+            agent_error_kind,
+            agent_timed_out,
+            error_kind,
+            mask_context_overflow=params.mask_context_overflow,
+            mask_agent_timeouts=params.mask_agent_timeouts,
+        )
         update_metrics(
             params.metrics_fpath,
             {
@@ -875,6 +899,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 "patch_exists": bool(patch.strip()),
                 "model_patch": patch or None,
                 "agent_timed_out": agent_timed_out,
+                "context_overflow": _is_context_overflow(agent_error_kind, agent_error),
                 "agent_error_kind": agent_error_kind,
                 "eval_timed_out": eval_timed_out,
                 "error_kind": error_kind,

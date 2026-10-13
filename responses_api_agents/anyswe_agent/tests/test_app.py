@@ -39,6 +39,7 @@ from responses_api_agents.anyswe_agent.app import (
     _model_url_for_rollout,
     _r2e_resolved,
     _safe_config_json,
+    _is_context_overflow,
     _should_mask_sample,
 )
 from responses_api_agents.anyswe_agent.prepare import _to_gym_row
@@ -201,6 +202,23 @@ class TestSandboxAPI:
         assert _should_mask_sample(False, None, False, "eval_timeout")
         assert _should_mask_sample(False, None, False, "sandbox")
         assert not _should_mask_sample(False, None, False, "eval_error")
+
+    def test_masking_flags_unmask_overflow_and_timeouts(self) -> None:
+        off = dict(mask_context_overflow=False, mask_agent_timeouts=False)
+        assert not _should_mask_sample(True, "context_window", False, None, **off)
+        assert not _should_mask_sample(False, "context_window", False, None, **off)
+        assert not _should_mask_sample(False, None, True, None, **off)
+        assert _should_mask_sample(True, "max_iteration", False, None, **off)
+        assert _should_mask_sample(False, None, True, "sandbox", **off)
+        assert _should_mask_sample(False, None, False, "eval_timeout", **off)
+        assert _should_mask_sample(False, None, True, None, mask_context_overflow=False)
+        assert not _should_mask_sample(False, None, True, None, mask_agent_timeouts=False)
+
+    def test_context_overflow_detection(self) -> None:
+        assert _is_context_overflow("context_window", "")
+        assert _is_context_overflow("other", "This model's maximum context length is 131072 tokens")
+        assert _is_context_overflow(None, "Prompt length exceeds max_model_len")
+        assert not _is_context_overflow("other", "tool failed")
 
     def test_dataset_routes(self) -> None:
         assert _dataset_family("princeton-nlp/SWE-bench_Verified") == "swebench"
