@@ -1,11 +1,11 @@
 # Serve ONLY the spartqa resources server (the /verify scorer), for driving
-# from nemo-evaluator via the gym:// environment adapter:
+# from an external eval runner:
 #
 #   ng_run "+config_paths=[resources_servers/spartqa/configs/spartqa_serve.yaml]"
 #
 # SpartQA needs no model server — verify() extracts the model's final answer
 # locally and scores the exact-or-contains match deterministically.
-# nemo-evaluator owns the policy model and generation; it POSTs the model's
+# The runner owns the policy model and generation; it POSTs the model's
 # answer to this server's /verify. See README.md.
 spartqa:
   resources_servers:

@@ -53,3 +53,10 @@ responses_create_params:
   top_p: 0.95
   max_output_tokens: 32768
   stream: false
+
+lmarena_v3_benchmark_environment_server:
+  _inherit_from: lmarena_v3_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: lmarena_v3_benchmark_agent

@@ -1,0 +1,284 @@
+---
+title: "Drive a Remote Agent"
+description: "Evaluate an agent service you host yourself — a composition of OpenAI Responses-compliant agents, with Gym driving the loop"
+position: 3
+---
+
+# Drive a Remote Agent
+
+The `remote_agent` server lets an agent that runs as **its own HTTP service** — in your repo, on
+your infrastructure — be driven by standard rollout collection. Your service implements an
+endpoint **compliant with the OpenAI `/v1/responses` contract**, and the two servers compose as
+Responses-speaking agents: each call your service receives the conversation so far and returns
+what it wants to do next. Gym runs the loop, executes environment tools, holds the session, and
+verifies.
+Your results land in the standard artifacts (`gym eval profile`, aggregation, and training
+pipelines all work unchanged).
+
+```
+collector ──/run──▶ remote_agent (Gym) ──POST /v1/responses──▶ your service ⟲ your model,
+                        │      ▲                                               your own tools
+                        │      └── Gym-tool results appended,     (any number of internal steps,
+                        │          loop repeats                    then: Gym-tool asks
+                        ▼                                          or a final answer)
+                  resources server (seed / Gym tools / verify — never exposed to your service)
+```
+
+## Who does what
+
+**Gym is responsible for:**
+
+1. Seeding a fresh environment session per rollout and holding its cookies — session state
+   and the task's answer key (`verifier_metadata`) never reach your service.
+2. Driving the loop: calling your service, executing the tool calls it asks for against the
+   environment, appending the results, and calling again.
+3. All failure handling: bounded connect retries, per-call and whole-rollout timeouts, and
+   converting every failure into a reward-0 row in the failures sidecar (a bad rollout never
+   crashes the collection run).
+4. Verifying the finished trajectory and reporting the reward.
+
+**Your service is responsible for:**
+
+1. Implementing `POST {agent_base_url}/v1/responses` and answering every call with a valid
+   Responses API object (required fields and types are enforced, unknown extra fields are
+   tolerated; an invalid object is a terminal, non-retried failure).
+2. Deciding what to do next on each call. Within a call your service can do **anything** —
+   run its own model for any number of turns, execute its own tools, spawn sub-agents. There
+   are exactly two reasons to return: you need a **Gym-hosted tool** executed (return the ask),
+   or the rollout is **finished** (return the answer).
+3. Being callable N times per rollout. Each call carries the full conversation so far, so a
+   stateless service needs nothing extra; if you want per-rollout state, set a cookie — Gym
+   echoes your cookies back on every subsequent call of the same rollout.
+4. Reporting `usage` (or omitting it entirely — allowed, but your token metrics are empty).
+
+## The contract, exactly
+
+**Every request you receive** is the task's `responses_create_params` with the conversation
+accumulated in `input`:
+
+1. `input` — the task messages, plus (from turn 2 onward) everything so far: your previous
+   output items and one `function_call_output` per tool call Gym executed for you.
+2. `tools` — the tool schemas this environment serves, verbatim from the dataset row. These
+   are the only tools you may ask Gym to execute.
+3. Your own cookies from earlier calls of this rollout, echoed back.
+
+**Every response you return** is one Responses API object whose `output` decides the next step.
+Returning does not mean your agent is done thinking — it means one of two things: "I need a Gym
+tool" or "I'm finished." Everything your agent did internally since the last call (its own model
+turns, its own tool executions) either stays private or rides along as paired call+output
+records:
+
+| You return | Gym does |
+|---|---|
+| One or more `function_call` items **without** a matching `function_call_output` (same `call_id`, same response) | Executes each against the resources server, appends each result as a `function_call_output`, and calls you again. |
+| `function_call` + `function_call_output` **pairs** (same `call_id`) | Nothing — that's your own internal tool record; it passes into the trajectory untouched. |
+| An assistant `message` and no unpaired calls | The rollout is done: Gym merges the full conversation into one trajectory and verifies it. |
+| `incomplete_details` set | The loop stops and the trajectory so far is verified. |
+
+**Expectations and edge semantics:**
+
+1. Ask only for tools the request's `tools` declared. An unknown tool name is not an error —
+   Gym sends the resources server's error text (e.g. a 404) back to you as that call's
+   `function_call_output`, and the rollout continues.
+2. Malformed `arguments` (not valid JSON) likewise come back to you as an error output,
+   never a crash.
+3. Never return an unpaired `function_call` for a tool you already executed yourself —
+   unpaired means "Gym, run this."
+4. One rollout = one conversation. Requests of the same rollout share your cookies;
+   different rollouts (including retries of the same task) start clean.
+
+## Quickstart
+
+A complete, realistic service against the in-repo stateful counter environment
+(`example_session_state_mgmt`; tasks read "add 1 then add 2 then get the count"). The **agent
+brain is the Claude Code CLI**: each call, the service renders the conversation into a prompt,
+lets Claude decide, and translates the decision into tool asks or a final answer. Requirements
+on the service's machine: `claude` on PATH and authenticated (a logged-in CLI or
+`ANTHROPIC_API_KEY` in the environment); pick the model with `CLAUDE_MODEL` (default `haiku`).
+
+```python
+# service.py — the Claude Code CLI as the agent's brain
+import json, os, subprocess
+from fastapi import FastAPI
+
+app = FastAPI()
+MODEL = os.environ.get("CLAUDE_MODEL", "haiku")
+
+PROMPT = """You are an agent solving a task by calling tools. You do not execute tools \
+yourself; you ask for them and the results come back in the conversation.
+
+Task conversation so far:
+{conversation}
+
+Tools you may ask for (JSON schemas):
+{tools}
+
+Reply with ONLY one JSON object, no prose, no code fences:
+- to call tools: {{"tool_calls": [{{"name": "<tool>", "arguments": {{...}}}}]}}
+- to finish:     {{"final": "<answer text>"}}
+Finish once the conversation contains enough tool results to answer; the final answer must be \
+exactly what the task asks for.
+"""
+
+
+def render(items: list) -> str:
+    lines = []
+    for item in items:
+        kind = item.get("type", "message")
+        if kind == "message":
+            content = item.get("content")
+            if isinstance(content, list):
+                content = " ".join(c.get("text", "") for c in content)
+            lines.append(f"[{item.get('role', 'user')}] {content}")
+        elif kind == "function_call":
+            lines.append(f"[you asked for] {item['name']}({item.get('arguments')})")
+        elif kind == "function_call_output":
+            lines.append(f"[tool result] {item.get('output')}")
+    return "\n".join(lines)
+
+
+@app.post("/v1/responses")
+def responses(params: dict):  # sync handler: FastAPI runs it in a threadpool, so
+    # concurrent rollouts don't block each other on the subprocess below.
+    prompt = PROMPT.format(conversation=render(params["input"]), tools=json.dumps(params.get("tools", [])))
+    # `claude -p` runs Claude's full agentic loop in one invocation: read-only file tools
+    # (Read/Glob/Grep) work by default; permission-gated tools (WebSearch, Bash, ...) are
+    # auto-denied headlessly unless pre-approved, e.g. --allowedTools "WebSearch,Bash".
+    # Either way Claude uses its OWN tools multi-step inside this single call — returning
+    # to Gym is only for Gym-hosted tools or the final answer.
+    proc = subprocess.run(
+        ["claude", "-p", prompt, "--output-format", "json", "--model", MODEL],
+        capture_output=True, timeout=300, check=True,
+    )
+    # The CLI's print mode returns its own JSON envelope (NOT the Anthropic Messages format):
+    # the final text sits in "result". The Responses object Gym expects is built by hand below —
+    # translating whatever your brain speaks into Responses format is the service's job.
+    payload = json.loads(proc.stdout)
+    decision = json.loads(payload["result"].strip().strip("`").removeprefix("json").strip())
+    turn = sum(1 for i in params["input"] if i.get("type") == "function_call_output")
+
+    if "tool_calls" in decision:  # unpaired asks: Gym executes these and calls us again
+        output = [{"type": "function_call", "id": f"fc_{turn}_{k}", "call_id": f"c_{turn}_{k}",
+                   "name": call["name"], "arguments": json.dumps(call.get("arguments", {}))}
+                  for k, call in enumerate(decision["tool_calls"])]
+    else:  # a final assistant message ends the rollout
+        output = [{"type": "message", "role": "assistant", "status": "completed", "id": f"m_{turn}",
+                   "content": [{"type": "output_text", "text": str(decision["final"]), "annotations": []}]}]
+
+    usage = payload.get("usage") or {}
+    return {
+        "id": "claude-cli-service", "created_at": 0.0, "model": f"claude-{MODEL}", "object": "response",
+        "output": output,
+        "parallel_tool_calls": False, "tools": [], "tool_choice": "auto",
+        "usage": {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        },
+    }
+```
+
+One config file wires the environment and the agent together (this exact shape drove the live
+end-to-end run — the only thing that changes for your own benchmark is the resources-server
+block and the ref name):
+
+```yaml
+# counter_remote.yaml
+example_session_state_mgmt_resources_server:
+  resources_servers:
+    example_session_state_mgmt:
+      entrypoint: app.py
+      domain: agent
+
+remote_agent:
+  responses_api_agents:
+    remote_agent:
+      entrypoint: app.py
+      # Your service's address — typically another machine, a container, or a cloud box.
+      # (For a first try with everything on one machine, http://localhost:9000 works too.)
+      agent_base_url: http://your-agent-host:9000
+      resources_server:
+        type: resources_servers
+        name: example_session_state_mgmt_resources_server   # the top-level key above
+      concurrency: 4
+      max_steps: 8
+```
+
+Run the three pieces in **separate terminals** — the first two are long-running servers, the
+third is the driver:
+
+```bash
+# Terminal 1 — on your service's machine:
+uvicorn service:app --host 0.0.0.0 --port 9000
+```
+
+```bash
+# Terminal 2 — on the Gym machine: environment + remote_agent (leave running):
+gym env start "+config_paths=[counter_remote.yaml]"
+```
+
+```bash
+# Terminal 3 — on the Gym machine, once the servers report ready:
+gym eval run --no-serve +agent_name=remote_agent \
+    +input_jsonl_fpath=resources_servers/example_session_state_mgmt/data/example.jsonl \
+    +output_jsonl_fpath=results/rollouts.jsonl
+```
+
+Expected: 5 rollouts, `mean/reward: 1.0`, and each trajectory reads
+`function_call → function_call_output → ... → message`. A live end-to-end run of exactly this
+setup — the service in a container on its own network, Claude deciding every call — scored 5/5.
+
+<Tip>
+Nothing here is specific to FastAPI or the Claude CLI: any HTTP stack works (the live run used
+stdlib `http.server`), and any brain works — render the conversation into your agent's context,
+let it decide, translate the decision into unpaired `function_call` items or a final message.
+Errors on your side are safe: a 5xx or timeout becomes a reward-0 row in Gym's failures sidecar,
+never a crashed run.
+</Tip>
+
+## Configuration knobs
+
+| Field | Default | What it does |
+|---|---|---|
+| `agent_base_url` | required | Your service's base URL. Validated: `http(s)` only, no query string or fragment, no embedded credentials. This is the only network direction — Gym calls you; your service never needs to reach Gym. |
+| `resources_server` | required | The environment that seeds, serves tools for, and verifies each rollout. Swap benchmarks by changing this ref — your service doesn't change. |
+| `concurrency` | `32` | Maximum rollouts in flight against your service, enforced server-side. |
+| `remote_responses_timeout_secs` | `1800` | Wallclock bound on ONE call to your service (a rollout makes one call per loop step). |
+| `run_timeout_secs` | `2100` | Bound on a whole rollout (seed + every loop step + verify), started after the concurrency slot is acquired — queue wait doesn't count. |
+| `max_steps` | unset | Maximum loop steps per rollout. Unset leaves `run_timeout_secs` as the only bound. |
+
+## Failure handling and resume
+
+Failures never crash a collection run. A down service (3 connection attempts, then fail), a
+timed-out call, a malformed reply, or a verifier error becomes a reward-0 row with
+`_ng_failure_class: "remote_agent_error"` in the failures sidecar (for
+`results/rollouts.jsonl` the sidecar is `results/rollouts_failures.jsonl`) —
+the main rollouts file stays clean, and `+resume_from_cache=true` retries failed tasks up to the
+attempt cap (`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`, default 3; terminal failures — an invalid response
+shape — are not retried). Connection failures and timeouts name the failing URL or the timeout
+knob involved.
+
+## Gotchas
+
+- **Your service is called multiple times per rollout.** Design for it: everything you need is
+  in each request's `input`, or in your own cookies.
+- **Redirects are rejected, not followed.** Any `3xx` from your service fails the rollout with
+  the `Location` shown — point `agent_base_url` at the final address. (Followed, a `301/302/303`
+  would silently re-issue the POST as a body-less GET; a `307/308` would silently re-send the
+  task to an address you never configured.)
+- **Partial `usage` fails validation.** Report the full object — `input_tokens`,
+  `output_tokens`, `total_tokens`, `input_tokens_details: {cached_tokens}`,
+  `output_tokens_details: {reasoning_tokens}` — or omit `usage` entirely (allowed; token
+  metrics are then empty, with a warning).
+- **A previous run's output can be reused as the input dataset** (for example, re-running the
+  tasks in a failures sidecar). Output rows carry the old run's results (`reward`, `response`,
+  `error`, internal `_ng_*` flags); those fields are stripped from each row on the way in, so a
+  stale result can't collide with or leak into the new run's output.
+- **Exposing your service on the public internet needs network-level trust.** Gym sends no
+  credential on the `/v1/responses` call (`agent_base_url` rejects embedded credentials), so an
+  internet-exposed service should sit behind a VPN, private network, IP allowlist, or
+  authenticating tunnel. Note that proxies configured via `HTTP_PROXY`/`HTTPS_PROXY` environment
+  variables are ignored (Gym's HTTP client does not read them), so a host that can only reach the
+  internet through such a proxy cannot reach your service.

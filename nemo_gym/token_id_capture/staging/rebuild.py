@@ -369,6 +369,10 @@ def linearize(
     terminal_hint: str | None = None,
 ) -> LinearizedRow:
     """Compatibility wrapper that still executes the production verifier."""
+    if terminal_hint is None:
+        # ``RolloutReceipt`` rejects an unpoisoned receipt without a terminal;
+        # surface the same rebuild failure the verifier reports for that case.
+        raise _fail("missing_terminal", "successful receipt has no terminal call")
     receipt = RolloutReceipt(
         rollout_id=rollout_id,
         terminal_model_call_id=terminal_hint,

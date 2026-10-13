@@ -95,6 +95,7 @@ from nemo_gym.base_resources_server import (
     NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
     RESERVED_MCP_TOOL_NAMES,
     MCPServerMetadata,
+    ResourcesSeedSessionResponse,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 
@@ -552,6 +553,16 @@ def _swap_route(app: FastAPI, idx: int, path: str, endpoint: Callable) -> None:
     app.router.routes[idx] = app.router.routes.pop()  # in-place swap keeps ordering vs catch-all routes
 
 
+async def _seed_body(request: Request) -> dict:
+    # request.body() returns FastAPI's cached bytes; the stream was consumed validating the body model.
+    raw_body = await request.body()
+    try:
+        seed_body = json.loads(raw_body) if raw_body else {}
+    except json.JSONDecodeError:
+        return {}
+    return seed_body if isinstance(seed_body, dict) else {}
+
+
 def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], dict]) -> None:
     """Replace the /seed_session route with a wrapper that appends the MCP session token to its response.
 
@@ -599,16 +610,14 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], di
             data = result.model_dump() if isinstance(result, BaseModel) else result
             result = response_model.model_validate(data)
         payload = jsonable_encoder(result)
-        if isinstance(payload, dict) and NEMO_GYM_MCP_METADATA_KEY not in payload:
-            # request.body() returns FastAPI's cached bytes; the stream was consumed validating the body model.
-            raw_body = await request.body()
-            try:
-                seed_body = json.loads(raw_body) if raw_body else {}
-            except json.JSONDecodeError:
-                seed_body = {}
-            if not isinstance(seed_body, dict):
-                seed_body = {}
-            payload[NEMO_GYM_MCP_METADATA_KEY] = mint_metadata(request, seed_body)
+        if isinstance(result, ResourcesSeedSessionResponse):
+            # An Environment Server reads MCP access only from the typed field, which forbids other keys.
+            if result.resources_tools is None:
+                # The session hook sees the task's fields, as it does for an Agent's legacy seed body.
+                task_data = (await _seed_body(request)).get("task_data")
+                payload["resources_tools"] = mint_metadata(request, task_data if isinstance(task_data, dict) else {})
+        elif isinstance(payload, dict) and NEMO_GYM_MCP_METADATA_KEY not in payload:
+            payload[NEMO_GYM_MCP_METADATA_KEY] = mint_metadata(request, await _seed_body(request))
         return JSONResponse(payload)
 
     # Stamp the fabricated signature onto the **kwargs wrapper so FastAPI injects exactly `params`.

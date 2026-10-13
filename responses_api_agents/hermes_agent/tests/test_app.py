@@ -14,30 +14,49 @@
 # limitations under the License.
 import asyncio
 import json
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
+from fastapi import HTTPException
 
+from nemo_gym.agent_utils import uv_bootstrap
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionRequest,
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    _AgentSessionRecord,
+)
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
+from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
+from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.hermes_agent.app import (
     HermesAgent,
     HermesAgentConfig,
     HermesAgentRunRequest,
     ModelServerRef,
     ResourcesServerRef,
+    _gym_mcp_tool_name,
     _split_input_to_user_and_history,
     _trajectory_to_output_items,
 )
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver
+from responses_api_agents.hermes_agent.sandbox import HermesSandboxSession, _sandbox_hermes_install
 
 
 class _FakeResponse:
@@ -63,6 +82,28 @@ def _config(**kwargs) -> HermesAgentConfig:
     )
 
 
+def _mcp_access(name: str, *, required: bool = True) -> MCPToolAccess:
+    return MCPToolAccess(
+        name=name,
+        required=required,
+        connection=MCPStreamableHTTPConnection(
+            url="http://resources:8000/mcp", headers={"X-NeMo-Gym-Session-Token": f"token-{name}"}
+        ),
+    )
+
+
+def test_gym_mcp_tool_name_maps_hermes_names_of_granted_servers() -> None:
+    assert _gym_mcp_tool_name("mcp_weather_get_weather", ["weather"]) == "mcp__weather__get_weather"
+    # Hermes replaced "-" and "." in the server name; the granted name is restored.
+    assert _gym_mcp_tool_name("mcp_my_store_v1_append", ["my-store.v1"]) == "mcp__my-store.v1__append"
+    # A granted name that extends another does not lose its tools to the shorter one.
+    assert _gym_mcp_tool_name("mcp_store_b_append", ["store", "store_b"]) == "mcp__store_b__append"
+    assert _gym_mcp_tool_name("mcp_store_append", ["store", "store_b"]) == "mcp__store__append"
+    # Built-in tools and servers that were not granted are left alone.
+    assert _gym_mcp_tool_name("terminal", ["weather"]) == "terminal"
+    assert _gym_mcp_tool_name("mcp_other_get", ["weather"]) == "mcp_other_get"
+
+
 class TestSanity:
     def test_construct(self) -> None:
         HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
@@ -78,6 +119,611 @@ class TestSanity:
     def test_configured_model_overrides_server_name(self) -> None:
         agent = HermesAgent(config=_config(model="Qwen3.6-35B-A3B"), server_client=MagicMock(spec=ServerClient))
         assert agent._model_name() == "Qwen3.6-35B-A3B"
+
+    @pytest.mark.parametrize("with_mcp", [False, True])
+    async def test_sandbox_access_selects_runtime_provider(self, monkeypatch, with_mcp) -> None:
+        hermes = HermesAgent(
+            config=_config(
+                enabled_toolsets=["terminal", "web"],
+                sandbox_config={"ttl_s": 123, "workdir": "/unused"},
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        provider_config = {"opensandbox": {"connection": {}}}
+        resolve = MagicMock(return_value=provider_config)
+        provider = AsyncMock()
+        sandbox = AsyncMock()
+        sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+        connect = AsyncMock(return_value=sandbox)
+        monkeypatch.setattr("nemo_gym.agent_utils.uv_bootstrap.shutil.which", lambda name: "/test/uv")
+        monkeypatch.setattr(
+            "responses_api_agents.hermes_agent.app.get_global_config_dict",
+            lambda: {"runtime": {}},
+        )
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.resolve_provider_config", resolve)
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: provider)
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.AsyncSandbox.connect", connect)
+
+        hermes._session_records["session"] = _AgentSessionRecord()
+        state = await hermes._initialize_agent_session_state(
+            "session",
+            AgentSeedSessionRequest(
+                agent_session_id="session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="test", task_id="task"),
+                tool_accesses=[_mcp_access("weather")] if with_mcp else [],
+                sandbox_access=SandboxAccess(
+                    connection=DirectSandboxConnection(
+                        provider_config_ref="runtime",
+                        descriptor={"sandbox_id": "sandbox"},
+                    ),
+                    workdir="/app",
+                ),
+            ),
+        )
+
+        resolve.assert_called_once_with("runtime", {"runtime": {}})
+        connect.assert_awaited_once_with(
+            {"sandbox_id": "sandbox"},
+            provider=provider,
+        )
+        sandbox.start.assert_not_awaited()
+        assert hermes.config.sandbox_config == {"ttl_s": 123, "workdir": "/unused"}
+        assert state.session.sandbox is sandbox
+        assert state.session.owns_sandbox is False
+        assert state.session.workdir == "/app"
+        assert state.session.session_dir.startswith("/tmp/nemo-gym-hermes-sessions/")
+        assert len(state.session.session_dir.rsplit("/", 1)[-1]) == 32
+        assert sandbox.exec.await_count == 2
+        assert {call.args[0].name for call in sandbox.upload.await_args_list} == {
+            "sandbox_runner.py",
+            "sandbox_observer.py",
+            "model_kwargs.py",
+        }
+
+    async def test_seed_installs_hermes_when_it_does_not_import(self, monkeypatch) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        sandbox = AsyncMock()
+        import_results = iter([1, 0])
+
+        async def exec_(command, **_kwargs):
+            if "import run_agent" in command:
+                return MagicMock(return_code=next(import_results), stdout="", stderr="")
+            return MagicMock(return_code=0, stdout="", stderr="")
+
+        sandbox.exec.side_effect = exec_
+        monkeypatch.setattr(
+            "responses_api_agents.hermes_agent.app.get_global_config_dict",
+            lambda: {"runtime": {}},
+        )
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.resolve_provider_config", MagicMock())
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: AsyncMock())
+        monkeypatch.setattr(
+            "responses_api_agents.hermes_agent.app.AsyncSandbox.connect", AsyncMock(return_value=sandbox)
+        )
+        monkeypatch.setattr("nemo_gym.agent_utils.uv_bootstrap.shutil.which", lambda _name: "/usr/bin/uv")
+
+        hermes._session_records["session"] = _AgentSessionRecord()
+        await hermes._initialize_agent_session_state(
+            "session",
+            AgentSeedSessionRequest(
+                agent_session_id="session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="test", task_id="task"),
+                sandbox_access=SandboxAccess(
+                    connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}),
+                    workdir="/app",
+                ),
+            ),
+        )
+
+        commands = [call.args[0] for call in sandbox.exec.await_args_list]
+        install = [command for command in commands if "pip install" in command]
+        assert len(install) == 1 and "rm -rf" in install[0]
+        # The import is checked before installing and again after.
+        assert sum("import run_agent" in command for command in commands) == 2
+        assert sandbox.upload.await_args_list[0].args[0] == Path("/usr/bin/uv")
+
+    @pytest.mark.parametrize(
+        "sandbox_config, install_timeout, runner_timeout, expected_ttl",
+        [
+            ({}, 900, 21600, 23100),
+            ({"workdir": "/fallback"}, 2.5, 3.25, 605.75),
+            ({"workdir": "/fallback", "ttl_s": 42}, 900, 21600, 42),
+            ({"workdir": "/fallback", "ttl_s": None}, 900, 21600, None),
+        ],
+    )
+    async def test_missing_sandbox_access_uses_configured_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sandbox_config: dict[str, object],
+        install_timeout: float,
+        runner_timeout: float,
+        expected_ttl: float | None,
+    ) -> None:
+        hermes = HermesAgent(
+            config=_config(
+                enabled_toolsets=["terminal", "web"],
+                sandbox_provider="runtime",
+                sandbox_config=sandbox_config,
+                sandbox_install_timeout_seconds=install_timeout,
+                sandbox_runner_timeout_seconds=runner_timeout,
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        provider = AsyncMock()
+        sandbox = AsyncMock()
+        sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+        sandbox_factory = MagicMock(return_value=sandbox)
+        original_config = hermes.config.sandbox_config.copy()
+        monkeypatch.setattr(
+            "responses_api_agents.hermes_agent.app.get_global_config_dict",
+            lambda: {"runtime": {}},
+        )
+        monkeypatch.setattr(
+            "responses_api_agents.hermes_agent.app.resolve_provider_config",
+            MagicMock(return_value={"local": {}}),
+        )
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: provider)
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.AsyncSandbox", sandbox_factory)
+
+        hermes._session_records["session"] = _AgentSessionRecord()
+        state = await hermes._initialize_agent_session_state(
+            "session",
+            AgentSeedSessionRequest(
+                agent_session_id="session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="test", task_id="task"),
+            ),
+        )
+
+        sandbox_factory.assert_called_once_with(provider)
+        sandbox.start.assert_awaited_once_with(SandboxSpec(**{**original_config, "ttl_s": expected_ttl}))
+        assert hermes.config.sandbox_config == original_config
+        assert state.session.sandbox is sandbox
+        assert state.session.workdir == original_config.get("workdir")
+        assert state.session.owns_sandbox is True
+        await hermes._close_agent_session_state(state)
+        sandbox.stop.assert_awaited_once()
+        sandbox.disconnect.assert_not_awaited()
+
+    async def test_close_rejects_a_different_episode(self) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        seeded = AgentSeedSessionRequest(
+            agent_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="test", task_id="task"),
+        )
+        hermes._session_records["session"] = _AgentSessionRecord(
+            state=MagicMock(request=seeded), episode_id=seeded.episode_id
+        )
+        hermes._close_agent_session_state = AsyncMock()
+        request = SimpleNamespace(session={"agent_session_id": "session"})
+
+        with pytest.raises(HTTPException, match="episode_id does not match"):
+            await hermes.close_agent_session(
+                request,
+                AgentCloseSessionRequest(
+                    agent_session_id="session",
+                    episode_id=EpisodeId(rollout_id="other"),
+                ),
+            )
+
+        hermes._close_agent_session_state.assert_not_awaited()
+
+    async def test_session_seed_and_close_are_idempotent(self) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        body = AgentSeedSessionRequest(
+            agent_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="test", task_id="task"),
+        )
+        state = MagicMock(request=body)
+        hermes._initialize_agent_session_state = AsyncMock(return_value=state)
+        hermes._close_agent_session_state = AsyncMock(
+            return_value=AgentCloseSessionResponse(agent_session_id="session")
+        )
+        request = SimpleNamespace(session={})
+
+        first = await hermes.seed_agent_session(request, body)
+        second = await hermes.seed_agent_session(request, body)
+        assert first == second
+        hermes._initialize_agent_session_state.assert_awaited_once()
+
+        close_body = AgentCloseSessionRequest(
+            agent_session_id="session",
+            episode_id=body.episode_id,
+        )
+        await hermes.close_agent_session(request, close_body)
+        await hermes.close_agent_session(request, close_body)
+        hermes._close_agent_session_state.assert_awaited_once_with(state)
+
+    async def test_several_workers_serve_run_but_reject_sessions(self) -> None:
+        """/run keeps no session, so only session seeding needs a single worker."""
+        hermes = HermesAgent(config=_config(num_workers=2), server_client=MagicMock(spec=ServerClient))
+        hermes._initialize_agent_session_state = AsyncMock()
+
+        with pytest.raises(ValueError, match="sessions require num_workers=1"):
+            await hermes.seed_agent_session(
+                SimpleNamespace(session={}),
+                AgentSeedSessionRequest(
+                    agent_session_id="session",
+                    episode_id=EpisodeId(rollout_id="rollout"),
+                    task_id=TaskId(taskset="test", task_id="task"),
+                ),
+            )
+
+        hermes._initialize_agent_session_state.assert_not_awaited()
+
+    async def test_seed_rejects_required_grants_other_than_mcp(self) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        body = AgentSeedSessionRequest(
+            agent_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="test", task_id="task"),
+            tool_accesses=[
+                DirectHTTPToolAccess(
+                    name="required-tools",
+                    required=True,
+                    base_url="http://resources:8000",
+                )
+            ],
+        )
+        hermes._initialize_agent_session_state = AsyncMock()
+
+        with pytest.raises(HTTPException, match="supports only MCP tool grants.*required-tools") as error:
+            await hermes.seed_agent_session(SimpleNamespace(session={}), body)
+
+        assert error.value.status_code == 422
+        hermes._initialize_agent_session_state.assert_not_awaited()
+
+    async def test_seed_accepts_required_mcp_grants_and_rejects_toolset_names(self) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        hermes._initialize_agent_session_state = AsyncMock()
+
+        def seed(name: str) -> AgentSeedSessionRequest:
+            return AgentSeedSessionRequest(
+                agent_session_id=f"session-{name}",
+                episode_id=EpisodeId(rollout_id=f"rollout-{name}"),
+                task_id=TaskId(taskset="test", task_id="task"),
+                tool_accesses=[_mcp_access(name)],
+            )
+
+        await hermes.seed_agent_session(SimpleNamespace(session={}), seed("weather"))
+        hermes._initialize_agent_session_state.assert_awaited_once()
+
+        # Hermes exposes an MCP server as a toolset of the same name, so it cannot shadow a built-in toolset.
+        with pytest.raises(ValueError, match="collide with Hermes toolsets: terminal"):
+            await hermes.seed_agent_session(SimpleNamespace(session={}), seed("terminal"))
+
+    @staticmethod
+    def _sandbox_session(
+        monkeypatch, sandbox, *, config=None, tool_accesses=()
+    ) -> tuple[HermesAgent, SimpleNamespace, AgentSeedSessionRequest]:
+        import nemo_gym.base_responses_api_agent as base_agent
+
+        monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server_client._build_server_base_url = lambda _cfg: "http://model-server:1"
+        hermes = HermesAgent(config=config or _config(), server_client=server_client)
+        seed = AgentSeedSessionRequest(
+            agent_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="test", task_id="task"),
+            tool_accesses=list(tool_accesses),
+        )
+        hermes._session_records["session"] = _AgentSessionRecord(
+            state=HermesSandboxSession(
+                request=seed,
+                session=SandboxSession(sandbox=sandbox, workdir=None, session_dir="/session", harness="Hermes"),
+            ),
+            episode_id=seed.episode_id,
+        )
+        request = SimpleNamespace(
+            session={"agent_session_id": "session"},
+            path_params={"rollout_id": seed.episode_id.capture_key},
+        )
+        original_download = sandbox.download
+
+        async def download(remote_path, local_path):
+            if remote_path.endswith("/cleanup.json"):
+                commands = getattr(sandbox, "commands", None)
+                Path(local_path).write_text(
+                    json.dumps(
+                        {
+                            "cleanup_confirmed": commands is None or any("kill -TERM" in cmd for cmd in commands),
+                            "error": None,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            else:
+                await original_download(remote_path, local_path)
+
+        sandbox.download = AsyncMock(side_effect=download)
+        return hermes, request, seed
+
+    async def test_sandbox_activation_calls_the_model_server_directly(self, monkeypatch) -> None:
+        class _Sandbox:
+            def __init__(self) -> None:
+                self.uploaded: dict = {}
+
+            async def upload(self, local_path, remote_path) -> None:
+                self.uploaded[remote_path] = Path(local_path).read_text()
+
+            # Mirrors AsyncSandbox.exec so an unsupported argument fails here too.
+            async def exec(
+                self, command, *, cwd=None, env=None, timeout_s=180, user=None, preserve_background_services=False
+            ) -> SandboxExecResult:
+                return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+            async def download(self, remote_path, local_path) -> None:
+                result = {"messages": [{"role": "assistant", "content": "done"}], "final_response": "done"}
+                output = {"result": result, "runtime": {"hostname": "sandbox", "pid": 1, "python": "python"}}
+                Path(local_path).write_text(json.dumps(output))
+
+        sandbox = _Sandbox()
+        hermes, request, seed = self._sandbox_session(monkeypatch, sandbox)
+
+        response = await hermes.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="fix bug"))
+
+        runner_input = json.loads(sandbox.uploaded["/session/input.json"])
+        assert "/session/process_supervisor.py" in sandbox.uploaded
+        assert runner_input["model_base_url"] == f"http://model-server:1/ng-rollout/{seed.episode_id.capture_key}/v1"
+        assert runner_input["user_message"] == "fix bug"
+        assert response.metadata["harness_execution"] == "sandbox"
+
+    async def test_activation_configures_granted_mcp_servers(self, monkeypatch) -> None:
+        class _Sandbox:
+            def __init__(self) -> None:
+                self.uploaded: dict = {}
+
+            async def upload(self, local_path, remote_path) -> None:
+                self.uploaded[remote_path] = Path(local_path).read_text()
+
+            async def exec(
+                self, command, *, cwd=None, env=None, timeout_s=180, user=None, preserve_background_services=False
+            ) -> SandboxExecResult:
+                return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+            async def download(self, remote_path, local_path) -> None:
+                tool_call = {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "mcp_weather_get_weather", "arguments": '{"city": "Paris"}'},
+                }
+                messages = [
+                    {"role": "user", "content": "what is the weather"},
+                    {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+                    {"role": "tool", "tool_call_id": "call-1", "content": "sunny"},
+                    {"role": "assistant", "content": "done"},
+                ]
+                result = {"messages": messages, "final_response": "done"}
+                output = {"result": result, "runtime": {"hostname": "sandbox", "pid": 1, "python": "python"}}
+                Path(local_path).write_text(json.dumps(output))
+
+        sandbox = _Sandbox()
+        hermes, request, _seed = self._sandbox_session(
+            monkeypatch,
+            sandbox,
+            config=_config(enabled_toolsets=["terminal"]),
+            tool_accesses=[_mcp_access("weather"), _mcp_access("search", required=False)],
+        )
+
+        response = await hermes.responses(
+            request, NeMoGymResponseCreateParamsNonStreaming(input="what is the weather")
+        )
+
+        runner_input = json.loads(sandbox.uploaded["/session/input.json"])
+        assert runner_input["mcp_servers"] == ["weather", "search"]
+        assert runner_input["required_mcp_servers"] == ["weather"]
+        assert runner_input["enabled_toolsets"] == ["terminal", "weather", "search"]
+        mcp_servers = yaml.safe_load(runner_input["config_yaml"])["mcp_servers"]
+        assert mcp_servers["weather"] == {
+            "url": "http://resources:8000/mcp",
+            "headers": {"X-NeMo-Gym-Session-Token": "token-weather"},
+            "tools": {"resources": False, "prompts": False},
+        }
+        # Verifiers see Gym's MCP naming, not Hermes'.
+        assert [item.name for item in response.output if item.type == "function_call"] == ["mcp__weather__get_weather"]
+
+    async def test_provider_timeout_without_output_confirms_cleanup_and_fails(self, monkeypatch) -> None:
+        class _Sandbox:
+            def __init__(self) -> None:
+                self.commands: list[str] = []
+
+            async def upload(self, *_args) -> None:
+                pass
+
+            async def download(self, *_args) -> None:
+                raise FileNotFoundError("worker did not checkpoint")
+
+            # Mirrors AsyncSandbox.exec so an unsupported argument fails here too.
+            async def exec(
+                self, command, *, cwd=None, env=None, timeout_s=180, user=None, preserve_background_services=False
+            ) -> SandboxExecResult:
+                self.commands.append(command)
+                if "supervisor.pid" in command and "exec " in command:
+                    return SandboxExecResult(stdout=None, stderr="timed out", return_code=124, error_type="timeout")
+                return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+        sandbox = _Sandbox()
+        hermes, request, _ = self._sandbox_session(monkeypatch, sandbox)
+
+        with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
+            await hermes.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="fix bug"))
+
+        stop = [command for command in sandbox.commands if "stop.request" in command and "kill -TERM" in command]
+        assert len(stop) == 1
+
+    @staticmethod
+    def _sandbox_with_saved_transcript(result: dict):
+        class _Sandbox:
+            def __init__(self) -> None:
+                self.commands: list[str] = []
+
+            async def upload(self, *_args) -> None:
+                pass
+
+            async def download(self, remote_path, local_path) -> None:
+                output = {"result": result, "runtime": {"hostname": "sandbox", "pid": 1, "python": "python"}}
+                Path(local_path).write_text(json.dumps(output))
+
+            # Mirrors AsyncSandbox.exec so an unsupported argument fails here too.
+            async def exec(
+                self, command, *, cwd=None, env=None, timeout_s=180, user=None, preserve_background_services=False
+            ) -> SandboxExecResult:
+                self.commands.append(command)
+                if "supervisor.pid" in command and "exec " in command:
+                    return SandboxExecResult(stdout=None, stderr="timed out", return_code=124, error_type="timeout")
+                return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+        return _Sandbox()
+
+    async def test_early_provider_timeout_with_a_transcript_stays_a_failure(self, monkeypatch) -> None:
+        # A transport TimeoutError long before the agent deadline is an infrastructure failure, even
+        # though a transcript was saved: it must not become a gradable wall_time outcome.
+        sandbox = self._sandbox_with_saved_transcript(
+            {"messages": [{"role": "assistant", "content": "partial"}], "final_response": None, "completed": False}
+        )
+        hermes, request, _ = self._sandbox_session(monkeypatch, sandbox)
+        clock = iter([0.0, 5.0])
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+        with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
+            await hermes.responses(
+                request,
+                NeMoGymResponseCreateParamsNonStreaming(input="fix bug", metadata={"agent_timeout_sec": "600"}),
+            )
+
+    async def test_provider_timeout_at_the_agent_deadline_returns_the_partial_transcript(self, monkeypatch) -> None:
+        sandbox = self._sandbox_with_saved_transcript(
+            {"messages": [{"role": "assistant", "content": "partial"}], "final_response": None, "completed": False}
+        )
+        hermes, request, _ = self._sandbox_session(monkeypatch, sandbox)
+        clock = iter([0.0, 600.5])
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+        response = await hermes.responses(
+            request,
+            NeMoGymResponseCreateParamsNonStreaming(input="fix bug", metadata={"agent_timeout_sec": "600"}),
+        )
+
+        assert response.metadata["stop_reason"] == "wall_time"
+        assert response.metadata["hermes_error_type"] == "TimeoutError"
+
+    async def test_runner_recorded_deadline_counts_as_deadline_evidence(self, monkeypatch) -> None:
+        # The supervisor stopped Hermes at the deadline and the runner wrote a wall_time transcript; the
+        # provider's own timeout fired a little later. No wall clock needed.
+        sandbox = self._sandbox_with_saved_transcript(
+            {
+                "messages": [],
+                "final_response": None,
+                "completed": False,
+                "interrupted": True,
+                "stop_reason": "wall_time",
+            }
+        )
+        hermes, request, _ = self._sandbox_session(monkeypatch, sandbox)
+        clock = iter([0.0, 1.0])
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+        response = await hermes.responses(
+            request,
+            NeMoGymResponseCreateParamsNonStreaming(input="fix bug", metadata={"agent_timeout_sec": "600"}),
+        )
+
+        assert response.metadata["stop_reason"] == "wall_time"
+
+    async def test_cleanup_cancellation_after_an_early_provider_timeout_stays_a_failure(self, monkeypatch) -> None:
+        # An early provider TimeoutError makes the session clean up: close publishes stop.request, the
+        # supervisor signals the runner, and the runner records an interrupted transcript with
+        # stop_reason "cancelled". That interruption is a consequence of the failure, not deadline
+        # evidence, so the failure must stand rather than become a scoreable wall_time outcome.
+        sandbox = self._sandbox_with_saved_transcript(
+            {
+                "messages": [],
+                "final_response": None,
+                "completed": False,
+                "interrupted": True,
+                "stop_reason": "cancelled",
+            }
+        )
+        hermes, request, _ = self._sandbox_session(monkeypatch, sandbox)
+        clock = iter([0.0, 1.0])
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+        with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
+            await hermes.responses(
+                request,
+                NeMoGymResponseCreateParamsNonStreaming(input="fix bug", metadata={"agent_timeout_sec": "900"}),
+            )
+
+    async def test_close_during_activation_stops_the_runner(self, monkeypatch) -> None:
+        class _Sandbox:
+            def __init__(self) -> None:
+                self.commands: list[str] = []
+                self.runner_started = asyncio.Event()
+
+            async def upload(self, *_args) -> None:
+                pass
+
+            async def disconnect(self) -> None:
+                pass
+
+            async def download(self, remote_path, local_path) -> None:
+                raise FileNotFoundError("worker was interrupted")
+
+            # Mirrors AsyncSandbox.exec so an unsupported argument fails here too.
+            async def exec(
+                self, command, *, cwd=None, env=None, timeout_s=180, user=None, preserve_background_services=False
+            ) -> SandboxExecResult:
+                self.commands.append(command)
+                if "supervisor.pid" in command and "exec " in command:
+                    self.runner_started.set()
+                    await asyncio.Event().wait()
+                return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+        sandbox = _Sandbox()
+        hermes, request, seed = self._sandbox_session(monkeypatch, sandbox)
+
+        activation = asyncio.create_task(
+            hermes.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="fix bug"))
+        )
+        await asyncio.wait_for(sandbox.runner_started.wait(), timeout=5)
+        await asyncio.wait_for(
+            hermes.close_agent_session(
+                request, AgentCloseSessionRequest(agent_session_id="session", episode_id=seed.episode_id)
+            ),
+            timeout=5,
+        )
+
+        stop = [command for command in sandbox.commands if "stop.request" in command and "kill -TERM" in command]
+        assert len(stop) == 1
+        assert hermes._session_records["session"].state is None
+        with pytest.raises(asyncio.CancelledError):
+            await activation
+
+    async def test_close_before_seed_prevents_late_creation(self) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        body = AgentSeedSessionRequest(
+            agent_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="test", task_id="task"),
+        )
+        request = SimpleNamespace(session={})
+
+        await hermes.close_agent_session(
+            request,
+            AgentCloseSessionRequest(
+                agent_session_id="session",
+                episode_id=body.episode_id,
+            ),
+        )
+
+        with pytest.raises(HTTPException, match="already closed"):
+            await hermes.seed_agent_session(request, body)
 
 
 class _FakeAgent:
@@ -187,7 +833,194 @@ class TestSigtermHandler:
         assert hermes.interrupted_agents == set()
 
 
+class TestResultUsage:
+    @pytest.mark.parametrize("partial", [False, True])
+    def test_reports_cache_inclusive_native_totals(self, partial) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        response = hermes._response_from_result(
+            body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            result={
+                "messages": [{"role": "assistant", "content": "done"}],
+                "partial": partial,
+                "input_tokens": 100,
+                "cache_read_tokens": 200,
+                "cache_write_tokens": 300,
+                "prompt_tokens": 600,
+                "completion_tokens": 80,
+                "reasoning_tokens": 30,
+            },
+            model_name="model",
+        )
+        assert response.usage.input_tokens == 600
+        assert response.usage.input_tokens_details.cached_tokens == 200
+        assert response.usage.output_tokens == 80
+        assert response.usage.output_tokens_details.reasoning_tokens == 30
+        assert response.usage.total_tokens == 680
+
+    @pytest.mark.parametrize(
+        "usage",
+        [{}, {"prompt_tokens": 10}, {"completion_tokens": 20}, {"prompt_tokens": None, "completion_tokens": 20}],
+    )
+    def test_missing_native_totals_remain_unknown(self, usage) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        response = hermes._response_from_result(
+            body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            result={"messages": [{"role": "assistant", "content": "partial answer"}], **usage},
+            model_name="model",
+        )
+        assert response.usage is None
+
+    def test_missing_details_remain_unknown(self) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        response = hermes._response_from_result(
+            body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            result={
+                "messages": [{"role": "assistant", "content": "done"}],
+                "prompt_tokens": 10,
+                "completion_tokens": 20,
+            },
+            model_name="model",
+        )
+        assert response.usage.input_tokens == 10
+        assert response.usage.output_tokens == 20
+        assert response.usage.total_tokens == 30
+        assert response.usage.input_tokens_details.cached_tokens is None
+        assert response.usage.output_tokens_details.reasoning_tokens is None
+
+
+class TestResultClassification:
+    @pytest.mark.parametrize(
+        "error",
+        [
+            "HTTP 429 Too Many Requests",
+            "HTTP 500 Internal Server Error",
+            "HTTP 403 Forbidden",
+            "Connection refused",
+            "Invalid API response shape. Likely rate limited or malformed provider response.",
+            None,
+        ],
+    )
+    @pytest.mark.parametrize("has_partial_patch", [False, True])
+    def test_provider_failure_is_not_a_gradable_model_outcome(self, error, has_partial_patch) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        messages = [{"role": "assistant", "content": "Applied a partial patch"}] if has_partial_patch else []
+        with pytest.raises(RuntimeError, match="Hermes agent failed"):
+            hermes._response_from_result(
+                body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+                result={"failed": True, "error": error, "messages": messages},
+                model_name="model",
+            )
+
+    @pytest.mark.parametrize(
+        "error", ["HTTP 400: controlled model failure", "HTTP 413: payload too large", "HTTP 422: bad params"]
+    )
+    def test_terminal_model_rejection_is_a_gradable_outcome(self, error) -> None:
+        # The model endpoint refused the request for what it asked, after Hermes's retries. The conformance
+        # suite's model_error scenario expects this to reach the verifier as an unmasked zero.
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        response = hermes._response_from_result(
+            body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            result={"failed": True, "error": error, "messages": []},
+            model_name="model",
+        )
+        assert response.status == "failed"
+        assert response.error is not None and response.error.message == error
+        assert response.metadata["model_rejected"] == error.split()[1].rstrip(":")
+        assert "provider_failed" not in response.metadata
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            {"failed": True, "error": "First response truncated due to output length limit"},
+            {"partial": True, "error": "Response truncated due to output length limit"},
+            {"partial": True, "error": "Context length exceeded (100 tokens). Cannot compress further."},
+            {"partial": True, "error": "Model generated invalid tool call: invalid"},
+            {"completed": True},
+            {"completed": False, "stop_reason": "max_iterations"},
+        ],
+    )
+    def test_model_outcomes_remain_gradable_with_partial_trajectory(self, outcome) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        response = hermes._response_from_result(
+            body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            result=outcome | {"messages": [{"role": "assistant", "content": "Applied a partial patch"}]},
+            model_name="model",
+        )
+        assert response.output[0].content[0].text == "Applied a partial patch"
+        assert response.metadata["partial"] == str(bool(outcome.get("partial"))).lower()
+        if outcome.get("stop_reason") == "max_iterations":
+            assert response.status == "incomplete"
+            assert response.error is None
+            assert response.metadata["stop_reason"] == "max_iterations"
+
+    @pytest.mark.parametrize("totals", [None, (0, 0), (20, 10)])
+    async def test_host_path_retains_provider_failure_for_masked_verification(self, monkeypatch, totals) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
+        monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
+        runner = MagicMock()
+        runner.run_conversation.return_value = {"failed": True, "error": "HTTP 500", "messages": []}
+        if totals is not None:
+            runner.session_prompt_tokens, runner.session_completion_tokens = totals
+            runner.session_cache_read_tokens = 0
+            runner.session_reasoning_tokens = 0
+        monkeypatch.setattr("run_agent.AIAgent", MagicMock(return_value=runner))
+        response = await hermes._create_response(NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+        assert response.status == "failed"
+        assert response.error.message == "HTTP 500"
+        assert response.metadata["provider_failed"] == "true"
+        if totals is None:
+            assert response.usage is None
+        else:
+            assert response.usage.input_tokens == totals[0]
+            assert response.usage.output_tokens == totals[1]
+            assert response.usage.total_tokens == sum(totals)
+
+
+class TestSandboxHermesInstall:
+    """The sandbox installs whatever Hermes this server has installed, so requirements.txt is the only pin."""
+
+    @staticmethod
+    def _installed(monkeypatch, *, version: str, direct_url: dict | None) -> None:
+        distribution = SimpleNamespace(
+            version=version,
+            read_text=lambda name: json.dumps(direct_url) if direct_url is not None else None,
+        )
+        monkeypatch.setattr("importlib.metadata.distribution", lambda name: distribution)
+
+    def test_git_install_becomes_a_github_archive_keyed_by_commit(self, monkeypatch) -> None:
+        commit = "a" * 40
+        self._installed(
+            monkeypatch,
+            version="0.6.0",
+            direct_url={"url": "https://github.com/cmunley1/hermes-agent.git", "vcs_info": {"commit_id": commit}},
+        )
+
+        requirement, key = _sandbox_hermes_install()
+
+        assert requirement == f"hermes-agent[mcp] @ https://github.com/cmunley1/hermes-agent/archive/{commit}.tar.gz"
+        assert key == commit[:12]
+
+    def test_release_install_pins_the_version(self, monkeypatch) -> None:
+        self._installed(monkeypatch, version="0.7.1", direct_url=None)
+
+        assert _sandbox_hermes_install() == ("hermes-agent[mcp]==0.7.1", "0.7.1")
+
+    def test_git_install_outside_github_is_rejected(self, monkeypatch) -> None:
+        self._installed(
+            monkeypatch,
+            version="0.6.0",
+            direct_url={"url": "https://gitlab.example.com/hermes-agent", "vcs_info": {"commit_id": "abc"}},
+        )
+
+        with pytest.raises(RuntimeError, match="gitlab.example.com"):
+            _sandbox_hermes_install()
+
+
 class TestSplitInputToUserAndHistory:
+    def test_string_input_is_the_user_message(self) -> None:
+        assert _split_input_to_user_and_history("fix bug") == ("fix bug", [], None)
+
     def test_user_only(self) -> None:
         items = [NeMoGymEasyInputMessage(role="user", content="hi")]
         user, history, system = _split_input_to_user_and_history(items)
@@ -448,7 +1281,8 @@ class TestObservability:
             runtime_gap,
         ]
 
-    def test_run_returns_observations_without_leaking_internal_attachment(self) -> None:
+    @pytest.mark.parametrize("provider_failed", [False, True, "model_rejected"])
+    def test_run_returns_observations_without_leaking_internal_attachment(self, provider_failed) -> None:
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {"observability_enabled": True}
         agent = HermesAgent(config=_config(), server_client=server_client)
@@ -464,6 +1298,17 @@ class TestObservability:
                 "tools": [],
             }
         )
+        if provider_failed == "model_rejected":
+            # A terminal HTTP 400 from the model: graded, not masked (conformance model_error scenario).
+            response = response.model_copy(update={"metadata": {"model_rejected": "400"}, "status": "failed"})
+            provider_failed = False
+        elif provider_failed:
+            response = response.model_copy(
+                update={
+                    "metadata": {"provider_failed": "true"},
+                    "status": "failed",
+                }
+            )
         observed_response = AsyncMock(
             return_value=AgentEpisode(
                 response=response,
@@ -493,6 +1338,12 @@ class TestObservability:
         with patch.object(HermesAgent, "_create_episode", observed_response):
             result = asyncio.run(agent.run(request, body))
 
+        assert result.reward == 1.0  # Retain the verifier's actual result even when masked.
+        assert result.mask_sample is provider_failed
+        if provider_failed:
+            assert result.failure_kind == "agent_request_failed"
+            assert result.failure_reason
+            assert result.finished_naturally is False
         assert result.ng_agent_observations is not None
         assert result.ng_agent_observations.source == "hermes"
         verify_json = server_client.post.await_args_list[-1].kwargs["json"]
@@ -531,3 +1382,52 @@ class TestObservability:
                     rollout_id="rid",
                 )
             )
+
+
+class TestSandboxUv:
+    """Seed uploads the uv build chosen for the sandbox's platform (see tests/unit_tests/test_uv_bootstrap.py)."""
+
+    async def test_seed_passes_the_configured_uv_cache_dir(self, monkeypatch, tmp_path) -> None:
+        hermes = HermesAgent(config=_config(uv_cache_dir=str(tmp_path)), server_client=MagicMock(spec=ServerClient))
+        sandbox = AsyncMock()
+        import_results = iter([1, 0])
+
+        async def exec_(command, **_kwargs):
+            if "import run_agent" in command:
+                return MagicMock(return_code=next(import_results), stdout="", stderr="")
+            if command == uv_bootstrap._PLATFORM_PROBE:
+                return MagicMock(return_code=0, stdout="Linux\nx86_64\ngnu\n", stderr="")
+            return MagicMock(return_code=0, stdout="", stderr="")
+
+        sandbox.exec.side_effect = exec_
+        monkeypatch.setattr(uv_bootstrap.shutil, "which", lambda name: "/usr/bin/uv")
+        monkeypatch.setattr(uv_bootstrap.platform, "machine", lambda: "aarch64")
+        monkeypatch.setattr(uv_bootstrap.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(uv_bootstrap, "_host_uv_version", lambda uv: "0.12.3")
+        monkeypatch.setattr(
+            uv_bootstrap, "_download_uv", lambda v, t, d: (d.parent.mkdir(parents=True), d.write_bytes(b"uv"))
+        )
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.get_global_config_dict", lambda: {"runtime": {}})
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.resolve_provider_config", MagicMock())
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: AsyncMock())
+        monkeypatch.setattr(
+            "responses_api_agents.hermes_agent.app.AsyncSandbox.connect", AsyncMock(return_value=sandbox)
+        )
+
+        hermes._session_records["session"] = _AgentSessionRecord()
+        await hermes._initialize_agent_session_state(
+            "session",
+            AgentSeedSessionRequest(
+                agent_session_id="session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="test", task_id="task"),
+                sandbox_access=SandboxAccess(
+                    connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}),
+                    workdir="/app",
+                ),
+            ),
+        )
+
+        uploaded = sandbox.upload.await_args_list[0].args[0]
+        # An aarch64 host driving an x86_64 glibc pod uploads the static musl build for x86_64.
+        assert uploaded == tmp_path / "0.12.3" / "x86_64-unknown-linux-musl" / "uv"

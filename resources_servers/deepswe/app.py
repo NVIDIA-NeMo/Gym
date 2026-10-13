@@ -250,8 +250,10 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             provider_options=self._provider_options(phase=phase),
         )
         sandbox = AsyncSandbox(provider)
-        await sandbox.start(spec)
-        if phase == "agent":
+
+        async def _run_setup(started: AsyncSandbox) -> None:
+            if phase != "agent":
+                return
             # The task images ship no git user identity, and git's identity
             # auto-detection is hostname-dependent: an FQDN hostname passes
             # with a warning, while a domainless one (e.g. a K8s pod name ->
@@ -259,12 +261,14 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             # identity unknown". v1.1 grading collects only committed work,
             # so seed an explicit identity instead of relying on the sandbox
             # provider's hostname format.
-            await sandbox.exec(
+            await started.exec(
                 'git config --global user.email "agent@nemo-gym.local"'
                 ' && git config --global user.name "NeMo Gym Agent"'
                 " && git config --global --add safe.directory /app || true",
                 timeout_s=60,
             )
+
+        await sandbox.start_with_setup(spec, _run_setup)
         return sandbox
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:

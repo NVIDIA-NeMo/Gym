@@ -14,3 +14,11 @@ nemo_fabric_mini_swe_agent:
             MSWEA_COST_TRACKING: ignore_errors
         runtime:
           max_turns: 8
+
+nemo_fabric_mini_swe_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: nemo_fabric_mini_swe_agent

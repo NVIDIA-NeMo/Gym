@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, ValidationInfo, model_validator
 
 from nemo_gym.token_id_capture.records import (  # noqa: F401  (re-exported for staging consumers)
     LEDGER_ROW_MISSING_CHAIN_HASH_REASON,
@@ -42,6 +42,9 @@ CaptureMode = Literal["token_in", "text"]
 Identifier = Annotated[StrictStr, Field(min_length=1)]
 NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
 DigestHex = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
+
+# Only the explicit local builder supplies this identity; it is never a wire field.
+_BUILD_STAGING_DIGEST = object()
 
 
 def staging_key(rollout_id: str, model_call_id: str) -> str:
@@ -166,7 +169,7 @@ class StagedCallBaseSnapshot(_DigestWireModel):
         return staging_key(self.rollout_id, self.model_call_id)
 
     @model_validator(mode="after")
-    def _validate_base_integrity(self) -> Self:
+    def _validate_base_integrity(self, info: ValidationInfo) -> Self:
         if self.parent_call_id is None and self.prev_len != 0:
             raise ValueError("a parentless staged call must have prev_len == 0")
         if self.parent_call_id is not None and self.prev_len == 0:
@@ -205,7 +208,10 @@ class StagedCallBaseSnapshot(_DigestWireModel):
             chain_hash=self.chain_hash,
             cumulative_hash=self.cumulative_hash,
         )
-        if self.digest != actual_digest:
+        if info.context is _BUILD_STAGING_DIGEST:
+            # Construction-time assignment requires a mutable model without validate_assignment.
+            self.digest = actual_digest
+        elif self.digest != actual_digest:
             raise ValueError("digest does not match staged call contents")
         return self
 
@@ -214,6 +220,66 @@ class StagedCallRecord(StagedCallBaseSnapshot):
     """One normalized token delta made durable by a framework staging sink."""
 
     extras: dict[str, Any] | None = None
+
+    @classmethod
+    def from_components(
+        cls,
+        *,
+        rollout_id: str,
+        model_call_id: str,
+        parent_call_id: str | None,
+        mode: CaptureMode,
+        prev_len: int,
+        delta_len: int,
+        cum_len: int,
+        weight_version: int,
+        token_ids_delta: list[int],
+        token_mask_delta: list[float],
+        generation_log_probs_delta: list[float],
+        extras: dict[str, Any] | None,
+        extras_digest: str,
+        chain_hash: str,
+        cumulative_hash: str,
+    ) -> Self:
+        """Validate local components and compute their digest exactly once.
+
+        Runs normal field, integrity, and extras validators. Wire constructors
+        still require a supplied digest and verify it against the contents.
+
+        Raises:
+            ValueError: A mask or log probability is not an exact Python float.
+            ValidationError: Other components fail field or integrity validation.
+        """
+        # Pydantic StrictFloat accepts integers. Local builders historically
+        # hashed before model construction and required exact Python floats.
+        for name, values in (
+            ("token_mask_delta", token_mask_delta),
+            ("generation_log_probs_delta", generation_log_probs_delta),
+        ):
+            if any(type(value) is not float for value in values):
+                raise ValueError(f"{name} values must be Python floats")
+        return cls.model_validate(
+            {
+                "rollout_id": rollout_id,
+                "model_call_id": model_call_id,
+                "parent_call_id": parent_call_id,
+                "mode": mode,
+                "prev_len": prev_len,
+                "delta_len": delta_len,
+                "cum_len": cum_len,
+                "weight_version": weight_version,
+                "token_ids_delta": token_ids_delta,
+                "token_mask_delta": token_mask_delta,
+                "generation_log_probs_delta": generation_log_probs_delta,
+                "extras": extras,
+                "extras_digest": extras_digest,
+                "chain_hash": chain_hash,
+                "cumulative_hash": cumulative_hash,
+                # Replaced by the integrity validator, after field validation.
+                "digest": "0" * 64,
+            },
+            context=_BUILD_STAGING_DIGEST,
+        )
 
     @model_validator(mode="after")
     def _validate_extras_integrity(self) -> Self:
@@ -356,6 +422,15 @@ class RolloutManifest(_WireModel):
     failures: list[ManifestFailure] = Field(default_factory=list)
 
 
+class RolloutRemoval(_WireModel):
+    """The result of retiring or deleting rollouts in a capture store or ledger."""
+
+    # Rollouts whose captured data existed and was removed.
+    removed: list[Identifier] = Field(default_factory=list)
+    # Rollouts with no captured data: already removed, or never recorded a call.
+    absent: list[Identifier] = Field(default_factory=list)
+
+
 class RolloutReceipt(_DigestWireModel):
     """Token-free immutable manifest the framework assembles at rollout end."""
 
@@ -369,8 +444,10 @@ class RolloutReceipt(_DigestWireModel):
     # named the response it kept, ``response_id``/``content`` when a witness
     # joined the scored response to a manifest row, ``heuristic`` when the
     # parent-link walk inferred it (also stamped on failed selections — it
-    # names the last stage attempted).
-    terminal_selection: Literal["declared", "response_id", "content", "heuristic"]
+    # names the last stage attempted). ``None`` when no attribution stage ran
+    # at all (for example the manifest failed to parse), so such receipts
+    # stay out of the per-method buckets.
+    terminal_selection: Literal["declared", "response_id", "content", "heuristic"] | None = None
     # The witness abstention/corroboration trail from attribution, kept on
     # success and failure alike so per-method metrics stay diagnosable.
     terminal_attribution_reason: str | None = None
@@ -382,4 +459,26 @@ class RolloutReceipt(_DigestWireModel):
             raise ValueError("receipt manifest contains duplicate model_call_id values")
         if self.terminal_model_call_id is not None and self.terminal_model_call_id not in set(model_call_ids):
             raise ValueError("terminal_model_call_id is absent from the receipt manifest")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_attribution_state(self) -> Self:
+        """Keep the terminal fields in one of the three documented states.
+
+        A trainable receipt names its terminal and the method that chose it. An
+        unset ``terminal_selection`` is reserved for receipts where no attribution
+        stage ran, which cannot name a terminal and must be poisoned with a reason.
+        A poisoned receipt may still carry a terminal and method, because
+        attribution can succeed before another call poisons the rollout.
+        """
+        if not self.capture_poisoned:
+            if self.failure_reason is not None:
+                raise ValueError("an unpoisoned receipt cannot carry a failure_reason")
+            if self.terminal_model_call_id is None or self.terminal_selection is None:
+                raise ValueError("an unpoisoned receipt must name terminal_model_call_id and terminal_selection")
+        if self.terminal_selection is None:
+            if self.terminal_model_call_id is not None:
+                raise ValueError("terminal_model_call_id requires a terminal_selection method")
+            if self.failure_reason is None:
+                raise ValueError("a receipt with no attribution stage must be poisoned with a failure_reason")
         return self

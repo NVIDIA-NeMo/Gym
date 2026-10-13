@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import re
 import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, mock_open
@@ -27,6 +28,7 @@ from nemo_gym.config_types import DatasetConfig, ResponsesAPIAgentServerInstance
 from nemo_gym.global_config import DictConfig, GlobalConfigDictParser
 from nemo_gym.train_data_utils import (
     AvgMinMax,
+    CategoricalMetrics,
     DatasetMetrics,
     DatasetValidatorState,
     StringMetrics,
@@ -126,6 +128,7 @@ class TestLoadAndValidateServerInstanceConfigs:
                                 "name": "example",
                                 "type": "example",
                                 "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
+                                "taskset": None,
                                 "num_repeats": 1,
                                 "source": None,
                                 "gitlab_identifier": None,
@@ -402,6 +405,62 @@ class TestLoadDatasets:
                         server_type_config_dict=DictConfig(server_type_config_dict),
                         responses_api_agents=server_type_config_dict["responses_api_agents"],
                     ),
+                ],
+            )
+
+    def test_missing_prepared_dataset_reports_configured_prepare_command(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "environment.yaml"
+        nested_config_path = tmp_path / "resources.yaml"
+        server_type_config_dict = {
+            "responses_api_agents": {
+                "simple_agent": {
+                    "host": "127.0.0.1",
+                    "port": 12345,
+                    "entrypoint": "app.py",
+                    "datasets": [
+                        {
+                            "name": "prepared_validation",
+                            "type": "validation",
+                            "jsonl_fpath": str(tmp_path / "missing.jsonl"),
+                            "prepare_script": str(tmp_path / "prepare.py"),
+                            "license": "Apache 2.0",
+                        }
+                    ],
+                }
+            }
+        }
+        config_path.write_text(
+            f"""environment:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: prepared_validation
+          type: validation
+          jsonl_fpath: {tmp_path / "missing.jsonl"}
+          prepare_script: {tmp_path / "prepare.py"}
+"""
+        )
+        nested_config_path.write_text("resources: {}\n")
+        monkeypatch.setattr(
+            nemo_gym.train_data_utils,
+            "get_global_config_dict",
+            lambda: DictConfig({"config_paths": [str(config_path), str(nested_config_path)]}),
+        )
+
+        with raises(
+            ValueError,
+            match=rf"gym eval prepare --config {re.escape(str(config_path))}",
+        ):
+            TrainDataProcessor().load_datasets(
+                config=TrainDataProcessorConfig(output_dirpath="", mode="train_preparation", should_download=True),
+                server_instance_configs=[
+                    ResponsesAPIAgentServerInstanceConfig(
+                        name="prepared_validation_agent",
+                        server_type_config_dict=DictConfig(server_type_config_dict),
+                        responses_api_agents=server_type_config_dict["responses_api_agents"],
+                    )
                 ],
             )
 
@@ -765,6 +824,127 @@ class TestValidateSamplesAndAggregateMetrics:
             ),
         )
         assert expected_metrics.model_dump() == state.metrics.model_dump()
+
+    def test_non_responses_rows_keep_existing_zero_metrics(self) -> None:
+        processor = TrainDataProcessor()
+        state = DatasetValidatorState()
+
+        processor._validate_samples_and_aggregate_metrics_single_sample(
+            state=state,
+            sample_idx=0,
+            sample_dict_str=json.dumps({"environment_owned_input": "value"}),
+            require_responses=False,
+        )
+
+        output = state.metrics.aggregate().model_dump_for_output()
+        assert output["Number of examples"] == 1
+        for name in (
+            "Number of tools",
+            "Json-dumped number of words (proxy for token count)",
+            "Number of turns",
+            "Temperature",
+        ):
+            assert output[name] == {
+                "Total # non-null values": 0,
+                "Average": 0,
+                "Min": 0,
+                "Max": 0,
+                "Standard deviation": 0,
+            }
+        assert "Number of tasks" not in output
+        assert "Json-dumped task-input words (proxy for token count)" not in output
+
+    def test_validate_materialized_task_metrics_with_owner_hook(self) -> None:
+        processor = TrainDataProcessor()
+        state = DatasetValidatorState()
+        sample = {
+            "task_id": {"taskset": "test_environment:example", "task_id": "1042"},
+            "task_input": {
+                "category": "reasoning",
+                "context": {},
+            },
+        }
+
+        processor._validate_samples_and_aggregate_metrics_single_sample(
+            state=state,
+            sample_idx=0,
+            sample_dict_str=json.dumps(sample),
+            dataset_metrics_hook=lambda task_input: {
+                "Categories": task_input["category"],
+                "Context coverage": bool(task_input["context"]),
+            },
+        )
+
+        assert state.offending_example_idxs == []
+        assert state.metrics.number_of_examples == 1
+        assert state.metrics.number_of_tasks == 1
+        output = state.metrics.aggregate().model_dump_for_output()
+        zero_metric = {
+            "Total # non-null values": 0,
+            "Average": 0,
+            "Min": 0,
+            "Max": 0,
+            "Standard deviation": 0,
+        }
+        assert output == {
+            "Number of examples": 1,
+            "Number of tasks": 1,
+            "Number of tools": zero_metric,
+            "Json-dumped number of words (proxy for token count)": zero_metric,
+            "Json-dumped task-input words (proxy for token count)": {
+                "Total # non-null values": 1,
+                "Average": len(json.dumps(sample["task_input"]).split()),
+                "Min": len(json.dumps(sample["task_input"]).split()),
+                "Max": len(json.dumps(sample["task_input"]).split()),
+                "Standard deviation": 0,
+            },
+            "Number of turns": zero_metric,
+            "Temperature": zero_metric,
+            "Tasksets": {
+                "counts": {"test_environment:example": 1},
+                "unique_count": 1,
+                "total_count": 1,
+            },
+            "Categories": {
+                "counts": {"reasoning": 1},
+                "unique_count": 1,
+                "total_count": 1,
+            },
+            "Context coverage": {
+                "Total # non-null values": 1,
+                "Average": 0,
+                "Min": 0,
+                "Max": 0,
+                "Standard deviation": 0,
+            },
+        }
+
+    def test_categorical_metrics_merge_distributions(self) -> None:
+        left = CategoricalMetrics()
+        left.observe("first")
+        right = CategoricalMetrics()
+        right.observe("second")
+        right.observe("first")
+
+        left.add(right)
+
+        assert left.aggregate().model_dump() == {
+            "counts": {"first": 2, "second": 1},
+            "unique_count": 2,
+            "total_count": 3,
+        }
+
+    def test_categorical_metrics_caps_labels_with_other_bucket(self) -> None:
+        metrics = CategoricalMetrics()
+        for index in range(nemo_gym.train_data_utils.MAX_CATEGORICAL_LABELS + 2):
+            metrics.observe(f"label-{index}")
+
+        aggregated = metrics.aggregate()
+
+        assert len(aggregated.counts) == nemo_gym.train_data_utils.MAX_CATEGORICAL_LABELS + 1
+        assert aggregated.counts["Other"] == 2
+        assert aggregated.unique_count == nemo_gym.train_data_utils.MAX_CATEGORICAL_LABELS + 1
+        assert aggregated.total_count == nemo_gym.train_data_utils.MAX_CATEGORICAL_LABELS + 2
 
     def test_numeric_close_tolerance_validation(self, monkeypatch: MonkeyPatch) -> None:
         """Test numeric_close with various numeric values to validate tolerance thresholds"""

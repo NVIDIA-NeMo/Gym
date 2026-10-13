@@ -298,13 +298,9 @@ def test_coords_enforce_staged_and_failed_shapes() -> None:
         )
 
 
-def test_stage_result_and_receipt_validate_identity() -> None:
-    assert StageResult(ok=True, staging_key="backend/key").staging_key == "backend/key"
-    with pytest.raises(ValidationError, match="requires an error"):
-        StageResult(ok=False)
-
+def _manifest_row() -> CallRecord:
     payload = _record_payload()
-    manifest = CallRecord(
+    return CallRecord(
         model_call_id=payload["model_call_id"],
         parent_call_id=payload["parent_call_id"],
         prev_len=payload["prev_len"],
@@ -319,6 +315,14 @@ def test_stage_result_and_receipt_validate_identity() -> None:
         cumulative_hash=payload["cumulative_hash"],
         response_id="chatcmpl-call-1",
     )
+
+
+def test_stage_result_and_receipt_validate_identity() -> None:
+    assert StageResult(ok=True, staging_key="backend/key").staging_key == "backend/key"
+    with pytest.raises(ValidationError, match="requires an error"):
+        StageResult(ok=False)
+
+    manifest = _manifest_row()
     receipt = RolloutReceipt(
         rollout_id="rollout-1",
         terminal_model_call_id="call-1",
@@ -333,6 +337,53 @@ def test_stage_result_and_receipt_validate_identity() -> None:
             manifest=[manifest],
             terminal_selection="declared",
         )
+    # No attribution stage ran (e.g. the manifest failed to parse): the
+    # selection stays unset rather than being stamped with a method, and the
+    # receipt must be poisoned so the row is not trainable.
+    unattributed = RolloutReceipt(
+        rollout_id="rollout-1",
+        manifest=[manifest],
+        capture_poisoned=True,
+        failure_reason="invalid_manifest_row",
+    )
+    assert unattributed.terminal_selection is None
+    with pytest.raises(ValidationError):
+        RolloutReceipt(rollout_id="rollout-1", manifest=[manifest], terminal_selection="guess")
+    # Attribution succeeded before a later call poisoned the rollout: the
+    # terminal and its method stay on the poisoned receipt.
+    poisoned_after_attribution = RolloutReceipt(
+        rollout_id="rollout-1",
+        terminal_model_call_id="call-1",
+        manifest=[manifest],
+        capture_poisoned=True,
+        failure_reason="worker_capture_failed",
+        terminal_selection="heuristic",
+    )
+    assert poisoned_after_attribution.terminal_model_call_id == "call-1"
+
+
+@pytest.mark.parametrize(
+    ("fields", "match"),
+    [
+        # Unpoisoned receipts must be fully attributed.
+        ({"terminal_model_call_id": None, "terminal_selection": "declared"}, "unpoisoned receipt must name"),
+        ({"terminal_model_call_id": "call-1", "terminal_selection": None}, "unpoisoned receipt must name"),
+        ({}, "unpoisoned receipt must name"),
+        (
+            {"terminal_model_call_id": "call-1", "terminal_selection": "declared", "failure_reason": "x"},
+            "cannot carry a failure_reason",
+        ),
+        # An unset selection is reserved for "no attribution stage ran".
+        (
+            {"terminal_model_call_id": "call-1", "capture_poisoned": True, "failure_reason": "x"},
+            "requires a terminal_selection",
+        ),
+        ({"capture_poisoned": True}, "must be poisoned with a failure_reason"),
+    ],
+)
+def test_rollout_receipt_rejects_inconsistent_attribution_state(fields: dict, match: str) -> None:
+    with pytest.raises(ValidationError, match=match):
+        RolloutReceipt(rollout_id="rollout-1", manifest=[_manifest_row()], **fields)
 
 
 def test_staging_namespace_has_no_serving_or_framework_dependencies() -> None:
@@ -353,3 +404,125 @@ def test_staging_namespace_has_no_serving_or_framework_dependencies() -> None:
             "assert not bad, f'forbidden imports: {bad}'"
         )
         subprocess.run([sys.executable, "-c", code], check=True)
+
+
+@pytest.mark.parametrize("length", [0, 1, 128, 8192, 73728])
+def test_bulk_column_encodings_match_scalar_v2_bytes(length: int) -> None:
+    import random
+    import struct
+
+    from nemo_gym.token_id_capture.staging.digest import _encode_float32_values
+
+    rng = random.Random(4319)
+    tokens = [rng.randrange(2**64) for _ in range(length)]
+    values = [rng.uniform(-100, 0) for _ in range(length)]
+    if length:
+        tokens[0] = 2**64 - 1
+        values[0] = -0.0
+    if length > 1:
+        values[1:4] = [2**-149, float.fromhex("0x1.fffffep127"), -(2**-150)]
+    header = struct.pack(">Q", length)
+    assert encode_token_ids(tokens) == header + b"".join(struct.pack(">Q", value) for value in tokens)
+    assert _encode_float32_values(values, field="test") == header + b"".join(
+        struct.pack(">f", value) for value in values
+    )
+
+
+@pytest.mark.parametrize("bad", [True, 1.0, -1, 2**64])
+def test_bulk_token_encoding_retains_strict_uint_validation(bad: object) -> None:
+    with pytest.raises(ValueError, match="unsigned 64-bit"):
+        encode_token_ids([1, bad])
+
+
+@pytest.mark.parametrize("bad", [True, 1, math.nan, math.inf, -math.inf, 1e39, -1e39])
+def test_bulk_float_encoding_retains_strict_finite_float32_validation(bad: object) -> None:
+    from nemo_gym.token_id_capture.staging.digest import _encode_float32_values
+
+    with pytest.raises(ValueError, match="finite Python floats|float32"):
+        _encode_float32_values([0.0, bad], field="test")
+
+
+def _local_record_components() -> dict:
+    payload = _record_payload()
+    for field in ("digest", "schema_version", "digest_version", "extras_digest_version"):
+        payload.pop(field)
+    return payload
+
+
+def test_local_record_builder_hashes_once_and_preserves_wire_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import Mock
+
+    from nemo_gym.token_id_capture.staging import records
+
+    expected = _record_payload()
+    components = _local_record_components()
+    compute = Mock(wraps=records.compute_staging_digest)
+    monkeypatch.setattr(records, "compute_staging_digest", compute)
+    record = StagedCallRecord.from_components(**components)
+    assert compute.call_count == 1
+    assert record.model_dump() == expected
+    assert StagedCallSnapshot.model_validate_json(record.model_dump_json()).model_dump() == expected
+    assert compute.call_count == 2
+    corrupted = {**expected, "generation_log_probs_delta": [0.0, -0.75]}
+    with pytest.raises(ValidationError, match="digest does not match"):
+        StagedCallSnapshot.model_validate(corrupted)
+    with pytest.raises(ValidationError, match="digest does not match"):
+        StagedCallSnapshot.model_validate(corrupted, context=object())
+    expected.pop("digest")
+    with pytest.raises(ValidationError, match="digest"):
+        StagedCallSnapshot.model_validate(expected)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("token_ids_delta", [True, 11], "valid integer"),
+        ("token_ids_delta", [10, 2**64], "unsigned 64-bit"),
+        ("generation_log_probs_delta", [0.0, math.nan], "finite number"),
+        ("generation_log_probs_delta", [0.0, 1e39], "float32"),
+        ("generation_log_probs_delta", [-0.1, -0.25], "prompt-carry log probabilities"),
+        ("token_mask_delta", [0.0, 0.5], "only 0.0 or 1.0"),
+        ("delta_len", 3, "delta_len 3 does not match 2 token IDs"),
+        ("parent_call_id", None, "parentless staged call must have prev_len == 0"),
+        ("extras", {"changed": True}, "extras_digest does not match extras"),
+    ],
+)
+def test_local_record_builder_keeps_integrity_checks(field: str, value: object, error: str) -> None:
+    with pytest.raises(ValidationError, match=error):
+        StagedCallRecord.from_components(**{**_local_record_components(), field: value})
+
+
+@pytest.mark.parametrize("field", ["token_mask_delta", "generation_log_probs_delta"])
+def test_local_record_builder_does_not_normalize_integer_float_columns(field: str) -> None:
+    with pytest.raises(ValueError, match="Python floats"):
+        StagedCallRecord.from_components(**{**_local_record_components(), field: [0, 1]})
+
+
+def test_bulk_token_encoding_reports_inconsistent_sequence_as_value_error() -> None:
+    class InconsistentTokens(list[int]):
+        def __len__(self) -> int:
+            return super().__len__() + 1
+
+    with pytest.raises(ValueError, match="token_ids cannot be encoded"):
+        encode_token_ids(InconsistentTokens([1]))
+
+
+@pytest.mark.parametrize("field", ["delta_len", "cum_len"])
+@pytest.mark.parametrize("boolean", [False, True])
+def test_staging_digest_rejects_boolean_lengths(field: str, boolean: bool) -> None:
+    # Match the numeric geometry so equality checks cannot reject True in place of 1.
+    args = {
+        **_digest_args(),
+        "parent_call_id": None,
+        "mode": "text",
+        "prev_len": 0,
+        "delta_len": 1,
+        "cum_len": 1,
+        "token_ids_delta": [10],
+        "token_mask_delta": [1.0],
+        "generation_log_probs_delta": [-0.25],
+        field: boolean,
+    }
+    error = f"{field} must be an unsigned 64-bit integer" if boolean else "staged call delta|cum_len"
+    with pytest.raises(ValueError, match=error):
+        compute_staging_digest(**args)

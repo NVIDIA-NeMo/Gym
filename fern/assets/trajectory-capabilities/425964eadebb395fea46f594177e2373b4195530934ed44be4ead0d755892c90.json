@@ -1,0 +1,1367 @@
+{
+  "gym_commit": "939cace5af1436789ead920d0f0b3e663784ad73",
+  "harnesses": {
+    "codex": {
+      "evidence": {
+        "TE-1": {
+          "observed": 6,
+          "passed": 6,
+          "required": 7
+        },
+        "TE-2": {
+          "observed": 6,
+          "passed": 6,
+          "required": 7
+        },
+        "TE-3": {
+          "observed": 5,
+          "passed": 0,
+          "required": 6
+        },
+        "TE-4": {
+          "observed": 6,
+          "passed": 6,
+          "required": 7
+        },
+        "TE-5": {
+          "observed": 5,
+          "passed": 0,
+          "required": 6
+        },
+        "TE-6": {
+          "observed": 5,
+          "passed": 5,
+          "required": 6
+        },
+        "TE-7": {
+          "observed": 6,
+          "passed": 6,
+          "required": 7
+        },
+        "TE-8": {
+          "observed": 6,
+          "passed": 0,
+          "required": 7
+        },
+        "TE-9": {
+          "observed": 6,
+          "passed": 0,
+          "required": 7
+        }
+      },
+      "scenarios": [
+        {
+          "artifact_report": "evidence/5aab8de881f63b27a3e99f33d5bdd1b8304290240cdde9296afe41b0a1cc5cc8/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "c50c25be678c42b37f0deebb12c2fcd7492f8ff3312cf2de16ddd48f09c6980f",
+            "rollouts.jsonl": "3c172fb0b59eea8d992a9cfa439c92b48a994d05cc66a25994e02445511636b1",
+            "runtime.json": "4437e9ed95e1e690dd5ee530dffd7119542f6e79723025c7d9159c88a06f11af",
+            "witness.json": "4e3c897af2316413799be4965ad4127a1fa66fc8fa75cf1016b0929ad0fe9a49"
+          },
+          "issues": [],
+          "model_attempts": 3,
+          "scenario": "tool_success",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/8635b8e327166b8641b7e3d5ad1e91694593d38b054b7e7166d634b088e9b4be/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "7e82e16e5bd9ca890fbfb9cebf92b4abcc85a893862184d333817e90e19ae9a4",
+            "rollouts.jsonl": "38aed6bb934098ff7b6631027597b32fc9ce65f7afcf0d9fd20aae8a5cfa7727",
+            "runtime.json": "4437e9ed95e1e690dd5ee530dffd7119542f6e79723025c7d9159c88a06f11af",
+            "witness.json": "f4d5cdae6317c0c76b1284be863ebef6c817abb5ae049ff6bbb32a62b03f5b7a"
+          },
+          "issues": [],
+          "model_attempts": 3,
+          "scenario": "tool_failure",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/234c0a6881303ecccd98b7b41ec220ff9e2a57c63e5c3eee4f70b74257d458fa/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "79ac7968a1a850a65be51b3a561ae2f616ecd713e893af27f58dbd2ee6efac05",
+            "rollouts.jsonl": "9bf72d47b09efeea5531511a57ebb8dc1bbd293447e8779806ada4c806d5aa0a",
+            "runtime.json": "4437e9ed95e1e690dd5ee530dffd7119542f6e79723025c7d9159c88a06f11af",
+            "witness.json": "8317c66824810d8b5f2f0f4c022c6c652de122a8d75001d87b3f54b2de8d1255"
+          },
+          "issues": [],
+          "model_attempts": 3,
+          "scenario": "usage_omitted",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/c2edb5bdcfc56c0948f8cd2a9386f16961a5d8d5c0123bf19408725fde55ac4d/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": false,
+          "hashes": {
+            "launch.json": "5676898c9df7531b4f9afa02929b097880444d13652e0fa67b92045a79e52a91",
+            "rollouts.jsonl": "3e91f09015df7cf3bf7ce48c92c86c372580a10fa5ada2b74b16da5892341518",
+            "runtime.json": "4437e9ed95e1e690dd5ee530dffd7119542f6e79723025c7d9159c88a06f11af",
+            "witness.json": "0b9cb6c2b2f788650d26a942db4e5b5655b7aab9222877350e0f7e31fad4de1a"
+          },
+          "issues": [
+            "not all prescribed model failures were observed",
+            "the harness did not finish the scripted model exchange",
+            "prescribed tool executions and their returned results were not all witnessed",
+            "expected verifier outcome was not observed",
+            "rollout reward differs from the verifier witness"
+          ],
+          "model_attempts": 1,
+          "scenario": "retry_429",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/33b51fd8b86da01a70ad351365a7abaff0421d23eb4a263da21d5ac87b1c0768/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "e3154d6e2ad5b275099f9a96fdb9759d706164790a78dfb0226735a52e897ddd",
+            "rollouts.jsonl": "3e8316c3cfb81c0d67bbb298354e33c1a2101fc49dcca44e18634721198bd13f",
+            "runtime.json": "4437e9ed95e1e690dd5ee530dffd7119542f6e79723025c7d9159c88a06f11af",
+            "witness.json": "b070b15eb369d4d0d21fe69e2126abae4fb013877b3f726748b88db3d8a2d1a9"
+          },
+          "issues": [],
+          "model_attempts": 4,
+          "scenario": "retry_500",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/4617eb0101f2b497c44b7e662ea37f0f57d63405b15efbde10317c1ac2f2d25a/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "2754eea61baf1e27eff742d5786c89f19c2ae59cae31afb67af6135489b7ad76",
+            "rollouts.jsonl": "382a4674b6b0ef178a55bc076da9c5ce4e16c099a5a01e1ead4d7f7d8866cff2",
+            "runtime.json": "4437e9ed95e1e690dd5ee530dffd7119542f6e79723025c7d9159c88a06f11af",
+            "witness.json": "4dbdcf556eb11e0c6652d1568a1072f61d480f3a7a1459028c451a374dd70820"
+          },
+          "issues": [],
+          "model_attempts": 1,
+          "scenario": "model_error",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/55cd5c8233a0e750072609c7b55cbfe01fc8019ac36df4d779baf6753b504bfb/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "c8f9eb1b0ebd66e0eca34d89d478ee3fefbd0ae3e7b7a9313d9a4eca0fdb0c0a",
+            "rollouts.jsonl": "c77fe7eb61475582c14f6c30a291a7ffc8598918a7d4ea656ede7479c294f3d0",
+            "runtime.json": "4437e9ed95e1e690dd5ee530dffd7119542f6e79723025c7d9159c88a06f11af",
+            "witness.json": "501e5bf89c623aff24b9048b28e56afd6985f2cd956540e5afa634a09f798940"
+          },
+          "issues": [],
+          "model_attempts": 3,
+          "scenario": "verifier_failure",
+          "verdict": "not_fulfilled"
+        }
+      ],
+      "verdict": "not_fulfilled"
+    },
+    "opencode": {
+      "evidence": {
+        "TE-1": {
+          "observed": 7,
+          "passed": 7,
+          "required": 7
+        },
+        "TE-2": {
+          "observed": 7,
+          "passed": 7,
+          "required": 7
+        },
+        "TE-3": {
+          "observed": 6,
+          "passed": 0,
+          "required": 6
+        },
+        "TE-4": {
+          "observed": 7,
+          "passed": 7,
+          "required": 7
+        },
+        "TE-5": {
+          "observed": 6,
+          "passed": 6,
+          "required": 6
+        },
+        "TE-6": {
+          "observed": 6,
+          "passed": 6,
+          "required": 6
+        },
+        "TE-7": {
+          "observed": 7,
+          "passed": 7,
+          "required": 7
+        },
+        "TE-8": {
+          "observed": 7,
+          "passed": 7,
+          "required": 7
+        },
+        "TE-9": {
+          "observed": 7,
+          "passed": 0,
+          "required": 7
+        }
+      },
+      "scenarios": [
+        {
+          "artifact_report": "evidence/e5232389b937ab01cfe070df7a03eb8b24df3f1b7f676f461f31af1d22ecfc29/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "95035022e91224f57be8bc6d129b9faf09f0cf649a8859e68309f6f6a2fc0205",
+            "rollouts.jsonl": "b5e26b58c3851e2fa9faebfd06f469b7aede447df8b265aa86b377adc2ad827e",
+            "runtime.json": "a46cccea8c3ea498e0d64e2b2cd2dc7b4be04cd32bdd538d6792e7ef45fb6b90",
+            "witness.json": "44497e8898f50d180975bec04eb5181604351375f2d738442d24dc3d384c9598"
+          },
+          "issues": [],
+          "model_attempts": 3,
+          "scenario": "tool_success",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/6b0770fb7ae5965e558b9ff5b1d9f18f0b5aebdd91c404a81e139420b5f621bf/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "f96e5b6706d56d3820da2313b6100e771d3dab9811de4d0a1cdb036843d4b72d",
+            "rollouts.jsonl": "4c44873cb87c55e9f498262fc92ffdb92ac4a5fb76e773768a1da1582164e2c0",
+            "runtime.json": "a46cccea8c3ea498e0d64e2b2cd2dc7b4be04cd32bdd538d6792e7ef45fb6b90",
+            "witness.json": "7ea7d666dca72290da2f62f616b124e481f577d3972102feae0bf3db7404f95c"
+          },
+          "issues": [],
+          "model_attempts": 3,
+          "scenario": "tool_failure",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/e9d5ffdfc4b4fbb1b292760c2055d99a871a797ebaac5b9069704917669f0ef5/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "b41e7e113cd6706182c3b422b935e1280e4150eec8655371444eec2b10724234",
+            "rollouts.jsonl": "7ab816046bc16f73121e2eb011913c1632ce86acea7657eeeaed63cf045512ef",
+            "runtime.json": "a46cccea8c3ea498e0d64e2b2cd2dc7b4be04cd32bdd538d6792e7ef45fb6b90",
+            "witness.json": "ca056e25d34559310532f0734f234bd3ebdc7102f7366bc7a800b11c516225bc"
+          },
+          "issues": [],
+          "model_attempts": 3,
+          "scenario": "usage_omitted",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/cdf1ff8136bb5713965009ae6f09cf9a949e43e6556f8b2230995f0268ef220c/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "197f663e6a8dfe2e0e0115c031b4bc25e972fd557d28321cbef38013b06bed0f",
+            "rollouts.jsonl": "e933b9bc62357b9d7ebb13cd033a380b15c4442760026978f21dea3f63962583",
+            "runtime.json": "a46cccea8c3ea498e0d64e2b2cd2dc7b4be04cd32bdd538d6792e7ef45fb6b90",
+            "witness.json": "c2ebaf92715c66abc437058928030eaa5a053cf46a0cf7e100846111662c9935"
+          },
+          "issues": [],
+          "model_attempts": 5,
+          "scenario": "retry_429",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/e0fb5dadabf66769febc3bc2cb67dca945b79dc3310c3afe005ce69a7eba2b17/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "9712561039d614925aa8984a3cf33e47dd67b51f2854e72705ed7698e1ef77a0",
+            "rollouts.jsonl": "d140402dbeebcbcfa5f3c59c3cbf7882fe8094a8299cf25f5e4640486512b481",
+            "runtime.json": "a46cccea8c3ea498e0d64e2b2cd2dc7b4be04cd32bdd538d6792e7ef45fb6b90",
+            "witness.json": "2a37c3b38771b2d82fff89ae4aafaf2befa29f3a0ba9d802cc4f5543fbb5fe15"
+          },
+          "issues": [],
+          "model_attempts": 4,
+          "scenario": "retry_500",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/609152e30c9d3f2d0d2e76d16dbb37cce5dd91eefbbef1558699413b7d480843/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "9334616ebd21fad19e9dbb79dfa6c2b1f5df62aeaab74c5ad6982f20b2b70f8d",
+            "rollouts.jsonl": "ed32822271f1bf7fa60a78c3c6c3539bcc051f6ff97acadb2cb24941e05a3265",
+            "runtime.json": "a46cccea8c3ea498e0d64e2b2cd2dc7b4be04cd32bdd538d6792e7ef45fb6b90",
+            "witness.json": "c159595d3ab18f4406c8aa10bc1be737d9e4e58e635352139ea87e970a85c389"
+          },
+          "issues": [],
+          "model_attempts": 1,
+          "scenario": "model_error",
+          "verdict": "fulfilled"
+        },
+        {
+          "artifact_report": "evidence/d1c01b2c5bc34c8b3855967709ffa13369c2130c71ef2384a0ade94241c00c9f/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "b2fc75912e57bb2216a2e96739db4f8ddc68de629bbe2e2744c6a36750fe7c82",
+            "rollouts.jsonl": "a1e223faf33a33e468b40d01922cc7bef379311626d4942e2623b00aad9566cb",
+            "runtime.json": "a46cccea8c3ea498e0d64e2b2cd2dc7b4be04cd32bdd538d6792e7ef45fb6b90",
+            "witness.json": "b2f221214160762c7304ae1a85e55e32d6166a8905414766d05bfed3747a5ff6"
+          },
+          "issues": [],
+          "model_attempts": 3,
+          "scenario": "verifier_failure",
+          "verdict": "not_fulfilled"
+        }
+      ],
+      "verdict": "not_fulfilled"
+    },
+    "pi": {
+      "evidence": {
+        "TE-1": {
+          "observed": 7,
+          "passed": 7,
+          "required": 7
+        },
+        "TE-2": {
+          "observed": 7,
+          "passed": 7,
+          "required": 7
+        },
+        "TE-3": {
+          "observed": 6,
+          "passed": 0,
+          "required": 6
+        },
+        "TE-4": {
+          "observed": 7,
+          "passed": 7,
+          "required": 7
+        },
+        "TE-5": {
+          "observed": 6,
+          "passed": 6,
+          "required": 6
+        },
+        "TE-6": {
+          "observed": 6,
+          "passed": 6,
+          "required": 6
+        },
+        "TE-7": {
+          "observed": 7,
+          "passed": 7,
+          "required": 7
+        },
+        "TE-8": {
+          "observed": 7,
+          "passed": 4,
+          "required": 7
+        },
+        "TE-9": {
+          "observed": 7,
+          "passed": 0,
+          "required": 7
+        }
+      },
+      "scenarios": [
+        {
+          "artifact_report": "evidence/0bb8cf29a2a7c14b622fa34b28b6f7da620a9461fe971e22018a484130bde6fe/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "7394b02a04cc7d2a845049e538c244c94f4498b472becf580aca7cf5e0480f4e",
+            "rollouts.jsonl": "a3c7b4f84fc02db3c9989f17324652571bbac4c9466b93122b74cc6d97ebe767",
+            "runtime.json": "92dcc997ba9de317b53c51cfee0e18a60f5b40e52d01f1783e8729a0d6ea5c29",
+            "witness.json": "7a0cc7d8bf6ed11d6f28fa3685b47b743a42f7c95e74c74cbf36f19940abf608"
+          },
+          "issues": [],
+          "model_attempts": 3,
+          "scenario": "tool_success",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/2ce996aa1ca4c3e16eaf6346c7ddfddfd2d48f97b6c5983b44d8355486d7a199/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "239666fc79a08d0f2a6f9f5f6e351054c57190b33d19e3cecbc41ce8db7f0c2c",
+            "rollouts.jsonl": "a6ad3c41cb16326d2d9dd27d7c08d264840054ac6129a71936d6c5322f891fc7",
+            "runtime.json": "92dcc997ba9de317b53c51cfee0e18a60f5b40e52d01f1783e8729a0d6ea5c29",
+            "witness.json": "cae8dde033e4b150eb3529e56cebc7ca7e1acce0805a8116d694f7b5102079b9"
+          },
+          "issues": [],
+          "model_attempts": 3,
+          "scenario": "tool_failure",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/059d55d2a83c6186c48ddc841a16c2d2c4b220eaaa517d97a8f06487399bcc8c/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "c8b310032dd4399433d10ed76e22a28ab69f79770ae13d4669319ae18ad11fce",
+            "rollouts.jsonl": "575ecc5fc96ac251adc0e5392cea1dc17c5d9e79e3b399f661547c38e5f0cc07",
+            "runtime.json": "92dcc997ba9de317b53c51cfee0e18a60f5b40e52d01f1783e8729a0d6ea5c29",
+            "witness.json": "6a4280069265417ba2f9c77bc6888898c57fabff8338773bafb4da9c73841f84"
+          },
+          "issues": [],
+          "model_attempts": 3,
+          "scenario": "usage_omitted",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/55582c015422508f8c7c140969a76d14f8bb153377689a0b50e675369ea01f6b/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "122fb0f2c48df8e4d3db2d611bbe979a75a3c511d952e5a569daa6e47a8b0544",
+            "rollouts.jsonl": "6db981a0e44963ac2cebd18e95b996668728e05c4e8ad0c7c9619698abb06eb4",
+            "runtime.json": "92dcc997ba9de317b53c51cfee0e18a60f5b40e52d01f1783e8729a0d6ea5c29",
+            "witness.json": "043a09551112360f830bf19c7962daa3af27379e8fdd8db16c2aad41ea21994f"
+          },
+          "issues": [],
+          "model_attempts": 5,
+          "scenario": "retry_429",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/1f9307f26aa79dd49a44c12885819278f115c340ae278a09334d34d6586c7892/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "d99dfa7be0f59f455cbd4a36acb9346f13d2da85a2909f23075e3f6efcdf4e8c",
+            "rollouts.jsonl": "c970c689ebaaf0d2600cac31e87a9be34dd9a50c27678030e5c28bc7c1300a40",
+            "runtime.json": "92dcc997ba9de317b53c51cfee0e18a60f5b40e52d01f1783e8729a0d6ea5c29",
+            "witness.json": "1349969761533812d179fd4877f5e3f397616fa011965873318285160079388a"
+          },
+          "issues": [],
+          "model_attempts": 4,
+          "scenario": "retry_500",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/4ee86caed333a92e96f1d58021daab2683b0db1873b1ced22a71f882631cbde5/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "33dd7a4c1ac3a5f279004f76e1bd725c446a88245daabdda1368944d7d504eca",
+            "rollouts.jsonl": "3ae4f7e18833b39efcc1d049bb0b493fe02dabb3abd3d9d3cbc1954b063bbc00",
+            "runtime.json": "92dcc997ba9de317b53c51cfee0e18a60f5b40e52d01f1783e8729a0d6ea5c29",
+            "witness.json": "0020ca50a1e5110d20886c464fa674ed0871cb3c8a060840d1f7a317c7f370e3"
+          },
+          "issues": [],
+          "model_attempts": 1,
+          "scenario": "model_error",
+          "verdict": "not_fulfilled"
+        },
+        {
+          "artifact_report": "evidence/054dde5e54cd4ec58476286fcd0a58f3f30c4cc8edb9e15f526d344e14f32c0a/evidence_summary.json",
+          "evidence": {
+            "TE-1": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-2": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-3": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            },
+            "TE-4": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-5": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-6": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-7": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-8": {
+              "artifact_verdict": "fulfilled",
+              "verdict": "fulfilled"
+            },
+            "TE-9": {
+              "artifact_verdict": "not_fulfilled",
+              "verdict": "not_fulfilled"
+            }
+          },
+          "execution": {
+            "returncode": 0,
+            "timed_out": false
+          },
+          "exercised": true,
+          "hashes": {
+            "launch.json": "bffb47a9144db73f6850d82ce2ba7fc5c46a6d99253d28020746f32021b8dece",
+            "rollouts.jsonl": "549d97e6e6ce42eabe7b3efefdf373cc5fff8bceb003cba74846e71fb7d768a7",
+            "runtime.json": "92dcc997ba9de317b53c51cfee0e18a60f5b40e52d01f1783e8729a0d6ea5c29",
+            "witness.json": "9e4138efff5527adf79f43f5ae7afdbeae1b416d4b33e7c954c1af2dccdb3dce"
+          },
+          "issues": [],
+          "model_attempts": 3,
+          "scenario": "verifier_failure",
+          "verdict": "not_fulfilled"
+        }
+      ],
+      "verdict": "not_fulfilled"
+    }
+  },
+  "limits": [
+    "local harness runtime and controlled Chat/Responses model only; no remote sandbox qualification",
+    "TE-10, P1, multimodal, compaction, parallelism and deployment health are outside this suite"
+  ],
+  "python": "3.13.14 (main, Aug  5 2026, 15:33:38) [Clang 22.1.3 ]",
+  "runtimes": {
+    "codex": {
+      "adapter_sha256": "bf55ed52f7bbb05b7a76237cc5680ef14246e4fa94b6c76a6ec3530936b0409c",
+      "version": "codex-cli 0.155.0-alpha.9.2"
+    },
+    "opencode": {
+      "adapter_sha256": "cbb12f7a386c9d129983f0d0bf5facdb4cb57a33d430c80b92ad8fc1374a7f3d",
+      "version": "1.17.11"
+    },
+    "pi": {
+      "adapter_sha256": "3b99e9a60de5d6e825cb16dd18c63b8bb9afd3e9161d669280d4cd121afa08e1",
+      "version": "0.80.2"
+    }
+  },
+  "schema_version": "trajectory-capabilities-table/v1",
+  "suite": "harness-p0-probes/v1",
+  "suite_sha256": "4cb1ccd9d4a64138a34e5f8940da7c66b55b667268ea25be791c93a45376ff65",
+  "summary_sha256": "40fcfb2c6d4c957cc25579b91d32e24a1b380407ff42ed219c9ad9e4c5b68355",
+  "tests": {
+    "checker": {
+      "junit_sha256": "08b30f56476faa1acf4a270c5180372cb420aa10d2491005054258906d729aa4",
+      "log_sha256": "f12116fbb42fe25165fc0e9088bcdaf5cb1ce52eef7c22d4e85a29639095cd2d",
+      "passed": 77,
+      "path": "tests/unit_tests/harness_capabilities",
+      "skipped": 0
+    },
+    "codex": {
+      "junit_sha256": "56e3535a7b316e34f81dd1de7040c2198f5645aba75b306f9418e327d1cf2bc0",
+      "log_sha256": "cc9e8f3c660bf05578ff2450402f4b974c78d4986e877a9adf2347abd2b33577",
+      "passed": 46,
+      "path": "responses_api_agents/codex_agent/tests",
+      "skipped": 0
+    },
+    "opencode": {
+      "junit_sha256": "02509b146f5404252701f8f823d9594e7f6734563c98c6695dac54b39a749b32",
+      "log_sha256": "b21aafd27505c80ec99c15833125f562d6a8cb87ec597e18223c32f0d7795b98",
+      "passed": 82,
+      "path": "responses_api_agents/opencode_agent/tests",
+      "skipped": 0
+    },
+    "pi": {
+      "junit_sha256": "749ecd9ae6709c60547f295ab303d72cdabc00ddd840146bfb8413ea238d4ae4",
+      "log_sha256": "6fb5bcee3ae2c68a7bbdc839dac6ef9c040dc5398befa5c97439e3734f596c9b",
+      "passed": 34,
+      "path": "responses_api_agents/pi_agent/tests",
+      "skipped": 0
+    },
+    "runner": {
+      "junit_sha256": "944724921767038266dc2010cfce517c113e0063a5356e628d87e07f08742fff",
+      "log_sha256": "788b4e62074bb67ede85563607cab6736fa871110bffb2939f4494a88b4ab14b",
+      "passed": 49,
+      "path": "scripts/harness_conformance/tests",
+      "skipped": 0
+    }
+  }
+}

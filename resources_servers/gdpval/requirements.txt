@@ -6,5 +6,6 @@ python-docx>=1.1
 python-pptx>=1.0
 openpyxl>=3.1
 pdfminer.six>=20251230
+cryptography>=42.0
 trafilatura>=1.12
 PyMuPDF>=1.24
