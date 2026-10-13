@@ -249,31 +249,35 @@ still scored, but reports `final_stage_degraded: 1` and no flat headline.
 ++multistage.stages='[{num_tasks: 45, partial_completion: {...}}, {num_tasks: 220, num_models: 4, partial_completion: {min_success_fraction: 0.95, min_per_reference_success_fraction: 0.5, min_successful_rows_per_reference: 1}}]'
 ```
 
-### Fresh vs. cached deliverables
+### Deliverables and re-judging
 
-- **Fresh** (generate deliverables): set `PERSIST_DELIVERABLES_DIR` to an
-  absolute path. The agent persists each deliverable to `persist_deliverables_dir`
-  and rejects a relative path at startup, including the config's fallback
-  `output/gdpval/deliverables`. A task that recurs in a later stage is judged
-  from its cached deliverable instead of re-running the policy.
-- **Cached / judge-only** (score existing deliverables, no policy GPUs): set the
-  `JUDGE_ONLY` and `PERSIST_DELIVERABLES_DIR` env vars so the agent skips the
-  policy and scores the cached deliverables:
+`/verify` persists each deliverable to `task_<id>/repeat_<n>/` under the GDPVal
+resources server's `persist_deliverables_dir` (`PERSIST_DELIVERABLES_DIR`). Use
+an absolute path; `transport_assignment_repair` requires one. A task that recurs
+in a later stage is judged from its persisted deliverable instead of re-running
+the policy.
+
+To judge a finished run's deliverables again, for example with a different judge
+panel, judge settings or references, use `gym eval reverify` on its output. It
+starts only the resources server and its judges, without the policy or a
+sandbox; each row's `deliverables_dir` names its persisted deliverable. A
+multi-stage run writes `<output stem>_materialized_inputs.jsonl` with every
+stage's rows, so each stage is judged again against the references it was
+assigned; the adaptive reference selection is not re-run.
 
 ```bash
-JUDGE_ONLY=true \
-PERSIST_DELIVERABLES_DIR=/path/to/deliverables_cache \
-gym eval run \
-    --model-type vllm_model --benchmark gdpval --split benchmark \
-    --output results/gdpval_multistage.jsonl \
+gym eval reverify \
+    --benchmark gdpval \
     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
-    ++multistage.enabled=true \
-    ++multistage.stages='[{num_tasks: 45}, {num_models: 4}]'
+    --inputs results/gdpval_multistage_materialized_inputs.jsonl \
+    --rollouts results/gdpval_multistage.jsonl \
+    --output results/gdpval_multistage_reverified.jsonl
 ```
 
-  The cache must contain a `task_<id>/repeat_<n>/` dir for every repeat the run
-  requests (the benchmark defaults to `num_repeats: 1`, i.e. `repeat_0`; raise it
-  with `++...datasets.0.num_repeats=N` and the cache needs `repeat_0`…`repeat_{N-1}`).
+In rubric mode, a verification without a usable judgement goes to the failures
+file as `judge_failed`, and `gym eval reverify --judge-failed-only` judges it
+again. In comparison mode a judging failure is a retryable environment-server
+failure, which `--resume` dispatches again.
 
 ### Full run as a single stage
 
@@ -318,11 +322,10 @@ no `finish_params.json` for it. Turn it on with `enabled: true`:
 | `reference_availability_only` | `false` | Skip the size checks and only move tasks away from references with no `finish_params.json` for the task. |
 
 - Without `reference_availability_only`, only a task whose candidate
-  deliverable already exists under the agent's `persist_deliverables_dir` (which
-  must be absolute) when its stage is planned can move. With an empty
-  deliverables directory that is only a task an earlier stage already produced,
-  so the repair is meant for judge-only runs and reruns over an existing
-  deliverables cache.
+  deliverable already exists under the GDPVal resources server's
+  `persist_deliverables_dir` (which must be absolute) when its stage is planned
+  can move. On a fresh run that is only a task an earlier stage already
+  produced.
 - `reference_availability_only: true` needs no candidate deliverable, so it also
   works on a fresh run.
 - A task it cannot place keeps its reference and is listed in the stage's plan
@@ -351,13 +354,10 @@ gym eval run \
     ++multistage.stages='[{num_tasks: 45, partial_completion: {min_success_fraction: 0.9, min_per_reference_success_fraction: 0.5, min_successful_rows_per_reference: 1}}, {num_tasks: 220, num_models: 4}]'
 ```
 
-Add `RERUN_INCOMPLETE=true` with the same `PERSIST_DELIVERABLES_DIR` when an
-unfinished task must resume or reuse its policy deliverable. A task whose
-deliverable already **finished** on disk (marked by `finish_params.json`) skips
-the policy rollout and is judged from cache; a task that never finished is
-re-rolled. `rerun_incomplete` also reuses **cached judgements** keyed by the
-task's assigned reference. Each stage's sampled tasks and per-task reference
-assignment are recorded in the stage journal (and re-derived deterministically
+A resume dispatches the rows that did not finish again. A row a later stage was
+reusing is judged again from its deliverable; any other row runs the policy
+again. Each stage's sampled tasks and per-task
+reference assignment are recorded in the stage journal (and re-derived deterministically
 from the stage seed for older plans), so they replay identically on resume. Use
 the same `multistage.seed` so an unplanned stage draws the same tasks.
 
@@ -366,22 +366,19 @@ is tied to a fingerprint of the dataset rows and task distribution; the stage
 list, seeds, `nested_tasks`, `column`, `reuse_cached_deliverables` and
 `transport_assignment_repair`; the reference ids and ELOs (not the contents of
 their deliverable directories); `num_repeats` and the other result-affecting
-rollout settings; and every server setting except endpoints, API keys, headers,
-`rerun_incomplete` and `concurrency`. A changed fingerprint, or a run without
+rollout settings; and every server setting except endpoints, API keys, headers
+and `concurrency`. A changed fingerprint, or a run without
 `--resume`, starts fresh and renames the old rollouts, failure sidecar, journal
 and aggregate metrics to `<file>.stale.<ns>`. A stage restart moves the rows it
 drops to `<file>.pruned.<ns>`. Neither is deleted; remove them by hand.
 `partial_completion`, `retry_inprocess` and `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS` are
 not fingerprinted, so they can be added or changed on a resume (except a
-policy already accepted as partial; see below). Cached judgements
-(`RERUN_INCOMPLETE`) are keyed by the same fingerprint.
+policy already accepted as partial; see below).
 
 After a stage has been accepted as partial, its policy, included evidence, and
 omitted keys are frozen. Changing or removing that policy on `--resume` fails
 closed; start a fresh output path if you intentionally want a different
-calibration decision. See
-[Task Re-run Mode](../../responses_api_agents/stirrup_agent/README.md#task-re-run-mode)
-for the full semantics.
+calibration decision.
 
 ## Agent settings
 
@@ -456,8 +453,8 @@ draws the same judges: `(task_id, "rubric")` for rubric mode and
 `(task_id, ref_id, ref_repeat)` for comparison. Set `JUDGE_SAMPLING_SEED` (or
 `++gdpval_resources_server.resources_servers.gdpval.judge_sampling_seed=<int>`)
 to additionally shift the whole stream. This makes multi-stage ELO reruns
-replayable per stage — combined with `RERUN_INCOMPLETE` the reselected reference
-subset draws the same panel members it did originally.
+replayable per stage: `gym eval reverify` draws the same panel members for each
+task and reference as the original run.
 
 ### Audio / video routing
 
@@ -551,7 +548,7 @@ Fields on `gdpval_resources_server.resources_servers.gdpval`:
 | `judge_reference_files_recursive` | `false` | Comparison only: include files in subdirectories of the task's `reference_files/`. Submission directories stay shallow. |
 | `judge_reference_files_from_eval` | `false` | Comparison only: read `reference_files/` from the eval task directory instead of each reference model's directory. Enable only after validating those prepared inputs. |
 | `strict_comparison_trials` | `false` | See [How sampling works](#how-sampling-works). |
-| `count_eval_missing_as_loss`, `missing_eval_task_ids` | `false`, `[]` | Comparison, multi-stage `stage_index` 1 only (indices start at 0): a listed task whose eval deliverable has no `finish_params.json` is scored as a loss against every reference instead of failing. Set the same two fields on `gdpval_stirrup_agent` so judge-only runs forward those tasks to the resources server. |
+| `count_eval_missing_as_loss`, `missing_eval_task_ids` | `false`, `[]` | Comparison, multi-stage `stage_index` 1 only (indices start at 0): a listed task whose eval deliverable has no `finish_params.json` is scored as a loss against every reference instead of failing. |
 | `judge_handles_audio`, `judge_handles_video` | `false` | Audio/video capability of the single judge when `judge_panel` is `null`. |
 | `on_missing_av_judge` | `warn` | See [Audio / video routing](#audio--video-routing). |
 
