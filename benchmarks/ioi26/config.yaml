@@ -7,6 +7,9 @@ ioi26_resources_server:
     competitive_coding_challenges:
       test_file: ${oc.env:CCC_TEST_FILE,benchmarks/ioi26/data/ioi26_metadata.json}
       shared_dir: ${oc.env:SHARED_TEMP_DIR,/tmp}
+      # Score the way IOI and NeMo Skills do, so totals are comparable with Skills baselines.
+      grade_all_subtasks: true
+      partial_credit: true
 
 ioi26_simple_agent:
   _inherit_from: competitive_coding_challenges_simple_agent
