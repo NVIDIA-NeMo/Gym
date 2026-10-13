@@ -109,11 +109,17 @@ HTTP/MCP tools are rejected. `context_window` and `max_output_tokens` are indepe
 config settings; leave room for the prompt in the served model's context. Configure
 sampling on the Gym model server. Request-level overrides are not silently ignored.
 Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
+Sessions ignore the task repository's OpenCode project config and instruction files
+(`AGENTS.md` or `CLAUDE.md`, `opencode.json`, `.opencode/`) unless `session_project_config`
+is set; settings Gym passes still take precedence over them.
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
 gaps. Runtime/model errors fail before verification; explicit limits can retain
-gradable partial output. This path is eval-only; working inference does not establish
+gradable partial output. With `session_return_failed_runs`, a run that ends on a
+runtime/model error instead returns status `failed` with its error and partial output,
+so the EnvironmentServer still verifies it; cancellation still fails the request.
+This path is eval-only; working inference does not establish
 training token-ID/logprob support or benchmark accuracy.
 
 For local calls, OpenCode is installed on first use in a shared background-thread
