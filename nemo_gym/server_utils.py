@@ -523,6 +523,8 @@ async def _request_with_retries(
 
             await asyncio.sleep(0.5)
         except Exception as e:
+            if _max_connection_retries == 0:
+                raise
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                 print_exc()
 

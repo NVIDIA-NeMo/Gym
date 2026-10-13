@@ -21,9 +21,10 @@ import os
 from copy import deepcopy
 from threading import Lock
 from time import monotonic, time, time_ns
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
+from urllib.parse import urlsplit
 
-from aiohttp.client_exceptions import ClientResponseError
+from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
 from fastapi import Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
@@ -227,6 +228,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Connection-error retry bound applied to clients when endpoint_file is set.
     endpoint_connection_retries: Optional[int] = 8
 
+    # Retry a failed generation once after refreshing the published endpoints.
+    retry_turn_on_other_endpoint: bool = False
+
     # Expose the Gym session (one per rollout) as the backend's conversation id.
     # ``conversation_params`` is a TensorRT-LLM extension outside the OpenAI Chat Completions
     # schema, and strict OpenAI-compatible backends reject it, so this is off by default and
@@ -333,20 +337,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 self.config.sampling_overrides,
             )
 
-        self._clients = [
-            NeMoGymAsyncOpenAI(
-                base_url=base_url,
-                api_key=self.config.api_key,
-                default_headers=self.config.default_headers,
-                max_connection_retries=(
-                    self.config.endpoint_connection_retries if self.config.endpoint_file else None
-                ),
-            )
-            for base_url in self.config.base_url
-        ]
+        self._clients = [self._new_endpoint_client(url) for url in self.config.base_url]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
-        self._endpoint_file_mtime: Optional[float] = None
         self._endpoint_missing_since: Optional[float] = None
         self._endpoint_last_check_at: Optional[float] = None
 
@@ -475,7 +468,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._apply_sampling_overrides(body_dict)
 
         client = self._resolve_client(request)
-        response_dict = await client.create_response(**body_dict)
+        response_dict, client = await self._create_with_endpoint_retry(request, client, "create_response", body_dict)
 
         return NeMoGymResponse.model_validate(response_dict)
 
@@ -887,7 +880,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         try:
-            chat_completion_dict = await client.create_chat_completion(**body_dict)
+            chat_completion_dict, client = await self._create_with_endpoint_retry(
+                request, client, "create_chat_completion", body_dict
+            )
         except ClientResponseError as e:
             if transport_io_enabled:
                 finished_ns = time_ns()
@@ -1244,7 +1239,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         client = self._resolve_client(request)
 
         try:
-            completion_dict = await client.create_completion(**completion_body)
+            completion_dict, client = await self._create_with_endpoint_retry(
+                request, client, "create_completion", completion_body
+            )
         except ClientResponseError as e:
             result_content_str = e.response_content.decode()
             is_out_of_context_length = e.status == 400 and (
@@ -1533,16 +1530,29 @@ class VLLMModel(SimpleResponsesAPIModel):
             ],
         )
 
-    def _maybe_rebind_endpoint(self) -> None:
-        """Rebind clients when a shared serving job publishes a new endpoint.
+    def _new_endpoint_client(self, url: str) -> NeMoGymAsyncOpenAI:
+        retry_options = {}
+        if self.config.retry_turn_on_other_endpoint:
+            # The proxy owns the only retry, including stale-admission responses.
+            retry_options = {"max_http_attempts": 1, "max_connection_retries": 0}
+        else:
+            retry_options = {
+                "max_connection_retries": self.config.endpoint_connection_retries
+                if self.config.endpoint_file
+                else None
+            }
+        return NeMoGymAsyncOpenAI(
+            base_url=url, api_key=self.config.api_key, default_headers=self.config.default_headers, **retry_options
+        )
 
-        Raises when the endpoints have stayed unpublished for longer than `endpoint_stale_grace_s`.
-        """
+    def _maybe_rebind_endpoint(self, *, force: bool = False) -> None:
+        """Read a complete publication, retaining clients for surviving URLs."""
         if not self.config.endpoint_file:
             return
         now = monotonic()
         if (
-            self._endpoint_last_check_at is not None
+            not force
+            and self._endpoint_last_check_at is not None
             and now - self._endpoint_last_check_at < self.config.endpoint_check_interval_s
         ):
             if self._endpoint_missing_since is not None:
@@ -1550,48 +1560,78 @@ class VLLMModel(SimpleResponsesAPIModel):
             return
         self._endpoint_last_check_at = now
         try:
-            mtime = os.stat(self.config.endpoint_file).st_mtime
+            # Compare content at the throttled interval: rapid atomic replaces can
+            # share an mtime. Publishers must replace the whole file atomically.
+            with open(self.config.endpoint_file) as endpoint_stream:
+                urls = list(dict.fromkeys(line.strip() for line in endpoint_stream if line.strip()))
         except FileNotFoundError:
-            # Serving jobs remove the endpoint file while rotating;
-            # keep the current clients until the successor publishes.
             self._note_endpoint_unpublished()
             return
-        except OSError:
-            # Transient filesystem trouble is not a backend exit; retry the current clients.
+        except (OSError, UnicodeError):
             return
-        if mtime == self._endpoint_file_mtime:
-            if self._endpoint_missing_since is not None:
-                self._note_endpoint_unpublished()
+        if not urls:
+            self._note_endpoint_unpublished()
             return
         try:
-            with open(self.config.endpoint_file) as endpoint_stream:
-                url = endpoint_stream.read().strip()
-        except OSError:
-            return
-        self._endpoint_file_mtime = mtime
-        if not url:
-            # An empty file is as unpublished as a missing one.
-            self._note_endpoint_unpublished()
+            valid = all(
+                urlsplit(url).scheme in ("http", "https")
+                and urlsplit(url).hostname
+                and not any(c.isspace() for c in url)
+                for url in urls
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            LOG.warning("Ignoring invalid endpoint publication for %s", self.config.name)
             return
         self._endpoint_missing_since = None
-        if [url] == self.config.base_url:
+        if urls == self.config.base_url:
             return
-        print(
-            f"vllm_model '{self.config.name}': backend endpoint changed "
-            f"{self.config.base_url} -> {[url]}; rebinding clients.",
-            flush=True,
+        old_clients = {client.base_url: client for client in self._clients}
+        LOG.info("vllm_model '%s': backend endpoints changed %s -> %s", self.config.name, self.config.base_url, urls)
+        self.config.base_url = urls
+        self._clients = [old_clients[url] if url in old_clients else self._new_endpoint_client(url) for url in urls]
+        self._session_id_to_client = {
+            session: client for session, client in self._session_id_to_client.items() if client.base_url in urls
+        }
+
+    def _select_endpoint(self, session_id: str, clients: List[NeMoGymAsyncOpenAI]) -> NeMoGymAsyncOpenAI:
+        # Rendezvous hashing is independent of endpoint order and process hash
+        # seeds. Removing an endpoint moves only the sessions assigned to it.
+        return max(
+            clients,
+            key=lambda client: hashlib.sha256(
+                json.dumps([session_id, client.base_url], separators=(",", ":")).encode("utf-8")
+            ).digest(),
         )
-        self.config.base_url = [url]
-        self._clients = [
-            NeMoGymAsyncOpenAI(
-                base_url=url,
-                api_key=self.config.api_key,
-                default_headers=self.config.default_headers,
-                max_connection_retries=self.config.endpoint_connection_retries,
+
+    async def _create_with_endpoint_retry(
+        self,
+        request: Request,
+        client: NeMoGymAsyncOpenAI,
+        method: Literal["create_response", "create_chat_completion", "create_completion"],
+        body: Dict[str, Any],
+    ) -> tuple[Dict[str, Any], NeMoGymAsyncOpenAI]:
+        try:
+            return await getattr(client, method)(**body), client
+        except (ClientConnectionError, ClientResponseError, asyncio.TimeoutError) as error:
+            if not self.config.retry_turn_on_other_endpoint:
+                raise
+            if isinstance(error, ClientResponseError) and not 500 <= error.status < 600:
+                raise
+            self._maybe_rebind_endpoint(force=True)
+            candidates = [candidate for candidate in self._clients if candidate.base_url != client.base_url]
+            if not candidates:
+                raise
+            session_id = request.session[SESSION_ID_KEY]
+            replacement = self._select_endpoint(session_id, candidates)
+            self._session_id_to_client[session_id] = replacement
+            stale = isinstance(error, ClientResponseError) and bool(
+                error.headers and error.headers.get("X-Nemo-Admission-Closed") == "1"
             )
-        ]
-        # Every session re-resolves onto the new host.
-        self._session_id_to_client.clear()
+            LOG.info("Endpoint retry %s -> %s stale_admission=%s", client.base_url, replacement.base_url, stale)
+        # Deliberately outside the exception handler: a second failure propagates.
+        return await getattr(replacement, method)(**body), replacement
 
     def _note_endpoint_unpublished(self) -> None:
         now = monotonic()
@@ -1611,9 +1651,12 @@ class VLLMModel(SimpleResponsesAPIModel):
         if session_id not in self._session_id_to_client:
             # Uvicorn workers do not share this cache. A stable assignment keeps
             # every turn in a session on the same vLLM endpoint across workers.
-            digest = hashlib.sha256(session_id.encode("utf-8")).digest()
-            client_idx = int.from_bytes(digest[:8], byteorder="big") % len(self._clients)
-            client = self._clients[client_idx]
+            if self.config.endpoint_file or self.config.retry_turn_on_other_endpoint:
+                client = self._select_endpoint(session_id, self._clients)
+            else:
+                digest = hashlib.sha256(session_id.encode("utf-8")).digest()
+                client_idx = int.from_bytes(digest[:8], byteorder="big") % len(self._clients)
+                client = self._clients[client_idx]
             self._session_id_to_client[session_id] = client
         client = self._session_id_to_client[session_id]
 

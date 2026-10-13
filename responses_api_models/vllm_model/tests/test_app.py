@@ -6145,3 +6145,166 @@ class TestPreserveEnvelopeIdFollowsCaptureContext:
             assert model._preserve_envelope_id() is False
         finally:
             reset_token_sink(token)
+
+
+class TestStartupEndpointRouting:
+    def test_removal_preserves_clients_and_unmoved_sessions(self, tmp_path) -> None:
+        server = TestEndpointFile()._make_server(tmp_path, endpoint_check_interval_s=0)
+        endpoint = tmp_path / "endpoint.txt"
+        urls = ["http://dedicated:8000/v1", "http://startup:8000/v1"]
+        endpoint.write_text("\n".join(urls))
+        requests = [MagicMock(session={SESSION_ID_KEY: f"session-{i}"}) for i in range(100)]
+        original = [server._resolve_client(request) for request in requests]
+        assert {client.base_url for client in original} == set(urls)
+        dedicated = next(client for client in server._clients if client.base_url == urls[0])
+        endpoint.write_text(urls[0])
+        assert all(server._resolve_client(request) is dedicated for request in requests)
+
+    def test_order_and_restart_independent_selection(self, tmp_path) -> None:
+        first = TestEndpointFile()._make_server(tmp_path)
+        second = TestEndpointFile()._make_server(tmp_path)
+        urls = ["http://a:8000/v1", "http://b:8000/v1", "http://c:8000/v1"]
+        (tmp_path / "endpoint.txt").write_text("\n".join(urls))
+        first._maybe_rebind_endpoint()
+        (tmp_path / "endpoint.txt").write_text("\n".join(reversed(urls)))
+        second._maybe_rebind_endpoint()
+        for i in range(100):
+            request = MagicMock(session={SESSION_ID_KEY: str(i)})
+            assert first._resolve_client(request).base_url == second._resolve_client(request).base_url
+
+    def test_same_mtime_content_change_and_invalid_publication(self, tmp_path) -> None:
+        import os
+
+        endpoint = tmp_path / "endpoint.txt"
+        endpoint.write_text("http://a:8000/v1")
+        stamp = endpoint.stat().st_mtime_ns
+        server = TestEndpointFile()._make_server(tmp_path, endpoint_check_interval_s=0)
+        server._maybe_rebind_endpoint()
+        endpoint.write_text("http://b:8000/v1")
+        os.utime(endpoint, ns=(stamp, stamp))
+        server._maybe_rebind_endpoint()
+        assert server.config.base_url == ["http://b:8000/v1"]
+        client = server._clients[0]
+        endpoint.write_text("http://c:8000/v1\nnot-a-url")
+        server._maybe_rebind_endpoint()
+        assert server._clients[0] is client
+
+    @mark.asyncio
+    @mark.parametrize("status", [400, 429, 500, 503])
+    @mark.parametrize("enabled", [False, True])
+    async def test_refresh_and_one_shot_retry(self, tmp_path, monkeypatch, status, enabled) -> None:
+        server = TestEndpointFile()._make_server(tmp_path, retry_turn_on_other_endpoint=enabled)
+        endpoint = tmp_path / "endpoint.txt"
+        endpoint.write_text("http://startup:8000/v1")
+        request = MagicMock(session={SESSION_ID_KEY: "session"})
+        old = server._resolve_client(request)
+        endpoint.write_text("http://dedicated:8000/v1")
+        calls = []
+        body = {
+            "messages": [{"role": "user", "content": "hello"}],
+            "conversation_params": {"conversation_id": "session"},
+        }
+        error = ClientResponseError(MagicMock(), (), status=status, headers={"X-Nemo-Admission-Closed": "1"})
+
+        async def create(client, **kwargs):
+            calls.append((client, kwargs))
+            if client is old:
+                raise error
+            return {"choices": [{"text": "hello"}]}
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", create)
+        if enabled and status >= 500:
+            result, selected = await server._create_with_endpoint_retry(request, old, "create_chat_completion", body)
+            assert result["choices"]
+            assert selected.base_url == "http://dedicated:8000/v1"
+            assert server._resolve_client(request) is selected
+            assert len(calls) == 2
+            assert calls[0][1] == calls[1][1] == body
+            assert selected.max_http_attempts == 1
+            assert selected.max_connection_retries == 0
+        else:
+            with raises(ClientResponseError) as raised:
+                await server._create_with_endpoint_retry(request, old, "create_chat_completion", body)
+            assert raised.value is error
+            assert len(calls) == 1
+
+    @mark.asyncio
+    async def test_connection_error_second_failure_is_not_retried(self, tmp_path, monkeypatch) -> None:
+        from aiohttp import ClientConnectionError
+
+        server = TestEndpointFile()._make_server(tmp_path, retry_turn_on_other_endpoint=True)
+        (tmp_path / "endpoint.txt").write_text("http://a:8000/v1\nhttp://b:8000/v1\nhttp://c:8000/v1")
+        request = MagicMock(session={SESSION_ID_KEY: "session"})
+        old = server._resolve_client(request)
+        calls = []
+
+        async def create(client, **kwargs):
+            calls.append(client.base_url)
+            raise ClientConnectionError("disconnected")
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_completion", create)
+        with raises(ClientConnectionError):
+            await server._create_with_endpoint_retry(request, old, "create_completion", {})
+        assert len(calls) == len(set(calls)) == 2
+
+    @mark.asyncio
+    async def test_disabled_nested_retries_include_timeout(self, tmp_path, monkeypatch) -> None:
+        server = TestEndpointFile()._make_server(tmp_path, retry_turn_on_other_endpoint=True)
+        transport = MagicMock()
+        transport.request = AsyncMock(side_effect=asyncio.TimeoutError)
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: transport)
+        with raises(asyncio.TimeoutError):
+            await server._clients[0].create_chat_completion(messages=[])
+        assert transport.request.await_count == 1
+
+    @mark.asyncio
+    @mark.parametrize("status", [400, 503])
+    async def test_real_http_layer_makes_at_most_two_requests(self, tmp_path, monkeypatch, status) -> None:
+        from aiohttp import ClientSession, web
+
+        counts = {"startup": 0, "dedicated": 0}
+        endpoint_file = tmp_path / "endpoint.txt"
+        dedicated_url = ""
+
+        async def startup(request):
+            counts["startup"] += 1
+            endpoint_file.write_text(dedicated_url)
+            return web.json_response(
+                {"error": "admission closed"}, status=status, headers={"X-Nemo-Admission-Closed": "1"}
+            )
+
+        async def dedicated(request):
+            counts["dedicated"] += 1
+            return web.json_response({"choices": [{"message": {"content": "hello"}}]})
+
+        app = web.Application()
+        app.router.add_post("/startup/chat/completions", startup)
+        app.router.add_post("/dedicated/chat/completions", dedicated)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        try:
+            port = runner.addresses[0][1]
+            dedicated_url = f"http://127.0.0.1:{port}/dedicated"
+            endpoint_file.write_text(f"http://127.0.0.1:{port}/startup")
+            model = TestEndpointFile()._make_server(tmp_path, retry_turn_on_other_endpoint=True)
+            request = MagicMock(session={SESSION_ID_KEY: "session"})
+            client = model._resolve_client(request)
+            async with ClientSession() as transport:
+                monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: transport)
+                if status == 503:
+                    result, selected = await model._create_with_endpoint_retry(
+                        request, client, "create_chat_completion", {"messages": []}
+                    )
+                    assert selected.base_url == dedicated_url
+                    assert result["choices"]
+                    assert counts == {"startup": 1, "dedicated": 1}
+                else:
+                    with raises(ClientResponseError):
+                        await model._create_with_endpoint_retry(
+                            request, client, "create_chat_completion", {"messages": []}
+                        )
+                    assert counts == {"startup": 1, "dedicated": 0}
+        finally:
+            await runner.cleanup()
