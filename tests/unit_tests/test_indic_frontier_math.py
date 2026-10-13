@@ -15,6 +15,39 @@ from nemo_gym.cli.main import _asset_config_path
 from nemo_gym.environment.manifest import load_manifest
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.registry import _manifest_entry
+from nemo_gym.task_data import load_task_data_schema, validate_jsonl_rows
+
+
+@pytest.mark.parametrize("rendered", [False, True], ids=["raw", "rendered"])
+def test_task_data_schema_validates_examples_without_dropping_metadata(rendered: bool) -> None:
+    server_dir = prep.BENCHMARK_DIR.parents[2] / "resources_servers/frontiermath"
+    adapter = load_task_data_schema(server_dir)
+    assert adapter is not None
+    rows = [json.loads(line) for line in (server_dir / "data/example.jsonl").read_text().splitlines()]
+    if not rendered:
+        for row in rows:
+            row.pop("responses_create_params")
+    report = validate_jsonl_rows("frontiermath", adapter, "examples", [json.dumps(row) for row in rows])
+    assert report.rows == 5
+    assert report.clean, report.summary()
+    for row in rows:
+        task = {key: value for key, value in row.items() if key != "responses_create_params"}
+        assert adapter.validate_python(task).model_dump() == task
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("answer_type", "approximate"), ("tier", "not-an-integer"), ("human_evaluation_pending", "unknown")],
+)
+def test_task_data_schema_rejects_invalid_grading_metadata(field: str, value: str) -> None:
+    server_dir = prep.BENCHMARK_DIR.parents[2] / "resources_servers/frontiermath"
+    adapter = load_task_data_schema(server_dir)
+    assert adapter is not None
+    row = json.loads((server_dir / "data/example.jsonl").read_text().splitlines()[0])
+    row[field] = value
+    report = validate_jsonl_rows("frontiermath", adapter, "invalid", [json.dumps(row)])
+    assert report.error_rows == 1
+    assert field in report.summary()
 
 
 def test_manifest_and_committed_requests() -> None:

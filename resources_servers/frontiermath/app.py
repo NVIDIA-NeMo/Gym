@@ -54,6 +54,8 @@ class FrontierMathVerifyResponse(FrontierMathRunRequest, BaseVerifyResponse):
 
 
 class FrontierMathResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
+
     config: FrontierMathConfig
 
     def model_post_init(self, context: object) -> None:

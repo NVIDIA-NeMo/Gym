@@ -16,12 +16,19 @@ from resources_servers.frontiermath.app import (
     FrontierMathVerifyRequest,
 )
 from resources_servers.frontiermath.grading import extract_answer, grade_answer
+from resources_servers.frontiermath.task_data import TaskData
 
 
 ANSWERS = json.loads(
     (Path(__file__).resolve().parents[3] / "benchmarks/indic/frontier_math/answers.json").read_text()
 )["answers"]
 BMO = ANSWERS[0]["expected_answer"]
+
+
+def test_task_data_required_fields_match_run_request() -> None:
+    required = {name for name, field in TaskData.model_fields.items() if field.is_required()}
+    wire_required = {name for name, field in FrontierMathRunRequest.model_fields.items() if field.is_required()}
+    assert required == wire_required - {"responses_create_params"}
 
 
 @pytest.mark.parametrize(
