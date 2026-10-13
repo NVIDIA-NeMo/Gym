@@ -114,7 +114,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         if record is None and (directory / "rollouts_failures.jsonl").exists():
             failures = list(json_rows(directory / "rollouts_failures.jsonl"))
             record = failures[0][1] if len(failures) == 1 else None
-        checks = model_timeout_checks(witness, record, timeout_kind=scenario.timeout_kind, fingerprint=_fingerprint)
+        checks = model_timeout_checks(witness, record)
         evidence = {}
     else:
         scope = EvidenceScope(

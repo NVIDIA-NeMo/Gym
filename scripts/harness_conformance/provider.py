@@ -159,16 +159,13 @@ class Probe:
             # Match cancellation at the capture boundary without manufacturing
             # an HTTP timeout response for a client-enforced deadline.
             raise asyncio.CancelledError("client disconnected during withheld model response")
-        server_timeout = index == 0 and self.scenario.timeout_kind == "server_response"
-        if server_timeout:
-            status = 504
         response_id = f"resp_{uuid4().hex}"
         namespaces = {}
         if status != 200:
             payload = {
                 "error": {
-                    "message": "policy model request timed out" if server_timeout else "controlled model failure",
-                    "type": "model_timeout" if server_timeout else "conformance_error",
+                    "message": "controlled model failure",
+                    "type": "conformance_error",
                     "code": str(status),
                 }
             }

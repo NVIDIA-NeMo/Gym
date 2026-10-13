@@ -23,7 +23,7 @@ class Scenario:
     usage: bool = True
     http_errors: tuple[int, ...] = ()
     terminal_error: bool = False
-    timeout_kind: Literal["harness_deadline", "server_response"] | None = None
+    timeout_kind: Literal["harness_deadline"] | None = None
     request_timeout_seconds: float = 2.0
     expected_reward: float = 1.0
     steps: bool = True
@@ -81,14 +81,6 @@ SCENARIOS = (
         tool_steps=0,
         steps=False,
         timeout_kind="harness_deadline",
-    ),
-    Scenario(
-        "model_server_timeout_response",
-        "Return an explicit HTTP 504 timeout on the first model request; check saved timeout evidence only.",
-        evidence=(),  # Recording probe only; it does not qualify the whole TE-1 contract.
-        tool_steps=0,
-        steps=False,
-        timeout_kind="server_response",
     ),
     Scenario(
         "model_error",

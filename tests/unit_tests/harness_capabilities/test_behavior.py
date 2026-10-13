@@ -114,17 +114,13 @@ def test_missing_output_witness_cannot_qualify_artifacts(behavior_episode):
     ]
 
 
-@pytest.mark.parametrize("kind", ["harness_deadline", "server_response"])
 @pytest.mark.parametrize(
     "mutation", [None, "missing", "wrong_request", "wrong_origin", "cancelled_only", "partial_stream"]
 )
-def test_timeout_recording_does_not_require_retry_or_verification(kind, mutation):
+def test_timeout_recording_does_not_require_retry_or_verification(mutation):
     request = {"input": [{"role": "user", "content": "task"}]}
-    error = {"error": {"message": "policy model request timed out", "type": "model_timeout", "code": "504"}}
-    first = {"request": request, "response": error, "status_code": 504}
+    first = {"request": request, "response": None, "status_code": None, "response_withheld": True}
     setting = {"limit": "test_request_timeout", "configured_s": 2.0}
-    if kind == "harness_deadline":
-        first.update(response=None, status_code=None, response_withheld=True)
     witness = {"attempts": [first], "timeout_setting": setting}
     call = {
         "model_call_id": "call-1",
@@ -161,14 +157,14 @@ def test_timeout_recording_does_not_require_retry_or_verification(kind, mutation
     elif mutation == "partial_stream":
         call["response"] = ": conformance wait\n\n"
         call["response_metadata"]["error_category"] = "stream_truncated"
-    checks = model_timeout_checks(witness, record, timeout_kind=kind, fingerprint=fingerprint)
+    checks = model_timeout_checks(witness, record)
     assert {c["id"] for c in checks} == {"model.timeout_stimulus", "model.timeout_retained"}
     assert all(c["tier"] == "P1" for c in checks)
     assert checks[0]["status"] == "pass"
-    expected = "pass" if mutation is None or (kind == "harness_deadline" and mutation == "partial_stream") else "fail"
+    expected = "pass" if mutation in (None, "partial_stream") else "fail"
     assert checks[1]["status"] == expected
 
 
 def test_unexercised_timeout_cannot_pass_with_plausible_artifacts():
-    checks = model_timeout_checks({}, {"ng_trajectory": {}}, timeout_kind="harness_deadline", fingerprint=fingerprint)
+    checks = model_timeout_checks({}, {"ng_trajectory": {}})
     assert all(c["status"] == "fail" for c in checks)

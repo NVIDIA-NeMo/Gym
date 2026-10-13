@@ -489,38 +489,6 @@ def test_chat_fingerprint_ignores_creation_clock():
     assert _fingerprint(request, 200, response) == _fingerprint(request, 200, without_clock)
 
 
-@pytest.mark.parametrize("dialect", ["chat/completions", "responses"])
-def test_server_timeout_response_is_retained_without_requiring_retry(tmp_path, dialect):
-    scenario = SCENARIO["model_server_timeout_response"]
-    probe = Probe(scenario, tmp_path)
-    body = {"model": "probe", "messages" if dialect == "chat/completions" else "input": []}
-    with TestClient(probe.model_app()) as client:
-        response = client.post(f"/ng-rollout/0-0/v1/{dialect}", json=body)
-    assert response.status_code == 504
-    assert response.json()["error"]["type"] == "model_timeout"
-    # No retry or verifier is needed to satisfy the recording contract.
-    call = {
-        "model_call_id": "c1",
-        "request": body,
-        "response": response.json(),
-        "response_metadata": {"status_code": 504, "response_id": None},
-    }
-    (tmp_path / "rollouts_failures.jsonl").write_text(json.dumps({"ng_trajectory": {"model_calls": [call]}}) + "\n")
-    result = inspect_episode(scenario, tmp_path, {"returncode": 1, "timed_out": False})
-    assert result["verdict"] == "fulfilled"
-    assert result["delivery"] == "failure_record"
-    assert result["health_report"] is None
-    assert {c["id"] for c in result["checks"]} == {"model.timeout_stimulus", "model.timeout_retained"}
-    assert not probe.finished and not probe.verifications
-    assert all(c["tier"] == "P1" for c in result["checks"])
-    # Missing timeout evidence stays a visible failure without blocking P0.
-    (tmp_path / "rollouts_failures.jsonl").write_text(json.dumps({"ng_trajectory": {}}) + "\n")
-    result = inspect_episode(scenario, tmp_path, {"returncode": 1, "timed_out": False})
-    assert result["verdict"] == "fulfilled"
-    assert result["behavioral_status"] == "fail"
-    assert next(c for c in result["checks"] if c["id"] == "model.timeout_retained")["status"] == "fail"
-
-
 @pytest.mark.parametrize("harness", HARNESSES)
 def test_deadline_driver_configures_client_limit_not_episode_guard(harness, tmp_path, monkeypatch):
     from scripts.harness_conformance.episode import _configure_request_timeout
@@ -542,3 +510,24 @@ def test_deadline_driver_configures_client_limit_not_episode_guard(harness, tmp_
         assert os.environ["HERMES_API_TIMEOUT"] == "2"
     else:
         assert "pi-timeout-launcher.py" in agent["command"]
+
+
+def test_missing_harness_deadline_evidence_is_nonblocking_p1(tmp_path):
+    (tmp_path / "witness.json").write_text(
+        json.dumps(
+            {
+                "attempts": [{"request": {}, "response_withheld": True}],
+                "timeout_setting": {"limit": "request_timeout", "configured_s": 2},
+            }
+        )
+    )
+    (tmp_path / "rollouts_failures.jsonl").write_text(json.dumps({"ng_trajectory": {}}) + "\n")
+    result = inspect_episode(
+        SCENARIO["harness_model_request_timeout"], tmp_path, {"returncode": 1, "timed_out": False}
+    )
+    assert result["verdict"] == "fulfilled"
+    assert result["delivery"] == "failure_record"
+    assert result["health_report"] is None
+    assert result["behavioral_status"] == "fail"
+    assert all(c["tier"] == "P1" for c in result["checks"])
+    assert next(c for c in result["checks"] if c["id"] == "model.timeout_retained")["status"] == "fail"

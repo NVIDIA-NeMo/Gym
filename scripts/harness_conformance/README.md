@@ -117,7 +117,6 @@ python scripts/run_harness_conformance.py --harness codex \
 | `retry_429` | Two 429 replies before the tool sequence | TE-1–TE-9, including distinct attempts with identical request bodies |
 | `retry_500` | One 500 reply before the tool sequence | TE-1–TE-9, including retained error payloads |
 | `harness_model_request_timeout` | Withhold the first reply until the harness's own request deadline | Explicit saved harness deadline and interrupted call |
-| `model_server_timeout_response` | Return a timeout error body with HTTP 504 on the first request | Saved request, timeout body and status |
 | `model_error` | Persistent 400 with no model response ID | TE-1, TE-2, TE-4, TE-7, and TE-8/TE-9 |
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
 
@@ -127,9 +126,9 @@ replies also include reasoning text. Requests adapt only the shell-tool name and
 argument schema advertised by the harness. Unsupported tool protocols are
 reported as exercise failures.
 
-The two timeout scenarios run only `model.timeout_stimulus` and
-`model.timeout_retained`, both P1. Their failures do not block the P0 verdict. They impose no retry, recovery, grade or health verdict
-and do not qualify the full TE-1 contract.
+The harness-request timeout scenario runs only `model.timeout_stimulus` and
+`model.timeout_retained`, both P1. Their failures do not block the P0 verdict. The scenario imposes no retry, recovery, grade or health verdict
+and does not qualify the full TE-1 contract.
 Later requests can succeed if the harness retries; retry policy is unchanged.
 Evidence may be in the normal rollout or the failure row, never repaired from
 capture sidecars.
@@ -147,10 +146,7 @@ limit name/value, and `target.model_call_id` resolving to the interrupted reques
 That producer/schema work is not implemented here. Missing records fail;
 disconnections, generic cancellation and elapsed time are not timeout evidence.
 
-`model_server_timeout_response` tests preservation of a server-reported timeout.
-HTTP 504 is the fixture's chosen response, not a claim that every timeout uses
-504 or that a deadline really fired inside the server. It does not exercise
-vLLM adapter internals. The existing `retry_500` scenario is unchanged.
+The separate HTTP-504 recording scenario is maintained in [#4564](https://github.com/NVIDIA-NeMo/Gym/pull/4564).
 
 The runner observes actual retry behavior. A runtime that does not retry the
 injected error leaves that scenario incomplete. A terminal error must still
