@@ -351,7 +351,8 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
         result = await sandbox.exec(
             command=f"mkdir -p {quote(remote)}/runtime && " + " && ".join(steps), timeout_s=600
         )
-        version = (result.stdout or "").strip()
+        # The version is the last line; archive tools may warn before it.
+        version = (result.stdout or "").strip().rpartition("\n")[2]
         # Setup failures are infrastructure errors, not zero-reward generations.
         if result.return_code != 0 or result.error_type:
             raise RuntimeError(f"Qwen Code setup failed: {(result.stderr or result.stdout or '')[-500:]}")

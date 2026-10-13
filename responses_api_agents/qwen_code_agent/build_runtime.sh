@@ -42,6 +42,6 @@ npm install --global --prefix runtime --no-audit --no-fund --os linux --cpu "$ar
   "@qwen-code/qwen-code@${qwen_version}"
 test -e runtime/bin/qwen
 # Node headers and the bundled npm are not needed at run time.
-tar czf "$out" -C runtime --exclude ./include --exclude ./share --exclude ./bin/npm --exclude ./bin/npx \
+tar czf "$out" --no-xattrs -C runtime --exclude ./include --exclude ./share --exclude ./bin/npm --exclude ./bin/npx \
   --exclude ./bin/corepack --exclude ./lib/node_modules/npm --exclude ./lib/node_modules/corepack .
 echo "wrote $out (Node ${node_version} linux-${arch}, Qwen Code ${qwen_version})"
