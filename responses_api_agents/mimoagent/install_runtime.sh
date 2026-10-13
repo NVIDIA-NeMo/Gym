@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 set -e
 PREFIX=${PREFIX:-/opt/mimo-rt}
 [ -x "$PREFIX/venv/bin/python" ] && "$PREFIX/venv/bin/python" -c "import mimoagent, fastapi" 2>/dev/null && exit 0

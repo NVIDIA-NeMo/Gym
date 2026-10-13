@@ -5,6 +5,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,6 +15,8 @@
 import asyncio
 import json
 import os
+import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -122,7 +125,7 @@ class MimoAgent(SimpleResponsesAPIAgent):
         cfg = get_first_server_config_dict(self.server_client.global_config_dict, self.config.model_server.name)
         return str(self.server_client._build_server_base_url(cfg)).rstrip("/").removesuffix("/v1")
 
-    def _build(self, body: NeMoGymResponseCreateParamsNonStreaming, prefix: str = ""):
+    def _build(self, body: NeMoGymResponseCreateParamsNonStreaming, prefix: str = "", cwd: str | None = None):
         from mimoagent.agents.factory import make_agent
         from mimoagent.config import expand_env_vars
         from mimoagent.environments.local import LocalEnvironment
@@ -163,7 +166,7 @@ class MimoAgent(SimpleResponsesAPIAgent):
                 return create(**kwargs)
 
             model.client.responses.create = create_with_strict
-        env = LocalEnvironment(cwd=self.config.cwd or os.getcwd(), timeout=self.config.command_timeout)
+        env = LocalEnvironment(cwd=cwd or self.config.cwd or os.getcwd(), timeout=self.config.command_timeout)
         agent = make_agent(agent_type, model, env, **agent_cfg)
         if MCP_CONFIG_PATH.exists() and hasattr(agent, "tool_registry"):
             from responses_api_agents.mimoagent.mcp_proxy import discover_mcp_tools
@@ -175,9 +178,9 @@ class MimoAgent(SimpleResponsesAPIAgent):
         return agent
 
     def _run_agent(
-        self, body: NeMoGymResponseCreateParamsNonStreaming, prefix: str
+        self, body: NeMoGymResponseCreateParamsNonStreaming, prefix: str, cwd: str | None = None
     ) -> tuple[str, str, list[dict[str, Any]]]:
-        agent = self._build(body, prefix)
+        agent = self._build(body, prefix, cwd=cwd)
         try:
             status, result = agent.run(_task_from_input(body))
         finally:
@@ -191,9 +194,11 @@ class MimoAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         return await self._respond(body, self.url_path_for_request("", request))
 
-    async def _respond(self, body: NeMoGymResponseCreateParamsNonStreaming, prefix: str) -> NeMoGymResponse:
+    async def _respond(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, prefix: str, cwd: str | None = None
+    ) -> NeMoGymResponse:
         async with self.sem:
-            status, result, messages = await asyncio.to_thread(self._run_agent, body, prefix)
+            status, result, messages = await asyncio.to_thread(self._run_agent, body, prefix, cwd)
         output = _output_items(messages)
         if result and not any(i["type"] == "message" and i["content"][0]["text"] == result for i in output):
             output += _output_items([{"role": "assistant", "content": result}])
@@ -218,14 +223,20 @@ class MimoAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(seed)
         cookies = request.cookies | seed.cookies
-        resp = await self._respond(body.responses_create_params, self.url_path_for_run("", body))
-        verify = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=body.model_dump() | {"response": json.loads(resp.model_dump_json())},
-            cookies=cookies,
-        )
-        await raise_for_status(verify)
+        # Direct /run rollouts share this server process, so give each its own workspace unless cwd is configured.
+        workspace = None if self.config.cwd else tempfile.mkdtemp(prefix="mimoagent_")
+        try:
+            resp = await self._respond(body.responses_create_params, self.url_path_for_run("", body), workspace)
+            verify = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=body.model_dump() | {"response": json.loads(resp.model_dump_json())},
+                cookies=cookies,
+            )
+            await raise_for_status(verify)
+        finally:
+            if workspace:
+                shutil.rmtree(workspace, ignore_errors=True)
         return BaseVerifyResponse.model_validate(await get_response_json(verify))
 
 
