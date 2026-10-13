@@ -3492,7 +3492,11 @@ class TestSWEBenchWrapperRun:
         args, kwargs = request_mock.await_args
         assert args == ("GET", "http://switchyard:4000/v1/sessions/0123456789abcdef0123456789abcdef/completions")
         assert kwargs["timeout"].total == 60
-        reconstruct_mock.assert_called_once_with(envelope, "0123456789abcdef0123456789abcdef", wrapper._vllm_converter)
+        reconstruct_mock.assert_called_once_with(
+            envelope,
+            "0123456789abcdef0123456789abcdef",  # pragma: allowlist secret — fixed capture-session test data
+            wrapper._vllm_converter,
+        )
 
 
 ########################################
