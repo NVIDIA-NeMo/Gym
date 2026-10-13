@@ -47,7 +47,8 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    SimpleResourcesServer,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
 )
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
@@ -72,6 +73,7 @@ from resources_servers.swebench.patch_capture import (
     capture_model_patch,
     prepare_git_for_commits,
 )
+from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 
 
 class R2EGymResourcesServerConfig(BaseResourcesServerConfig):
@@ -140,7 +142,7 @@ class R2EGymVerifyResponse(BaseVerifyResponse):
     model_patch_sha256: str = ""
 
 
-class R2EGymResourcesServer(SimpleResourcesServer):
+class R2EGymResourcesServer(SandboxSessionResourcesServer):
     ray_enabled = False
     config: R2EGymResourcesServerConfig
 
@@ -238,28 +240,48 @@ class R2EGymResourcesServer(SimpleResourcesServer):
                 drop_sections=drop_patch_sections,
             )
         finally:
-            await self._stop_sandbox(original_sandbox)
+            await self._release_task_sandbox(session_id, original_sandbox)
 
-    async def seed_session(self, request: Request, body: R2EGymSeedSessionRequest) -> R2EGymSeedSessionResponse:
-        """Start the instance's image so an agent can work in it, minus everything that gives the task away."""
+    async def seed_session(
+        self, request: Request, body: R2EGymSeedSessionRequest | ResourcesSeedSessionRequest
+    ) -> R2EGymSeedSessionResponse | ResourcesSeedSessionResponse:
+        """Start the instance's image so an agent can work in it, minus everything that gives the task away.
+
+        An Environment Server seeds a typed session and gets the sandbox back as ``sandbox_access``; an
+        agent's ``/run`` seeds with the row and gets the sandbox handle.
+        """
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return await self.seed_task_sandbox_session(request, body, R2EGymInstanceRequest)
         session_id = request.session[SESSION_ID_KEY]
         await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
-        self._session_id_to_pristine_untracked.pop(session_id, None)
-        sandbox = await self._create_sandbox(body)
         try:
-            await self._hide_tests_from_agent(sandbox, body.instance_id)
-            if self.config.apply_anti_cheating:
-                await apply_anti_cheat_setup(sandbox, REPO_DIRECTORY, body.instance_id, "r2e_gym")
-            # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
-            await prepare_git_for_commits(sandbox, REPO_DIRECTORY, "r2e_gym")
-            self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
-                sandbox, REPO_DIRECTORY
-            )
+            await self._start_task_sandbox(session_id, body)
         except BaseException:
-            await self._stop_sandbox(sandbox)
+            # A sandbox that leaked hidden tests must not be handed out or left running.
+            await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
             raise
+        return R2EGymSeedSessionResponse(
+            sandbox_handle=str(self._session_id_to_sandbox[session_id]._handle.sandbox_id), workdir=REPO_DIRECTORY
+        )
+
+    async def _start_task_sandbox(self, session_id: str, body: R2EGymInstanceRequest) -> str:
+        """Start the task sandbox for ``session_id`` and return the directory the agent works in."""
+        self._forget_task_sandbox_state(session_id)
+        sandbox = await self._create_sandbox(body)
+        # Own the sandbox before preparing it, so a failed seed can still stop it.
         self._session_id_to_sandbox[session_id] = sandbox
-        return R2EGymSeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id), workdir=REPO_DIRECTORY)
+        await self._hide_tests_from_agent(sandbox, body.instance_id)
+        if self.config.apply_anti_cheating:
+            await apply_anti_cheat_setup(sandbox, REPO_DIRECTORY, body.instance_id, "r2e_gym")
+        # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
+        await prepare_git_for_commits(sandbox, REPO_DIRECTORY, "r2e_gym")
+        self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
+            sandbox, REPO_DIRECTORY
+        )
+        return REPO_DIRECTORY
+
+    def _forget_task_sandbox_state(self, session_id: str) -> None:
+        self._session_id_to_pristine_untracked.pop(session_id, None)
 
     def _response(self, body: R2EGymVerifyRequest, **fields: Any) -> R2EGymVerifyResponse:
         # Spread the request: BaseVerifyResponse extends BaseVerifyRequest, so responses_create_params
@@ -277,6 +299,7 @@ class R2EGymResourcesServer(SimpleResourcesServer):
         if self.config.is_verifying_golden_patch:
             capture = PatchCapture.static(body.patch, mode, "golden")
         else:
+            self._claim_task_sandbox(session_id)
             try:
                 capture = await self._extract_model_patch(session_id, REPO_DIRECTORY)
             except Exception as exc:
