@@ -45,11 +45,10 @@
 # the run. To accept stage 1 with a bounded number of missing rows, give it a
 # partial_completion policy (see benchmarks/gdpval/README.md).
 #
-# To resume, rerun the same command with --resume, adding RERUN_INCOMPLETE=true
-# to reuse finished deliverables and cached judgements. The resume journal is
+# To resume, rerun the same command with --resume. The resume journal is
 # discarded (renamed *.stale.<ns>) when the dataset, stage shape, seed,
 # num_repeats, references or any model/agent/judge setting other than
-# endpoints, API keys, headers, RERUN_INCOMPLETE and agent concurrency changes.
+# endpoints, API keys, headers and agent concurrency changes.
 #
 # NOTE ON MEDIA: MiniMax-M3 reads images + video but has NO audio tower, so audio
 # deliverables are dropped with a warning (everything else is still graded).

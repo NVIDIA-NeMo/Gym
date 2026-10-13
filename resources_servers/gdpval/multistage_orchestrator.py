@@ -118,10 +118,9 @@ from resources_servers.gdpval.multistage_elo import (
 # Top-level server-config fields the resume fingerprint ignores (see
 # ``compute_fingerprint``). Connection fields say how a server is reached;
 # operational fields are knobs a resume is expected to change without
-# affecting any result: ``rerun_incomplete`` (``RERUN_INCOMPLETE``) is how a
-# resume reuses cached work, and ``concurrency`` only bounds parallelism.
+# affecting any result: ``concurrency`` only bounds parallelism.
 _CONNECTION_SERVER_FIELDS = frozenset({"host", "port", "base_url", "api_key", "default_headers"})
-_OPERATIONAL_SERVER_FIELDS = frozenset({"rerun_incomplete", "concurrency"})
+_OPERATIONAL_SERVER_FIELDS = frozenset({"concurrency"})
 
 
 # A rollout runner: given a list of fully-formed rollout rows, run them and
