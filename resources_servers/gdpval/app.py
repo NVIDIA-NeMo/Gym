@@ -44,7 +44,7 @@ import tempfile
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Literal, Optional, Set, Tuple, Union
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -57,6 +57,7 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
@@ -254,6 +255,8 @@ def _strict_comparison_trial_failure(
 
 
 class GDPValResourcesServerConfig(BaseResourcesServerConfig):
+    # /verify without a session judges the persisted deliverable named by the request's deliverables_dir.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     reward_mode: Literal["rubric", "comparison"] = "rubric"
 
     # Comparison-mode: one or more reference models the eval deliverable is
@@ -499,6 +502,7 @@ class GDPValVerifyRequest(BaseVerifyRequest):
     stage_index: Optional[int] = None
     expected_final_stage_index: Optional[int] = None
     expected_stage_row_count: Optional[int] = None
+    accepted_stage_row_count: Optional[int] = None
     ng_task_index: Optional[int] = Field(default=None, alias="_ng_task_index")
     ng_rollout_index: Optional[int] = Field(default=None, alias="_ng_rollout_index")
     ng_attempt_index: Optional[int] = Field(default=None, alias="_ng_attempt_index")
