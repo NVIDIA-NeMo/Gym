@@ -32,8 +32,10 @@ from nemo_gym.tasks.harbor.hub import (
     load_registry,
     resolve_dataset,
     validate_git_url,
+    validate_task_name,
 )
 from nemo_gym.tasks.harbor.materialize import materialize_task, run_config, write_rows
+from nemo_gym.tasks.harbor.package_store import PackageStoreError
 
 
 HELLO_TOML = """
@@ -185,6 +187,43 @@ class TestDigest:
         (task / "tests" / "__pycache__" / "x.pyc").write_bytes(b"x")
         (task / "notes.txt").write_text("not covered")
         assert content_hash(task) == second
+
+    def test_archive_hash_is_the_published_hash_without_exclusions(self, tmp_path):
+        import hashlib
+
+        from nemo_gym.tasks.harbor.digest import archive_hash
+
+        task = write_task(tmp_path / "t")
+        (task / "notes.txt").write_text("not covered by either digest")
+        # Harbor's record format: sorted `relative NUL sha256 LF` over the covered files, exactly what its
+        # packager hashes and ships, so an archive without excluded names hashes the same both ways.
+        records = {
+            "environment/Dockerfile",
+            "instruction.md",
+            "solution/solve.sh",
+            "task.toml",
+            "tests/test.sh",
+        }
+        published = hashlib.sha256()
+        for relative in sorted(records):
+            file_hash = hashlib.sha256((task / relative).read_bytes()).hexdigest()
+            published.update(f"{relative}\0{file_hash}\n".encode())
+        assert archive_hash(task) == published.hexdigest() == content_hash(task)
+
+        # A byte-code cache is noise to the folder digest but a file to the archive digest: a published
+        # archive holds exactly the files the packager kept, so every file in it counts.
+        (task / "tests" / "__pycache__").mkdir()
+        (task / "tests" / "__pycache__" / "x.pyc").write_bytes(b"x")
+        assert content_hash(task) == published.hexdigest()
+        assert archive_hash(task) != published.hexdigest()
+        pyc_hash = hashlib.sha256(b"x").hexdigest()
+        published.update(f"tests/__pycache__/x.pyc\0{pyc_hash}\n".encode())
+        assert archive_hash(task) != published.hexdigest()  # records stay sorted: __pycache__ sorts before test.sh
+        with_pyc = hashlib.sha256()
+        for relative in sorted(records | {"tests/__pycache__/x.pyc"}):
+            file_hash = hashlib.sha256((task / relative).read_bytes()).hexdigest()
+            with_pyc.update(f"{relative}\0{file_hash}\n".encode())
+        assert archive_hash(task) == with_pyc.hexdigest()
 
 
 class TestLoadTask:
@@ -366,6 +405,10 @@ class TestHub:
     def test_ref_parsing(self):
         assert HubRef.parse("harbor:hello-world") == HubRef("hello-world", None)
         assert HubRef.parse("harbor:terminal-bench@2.0") == HubRef("terminal-bench", "2.0")
+        package = HubRef.parse("harbor:terminal-bench/terminal-bench@4.0.0")
+        assert package == HubRef("terminal-bench/terminal-bench", "4.0.0") and package.is_package
+        assert HubRef.parse("harbor:org/name@sha256:" + "a" * 64).version == "sha256:" + "a" * 64
+        assert not HubRef.parse("harbor:hello-world").is_package
         with pytest.raises(HubError):
             HubRef.parse("hello-world")
         with pytest.raises(HubError):
@@ -432,6 +475,14 @@ class TestHub:
         )
         [dataset] = load_registry(cache)
         assert dataset.tasks == (RegistryTask("hello-world", "https://github.com/x/y", "HEAD", "p"),)
+
+    def test_registry_task_names_that_are_not_folder_names_are_refused(self, tmp_path):
+        cache = tmp_path / ".harbor"
+        cache.mkdir()
+        task = {"name": "../..", "git_url": "https://github.com/x/y", "git_commit_id": "HEAD", "path": "p"}
+        (cache / "registry.json").write_text(json.dumps([{"name": "d", "version": "1.0", "tasks": [task]}]))
+        with pytest.raises(HubError, match=r"'\.\./\.\.'"):
+            load_registry(cache)
 
     @pytest.mark.parametrize(
         "url",
@@ -558,6 +609,58 @@ class TestHub:
         assert sorted(p.name for p in folder.iterdir() if p.is_dir()) == sorted(t.name for t in dataset.tasks)
         pins = tomllib.loads((folder / "manifest.toml").read_text())["tasks"]
         assert {pin["git_commit_id"] for pin in pins.values()} == {sha}
+
+
+class TestTaskNames:
+    """One validator guards every name that becomes a folder under the dataset folder."""
+
+    @pytest.mark.parametrize("name", ["../..", "a/b", "a\\b", ".", "..", "", "a\0b"])
+    def test_names_that_escape_or_are_not_a_folder_are_rejected(self, name):
+        with pytest.raises(HubError) as registry_error:
+            validate_task_name(name)
+        assert repr(name) in str(registry_error.value)
+        with pytest.raises(PackageStoreError) as store_error:
+            validate_task_name(name, error=PackageStoreError)
+        assert repr(name) in str(store_error.value)
+
+    @pytest.mark.parametrize("name", ["task$1", "name-with.dots_ok"])
+    def test_real_task_names_are_accepted(self, name):
+        assert validate_task_name(name) == name
+        assert validate_task_name(name, error=PackageStoreError) == name
+
+
+class TestSeparateVerifierFields:
+    def test_collect_hooks_and_artifacts_parse(self):
+        from pathlib import PurePosixPath
+
+        config = HarborTaskConfig.model_validate(
+            {
+                "artifacts": [
+                    "/app/output/report.json",
+                    {"source": "/var/log/api", "destination": "api-logs", "service": "api"},
+                ],
+                "verifier": {
+                    "environment_mode": "separate",
+                    "environment": {"docker_image": "org/verifier:1", "cpus": 2},
+                    "collect": [
+                        {"command": "kafka-dump > /logs/artifacts/topics.txt", "service": "kafka", "timeout_sec": 10}
+                    ],
+                },
+            }
+        )
+        assert [a.host_path for a in config.artifacts] == [
+            PurePosixPath("app/output/report.json"),
+            PurePosixPath("api-logs"),
+        ]
+        assert config.artifacts[1].service == "api"
+        assert config.verifier.collect[0].service == "kafka" and config.verifier.collect[0].timeout_sec == 10
+        assert not config.is_shared_verifier
+
+    def test_artifact_paths_stay_contained(self):
+        with pytest.raises(ValueError, match="inside"):
+            HarborTaskConfig.model_validate({"artifacts": ["/app/../etc/passwd"]})
+        with pytest.raises(ValueError, match="relative"):
+            HarborTaskConfig.model_validate({"artifacts": [{"source": "/a", "destination": "/abs"}]})
 
 
 class TestCli:

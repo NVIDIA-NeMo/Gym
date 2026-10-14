@@ -32,6 +32,34 @@ git -C terminal-bench-2-1 checkout --detach 7131e4375048a0e408a8fb404b5f499d726b
 and are ignored). Every command below takes that folder as its target, and the loader generates the task mapping
 and dataset rows for each run.
 
+### Or fetch from the Harbor package store
+
+The same dataset is published in Harbor's package store as `terminal-bench/terminal-bench-2-1`. A
+`harbor:<org>/<name>` reference fetches it into Gym's shared datasets folder (`$NEMO_GYM_DATASETS_DIR`, default
+`./datasets`) and takes the place of `terminal-bench-2-1/tasks` in every command below:
+
+```bash
+gym dataset validate harbor:terminal-bench/terminal-bench-2-1 --sandbox opensandbox --output tb21-oracle.jsonl
+gym eval run harbor:terminal-bench/terminal-bench-2-1 --agent terminus_2_sandboxed_agent --sandbox opensandbox \
+  --model-type openai_model --model <model> --model-url <url>
+```
+
+The plain reference resolves the store's `latest` tag, writes the task folders into `datasets/terminal-bench-2-1/`
+and records the package and the version it resolved in the `manifest.toml` there. A later fetch keeps every folder
+whose content still matches, and once `latest` has moved on it refuses the folder and names both versions, so a
+stale copy is never mixed with a newer one. To pin the version, name its content hash; the folder then carries the
+first twelve characters of the hash (`datasets/terminal-bench-2-1-7d7bdc1cbeda/`):
+
+```bash
+gym dataset validate harbor:terminal-bench/terminal-bench-2-1@sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a \
+  --sandbox opensandbox --output tb21-oracle.jsonl
+```
+
+Every task archive is checked against the content hash Harbor published for it before it takes its place in the
+folder. The store version above holds the same 89 tasks as the pinned commit and differs from it in one file,
+`sanitize-git-repo/tests/test_outputs.py`, so use the clone to compare with the `terminal_bench_2_1` Resources
+Server and the store to compare with Harbor's own published numbers.
+
 ## Check the reference solutions
 
 ```bash
