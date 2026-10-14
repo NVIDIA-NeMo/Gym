@@ -87,7 +87,12 @@ from nemo_gym.token_id_capture.lineage import (
     LineageIndex,
     RolloutLineage,
 )
-from nemo_gym.token_id_capture.protocols import TokenCaptureFrozenError, TokenCaptureRetiredError, TokenSource
+from nemo_gym.token_id_capture.protocols import (
+    LineageMatch,
+    TokenCaptureFrozenError,
+    TokenCaptureRetiredError,
+    TokenSource,
+)
 from nemo_gym.token_id_capture.records import response_finish_reason
 from nemo_gym.token_id_capture.store import make_token_store
 
@@ -410,21 +415,52 @@ def test_a_refusal_for_a_retired_rollout_is_rejected(tmp_path):
 
 
 def test_record_refusal_uses_the_optional_sink_extension():
-    calls: list[tuple[str, str, str | None]] = []
+    # The record carries the lineage decision ``resolve_parent`` made for the request before
+    # dispatch, so the builder can place the refusal on the branch it continued.
+    calls: list[tuple] = []
 
     class Sink:
-        async def refuse_call(self, rollout_id: str, *, model_call_id: str, code: str | None) -> None:
-            calls.append((rollout_id, model_call_id, code))
+        async def refuse_call(
+            self,
+            rollout_id: str,
+            *,
+            model_call_id: str,
+            code: str | None,
+            parent_call_id: str | None = None,
+            parent_resolution: ParentResolutionStatus | None = None,
+        ) -> None:
+            calls.append((rollout_id, model_call_id, code, parent_call_id, parent_resolution))
 
     context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    context.parent_resolution = LineageResolution(
+        ParentResolutionStatus.RESOLVED,
+        match=LineageMatch(model_call_id="p", cumulative_token_ids=(1, 2, 3), digest="d"),
+    )
     token = set_token_sink(context)
     try:
         asyncio.run(record_refusal("context_length_exceeded"))
     finally:
         reset_token_sink(token)
 
-    assert calls == [("r", "c", "context_length_exceeded")]
+    assert calls == [("r", "c", "context_length_exceeded", "p", ParentResolutionStatus.RESOLVED)]
     assert context.refusal_recorded is True
+
+
+def test_record_refusal_without_a_lineage_decision_records_no_parent():
+    calls: list[tuple] = []
+
+    class Sink:
+        async def refuse_call(self, rollout_id: str, *, model_call_id: str, code: str | None, **lineage) -> None:
+            calls.append((code, lineage))
+
+    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    token = set_token_sink(context)
+    try:
+        asyncio.run(record_refusal(None))
+    finally:
+        reset_token_sink(token)
+
+    assert calls == [(None, {"parent_call_id": None, "parent_resolution": None})]
 
 
 def test_record_refusal_without_the_extension_warns_once_and_leaves_the_intent_dangling(caplog):
@@ -459,7 +495,7 @@ def test_the_unserved_call_reasons_are_the_refusal_and_the_uncommitted_call():
 
 def test_record_refusal_never_raises(caplog):
     class Sink:
-        async def refuse_call(self, rollout_id: str, *, model_call_id: str, code: str | None) -> None:
+        async def refuse_call(self, rollout_id: str, *, model_call_id: str, code: str | None, **lineage) -> None:
             raise RuntimeError("disk full")
 
     context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())

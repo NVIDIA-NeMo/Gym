@@ -287,7 +287,7 @@ def test_kit_rejects_a_sink_whose_refusal_leaves_the_intent_dangling(tmp_path):
     from nemo_gym.token_id_capture.conformance import ConformanceError
 
     class _Forgetful(TokenCaptureStore):
-        async def refuse_call(self, rollout_id, *, model_call_id, code):
+        async def refuse_call(self, rollout_id, *, model_call_id, code, parent_call_id=None, parent_resolution=None):
             # Fences a retired rollout like the real store, but acknowledges without recording anything.
             if self._read_state(rollout_id).get("retired", False):
                 raise TokenCaptureRetiredError(f"Token capture for rollout {rollout_id} is retired")

@@ -397,14 +397,23 @@ async def _check_refuse_call_resolution(sink: TokenSink, src: TokenSource, rollo
     begin = getattr(sink, "begin_call", None)
     if begin is not None:
         await begin(rollout_id, "call-2")
-    await sink.refuse_call(rollout_id, model_call_id="call-2", code="context_length_exceeded")  # type: ignore[attr-defined]
+    await sink.refuse_call(  # type: ignore[attr-defined]
+        rollout_id,
+        model_call_id="call-2",
+        code="context_length_exceeded",
+        parent_call_id="call-1",
+        parent_resolution=ParentResolutionStatus.RESOLVED,
+    )
     snapshot = await src.freeze(rollout_id)
     _require(not snapshot.incomplete, name, "a refused call's intent still masked the rollout")
     _require(
-        [(record.model_call_id, record.code) for record in snapshot.refusals]
-        == [("call-2", "context_length_exceeded")],
+        [
+            (record.model_call_id, record.code, record.parent_call_id, record.parent_resolution)
+            for record in snapshot.refusals
+        ]
+        == [("call-2", "context_length_exceeded", "call-1", ParentResolutionStatus.RESOLVED)],
         name,
-        f"the frozen snapshot does not report the refusal: {snapshot.refusals!r}",
+        f"the frozen snapshot does not report the refusal with its lineage: {snapshot.refusals!r}",
     )
     try:
         await sink.refuse_call(rollout_id, model_call_id="call-3", code="context_length_exceeded")  # type: ignore[attr-defined]

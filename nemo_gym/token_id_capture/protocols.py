@@ -36,9 +36,12 @@ An intent with no matching entry at freeze must mask the rollout.
 That closes the window where the final call's entry is lost without a trace.
 ``begin_call`` runs before generation, so the caller may fail the model call at zero compute cost.
 
-A sink may additionally implement ``refuse_call(rollout_id, *, model_call_id, code)``.
+A sink may additionally implement
+``refuse_call(rollout_id, *, model_call_id, code, parent_call_id=None, parent_resolution=None)``.
 It is an optional extension beside ``begin_call`` and likewise not part of ``TokenSink``.
-``refuse_call`` durably records that the engine refused the call before it generated anything.
+``refuse_call`` durably records that the engine refused the call before it generated anything,
+together with the request-time lineage decision (the recorded call the refused request continued
+and that decision's status), which the builder reads to place the refusal on one branch.
 Such a call can never produce an entry, so the refusal resolves its pre-dispatch intent
 instead of leaving it dangling, and the frozen snapshot reports it in ``refusals``.
 After the rollout is frozen it must either fail with ``TokenCaptureFrozenError`` or leave the

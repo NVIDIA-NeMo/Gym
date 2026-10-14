@@ -363,8 +363,11 @@ async def record_refusal(code: str | None) -> None:
 
     On the local capture path the sink's optional ``refuse_call`` extension stores a
     ``RefusalRecord`` and resolves the intent ``register_call_intent`` wrote, so the rollout
-    freezes complete. A sink without the extension leaves the intent dangling, and the rollout
-    is masked as a lost call would be; that is logged once per worker.
+    freezes complete. The record carries the request-time lineage decision ``resolve_parent``
+    made before dispatch (the call the refused request continued), so the builder can tell a
+    refusal that followed the delivered chain from one on another branch. A sink without the
+    extension leaves the intent dangling, and the rollout is masked as a lost call would be;
+    that is logged once per worker.
 
     Under worker custody the ledger gets a failure row with ``ENGINE_REFUSED_CALL_REASON``.
     The call never reached the worker's staging, so the outcome is definite, unlike the
@@ -387,7 +390,15 @@ async def record_refusal(code: str | None) -> None:
         if refuse is None:
             _note_missing_refuse_call(context)
             return
-        await refuse(context.rollout_id, model_call_id=context.model_call_id, code=code)
+        resolution = context.parent_resolution
+        match = resolution.match if resolution is not None else None
+        await refuse(
+            context.rollout_id,
+            model_call_id=context.model_call_id,
+            code=code,
+            parent_call_id=match.model_call_id if match is not None else None,
+            parent_resolution=resolution.status if resolution is not None else None,
+        )
         context.refusal_recorded = True
     except TokenCaptureFrozenError:
         # The freeze sealed the verdict, as for a late ``put``; see ``commit_entry``.

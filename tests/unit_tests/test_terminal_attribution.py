@@ -788,22 +788,64 @@ def _completed_chain_entries() -> list[TokenEntry]:
     ]
 
 
+def _aux_root_entry() -> TokenEntry:
+    """A side call with its own prompt, served while the main chain was already complete."""
+    return _entry("aux1", [9, 9], [8, 8], text="summary", response_id="resp_aux", created_at=3.2)
+
+
+def _terminal_twin_entry() -> TokenEntry:
+    """A retry of the terminal call that served the same tokens under its own call id."""
+    return _entry(
+        "call2b",
+        [1, 2, 3, 4, 5, 6],
+        [7, 8],
+        text="final answer",
+        response_id="resp_2b",
+        created_at=3.2,
+        parent_call_id="call1",
+    )
+
+
+_RESOLVED = ParentResolutionStatus.RESOLVED
+
+
 @pytest.mark.parametrize(
-    ("refused_at", "expected_status"),
-    [(3.5, "incomplete"), (2.5, None)],
-    ids=["terminal-refusal", "recovered-refusal"],
+    ("extra_entries", "refusal", "expected_status"),
+    [
+        ([], {"parent_call_id": "call2", "parent_resolution": _RESOLVED}, "incomplete"),
+        ([_terminal_twin_entry()], {"parent_call_id": "call2b", "parent_resolution": _RESOLVED}, "incomplete"),
+        ([], {"parent_call_id": "call1", "parent_resolution": _RESOLVED, "created_at": 2.5}, None),
+        ([_aux_root_entry()], {"parent_call_id": "aux1", "parent_resolution": _RESOLVED}, None),
+        ([], {"parent_call_id": "call2", "parent_resolution": _RESOLVED, "code": None}, None),
+        ([], {"parent_resolution": ParentResolutionStatus.UNRESOLVED}, None),
+    ],
+    ids=[
+        "continues-terminal",
+        "continues-terminal-twin",
+        "recovered",
+        "auxiliary-branch",
+        "parameter-error",
+        "unresolved-parent",
+    ],
 )
-def test_a_refusal_ends_the_rebuilt_response_only_when_it_came_after_the_terminal_call(refused_at, expected_status):
-    # A refusal after the last served call means the harness's next request no longer fit the
-    # context window: the rollout ended at the model's limit. A refusal the harness recovered
-    # from, by compacting and getting a later call served, ended nothing.
+def test_a_refusal_ends_the_rebuilt_response_only_when_it_continued_the_terminal_call(
+    extra_entries, refusal, expected_status
+):
+    # The refused request's lineage, resolved before dispatch like a served call's, says what it
+    # continued. Only a context-window refusal of the request that followed the delivered terminal
+    # call (or a token-identical retry of it) ended the rollout at the model's limit. A refusal the
+    # harness recovered from, one on an auxiliary branch, one of an output-token parameter, and one
+    # whose parent is unknown leave the verdict alone, however late they were recorded.
+    record = RefusalRecord(
+        **{"model_call_id": "call3", "code": "context_length_exceeded", "created_at": 3.5, **refusal}
+    )
     built = _assemble(
         "r",
-        _completed_chain_entries(),
+        _completed_chain_entries() + extra_entries,
         "prefix_merging",
         "m",
         explicit_terminal_call_id="call2",
-        refusals=(RefusalRecord(model_call_id="call3", code="context_length_exceeded", created_at=refused_at),),
+        refusals=(record,),
     )
     assert built[MASK_SAMPLE_KEY] is False
     assert built["rebuilt_response"].get("status") == expected_status
@@ -823,7 +865,13 @@ def test_finalize_reports_a_terminal_refusal_on_the_result(tmp_path):
         for entry in _completed_chain_entries():
             await store.put(entry.model_copy(update={"rollout_id": "t0-r0"}))
         await store.begin_call("t0-r0", "call3")
-        await store.refuse_call("t0-r0", model_call_id="call3", code="context_length_exceeded")
+        await store.refuse_call(
+            "t0-r0",
+            model_call_id="call3",
+            code="context_length_exceeded",
+            parent_call_id="call2",
+            parent_resolution=ParentResolutionStatus.RESOLVED,
+        )
         return await finalize_rollout_token_capture(result, store)
 
     built = asyncio.run(go())
@@ -834,6 +882,10 @@ def test_finalize_reports_a_terminal_refusal_on_the_result(tmp_path):
     (refusal,) = result[TOKEN_CAPTURE_KEY]["refusals"]
     assert (refusal["model_call_id"], refusal["code"]) == ("call3", "context_length_exceeded")
     assert refusal["created_at"] > 3.0
+    assert (refusal["parent_call_id"], refusal["parent_resolution"]) == (
+        "call2",
+        ParentResolutionStatus.RESOLVED.value,
+    )
 
 
 def test_finalize_honors_an_explicit_terminal_key(tmp_path):

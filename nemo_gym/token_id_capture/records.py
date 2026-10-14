@@ -86,6 +86,11 @@ LEDGER_ROW_MISSING_RESPONSE_ID_REASON = "ledger_row_missing_response_id"
 # A committed ledger row lacks the chain or cumulative digest that verification anchors on.
 LEDGER_ROW_MISSING_CHAIN_HASH_REASON = "ledger_row_missing_chain_hash"
 
+# The error code the client receives, and a ``RefusalRecord`` carries, when the engine refused a
+# request because the prompt does not fit the context window (OpenAI's name for that error). A
+# refusal that named only an output-token parameter carries no code.
+CONTEXT_LENGTH_EXCEEDED_ERROR_CODE = "context_length_exceeded"
+
 
 class ParentResolutionStatus(StrEnum):
     """Describe whether a model call has a proven captured predecessor."""
@@ -130,18 +135,27 @@ class RefusalRecord(BaseModel):
     A refusal is not a lost capture: the call never generated, and the client was told why.
     On the local capture path the refusal resolves the call's pre-dispatch intent, so the
     rollout is not incomplete; the record is what tells a consumer where the engine refused.
-    ``code`` is the error code the client received: ``context_length_exceeded`` for a prompt
-    that does not fit the context window, ``None`` when the envelope carried no code (an
-    output-token parameter the engine rejected).
+    ``code`` is the error code the client received: ``CONTEXT_LENGTH_EXCEEDED_ERROR_CODE`` for
+    a prompt that does not fit the context window, ``None`` when the envelope carried no code
+    (an output-token parameter the engine rejected). ``parent_call_id`` is the recorded call the
+    refused request continued, which places the refusal on one branch of the rollout.
     """
 
     model_config = ConfigDict(extra="allow")
 
     model_call_id: str
     code: str | None = None
-    # Seconds since the epoch, stamped when the refusal is recorded. The builder orders it
-    # against the delivered terminal call to decide whether the refusal ended the rollout.
+    # Seconds since the epoch, stamped when the refusal is recorded.
     created_at: float = 0.0
+    # The recorded call the refused request continued, from the request-time lineage resolution
+    # that runs before dispatch (the decision a served call's entry carries as ``parent_call_id``).
+    # ``None`` for a root request, an unresolved continuation, or a record written before the
+    # field existed. The builder counts a refusal as the rollout's ending only when this names
+    # the delivered terminal call or a call whose token sequence is identical to it.
+    parent_call_id: str | None = None
+    # The status of that lineage decision; ``None`` when none was made or the record predates
+    # the field.
+    parent_resolution: ParentResolutionStatus | None = None
 
 
 class TokenEntry(BaseModel):

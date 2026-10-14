@@ -72,6 +72,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.token_id_capture import (
     CaptureContext,
     InMemoryLineageStore,
+    ParentResolutionStatus,
     TokenCaptureStore,
     reset_token_sink,
     resolve_parent,
@@ -1095,6 +1096,9 @@ class TestApp:
         (record,) = snapshot.refusals
         assert (record.model_call_id, record.code) == ("mc-1", "context_length_exceeded")
         assert record.created_at > 0
+        # The dispatch resolved the request's lineage before the engine was called; a request with
+        # no model-authored history is a root, and the record carries that decision.
+        assert (record.parent_call_id, record.parent_resolution) == (None, ParentResolutionStatus.ROOT)
 
     def test_a_max_tokens_only_400_is_a_refusal_without_a_code(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         # A 400 that names only the output-token parameter is still a request the engine refused

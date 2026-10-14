@@ -48,7 +48,7 @@ from nemo_gym.token_id_capture.protocols import (
     TokenCaptureRetiredError,
     TokenCaptureSnapshot,
 )
-from nemo_gym.token_id_capture.records import RefusalRecord, TokenEntry
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, RefusalRecord, TokenEntry
 
 
 logger = logging.getLogger(__name__)
@@ -320,13 +320,22 @@ class TokenCaptureStore:
     async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
         await asyncio.to_thread(self._begin_call, rollout_id, model_call_id)
 
-    def _refuse_call(self, rollout_id: str, model_call_id: str, code: str | None) -> None:
+    def _refuse_call(
+        self,
+        rollout_id: str,
+        model_call_id: str,
+        code: str | None,
+        parent_call_id: str | None = None,
+        parent_resolution: ParentResolutionStatus | None = None,
+    ) -> None:
         """Durably record that the engine refused a captured call before it generated anything.
 
         The refusal resolves the call's pre-dispatch intent: no entry can ever arrive for the
         call, so ``freeze_now`` stops reporting the intent as dangling. The record lives in the
         state file and is fsynced here because it cannot be rebuilt from the JSONL tail.
-        Repeating a call id with the same code is a no-op; a different code is a conflict.
+        ``parent_call_id`` and ``parent_resolution`` are the request-time lineage decision, so
+        the builder can tell a refusal that continued the delivered chain from one on another
+        branch. Repeating a call id with the same code is a no-op; a different code is a conflict.
         """
         with self._locked(rollout_id):
             state = self._read_state(rollout_id)
@@ -343,14 +352,30 @@ class TokenCaptureStore:
                 raise ValueError(
                     f"Model call id {model_call_id!r} was refused with a different code for rollout {rollout_id!r}"
                 )
-            refusals.append(RefusalRecord(model_call_id=model_call_id, code=code, created_at=time.time()))
+            refusals.append(
+                RefusalRecord(
+                    model_call_id=model_call_id,
+                    code=code,
+                    created_at=time.time(),
+                    parent_call_id=parent_call_id,
+                    parent_resolution=parent_resolution,
+                )
+            )
             state["refusals"] = [record.model_dump(mode="json") for record in refusals]
             state["version"] = int(state.get("version", 0)) + 1
             self._write_state(rollout_id, state)
 
-    async def refuse_call(self, rollout_id: str, *, model_call_id: str, code: str | None) -> None:
+    async def refuse_call(
+        self,
+        rollout_id: str,
+        *,
+        model_call_id: str,
+        code: str | None,
+        parent_call_id: str | None = None,
+        parent_resolution: ParentResolutionStatus | None = None,
+    ) -> None:
         """Record an engine refusal; see ``_refuse_call``."""
-        await asyncio.to_thread(self._refuse_call, rollout_id, model_call_id, code)
+        await asyncio.to_thread(self._refuse_call, rollout_id, model_call_id, code, parent_call_id, parent_resolution)
 
     def _dangling_intents(self, rollout_id: str, entries: tuple[TokenEntry, ...], state: dict[str, Any]) -> list[str]:
         path = self.intents_path_for(rollout_id)
