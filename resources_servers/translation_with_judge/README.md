@@ -59,8 +59,8 @@ docker run -it --rm \
   --gpus all \
   --network host \
   --ipc host \
-  -v /fsx2:/fsx2 \
-  -v /fsx2/opensource-models:/root/.cache/huggingface \
+  -v /host/path:/container/path \
+  -v /host/path/opensource-models:/root/.cache/huggingface \
   --entrypoint /bin/bash \
   vllm/vllm-openai:latest
 
