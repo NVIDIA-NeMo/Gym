@@ -24,7 +24,7 @@ Session support varies by adapter. Check the adapter's README for supported feat
 | Resources Server | The benchmark server. It prepares tasks, owns task sandboxes, verifies results, and can expose tools. |
 | Task sandbox | The isolated environment that contains the task repository. The harness and its tools run here. |
 | Borrowed or owned sandbox | A sandbox is *borrowed* when the Resources Server creates it and passes it to the agent, and *owned* when the agent creates it. Only the owner destroys a sandbox. |
-| Detached task service | A process that the task deliberately starts in its own process group or session, such as a server that the verifier queries. It can outlive the harness. |
+| Task service | A background process that a completed tool call leaves running, such as a server that the verifier queries. It can outlive the harness. |
 
 ## Choose an integration path
 
@@ -151,18 +151,18 @@ The agent session must close successfully before verification starts. Agent clos
 
 The two Resources Servers below implement different lifetime policies. Both descriptions cover the normal borrowed-session path with golden-patch mode disabled. The diagram above shows one verification attempt and leaves out validation, retries, and error handling.
 
-**Terminal Bench 2.1** ([#3902 at `c2a6dec84`](https://github.com/NVIDIA-NeMo/Gym/blob/c2a6dec84eeee4d59dd284bbd0c9bd4acefaab3a/resources_servers/terminal_bench_2_1/app.py#L483-L521))
+**Terminal Bench 2.1** ([#3902 at `ab9f3cc27`](https://github.com/NVIDIA-NeMo/Gym/blob/ab9f3cc27e5669c73fb163235507450363cd628f/resources_servers/terminal_bench_2_1/app.py#L483-L521))
 
-- *Where verification runs:* in the sandbox the agent used. Verification runs `bash /tests/test.sh` there, so detached task services that the agent started remain available to the tests. The first verification result is cached for the session: an identical retry replays it instead of grading the already-modified task again.
-- *When the sandbox stops:* verification keeps the sandbox. The Environment Server's final `/close_session` call reaches [`close_resources_session()`](https://github.com/NVIDIA-NeMo/Gym/blob/c2a6dec84eeee4d59dd284bbd0c9bd4acefaab3a/resources_servers/terminal_bench_2_1/app.py#L264-L281), which stops the sandbox and keeps the close response for `session_close_retry_window_seconds`. If stopping fails, the Resources Server keeps ownership so that close can retry. Close also fences a setup that is still in progress, so a setup that finishes after a timed-out close stops its own sandbox. The provider TTL is the backstop for sandboxes left behind at shutdown.
+- *Where verification runs:* in the sandbox the agent used. Verification runs `bash /tests/test.sh` there, so task services that the agent started remain available to the tests. The first verification result is cached for the session: an identical retry replays it instead of grading the already-modified task again.
+- *When the sandbox stops:* verification keeps the sandbox. The Environment Server's final `/close_session` call reaches [`close_resources_session()`](https://github.com/NVIDIA-NeMo/Gym/blob/ab9f3cc27e5669c73fb163235507450363cd628f/resources_servers/terminal_bench_2_1/app.py#L264-L281), which stops the sandbox and keeps the close response for `session_close_retry_window_seconds`. If stopping fails, the Resources Server keeps ownership so that close can retry. Close also fences a setup that is still in progress, so a setup that finishes after a timed-out close tries to stop its own sandbox. If that stop fails after the Environment Server has cancelled its final close callback, nothing retries it automatically: the Resources Server keeps the fence and the sandbox handle for an explicit close retry or shutdown. The provider TTL can stop the abandoned sandbox, but it does not clear the Resources Server's in-memory record.
 
 **SWE-bench Pro** ([revision `7f16ec541`](https://github.com/NVIDIA-NeMo/Gym/blob/7f16ec541534b95dde258c449be09a461b33e8d4/resources_servers/swebench_pro/app.py#L464-L560))
 
 - *Where verification runs:* in a fresh verifier sandbox. Verification exports and downloads the patch from the task sandbox, then creates a verifier sandbox that receives the patch and the verification inputs.
 - *When the sandboxes stop:* `_extract_model_patch()` stops the original sandbox in its `finally` block. Each verification attempt stops its own verifier sandbox in `finally`. The final `/close_session` call releases any remaining session resources.
-- *What it relies on:* patch extraction runs in the task sandbox after agent close, so the harness and its foreground tools must have stopped. A build or watcher that is still writing can change the patch or hold `.git/index.lock`.
+- *What it relies on:* patch extraction runs in the task sandbox after agent close, so the harness and its tool commands must have stopped. A build or watcher that is still writing can change the patch or hold `.git/index.lock`. See [Harness termination](#harness-termination) for the cases that the supervisor cannot stop.
 
-The Terminal Bench 2.1 behavior, and the process-group termination policy described in [Harness termination](#harness-termination), come from the open PR [#3902](https://github.com/NVIDIA-NeMo/Gym/pull/3902) at revision `c2a6dec84`. Check whether your checkout includes it before you choose a pairing.
+The Terminal Bench 2.1 behavior, and the process-group termination policy described in [Harness termination](#harness-termination), come from the open PR [#3902](https://github.com/NVIDIA-NeMo/Gym/pull/3902) at revision `ab9f3cc27`. Check whether your checkout includes it before you choose a pairing.
 
 Neither policy changes the Resources Server's session API or the `SandboxAccess` contract that the agent receives. Keep the choice between reusing the task sandbox and creating a verifier sandbox in the Resources Server, so that swapping the agent cannot change the benchmark's ownership or verification policy. The final `/close_session` call is still required when verification has already stopped the original sandbox.
 
@@ -222,6 +222,7 @@ Follow these rules for a borrowed sandbox:
 - Reject connection kinds that the adapter cannot use. Hermes, Pi, and Codex accept only `direct`.
 - Require an absolute `workdir`. Keep runtime files, session files, harness configuration, and caches outside it. For example, Pi and Codex keep session files under `/tmp/nemo-gym-<harness>-sessions/<id>`.
 - Isolate harness state with harness-specific variables, such as `CODEX_HOME` or `PI_CODING_AGENT_DIR`, instead of overriding `HOME`. Tool shells must keep the task's `HOME` and `XDG_*` directories, because verification runs with the task's home and agent close deletes the session directory. Otherwise, the effects of commands such as `git config --global` or `pip install --user`, and files written under `~`, land in a throwaway home and can silently lower scores.
+- If correctness depends on a harness plugin or hook, make it fail closed. For example, OpenCode logs a plugin that fails to load and still exits 0, so the OpenCode adapter's task-environment plugin writes `task-environment.ready` after it restores the task's `HOME`, and the adapter refuses to return a gradable result without that receipt.
 - Install only the harness runtime. The Resources Server has already prepared the task repository and its dependencies.
 - If connection or setup fails, propagate the error. Never fall back to the host or to a different sandbox.
 - On close, remove only adapter-owned files and disconnect. The Resources Server destroys the sandbox.
@@ -472,7 +473,7 @@ Hermes, Pi, and Codex select one of the following execution paths for each reque
 
 The compatibility `/run` endpoint requires an explicit `resources_server` binding and uses the adapter's host path. Setting `resources_server: null` does not disable host execution through `/v1/responses`. Setting `sandbox_provider` enables agent-owned sessions, but it does not move sessionless calls into a sandbox. Reject a stale or invalid session binding instead of treating it as a host request.
 
-When the Resources Server supplies a sandbox, propagate setup and connection failures. Never run the task on the host or in a different sandbox instead. Host execution is a separate mode that you select explicitly, and it does not isolate the task. Initialize host CLI dependencies only for the host path, and prepare the sandbox runtime during seed.
+When the Resources Server supplies a sandbox, propagate setup and connection failures. Never run the task on the host or in a different sandbox instead. Host execution is a separate mode that you select explicitly, and it does not isolate the task. Prepare the sandbox runtime during seed, and do not install an unused copy on the Agent Server host. An optional host path may install its runtime on first use instead of at server startup. If it does, document that first-call setup, share concurrent installation attempts, surface installation failures, and let a later call retry. Host tools that every path requires still install at server startup.
 
 ## Build the adapter with `agent_utils`
 
@@ -566,7 +567,7 @@ Keep harness-specific response parsing and model and tool behavior in the adapte
 **1. Define the session state.** Subclass `AgentSessionState` and compose a `SandboxSession`. Implement two hooks:
 
 - `stage_activation` uploads the activation input and returns `SandboxCommand(argv=..., python=...)`. `python` is the sandbox interpreter that runs the supervisor. Install the runtime earlier, during seed.
-- `collect` copies artifacts to the Agent Server after harness termination is confirmed, including partial output from interrupted runs. It may run a bounded snapshot command, but it must not restart the harness.
+- `collect` copies artifacts to the Agent Server after harness termination is confirmed, including partial output from interrupted runs. It may run a bounded snapshot command, but it must not restart the harness. Bound the size of what it downloads: trim large logs inside the sandbox first and keep the tail with a truncation marker. For example, `hermes_sandboxed_agent` keeps the last 1 MiB of its runner log.
 
 ```python
 @dataclass
@@ -669,7 +670,7 @@ When you migrate an adapter from an earlier `runner.py` or `sandbox/session.py` 
 Implement the [agent-session API](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/base_responses_api_agent.py) on the supplied `SandboxAccess`:
 
 - Pin the harness version and the task image digest. Check the image's runtime, utilities, certificates, platform, and permissions.
-- Install the harness in the supplied sandbox during seed. Check bootstrap dependencies, and keep failed commands, exit codes, and stderr.
+- Install the harness in the supplied sandbox during seed, before activation. Do not also install it on the Agent Server host unless the host path uses it. Check bootstrap dependencies, and keep failed commands, exit codes, and stderr.
 - Keep runtime files, harness configuration, and caches outside the task repository, without overriding the `HOME` and `XDG_*` directories that tool shells inherit. Preserve the task's dependencies, and pass only the credentials and configuration the harness needs.
 - Publish the session only after setup succeeds. On failure, release connections and keep the state needed to retry unfinished cleanup.
 - Never fall back to a host CLI or a replacement sandbox.
@@ -762,17 +763,32 @@ Serialize close requests. Keep successful close responses for a documented, boun
 ### Harness termination
 
 <Note>
-This termination contract comes from the open PR [#3902](https://github.com/NVIDIA-NeMo/Gym/pull/3902) ([`process_supervisor.py` at `c2a6dec84`](https://github.com/NVIDIA-NeMo/Gym/blob/c2a6dec84eeee4d59dd284bbd0c9bd4acefaab3a/nemo_gym/agent_utils/process_supervisor.py)). Until that PR lands, the supervisor on `main` also kills processes that left the harness process group, and every unconfirmed receipt is retryable.
+This termination contract comes from the open PR [#3902](https://github.com/NVIDIA-NeMo/Gym/pull/3902) ([`process_supervisor.py` at `ab9f3cc27`](https://github.com/NVIDIA-NeMo/Gym/blob/ab9f3cc27e5669c73fb163235507450363cd628f/nemo_gym/agent_utils/process_supervisor.py)). Until that PR lands, the supervisor on `main` also kills processes that left the harness process group, and every unconfirmed receipt is retryable.
 </Note>
 
-The supervisor starts the harness in a new process group. When the harness exits, times out, or is stopped, the supervisor sends `SIGTERM`, waits for the grace period, and then kills and reaps the whole group. This also stops foreground tool commands, such as `make`, `pip install`, or `pytest`, that the harness left running when it exited or was signaled. `cleanup_confirmed: true` means that the harness process group has stopped and been reaped. It does not mean that the sandbox is empty.
+The supervisor starts the harness in a new process group and makes itself the child subreaper, so processes orphaned inside the sandbox are reparented to it. How it stops processes depends on how the harness ends:
 
-Processes that left the group, such as detached task services, survive until the sandbox owner tears down the sandbox: the Resources Server after verification or episode failure, or the agent when it closes an owned sandbox. Process groups cannot distinguish an intentional service from a tool command that started its own group, so an escaped tool command can keep changing the task until teardown.
+- **Timeout or stop.** Before it signals the harness, the supervisor records the children it has already adopted, typically services left by completed tool calls. It sends `SIGTERM`, waits for the grace period, and kills and reaps the harness process group. It then repeatedly kills and reaps every newly adopted child that is not in that record, including in-flight tool commands in their own sessions and the children they orphan, until none remain or the cleanup deadline passes. The recorded services survive.
+- **Natural exit.** The supervisor kills and reaps the harness process group. It has no earlier point at which to separate services from tools, so tool commands that are still running in their own sessions are left alone.
+
+This matters because Pi, Codex, OpenCode, OpenClaw, and Hermes all start each shell-tool command in a new session. A group kill alone does not reach those commands, and any background process that a completed tool leaves behind, even a plain `server &`, survives as a task service.
+
+`cleanup_confirmed: true` means that no live harness-group processes remain and, after a timeout or stop, that newly adopted children were drained. A zombie held by a parent outside the group does not block confirmation, but unreadable process state fails closed. The receipt does not mean the sandbox is idle, and it is not a security boundary. These cases remain open:
+
+- After a natural exit, unfinished tool commands in other sessions cannot be distinguished from services and can still change task files.
+- A process adopted just before the stop is preserved as a service.
+- A PID can be reused during the stop window.
+- A preserved service can orphan more children during cleanup.
+
+Services survive until the sandbox owner tears down the sandbox: the Resources Server after verification or episode failure, or the agent when it closes an owned sandbox.
+
+Keep every harness process in the supervised process group. Disable modes in which the harness respawns or daemonizes itself. For example, OpenClaw restarts its agent as a detached process in its own session when stdio is not a TTY, so the OpenClaw adapter sets `OPENCLAW_NO_RESPAWN=1`. Without it, a forced stop can leave the agent running and calling the model while the receipt reports success.
 
 A task service that must survive the harness needs to:
 
-- Detach its process group and standard streams, for example with `subprocess.Popen(start_new_session=True)`, stdin from `/dev/null`, and stdout and stderr in task-owned log files. `nohup ... &` alone is not enough, because a shell deadline or a process-group stop can still end the service.
+- Detach its process group and standard streams, for example with `subprocess.Popen(start_new_session=True)`, stdin from `/dev/null`, and stdout and stderr in task-owned log files. `nohup ... &` alone is not portable across harnesses, because a shell deadline or a process-group stop can still end the service.
 - Keep its data in task-owned files, not in the agent's session directory, which agent close removes.
+- Be reachable before the tool call that starts it finishes.
 
 Redirect supervisor and harness output to a file, as `supervised_launch_command()` does with `output.log`. A surviving service that inherits the provider's output pipe keeps provider exec open until its hard timeout.
 
@@ -837,7 +853,8 @@ Record evidence conformance and sandbox lifecycle validation separately, because
 - **Execution modes.** Test host calls with no sandbox access or provider, borrowed agent sessions, agent-owned sessions with a configured provider, and rejection of a seed with neither. Assert that host calls never create a sandbox and that sandbox failures never fall back to the host. Test the compatibility `/run` endpoint with and without a Resources Server binding.
 - **Installation.** Test cold installation, runtime reuse, failed and partial installation, and unsupported platforms. Include a binary harness on an image without Python, and require setup to provision the supervisor interpreter or reject the image explicitly. Claim offline or read-only mounted-runtime support only after you test those deployments.
 - **Failures and races.** Test setup failures, request mapping, unsupported controls, isolation, retries, cancellation, close races, and termination failures. Include supervisor upload failures, close during upload, interpreter or supervisor bootstrap failures before launch, termination before transport cancellation, artifact capture before teardown, capture failures, and malformed optional diagnostics. Check that a final negative receipt releases a borrowed connection without making the activation gradable.
-- **Process termination.** Use real Linux processes. A foreground tool command that outlives the harness CLI must be stopped after a natural exit, a timeout, and a cancellation, and an explicitly detached service must survive every one of those endings. Read the process state from `/proc/<pid>/stat`, because `os.kill(pid, 0)` also succeeds for a zombie. Run the `sandbox`-marked tests with the local provider, which exposes a surviving process that holds the exec output pipe open.
+- **Process termination.** Use real Linux processes. Cover tool commands in the harness group and in their own sessions (`start_new_session=True`), with grandchildren, under a harness that exits on `SIGTERM` and one that must be killed, for both a deadline and a close. A tool still running at the stop must not change the task after a confirmed receipt, and a service started by an earlier, completed tool call must survive. Check that every harness process shares the supervised process group, and that a zombie held by a parent outside the group does not block confirmation. Read the process state from `/proc/<pid>/stat`, because `os.kill(pid, 0)` also succeeds for a zombie. Run the `sandbox`-marked tests with the local provider, which exposes a surviving process that holds the exec output pipe open.
+- **Test hygiene.** Bound every wait in lifecycle tests, for example with `asyncio.wait_for()`, so that a regression fails instead of hanging. Check that each new regression test fails when you revert the fix it covers.
 - **Task environment.** Confirm that tool shells keep the task's `HOME` and `XDG_*` directories, and that files a tool writes under `~` are visible to verification.
 - **Real smoke test.** Run a real model on a real task with tools and verification. Confirm that the harness runs in the sandbox, that the agent closes before verification, and that the sandbox owner cleans it up. Inspect failures, traces, artifacts, and grading coverage.
 - **Composition.** Show a second compatible pairing that works through configuration changes alone. Record versions and unsupported combinations.
