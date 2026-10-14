@@ -164,11 +164,12 @@ adopted children outside the harness group remain for Resources to stop after ve
 or episode failure. This includes unfinished background jobs such as `make &` left by an
 earlier tool call, as well as services; either can continue writing during verification.
 
-To survive this forced-stop cleanup, a service must be outside the harness group and
-already adopted by the supervisor before the stop. In the usual tool-launch path, let
-the launching tool finish before the harness deadline or stop so that adoption can occur.
-A service that remains parented by an in-flight tool and is orphaned during the stop's
-grace period is newly adopted and drained along with the in-flight tools.
+To survive this forced-stop cleanup, a service must be outside the harness group and,
+before the stop, adopted by the supervisor or descended from a process that was. In the
+usual tool-launch path, let the process that launched it exit before the harness deadline
+or stop so that adoption can occur. A service still parented by an in-flight tool is
+adopted when that tool exits or is killed during the stop, and is drained with the
+in-flight tools.
 
 Natural CLI exit has no such cutoff: unfinished tools in separate sessions cannot be
 distinguished from services and may still change task files. Adoption races, PID reuse,
