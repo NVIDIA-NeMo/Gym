@@ -5,12 +5,16 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
 import resources_servers.deepswe.app as app_module
+from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.sandbox import SandboxResources
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.deepswe.app import (
     DeepSWEResourcesServer,
     DeepSWEResourcesServerConfig,
@@ -329,6 +333,136 @@ async def test_rollout_without_seed_returns_incomplete_result(
     assert response.evaluation_completed is False
     assert "No DeepSWE agent sandbox" in (response.verifier_error or "")
     create_sandbox.assert_not_awaited()
+
+
+def _environment_seed(
+    session_id: str = "resources-session-1", task: str = "example-task"
+) -> ResourcesSeedSessionRequest:
+    """The seed single_agent_turn_legacy sends for a prepared DeepSWE row."""
+    row = _request()
+    return ResourcesSeedSessionRequest(
+        resources_session_id=session_id,
+        episode_id=EpisodeId(rollout_id="rollout-1"),
+        task_id=TaskId(taskset="deepswe_opencode_resources_server", task_id=task),
+        task_data={key: row[key] for key in ("task_id", "image", "verifier_metadata")} | {"split": "test"},
+    )
+
+
+def _agent_sandbox() -> AsyncMock:
+    sandbox = AsyncMock()
+    sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox", "workdir": "/app"}
+    return sandbox
+
+
+def test_environment_session_follows_the_resources_session_contract(task_assets: Path) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    agent_sandbox = _agent_sandbox()
+    server._create_sandbox = AsyncMock(return_value=agent_sandbox)
+
+    check_resources_session_contract(server.setup_webserver(), _environment_seed(), keeps_state=True)
+
+    # The repeated seed returned the same sandbox, and close stopped it once.
+    server._create_sandbox.assert_awaited_once()
+    assert server._create_sandbox.await_args.kwargs == {"phase": "agent"}
+    agent_sandbox.stop.assert_awaited_once()
+    assert server._agent_sessions == {}
+
+
+def test_environment_session_lends_the_agent_sandbox_until_verify_consumes_it(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    agent_sandbox = _agent_sandbox()
+    verifier_sandbox = AsyncMock()
+    server._create_sandbox = AsyncMock(side_effect=[agent_sandbox, verifier_sandbox])
+    collect_model_patch = AsyncMock(return_value=b"agent patch\n")
+    monkeypatch.setattr(server, "_collect_model_patch", collect_model_patch)
+    monkeypatch.setattr(
+        server, "_run_verifier", AsyncMock(return_value=VerifierResult(evaluation_completed=True, reward=1.0))
+    )
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    seed = _environment_seed()
+
+    seeded = client.post("/seed_session", json=seed.model_dump(mode="json"))
+    assert seeded.status_code == 200, seeded.text
+    assert seeded.json()["sandbox_access"] == {
+        "connection": {
+            "kind": "direct",
+            "provider_config_ref": "test",
+            "descriptor": {"sandbox_id": "agent-sandbox", "workdir": "/app"},
+        },
+        "workdir": "/app",
+    }
+    agent_sandbox.serialize.assert_awaited_once_with(scope="operate")
+    agent_sandbox.stop.assert_not_awaited()
+
+    # single_agent_turn_legacy verifies with the row's task data and the seed's session cookie.
+    verify_body = seed.task_data | {key: _request()[key] for key in ("responses_create_params", "response")}
+    verified = client.post("/verify", json=verify_body)
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["reward"] == 1.0
+    assert verified.json()["model_patch"] == "agent patch\n"
+    assert collect_model_patch.await_args.args[0] is agent_sandbox
+    agent_sandbox.stop.assert_awaited_once()
+    verifier_sandbox.stop.assert_awaited_once()
+
+    # A repeated verify or seed must not grade or lend a sandbox that verify already stopped.
+    assert client.post("/verify", json=verify_body).status_code == 500
+    assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 500
+    close = ResourcesCloseSessionRequest(resources_session_id=seed.resources_session_id, episode_id=seed.episode_id)
+    assert client.post("/close_session", json=close.model_dump(mode="json")).status_code == 200
+    agent_sandbox.stop.assert_awaited_once()
+    assert server._create_sandbox.await_count == 2
+
+
+def test_environment_seed_rejects_a_task_id_that_does_not_match_the_row(task_assets: Path) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    server._create_sandbox = AsyncMock()
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+
+    response = client.post("/seed_session", json=_environment_seed(task="other-task").model_dump(mode="json"))
+
+    assert response.status_code == 500
+    server._create_sandbox.assert_not_awaited()
+
+
+def test_failed_close_keeps_the_agent_sandbox_for_a_retry(task_assets: Path) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    agent_sandbox = _agent_sandbox()
+    agent_sandbox.stop.side_effect = [RuntimeError("provider unavailable"), None]
+    server._create_sandbox = AsyncMock(return_value=agent_sandbox)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    seed = _environment_seed()
+    close = ResourcesCloseSessionRequest(
+        resources_session_id=seed.resources_session_id, episode_id=seed.episode_id
+    ).model_dump(mode="json")
+
+    assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 200
+    assert client.post("/close_session", json=close).status_code == 500
+    assert server._agent_sessions[seed.resources_session_id].sandbox is agent_sandbox
+    assert client.post("/close_session", json=close).status_code == 200
+    assert agent_sandbox.stop.await_count == 2
+    assert server._agent_sessions == {}
+    assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 500
+
+
+def test_environment_sessions_require_one_worker(task_assets: Path) -> None:
+    config = _config(task_assets, golden=False)
+    config.num_workers = 2
+    server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    server._create_sandbox = AsyncMock()
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+
+    assert client.post("/seed_session", json=_environment_seed().model_dump(mode="json")).status_code == 500
+    server._create_sandbox.assert_not_awaited()
 
 
 def test_conflicting_task_ids_fail() -> None:

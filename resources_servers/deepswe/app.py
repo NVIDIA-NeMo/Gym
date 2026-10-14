@@ -20,7 +20,7 @@ from traceback import format_exc
 from typing import Any
 
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -28,12 +28,18 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY, get_first_server_config_dict, is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.task_store import (
@@ -51,6 +57,8 @@ from resources_servers.deepswe.task_store import (
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
+# The task repository in every DeepSWE image; the agent works and commits here.
+AGENT_WORKDIR = "/app"
 
 
 def _resolve_repo_path(path: Path) -> Path:
@@ -174,6 +182,13 @@ def _resolve_task(body: DeepSWEInstanceRequest, task_store: DeepSWETaskStore) ->
 class DeepSWEResourcesServer(SimpleResourcesServer):
     config: DeepSWEResourcesServerConfig
 
+    # Environment Server sessions, keyed by resources_session_id, which is also the session cookie's ID.
+    # A session keeps its identity until close, so a repeated verify cannot grade an empty patch, and its
+    # close fence so a late seed cannot recreate it. Like the agent sandboxes, they are process-local.
+    _session_identities: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
+    _closed_sessions: dict[str, EpisodeId] = PrivateAttr(default_factory=dict)
+    _session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
+
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._task_store = DeepSWETaskStore(
@@ -235,7 +250,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             image=task_image(task),
             ttl_s=self.config.sandbox_config.get("ttl_s"),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
-            workdir="/app",
+            workdir=AGENT_WORKDIR,
             env=dict(self.config.sandbox_config.get("env", {})),
             files={},
             metadata=provider_metadata
@@ -403,9 +418,18 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             partial=float(reward_data.get("partial", 0.0)),
         )
 
-    async def seed_session(self, request: Request, body: DeepSWESeedSessionRequest) -> DeepSWESeedSessionResponse:
+    async def seed_session(
+        self, request: Request, body: DeepSWESeedSessionRequest | ResourcesSeedSessionRequest
+    ) -> DeepSWESeedSessionResponse | ResourcesSeedSessionResponse:
+        """Start the agent sandbox for a task.
+
+        An Environment Server seeds with a ``ResourcesSeedSessionRequest`` and hands the returned
+        ``sandbox_access`` to the agent; an agent's ``/run`` seeds with the flat task row.
+        """
         if self.config.is_verifying_golden_patch:
             raise RuntimeError("DeepSWE seed_session is unavailable in golden-patch mode")
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return await self._seed_environment_session(request, body)
 
         task = _resolve_task(body, self._task_store)
         session_id = str(request.session[SESSION_ID_KEY])
@@ -417,31 +441,96 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 phase="replaced-agent",
             )
 
+        agent_session = await self._start_agent_session(task)
+        self._agent_sessions[session_id] = agent_session
+        return DeepSWESeedSessionResponse(
+            sandbox_handle=agent_session.sandbox_handle,
+            sandbox_descriptor=agent_session.sandbox_descriptor,
+        )
+
+    async def _start_agent_session(self, task: Task, *, scope: str | None = None) -> AgentSandboxSession:
         sandbox: AsyncSandbox | None = None
         try:
             sandbox = await self._create_sandbox(task, phase="agent")
-            current_task_id = task_id(task)
-            current_task_image = task_image(task)
-            descriptor = await sandbox.serialize()
+            descriptor = await sandbox.serialize(scope=scope)
             sandbox_handle = descriptor.get("sandbox_id") if isinstance(descriptor, dict) else None
             if not isinstance(sandbox_handle, str) or not sandbox_handle:
                 raise RuntimeError("DeepSWE sandbox provider did not return a sandbox_id")
-            sandbox_descriptor = dict(descriptor)
-            self._agent_sessions[session_id] = AgentSandboxSession(
-                task_id=current_task_id,
-                image=current_task_image,
+            return AgentSandboxSession(
+                task_id=task_id(task),
+                image=task_image(task),
                 sandbox=sandbox,
                 sandbox_handle=sandbox_handle,
-                sandbox_descriptor=sandbox_descriptor,
-            )
-            return DeepSWESeedSessionResponse(
-                sandbox_handle=sandbox_handle,
-                sandbox_descriptor=sandbox_descriptor,
+                sandbox_descriptor=dict(descriptor),
             )
         except Exception:
             if sandbox is not None:
                 await self._stop_sandbox(sandbox, task_id=task_id(task), phase="failed-agent-seed")
             raise
+
+    async def _seed_environment_session(
+        self, request: Request, body: ResourcesSeedSessionRequest
+    ) -> ResourcesSeedSessionResponse:
+        if self.config.num_workers not in (None, 1):
+            raise ValueError("DeepSWE Environment Server sessions are process-local and require num_workers=1")
+        session_id = body.resources_session_id
+        # verify finds the agent sandbox through this session cookie.
+        request.session[SESSION_ID_KEY] = session_id
+        async with self._session_locks.setdefault(session_id, asyncio.Lock()):
+            if session_id in self._closed_sessions:
+                raise ValueError(f"DeepSWE resources session is already closed: {session_id}")
+            identity = self._session_identities.get(session_id)
+            if identity is not None:
+                if identity != (body.episode_id, body.task_id):
+                    raise ValueError("resources_session_id is already bound to another episode or task")
+                return self._environment_seed_response(session_id)
+            task = _resolve_task(DeepSWEInstanceRequest.model_validate(body.task_data), self._task_store)
+            if body.task_id.task_id != task_id(task):
+                raise ValueError(f"TaskId {body.task_id.task_id!r} does not match DeepSWE task {task_id(task)!r}")
+            # The agent may operate the sandbox but not destroy it: verify collects the patch from it.
+            self._agent_sessions[session_id] = await self._start_agent_session(task, scope="operate")
+            self._session_identities[session_id] = (body.episode_id, body.task_id)
+            return self._environment_seed_response(session_id)
+
+    def _environment_seed_response(self, session_id: str) -> ResourcesSeedSessionResponse:
+        agent_session = self._agent_sessions.get(session_id)
+        if agent_session is None:
+            raise ValueError(f"The DeepSWE agent sandbox of {session_id} was already verified")
+        return ResourcesSeedSessionResponse(
+            resources_session_id=session_id,
+            sandbox_access=SandboxAccess(
+                connection=DirectSandboxConnection(
+                    provider_config_ref=self.config.sandbox_provider,
+                    descriptor=agent_session.sandbox_descriptor,
+                ),
+                workdir=AGENT_WORKDIR,
+            ),
+        )
+
+    async def close_resources_session(
+        self, request: Request, body: ResourcesCloseSessionRequest
+    ) -> ResourcesCloseSessionResponse:
+        """Stop the agent sandbox unless verify already did, and fence later seeds of the session.
+
+        A failed stop raises without fencing and keeps the sandbox, so a retried close stops it.
+        """
+        session_id = body.resources_session_id
+        async with self._session_locks.setdefault(session_id, asyncio.Lock()):
+            closed_episode_id = self._closed_sessions.get(session_id)
+            if closed_episode_id is not None and closed_episode_id != body.episode_id:
+                raise ValueError("episode_id does not match the closed resources session")
+            identity = self._session_identities.get(session_id)
+            if identity is not None and identity[0] != body.episode_id:
+                raise ValueError("episode_id does not match the seeded resources session")
+            if closed_episode_id is None:
+                agent_session = self._agent_sessions.get(session_id)
+                if agent_session is not None:
+                    await agent_session.sandbox.stop()
+                    del self._agent_sessions[session_id]
+                self._session_identities.pop(session_id, None)
+                self._closed_sessions[session_id] = body.episode_id
+            request.session.pop(SESSION_ID_KEY, None)
+            return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
     async def verify(self, request: Request, body: DeepSWEVerifyRequest) -> DeepSWEVerifyResponse:
         task = _resolve_task(body, self._task_store)
@@ -457,6 +546,11 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         else:
             model_patch = b""
             agent_session = self._agent_sessions.pop(session_id, None)
+            if agent_session is None and (
+                session_id in self._session_identities or session_id in self._closed_sessions
+            ):
+                # Verify consumes an Environment Server session's sandbox; grading again would score an empty patch.
+                raise ValueError(f"The DeepSWE agent sandbox of {session_id} was already verified or closed")
             if agent_session is None:
                 patch_error = f"No DeepSWE agent sandbox exists for session {session_id!r}"
             else:

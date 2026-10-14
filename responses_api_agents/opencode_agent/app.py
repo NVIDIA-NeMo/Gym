@@ -26,10 +26,11 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import time
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
+from openai.types.responses import ResponseError
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
@@ -151,9 +152,18 @@ fi
         "assert all(workdir != root and workdir not in root.parents and root not in workdir.parents "
         "for root in roots), 'OpenCode runtime/session storage overlaps the task workdir'"
     )
+    # OpenCode keeps its config, cache and state under the task's HOME, as the shell expands them.
+    home_storage = " ".join(
+        f'"${{{variable}:-${{HOME:-}}/{default}}}/opencode"'
+        for variable, default in (
+            ("XDG_CONFIG_HOME", ".config"),
+            ("XDG_CACHE_HOME", ".cache"),
+            ("XDG_STATE_HOME", ".local/state"),
+        )
+    )
     return (
         bootstrap + f"python3 -I -c {quote(validate_paths)} {quote(workdir)} "
-        f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)} && mkdir -p {quote(directory)}"
+        f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)} {home_storage} && mkdir -p {quote(directory)}"
     )
 
 
@@ -181,8 +191,18 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Used only when Resources does not supply a borrowed sandbox.
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    # Prebuilt `opencode_version` executables already inside the sandbox, keyed by the sandbox libc,
+    # for sandboxes that cannot download the runtime. Unlisted libcs keep the download.
+    sandbox_runtime_binaries: dict[Literal["glibc", "musl"], str] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    # Sessions: let OpenCode load the task repository's project config and instruction files (AGENTS.md or
+    # CLAUDE.md, opencode.json, .opencode/), as it does when run in that repository. Settings Gym passes still
+    # take precedence. Off by default, so a repository cannot add instructions, agents, plugins or tools.
+    session_project_config: bool = False
+    # Sessions: return a run that ended on a model or runtime error as a failed response with its partial
+    # output instead of an HTTP error, so an EnvironmentServer still verifies the task. Cancellation still raises.
+    session_return_failed_runs: bool = False
 
     @property
     def command_parts(self) -> list[str]:
@@ -634,6 +654,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
+        if any(
+            not PurePosixPath(path).is_absolute() or "\x00" in path
+            for path in self.config.sandbox_runtime_binaries.values()
+        ):
+            raise HTTPException(422, "OpenCode sandbox_runtime_binaries must be absolute sandbox paths")
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
             sandbox = AsyncSandbox(provider)
@@ -676,6 +701,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     f"{directory}/{installer}",
                     runtime,
                     self.config.opencode_version,
+                    *(
+                        arg
+                        for libc, path in sorted(self.config.sandbox_runtime_binaries.items())
+                        for arg in (f"--{libc}-binary", path)
+                    ),
                 )
             )
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
@@ -875,13 +905,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             "command": command,
             "prompt": prompt,
             "env": {
-                "HOME": f"{state.session.session_dir}/home",
+                # Only OpenCode's session database moves to the session directory. HOME and the other XDG
+                # directories stay the task image's: OpenCode's shell and formatter processes inherit them, and
+                # task toolchains keep their prepared state there (git identity, Go module caches, rustup).
                 "XDG_DATA_HOME": f"{state.session.session_dir}/data",
-                "XDG_CONFIG_HOME": f"{state.session.session_dir}/config",
-                "XDG_CACHE_HOME": f"{state.session.session_dir}/cache",
-                "XDG_STATE_HOME": f"{state.session.session_dir}/state",
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
-                "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
+                **({} if self.config.session_project_config else {"OPENCODE_DISABLE_PROJECT_CONFIG": "true"}),
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",
                 "OPENCODE_DISABLE_MODELS_FETCH": "true",
                 "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
@@ -999,10 +1028,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 detail="Usage comes from OpenCode persisted assistant messages; compare against captured Gym model calls.",
             )
         )
-        if failure is not None:
+        # Cancellation is a BaseException, so it always propagates.
+        returns_failure = self.config.session_return_failed_runs and (
+            failure is None or isinstance(failure, Exception)
+        )
+        if failure is not None and not returns_failure:
             raise failure
-        if error:
+        if error and not returns_failure:
             raise HTTPException(502, format_sandbox_error(error, stderr=state.stderr))
+        failure_message = f"{type(failure).__name__}: {failure}" if failure is not None else error
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -1011,6 +1045,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             output=output,
             usage=usage,
             status=status,
+            error=(
+                ResponseError(code="server_error", message=format_sandbox_error(failure_message, stderr=state.stderr))
+                if failure_message
+                else None
+            ),
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,

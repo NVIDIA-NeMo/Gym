@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# DeepSWE through an EnvironmentServer: Resources seeds the no-network agent sandbox, OpenCode works in it
+# through an agent session, Resources grades the committed patch in a fresh verifier sandbox, then both close.
 config_paths:
-  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
   - resources_servers/deepswe/configs/deepswe.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
 deepswe_opencode_resources_server:
   _inherit_from: deepswe_resources_server
@@ -13,15 +16,22 @@ deepswe_opencode_resources_server:
         type: responses_api_models
         name: policy_model
 
-deepswe_opencode_sandboxed_agent:
-  _inherit_from: opencode_sandboxed_agent
+deepswe_opencode_agent:
+  _inherit_from: opencode_agent
   responses_api_agents:
-    opencode_sandboxed_agent:
-      sandbox_timeout: 10800  # DeepSWE agent timeout override: 3 hours.
-
+    opencode_agent:
       resources_server:
         type: resources_servers
         name: deepswe_opencode_resources_server
+      timeout: 10800  # DeepSWE agent budget: 3 hours.
+      # Sessions are process-local to this one worker; leave every collected rollout room to run.
+      concurrency: 1024
+      # Keep the previous benchmark's output budget: the whole context window.
+      max_output_tokens: ${.context_window}
+      # As before, a run that ends on a model or runtime error is still verified and graded, not retried.
+      session_return_failed_runs: true
+      # As before, OpenCode reads the task repository's AGENTS.md or CLAUDE.md.
+      session_project_config: true
       datasets:
         - name: deepswe_v1_1
           type: benchmark
@@ -30,9 +40,12 @@ deepswe_opencode_sandboxed_agent:
           num_repeats: 10
 
 deepswe_environment_server:
+  _inherit_from: single_agent_turn_legacy
   environment_servers:
-    legacy_agent:
-      entrypoint: app.py
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: deepswe_opencode_resources_server
       agent_server:
         type: responses_api_agents
-        name: deepswe_opencode_sandboxed_agent
+        name: deepswe_opencode_agent

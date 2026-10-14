@@ -17,12 +17,12 @@ and apply to local calls too. Subagents (`task`) are intentionally enabled for t
 general-purpose integration; the separate `opencode_sandboxed_agent` benchmark
 profile still disables them. Use explicit tool overrides when comparing scores.
 
-Existing flat-row benchmarks keep the `opencode_sandboxed_agent` entrypoint
-and configuration for their Resources-owned lifecycle.
+DeepSWE (`benchmarks/deepswe/opencode.yaml`) runs this agent through EnvironmentServer
+sessions. Other existing flat-row benchmarks keep the `opencode_sandboxed_agent`
+entrypoint and configuration for their Resources-owned lifecycle.
 
 The old `opencode_sandboxed_agent` package remains separate; only its shell PATH
-quoting is fixed for directories containing spaces. No benchmark recipes or
-Resources allowlists are migrated by this integration.
+quoting is fixed for directories containing spaces.
 
 ## EnvironmentServer sessions
 
@@ -80,7 +80,17 @@ bundle. Missing required packages are installed with apt-get or apk as root;
 non-root images must preinstall them. System `rg` is a best-effort optimization:
 setup tries apt-get or apk as root, but only warns if it is unavailable. OpenCode
 can then download ripgrep on demand; offline images should preinstall it.
-Cached matching OpenCode runtimes need no runtime download. Task dependencies are preserved.
+Cached matching OpenCode runtimes need no runtime download. For sandboxes without
+internet access, set `sandbox_runtime_binaries` to prebuilt executables of the pinned
+version that are already inside the sandbox (for example on a read-only mount), keyed
+by `glibc` or `musl`. Setup copies the one matching the sandbox libc into the runtime
+cache and checks its version instead of downloading. Task dependencies are preserved.
+
+OpenCode runs with the sandbox's own HOME and XDG config, cache and state directories,
+so its shell commands and formatters see the toolchains and git identity the image
+prepared, such as Go module caches and rustup toolchains. Only its session database
+moves to the session directory. HOME must be writable, and setup rejects a workdir that
+would contain OpenCode's config, cache or state directories.
 
 Local and sandbox execution share `runtime.OPENCODE_VERSION` and the model-call
 correlation plugin. The plugin is uploaded into each sandbox when model-call
@@ -99,18 +109,24 @@ HTTP/MCP tools are rejected. `context_window` and `max_output_tokens` are indepe
 config settings; leave room for the prompt in the served model's context. Configure
 sampling on the Gym model server. Request-level overrides are not silently ignored.
 Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
+Sessions ignore the task repository's OpenCode project config and instruction files
+(`AGENTS.md` or `CLAUDE.md`, `opencode.json`, `.opencode/`) unless `session_project_config`
+is set; settings Gym passes still take precedence over them.
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
 gaps. Runtime/model errors fail before verification; explicit limits can retain
-gradable partial output. This path is eval-only; working inference does not establish
+gradable partial output. With `session_return_failed_runs`, a run that ends on a
+runtime/model error instead returns status `failed` with its error and partial output,
+so the EnvironmentServer still verifies it; cancellation still fails the request.
+This path is eval-only; working inference does not establish
 training token-ID/logprob support or benchmark accuracy.
 
 For local calls, OpenCode is installed on first use in a shared background-thread
 task, without blocking the event loop. Failed installs can be retried. A configured `repo_dir` is
 preserved; otherwise the temporary workspace is removed after the call. A local
-working directory is not filesystem isolation. Existing sandboxed benchmarks keep
-using `opencode_sandboxed_agent` directly; there is no bridge or execution-mode flag.
+working directory is not filesystem isolation. Sandboxed benchmarks other than DeepSWE
+keep using `opencode_sandboxed_agent` directly; there is no bridge or execution-mode flag.
 
 ## Configuration compatibility
 

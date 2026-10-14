@@ -19,7 +19,7 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     """Run the real installer with an isolated PATH and no access to the host package manager."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    for name in ("bash", "uname", "getconf", "mkdir", "cp", "tar", "gzip", "chmod"):
+    for name in ("bash", "uname", "getconf", "mkdir", "cp", "mv", "rm", "tar", "gzip", "chmod"):
         executable = shutil.which(name)
         if executable is None:
             pytest.skip(f"Installer test requires {name}")
@@ -60,9 +60,9 @@ fi
     return tmp_path, os.environ | {"PATH": str(bindir), "TEST_ROOT": str(tmp_path)}
 
 
-def run_installer(root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def run_installer(root: Path, env: dict[str, str], *options: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(root / "bin/bash"), str(root / "install.sh"), str(root / "runtime"), "1.17.11"],
+        [str(root / "bin/bash"), str(root / "install.sh"), str(root / "runtime"), "1.17.11", *options],
         env=env,
         capture_output=True,
         text=True,
@@ -139,6 +139,71 @@ def test_wrong_cached_version_is_not_reused(sandbox):
     result = run_installer(root, env)
     assert result.returncode == 19, result.stderr
     assert (root / "download.log").exists()
+
+
+def mounted_binary(root: Path, name: str, version: str) -> Path:
+    """A prebuilt runtime on a read-only mount: present in the sandbox but not executable."""
+    binary = root / "mount" / name
+    binary.parent.mkdir(exist_ok=True)
+    binary.write_text(f"#!/bin/bash\necho {version}\n")
+    binary.chmod(0o444)
+    return binary
+
+
+def test_sandbox_local_binary_installs_without_network_or_packages(sandbox):
+    root, env = sandbox
+    binary = mounted_binary(root, "opencode-glibc", "1.17.11")
+    result = run_installer(root, env, "--glibc-binary", str(binary))
+    assert result.returncode == 0, result.stderr
+    installed = root / "runtime/opencode"
+    assert installed.read_text() == binary.read_text()
+    assert os.access(installed, os.X_OK)
+    assert not (root / "runtime/opencode.partial").exists()
+    assert not (root / "download.log").exists()
+    assert not (root / "packages.log").exists()
+
+
+def test_sandbox_local_binary_with_another_version_is_rejected(sandbox):
+    root, env = sandbox
+    binary = mounted_binary(root, "opencode-glibc", "1.17.10")
+    result = run_installer(root, env, "--glibc-binary", str(binary))
+    assert result.returncode == 1
+    assert f"OpenCode version mismatch in {binary}: requested 1.17.11, found 1.17.10" in result.stderr
+    assert not (root / "runtime/opencode").exists()
+    assert not (root / "runtime/opencode.partial").exists()
+    assert not (root / "download.log").exists()
+
+
+def test_sandbox_local_binary_for_another_libc_keeps_the_download(sandbox):
+    root, env = sandbox
+    result = run_installer(root, env, "--musl-binary", str(mounted_binary(root, "opencode-musl", "1.17.11")))
+    assert result.returncode == 19, result.stderr
+    assert (root / "download.log").exists()
+
+
+def test_musl_sandbox_uses_its_own_local_binary(sandbox):
+    root, env = sandbox
+    for name, script in {
+        "getconf": "#!/bin/bash\nexit 1\n",
+        "ldd": "#!/bin/bash\necho 'musl libc (x86_64)' >&2\nexit 1\n",
+    }.items():
+        (root / "bin" / name).unlink(missing_ok=True)
+        (root / "bin" / name).write_text(script)
+        (root / "bin" / name).chmod(0o755)
+    glibc = mounted_binary(root, "opencode-glibc", "1.17.10")
+    musl = mounted_binary(root, "opencode-musl", "1.17.11")
+    result = run_installer(root, env, "--glibc-binary", str(glibc), "--musl-binary", str(musl))
+    assert result.returncode == 0, result.stderr
+    assert (root / "runtime/opencode").read_text() == musl.read_text()
+    assert not (root / "download.log").exists()
+
+
+def test_unknown_installer_option_is_rejected(sandbox):
+    root, env = sandbox
+    result = run_installer(root, env, "--binary", "/unused")
+    assert result.returncode == 2
+    assert "Unknown OpenCode installer option: --binary" in result.stderr
+    assert not (root / "download.log").exists()
 
 
 def test_rhel_certificate_bundle_does_not_require_root_or_package_manager(sandbox):

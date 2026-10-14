@@ -268,7 +268,9 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
         payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
         assert payload["prompt"] == "Fix the code"
         assert payload["command"][0].endswith("nemo-gym-opencode-runtime-1.17.11/opencode")
-        assert payload["env"]["HOME"].startswith("/tmp/")
+        # Task toolchains keep the image's HOME and XDG directories; only OpenCode's database moves.
+        assert payload["env"]["XDG_DATA_HOME"] == f"{sandbox.directory}/data"
+        assert not {"HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"} & payload["env"].keys()
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"] == {
             "context": 32000,
@@ -707,7 +709,9 @@ def test_session_http_usage_gaps_follow_persisted_optional_counter_availability(
     assert ("token_usage_detail_unavailable" in gaps) == (cache == 0 or reasoning == 0)
 
 
-@pytest.mark.parametrize("option", ["missing-sandbox", "worker", "required-tool", "workdir", "unpinned", "provider"])
+@pytest.mark.parametrize(
+    "option", ["missing-sandbox", "worker", "required-tool", "workdir", "unpinned", "provider", "runtime-binary"]
+)
 def test_invalid_seed_never_connects(setup, option):
     agent, sandbox = setup
     body = seed().model_dump(mode="json")
@@ -724,6 +728,8 @@ def test_invalid_seed_never_connects(setup, option):
         body["sandbox_access"]["workdir"] = "/"
     elif option == "unpinned":
         agent.config.opencode_version = "latest"
+    elif option == "runtime-binary":
+        agent.config.sandbox_runtime_binaries = {"glibc": "relative/opencode"}
     else:
         agent.config.opencode_config = {"provider": {"other": {"apiKey": "must-not-copy"}}}
     with TestClient(agent.setup_webserver()) as client:
@@ -733,6 +739,23 @@ def test_invalid_seed_never_connects(setup, option):
         else:
             assert client.post("/v1/agent_sessions", json=body).status_code == 422
     sandbox.exec.assert_not_awaited()
+
+
+async def test_sandbox_runtime_binaries_reach_the_installer(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_runtime_binaries = {
+        "musl": "/mnt/runtime/opencode-musl",
+        "glibc": "/mnt/runtime dir/opencode",
+    }
+    request = Request({"type": "http", "session": {}})
+    await agent.seed_agent_session(request, seed())
+    install = next(
+        call.args[0] for call in sandbox.exec.await_args_list if "install_opencode_runtime.sh" in call.args[0]
+    )
+    assert install.endswith(
+        "/tmp/nemo-gym-opencode-runtime-1.17.11 1.17.11 "
+        "--glibc-binary '/mnt/runtime dir/opencode' --musl-binary /mnt/runtime/opencode-musl"
+    )
 
 
 @pytest.mark.parametrize("output_budget", [0, -1, 32001])
@@ -781,6 +804,79 @@ def test_partial_output_survives_model_failure_and_timeout(setup, kind, tmp_path
         assert retry.json() == closed.json()
         assert client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"}).status_code == 409
     sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize("kind", ["model_error", "nonzero_exit", "no_assistant", "execution_error"])
+def test_failed_run_returns_its_partial_output_for_verification_when_enabled(setup, kind, tmp_path):
+    agent, sandbox = setup
+    agent.config.session_return_failed_runs = True
+    export = json.loads(sandbox.events)
+    if kind == "model_error":
+        export["messages"][-1]["info"]["error"] = {"name": "APIError", "message": "context length exceeded"}
+    elif kind == "nonzero_exit":
+        sandbox.result["return_code"] = 1
+    elif kind == "no_assistant":
+        export["messages"] = export["messages"][:1]
+    else:
+        run = sandbox.create
+
+        async def lost_connection(**kwargs):
+            await run(**kwargs)
+            return SimpleNamespace(error_type="sandbox", return_code=0, stdout="", stderr="sandbox connection lost")
+
+        sandbox.launch.side_effect = lost_connection
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        body = result.json()
+        assert body["status"] == "failed"
+        assert body["error"]["code"] == "server_error"
+        expected_message = {
+            "model_error": "context length exceeded",
+            "nonzero_exit": "OpenCode exited with code 1",
+            "no_assistant": "OpenCode produced no assistant result",
+            "execution_error": "sandbox connection lost",
+        }[kind]
+        assert expected_message in body["error"]["message"]
+        if kind != "no_assistant":
+            # Work done before the failure stays visible to the verifier and in the transcript.
+            assert body["output"][-1]["content"][0]["text"] == "Fixed"
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200
+    invocation = next(
+        record for record in closed.json()["agent_observations"]["records"] if record["kind"] == "agent_invocation"
+    )
+    assert invocation["status"] == "failed"
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_cancelled_run_still_raises_when_failed_runs_are_returned(setup, tmp_path):
+    agent, sandbox = setup
+    agent.config.session_return_failed_runs = True
+    sandbox.blocked = True
+    capture_observations(sandbox, tmp_path)
+    request, session_id, task = await activate(agent, sandbox)
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.parametrize("project_config", [False, True])
+def test_task_repository_project_config_follows_the_session_setting(setup, project_config):
+    agent, sandbox = setup
+    agent.config.session_project_config = project_config
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+    # OpenCode skips the repository's AGENTS.md/CLAUDE.md and opencode.json only when this flag is set.
+    assert payload["env"].get("OPENCODE_DISABLE_PROJECT_CONFIG") == (None if project_config else "true")
+    assert payload["cwd"] == "/app"
 
 
 @pytest.mark.parametrize(

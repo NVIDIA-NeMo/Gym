@@ -75,10 +75,16 @@ def _resolved_config():
     )
 
 
+@pytest.mark.parametrize("model_error", [False, True])
 async def test_session_composition_routes_collector_through_environment_and_responses(
-    setup, monkeypatch: pytest.MonkeyPatch
+    setup, monkeypatch: pytest.MonkeyPatch, model_error: bool
 ):
     agent, sandbox = setup
+    if model_error:
+        # A run that ends on a model error is still verified when the agent returns failed runs.
+        export = json.loads(sandbox.events)
+        export["messages"][-1]["info"]["error"] = {"name": "APIError", "message": "context length exceeded"}
+        sandbox.events = json.dumps(export)
     monkeypatch.chdir(Path(__file__).resolve().parents[3])
     # The benchmark's existing allowlist is unchanged; this integration is opt-in.
     monkeypatch.setenv("NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING", "1")
@@ -93,6 +99,7 @@ async def test_session_composition_routes_collector_through_environment_and_resp
     # Session routing must not require an execution-mode override.
     assert "execution_mode" not in type(agent.config).model_fields
     assert agent.config.opencode_config["permission"]["bash"]["*git submodule update*"] == "deny"
+    agent.config.session_return_failed_runs = model_error
     agent.server_client.global_config_dict = config
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = config
@@ -188,6 +195,7 @@ async def test_session_composition_routes_collector_through_environment_and_resp
     assert calls[3][2]["input"] == "Fix the code"
     assert "grader-only" not in json.dumps(calls[3][2])
     assert responses_body["output"][-1]["content"][0]["text"] == "Fixed"
+    assert responses_body["status"] == ("failed" if model_error else "completed")
     assert responses_body["usage"]["total_tokens"] == 16
     assert not any(record.state is not None for record in agent._session_records.values())
     sandbox.stop.assert_not_awaited()

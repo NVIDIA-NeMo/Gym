@@ -1,11 +1,12 @@
 name: deepswe/opencode
-version: 0.1.0
+version: 0.2.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: coding
-description: DeepSWE v1.1 software engineering tasks with prepared instructions, an
-  OpenCode sandboxed agent, and execution-based patch verification.
+description: DeepSWE v1.1 software engineering tasks with prepared instructions, OpenCode
+  working in the no-network task sandbox through an agent session, and execution-based
+  patch verification.
 modality: text
 licensing: unknown
 authors:
@@ -18,7 +19,7 @@ reward:
 determinism: unknown
 config_path: ../opencode.yaml
 resources_server: deepswe
-agent_server: opencode_sandboxed_agent
+agent_server: opencode_agent
 datasets:
 - name: deepswe_v1_1
   type: benchmark

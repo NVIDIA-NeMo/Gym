@@ -43,15 +43,52 @@ python resources_servers/deepswe/validate_golden.py +concurrency=113
 
 ## Run OpenCode rollouts
 
-Use the benchmark config with a model and sandbox-provider config. Launch Gym with `+use_absolute_ip=true` when
-OpenSandbox needs a host-routable model-server address.
+`benchmarks/deepswe/opencode.yaml` runs `opencode_agent` through the `single_agent_turn_legacy` Environment Server.
+For each row the Environment Server seeds this resources server, which starts the agent sandbox and lends it to the
+agent as `sandbox_access`. It then opens an OpenCode session in that sandbox, runs the task prompt within a
+three-hour budget, and closes the agent session, which stops OpenCode's processes and captures its transcript.
+Finally it calls verify and closes the resources session, which stops the agent sandbox if verify has not.
+
+The agent sandbox has no internet access, so the pinned OpenCode runtime cannot be downloaded into it. Point
+`sandbox_runtime_binaries` at a prebuilt executable of that version that is already present inside the sandbox, for
+example on a read-only mount. Launch Gym with `+use_absolute_ip=true` when OpenSandbox needs a host-routable
+model-server address.
 
 ```bash
 gym env start \
   --config benchmarks/deepswe/opencode.yaml \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
-  --config responses_api_models/<model>/configs/<model>.yaml
+  --config responses_api_models/<model>/configs/<model>.yaml \
+  ++deepswe_opencode_agent.responses_api_agents.opencode_agent.sandbox_runtime_binaries.glibc=/mnt/opencode/opencode-linux-x64
 ```
+
+Sessions are process-local, so the agent and this resources server each run one worker. Agent settings live under
+`deepswe_opencode_agent.responses_api_agents.opencode_agent`. The previous `opencode_sandboxed_agent` recipe's
+settings map to that block as follows:
+
+| Previous setting | Now |
+| --- | --- |
+| `sandbox_timeout: 10800` | `timeout: 10800` |
+| `opencode_max_context_window` | `context_window`; `max_output_tokens` follows it, as the previous output limit did |
+| `remote_opencode_install_script_path`, `remote_opencode_binary_path` | `sandbox_runtime_binaries.glibc` (no install script) |
+| `remote_opencode_musl_binary_path` | `sandbox_runtime_binaries.musl` |
+| `opencode_config.permission` | Same command restrictions; `webfetch`, `websearch` and `skill` are disabled under `opencode_config.tools` |
+| `execution_failure_reward_zero: false` (a run that ended on an OpenCode error was still verified and graded normally) | `session_return_failed_runs: true`: the run is returned with status `failed` and its error, then verified and graded normally instead of retried |
+| OpenCode read the repository's `AGENTS.md` or `CLAUDE.md` and project config | `session_project_config: true` |
+| `datasets` | Unchanged, on this agent block |
+
+The session path does not support these previous controls, and the agent ignores them if they are set:
+
+- `opencode_model_call_timeout` (one hour per model request): model requests have no per-request deadline; the
+  three-hour budget bounds the run.
+- Request-level `temperature` and `top_p`: configure sampling on the Gym model server.
+- `token_id_capture`, `debug`, `artifacts_dir` and `local_ripgrep_binary_path`. The transcript is returned in the
+  rollout's agent observations instead of an export file. OpenCode downloads ripgrep on demand, so its `glob` and
+  `grep` tools need a sandbox image that already provides `rg`, as before.
+
+Earlier reasoning reaches the model as before. Gym's vLLM model server returns it inside `<think>` tags in the
+assistant content, OpenCode sends that content back in later requests, and the model server moves it into the
+reasoning field before calling vLLM.
 
 As in upstream DeepSWE v1.1, the agent must commit its work. At verification time the resources server executes the
 task's pinned `[[verifier.collect]]` hook, which writes `git diff --binary <base_commit> HEAD` to

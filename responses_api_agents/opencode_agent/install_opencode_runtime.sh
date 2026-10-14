@@ -16,15 +16,26 @@ python3 -c 'import sys; assert sys.platform == "linux" and sys.version_info >= (
 if [ "${NG_OPENCODE_INSTALL_LOCKED:-0}" != 1 ]; then
   exec python3 -c 'import fcntl,os,sys; fd=os.open(sys.argv[1]+".lock",os.O_CREAT|os.O_RDWR,0o600); fcntl.flock(fd,fcntl.LOCK_EX); os.set_inheritable(fd,True); os.environ["NG_OPENCODE_INSTALL_LOCKED"]="1"; os.execvp("bash",["bash",*sys.argv[2:]])' "$runtime" "$0" "$@"
 fi
+shift 2
+glibc_binary=
+musl_binary=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --glibc-binary) glibc_binary=${2:?--glibc-binary requires a path}; shift 2 ;;
+    --musl-binary) musl_binary=${2:?--musl-binary requires a path}; shift 2 ;;
+    *) echo "Unknown OpenCode installer option: $1" >&2; exit 2 ;;
+  esac
+done
 case "$(uname -m)" in
   x86_64) arch=x64-baseline ;;
   aarch64) arch=arm64 ;;
   *) echo 'OpenCode sandbox execution supports Linux x86_64/aarch64 task images' >&2; exit 1 ;;
 esac
 if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
-  :
+  local_binary=$glibc_binary
 elif [[ "$(ldd --version 2>&1 || true)" == *musl* ]]; then
   arch="${arch}-musl"
+  local_binary=$musl_binary
 else
   echo 'OpenCode sandbox execution requires glibc or musl; could not identify the sandbox libc' >&2
   exit 1
@@ -33,6 +44,20 @@ mkdir -p "$runtime/home" "$runtime/cache" "$runtime/data" "$runtime/config"
 export HOME="$runtime/home" XDG_CACHE_HOME="$runtime/cache" XDG_DATA_HOME="$runtime/data" XDG_CONFIG_HOME="$runtime/config"
 cached=false
 if [ -x "$runtime/opencode" ] && [ "$("$runtime/opencode" --version)" = "$version" ]; then
+  cached=true
+fi
+# A prebuilt runtime already inside the sandbox (for example on a read-only mount)
+# needs no network access. Its version is checked like a downloaded one.
+if [ "$cached" = false ] && [ -n "$local_binary" ]; then
+  cp "$local_binary" "$runtime/opencode.partial"
+  chmod 0755 "$runtime/opencode.partial"
+  actual=$("$runtime/opencode.partial" --version)
+  if [ "$actual" != "$version" ]; then
+    rm -f "$runtime/opencode.partial"
+    echo "OpenCode version mismatch in $local_binary: requested $version, found $actual" >&2
+    exit 1
+  fi
+  mv -f "$runtime/opencode.partial" "$runtime/opencode"
   cached=true
 fi
 missing=()
