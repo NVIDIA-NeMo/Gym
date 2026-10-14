@@ -194,8 +194,8 @@ def trace_to_response(path: Path, task_id: str, model: str, expected_score: floa
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "total_tokens": input_tokens + output_tokens,
-                "input_tokens_details": {"cached_tokens": 0},
-                "output_tokens_details": {"reasoning_tokens": 0},
+                "input_tokens_details": {"cached_tokens": end.get("cached_tokens")},
+                "output_tokens_details": {"reasoning_tokens": end.get("reasoning_tokens")},
             },
         }
     )

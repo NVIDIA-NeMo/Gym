@@ -103,6 +103,8 @@ def test_trace_preserves_tool_pairs_user_turns_reasoning_and_usage(tmp_path):
     assert response.output[4].role == "user"
     assert response.output[4].content == "Clarification"
     assert response.usage.total_tokens == 42
+    assert response.usage.input_tokens_details.cached_tokens is None
+    assert response.usage.output_tokens_details.reasoning_tokens is None
 
 
 @pytest.mark.parametrize(
