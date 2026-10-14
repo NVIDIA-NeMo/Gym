@@ -1845,7 +1845,7 @@ def test_eval_run_keeps_home_relative_target(monkeypatch):
 
     captured = []
     monkeypatch.setattr(harbor_cli, "run_target", lambda args, overrides: captured.append(args.target))
-    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "~/tasks", "--agent", "hermes"])
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "~/tasks", "--agent", "hermes_agent"])
     cli_main.main()
     assert captured == ["~/tasks"]
 
@@ -1872,9 +1872,9 @@ def test_eval_run_ambiguous_folder_targets_take_precedence(tmp_path, monkeypatch
     )
     captured = []
     monkeypatch.setattr(harbor_cli, "run_target", lambda args, overrides: captured.append((args.target, overrides)))
-    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", target, "--agent", "hermes", "+limit=3"])
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", target, "--agent", "hermes_agent", "+limit=3"])
     cli_main.main()
-    assert captured == [(target, ["+agent_name=hermes", "+limit=3"])]
+    assert captured == [(target, ["+agent_name=hermes_agent", "+limit=3"])]
 
 
 @pytest.mark.parametrize("override", ["trial=1", "+folder=/tmp/tasks", "~unused_server=value"])

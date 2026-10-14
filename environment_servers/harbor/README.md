@@ -103,7 +103,8 @@ were not exercised by these examples.
 To run the bundled tasks with Hermes and a configured sandbox provider and model:
 
 ```bash
-gym eval run environment_servers/harbor/data/tasks --agent hermes --config <provider-and-model.yaml>
+gym eval run environment_servers/harbor/data/tasks --agent hermes_agent --sandbox opensandbox \
+  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
 The loader generates the task mapping and dataset rows for that run.
