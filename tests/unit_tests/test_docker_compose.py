@@ -1397,3 +1397,78 @@ async def test_cleanup_failure_still_attempts_volume_helper_and_transport():
     healthy.stop.assert_awaited_once()
     helper.stop.assert_awaited_once()
     provider.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_spec_env_wins_over_compose_environment_only_where_the_caller_gives_one(tmp_path):
+    """A spec's env is the caller's host-resolved override, so it beats the service's Compose ``environment`` (a
+    ``${HF_TOKEN:-}`` that interpolated to empty upstream must not hide the host value, as in Harbor, where the
+    task's env override file is merged after the task's Compose file). A key only the Compose file sets is kept,
+    and a sidecar given an empty spec env keeps its Compose ``environment``."""
+    from nemo_gym.sandbox.providers.base import SandboxSpec
+
+    main_out, side_out = tmp_path / "main", tmp_path / "side"
+    provider = ShellProvider()
+    group = make_compose(
+        provider,
+        {
+            "services": {
+                "main": {
+                    "image": "image",
+                    "command": [
+                        "sh",
+                        "-c",
+                        f'printf "%s|%s|%s|%s" "$HF_TOKEN" "$ONLY_COMPOSE" "$TASK_ID" "$ONLY_SPEC" > {main_out}; sleep 1',
+                    ],
+                    "environment": {"HF_TOKEN": "", "ONLY_COMPOSE": "c", "TASK_ID": "t016"},
+                    "healthcheck": {"test": ["CMD-SHELL", f"test -f {main_out}"], "interval": "1ms"},
+                },
+                "side": {
+                    "image": "image",
+                    "command": ["sh", "-c", f'printf "%s" "$HF_TOKEN" > {side_out}; sleep 1'],
+                    "environment": {"HF_TOKEN": "sidecar-literal"},
+                    "healthcheck": {"test": ["CMD-SHELL", f"test -f {side_out}"], "interval": "1ms"},
+                },
+            }
+        },
+        service_specs={
+            "main": SandboxSpec(env={"HF_TOKEN": "hostval", "ONLY_SPEC": "s"}, ttl_s=30),
+            "side": SandboxSpec(env={}, ttl_s=30),
+        },
+        poll_interval_s=0.01,
+    )
+    async with group:
+        assert group._plans["main"]["spec"].env == {
+            "HF_TOKEN": "hostval",
+            "ONLY_COMPOSE": "c",
+            "TASK_ID": "t016",
+            "ONLY_SPEC": "s",
+        }
+        assert group._plans["side"]["spec"].env == {"HF_TOKEN": "sidecar-literal"}
+        assert main_out.read_text() == "hostval|c|t016|s"
+        assert side_out.read_text() == "sidecar-literal"
+
+
+@pytest.mark.asyncio
+async def test_unsupported_fields_are_refused_with_the_shared_message_before_creating():
+    """The adapter raises the first message of the pure field check prepare also runs, before it asks the provider
+    for anything; ``pull_policy`` is one of the refused keys, so the Harbor layer drops it upstream."""
+    from nemo_gym.sandbox.compose_fields import unsupported_compose_fields
+
+    provider = Provider()
+    document = {
+        "services": {
+            "main": {"image": "a"},
+            "task-server": {"image": "b", "platform": "linux/amd64", "deploy": {}, "pull_policy": "always"},
+        }
+    }
+    expected = "Service 'task-server': unsupported Compose fields ['deploy', 'platform', 'pull_policy']"
+    assert unsupported_compose_fields(document) == [expected]
+    group = make_compose(provider, document)
+    with pytest.raises(NotImplementedError, match=re.escape(expected)):
+        await group.start()
+    assert provider.created == []
+    top = make_compose(provider, {"x-extra": 1, "services": {"main": {"image": "a", "deploy": {}}}})
+    with pytest.raises(NotImplementedError, match=re.escape("Unsupported Compose fields: ['x-extra']")):
+        await top.start()
+    assert provider.created == []

@@ -15,7 +15,7 @@ import nemo_gym.global_config as global_config
 from nemo_gym.path_utils import failures_path_for, materialized_path_for
 from nemo_gym.tasks.harbor.cli import build_run, prepare_target, resolve_agent
 from nemo_gym.tasks.harbor.validation_report import summarize_validation
-from tests.unit_tests.test_harbor_tasks import write_task
+from tests.unit_tests.test_harbor_tasks import no_real_registry, write_task  # noqa: F401 (autouse fixture)
 
 
 def result(task="a", *, index=0, repeat=0, **fields):

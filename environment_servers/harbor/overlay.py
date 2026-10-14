@@ -15,7 +15,14 @@ import asyncio
 import shlex
 from collections.abc import Mapping
 
-from environment_servers.harbor.users import _exec_as_root_user, _exec_user, _is_numeric_user, _is_plain_root, _is_root
+from environment_servers.harbor.users import (
+    _exec_as_root_user,
+    _exec_user,
+    _is_numeric_user,
+    _is_plain_root,
+    _is_root,
+    _user_group,
+)
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.dockerfile import OverlayRun
@@ -106,7 +113,7 @@ class HarborOverlayMixin:
 
     """
 
-    async def _apply_overlay(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
+    async def _apply_overlay(self, sandbox: AsyncSandbox, task: HarborTask) -> dict[str, str]:
         """Run the Dockerfile ``RUN`` lines the loader recorded, in order, before anything else uses the sandbox.
 
         Each line runs with the ``ENV``, ``WORKDIR`` and ``USER`` the loader resolved for it, the
@@ -115,28 +122,32 @@ class HarborOverlayMixin:
         alone when the image ships it), a numeric ``USER`` is mapped to its name in the image (a uid
         without a passwd entry is passed as the number: Docker's ``--user`` and OpenSandbox's ``uid`` take
         it, the ``su``-backed providers refuse it with their own message), then the line runs. A ``USER``
-        with uid 0 and a group of its own (``root:1234``, ``0:0``) keeps that group on its ``WORKDIR`` but
-        runs its lines as plain root: the exec API has no user:group form, and the ``su``-backed providers
-        (OpenSandbox, enroot, apptainer) reject ``root:1234`` as an account name. The whole overlay
+        that names a group (``root:1234``, ``app:1234``, ``1000:1000``) keeps that group on its ``WORKDIR``
+        and runs its lines as the pair, which only Docker's ``--user`` applies: the ``su``-backed providers
+        (OpenSandbox, enroot, apptainer) would reject ``root:1234`` as an account name or drop the group, so
+        :meth:`HarborEnvironmentServer._sandbox_spec` refuses such a line's user on them before the sandbox
+        exists. Root's own group (``0:0``, ``root:root``) is plain root everywhere. The whole overlay
         shares ``[environment].build_timeout_sec``, as a build would. A line that exits non-zero or
         runs out of budget raises :class:`HarborOverlayError` with the command and the tail of its
         output: the task's Dockerfile does not apply, so retrying would not help. A provider that
         cannot run a step at all raises :class:`HarborOverlayUnavailable` instead, so the seed is retried.
         """
+        user_names: dict[str, str] = {}
         if not task.overlay:
-            return
+            return user_names
         budget = task.config.environment.build_timeout_sec
         loop = asyncio.get_running_loop()
         deadline = loop.time() + budget
         total = len(task.overlay)
         prepared_workdirs: set[str] = {"/"}  # the root always exists; every other WORKDIR is made once
-        user_names: dict[str, str] = {}
 
         async def as_root(command: str, label: str, what: str) -> SandboxExecResult:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise HarborOverlayError(f"{label} not run: [environment].build_timeout_sec={budget} is used up")
-            result = await _exec_as_root_user(sandbox, command, configured_user=task.sandbox_user, timeout_s=remaining)
+            result = await _exec_as_root_user(
+                sandbox, command, configured_user=task.sandbox_user, spec_user=task.user, timeout_s=remaining
+            )
             _check_overlay_result(result, label, what, budget)
             return result
 
@@ -170,14 +181,17 @@ class HarborOverlayMixin:
             if remaining <= 0:
                 raise HarborOverlayError(f"{label} not run: [environment].build_timeout_sec={budget} is used up")
             command = overlay_shell_command(step, task.env)
-            if _is_root(user):
-                # Root with a group of its own included: the group stays on the WORKDIR, the line runs as root.
+            if _is_root(user) and not _user_group(user):
+                # Plain root (root's own group included): the one exec path every provider runs as root.
                 result = await _exec_as_root_user(
-                    sandbox, command, configured_user=task.sandbox_user, timeout_s=remaining
+                    sandbox, command, configured_user=task.sandbox_user, spec_user=task.user, timeout_s=remaining
                 )
             else:
+                # A named user, a bare uid, or a user:group pair as written, `root:1234` included: Docker's --user
+                # applies the pair, and `_sandbox_spec` refused it on every other provider before the sandbox existed.
                 result = await sandbox.exec(command, cwd="/", timeout_s=remaining, user=_exec_user(user))
             _check_overlay_result(result, label, None, budget)
         # WORKDIR instructions after the last RUN line exist in the built image too.
         for instruction in workdirs:
             await make_workdir(instruction.path, instruction.user, f"after RUN line {total}/{total}")
+        return user_names

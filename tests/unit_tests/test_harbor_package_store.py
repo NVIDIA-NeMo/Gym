@@ -17,7 +17,10 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.tasks.harbor import content_hash, discover_tasks
-from tests.unit_tests.test_harbor_tasks import write_task
+from tests.unit_tests.test_harbor_tasks import (
+    no_real_registry,  # noqa: F401 (autouse fixture)
+    write_task,
+)
 
 
 @pytest.fixture

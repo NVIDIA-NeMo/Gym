@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 
 from fastapi import HTTPException
 
+from environment_servers.harbor.entrypoint import EntrypointLaunch, _cancel_entrypoint
 from environment_servers.harbor.users import _is_root
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose
@@ -58,6 +59,8 @@ class HarborSession:
     session_id: str
     provider_ref: str
     compose: AsyncSandboxCompose | None = None
+    # The image entrypoint the seed started beside the keepalive, cancelled before the sandbox is stopped.
+    entrypoint: EntrypointLaunch | None = None
     # Separate verification stops the agent's sandbox before test.sh runs; cleanup must not stop it twice.
     agent_sandbox_stopped: bool = False
     # In a Compose group the agent's own container is stopped before the sidecars' hooks run (see ``stop_main``).
@@ -92,6 +95,7 @@ class HarborSession:
         """Stop the agent's sandbox, and its sidecars when the task is a Compose group."""
         if self.agent_sandbox_stopped:
             return
+        await _cancel_entrypoint(self.entrypoint)
         if self.compose is not None:
             # A main container stopped by ``stop_main`` is skipped: a sandbox stop is idempotent.
             await self.compose.stop()

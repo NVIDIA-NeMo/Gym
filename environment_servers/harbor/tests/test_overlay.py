@@ -43,7 +43,15 @@ HINTS = cpu_cap_env(1)
 
 class TestOverlay:
     def overlay_server(
-        self, tmp_path, monkeypatch, *, dockerfile=OVERLAY_DOCKERFILE, toml=TASK_TOML, sandbox=None, image_config=None
+        self,
+        tmp_path,
+        monkeypatch,
+        *,
+        dockerfile=OVERLAY_DOCKERFILE,
+        toml=TASK_TOML,
+        sandbox=None,
+        image_config=None,
+        provider="opensandbox",
     ):
         sandbox = sandbox or OverlaySandbox()
         server, task, _, created = make_server(
@@ -53,7 +61,7 @@ class TestOverlay:
         task = load_task(task.path)
         server.config.tasksets["ds"].tasks["hello"] = task.digest
         monkeypatch.setattr(
-            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {provider: {}}}
         )
 
         async def create(task, workdir, *, episode_key=None):
@@ -134,10 +142,10 @@ class TestOverlay:
             "user": "agent",
             "cwd": "/app",
         }
-        # Lines before `USER agent` run as root, which is the image's own default user, so without an override
-        # (every provider supports the plain exec path); after it, as agent.
-        assert task.sandbox_user is None
-        assert [c["user"] for c in (first, second, third)] == [None, None, "agent"]
+        # Lines before `USER agent` run as root. The image's own default user is root, but the sandbox was
+        # created with the Dockerfile's final USER (agent) as its exec default, so root is asked for explicitly.
+        assert task.sandbox_user is None and task.user == "agent"
+        assert [c["user"] for c in (first, second, third)] == ["root", "root", "agent"]
         assert all(c["cwd"] == "/" and c["env"] is None for c in (first, second, third))
         commands = [c["command"] for c in sandbox.execs]
         # /app is made as root when the first RUN after `WORKDIR /app` comes up, once, then only entered.
@@ -145,7 +153,7 @@ class TestOverlay:
         assert first["command"] == (
             f"unset MSG; export PATH={IMAGE_PATH}; cd / || exit 1; exec /bin/sh -c {shlex.quote(first['seen']['command'])}"
         )
-        assert sandbox.execs[1]["user"] is None and commands.count("mkdir -p /app") == 1
+        assert sandbox.execs[1]["user"] == "root" and commands.count("mkdir -p /app") == 1
         # The overlay shares the task's build budget: the first line sees all of it, later ones what is left.
         assert first["timeout_s"] == pytest.approx(task.config.environment.build_timeout_sec, abs=1)
         assert second["timeout_s"] <= first["timeout_s"] and third["timeout_s"] <= second["timeout_s"]
@@ -186,7 +194,7 @@ class TestOverlay:
         assert prepare["command"] == (
             "test -d /home/agent/work || (mkdir -p /home/agent/work && chown agent /home/agent/work)"
         )
-        assert prepare["user"] is None  # the image's default user is root already
+        assert prepare["user"] == "root"  # the sandbox's exec default is the Dockerfile's final USER (agent)
         assert sandbox.dirs["/home/agent/work"] == "agent" and sandbox.dirs["/home/agent"] == "root"
         assert run["seen"] == {
             "command": "touch made",
@@ -205,11 +213,13 @@ class TestOverlay:
 
         assert response.failure is None, response.failure
         lookup, prepare, first, second = sandbox.execs[:4]
-        assert lookup["command"] == "getent passwd 1000 | cut -d: -f1" and lookup["user"] is None
+        assert lookup["command"] == "getent passwd 1000 | cut -d: -f1" and lookup["user"] == "root"
         # The name serves the directory's owner and both lines; the lookup happens once.
-        assert prepare["command"].endswith("chown agent /home/agent/work)") and prepare["user"] is None
+        assert prepare["command"].endswith("chown agent /home/agent/work)") and prepare["user"] == "root"
         assert [c["seen"]["user"] for c in (first, second)] == ["agent", "agent"]
         assert sum("getent" in c["command"] for c in sandbox.execs) == 1
+        # The resolved name, not the uid, becomes the sandbox's default user after the overlay.
+        assert sandbox.default_user == "agent"
 
     async def test_root_steps_on_a_non_root_image_override_the_image_user(self, tmp_path, monkeypatch):
         # jupyter/base-notebook style: the image runs as jovyan, the Dockerfile switches to root and stays there.
@@ -267,13 +277,24 @@ class TestOverlay:
         # "4242" would be looked up as an account name by the su-backed providers and fail.
         assert lookup["command"] == "getent passwd 4242 | cut -d: -f1"
         assert run["user"] == 4242 and isinstance(run["user"], int) and run["seen"]["user"] == "4242"
-        # A uid:gid pair stays as written: only Docker's --user takes the pair.
+        # A uid:gid pair stays as written, on the line and as the default: only Docker's --user takes the pair.
         server, task, sandbox, _ = self.overlay_server(
-            tmp_path, monkeypatch, dockerfile="FROM img\nUSER 4242:4242\nRUN id\n"
+            tmp_path, monkeypatch, dockerfile="FROM img\nUSER 4242:4242\nRUN id\n", provider="docker"
         )
         response = await run_episode(server, task)
         assert response.failure is None, response.failure
-        assert sandbox.execs[1]["user"] == "4242:4242"
+        assert sandbox.execs[1]["user"] == "4242:4242" and sandbox.default_user == "4242:4242"
+        # Every other provider switches user by name only: the pair is refused before the sandbox exists.
+        server, task, sandbox, created = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile="FROM img\nUSER 4242:4242\nRUN id\n"
+        )
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and response.failure.terminal
+        assert (
+            "user '4242:4242' names group '4242'; the 'opensandbox' sandbox provider"
+            in response.failure.failure_reason
+        )
+        assert created == [] and sandbox.execs == []
         # A provider that refuses the uid fails the line itself, with its message: the Dockerfile does not apply.
         sandbox = OverlaySandbox(
             failing="id", failure=SandboxExecResult(stdout="", stderr="unable to find user 4242\n", return_code=125)
@@ -287,31 +308,85 @@ class TestOverlay:
         assert "unable to find user 4242" in response.failure.failure_reason and sandbox.stopped
 
     @pytest.mark.parametrize("user", ["root:1234", "0:0"])
-    async def test_root_with_a_group_keeps_the_group_on_its_workdir_and_runs_the_line_as_root(
+    async def test_root_with_a_group_keeps_the_group_on_its_workdir_and_on_its_lines_on_docker(
         self, tmp_path, monkeypatch, user
     ):
+        """Docker's --user takes `root:1234`, so a RUN line under it runs with gid 1234 as a build would; root's own
+        group (`0:0`) is plain root. Running the line as plain root would give the files it creates gid 0."""
         server, task, sandbox, _ = self.overlay_server(
-            tmp_path, monkeypatch, dockerfile=f"FROM img\nUSER {user}\nWORKDIR /srv/data\nRUN id -g\n"
+            tmp_path,
+            monkeypatch,
+            dockerfile=f"FROM img\nUSER {user}\nWORKDIR /srv/data\nRUN id -g\n",
+            provider="docker",
         )
         response = await run_episode(server, task)
         assert response.failure is None, response.failure
         prepare, run = sandbox.execs[:2]
-        # The directory gets the group a build would give it; the line itself runs as plain root, since the
-        # su-backed providers (OpenSandbox, enroot, apptainer) reject "root:1234" or "0:0" as an account name.
+        # The directory gets the group a build would give it, made as root (the plain exec path on a root image).
         assert prepare["command"] == f"test -d /srv/data || (mkdir -p /srv/data && chown {user} /srv/data)"
         assert prepare["user"] is None and sandbox.dirs["/srv/data"] == user
-        assert run["user"] is None and run["seen"]["user"] == "root"
-        # On a non-root image the same line takes the root override, as every other root step does.
+        # The line runs as the pair as written (Docker's `--user root:1234`); root's own group stays plain root.
+        expected = "root:1234" if user == "root:1234" else None
+        assert run["user"] == expected and run["seen"]["user"] == (expected or "root")
+        # The default Docker then applies to every exec keeps the group too.
+        assert sandbox.default_user == expected
+        # On a non-root image the pair is still asked for as written; plain root takes the root override.
         server, task, sandbox, _ = self.overlay_server(
             tmp_path,
             monkeypatch,
             dockerfile=f"FROM img\nUSER {user}\nRUN id -g\n",
             sandbox=OverlaySandbox(image_user="jovyan"),
             image_config={"Env": [f"PATH={IMAGE_PATH}"], "User": "jovyan"},
+            provider="docker",
         )
         response = await run_episode(server, task)
         assert response.failure is None, response.failure
-        assert sandbox.execs[0]["user"] == "root" and sandbox.execs[0]["seen"]["user"] == "root"
+        assert sandbox.execs[0]["user"] == (expected or "root") and sandbox.execs[0]["seen"]["user"] == (
+            expected or "root"
+        )
+        assert sandbox.default_user == (expected or "root")
+
+    @pytest.mark.parametrize("user", ["root:1234", "0:0"])
+    async def test_root_with_a_group_off_docker_is_refused_unless_it_is_roots_own_group(
+        self, tmp_path, monkeypatch, user
+    ):
+        # OpenSandbox cannot run as `root:1234` (it would run as gid 0 where Harbor's Docker gives gid 1234), so
+        # the task is refused before its sandbox exists; `0:0` names no group Docker's --user would add.
+        server, task, sandbox, created = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile=f"FROM img\nUSER {user}\nWORKDIR /srv/data\nRUN id -g\n"
+        )
+        response = await run_episode(server, task)
+        if user == "0:0":
+            assert response.failure is None, response.failure
+            assert sandbox.default_user is None and sandbox.dirs["/srv/data"] == "0:0"
+        else:
+            assert response.failure.stage == "seed" and response.failure.terminal
+            assert "user 'root:1234' names group '1234'; the 'opensandbox'" in response.failure.failure_reason
+            assert created == [] and sandbox.execs == []
+
+    @pytest.mark.parametrize("user", ["root:1234", "app:1234", "1000:1000"])
+    async def test_a_run_line_under_a_user_with_a_group_is_refused_off_docker_before_the_sandbox_exists(
+        self, tmp_path, monkeypatch, user
+    ):
+        """The pair of an intermediate USER (the final USER is plain root here) is refused the same way: on a
+        provider that switches user by name the line would run with the group lost or fail half-way through the
+        overlay with `su`'s message, so the task is refused whole, before any sandbox is created."""
+        dockerfile = f"FROM img\nUSER {user}\nRUN id -g\nUSER root\nRUN id -g\n"
+        server, task, sandbox, created = self.overlay_server(tmp_path, monkeypatch, dockerfile=dockerfile)
+        assert task.user == "root" and [step.user for step in task.overlay] == [user, "root"]
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and response.failure.terminal
+        group = user.partition(":")[2]
+        assert f"user {user!r} names group {group!r}; the 'opensandbox'" in response.failure.failure_reason
+        assert created == [] and sandbox.execs == []
+        # Docker takes the pair, on the line as written (a uid by the name the image gives it, as for a bare uid),
+        # and the final USER root leaves the default alone.
+        server, task, sandbox, _ = self.overlay_server(tmp_path, monkeypatch, dockerfile=dockerfile, provider="docker")
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        first, second = [call for call in sandbox.execs if call.get("seen") and "id -g" in call["seen"]["command"]]
+        assert first["user"] == ("agent:1000" if user == "1000:1000" else user)
+        assert second["user"] is None and sandbox.default_user is None
 
     async def test_the_final_workdir_belongs_to_the_user_of_its_instruction(self, tmp_path, monkeypatch):
         # node:20 style: USER node, then WORKDIR, then a RUN that writes there as node. A sandbox created with the

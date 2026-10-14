@@ -23,7 +23,6 @@ moved tag cannot change the image under a recorded configuration; the entry stay
 the written reference, which is how the task loader and the Compose resolver look it up.
 """
 
-import json
 import logging
 import tomllib
 from pathlib import Path
@@ -43,9 +42,9 @@ from nemo_gym.tasks.harbor.compose_variables import (
 from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
 from nemo_gym.tasks.harbor.models import HarborTaskConfig
-from nemo_gym.tasks.harbor.records import IMAGE_CONFIGS_FILE
+from nemo_gym.tasks.harbor.records import IMAGE_CONFIGS_FILE, read_image_configs, record_lock, write_json_record
 from nemo_gym.tasks.harbor.registry import ImageConfigError, RegistryClient
-from nemo_gym.tasks.harbor.task import TASK_FILE, HarborTask, dockerfile_base_image, is_task_folder
+from nemo_gym.tasks.harbor.task import DOCKERFILE, TASK_FILE, HarborTask, dockerfile_base_image, is_task_folder
 
 
 LOGGER = logging.getLogger(__name__)
@@ -97,6 +96,92 @@ def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
     return document
 
 
+# The keys of ``main`` that describe how Harbor builds its image, meaningless once the image is built and recorded.
+MAIN_BUILD_KEYS = ("build", "pull_policy")
+
+
+def without_main_build(document: dict[str, Any]) -> dict[str, Any]:
+    """``document`` with ``main``'s ``build`` and ``pull_policy`` removed, for a task that runs from the image
+    prepare built and recorded.
+
+    Harbor builds ``main`` from the task's Compose file at every start, so the file may give ``main`` a
+    ``build:`` (args, a target, a ``dockerfile_inline``) and Harbor's own template sets ``pull_policy: build``.
+    Gym builds that image once at prepare, with the same file, and the loader then substitutes the recorded
+    ``hb__<hash>`` image for ``main`` (``MAIN_IMAGE_NAME`` resolves to it). The two keys describe a build that
+    already happened; the sandbox Compose adapter starts images only and refuses them as unsupported fields,
+    so they are dropped here rather than failing every episode of a task prepare accepted. Nothing else is
+    touched: a sidecar's ``build:`` is refused at prepare, and a task in pull or overlay mode goes through
+    :func:`without_restated_main_build` instead.
+    """
+    services = document.get("services") if isinstance(document, dict) else None
+    main = services.get("main") if isinstance(services, dict) else None
+    if isinstance(main, dict) and any(key in main for key in MAIN_BUILD_KEYS):
+        services["main"] = {key: value for key, value in main.items() if key not in MAIN_BUILD_KEYS}
+    return document
+
+
+# The keys of ``main``'s ``build:`` that only restate what Harbor's own build template supplies for the task's
+# ``environment/`` folder; any other key configures a build Gym does not run in pull or overlay mode.
+RESTATED_BUILD_KEYS = frozenset({"context", "dockerfile", "pull"})
+
+
+def without_restated_main_build(task: HarborTask, document: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """``document`` with ``main``'s ``build:`` dropped when it only restates Harbor's own build of the task's
+    Dockerfile, for a task in pull or overlay mode, and a reason instead when that section carries a key Gym
+    cannot apply without a build. Any other task is returned as it is.
+
+    Harbor builds ``main`` from ``environment/Dockerfile`` through its own template, which already sets
+    ``build.context: ${CONTEXT_DIR}`` (``docker-compose-build.yaml`` at v0.22.0, appended before the task file),
+    so a task file that repeats ``context``, ``dockerfile: Dockerfile`` or ``pull`` changes nothing there;
+    orca-bench, terminal_bench_aai and data-eng-bench do, some 600 hub tasks. Gym runs such a Dockerfile without
+    a build (the loader folded it into the task in pull mode, or runs its ``RUN`` lines at seed in overlay mode),
+    so the restatement is dropped as a built task's section is (:func:`without_main_build`). ``args``,
+    ``target``, ``dockerfile_inline``, another ``dockerfile`` or another ``context`` would change the image
+    Harbor builds and have no equivalent without one, so the task is reported, not started on the wrong image.
+    """
+    if task.built_image is not None or task.config.environment.docker_image or not (task.path / DOCKERFILE).is_file():
+        return document, None
+    services = document.get("services") if isinstance(document, dict) else None
+    main = services.get("main") if isinstance(services, dict) else None
+    if not isinstance(main, dict) or "build" not in main:
+        return document, None
+    build = main["build"]
+    if isinstance(build, str):
+        build = {"context": build}
+    unsupported = "cannot be applied in pull or overlay mode (Gym does not build this Dockerfile)"
+    if not isinstance(build, dict):
+        return document, f"main.build {unsupported}"
+    offending = sorted(str(key) for key in build if key not in RESTATED_BUILD_KEYS)
+    context = build.get("context")
+    if context is not None and context not in (".", "./") and Path(str(context)) != task.path / "environment":
+        offending.append("context")
+    if build.get("dockerfile") not in (None, "Dockerfile", "./Dockerfile"):
+        offending.append("dockerfile")
+    if offending:
+        return document, f"{', '.join(f'main.build.{key}' for key in offending)} {unsupported}"
+    services["main"] = {key: value for key, value in main.items() if key != "build"}
+    return document, None
+
+
+def without_pull_policy(document: dict[str, Any]) -> dict[str, Any]:
+    """``document`` with ``pull_policy`` removed from every service, for the sandbox Compose adapter.
+
+    The key tells ``docker compose`` when to pull or build an image before starting it (Harbor's template sets
+    ``pull_policy: build`` on ``main``; a task file may give a sidecar ``always`` or ``missing``). The sandbox
+    starts the recorded image it is given and has no pull step of its own to configure, so the key is dropped
+    from the document the sandbox receives, in every image mode, instead of being refused as an unsupported
+    field. ``build:`` is not touched here: a sidecar's is still refused (no provider starts a locally built
+    sidecar) and ``main``'s is dropped by :func:`without_main_build` for a task that runs from its recorded
+    built image, or by :func:`without_restated_main_build` when it only restates Harbor's build.
+    """
+    services = document.get("services") if isinstance(document, dict) else None
+    if isinstance(services, dict):
+        for name, service in services.items():
+            if isinstance(service, dict) and "pull_policy" in service:
+                services[name] = {key: value for key, value in service.items() if key != "pull_policy"}
+    return document
+
+
 def compose_image_references(task: HarborTask) -> list[str]:
     """Every image a Compose task starts: the task image for ``main`` and each sidecar's image."""
     document = load_compose_document(task)
@@ -132,7 +217,7 @@ def dockerfile_base_images(folder: Path, *, select: Callable[[str], bool] | None
     to report.
     """
     # Resolved like load_task does: overrides are keyed by the task folder's name and dataset.toml
-    # sits beside the task folders.
+    # sits beside the task folders, or one level up for datasets/<name>/tasks/.
     folder = Path(folder).resolve()
     single = is_task_folder(folder)
     children = [folder] if single else sorted(child for child in folder.iterdir() if child.is_dir())
@@ -156,7 +241,11 @@ def dockerfile_base_images(folder: Path, *, select: Callable[[str], bool] | None
 
 
 def record_image_configs(
-    references: dict[str, list[str]], folder: Path, *, client: RegistryClient | None = None, what: str = "image"
+    references: dict[str, list[str]],
+    folder: Path,
+    *,
+    client: RegistryClient | None = None,
+    what: str = "image",
 ) -> Path | None:
     """Record the configuration of ``references`` (image reference to the tasks using it) into ``folder``.
 
@@ -167,26 +256,39 @@ def record_image_configs(
     not move either. Returns the file's path, or ``None`` when there is nothing to record. A
     reference the registry cannot resolve raises :class:`ImageConfigError` naming the image,
     the tasks and the registry's answer.
+
+    The registry is asked outside the file's sidecar lock (:func:`record_lock`), so a slow
+    registry never holds up another process; the file is then read again, merged and replaced
+    under the lock, and an entry another process recorded in the meantime is kept over the
+    one resolved here, as a pinned entry always is (a legacy entry is replaced by its re-read).
     """
     if not references:
         return None
-    path = Path(folder) / IMAGE_CONFIGS_FILE
-    recorded: dict[str, Any] = json.loads(path.read_text()) if path.is_file() else {}
+    folder = Path(folder)
+    path = folder / IMAGE_CONFIGS_FILE
+    recorded = read_image_configs(folder)
     missing = [ref for ref in references if (recorded.get(ref) or {}).get("record_version") != RECORD_VERSION]
     if not missing:
         return path
-    client = client or RegistryClient()
+    if client is None:
+        client = RegistryClient()
     LOGGER.info(f"Recording the configuration of {len(missing)} {what}(s) into {path}")
+    resolved: dict[str, Any] = {}
     for reference in missing:
         pinned = (recorded.get(reference) or {}).get("image")
         try:
-            recorded[reference] = client.image_config(pinned or reference)
+            resolved[reference] = client.image_config(pinned or reference)
         except ImageConfigError as exc:
             tasks = ", ".join(references[reference][:5]) or "-"
             raise ImageConfigError(
                 f"Could not record the configuration of {what} {reference!r} (used by task(s) {tasks}): {exc}"
             ) from exc
-    path.write_text(json.dumps(dict(sorted(recorded.items())), indent=2, sort_keys=True) + "\n")
+    with record_lock(path):
+        recorded = read_image_configs(folder)
+        for reference, record in resolved.items():
+            if (recorded.get(reference) or {}).get("record_version") != RECORD_VERSION:
+                recorded[reference] = record
+        write_json_record(path, recorded)
     return path
 
 

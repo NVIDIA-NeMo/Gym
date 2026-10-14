@@ -1642,6 +1642,15 @@ async def test_create_pty_requires_capability_and_start() -> None:
     assert provider.pty_specs[1].cwd == "/elsewhere"
     await sandbox.stop()
 
+    # A PTY session inherits the sandbox's default user like exec does; an explicit user still wins.
+    provider = PtySandboxProvider()
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image:tag", user="agent"))
+    await sandbox.pty.create("id")
+    await sandbox.pty.create("id", user="root")
+    assert [spec.user for spec in provider.pty_specs] == ["agent", "root"]
+    await sandbox.stop()
+
 
 async def test_pty_exec_collects_output_and_exit() -> None:
     from nemo_gym.sandbox import SandboxPtySpec
@@ -2162,6 +2171,28 @@ def test_sandbox_config_rejects_a_non_numeric_resource_value() -> None:
 def test_sandbox_config_rejects_unknown_settings(fields: dict) -> None:
     with pytest.raises(ValidationError):
         SandboxConfig(**fields)
+
+
+def test_exec_defaults_to_the_spec_user_and_an_explicit_user_wins() -> None:
+    async def _run() -> None:
+        provider_name = f"fake-{uuid4().hex}"
+        register_provider(provider_name, FakeSandboxProvider)
+        sandbox = AsyncSandbox({provider_name: {}})
+        await sandbox.start(SandboxSpec(image="image:tag", workdir="/repo", user="agent"))
+        provider = FakeSandboxProvider.last_instance
+        assert sandbox.default_user == "agent"
+
+        await sandbox.exec("id", timeout_s=5)
+        await sandbox.exec("id", timeout_s=5, user="root")
+        assert [call["user"] for call in provider.exec_calls] == ["agent", "root"]
+
+        # Without a spec user the provider's own default applies, as before.
+        plain = AsyncSandbox({provider_name: {}})
+        await plain.start(SandboxSpec(image="image:tag"))
+        await plain.exec("id", timeout_s=5)
+        assert plain.default_user is None and FakeSandboxProvider.last_instance.exec_calls[-1]["user"] is None
+
+    asyncio.run(_run())
 
 
 def test_clamp_resource_requests_caps_each_request_at_the_declared_limit() -> None:

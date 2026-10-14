@@ -25,6 +25,7 @@ from typing import Any, Awaitable
 import yaml
 
 from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
+from environment_servers.harbor.users import _creation_user
 from environment_servers.harbor.verifier import _verifier_image, _verifier_key
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxSpec, clamp_resource_requests
@@ -33,7 +34,13 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.tasks.harbor import HarborTask
-from nemo_gym.tasks.harbor.image_configs import load_compose_document
+from nemo_gym.tasks.harbor.errors import HarborTaskError
+from nemo_gym.tasks.harbor.image_configs import (
+    load_compose_document,
+    without_main_build,
+    without_pull_policy,
+    without_restated_main_build,
+)
 from nemo_gym.tasks.harbor.models import HarborEnvironment
 
 
@@ -127,6 +134,23 @@ class HarborSandboxMixin:
         # limit. They are hints, the cgroup limit stays the provider's, and whatever the task declares
         # (`[environment.env]`, the image's `ENV`, the verifier environment's `env`) wins on a key clash.
         env = cpu_cap_env(resources.get("cpu")) | task_env
+        # The default for every exec in the task's own image: the Dockerfile's final USER (or [agent].user)
+        # for the agent, the image's own USER for a separate verifier in that image, independent of
+        # [agent].user. A separate verifier in another image keeps that image's own default. An overlay task
+        # starts without it, because its RUN lines may be what creates the user, and a numeric uid is never
+        # the facade's raw default; `_set_default_user` installs the normalised default once the sandbox runs.
+        default = task.entrypoint_user if role == "verifier" else task.user
+        runs_task_image = image is None or image == task.image
+        if runs_task_image:
+            # A `name:group` default is Docker's alone: refused here, before the sandbox exists, for an overlay task
+            # too (it installs the default after its RUN lines), as Daytona would create the sandbox for that user.
+            self._refuse_unsupported_group(task, default, global_config_dict)
+            # So is the user of every overlay RUN line (`USER root:1234` then `RUN ...`): the line would run with
+            # the group lost or be refused by `su` half-way through the overlay, so the task is refused whole.
+            for step in task.overlay:
+                self._refuse_unsupported_group(task, step.user, global_config_dict)
+        in_task_image = runs_task_image and not task.overlay
+        user = _creation_user(task, default) if in_task_image else None
         return SandboxSpec(
             image=image or task.image,
             ttl_s=ttl,
@@ -136,6 +160,7 @@ class HarborSandboxMixin:
             metadata=metadata,
             resources=resources,
             provider_options=self._provider_options_within(resources, task, role),
+            user=user,
         )
 
     def _provider_options_within(self, resources: Mapping[str, Any], task: HarborTask, role: str) -> dict[str, Any]:
@@ -169,6 +194,16 @@ class HarborSandboxMixin:
         if self.config.gpu_sandbox_provider and _needs_gpu(task):
             return self.config.gpu_sandbox_provider
         return self.config.sandbox_provider
+
+    def _task_provider_name(self, task: HarborTask, global_config_dict: Mapping[str, Any] | None = None) -> str | None:
+        """The registry name of the provider that runs ``task`` (``docker``, ``opensandbox``, ...); ``None`` for a
+        provider instance in place of the config (tests) that names itself no better."""
+        if global_config_dict is None:
+            global_config_dict = get_global_config_dict()
+        provider_config = resolve_provider_config(self._provider_ref(task), global_config_dict)
+        if isinstance(provider_config, Mapping):
+            return next(iter(provider_config))
+        return getattr(provider_config, "name", None)
 
     async def _create_sandbox(self, task: HarborTask, workdir: str | None, *, episode_key: str) -> AsyncSandbox:
         provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
@@ -224,7 +259,20 @@ class HarborSandboxMixin:
         """The published overlay resolved against recorded image metadata, ready for the Compose adapter."""
         image_configs = self._compose_image_configs(task)
         # The same reader prepare used: env_file inlined and ${VAR} resolved from the task, not the process.
-        document = resolve_compose(load_compose_document(task), task.image, image_configs)
+        document = load_compose_document(task)
+        # The sandbox has no pull step to configure, so ``pull_policy`` is dropped from every service. Prepare
+        # ran the adapter's field check on this same document (``nemo_gym.tasks.harbor.cli``).
+        document = without_pull_policy(document)
+        if task.built_image is not None:
+            # Prepare built main from this file; the recorded image stands in for its build: section.
+            document = without_main_build(document)
+        else:
+            # A pull or overlay task's main build: that only restates Harbor's own build of the Dockerfile is
+            # dropped; a key that would change the image is the task's error, which prepare already reported.
+            document, reason = without_restated_main_build(task, document)
+            if reason is not None:
+                raise HarborTaskError(f"{task.task_id}: {reason}")
+        document = resolve_compose(document, task.image, image_configs)
         adapt_non_root_sidecars(document, image_configs)
         provider = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         if "opensandbox" in provider:
@@ -273,8 +321,24 @@ class HarborSandboxMixin:
         # An overlay task's main service starts without the task workdir, as its single sandbox would (see
         # `_create_sandbox_within_deadline`); the sidecars derive from it and start in their images' own.
         main_spec = self._sandbox_spec(task, None if task.overlay else task.workdir)
+        # Sidecars keep their own image's default user; the task's USER belongs to the main image only.
         sidecar_spec = replace(
-            main_spec, resources={}, env={}, provider_options=dict(self.config.sandbox_provider_options)
+            main_spec, resources={}, env={}, user=None, provider_options=dict(self.config.sandbox_provider_options)
+        )
+        # Harbor's order for main: image ENV (baked in, or the Dockerfile ENV the loader folded into task.env for a
+        # pull or overlay task) < the task's Compose file < Harbor's env override file, which holds only the
+        # host-resolved [environment].env (harbor 0.22.0 environments/docker/docker.py 363-370, environments/base.py
+        # 278-285). _sandbox_spec's env is task.env, the image layer with [environment].env already over it; the
+        # file goes between the two here, and the adapter applies the whole spec env over the file (``{**env,
+        # **spec.env}``), which leaves exactly those three layers in that order.
+        compose_env = {
+            key: str(value)
+            for key, value in ((document["services"].get("main") or {}).get("environment") or {}).items()
+            if value is not None
+        }
+        main_spec = replace(
+            main_spec,
+            env={**main_spec.env, **compose_env, **resolve_env_templates(task.config.environment.env or {})},
         )
         compose = AsyncSandboxCompose(
             resolve_provider_config(self._provider_ref(task), get_global_config_dict()),
