@@ -84,6 +84,7 @@ def test_migrates_a_config_outside_the_repository(tmp_path: Path) -> None:
         "osworld_agent",
         "oracle_agent",
         "terminus_2_sandboxed_agent",
+        "miniswe_sandboxed_agent",
     ],
 )
 def test_migration_respects_native_session_templates(
@@ -117,6 +118,7 @@ def test_migration_respects_native_session_templates(
         "opencode_agent",
         "oracle_agent",
         "terminus_2_sandboxed_agent",
+        "miniswe_sandboxed_agent",
     ],
 )
 def test_native_capable_overlay_keeps_inherited_resources(tmp_path: Path, agent_type: str) -> None:

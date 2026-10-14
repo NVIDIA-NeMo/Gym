@@ -25,7 +25,7 @@ from fastapi import Body, HTTPException, Request
 from pydantic import Field
 
 from environment_servers.harbor.app import resolve_env_templates
-from environment_servers.harbor.sandbox_io import upload_dir
+from environment_servers.harbor.sandbox_io import SandboxTransferError, _exec_as_root, upload_dir
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -178,8 +178,18 @@ class OracleAgent(SimpleResponsesAPIAgent):
         if self.config.max_solve_timeout_s is not None:
             timeout = min(timeout, self.config.max_solve_timeout_s)
         env = {"DEBIAN_FRONTEND": "noninteractive", **resolve_env_templates(settings.solution.env)}
-        await upload_dir(session.sandbox, task.path / "solution", SOLUTION_DIR)
-        await session.sandbox.exec(f"mkdir -p {SOLVE_LOG_DIR} && chmod 777 {SOLVE_LOG_DIR}", cwd="/", timeout_s=60)
+        try:
+            await upload_dir(session.sandbox, task.path / "solution", SOLUTION_DIR)
+            prepared = await _exec_as_root(
+                session.sandbox, f"mkdir -p {SOLVE_LOG_DIR} && chmod 777 {SOLVE_LOG_DIR}", timeout_s=60
+            )
+            if prepared.return_code:
+                raise SandboxTransferError(f"Could not create {SOLVE_LOG_DIR}: {prepared.stderr or prepared.stdout}")
+        except SandboxTransferError as exc:
+            # The sandbox user cannot place the solution where solve.sh expects it (for example an image
+            # that runs as a non-root user without the capability to switch to root). Report it as an
+            # oracle failure so the row stays scored and the reason is visible.
+            return self._response(body, ORACLE_STATUS_FAILED, str(exc), {"oracle_error_type": "transfer"})
         # One bounded exec: the provider keeps the command alive for `timeout_s`, and `timeout`
         # inside the container stops the solution itself. Output goes to a file we tail.
         result = await session.sandbox.exec(
