@@ -75,6 +75,10 @@ def make_task(root: Path, task_toml: str) -> Path:
 ASSEMBLY_JUDGE = '''import json
 
 
+def _normalize(source):
+    return str(source)
+
+
 def _zero(reason):
     return {"reward": 0.0, "reason": reason}
 
@@ -85,14 +89,70 @@ def score(solution_json):
     segments = sol.get("segments")
     if not isinstance(segments, list):
         return _zero("solution.json: segments not a list")
-    return {"reward": len(segments) / 4}
+
+    pred = [_normalize(seg.get("source", "")) for seg in segments]
+    return {"reward": len(pred) / 4}
 '''
 
 
-def test_assembly_judge_guard_scores_non_object_manifest_zero(tmp_path: Path) -> None:
+def pin_synthetic_assembly_judge(monkeypatch: pytest.MonkeyPatch, task: Path) -> None:
+    hardened = ASSEMBLY_JUDGE.replace(
+        harbor_runner._ASSEMBLY_MANIFEST_PARSER,
+        harbor_runner._ASSEMBLY_HARDENED_PARSER,
+    )
+    monkeypatch.setattr(
+        harbor_runner,
+        "_ASSEMBLY_JUDGE_SHA256",
+        {
+            task.name: (
+                hashlib.sha256(ASSEMBLY_JUDGE.encode()).hexdigest(),
+                hashlib.sha256(hardened.encode()).hexdigest(),
+            )
+        },
+    )
+
+
+def test_assembly_judge_hash_manifest_covers_all_pinned_tasks() -> None:
+    assert set(harbor_runner._ASSEMBLY_JUDGE_SHA256) == {
+        f"agentic-vbench-assembly-task{i}" for i in range(1, 19)
+    }
+    assert all(
+        len(source_sha256) == len(staged_sha256) == 64
+        for source_sha256, staged_sha256 in harbor_runner._ASSEMBLY_JUDGE_SHA256.values()
+    )
+
+
+PINNED_ASSEMBLY_ROOT = Path(os.environ.get("AGENTIC_VBENCH_ROOT", "/nonexistent")) / (
+    "tasks/agentic_vbench_assembly"
+)
+
+
+@pytest.mark.skipif(not PINNED_ASSEMBLY_ROOT.is_dir(), reason="Pinned Agentic-VBench checkout not available")
+def test_pinned_assembly_judges_match_and_stage_to_exact_hashes(tmp_path: Path) -> None:
+    for task_id, (source_sha256, staged_sha256) in harbor_runner._ASSEMBLY_JUDGE_SHA256.items():
+        task = PINNED_ASSEMBLY_ROOT / task_id
+        source = task / "steps/solve/tests/judge.py"
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == source_sha256
+        output = tmp_path / "outputs" / task_id
+        output.mkdir(parents=True)
+
+        staged = stage_assembly_judge_guard(
+            task,
+            staging=tmp_path / "staging",
+            output=output,
+        )
+
+        assert hashlib.sha256((staged / "steps/solve/tests/judge.py").read_bytes()).hexdigest() == staged_sha256
+
+
+def test_assembly_judge_guard_scores_non_object_manifest_zero_and_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     task = make_task(tmp_path / "tasks/agentic_vbench_assembly", JUDGED_TASK)
     source_judge = task / "steps/solve/tests/judge.py"
     source_judge.write_text(ASSEMBLY_JUDGE)
+    pin_synthetic_assembly_judge(monkeypatch, task)
     output = tmp_path / "output"
     output.mkdir()
 
@@ -102,6 +162,8 @@ def test_assembly_judge_guard_scores_non_object_manifest_zero(tmp_path: Path) ->
         output=output,
     )
 
+    original_namespace = {}
+    exec(ASSEMBLY_JUDGE, original_namespace)
     namespace = {}
     exec((staged / "steps/solve/tests/judge.py").read_text(), namespace)
     bare_list = tmp_path / "bare-list.json"
@@ -112,23 +174,57 @@ def test_assembly_judge_guard_scores_non_object_manifest_zero(tmp_path: Path) ->
     valid_object.write_text('{"segments": [{"source": "3"}, {"source": "4"}]}')
     assert namespace["score"](bare_list) == {
         "reward": 0.0,
-        "reason": "solution.json: expected an object with a segments list",
+        "reason": "solution.json: expected top-level object",
     }
     assert namespace["score"](scalar_segment) == {
         "reward": 0.0,
-        "reason": "solution.json: segment entries must be objects",
+        "reason": "solution.json: segment 0 is not an object",
     }
-    assert namespace["score"](valid_object) == {"reward": 0.5}
+    assert namespace["score"](valid_object) == original_namespace["score"](valid_object) == {"reward": 0.5}
     assert source_judge.read_text() == ASSEMBLY_JUDGE
     provenance = json.loads((output / "assembly_judge_guard.json").read_text())
     assert provenance["original_judge_sha256"] == hashlib.sha256(ASSEMBLY_JUDGE.encode()).hexdigest()
     assert provenance["staged_judge_sha256"] != provenance["original_judge_sha256"]
+    assert stage_assembly_judge_guard(
+        task,
+        staging=tmp_path / "staging",
+        output=output,
+    ) == staged
+    assert (staged / "steps/solve/tests/judge.py").read_text().count("expected top-level object") == 1
 
 
-def test_assembly_judge_guard_rejects_unexpected_pinned_parser(tmp_path: Path) -> None:
+def test_assembly_judge_guard_rejects_unexpected_pinned_parser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     task = make_task(tmp_path / "tasks/agentic_vbench_assembly", JUDGED_TASK)
+    source = task / "steps/solve/tests/judge.py"
+    source_text = source.read_text()
+    monkeypatch.setattr(
+        harbor_runner,
+        "_ASSEMBLY_JUDGE_SHA256",
+        {task.name: (hashlib.sha256(source_text.encode()).hexdigest(), "0" * 64)},
+    )
     with pytest.raises(ValueError, match="unexpected manifest parser"):
         stage_assembly_judge_guard(task, staging=tmp_path / "staging", output=tmp_path)
+    assert source.read_text() == source_text
+    assert not (tmp_path / "staging").exists()
+
+
+def test_assembly_judge_guard_rejects_unexpected_source_without_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = make_task(tmp_path / "tasks/agentic_vbench_assembly", JUDGED_TASK)
+    source = task / "steps/solve/tests/judge.py"
+    source.write_text(ASSEMBLY_JUDGE)
+    pin_synthetic_assembly_judge(monkeypatch, task)
+    source.write_text(ASSEMBLY_JUDGE + "# unexpected edit\n")
+
+    with pytest.raises(ValueError, match="unexpected source digest"):
+        stage_assembly_judge_guard(task, staging=tmp_path / "staging", output=tmp_path)
+
+    assert not (tmp_path / "staging").exists()
 
 
 def test_assembly_judge_guard_leaves_other_families_unstaged(tmp_path: Path) -> None:

@@ -227,17 +227,119 @@ NATIVE_JUDGE_ENV = {"ANTHROPIC_API_KEY", "GEMINI_API_KEY"}
 TYPING_DIAGNOSTIC = "find / -name 'typing_extensions*' 2>/dev/null | head -20"
 
 _ASSEMBLY_FAMILY = "agentic_vbench_assembly"
-_ASSEMBLY_MANIFEST_ANCHOR = '''    segments = sol.get("segments")
+_ASSEMBLY_MANIFEST_PARSER = '''    segments = sol.get("segments")
     if not isinstance(segments, list):
         return _zero("solution.json: segments not a list")
-'''
-_ASSEMBLY_MANIFEST_GUARD = '''    if not isinstance(sol, dict):
-        return _zero("solution.json: expected an object with a segments list")
 
+    pred = [_normalize(seg.get("source", "")) for seg in segments]
 '''
-_ASSEMBLY_SEGMENTS_GUARD = '''    if not all(isinstance(segment, dict) for segment in segments):
-        return _zero("solution.json: segment entries must be objects")
+_ASSEMBLY_HARDENED_PARSER = '''    if not isinstance(sol, dict):
+        return _zero("solution.json: expected top-level object")
+
+    segments = sol.get("segments")
+    if not isinstance(segments, list):
+        return _zero("solution.json: segments not a list")
+
+    for i, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            return _zero(f"solution.json: segment {i} is not an object")
+
+    pred = [_normalize(seg.get("source", "")) for seg in segments]
 '''
+_ASSEMBLY_JUDGE_SHA256 = {
+    "agentic-vbench-assembly-task1": (
+        "61a3ec3270a5ecf9ea394c6f7216d08a9af1d9ef794bf6ac297752f30fee168e",
+        "5bc591c8439c11c262dc4073d1db3750f15603f6d6dbc7d6551ca045b3d21fad",
+    ),
+    "agentic-vbench-assembly-task2": (
+        "7c70dc9c2dc357993f91e80b51a74d153c9bf8dc5274ca826ad9eaf2ae0f9ca3",
+        "161d8e04440b8add9280fa2649e4d1470f49f4fcd68697b6cd32eae7aa80868b",
+    ),
+    "agentic-vbench-assembly-task3": (
+        "0e76e6774046ea9448c3d5a906d7c04f50cf05706739f2afb82c77d887639548",
+        "f7a2030f194ebc0befb1fd349efb6d39d78f260abc88672923d91f161a0ec453",
+    ),
+    "agentic-vbench-assembly-task4": (
+        "73da97f7929d94831141a23954b910ae03f5d0de93ac12cf27df3a9a1c713ba5",
+        "02f5894208585abf30fde48c68f5ea9ccaf53182c934eadc1520f8ab97339646",
+    ),
+    "agentic-vbench-assembly-task5": (
+        "129b6d6ceb8ed68e2f1c89246b99ed18db5908c80bffa7425c03dc2dc08ac094",
+        "61e63f8d5401fd496f13757221dec0f550d8f1d9bf93aa30d4a410e4e1f7e2f9",
+    ),
+    "agentic-vbench-assembly-task6": (
+        "609f102e08adf0eccfbd0bb4973a20ff6b88b402f7a61a906a45eb3a55dc3dc4",
+        "6d449633c37da9fd10a8f4cf046623c21f7f15c9da372c01b127d372d31a6156",
+    ),
+    "agentic-vbench-assembly-task7": (
+        "7dd6d792007f581f2b9b843d5ca1958560884b253edd7a8c34e73db1376191d6",
+        "08978a086806d75c1880979160227cc753965eeb6ced6dfc1028d5ff45c8eb5e",
+    ),
+    "agentic-vbench-assembly-task8": (
+        "52b01834e4c342888e0238e399507572ed82e65b6082eb27ddaedded7c985e75",
+        "2dd1339341fe5a4ca6052aeb4edb58c740019a4a2610356eeadef56acb5373a4",
+    ),
+    "agentic-vbench-assembly-task9": (
+        "49b585fd2413798d6b484b1123c5ff476e791715dc99fa42f21e642637cf492f",
+        "30e2816a2fd73e4b0a165943655cd32dea316f830c92a16cdb05e9c3feeb1d15",
+    ),
+    "agentic-vbench-assembly-task10": (
+        "9ce0f3da6ae606f775505e33e8380539e3f27de185bc137d6d401d4747ee40c4",
+        "d7c7124dc304f8a6e8e394b463838b13b1d309615518b6d2ec3d89388e818045",
+    ),
+    "agentic-vbench-assembly-task11": (
+        "2de466f807ab097e1ca754908ebc36ffe9c1ba716a540455287568322de68c06",
+        "955ebfc11fae35bff96f6a9cf2d281bc03f43c2630aa2d3919314bb8ae8164ba",
+    ),
+    "agentic-vbench-assembly-task12": (
+        "c2648737e1de760e743fa29115a0c241ef18c3f0a6132eea70161ab96497ddcb",
+        "fe363ddc8b720c512833064d032ab5e8a3df691efb4d726a98fa4e5475417a38",
+    ),
+    "agentic-vbench-assembly-task13": (
+        "ef488cd4f71e0947cf19ecab470ff6693e15de26a5cdd07e8e203cb75e84866a",
+        "821ee8de3bd3be80c7ece58b0c1ecd9d1d3845572bfb021014b2b3955074d379",
+    ),
+    "agentic-vbench-assembly-task14": (
+        "20660911630e38d25bad3c8d2d9c9148ab9781a3fa4d3d6c5a89c72ec64143ea",
+        "0d8538b9696f1bc1089d8415c0a8a35e5efef8fa34fc289e46a8c92c7305e305",
+    ),
+    "agentic-vbench-assembly-task15": (
+        "26451dde4b9328495aad4610f0f48282b51d4660695219645118cc37b0468b6e",
+        "bab7f16a3c74117ab03c7e5fd8dcae473454768021cbb9ceb31a1f7f37085a1f",
+    ),
+    "agentic-vbench-assembly-task16": (
+        "a7293e8e95cc59c27cdbafe9802983c21d961f868fb426c68f30a99d7e628689",
+        "670f636b37cf077fd5e58054021cad1cd98d34fabd62ef844687199fdb4dc9c0",
+    ),
+    "agentic-vbench-assembly-task17": (
+        "7ad56e110ec984d69a9d2afbaf2d9ed93eda71d1a621ae7c350e1e845858922d",
+        "c5d6dd370825d997bce0138f08760ba14e543e60d70f4503d59391ada669fc99",
+    ),
+    "agentic-vbench-assembly-task18": (
+        "f2dea83ca090e44108be5ce52817b6bbfd4266a0ecf909b30b7f7bcbc2954682",
+        "49724c26534af8519849e42e5411ebc4793257ce6ea68bbdbd1d430812d807cc",
+    ),
+}
+
+
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _harden_assembly_judge(source: bytes, task_id: str) -> bytes:
+    expected = _ASSEMBLY_JUDGE_SHA256.get(task_id)
+    if expected is None:
+        raise ValueError(f"Unexpected pinned assembly task: {task_id}")
+    source_sha256, staged_sha256 = expected
+    if _digest(source) != source_sha256:
+        raise ValueError(f"Pinned assembly judge has an unexpected source digest: {task_id}")
+    text = source.decode()
+    if text.count(_ASSEMBLY_MANIFEST_PARSER) != 1:
+        raise ValueError(f"Pinned assembly judge has an unexpected manifest parser: {task_id}")
+    hardened = text.replace(_ASSEMBLY_MANIFEST_PARSER, _ASSEMBLY_HARDENED_PARSER).encode()
+    if _digest(hardened) != staged_sha256:
+        raise ValueError(f"Assembly judge hardening produced an unexpected digest: {task_id}")
+    return hardened
 
 
 def stage_assembly_judge_guard(task_path: Path, *, staging: Path, output: Path) -> Path:
@@ -246,31 +348,34 @@ def stage_assembly_judge_guard(task_path: Path, *, staging: Path, output: Path) 
     The upstream judge calls ``sol.get`` immediately after ``json.loads``. A model
     can therefore create valid JSON with the wrong top-level shape (for example, a
     bare list), which raises ``AttributeError`` instead of producing the same zero
-    reward as every other malformed manifest. Stage only assembly tasks and insert
-    the missing type check; valid-object scoring remains byte-for-byte unchanged.
+    reward as every other malformed manifest. Stage only exact pinned assembly
+    judges; valid-object scoring is unchanged and the source checkout stays clean.
     """
     if task_path.parent.name != _ASSEMBLY_FAMILY:
         return task_path
 
+    task_id = task_path.name
+    source_judge = task_path / "steps/solve/tests/judge.py"
+    hardened = _harden_assembly_judge(source_judge.read_bytes(), task_id)
     staged = staging / task_path.name
+    expected_staged_sha256 = _ASSEMBLY_JUDGE_SHA256[task_id][1]
+    if staged.exists():
+        staged_judge = staged / "steps/solve/tests/judge.py"
+        if not staged_judge.is_file() or _digest(staged_judge.read_bytes()) != expected_staged_sha256:
+            raise ValueError(f"Existing staged assembly judge has an unexpected digest: {task_id}")
+        return staged
+
     shutil.copytree(task_path, staged)
     judge = staged / "steps/solve/tests/judge.py"
-    source = judge.read_text()
-    if source.count(_ASSEMBLY_MANIFEST_ANCHOR) != 1:
-        raise ValueError(f"Pinned assembly judge has an unexpected manifest parser: {task_path}")
-    replacement = _ASSEMBLY_MANIFEST_GUARD + _ASSEMBLY_MANIFEST_ANCHOR + _ASSEMBLY_SEGMENTS_GUARD
-    judge.write_text(source.replace(_ASSEMBLY_MANIFEST_ANCHOR, replacement))
-
-    def digest(path: Path) -> str:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+    judge.write_bytes(hardened)
 
     (output / "assembly_judge_guard.json").write_text(
         json.dumps(
             {
                 "source_task": str(task_path),
                 "reason": "non-object solution manifests score zero instead of crashing the verifier",
-                "original_judge_sha256": digest(task_path / "steps/solve/tests/judge.py"),
-                "staged_judge_sha256": digest(judge),
+                "original_judge_sha256": _digest(source_judge.read_bytes()),
+                "staged_judge_sha256": _digest(judge.read_bytes()),
             },
             indent=2,
         )
