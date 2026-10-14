@@ -347,6 +347,110 @@ def test_unsupported_seed_rejected_before_connection(setup, option):
     sandbox.exec.assert_not_awaited()
 
 
+def mcp_grant(name="gdpval_resources_server", *, required=True, url="http://resources.example:7000/mcp"):
+    return {
+        "kind": "mcp",
+        "name": name,
+        "required": required,
+        "connection": {"url": url, "headers": {"X-NeMo-Gym-Session-Token": f"token-{name}"}},
+    }
+
+
+def test_mcp_grants_reach_the_sandbox_codex_config(setup):
+    agent, sandbox = setup
+    agent.config = CodexAgentConfig(
+        **(
+            agent.config.model_dump()
+            | {
+                "mcp_tool_timeout_seconds": 300,
+                "tool_accesses": [mcp_grant("search", required=False, url="http://search.example:7100/mcp")],
+            }
+        )
+    )
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [
+        mcp_grant(),
+        # An optional direct HTTP grant stays unused rather than failing the seed.
+        {"kind": "direct_http", "name": "direct.tools", "base_url": "http://resources", "required": False},
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=body)
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        assert config["mcp_servers"] == {
+            "search": {
+                "url": "http://search.example:7100/mcp",
+                "http_headers": {"X-NeMo-Gym-Session-Token": "token-search"},
+                "tool_timeout_sec": 300.0,
+            },
+            "gdpval_resources_server": {
+                "url": "http://resources.example:7000/mcp",
+                "http_headers": {"X-NeMo-Gym-Session-Token": "token-gdpval_resources_server"},
+                "required": True,
+                "tool_timeout_sec": 300.0,
+            },
+        }
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        # The token reaches Codex only through its config, never the command line.
+        assert "token-gdpval_resources_server" not in json.dumps(payload)
+        assert client.post("/v1/agent_sessions/close", json=close_body(body["agent_session_id"])).status_code == 200
+
+
+def test_episode_mcp_grant_replaces_configured_grant_of_the_same_name(setup):
+    agent, sandbox = setup
+    agent.config = CodexAgentConfig(
+        **(agent.config.model_dump() | {"tool_accesses": [mcp_grant(url="http://stale.example:1/mcp")]})
+    )
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [mcp_grant()]
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=body).status_code == 200
+        assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code == 200
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        assert config["mcp_servers"]["gdpval_resources_server"]["url"] == "http://resources.example:7000/mcp"
+        assert "tool_timeout_sec" not in config["mcp_servers"]["gdpval_resources_server"]
+
+
+def test_session_without_grants_writes_no_mcp_servers(setup):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code == 200
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        assert "mcp_servers" not in config
+
+
+@pytest.mark.parametrize(
+    "grant, message",
+    [
+        (
+            {"kind": "direct_http", "name": "resources.direct_http", "base_url": "http://r", "required": True},
+            "supports only MCP tool grants; required grants it cannot use: resources.direct_http",
+        ),
+        (mcp_grant("resources.mcp"), "letters, digits, '-' and '_': resources.mcp"),
+        (mcp_grant("resources.mcp", required=False), "letters, digits, '-' and '_': resources.mcp"),
+    ],
+)
+def test_unusable_tool_grants_are_rejected_before_connection(setup, grant, message):
+    agent, sandbox = setup
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [grant]
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=body)
+    assert response.status_code == 422
+    assert message in response.json()["detail"]
+    sandbox.exec.assert_not_awaited()
+
+
+def test_mcp_tool_timeout_must_be_positive_and_finite(setup):
+    agent, _ = setup
+    for value in (0, -1, float("inf")):
+        with pytest.raises(ValidationError):
+            CodexAgentConfig(**(agent.config.model_dump() | {"mcp_tool_timeout_seconds": value}))
+
+
 def test_shared_seed_rejects_multiple_workers_before_initialization(setup):
     agent, sandbox = setup
     agent.config.num_workers = 2
