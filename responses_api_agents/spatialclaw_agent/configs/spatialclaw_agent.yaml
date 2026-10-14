@@ -1,0 +1,31 @@
+spatialclaw_agent:
+  responses_api_agents:
+    spatialclaw_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      spatialclaw_url: ssh://git@gitlab-master.nvidia.com:12051/ehosseiniasl/spatial_claw.git
+      spatialclaw_commit: 946ac114dfcabf9df997629bfa8b6f2f66da1425  # pragma: allowlist secret
+      spatialclaw_root: ${oc.env:SPATIALCLAW_ROOT,null}
+      source_cache_root: null
+      dataset_config: ???
+      model_config_path: ${oc.env:SPATIALCLAW_MODEL_CONFIG,nemotron-3-nano-omni-30b-a3b-reasoning-spatialclaw-think65536}
+      model_name: ${policy_model_name}
+      video_root: ???
+      gpu_server_registry: ${oc.env:SPATIALCLAW_GPU_SERVER_REGISTRY,null}
+      config_overrides:
+        sam3_max_video_frames: null
+      max_output_tokens: null
+      concurrency: 1
+      timeout: 1800
+      workspace_root: ${oc.env:SPATIALCLAW_WORKSPACE_ROOT,outputs/spatialclaw_agent}
+      frame_cache_root: ${oc.env:SPATIALCLAW_FRAME_CACHE_ROOT,outputs/spatialclaw_frame_cache}
+      keep_workspaces: true
+      enable_logging: true
+      # Benchmark configs replace this list via `_inherit_from`. Declaring the
+      # key here keeps the inherited OmegaConf node structurally mergeable.
+      datasets: []

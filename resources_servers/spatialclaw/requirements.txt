@@ -1,0 +1,7 @@
+-e nemo-gym[dev] @ ../../
+numpy>=2.1,<3
+pandas>=2.0
+datasets>=2.0
+Pillow>=10.0
+opencv-python-headless>=4.8,<4.13
+imageio-ffmpeg>=0.5
