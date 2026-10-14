@@ -32,7 +32,7 @@ Decide how deeply Gym needs to integrate with the agent before you write an adap
 
 ```mermaid
 flowchart LR
-    AGENT["Existing agent"] --> SCORES{"Need only<br/>evaluation scores?"}
+    AGENT["Existing agent"] --> SCORES{"Scores only?<br/>No model-call capture,<br/>training, or task sandbox"}
     SCORES -->|Yes| REMOTE["Remote Agent"]
     SCORES -->|No| EPISODE{"Does the agent own<br/>the episode protocol?"}
     EPISODE -->|Yes| ENV["Custom Environment Server"]
@@ -41,7 +41,7 @@ flowchart LR
 
 | Path | What you build | What Gym does | Limits |
 | --- | --- | --- | --- |
-| [Remote Agent](/main/agent-server/remote-agent) | An HTTP service that you host, with a `/v1/responses` endpoint that returns the agent's next step. | Drives the loop, runs the environment tools that your service requests, holds the session, and verifies the result. | Gym sees only what your service returns. Your service calls its own model, so Gym cannot capture model calls or training token IDs, and the service cannot use a task sandbox. |
+| [Remote Agent](/main/agent-server/remote-agent) | An HTTP service that you host, with a `/v1/responses` endpoint that returns the agent's next step. | Drives the loop, runs the environment tools that your service requests, holds the session, and verifies the result. | Scores only. No model-call capture and no training, because your service calls its own model and Gym sees only what the service returns. No task sandbox, because the service cannot reach one. |
 | Agent Server adapter | An adapter under `responses_api_agents/<harness>/` that runs the harness or framework. | Everything in [What Gym provides](#what-gym-provides), including model-call capture, tool grants, and task sandboxes. | You write the conversion and mapping code described in [What you write](#what-you-write). |
 | Custom Environment Server | A server that owns the episode protocol, such as [`nemo_user_sim`](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/nemo_user_sim), which routes simulated-user and assistant turns through their own Agent Servers. | Rollout collection, the `BaseEnvironmentServer` base class with concurrency and cleanup handling, and the Resources Server session and verification APIs. | Not covered on this page. See [system design](/main/infrastructure/engineering-notes/system-design) for how Environment Servers drive rollouts. |
 
