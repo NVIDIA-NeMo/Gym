@@ -110,10 +110,11 @@ Completed parser reports follow Pro's required-pass rule, including empty report
 execution failures or unusable parser output remain inconclusive.
 The agent inherits Gym's standard aggregation; Slurm reporting includes coverage.
 
-The supervisor stops live harness-group processes and reaps its children. On timeout
-or close it preserves children already adopted before the stop, typically services from
-completed tools, and drains newly adopted children within the cleanup deadline, including
-tools in separate sessions. The sandbox owner stops the preserved services later.
+The supervisor stops live harness-group processes and reaps its children. At the harness
+timeout it preserves children already adopted before the stop and outside the harness
+group, and drains newly adopted children within the cleanup deadline, including tools in
+separate sessions. This runner does not pass a stop file, so it does not request this
+supervisor cleanup on close. The sandbox owner stops the preserved processes later.
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
 those processes may still change task files. The stop-time cutoff also has adoption/PID
 races and cannot classify later service forks. It is not a security boundary.
