@@ -416,6 +416,9 @@ class E2BProvider:
             "timeout": max(1, math.ceil(timeout_s)) if timeout_s is not None else None,
             "allow_internet_access": self._create.allow_internet_access,
             "secure": self._create.secure,
+            # Kill at timeout. Newer SDKs otherwise leave autoPause to the server, and some E2B-compatible
+            # servers default to pausing, which keeps timed-out sandboxes around until someone deletes them.
+            "lifecycle": {"on_timeout": "kill"},
             **self._api_params(),
         }
         if spec.ready_timeout_s is not None:

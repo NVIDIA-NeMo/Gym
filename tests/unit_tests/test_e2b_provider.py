@@ -349,6 +349,7 @@ async def test_real_sdk_user_agent_and_call_shapes() -> None:
         metadata={},
         secure=True,
         allow_internet_access=True,
+        lifecycle={"on_timeout": "kill"},
     )
     inspect.signature(e2b.AsyncSandbox.connect).bind("sbx-existing", request_timeout=30)
     inspect.signature(e2b.AsyncSandbox.kill).bind(
@@ -887,6 +888,11 @@ class TestCreateAndLifecycle:
 
     async def test_aclose_is_a_noop(self) -> None:
         assert await E2BProvider().aclose() is None
+
+    async def test_sandboxes_are_killed_not_paused_at_timeout(self) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        handle = await provider.create(_spec(ttl_s=60))
+        assert handle.raw.create_kwargs["lifecycle"] == {"on_timeout": "kill"}
 
 
 # --------------------------------------------------------------------------
