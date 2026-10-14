@@ -307,6 +307,14 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Prefix supply is incompatible with use_completions_api=true.
     supply_prefix_token_ids: bool = False
 
+    # Opt in to sending the newest assistant message's prompt_token_ids + generation_token_ids
+    # as required_prefix_token_ids, for backends that splice that exact prefix into the prompt
+    # (NeMo-RL's vLLM HTTP server and Dynamo token wrapper).
+    # Off by default: stock vLLM ignores the field, and strict OpenAI-compatible frontends
+    # (for example Dynamo) reject unknown request fields.
+    # Mutually exclusive with supply_prefix_token_ids, which owns the field when enabled.
+    derive_prefix_token_ids_from_messages: bool = False
+
     # As of Feb 2026, we default this to False since majority of open source models aren't responses native with the exception of GPT-OSS
     is_responses_native: bool = False
 
@@ -396,6 +404,17 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             raise ValueError("supply_prefix_token_ids is not supported with use_completions_api=true")
         if self.supply_prefix_token_ids and self.is_responses_native:
             raise ValueError("supply_prefix_token_ids is not supported with is_responses_native=true")
+        if self.derive_prefix_token_ids_from_messages:
+            if not self.return_token_id_information:
+                raise ValueError("derive_prefix_token_ids_from_messages requires return_token_id_information=true")
+            if self.supply_prefix_token_ids:
+                raise ValueError(
+                    "derive_prefix_token_ids_from_messages and supply_prefix_token_ids are mutually exclusive"
+                )
+            if self.use_completions_api:
+                raise ValueError(
+                    "derive_prefix_token_ids_from_messages is not supported with use_completions_api=true"
+                )
         return self
 
     # When True, outbound calls go to vLLM's /v1/completions endpoint instead
@@ -924,6 +943,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict = self._external_capture_handler.prepare_request(body_dict)
         else:
             body_dict = self._apply_prefix_supply(body_dict)
+            self._derive_required_prefix_token_ids(body_dict)
 
         return body_dict
 
@@ -1337,6 +1357,36 @@ class VLLMModel(SimpleResponsesAPIModel):
             cls._require_token_id_list(prompt_value, "prompt_token_ids"),
             cls._require_token_id_list(generation_value, "choice.token_ids"),
         )
+
+    def _derive_required_prefix_token_ids(self, body_dict: Dict[str, Any]) -> None:
+        """Send the newest assistant turn's exact tokens as ``required_prefix_token_ids``.
+
+        Opt-in through ``derive_prefix_token_ids_from_messages``, which config validation keeps
+        apart from ``supply_prefix_token_ids``. A caller-supplied prefix is kept. External staging
+        never carries the token array in the body; its worker fetches the prefix itself.
+
+        Only the newest assistant message counts. Without a token bundle there is no prefix:
+        an older turn's tokens stop being a prefix of the prompt once a later turn is injected,
+        edited, or regenerated.
+        """
+        if not self.config.derive_prefix_token_ids_from_messages:
+            return
+        if body_dict.get("required_prefix_token_ids") is not None:
+            return
+        context = current_capture_context()
+        if context is not None and context.external_staging:
+            return
+
+        for message in reversed(body_dict.get("messages") or []):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            token_bundle = self._extract_message_token_bundle(message)
+            if token_bundle is not None:
+                body_dict["required_prefix_token_ids"] = [
+                    *token_bundle["prompt_token_ids"],
+                    *token_bundle["generation_token_ids"],
+                ]
+            return
 
     def _extract_choice_logprobs(self, choice_dict: Dict[str, Any]) -> tuple[List[int], List[float]]:
         logprobs_block = choice_dict.get("logprobs")
