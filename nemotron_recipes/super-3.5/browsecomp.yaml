@@ -52,8 +52,8 @@ browsecomp_benchmark_resources_server:
       exa_api_key: ${oc.select:exa_api_key,null}
       # Exa's multi-step research search, as the published run used (Gym's default is auto).
       exa_search_type: deep
-      # Domains search skips: the NVIDIA opt-out registry the published run used (same 47
-      # domains); the path comes from browsecomp.setup.sh.
+      # Domains search skips, as in the published run; a different list changes search
+      # coverage and so the results. The path comes from browsecomp.setup.sh.
       exclude_domains_file_path: ${oc.env:BROWSECOMP_EXCLUDE_DOMAINS}
 
 browsecomp_benchmark_agent:

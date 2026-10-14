@@ -58,8 +58,8 @@
 # agent's default is 32). A full comparison run takes hours and makes about a thousand judge
 # calls. LIMIT works in rubric mode; a comparison run needs every stage's tasks.
 
-# Gym commit the published number was produced with; run.sh pins to it. It is on the branch of
-# Gym pull request #3333, not on main: run.sh fetches it by its id.
+# Gym commit the published number was produced with; run.sh pins to it. It comes from Gym pull
+# request #3333, which was squash-merged, so it is not on main: run.sh fetches it by its id.
 gym_commit: df3e201d942f6397def1ec8c10037d29115fcbbd
 # Gym benchmark config this recipe builds on.
 benchmark_config: benchmarks/gdpval/config.yaml
@@ -79,19 +79,18 @@ gdpval_judge_model:
 gdpval_resources_server:
   resources_servers:
     gdpval:
-      # The published run's panel: each judge call samples one member's reasoning settings, but
-      # goes to the judge server's model (above). It also set handles_audio_video on Gemini,
-      # which is not a field at this commit and was ignored, so no judge read audio or video
-      # natively (the benchmark default lets Gemini read both). Lists are replaced, not merged.
+      # The published run's panel; it replaces the benchmark default (lists are not merged), so,
+      # as in that run, no judge reads audio or video natively. Each call samples one member's
+      # reasoning settings but goes to the judge server's model (above).
       judge_panel:
       - name: gpt-5.5
-        model: ${oc.select:gdpval_judge_gpt_model,gpt-5.5}
+        model: gpt-5.5
         create_params_overrides: {reasoning_effort: medium}
       - name: gemini-3.1-pro
         model: ${oc.select:gdpval_judge_gemini_model,gemini-3.1-pro-preview}
         create_params_overrides: {extra_body: {reasoning_effort: high}}
       - name: claude-opus-4.8
-        model: ${oc.select:gdpval_judge_claude_model,claude-opus-4-8}
+        model: claude-opus-4-8
         create_params_overrides: {extra_body: {thinking: {type: enabled}}}
       # Reproducible judge sampling, as in the published run (default: per-task only).
       judge_sampling_seed: 42
