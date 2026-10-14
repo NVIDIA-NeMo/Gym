@@ -19,6 +19,7 @@ import hashlib
 import ipaddress
 import logging
 import math
+import random
 import re
 import shlex
 from collections.abc import Mapping
@@ -551,6 +552,13 @@ class OpenSandboxCreateConfig:
     # Refresh a created sandbox's TTL while this provider owns its handle.
     # This does not change task/command timeouts or renew borrowed handles.
     renew_interval_s: float | None = None
+    # A lease: the sandbox is created with this TTL instead of the spec's ``ttl_s``, and every renewal sets it
+    # to now plus this TTL again. The sandbox lives while the creating process renews it, and the service
+    # deletes it within one TTL of the last renewal: after a crash, a dead process's sandboxes do not run on
+    # for the spec's whole lifetime. Requires ``renew_interval_s``.
+    renew_ttl_s: float | None = None
+    # Per-call budget of one renewal: a hung renew must not use up the TTL it is meant to extend.
+    renew_timeout_s: float = 30.0
 
     def __post_init__(self) -> None:
         if self.image_pull_policy is not None:
@@ -561,6 +569,13 @@ class OpenSandboxCreateConfig:
             not math.isfinite(self.renew_interval_s) or self.renew_interval_s <= 0
         ):
             raise ValueError("create.renew_interval_s must be finite and > 0")
+        if self.renew_ttl_s is not None:
+            if not math.isfinite(self.renew_ttl_s) or self.renew_ttl_s <= 0:
+                raise ValueError("create.renew_ttl_s must be finite and > 0")
+            if self.renew_interval_s is None or self.renew_interval_s >= self.renew_ttl_s:
+                raise ValueError("create.renew_ttl_s requires a shorter create.renew_interval_s")
+        if not math.isfinite(self.renew_timeout_s) or self.renew_timeout_s <= 0:
+            raise ValueError("create.renew_timeout_s must be finite and > 0")
         if self.retries < 0:
             raise ValueError("create.retries must be >= 0")
         if self.retry_delay_s < 0:
@@ -1340,11 +1355,6 @@ class OpenSandboxProvider:
         # callers pass their own predicate.
         is_retryable: Callable[[BaseException], bool] = _is_retryable_sdk_operation_error,
     ) -> Any:
-        renewal = self._renewals.get(sandbox_id)
-        if renewal is not None and renewal.done() and not renewal.cancelled():
-            error = renewal.exception()
-            if error is not None:
-                raise RuntimeError(f"OpenSandbox lifetime renewal failed for sandbox {sandbox_id!r}") from error
         AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential = _require_tenacity()
         retry_count = self._operations.retries if retries is None else retries
         max_attempts = retry_count + 1
@@ -1580,38 +1590,47 @@ class OpenSandboxProvider:
         return SandboxEndpoint(endpoint=endpoint_url, headers=headers)
 
     def _start_renewal(self, handle: SandboxHandle, ttl_s: int | float) -> None:
+        """Renew the sandbox's TTL every ``renew_interval_s`` (jittered by 10%) until cancelled.
+
+        A renewal that fails after its retries is logged and the next one tries again: the sandbox has TTL
+        minus one interval of slack, and one that expires anyway fails its next operation with the service's
+        error. The interval is jittered so sandboxes created together do not renew together.
+        """
+        interval_s = self._create.renew_interval_s
+
         async def renew() -> None:
             while True:
-                await asyncio.sleep(self._create.renew_interval_s)
-                await self._await_sdk_operation(
-                    lambda: handle.raw.renew(timedelta(seconds=ttl_s)),
-                    operation="renew",
-                    sandbox_id=handle.sandbox_id,
-                    timeout_s=self._connection.request_timeout_s or 60,
-                )
+                await asyncio.sleep(interval_s * random.uniform(0.9, 1.1))
+                try:
+                    await self._await_sdk_operation(
+                        lambda: handle.raw.renew(timedelta(seconds=ttl_s)),
+                        operation="renew",
+                        sandbox_id=handle.sandbox_id,
+                        timeout_s=self._create.renew_timeout_s,
+                    )
+                except Exception as error:
+                    LOGGER.warning(
+                        "OpenSandbox lifetime renewal failed for sandbox %r; retrying in about %gs: %r",
+                        handle.sandbox_id,
+                        interval_s,
+                        error,
+                    )
 
-        def report_failure(task: asyncio.Task[None]) -> None:
-            if not task.cancelled() and (error := task.exception()) is not None:
-                LOGGER.error("OpenSandbox lifetime renewal failed for sandbox %r: %r", handle.sandbox_id, error)
+        self._renewals[handle.sandbox_id] = asyncio.create_task(renew(), name=f"opensandbox-renew-{handle.sandbox_id}")
 
-        task = asyncio.create_task(renew(), name=f"opensandbox-renew-{handle.sandbox_id}")
-        task.add_done_callback(report_failure)
-        self._renewals[handle.sandbox_id] = task
-
-    async def _stop_renewal(self, sandbox_id: str) -> BaseException | None:
+    async def _stop_renewal(self, sandbox_id: str) -> None:
         task = self._renewals.pop(sandbox_id, None)
         if task is None:
-            return None
+            return
         task.cancel()
-        result = (await asyncio.gather(task, return_exceptions=True))[0]
-        return result if isinstance(result, Exception) else None
+        await asyncio.gather(task, return_exceptions=True)
 
     async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
         """Create a sandbox through ``opensandbox.Sandbox.create``."""
-        if self._create.renew_interval_s is not None and (
-            spec.ttl_s is None or self._create.renew_interval_s >= spec.ttl_s
-        ):
-            raise ValueError("create.renew_interval_s requires a longer, explicit sandbox ttl_s")
+        # With a lease the provider's TTL replaces the spec's, which other providers read as the whole lifetime.
+        ttl_s = self._create.renew_ttl_s if self._create.renew_ttl_s is not None else spec.ttl_s
+        if self._create.renew_interval_s is not None and (ttl_s is None or self._create.renew_interval_s >= ttl_s):
+            raise ValueError("create.renew_interval_s requires a longer, explicit sandbox ttl_s or create.renew_ttl_s")
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         options = OpenSandboxProviderOptions.from_mapping(spec.provider_options)
 
@@ -1632,8 +1651,8 @@ class OpenSandboxProvider:
             kwargs["image"] = _to_image_spec(spec.image, options.image_auth)
         if options.snapshot_id is not None:
             kwargs["snapshot_id"] = options.snapshot_id
-        if spec.ttl_s is not None:
-            kwargs["timeout"] = timedelta(seconds=spec.ttl_s)
+        if ttl_s is not None:
+            kwargs["timeout"] = timedelta(seconds=ttl_s)
         if spec.ready_timeout_s is not None:
             kwargs["ready_timeout"] = timedelta(seconds=spec.ready_timeout_s)
         if spec.entrypoint is not None:
@@ -1689,7 +1708,7 @@ class OpenSandboxProvider:
             await self._cleanup_failed_create_handle(created_handle)
             raise
         if self._create.renew_interval_s is not None:
-            self._start_renewal(handle, spec.ttl_s)
+            self._start_renewal(handle, ttl_s)
         return handle
 
     async def _create_with_retries(
@@ -2250,7 +2269,7 @@ class OpenSandboxProvider:
 
     async def close(self, handle: SandboxHandle) -> None:
         """Terminate the sandbox and close local SDK resources."""
-        renewal_error = await self._stop_renewal(handle.sandbox_id)
+        await self._stop_renewal(handle.sandbox_id)
 
         async def kill_ignore_missing() -> None:
             # Terminate is idempotent: not-found means the sandbox is already
@@ -2287,9 +2306,5 @@ class OpenSandboxProvider:
                 e,
             )
 
-        if renewal_error is not None:
-            raise RuntimeError(
-                f"OpenSandbox lifetime renewal failed for sandbox {handle.sandbox_id!r}"
-            ) from renewal_error
         if close_error is not None:
             return

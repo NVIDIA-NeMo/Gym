@@ -15,8 +15,9 @@ A sandbox lives while the process that created it uses it.
 :meth:`~SandboxSessionCheckpointer.stop` frees it when its episode is verified, closed, or retired;
 :meth:`~SandboxSessionCheckpointer.park` frees the exported ones when the controller stops after a commit;
 a restore stops the crashed process's sandboxes it supersedes. What a crashed process leaves running ends with
-the provider's lifetime: on OpenSandbox, ``create.renew_interval_s`` keeps a sandbox alive only while the
-process that created it renews it.
+the provider's lease: on OpenSandbox the shipped config creates every sandbox with ``create.renew_ttl_s`` and
+the creating process renews it every ``create.renew_interval_s``, so the service deletes a dead process's
+sandboxes within one TTL. Forks made by a restore go through the same create and get the same lease.
 
 A snapshot lives while a checkpoint the controller may restore names it. No episode event deletes one: a
 checkpoint taken before a rollout finished still restores that rollout. Instead the checkpointer keeps an index
