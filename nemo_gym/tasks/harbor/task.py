@@ -19,7 +19,7 @@ from nemo_gym.tasks.harbor.dataset_config import (
     apply_dataset_config,
     read_dataset_config,
 )
-from nemo_gym.tasks.harbor.digest import content_hash
+from nemo_gym.tasks.harbor.digest import content_hash, context_digest
 from nemo_gym.tasks.harbor.dockerfile import (
     BaseImageConfig,
     DockerfileNeedsBuild,
@@ -31,7 +31,7 @@ from nemo_gym.tasks.harbor.dockerfile import (
 )
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.models import HarborTaskConfig
-from nemo_gym.tasks.harbor.records import IMAGE_CONFIGS_FILE, read_image_configs
+from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE, read_built_images, read_image_configs
 
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,23 @@ class HarborTask:
     the base image's recorded ``User`` (``None`` is root), not the Dockerfile's final ``USER`` or
     ``[agent].user``; for a declared ``docker_image`` built from a pull-mode Dockerfile it is that
     Dockerfile's final ``USER``. When neither is known the task's ``user`` stands in for it.
+
+
+    ``built_image`` is the image prepare built from the task's ``environment/`` folder when the
+    Dockerfile needed a build (``built-images.json``); ``image`` is then that image and the task
+    runs in pull mode from it. ``None`` in the other two modes and for a prebuilt image.
+
+    ``entrypoint`` is the image's ``Entrypoint`` as Docker would start it: the built image's recorded
+    one, or the base image's for a Dockerfile the loader resolves unless that Dockerfile wrote
+    ``ENTRYPOINT []``. ``None`` when the image records none or no configuration is recorded (a prebuilt
+    ``docker_image``). ``image_shell`` is the image's ``Shell`` (Docker's ``/bin/sh -c`` when it sets none),
+    what the daemon runs a ``CMD-SHELL`` healthcheck through, ``None`` likewise when nothing is recorded.
+    ``entrypoint_user`` and ``entrypoint_workdir`` are the ``User`` and ``WorkingDir``
+    the image starts with (``None`` is root and ``/``): what Docker gives its ``ENTRYPOINT`` and its
+    ``HEALTHCHECK``, independent of ``[agent].user`` and ``[environment].workdir``, which only shape the
+    commands run beside them. They are known whenever the image's configuration is, with or without an
+    entrypoint. ``image_healthcheck`` is the recorded Dockerfile ``HEALTHCHECK`` block (``Test``,
+    ``Interval``, ... as Docker records them), or ``None``.
     """
 
     path: Path
@@ -84,6 +101,12 @@ class HarborTask:
     user: str | None
     overlay: tuple[OverlayRun, ...] = ()
     sandbox_user: str | None = None
+    built_image: str | None = None
+    entrypoint: tuple[str, ...] | None = None
+    entrypoint_user: str | None = None
+    image_shell: tuple[str, ...] | None = None
+    entrypoint_workdir: str | None = None
+    image_healthcheck: dict[str, Any] | None = None
     overlay_workdirs: tuple[OverlayWorkdir, ...] = ()
 
     @property
@@ -106,6 +129,26 @@ class HarborTask:
 
 def is_task_folder(path: Path) -> bool:
     return (Path(path) / TASK_FILE).is_file()
+
+
+def built_image(task_folder: Path) -> str | None:
+    """The image prepare built for the task's Dockerfile, when ``built-images.json`` records one."""
+    task_folder = Path(task_folder)
+    context = task_folder / DOCKERFILE.parent
+    if not context.is_dir():
+        return None
+    entry = read_built_images(task_folder.parent).get(context_digest(context))
+    image = entry.get("image") if isinstance(entry, dict) else None
+    return str(image) if image else None
+
+
+def _build_required(dockerfile: Path, reason: Exception) -> HarborTaskError:
+    return HarborTaskError(
+        f"{dockerfile} needs a build ({reason}) and no built image is recorded in "
+        f"{dockerfile.parent.parent.parent / BUILT_IMAGES_FILE}. `gym eval run` and `gym dataset validate` build it "
+        "when buildah, podman or docker is installed (configured by the `builds:` block, see "
+        "environment_servers/harbor/README.md), or declare [environment].docker_image with a prebuilt image."
+    )
 
 
 def dockerfile_base_image(task_folder: Path, declared_image: str | None) -> str | None:
@@ -216,6 +259,14 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
     base_known = False
     base_user: str | None = None
     dockerfile = path / DOCKERFILE
+    built: str | None = None
+    # What Docker starts the image with: the record of the image the sandbox runs (built image), or the
+    # base image's record carried through the Dockerfile's final USER and WORKDIR (pull and overlay mode).
+    entrypoint: tuple[str, ...] | None = None
+    entrypoint_user: str | None = None
+    entrypoint_workdir: str | None = None
+    image_healthcheck: dict[str, Any] | None = None
+    image_shell: tuple[str, ...] | None = None
     if dockerfile.is_file():
         try:
             dockerfile_text = dockerfile.read_text()
@@ -225,11 +276,25 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
             parsed = parse_dockerfile(dockerfile_text)
         except DockerfileNeedsBuild as exc:
             if image is None:
-                raise HarborTaskError(
-                    f"{dockerfile} needs a build ({exc}); building Dockerfiles is not supported yet. "
-                    "Declare [environment].docker_image with a prebuilt image to run this task."
-                ) from exc
+                # Build mode: prepare built the context once and recorded the image next to the tasks.
+                built = built_image(path)
+                if built is None:
+                    raise _build_required(dockerfile, exc) from exc
             parsed = None
+        if built is not None:
+            # The built image is pulled like a prebuilt one; its recorded configuration gives the
+            # Dockerfile's final WORKDIR, ENV and USER.
+            record = read_image_configs(path.parent).get(built)
+            base = BaseImageConfig.from_record(record) if record is not None else None
+            image = built
+            if base is not None:
+                base_known = True
+                base_user = base.user
+                workdir = workdir or base.workdir
+                env = base.env | env
+                user = base.user
+                entrypoint, entrypoint_user, entrypoint_workdir = base.entrypoint, base.user, base.workdir
+                image_healthcheck, image_shell = base.healthcheck, base.shell
         if parsed is not None and (image is None or not parsed.has_runs):
             # A prebuilt image already holds whatever its Dockerfile's RUN lines did; only a
             # pull-mode Dockerfile contributes settings next to a declared image.
@@ -253,12 +318,27 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
                     "`gym dataset validate`) to record it."
                 ) from exc
             except DockerfileNeedsBuild as exc:
-                if image is None:
-                    raise HarborTaskError(f"{dockerfile} needs a build ({exc})") from exc
-                # As for a parse-time build requirement above: the declared image already holds the
-                # build's result, so the task runs it with task.toml's own settings.
-                logger.debug("%s: %s; the declared image %s runs as is", dockerfile, exc, image)
-                base_known = False
+                if image is not None:
+                    # As for a parse-time build requirement above: the declared image already holds the
+                    # build's result, so the task runs it with task.toml's own settings.
+                    logger.debug("%s: %s; the declared image %s runs as is", dockerfile, exc, image)
+                    base_known = False
+                else:
+                    # An expansion the overlay cannot resolve: a build, unless prepare already built it.
+                    built = built_image(path)
+                    if built is None:
+                        raise _build_required(dockerfile, exc) from exc
+                    record = read_image_configs(path.parent).get(built)
+                    base = BaseImageConfig.from_record(record) if record is not None else None
+                    image = built
+                    base_known = base is not None
+                    base_user = base.user if base is not None else None
+                    if base is not None:
+                        workdir = workdir or base.workdir
+                        env = base.env | env
+                        user = base.user
+                        entrypoint, entrypoint_user, entrypoint_workdir = base.entrypoint, base.user, base.workdir
+                        image_healthcheck, image_shell = base.healthcheck, base.shell
             if resolved is not None:
                 image = image or pinned_image or resolved.image
                 workdir = workdir or resolved.workdir
@@ -267,6 +347,13 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
                 overlay = resolved.runs
                 # Pull mode creates nothing: only an overlay makes the Dockerfile's directories at seed.
                 overlay_workdirs = resolved.workdirs if resolved.runs else ()
+                if base is not None:
+                    # The image Docker would build from this Dockerfile keeps the base's entrypoint (unless
+                    # the Dockerfile cleared it), healthcheck and shell (a SHELL instruction needs a build),
+                    # started with its final USER and WORKDIR.
+                    entrypoint = None if resolved.entrypoint_cleared else base.entrypoint
+                    entrypoint_user, entrypoint_workdir = resolved.user, resolved.workdir
+                    image_healthcheck, image_shell = base.healthcheck, base.shell
     dockerfile_user = user
     if config.agent.user is not None:
         user = str(config.agent.user)
@@ -295,6 +382,12 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
         user=user,
         overlay=overlay,
         sandbox_user=sandbox_user,
+        built_image=built,
+        entrypoint=entrypoint,
+        entrypoint_user=entrypoint_user,
+        image_shell=image_shell,
+        entrypoint_workdir=entrypoint_workdir,
+        image_healthcheck=image_healthcheck,
         overlay_workdirs=overlay_workdirs,
     )
 

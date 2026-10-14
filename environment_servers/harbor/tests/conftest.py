@@ -141,6 +141,11 @@ class FakeSandbox:
     dirs: dict[str, str] = field(default_factory=lambda: {"/": "root", "/tmp": "root", "/home": "root"})
     passwd: dict[str, str] = field(default_factory=lambda: {"0": "root", "1000": "agent"})
 
+    default_user: str | int | None = None
+
+    def set_default_user(self, user):
+        self.default_user = user
+
     def run(self, fragment: str) -> dict:
         """The record of the one exec whose command, prefix aside, holds ``fragment``."""
         (record,) = [c for c in self.execs if c.get("seen") and fragment in c["seen"]["command"]]
@@ -610,6 +615,7 @@ IMAGE_CONFIGS = {
         "architecture": "amd64",
         "image": "org/kafka@sha256:" + "c" * 64,
         "config": {"Cmd": ["kafka"], "User": "appuser"},
+        "record_version": RECORD_VERSION,
     },
 }
 

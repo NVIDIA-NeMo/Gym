@@ -13,10 +13,12 @@ from nemo_gym.tasks.harbor.dockerfile import (
     RECORD_VERSION,
     BaseImageConfig,
     DockerfileNeedsBuild,
+    OverlayImage,
     OverlayRun,
     base_image_only,
     overlay_image,
     parse_dockerfile,
+    resolve_dockerfile,
 )
 from tests.unit_tests.test_harbor_tasks import IMAGE_PATH, TB21_DEBIAN_DOCKERFILE, dockerfile
 
@@ -33,6 +35,43 @@ SWEBENCH_IMAGE_ENV = [f"PATH=/opt/miniconda3/bin:{IMAGE_PATH}", "LANG=C.UTF-8"]
 
 
 class TestOverlayDockerfile:
+    def test_cleared_entrypoint_is_recorded_and_a_real_one_needs_a_build(self):
+        # ``ENTRYPOINT []`` is the one entrypoint instruction the loader accepts: it records that the base
+        # image's entrypoint must not run. ``CMD []`` is accepted and changes nothing.
+        parsed = parse_dockerfile("FROM ubuntu:24.04\nENTRYPOINT []\nWORKDIR /app\n")
+        assert parsed.entrypoint_cleared is True
+        assert parse_dockerfile("FROM ubuntu:24.04\nCMD []\n").entrypoint_cleared is False
+        assert parse_dockerfile("FROM ubuntu:24.04\nWORKDIR /app\n").entrypoint_cleared is False
+        resolved = resolve_dockerfile(
+            parsed,
+            BaseImageConfig.from_record({"record_version": RECORD_VERSION, "config": {"Entrypoint": ["/start.sh"]}}),
+        )
+        assert isinstance(resolved, OverlayImage) and resolved.entrypoint_cleared is True
+        assert base_image_only("FROM ubuntu:24.04\nENTRYPOINT []\n").entrypoint_cleared is True
+        assert base_image_only("FROM ubuntu:24.04\n").entrypoint_cleared is False
+        with pytest.raises(DockerfileNeedsBuild, match="ENTRYPOINT"):
+            parse_dockerfile('FROM ubuntu:24.04\nENTRYPOINT ["/start.sh"]\n')
+        with pytest.raises(DockerfileNeedsBuild, match="ENTRYPOINT"):
+            parse_dockerfile("FROM ubuntu:24.04\nENTRYPOINT /start.sh\n")
+        with pytest.raises(DockerfileNeedsBuild, match="ENTRYPOINT"):
+            parse_dockerfile('FROM ubuntu:24.04\nENTRYPOINT [""]\n')
+
+    def test_base_image_config_records_entrypoint_and_healthcheck(self):
+        health = {"Test": ["CMD-SHELL", "curl -f http://localhost/"], "Interval": 10_000_000_000}
+        config = BaseImageConfig.from_record(
+            {
+                "record_version": RECORD_VERSION,
+                "config": {"Entrypoint": ["/entrypoint.sh", "--flag"], "Healthcheck": health, "User": "app"},
+            }
+        )
+        assert config.entrypoint == ("/entrypoint.sh", "--flag") and config.healthcheck == health
+        assert config.user == "app"
+        empty = BaseImageConfig.from_record(
+            {"record_version": RECORD_VERSION, "config": {"Entrypoint": [], "Healthcheck": {}, "Env": ["A=1"]}}
+        )
+        assert empty.entrypoint is None and empty.healthcheck is None and empty.env == {"A": "1"}
+        assert BaseImageConfig.from_record({"record_version": RECORD_VERSION}).entrypoint is None
+
     def test_swebench_verified_shape(self):
         base = BaseImageConfig.from_record(
             {"record_version": RECORD_VERSION, "config": {"Env": SWEBENCH_IMAGE_ENV, "WorkingDir": "/testbed"}}
@@ -153,7 +192,3 @@ class TestOverlayDockerfile:
         ]
         with pytest.raises(DockerfileNeedsBuild, match="heredoc"):
             parse_dockerfile("FROM img\nRUN echo $((1<<2)) && cat <<EOF\n4\nEOF\n")
-
-    def test_emptied_entrypoint_is_ignored(self):
-        overlay = dockerfile("FROM img\nRUN true\nENTRYPOINT []\n")
-        assert len(overlay.runs) == 1

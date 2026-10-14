@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 import nemo_gym.tasks.harbor.hub as hub_module
+import nemo_gym.tasks.harbor.prepare_builds as prepare_builds
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTaskConfig, content_hash, discover_tasks, load_task
 from nemo_gym.tasks.harbor.cli import (
     AgentSelection,
@@ -364,9 +365,11 @@ class TestDockerfileDetection:
     def test_anything_else_needs_a_build(self, text):
         assert base_image_only(text) is None
 
-    def test_emptied_entrypoint_is_ignored_in_pull_mode(self):
+    def test_emptied_entrypoint_is_accepted_in_pull_mode_and_recorded_as_cleared(self):
         base = base_image_only("FROM ubuntu:24.04\nENTRYPOINT []\nCMD [ ]\nWORKDIR /app\n")
         assert base is not None and base.image == "ubuntu:24.04" and base.workdir == "/app"
+        assert base.entrypoint_cleared is True
+        assert base_image_only("FROM ubuntu:24.04\nCMD [ ]\n").entrypoint_cleared is False
         assert base_image_only('FROM ubuntu\nENTRYPOINT ["sleep", "infinity"]') is None
         assert base_image_only('FROM ubuntu\nCMD ["bash"]') is None
 
@@ -627,6 +630,89 @@ class TestLoadTask:
         assert all(str(task.path / "task.toml") in message for message in messages)
         assert any("`allowlist`" in message for message in messages)
         assert any("`environment.new_harbor_key`" in message for message in messages)
+
+    def test_built_image_record_gives_the_entrypoint_its_user_workdir_and_healthcheck(self, tmp_path):
+        from nemo_gym.tasks.harbor.digest import context_digest
+        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+
+        folder = write_task(tmp_path / "t", dockerfile='FROM ubuntu\nCOPY . /app\nENTRYPOINT ["/entrypoint.sh"]\n')
+        built = "registry.example/ds-t:abc"
+        (tmp_path / BUILT_IMAGES_FILE).write_text(
+            json.dumps({context_digest(folder / "environment"): {"image": built}})
+        )
+        health = {"Test": ["CMD-SHELL", "test -f /tmp/healthy"], "Interval": 10_000_000, "Retries": 3}
+        write_image_config(
+            tmp_path,
+            built,
+            Env=["PATH=/bin"],
+            Entrypoint=["/entrypoint.sh"],
+            User="app",
+            WorkingDir="/srv",
+            Healthcheck=health,
+            Shell=["/bin/bash", "-o", "pipefail", "-c"],
+        )
+        toml = HELLO_TOML.replace("gpus = 0", 'gpus = 0\nworkdir = "/work"').replace(
+            "timeout_sec = 120.0\n\n[environment]", 'timeout_sec = 120.0\nuser = "agent"\n\n[environment]'
+        )
+        task = load_task(
+            write_task(tmp_path / "t", dockerfile=(folder / "environment" / "Dockerfile").read_text(), toml=toml)
+        )
+        assert task.image == built and task.entrypoint == ("/entrypoint.sh",)
+        # The entrypoint starts as the image records, whatever task.toml makes the task's user and workdir.
+        assert (task.user, task.workdir) == ("agent", "/work")
+        assert (task.entrypoint_user, task.entrypoint_workdir) == ("app", "/srv")
+        assert task.image_healthcheck == health
+        # The image's SHELL comes with them: what Docker runs a CMD-SHELL healthcheck through.
+        assert task.image_shell == ("/bin/bash", "-o", "pipefail", "-c")
+
+    def test_built_image_without_a_record_or_entrypoint_has_none(self, tmp_path):
+        from nemo_gym.tasks.harbor.digest import context_digest
+        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+
+        folder = write_task(tmp_path / "t", dockerfile="FROM ubuntu\nCOPY . /app\n")
+        built = "registry.example/ds-t:abc"
+        (tmp_path / BUILT_IMAGES_FILE).write_text(
+            json.dumps({context_digest(folder / "environment"): {"image": built}})
+        )
+        task = load_task(folder)
+        assert task.image == built and task.entrypoint is None and task.image_healthcheck is None
+        assert task.image_shell is None  # nothing recorded, so no shell is known either
+        write_image_config(tmp_path, built, Env=["PATH=/bin"], Entrypoint=[], User="app")
+        task = load_task(folder)
+        assert task.user == "app" and task.entrypoint is None
+        # The image's user and WorkingDir are known without an entrypoint: its HEALTHCHECK runs as them too,
+        # through Docker's default shell when the image records no SHELL.
+        assert (task.entrypoint_user, task.entrypoint_workdir) == ("app", None)
+        assert task.image_shell == ("/bin/sh", "-c")
+
+    def test_pull_and_overlay_tasks_take_the_base_entrypoint_unless_cleared(self, tmp_path):
+        bash = ["/bin/bash", "-o", "pipefail", "-c"]
+        write_image_config(
+            tmp_path, "img", Env=["PATH=/bin"], Entrypoint=["/start.sh"], WorkingDir="/srv", User="svc", Shell=bash
+        )
+        # Pull mode: the base's entrypoint, started with the Dockerfile's final USER and WORKDIR, and the base's
+        # shell (a SHELL instruction of the Dockerfile itself would need a build).
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM img\nWORKDIR /work\nUSER other\n"))
+        assert task.entrypoint == ("/start.sh",)
+        assert (task.entrypoint_user, task.entrypoint_workdir) == ("other", "/work")
+        assert task.image_shell == tuple(bash)
+        # [agent].user overrides the task's user only; the entrypoint keeps the image's.
+        toml = HELLO_TOML.replace(
+            "timeout_sec = 120.0\n\n[environment]", 'timeout_sec = 120.0\nuser = "agent"\n\n[environment]'
+        )
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM img\nRUN true\n", toml=toml))
+        assert task.user == "agent" and task.overlay
+        assert (task.entrypoint, task.entrypoint_user, task.entrypoint_workdir) == (("/start.sh",), "svc", "/srv")
+        assert task.image_shell == tuple(bash)
+        # ENTRYPOINT [] clears it.
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM img\nRUN true\nENTRYPOINT []\n"))
+        assert task.entrypoint is None and (task.entrypoint_user, task.entrypoint_workdir) == ("svc", "/srv")
+        # Without a recorded base image, or for a prebuilt image, nothing is known.
+        unknown = load_task(write_task(tmp_path / "t", dockerfile="FROM unknown\nWORKDIR /app\n"))
+        assert unknown.entrypoint is None and unknown.image_shell is None
+        toml = HELLO_TOML.replace("cpus = 1", 'docker_image = "org/task:1"\ncpus = 1')
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM img\nRUN true\n", toml=toml))
+        assert task.image == "org/task:1" and task.entrypoint is None and task.image_shell is None
 
 
 class TestDiscovery:
@@ -1097,6 +1183,18 @@ def fake_registry(monkeypatch):
     return FakeRegistryClient
 
 
+@pytest.fixture(autouse=True)
+def no_real_registry(monkeypatch):
+    """No test here, or in a module that imports ``write_task``, reaches a registry. Its default Dockerfile is
+    ``FROM ubuntu:24.04`` and prepare records base images, so a test that did not ask for ``fake_registry`` went
+    to Docker Hub and failed on its rate limit (HTTP 429) whatever the code under test did."""
+    from nemo_gym.tasks.harbor import image_configs as image_configs_module
+
+    monkeypatch.setattr(image_configs_module, "RegistryClient", FakeRegistryClient)
+    monkeypatch.setattr(FakeRegistryClient, "missing", set())
+    monkeypatch.setattr(FakeRegistryClient, "resolved", [])
+
+
 @pytest.mark.usefixtures("fake_registry")
 class TestCli:
     def test_prepare_local_folder(self, tmp_path):
@@ -1224,6 +1322,126 @@ class TestCli:
         only = prepare_target(str(folder), output_root=tmp_path / "out3", only=["gpu-*"])
         assert [task.task_id for task in only.tasks] == ["gpu-task"]
         assert "Skipping keep: not in --only-tasks" in capsys.readouterr().out
+
+    def test_prepare_leaves_out_tasks_whose_compose_file_does_not_resolve(self, tmp_path, monkeypatch, caplog):
+        # N7: one task's Compose file no longer drops the dataset; the task is left out like one that does not load.
+        monkeypatch.delenv("API_KEY", raising=False)
+        folder = tmp_path / "ds"
+        services = {
+            "good": "environment: ['TEST_DIR=${TEST_DIR}']",
+            "bad-required": "environment: ['API_KEY=${API_KEY:?API_KEY is needed}']",
+            "bad-env-file": "env_file: missing.env",
+        }
+        for name, line in services.items():
+            write_task(folder / name)
+            (folder / name / "environment" / "docker-compose.yaml").write_text(f"services:\n  main:\n    {line}\n")
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.cli"):
+            prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+        assert [t.task_id for t in prepared.tasks] == ["good"]
+        assert sorted(prepared.skipped) == ["bad-env-file", "bad-required"]
+        assert prepared.skipped["bad-required"] == (
+            "bad-required: docker-compose.yaml: ${API_KEY} is required: API_KEY is needed"
+        )
+        assert "env_file 'missing.env' not found" in prepared.skipped["bad-env-file"]
+        assert json.loads((prepared.output_dir / "skipped.json").read_text()) == prepared.skipped
+        assert len(prepared.rows_path.read_text().splitlines()) == 1
+        assert sorted(r.getMessage()[:22] for r in caplog.records) == [
+            "Skipping task bad-env-",
+            "Skipping task bad-requ",
+        ]
+        # With nothing left, one error lists every task and its reason.
+        (folder / "good" / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    env_file: gone.env\n"
+        )
+        with pytest.raises(ValueError, match=r"No runnable task left in .*; left out:") as info:
+            prepare_target(str(folder), output_root=tmp_path / "out2")
+        message = str(info.value)
+        assert "\n  bad-required: docker-compose.yaml: ${API_KEY} is required: API_KEY is needed" in message
+        assert "\n  bad-env-file: docker-compose.yaml: " in message and "\n  good: docker-compose.yaml: " in message
+
+    def test_prepare_leaves_out_tasks_whose_image_fails_to_build_and_builds_the_rest(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from nemo_gym.tasks.harbor.build_tools import ImageBuilder
+
+        folder = tmp_path / "ds"
+        write_task(folder / "plain")
+        write_task(folder / "ok", dockerfile="FROM ubuntu:24.04\nCOPY ok.txt /ok.txt\n")
+        write_task(folder / "bad", dockerfile="FROM ubuntu:24.04\nCOPY bad.txt /bad.txt\n")
+        failing = str(folder / "bad" / "environment")
+
+        def docker(argv, env=None):
+            if failing in argv:
+                return subprocess.CompletedProcess(argv, 1, "", "build: boom\n")
+            if "inspect" in argv:
+                data = [
+                    {"Id": "sha256:def456", "Architecture": "amd64", "Os": "linux", "Config": {"WorkingDir": "/srv"}}
+                ]
+                return subprocess.CompletedProcess(argv, 0, json.dumps(data), "")
+            return subprocess.CompletedProcess(argv, 0, "built\n", "")
+
+        monkeypatch.setattr(prepare_builds, "ImageBuilder", lambda **kw: ImageBuilder(tool="docker", run=docker))
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+        # The context that failed leaves its task out with the build's reason; the other context still built and
+        # its task runs from the built image.
+        assert [t.task_id for t in prepared.tasks] == ["ok", "plain"]
+        ok = prepared.tasks[0]
+        assert ok.built_image is not None and ok.image == ok.built_image and "hb__" in ok.image
+        assert list(prepared.skipped) == ["bad"]
+        assert prepared.skipped["bad"].startswith("Could not build the Dockerfile image(s) for task(s) bad: ")
+        assert "boom" in prepared.skipped["bad"]
+        assert json.loads((prepared.output_dir / "skipped.json").read_text()) == prepared.skipped
+        assert "Built 1 image(s) with docker, kept local" in capsys.readouterr().out
+        # The same failure as the only task: the one error carries the build's reason.
+        with pytest.raises(ValueError, match=r"No runnable task left.*\n  bad: Could not build the Dockerfile image"):
+            prepare_target(str(folder / "bad"), output_root=tmp_path / "out2")
+
+    def test_a_main_build_one_task_gets_wrong_leaves_that_task_out_and_the_rest_prepares(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # main's build section is read at build time, per context, never at planning: the cadir-ci-benchmark shape
+        # (`${VAR:?...}` in services.main.build with the variable unset) and a task env the host does not set leave
+        # those tasks out with their reasons and nothing else, with builds enabled or disabled.
+        from nemo_gym.tasks.harbor.build_options import BuildOptions
+        from nemo_gym.tasks.harbor.build_tools import ImageBuilder
+
+        monkeypatch.delenv("NEMO_GYM_NOT_SET", raising=False)
+        folder = tmp_path / "ds"
+        write_task(folder / "plain")
+        write_task(folder / "ok", dockerfile="FROM ubuntu:24.04\nCOPY ok.txt /ok.txt\n")
+        write_task(folder / "bad", dockerfile="FROM ubuntu:24.04\nCOPY bad.txt /bad.txt\n")
+        (folder / "bad" / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    build:\n      args:\n        RUNTIME: ${NEMO_GYM_NOT_SET:?set NEMO_GYM_NOT_SET}\n"
+        )
+        env_toml = HELLO_TOML + '\n[environment.env]\nFOO = "${NEMO_GYM_NOT_SET}"\n'
+        write_task(folder / "bad-env", dockerfile="FROM ubuntu:24.04\nCOPY x /x\n", toml=env_toml)
+        (folder / "bad-env" / "environment" / "docker-compose.yaml").write_text("services:\n  main:\n    build: .\n")
+        # Builds disabled: no Compose file is read, nothing raises, and the loader leaves the three out as before.
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions(enabled=False))
+        assert [t.task_id for t in prepared.tasks] == ["plain"]
+        assert sorted(prepared.skipped) == ["bad", "bad-env", "ok"]
+        assert all("needs a build (COPY)" in reason for reason in prepared.skipped.values())
+
+        def docker(argv, env=None):
+            if "inspect" in argv:
+                data = [
+                    {"Id": "sha256:def456", "Architecture": "amd64", "Os": "linux", "Config": {"WorkingDir": "/srv"}}
+                ]
+                return subprocess.CompletedProcess(argv, 0, json.dumps(data), "")
+            return subprocess.CompletedProcess(argv, 0, "built\n", "")
+
+        monkeypatch.setattr(prepare_builds, "ImageBuilder", lambda **kw: ImageBuilder(tool="docker", run=docker))
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out2")
+        assert [t.task_id for t in prepared.tasks] == ["ok", "plain"]
+        assert sorted(prepared.skipped) == ["bad", "bad-env"]
+        assert prepared.skipped["bad"].startswith("Could not build the Dockerfile image(s) for task(s) bad: ")
+        assert "${NEMO_GYM_NOT_SET} is required: set NEMO_GYM_NOT_SET" in prepared.skipped["bad"]
+        assert "[environment].env FOO of task(s) bad-env reads ${NEMO_GYM_NOT_SET}" in prepared.skipped["bad-env"]
+        assert json.loads((prepared.output_dir / "skipped.json").read_text()) == prepared.skipped
+        assert "Built 1 image(s) with docker, kept local" in capsys.readouterr().out
+        # Alone, the one error carries the interpolation reason.
+        with pytest.raises(ValueError, match=r"No runnable task left.*\n  bad: Could not build.*set NEMO_GYM_NOT_SET"):
+            prepare_target(str(folder / "bad"), output_root=tmp_path / "out3")
 
     def test_prepare_scopes_rows_to_the_agent(self, tmp_path):
         """Two agents prepared with different selections on one taskset keep their own rows and configs."""
@@ -1675,7 +1893,7 @@ def test_config_overlays_win_after_real_loading_and_inheritance(tmp_path):
 
 
 @pytest.mark.parametrize("skip", [False, True])
-def test_partial_eval_requires_explicit_opt_in_and_records_reasons(tmp_path, monkeypatch, skip):
+def test_partial_eval_requires_explicit_opt_in_and_records_reasons(tmp_path, monkeypatch, capsys, skip):
     import sys
 
     import nemo_gym.cli.main as main_module
@@ -1713,6 +1931,49 @@ def test_partial_eval_requires_explicit_opt_in_and_records_reasons(tmp_path, mon
         assert not dispatched
     skipped = json.loads((tmp_path / "results" / "harbor" / "ds" / "skipped.json").read_text())
     assert list(skipped) == ["bad"] and "task.toml" in skipped["bad"]
+    if not skip:
+        # The refusal lists every task left out and why, not only the count.
+        assert "1 task(s) could not load" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("skip", [False, True])
+def test_partial_eval_names_every_task_whose_compose_file_does_not_resolve(tmp_path, monkeypatch, capsys, skip):
+    import sys
+
+    import nemo_gym.cli.main as main_module
+
+    monkeypatch.delenv("API_KEY", raising=False)
+    write_task(tmp_path / "ds" / "good")
+    services = {
+        "bad-required": "environment: ['API_KEY=${API_KEY:?API_KEY is needed}']",
+        "bad-env-file": "env_file: missing.env",
+    }
+    for name, line in services.items():
+        write_task(tmp_path / "ds" / name)
+        (tmp_path / "ds" / name / "environment" / "docker-compose.yaml").write_text(
+            f"services:\n  main:\n    {line}\n"
+        )
+    monkeypatch.chdir(tmp_path)
+    dispatched = []
+    monkeypatch.setattr(main_module, "dispatch", lambda *args: dispatched.append(args))
+    argv = ["gym", "eval", "run", str(tmp_path / "ds"), "--agent", "hermes_agent", "--model-type", "vllm_model"]
+    argv += ["+policy_model_name=test-model", "+policy_base_url=http://localhost:1", "+policy_api_key=none"]
+    monkeypatch.setattr(sys, "argv", argv + (["--skip-unloadable"] if skip else []))
+    if skip:
+        main_module.main()
+        assert len(dispatched) == 1
+    else:
+        with pytest.raises(SystemExit) as exc:
+            main_module.main()
+        assert exc.value.code != 0 and not dispatched
+        err = capsys.readouterr().err
+        assert "2 task(s) could not load" in err
+        assert "\n  bad-required: docker-compose.yaml: ${API_KEY} is required: API_KEY is needed\n" in err
+        assert "\n  bad-env-file: docker-compose.yaml: " in err and "missing.env" in err
+        assert "Use --skip-unloadable" in err
+    skipped = json.loads((tmp_path / "results" / "harbor" / "ds" / "skipped.json").read_text())
+    assert sorted(skipped) == ["bad-env-file", "bad-required"]
+    assert skipped["bad-required"].endswith("${API_KEY} is required: API_KEY is needed")
 
 
 def test_manifest_publication_failure_keeps_previous_pins(tmp_path, registry_repo, monkeypatch):

@@ -26,6 +26,14 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
+from environment_servers.harbor.entrypoint import (
+    ENTRYPOINT_FAILED_KIND,
+    ENTRYPOINT_LOG_NAME,
+    VERIFIER_ENTRYPOINT_LOG_NAME,
+    EntrypointLaunch,
+    HarborEntrypointError,
+    _cancel_entrypoint,
+)
 from environment_servers.harbor.overlay import OVERLAY_FAILED_KIND, HarborOverlayError
 from environment_servers.harbor.session import (
     AGENT_LOGS_DIR,
@@ -164,6 +172,36 @@ def select_reward(rewards: dict[str, float]) -> float | None:
     return None
 
 
+def _verifier_user(task: HarborTask) -> str | int | None:
+    """The user ``test.sh`` runs as, named explicitly because the sandbox's default may be ``[agent].user``:
+    ``[verifier].user`` when set, else the sandbox's own default for a separate verifier in another image
+    (that image's ``USER``, which :meth:`HarborEnvironmentServer._sandbox_spec` leaves in place, never the task
+    image's), else the task image's own ``USER`` (what ``docker compose exec`` gives Harbor, a numeric one as a
+    uid), else root when an agent override is installed and the image's ``USER`` is not recorded (Harbor's
+    environment default), else the sandbox's own default."""
+    settings = task.config.verifier
+    if settings.user is not None:
+        return settings.user
+    if not task.config.is_shared_verifier and not _verifier_runs_task_image(task):
+        # Another image: its own USER is already the sandbox's default (see `_sandbox_spec`), never the task image's.
+        return None
+    user = task.entrypoint_user
+    if user is None:
+        return "root" if task.user is not None else None
+    name, _, _ = str(user).partition(":")
+    return int(name) if name.isdigit() else name
+
+
+def _verifier_runs_task_image(task: HarborTask) -> bool:
+    """A separate verifier that Gym runs in the task's own image, which then gets that image's start.
+
+    Harbor builds such a verifier from ``tests/Dockerfile`` and only ``up --wait``s it; this layer has no
+    build for it and verifies in the task image instead, so that image's entrypoint and ``HEALTHCHECK``
+    are Gym's substitute for the verifier image's own.
+    """
+    return not task.config.is_shared_verifier and task.image is not None and _verifier_image(task) == task.image
+
+
 def _verifier_image(task: HarborTask) -> str | None:
     """The prebuilt image a separate verifier runs in: ``[verifier.environment].docker_image``, else the agent's."""
     if task.config.is_shared_verifier:
@@ -244,14 +282,20 @@ class HarborVerificationMixin:
         return logs_dir
 
     async def _collect_reward(
-        self, sandbox: AsyncSandbox, task: HarborTask, logs_dir: Path
+        self,
+        sandbox: AsyncSandbox,
+        task: HarborTask,
+        logs_dir: Path,
+        *,
+        entrypoint_log: str | None = None,
     ) -> tuple[tuple[int, int | None] | None, dict[str, float] | None, str | None]:
         """Download the reward files and the wrapper's exit record, then whatever else the verifier wrote.
 
         The reward and the exit record are the required transfer, whatever the exit code: a grader may
         have written its reward before a late exit, and a timed-out run's partial logs are still worth
-        keeping. Optional diagnostics cannot invalidate a measured score. Returns the exit record (None
-        when the wrapper never reached its end), the rewards and the reward problem.
+        keeping. Optional diagnostics cannot invalidate a measured score. With ``entrypoint_log``, the
+        sandbox's entrypoint output lands under that name too. Returns the exit record (None when the
+        wrapper never reached its end), the rewards and the reward problem.
         """
         await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, names=("reward.json", "reward.txt", EXIT_RECORD_NAME))
         exit_record = parse_exit_record(logs_dir)
@@ -260,6 +304,8 @@ class HarborVerificationMixin:
             await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, skip_unsafe=True)
         except Exception:
             LOGGER.warning("Could not collect optional verifier logs for %s", task.task_id, exc_info=True)
+        if entrypoint_log is not None:
+            await self._collect_entrypoint_log(sandbox, task, logs_dir / entrypoint_log)
         return exit_record, rewards, problem
 
     async def _run_separate_verifier(self, session: HarborSession) -> dict[str, Any]:
@@ -286,6 +332,7 @@ class HarborVerificationMixin:
             )
         artifacts_dir = logs_dir / "artifacts"
         verifier: AsyncSandbox | None = None
+        verifier_entrypoint: EntrypointLaunch | None = None
         try:
             main_hooks = [hook for hook in settings.collect if _is_main_service(hook.service)]
             sidecar_hooks = [hook for hook in settings.collect if not _is_main_service(hook.service)]
@@ -295,6 +342,10 @@ class HarborVerificationMixin:
             sidecar_artifacts = [(i, artifact) for i, artifact in artifacts if not _is_main_service(artifact.service)]
             await self._run_collect_hooks(session, main_hooks)
             restored = await self._download_artifacts(session, main_artifacts, artifacts_dir)
+            died = None
+            if session.entrypoint is not None:
+                await self._collect_entrypoint_log(session.sandbox, task, logs_dir / ENTRYPOINT_LOG_NAME)
+                died = await self._entrypoint_died_during_rollout(session.sandbox, task, session.entrypoint, logs_dir)
             # Harbor's phased collection: the agent's own container is stopped before the sidecars' hooks
             # run and their artifacts are read, so no agent process can change a sidecar's state meanwhile.
             await session.stop_main()
@@ -304,11 +355,19 @@ class HarborVerificationMixin:
             # The episode key stays reserved until the episode's final cleanup, which releases it without
             # stopping the agent side again.
             await session.stop_agent_side()
+            if died is not None:
+                return self._masked(ENTRYPOINT_FAILED_KIND, died) | {"verifier_logs_dir": str(logs_dir.resolve())}
 
             verifier = await self._create_verifier_sandbox(task, episode_key=session.session_id)
+            names: dict[str, str] = {}
             if _verifier_gets_overlay(task):
                 # The verifier runs in the task's own image, so it needs the same overlay as the agent did.
-                await self._apply_overlay(verifier, task)
+                names = await self._apply_overlay(verifier, task)
+            if _verifier_runs_task_image(task):
+                # Its default is that image's own USER, never [agent].user, resolved by name once it exists.
+                await self._set_default_user(verifier, task, names, role="verifier")
+            # The verifier's /logs folders exist before its entrypoint starts, as in the seed and as Harbor's
+            # /logs/verifier bind mount does; /tests and the artifacts follow, as Harbor uploads them after start.
             prepare = await exec_as_root(
                 verifier,
                 f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR} && chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR}",
@@ -316,6 +375,14 @@ class HarborVerificationMixin:
             )
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
+            if _verifier_runs_task_image(task):
+                # Harbor builds a separate verifier from tests/Dockerfile (or runs [verifier.environment]'s
+                # docker_image) and only `up --wait`s it. This verifier runs in the task image instead, so that
+                # image's entrypoint and HEALTHCHECK stand in for the verifier image's own start; the task's
+                # [environment.healthcheck] is not run here, as Harbor does not run it in the verifier.
+                image_user = await self._image_user_name(verifier, task, names)
+                verifier_entrypoint = await self._start_entrypoint(verifier, task, image_user)
+                await self._wait_healthy(verifier, task, verifier_entrypoint, user=image_user, task_check=False)
             # A prebuilt verifier image usually ships /tests already, with the modes its tests expect.
             # Only upload the package's tests when the image has none, as the old server did.
             if await remote_kind(verifier, f"{TESTS_DIR}/test.sh") is None:
@@ -324,6 +391,9 @@ class HarborVerificationMixin:
                 await upload_archive(verifier, archive, kind, source)
                 # The staged tree stays as the diagnostic; the archive served its purpose.
                 archive.unlink(missing_ok=True)
+            if verifier_entrypoint is not None:
+                # The last look before test.sh, in a fresh sandbox the agent never had: its exit status is trusted.
+                await self._check_entrypoint(verifier, task, verifier_entrypoint)
             # A sub-second task budget still gets one whole second: `timeout 0` would mean no limit.
             budget = max(1, math.ceil(settings.timeout_sec))
             await _make_test_script_executable(verifier)
@@ -331,11 +401,16 @@ class HarborVerificationMixin:
                 verifier_command(budget),
                 env=resolve_env_templates(settings.env),
                 timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
-                user=settings.user,
+                user=_verifier_user(task),
             )
             if result.error_type not in (None, "timeout"):
                 return self._masked(failure_kinds.VERIFIER_ERROR, f"test.sh could not run: {result.error_type}")
-            exit_record, rewards, problem = await self._collect_reward(verifier, task, logs_dir)
+            exit_record, rewards, problem = await self._collect_reward(
+                verifier,
+                task,
+                logs_dir,
+                entrypoint_log=VERIFIER_ENTRYPOINT_LOG_NAME if verifier_entrypoint is not None else None,
+            )
             if exit_record is None and result.error_type != "timeout":
                 # The wrapper never reached its end: the guard found no `timeout` or `bash` (exit 127
                 # before any redirection), or the shell itself could not run. test.sh never started.
@@ -350,10 +425,15 @@ class HarborVerificationMixin:
             # The rollout is complete; losing the verifier's sandbox to its overlay must not discard it.
             LOGGER.error(f"Dockerfile overlay failed in the verifier sandbox for {task.task_id}: {exc}")
             return self._masked(OVERLAY_FAILED_KIND, f"Dockerfile overlay failed in the verifier sandbox: {exc}")
+        except HarborEntrypointError as exc:
+            # Likewise for the task image's entrypoint failing in the verifier's fresh sandbox.
+            LOGGER.error(f"Image ENTRYPOINT failed in the verifier sandbox for {task.task_id}: {exc}")
+            return self._masked(ENTRYPOINT_FAILED_KIND, f"Image ENTRYPOINT failed in the verifier sandbox: {exc}")
         except Exception as exc:
             LOGGER.exception(f"Separate verification infrastructure failed for {task.task_id}")
             return self._masked(failure_kinds.PROVIDER_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
         finally:
+            await _cancel_entrypoint(verifier_entrypoint)
             # Owned from before start(): a create that failed or timed out is released here too.
             if _verifier_key(session.session_id) in self._sandboxes:
                 try:
@@ -475,6 +555,11 @@ class HarborVerificationMixin:
                 f"Could not create verifier logs under {self._artifacts_dir}: {type(exc).__name__}: {exc}",
             )
         try:
+            if session.entrypoint is not None:
+                died = await self._entrypoint_died_during_rollout(sandbox, task, session.entrypoint, logs_dir)
+                if died is not None:
+                    await self._collect_entrypoint_log(sandbox, task, logs_dir / ENTRYPOINT_LOG_NAME)
+                    return self._masked(ENTRYPOINT_FAILED_KIND, died) | {"verifier_logs_dir": str(logs_dir.resolve())}
             await self._run_collect_hooks(session, settings.collect)
             # Replace agent-planted directory links before cleanup: find does not follow its starting
             # symlink, while tar does. Unlink /logs first without touching its former target.
@@ -508,11 +593,16 @@ class HarborVerificationMixin:
                 cwd=session.workdir,
                 env=resolve_env_templates(settings.env),
                 timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
-                user=settings.user,
+                user=_verifier_user(task),
             )
             if result.error_type not in (None, "timeout"):
                 return self._masked(failure_kinds.VERIFIER_ERROR, f"test.sh could not run: {result.error_type}")
-            exit_record, rewards, problem = await self._collect_reward(sandbox, task, logs_dir)
+            exit_record, rewards, problem = await self._collect_reward(
+                sandbox,
+                task,
+                logs_dir,
+                entrypoint_log=ENTRYPOINT_LOG_NAME if session.entrypoint is not None else None,
+            )
             if exit_record is None and result.error_type != "timeout":
                 # The wrapper never reached its end: the guard found no `timeout` or `bash` (exit 127
                 # before any redirection), or the shell itself could not run. test.sh never started.
@@ -570,6 +660,17 @@ class HarborVerificationMixin:
                 f"reward.json for {task.task_id!r} has several keys and none named 'reward': {sorted(rewards)}",
             )
         return {"reward": reward, "verifier_rewards": rewards} | extras
+
+    def _refuse_verifier_group(self, task: HarborTask) -> None:
+        """Refuse at seed the ``name:group`` a separate verifier graded in the task's own image would run as.
+
+        That verifier installs the image's own ``USER`` as its default (:meth:`HarborUsersMixin._set_default_user`
+        with ``role="verifier"``), whose group only Docker applies, and the task and the provider are both known
+        before any sandbox exists. Refused there, the episode fails as a seed failure instead of paying the whole
+        rollout and failing at verification; a verifier in another image keeps that image's default untouched.
+        """
+        if _verifier_runs_task_image(task):
+            self._refuse_unsupported_group(task, task.entrypoint_user)
 
     @staticmethod
     def _measured(reward: float, kind: str, reason: str) -> dict[str, Any]:

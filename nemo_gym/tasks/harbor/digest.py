@@ -8,12 +8,17 @@ SHA256 over sorted ``relative_path NUL file_sha256 LF`` records covering
 ``task.toml``, ``instruction.md``, ``README.md``, ``trajectory.json`` and everything
 under ``environment/``, ``tests/``, ``solution/`` and ``steps/``. The digest travels in
 ``task_data`` under :data:`DIGEST_KEY` so the resources server can refuse a row whose
-folder changed after materialization. :func:`context_digest` is the other digest here: Harbor's environment
-id of a Dockerfile build context, which keys and names the images prepare builds.
+folder changed after materialization. :func:`context_digest` is the second digest here: Harbor's environment
+id of a Dockerfile build context, which keys and names the images prepare builds. :func:`inputs_digest` is the
+third: everything a build of that context reads, recorded with the built image so a context whose Harbor id
+is unchanged but whose inputs are not (a mode, a symbolic link, an empty folder, a build setting) is rebuilt.
 """
 
 import fnmatch
 import hashlib
+import os
+import stat
+from collections.abc import Mapping
 from pathlib import Path
 
 from nemo_gym.tasks.harbor.harbor_compat import environment_content_hash
@@ -90,9 +95,50 @@ def context_digest(path: Path) -> str:
     Harbor's image name is the contract, not a complete cache identity. An empty folder hashes to its
     name, as Harbor hashes it when the task declares no ``docker_image`` (one that does never reaches a
     build). Two contexts with the same files get the same id, so it keys the build record (see
-    ``nemo_gym.tasks.harbor.image_build``).
+    ``nemo_gym.tasks.harbor.image_build``); whether a recorded image is reused is :func:`inputs_digest`'s call.
     """
     path = Path(path)
     if not path.is_dir():
         raise ValueError(f"Not a build context folder: {path}")
     return environment_content_hash(path)
+
+
+def inputs_digest(context: Path, settings: Mapping[str, str] | None = None) -> str:
+    """Digest of everything an image build of the context folder at ``context`` reads.
+
+    Where :func:`context_digest` is Harbor's name for the context, this is the build's identity: SHA-256 (64 hex
+    characters) over every entry under ``context``, sorted by relative posix path, as
+    ``relative_path NUL kind NUL st_mode NUL payload LF``. ``kind`` is ``f`` for a regular file (payload: the
+    SHA-256 of its bytes), ``l`` for a symbolic link (payload: its target, read, not followed), ``d`` for a
+    folder (no payload, so an empty folder counts) and ``o`` for anything else; ``st_mode`` is the full
+    ``lstat`` mode in octal, permission bits included. Nothing is skipped: the names Harbor's hash ignores
+    (``__pycache__``, ``.git``, ``.DS_Store``) and symbolic links are part of it, since a build tool reads them.
+    ``settings`` are the build's inputs outside the tree (the Dockerfile path, the build arguments), appended
+    as ``NUL key NUL value LF`` records sorted by key. Folder ownership is not part of it: a build does not
+    read it, and it differs between hosts that hold the same folder.
+    """
+    context = Path(context)
+    if not context.is_dir():
+        raise ValueError(f"Not a build context folder: {context}")
+    entries: list[tuple[str, Path]] = []
+    for root, dirs, files in os.walk(context, followlinks=False):
+        root_path = Path(root)
+        for name in dirs + files:
+            path = root_path / name
+            entries.append((path.relative_to(context).as_posix(), path))
+    digest = hashlib.sha256()
+    for relative, path in sorted(entries, key=lambda item: item[0]):
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            kind, payload = "l", os.readlink(path)
+        elif stat.S_ISDIR(mode):
+            kind, payload = "d", ""
+        elif stat.S_ISREG(mode):
+            with path.open("rb") as stream:
+                kind, payload = "f", hashlib.file_digest(stream, "sha256").hexdigest()
+        else:
+            kind, payload = "o", ""
+        digest.update(f"{relative}\0{kind}\0{mode:o}\0{payload}\n".encode())
+    for key, value in sorted((settings or {}).items()):
+        digest.update(f"\0{key}\0{value}\n".encode())
+    return digest.hexdigest()

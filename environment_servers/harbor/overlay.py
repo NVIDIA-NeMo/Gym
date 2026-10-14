@@ -106,7 +106,7 @@ class HarborOverlayMixin:
 
     """
 
-    async def _apply_overlay(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
+    async def _apply_overlay(self, sandbox: AsyncSandbox, task: HarborTask) -> dict[str, str]:
         """Run the Dockerfile ``RUN`` lines the loader recorded, in order, before anything else uses the sandbox.
 
         Each line runs with the ``ENV``, ``WORKDIR`` and ``USER`` the loader resolved for it, the
@@ -123,20 +123,22 @@ class HarborOverlayMixin:
         output: the task's Dockerfile does not apply, so retrying would not help. A provider that
         cannot run a step at all raises :class:`HarborOverlayUnavailable` instead, so the seed is retried.
         """
+        user_names: dict[str, str] = {}
         if not task.overlay:
-            return
+            return user_names
         budget = task.config.environment.build_timeout_sec
         loop = asyncio.get_running_loop()
         deadline = loop.time() + budget
         total = len(task.overlay)
         prepared_workdirs: set[str] = {"/"}  # the root always exists; every other WORKDIR is made once
-        user_names: dict[str, str] = {}
 
         async def as_root(command: str, label: str, what: str) -> SandboxExecResult:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise HarborOverlayError(f"{label} not run: [environment].build_timeout_sec={budget} is used up")
-            result = await _exec_as_root_user(sandbox, command, configured_user=task.sandbox_user, timeout_s=remaining)
+            result = await _exec_as_root_user(
+                sandbox, command, configured_user=task.sandbox_user, spec_user=task.user, timeout_s=remaining
+            )
             _check_overlay_result(result, label, what, budget)
             return result
 
@@ -173,7 +175,7 @@ class HarborOverlayMixin:
             if _is_root(user):
                 # Root with a group of its own included: the group stays on the WORKDIR, the line runs as root.
                 result = await _exec_as_root_user(
-                    sandbox, command, configured_user=task.sandbox_user, timeout_s=remaining
+                    sandbox, command, configured_user=task.sandbox_user, spec_user=task.user, timeout_s=remaining
                 )
             else:
                 result = await sandbox.exec(command, cwd="/", timeout_s=remaining, user=_exec_user(user))
@@ -181,3 +183,4 @@ class HarborOverlayMixin:
         # WORKDIR instructions after the last RUN line exist in the built image too.
         for instruction in workdirs:
             await make_workdir(instruction.path, instruction.user, f"after RUN line {total}/{total}")
+        return user_names

@@ -12,8 +12,11 @@ rows were materialized (see ``nemo_gym.tasks.harbor``).
 - seed: check the row's digest against the mapping and the folder, start the task's
   image as a sandbox through the configured provider, run the ``RUN`` lines of an
   overlay-mode Dockerfile with the ``ENV``, ``WORKDIR`` and ``USER`` the loader resolved for
-  each (see ``nemo_gym.tasks.harbor.dockerfile``), create the working directory. A ``RUN``
-  line that fails is a terminal seed failure (the task's Dockerfile does not apply); a
+  each (see ``nemo_gym.tasks.harbor.dockerfile``), create the working directory, start the
+  image's recorded ``ENTRYPOINT`` beside the provider's keepalive the way Harbor's Compose files
+  leave it running (with ``sh -c "sleep infinity"`` as its arguments), then wait for the image's
+  healthcheck and the task's. A ``RUN`` line that fails, or an entrypoint that exits non-zero
+  before the hand-over, is a terminal seed failure (the task's Dockerfile does not apply); a
   provider that cannot run one is retryable;
 - agent: open an agent session on the configured agent server, handing it a
   ``SandboxAccess`` for that sandbox, post the task's ``responses_create_params`` to it,
@@ -42,10 +45,16 @@ from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseErr
 from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, PositiveFloat
 
-from environment_servers.harbor.entrypoint import HarborEntrypointMixin
+from environment_servers.harbor.entrypoint import (
+    EntrypointLaunch,
+    HarborEntrypointError,
+    HarborEntrypointMixin,
+    _cancel_entrypoint,
+)
 from environment_servers.harbor.overlay import HarborOverlayError, HarborOverlayMixin
 from environment_servers.harbor.sandboxes import COMPOSE_IMAGES_FILE, HarborSandboxMixin
 from environment_servers.harbor.session import HarborSession, HarborSessionMixin, resolve_env_templates
+from environment_servers.harbor.users import HarborUsersMixin
 from environment_servers.harbor.verifier import HarborVerificationMixin, _verifier_image, _verifier_key
 from nemo_gym import RESULTS_DIR
 from nemo_gym.base_environment_server import (
@@ -72,6 +81,7 @@ from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgent
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
 from nemo_gym.tasks.harbor.errors import HarborTaskError
+from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
 
 
 LOGGER = logging.getLogger(__name__)
@@ -145,6 +155,7 @@ class HarborEnvironmentServer(
     HarborVerificationMixin,
     HarborEntrypointMixin,
     HarborOverlayMixin,
+    HarborUsersMixin,
 ):
     config: HarborEnvironmentServerConfig
     request_model = SingleAgentTurnRequest
@@ -206,6 +217,8 @@ class HarborEnvironmentServer(
         session = self._sessions.get(episode_key)
         if sandbox is not None:
             if session is None or not session.agent_sandbox_stopped:
+                if session is not None:
+                    await _cancel_entrypoint(session.entrypoint)
                 await sandbox.stop()
             del self._sandboxes[episode_key]
         self._sessions.pop(episode_key, None)
@@ -231,8 +244,8 @@ class HarborEnvironmentServer(
             shutil.copytree(folder, snapshot, symlinks=True)
             # Dataset-level files live beside the task folders and the loader reads them from the
             # task's parent, so the snapshot gets copies at the same relative place: the dataset's
-            # own settings (dataset.toml) and the recorded image configurations.
-            for name in (DATASET_FILE, COMPOSE_IMAGES_FILE):
+            # own settings (dataset.toml), the recorded image configurations and the built images.
+            for name in (DATASET_FILE, COMPOSE_IMAGES_FILE, BUILT_IMAGES_FILE):
                 sidecar = folder.parent / name
                 if sidecar.is_file():
                     shutil.copy2(sidecar, snapshot_root / name)
@@ -472,6 +485,9 @@ class HarborEnvironmentServer(
         resolve_env_templates(task.config.verifier.env)
         if task.config.verifier.environment is not None:
             resolve_env_templates(task.config.verifier.environment.env)
+        # The separate verifier's user is as static as its image: a `name:group` the provider cannot run as fails
+        # here, before the rollout it would otherwise follow (`_sandbox_spec` refuses the agent's own the same way).
+        self._refuse_verifier_group(task)
         if self._shutting_down:
             raise HTTPException(503, "Environment server is shutting down")
         for stale_key in (episode_key, _verifier_key(episode_key)):
@@ -488,6 +504,7 @@ class HarborEnvironmentServer(
                     503, f"A sandbox of a previous attempt of this episode could not be stopped yet: {exc}"
                 ) from exc
         compose: AsyncSandboxCompose | None = None
+        launch: EntrypointLaunch | None = None
         try:
             if task.needs_compose:
                 compose = await self._create_compose(task, episode_key)
@@ -506,18 +523,42 @@ class HarborEnvironmentServer(
                 provider_ref=self._provider_ref(task),
                 compose=compose,
             )
-            await self._apply_overlay(sandbox, task)
+            names = await self._apply_overlay(sandbox, task)
+            await self._set_default_user(sandbox, task, names)
+            image_user = await self._image_user_name(sandbox, task, names)
+            # The working directory and /logs exist before the entrypoint starts, as Harbor's bind mounts do.
             session.workdir = await self._prepare_workdir(sandbox, task, task.workdir)
-            await self._wait_healthy(sandbox, task)
+            launch = session.entrypoint = await self._start_entrypoint(
+                sandbox, task, image_user, prepared_workdir=session.workdir
+            )
+            await self._wait_healthy(sandbox, task, launch, user=image_user)
             await self._write_task_context(sandbox, task)
-        except HarborOverlayError as exc:
-            # The task's own Dockerfile failed to apply: a task error, not a sandbox one.
+            if launch is not None:
+                # The last look before the hand-over: an entrypoint that died during the seed's remaining steps
+                # (a setup script failing after its first lines) is a seed failure, not a rollout on an empty task.
+                await self._check_entrypoint(sandbox, task, launch)
+        except HTTPException as exc:
+            # A seed step that judged the failure itself keeps its status: the task's `name:group` user refused on
+            # a provider that switches user by name only (`HarborUserError`, a 422 the task and the deployment
+            # disagree on, which no retry mends) or an environment variable the task requires and the deployment
+            # lacks. Refused before the sandbox exists on the create path; one created another way is stopped here.
             try:
+                await _cancel_entrypoint(launch)
                 await self._stop_sandbox(episode_key)
             except Exception:
-                LOGGER.exception("Failed to stop Harbor sandbox after a failed overlay")
-            LOGGER.error("Dockerfile overlay failed for %s: %s", task.task_id, exc)
-            raise HTTPException(422, f"Dockerfile overlay failed for {task.task_id!r}: {exc}") from exc
+                LOGGER.exception("Failed to stop Harbor sandbox after a refused seed")
+            LOGGER.error("Seed refused for %s: %s", task.task_id, exc.detail)
+            raise
+        except (HarborOverlayError, HarborEntrypointError) as exc:
+            # The task's own Dockerfile (or the image it built) failed to apply: a task error, not a sandbox one.
+            what = "Dockerfile overlay" if isinstance(exc, HarborOverlayError) else "Image ENTRYPOINT"
+            try:
+                await _cancel_entrypoint(launch)
+                await self._stop_sandbox(episode_key)
+            except Exception:
+                LOGGER.exception("Failed to stop Harbor sandbox after a failed %s", what.lower())
+            LOGGER.error("%s failed for %s: %s", what, task.task_id, exc)
+            raise HTTPException(422, f"{what} failed for {task.task_id!r}: {exc}") from exc
         except BaseException as exc:
             if not isinstance(exc, Exception):
                 # Cancellation (the episode deadline fired): the registered `close_sandbox` cleanup stops
@@ -525,6 +566,7 @@ class HarborEnvironmentServer(
                 # since the deadline cancels only once, and hold the episode key for as long as the stop.
                 raise
             try:
+                await _cancel_entrypoint(launch)
                 await self._stop_sandbox(episode_key)
             except Exception:
                 LOGGER.exception("Failed to stop Harbor sandbox after failed seed")
