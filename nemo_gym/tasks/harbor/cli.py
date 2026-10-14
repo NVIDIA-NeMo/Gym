@@ -7,32 +7,41 @@ Preparation writes, under ``results/harbor/<taskset>/``:
 
 - ``tasks.jsonl``: one materialized row per loadable task;
 - ``skipped.json``: omitted task IDs and reasons (empty when all tasks load);
-- ``run_config.yaml``: the agent and environment server blocks.
+- ``run_config_<agent>.yaml``: the agent and environment server blocks.
 
 Then the ordinary end-to-end rollout collection runs with that config plus the
 selected agent, environment server and model configs.
 """
 
 import argparse
+import fnmatch
 import json
 import logging
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from nemo_gym import component_search_roots
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError
-from nemo_gym.tasks.harbor.digest import DIGEST_KEY
+from nemo_gym.path_utils import materialized_path_for
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.hub import HubError, datasets_dir, fetch_ref, is_hub_ref
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
 from nemo_gym.tasks.harbor.task import HarborTask, discover_tasks
-from nemo_gym.tasks.harbor.validation_report import _dig, _validation_key, _validation_rows, summarize_validation
+from nemo_gym.tasks.harbor.validation_report import (
+    _task_digests,
+    _validation_key,
+    _validation_rows,
+    summarize_validation,
+)
 
+
+if TYPE_CHECKING:
+    from nemo_gym.rollout_collection import RolloutCollectionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -90,11 +99,19 @@ def prepare_target(
     *,
     output_root: Path = DEFAULT_OUTPUT_ROOT,
     refresh_registry: bool = False,
+    exclude: list[str] | None = None,
+    only: list[str] | None = None,
+    rows_name: str = "tasks.jsonl",
 ) -> PreparedTaskset:
     """Fetch (for hub references) and load the tasks, then write the rows file.
 
     A task folder that does not load is skipped with a warning (and listed in
     ``PreparedTaskset.skipped``) so the rest of the dataset still prepares.
+
+    Tasks matching an ``exclude`` glob, and Compose tasks (which the harbor environment server
+    cannot run yet), are left out of the rows and listed on stdout. ``rows_name`` names the rows
+    file inside the taskset's output folder: a run scopes it to its agent, so two agents prepared
+    with different selections on one taskset keep their own rows.
     """
     if is_hub_ref(target):
         folder = fetch_ref(target, refresh_registry=refresh_registry)
@@ -114,7 +131,12 @@ def prepare_target(
         )
     for task_id, error in errors.items():
         logger.warning("Skipping task %s: %s", task_id, error)
-    rows_path = output_dir / "tasks.jsonl"
+    tasks, skipped = select_tasks(tasks, exclude or [], only)
+    for task_id, reason in skipped:
+        print(f"Skipping {task_id}: {reason}")
+    if not tasks:
+        raise ValueError(f"No runnable task left in {folder}")
+    rows_path = output_dir / rows_name
     write_rows(tasks, taskset, rows_path)
     skipped_note = f", skipped {len(errors)}" if errors else ""
     print(f"Materialized {len(tasks)} task(s) from {folder} into {rows_path}{skipped_note}")
@@ -145,6 +167,30 @@ def runs_in_sandbox(impl_name: str, impl_config: Any) -> bool:
         if path.is_file():
             return entrypoint_class_flag(path, CALLS_MODEL_FROM_SANDBOX_KEY) is True
     return False
+
+
+def select_tasks(
+    tasks: list[HarborTask], exclude: list[str], only: list[str] | None = None
+) -> tuple[list[HarborTask], list[tuple[str, str]]]:
+    """Split tasks into the ones to run and ``(task_id, reason)`` pairs left out."""
+    kept: list[HarborTask] = []
+    skipped: list[tuple[str, str]] = []
+    for task in tasks:
+        pattern = next((p for p in exclude if fnmatch.fnmatchcase(task.task_id, p)), None)
+        if only and not any(fnmatch.fnmatchcase(task.task_id, p) for p in only):
+            skipped.append((task.task_id, "not in --only-tasks"))
+        elif pattern is not None:
+            skipped.append((task.task_id, f"excluded by --exclude-tasks {pattern!r}"))
+        elif task.needs_compose:
+            skipped.append((task.task_id, "Compose environments are not supported yet"))
+        else:
+            kept.append(task)
+    return kept, skipped
+
+
+def _patterns(args: argparse.Namespace, name: str) -> list[str]:
+    raw = getattr(args, name, None) or ""
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 def resolve_agent(agent: str) -> AgentSelection:
@@ -236,7 +282,8 @@ def build_run(
     config["output_jsonl_fpath"] = str(prepared.output_dir / "rollouts.jsonl")
     if agent.runs_in_sandbox:
         config[USE_ABSOLUTE_IP_KEY] = True
-    config_path = prepared.output_dir / "run_config.yaml"
+    # One file per agent, so a validate and an eval run on the same taskset do not overwrite each other.
+    config_path = prepared.output_dir / f"run_config_{agent.instance_name}.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
 
     config_paths = [config_path.resolve(), agent.config_path, _config_path(ENVIRONMENT_SERVER_CONFIG)]
@@ -250,9 +297,11 @@ def build_run(
     return config_path, tokens
 
 
+@exit_cleanly_on_config_error
 def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
     """Entry point for ``gym eval run <target> ...``."""
     from nemo_gym.cli.main import _merge_config_paths, dispatch
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
 
     if getattr(args, "no_serve", False):
         args._parser.error("A Harbor target starts its own servers; drop --no-serve")
@@ -273,8 +322,13 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
         validate_target(args, overrides, agent=agent)
         return
     try:
-        prepared = prepare_target(args.target)
-    except (HarborTaskError, HubError, OSError) as exc:
+        prepared = prepare_target(
+            args.target,
+            exclude=_patterns(args, "exclude_tasks"),
+            only=_patterns(args, "only_tasks"),
+            rows_name=_rows_name(agent),
+        )
+    except (HarborTaskError, HubError, ValueError, OSError) as exc:
         args._parser.error(str(exc))
     if prepared.skipped and not getattr(args, "skip_unloadable", False):
         args._parser.error(
@@ -285,8 +339,85 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
         config_path, tokens = build_run(prepared, agent, sandbox=sandbox, overrides=overrides)
     except (HarborTaskError, OSError) as exc:
         args._parser.error(str(exc))
+    tokens = _merge_config_paths(tokens)
+    collection = _resolved_collection(tokens, prepared)
+    cache = _resumable_cache(collection)
+    if cache is not None:
+        # The collector resumes its saved inputs, not the rows just prepared: a selection or digest that
+        # changed since would run (or 404 on) tasks the server no longer maps. Refuse before startup.
+        conflict = _resume_conflict(cache, RolloutCollectionHelper()._preprocess_rows_from_config(collection))
+        if conflict:
+            args._parser.error(conflict)
     print(f"Run config written to {config_path} (datasets folder: {datasets_dir()})")
-    dispatch("nemo_gym.cli.eval:e2e_rollout_collection", _merge_config_paths(tokens))
+    dispatch("nemo_gym.cli.eval:e2e_rollout_collection", tokens)
+
+
+def _rows_name(agent: AgentSelection) -> str:
+    """The rows file of one agent's run on a taskset: ``tasks_<agent>.jsonl`` next to ``run_config_<agent>.yaml``."""
+    return f"tasks_{agent.instance_name}.jsonl"
+
+
+def _resolved_collection(tokens: list[str], prepared: PreparedTaskset) -> "RolloutCollectionConfig":
+    """The collector's effective configuration for ``tokens``: resolved through the same parser and cache
+    dispatch uses, file overlays included, so what it would resume and run is read from it rather than
+    guessed from the command line."""
+    from omegaconf import OmegaConf
+    from omegaconf.errors import InterpolationResolutionError
+
+    from nemo_gym.global_config import get_global_config_dict, translate_interpolation_error
+    from nemo_gym.rollout_collection import RolloutCollectionConfig
+
+    sys.argv = [sys.argv[0], *tokens]
+    config = get_global_config_dict()
+    try:
+        resolved = OmegaConf.to_container(config, resolve=True)
+    except InterpolationResolutionError as exc:
+        raise translate_interpolation_error(exc) from exc
+    return RolloutCollectionConfig.model_validate({**resolved, "input_jsonl_fpath": str(prepared.rows_path)})
+
+
+def _resumable_cache(collection: "RolloutCollectionConfig") -> Path | None:
+    """The saved inputs the collector would resume, or None when it starts fresh. Its own condition: the
+    effective ``resume_from_cache`` (flag or config file) and both the results file and the saved inputs."""
+    if not collection.resume_from_cache:
+        return None
+    output = Path(collection.output_jsonl_fpath)
+    materialized = materialized_path_for(output)
+    if not output.is_file() or not materialized.is_file():
+        return None
+    return materialized
+
+
+def _resume_conflict(materialized: Path, expected: list[dict[str, object]]) -> str | None:
+    """Why ``--resume`` cannot go ahead: the cached rows name other tasks or digests than the rows the collector
+    would run now (``expected``, after ``limit``)."""
+
+    def identity(row: dict[str, object]) -> tuple[str, str]:
+        return _validation_key(row)[:2]
+
+    cached = _task_digests(_validation_rows(materialized), identity)
+    current = _task_digests(expected, identity)
+    if cached == current:
+        return None
+    dropped = sorted(name for taskset, name in cached if (taskset, name) not in current)
+    added = sorted(name for taskset, name in current if (taskset, name) not in cached)
+    changed = sorted(
+        name for key, digest in current.items() if key in cached and cached[key] != digest for name in [key[1]]
+    )
+    detail = ", ".join(
+        part
+        for part in (
+            f"no longer selected: {', '.join(dropped)}" if dropped else "",
+            f"newly selected: {', '.join(added)}" if added else "",
+            f"changed digest: {', '.join(changed)}" if changed else "",
+        )
+        if part
+    )
+    return (
+        f"Cannot resume from {materialized}: the task selection or task digests differ from the cached run "
+        f"({detail}). Rerun with the same --only-tasks/--exclude-tasks, or pass +resume_from_cache=false to "
+        f"start over, or a new +output_jsonl_fpath to keep the old results"
+    )
 
 
 @exit_cleanly_on_config_error
@@ -296,12 +427,8 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
     ``gym eval run <target> --agent harbor_oracle`` lands here too, with its ``agent`` selection, so the oracle's
     results never share a folder with a model's.
     """
-    from omegaconf import OmegaConf
-    from omegaconf.errors import InterpolationResolutionError
-
     from nemo_gym.cli.main import _merge_config_paths, dispatch
-    from nemo_gym.global_config import get_global_config_dict, translate_interpolation_error
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
 
     # Evaluation and reference validation must never share inputs, configs, or cached results.
     try:
@@ -309,7 +436,13 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
         sandbox = getattr(args, "sandbox", None)
         if sandbox is not None:
             resolve_sandbox_config(sandbox)
-        prepared = prepare_target(args.target, output_root=DEFAULT_OUTPUT_ROOT / "validation")
+        prepared = prepare_target(
+            args.target,
+            output_root=DEFAULT_OUTPUT_ROOT / "validation",
+            exclude=_patterns(args, "exclude_tasks"),
+            only=_patterns(args, "only_tasks"),
+            rows_name=_rows_name(agent),
+        )
     except (HarborTaskError, HubError, ValueError, OSError, yaml.YAMLError) as exc:
         args._parser.error(str(exc))
     unvalidated = [task.task_id for task in prepared.tasks if not task.has_solution]
@@ -322,26 +455,17 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
         config_path, tokens = build_run(prepared, agent, sandbox=sandbox, overrides=list(overrides))
         tokens = _merge_config_paths(tokens)
         # Resolve through the same parser and cache used by dispatch, including file overlays.
-        sys.argv = [sys.argv[0], *tokens]
-        config = get_global_config_dict()
-        try:
-            resolved = OmegaConf.to_container(config, resolve=True)
-        except InterpolationResolutionError as exc:
-            raise translate_interpolation_error(exc) from exc
-        collection = RolloutCollectionConfig.model_validate({**resolved, "input_jsonl_fpath": str(prepared.rows_path)})
+        collection = _resolved_collection(tokens, prepared)
         expected = RolloutCollectionHelper()._preprocess_rows_from_config(collection)
         rollouts = Path(collection.output_jsonl_fpath)
-        if collection.resume_from_cache and rollouts.is_file() and collection.materialized_jsonl_fpath.is_file():
+        cache = _resumable_cache(collection)
+        if cache is not None:
             # The collector resumes its saved inputs, not the just-prepared task rows. Reject a stale
             # selection or digest before startup so an old reward cannot validate a changed solution.
-            cached = _validation_rows(collection.materialized_jsonl_fpath)
-            current_digests = {
-                _validation_key(row): _dig(row, "task_input", "task_data", DIGEST_KEY) for row in expected
-            }
-            cached_digests = {_validation_key(row): _dig(row, "task_input", "task_data", DIGEST_KEY) for row in cached}
-            if cached_digests != current_digests:
+            cached_digests = _task_digests(_validation_rows(cache), _validation_key)
+            if cached_digests != _task_digests(expected, _validation_key):
                 raise ConfigError(
-                    f"Cannot resume Harbor validation from {collection.materialized_jsonl_fpath}: "
+                    f"Cannot resume Harbor validation from {cache}: "
                     "the selected tasks or task digests have changed. Use +resume_from_cache=false "
                     "to validate the current tasks, or choose a new +output_jsonl_fpath to keep the old results."
                 )
