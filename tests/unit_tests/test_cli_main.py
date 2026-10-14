@@ -288,10 +288,10 @@ class TestEvalExportFlags:
         assert target == "nemo_gym.cli.eval:export_rollouts_as_atif"
         assert set(overrides) == {
             "+format=atif",
-            '+rollouts_jsonl_fpath="rollouts.jsonl"',
-            '+output_dirpath="atif"',
-            '+session_id="evaluation-42"',
-            '+agent_version="2.3.1"',
+            "+rollouts_jsonl_fpath='rollouts.jsonl'",
+            "+output_dirpath='atif'",
+            "+session_id='evaluation-42'",
+            "+agent_version='2.3.1'",
         }
 
 
@@ -758,6 +758,38 @@ class TestEvalProfileFlags:
             main()
 
 
+class TestDatasetValidateFlags:
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "current(1).jsonl",
+            "current,failed.jsonl",
+            "plain.jsonl",
+            "résumé.jsonl",
+            "日本語.jsonl",
+            r"dir\name.jsonl",
+            r"C:\Users\me\out.jsonl",
+            "it's.jsonl",
+            r"a\'b.jsonl",
+            r"trail\\",
+        ],
+    )
+    def test_output_reaches_the_validation_run_quoted(self, monkeypatch: MonkeyPatch, name: str) -> None:
+        # The file name is not a Hydra expression: unquoted, `(` is a parse error and `,` is ambiguous. It is
+        # also not JSON: Hydra keeps `\uXXXX` and a doubled backslash literally, so the override must parse
+        # back to the exact name the user typed, Unicode and backslashes included.
+        from nemo_gym.tasks.harbor import cli as harbor_cli
+
+        captured: list = []
+        monkeypatch.setattr(harbor_cli, "validate_target", lambda args, overrides: captured.append(overrides))
+        monkeypatch.setattr(sys, "argv", ["gym", "dataset", "validate", "tasks", "--output", name])
+        main()
+        assert len(captured) == 1 and len(captured[0]) == 1
+        assert captured[0][0].startswith("+output_jsonl_fpath='")
+        parsed = OverridesParser.create().parse_overrides(captured[0])[0]
+        assert (parsed.key_or_group, parsed.value()) == ("output_jsonl_fpath", name)
+
+
 class TestEvalReverifyFlags:
     @pytest.mark.parametrize(
         "flag_argv, expected_override",
@@ -914,7 +946,7 @@ class TestEnvInitFlags:
             "+scaffold_kind=benchmark",
             '+scaffold_name="sample"',
             "+profile=custom-gym-verifier",
-            '+reuse_verifier="shared"',
+            "+reuse_verifier='shared'",
             "+reward_range=[-1.0,1.0]",
             "+higher_is_better=false",
         }
@@ -965,7 +997,7 @@ class TestEnvValidateOnboardingFlags:
         )
         assert target == "nemo_gym.cli.env:validate"
         assert set(overrides) == {
-            '+manifest_path="benchmarks/gpqa/manifest.yaml"',
+            "+manifest_path='benchmarks/gpqa/manifest.yaml'",
             "+sync=true",
             "+json=true",
         }
@@ -1052,7 +1084,7 @@ class TestSearch:
         # `gym search <query>` (no type) searches the unified environment catalog.
         target, overrides = _dispatch_for(monkeypatch, ["search", "math"])
         assert target == "nemo_gym.cli.env:list_environments"
-        assert overrides == ['+query="math"']
+        assert overrides == ["+query='math'"]
 
     @pytest.mark.parametrize(
         "component_type, expected_target, expected_kind",
@@ -1070,19 +1102,21 @@ class TestSearch:
         # `gym search <type> <query>` runs that type's listing, filtered by the query.
         target, overrides = _dispatch_for(monkeypatch, ["search", component_type, "swe"])
         assert target == expected_target
-        assert overrides == ([f"+catalog_kind={expected_kind}"] if expected_kind else []) + ['+query="swe"']
+        assert overrides == ([f"+catalog_kind={expected_kind}"] if expected_kind else []) + ["+query='swe'"]
 
     def test_search_json(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(monkeypatch, ["search", "math", "--json"])
-        assert set(overrides) == {'+query="math"', "+json=true"}
+        assert set(overrides) == {"+query='math'", "+json=true"}
 
-    @pytest.mark.parametrize("query", ["(A)", "a b", "[x]", "A|B", '"quoted" task'])
+    @pytest.mark.parametrize(
+        "query", ["(A)", "a b", "[x]", "A|B", '"quoted" task', "it's", "résumé", r"back\slash", r"ends\\"]
+    )
     def test_search_query_with_special_chars_is_hydra_safe(self, monkeypatch: MonkeyPatch, query) -> None:
         # The query is quoted so Hydra's override grammar accepts characters that are otherwise syntax,
         # e.g. `gym search agents "(A)"` used to raise an override parse error. The quoted override must
-        # both be valid Hydra and round-trip back to the original query string.
+        # both be valid Hydra and round-trip back to the original query string, Unicode and backslashes too.
         _, overrides = _dispatch_for(monkeypatch, ["search", "agents", query])
-        assert overrides == [f"+query={json.dumps(query)}"]
+        assert len(overrides) == 1 and overrides[0].startswith("+query='")
         parsed = OverridesParser.create().parse_overrides(overrides)[0]
         assert parsed.value() == query
 
@@ -1830,8 +1864,8 @@ class TestListEnvironmentsRouting:
         assert set(overrides) == {
             "+domain=math",
             "+catalog_kind=benchmark",
-            '+modality="text"',
-            '+licensing="Apache-2.0"',
+            "+modality='text'",
+            "+licensing='Apache-2.0'",
             f"+status={status}",
             "+lifecycle=active",
         }

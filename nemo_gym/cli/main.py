@@ -79,6 +79,19 @@ def dispatch(target: str, overrides: list[str]) -> None:
     func()
 
 
+def _hydra_quote(value: str) -> str:
+    """Single-quote `value` as a literal for Hydra's override grammar, so it parses back to the same string.
+
+    `json.dumps` is not that encoder: Hydra keeps `\\uXXXX`, `\\t` and a doubled backslash literally, so a Unicode
+    or backslash-containing filename would reach the command under another name. Hydra un-escapes a backslash
+    only when its run ends at a quote character, so only those runs (and the quote itself) are escaped here.
+    Everything else, Unicode included, is passed through unchanged.
+    """
+    escaped = re.sub(r"(\\*)(')", lambda m: m.group(1) * 2 + "\\'", value)
+    escaped = re.sub(r"(\\+)$", lambda m: m.group(1) * 2, escaped)
+    return f"'{escaped}'"
+
+
 def _value_flag(
     name: str,
     hydra_key: str,
@@ -88,12 +101,15 @@ def _value_flag(
     choices: tuple[str, ...] | None = None,
     quote: bool = False,
 ) -> Flag:
-    """A `--name VALUE` flag that maps to the Hydra override `+<hydra_key>=VALUE` (omitted when unset)."""
+    """A `--name VALUE` flag that maps to the Hydra override `+<hydra_key>=VALUE` (omitted when unset).
+
+    `quote=True` passes VALUE as a literal string (see `_hydra_quote`), for filenames and free text.
+    """
     dest = name.replace("-", "_")
     return Flag(
         register=lambda p: p.add_argument(f"--{name}", *aliases, dest=dest, choices=choices, help=flag_help),
         translate_to_hydra=lambda args: (
-            [f"+{hydra_key}={json.dumps(getattr(args, dest)) if quote else getattr(args, dest)}"]
+            [f"+{hydra_key}={_hydra_quote(getattr(args, dest)) if quote else getattr(args, dest)}"]
             if getattr(args, dest) is not None
             else []
         ),
@@ -236,7 +252,7 @@ SEARCH_TERMS = Flag(
             help="Text matched (substring or fuzzy) against a component's name, description, and key metadata.",
         ),
     ),
-    translate_to_hydra=lambda args: [f"+query={json.dumps(args.query)}"] if getattr(args, "query", None) else [],
+    translate_to_hydra=lambda args: [f"+query={_hydra_quote(args.query)}"] if getattr(args, "query", None) else [],
 )
 
 
@@ -943,6 +959,8 @@ COMMANDS = {
             SEARCH_DIR,
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent tasks."),
             _value_flag("limit", "limit", "Maximum number of tasks to validate."),
+            # Quoted: a file name with parentheses or commas is not a Hydra expression.
+            _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",), quote=True),
         ),
     ),
     "dataset collate": Command(

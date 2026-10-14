@@ -88,6 +88,13 @@ Resource settings come from the task. `sandbox_resources_override`, `gpu_sandbox
 `request_gpu_type` and `verifier_grace_s` belong to later stack layers and are not configuration options
 in this PR.
 
+A registry fetch (`harbor:<dataset>`, below) reuses a task folder already in Gym's datasets folder when its
+`manifest.toml` pin names the registry's `git_url` and `path` with a full commit SHA, the folder has a
+`task.toml`, and no symlink in it leaves the folder. The recorded commit is kept on purpose when the registry's
+entry moves (a deleted folder is fetched again at that commit), and the fetch does not hash the folder's content
+(Harbor's own download reuses any non-empty folder without a check). Move the folder aside to fetch the
+registry's current copy.
+
 `harbor:<dataset>[@<version>]` resolves the Harbor registry and fetches task folders into Gym's shared
 datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `./datasets`). A local task folder, or a folder of task
 folders, works the same way. The generated run config declares the materialized rows as the agent's

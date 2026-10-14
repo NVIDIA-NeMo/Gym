@@ -87,7 +87,7 @@ def validation_cli(tmp_path, monkeypatch):
     return invoke
 
 
-@pytest.mark.parametrize("source", ["cli", "file"])
+@pytest.mark.parametrize("source", ["cli", "file", "flag"])
 def test_validate_reads_effective_output_and_preserves_evaluation_artifacts(
     tmp_path, monkeypatch, validation_cli, source
 ):
@@ -97,7 +97,9 @@ def test_validate_reads_effective_output_and_preserves_evaluation_artifacts(
     original_config = config_path.read_bytes()
     stale = evaluated.output_dir / "rollouts.jsonl"
     write_jsonl(stale, [result()])
-    custom = tmp_path / "custom output.jsonl"
+    # `--output` is translated to a quoted Hydra override, so parentheses, commas, Unicode and backslashes
+    # survive the real parse and collection is pointed at the file the user named.
+    custom = tmp_path / (r"résumé(1),back\slash.jsonl" if source == "flag" else "custom output.jsonl")
     overlay = tmp_path / "overlay.yaml"
     overlay.write_text(yaml.safe_dump({"output_jsonl_fpath": str(custom)}))
     seen = []
@@ -110,7 +112,11 @@ def test_validate_reads_effective_output_and_preserves_evaluation_artifacts(
         write_jsonl(custom, [result(reward=0.0)])
 
     monkeypatch.setattr(main_module, "dispatch", collect)
-    flags = [f"+output_jsonl_fpath={json.dumps(str(custom))}"] if source == "cli" else ["--config", str(overlay)]
+    flags = {
+        "cli": [f"+output_jsonl_fpath='{custom}'"],
+        "file": ["--config", str(overlay)],
+        "flag": ["--output", str(custom)],
+    }[source]
     with pytest.raises(SystemExit) as exc:
         validation_cli(*flags)
     assert exc.value.code == 1
