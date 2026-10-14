@@ -47,7 +47,11 @@ def generation(tmp_path, monkeypatch):
                 harness: {
                     "verdict": "not_fulfilled",
                     "scenarios": [
-                        {"scenario": s.name, "checks": [{"id": "calls.outcome", "kind": "schema", "status": "fail"}]}
+                        {
+                            "scenario": s.name,
+                            "verdict": "not_fulfilled",
+                            "checks": [{"id": "calls.outcome", "kind": "schema", "status": "fail"}],
+                        }
                         for s in scenarios
                     ],
                     "evidence": {key: {"passed": 0, "observed": 1, "required": 7} for key in table.checker.NAMES},
@@ -83,7 +87,7 @@ def test_failed_unit_gate_preserves_table_and_never_runs_probes(generation, monk
         table.regenerate(**kwargs)
     assert "probes" not in calls
     assert page.read_bytes() == original
-    assert not (root / table.ASSETS).exists()
+    assert not (kwargs["output"] / "generation_report.json").exists()
 
 
 def test_evidence_failures_publish_commit_runtime_and_test_provenance(generation):
@@ -92,13 +96,13 @@ def test_evidence_failures_publish_commit_runtime_and_test_provenance(generation
     assert calls == ["revision", "runner", "pi", "checker", "revision", "probes", "revision"]
     text = page.read_text()
     assert text.startswith("Introduction\n") and text.endswith("\nDeprecated C-table\n")
-    assert COMMIT in text and "synthetic-runtime-v1" in text
-    assert "## pi" in text and "| **Schema** |" in text and "`calls.outcome` | ✗" in text
-    assert "## hermes" in text and "No check results available | ✗" in text
-    (asset,) = (root / table.ASSETS).glob("*.json")
-    assert asset.name in text
-    report = json.loads(asset.read_text())
+    assert COMMIT in text
+    assert "### `pi`" in text and "| **Schema** |" in text and "`calls.outcome` | ✗" in text
+    assert "`hermes` | Not measured | —" in text
+    assert not (root / "fern/assets").exists()
+    report = json.loads((kwargs["output"] / "generation_report.json").read_text())
     assert report["gym_commit"] == COMMIT
+    assert report["runtimes"]["pi"]["version"] == "synthetic-runtime-v1"
     assert set(report["tests"]) == {"runner", "pi", "checker"}
 
 
@@ -129,7 +133,7 @@ def test_failed_generation_preserves_previous_table(generation, monkeypatch, pro
     with pytest.raises(ValueError):
         table.regenerate(**kwargs)
     assert page.read_bytes() == original
-    assert not (root / table.ASSETS).exists()
+    assert not (kwargs["output"] / "generation_report.json").exists()
 
 
 @pytest.mark.parametrize(

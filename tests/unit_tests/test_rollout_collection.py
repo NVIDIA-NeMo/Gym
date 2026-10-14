@@ -60,6 +60,7 @@ from nemo_gym.rollout_collection import (
     NG_DISPATCH_DRAINED_KEY,
     NG_ENVIRONMENT_SERVER_KEY,
     NG_FAILURE_CLASS_KEY,
+    NG_FAILURE_JUDGE_ERROR_KEY,
     NG_NO_PERSIST_KEY,
     NG_PERF_KEY,
     NG_TERMINAL_KEY,
@@ -9199,6 +9200,32 @@ class TestEnvironmentServerRouting:
 
         with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_trajectory'\]"):
             nemo_gym.rollout_collection._episode_record(reply)
+
+    def test_episode_result_from_a_failed_judge_keeps_its_failure_class(self) -> None:
+        """judge_failsafe's verify result stays a result and keeps the class that routes it to the failures file."""
+        result = {
+            "reward": 0.0,
+            "mask_sample": True,
+            "failure_kind": "judge_failed",
+            NG_FAILURE_CLASS_KEY: "judge_failed",
+            NG_FAILURE_JUDGE_ERROR_KEY: "judge timed out",
+        }
+
+        record = nemo_gym.rollout_collection._episode_record(self._native_identity("a") | {"result": result})
+
+        assert record[NG_FAILURE_CLASS_KEY] == "judge_failed"
+        assert record[NG_FAILURE_JUDGE_ERROR_KEY] == "judge timed out"
+        assert record["mask_sample"] is True
+
+    def test_episode_result_may_not_pair_a_failure_class_with_another_value(self) -> None:
+        reply = self._native_identity("a") | {"result": {"reward": 0.0, NG_FAILURE_CLASS_KEY: "agent_run_error"}}
+        with pytest.raises(ValueError, match=rf"reserved for rollout collection: \['{NG_FAILURE_CLASS_KEY}'\]"):
+            nemo_gym.rollout_collection._episode_record(reply)
+
+    def test_failed_judge_result_may_not_use_other_collector_keys(self) -> None:
+        result = {"reward": 0.0, NG_FAILURE_CLASS_KEY: "judge_failed", "ng_trajectory": {}}
+        with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_trajectory'\]"):
+            nemo_gym.rollout_collection._episode_record(self._native_identity("a") | {"result": result})
 
     def test_episode_detection_needs_object_identities_and_an_object_failure(self) -> None:
         """An agent reply echoing identity fields as strings is not an episode reply; a bad failure is an error."""

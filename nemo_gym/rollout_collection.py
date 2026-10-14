@@ -61,7 +61,7 @@ from nemo_gym.config_types import (
 from nemo_gym.deliverables import is_deliverable
 from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.failure_kinds import CANCELLED, is_namespaced, is_registered
+from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -204,6 +204,7 @@ NG_NO_PERSIST_KEY = "_ng_no_persist"
 # Set only by Gym, on the result it builds for a row the dispatch budget never started.
 NG_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+NG_FAILURE_JUDGE_ERROR_KEY = "_ng_failure_judge_error"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
 ENVIRONMENT_SERVER_FAILURE_CLASS = "environment_server_failed"
@@ -393,12 +394,24 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     result = response.get("result")
     if not isinstance(result, Mapping):
         raise ValueError(f"environment server reply for task {task_id!r} carries a non-object result: {result!r}")
+    judge_failure: Dict[str, Any] = {}
+    if result.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED:
+        # judge_failsafe's 200 verify result; stays a result so reverify can re-judge it.
+        judge_failure = {
+            NG_FAILURE_CLASS_KEY: JUDGE_FAILED,
+            NG_FAILURE_JUDGE_ERROR_KEY: result.get(NG_FAILURE_JUDGE_ERROR_KEY),
+        }
+        # drop the judge failure keys from the result so it doesn't raise in _is_collector_key
+        # we don't want to modify the check itself because we want it to raise for other values
+        # of `NG_FAILURE_CLASS_KEY` field
+        result = {key: value for key, value in result.items() if key not in judge_failure}
     reserved = sorted(key for key in result if _is_collector_key(key))
     if reserved:
         raise ValueError(
             f"environment server result for task {task_id!r} uses keys reserved for rollout collection: {reserved}"
         )
-    record = dict(result)
+    # add judge failure info to the record
+    record = dict(result) | judge_failure
     record[NG_TASK_ID_KEY] = task_id
     return record
 
