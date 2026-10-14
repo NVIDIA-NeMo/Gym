@@ -18,7 +18,17 @@ import re
 import warnings
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Tag, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    PrivateAttr,
+    SerializationInfo,
+    Tag,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 
 # Reject unknown fields on all config models so typos in YAML surface immediately.
@@ -31,6 +41,32 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # (e.g. slurm_script.py) detect this prefix and emit an unquoted shell reference instead
 # of a literal, so the value is picked up from the job's actual environment at run time.
 RUNTIME_ENV_PREFIX = "runtime:"
+
+
+# `model_dump` context flag: write each `host:` env value as its `host:VAR` reference, so a
+# record meant for other readers never holds the submitter's resolved secrets.
+HOST_ENV_REFS = "host_env_refs"
+
+
+class _HostEnvRefs(BaseModel):
+    """Remembers which `env` values came from `host:` so a dump can write the reference back."""
+
+    _host_env_refs: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _keep_host_env_refs(cls, data: Any, handler: Any) -> Any:
+        model = handler(data)
+        raw = data.get("env") if isinstance(data, dict) else None
+        if isinstance(raw, dict):
+            model._host_env_refs = {k: v for k, v in raw.items() if isinstance(v, str) and v.startswith("host:")}
+        return model
+
+    @field_serializer("env", check_fields=False)
+    def _serialize_env(self, env: dict[str, str], info: SerializationInfo) -> dict[str, str]:
+        if info.context and info.context.get(HOST_ENV_REFS):
+            return {k: self._host_env_refs.get(k, v) for k, v in env.items()}
+        return env
 
 
 def resolve_env_dict(env: dict[str, str]) -> dict[str, str]:
@@ -76,10 +112,16 @@ class HealthCheckConfig(_StrictModel):
     timeout_seconds: int = 60
 
 
-class BaseServiceConfig(_StrictModel):
+class BaseServiceConfig(_HostEnvRefs, _StrictModel):
     container: str
     # Resolved to the sole compute resource name at validation time when not set.
     placement: str | None = None
+    # Name of a node pool in the placed compute's `node_pools`. Pins this service to
+    # that pool's slice of the allocation instead of letting it land wherever srun
+    # starts, which is how two services get nodes of their own -- a scorer or judge
+    # that cannot share a GPU with the policy, or a prefill/decode split. Pools take
+    # contiguous node ranges in declaration order. None means the whole allocation.
+    node_pool: str | None = None
     health_check: HealthCheckConfig | None = None
     # Values may be prefixed `lit:` (literal), `host:VAR` (read from the submitting
     # machine's env), or `runtime:VAR` (resolved from the job's own env at run time).
@@ -120,6 +162,8 @@ class VllmServiceConfig(BaseModelServiceConfig):
     use_ray_serve: bool = False
     # Raw extra flags appended verbatim to `vllm serve` (e.g. "--max-model-len 8192").
     extra_args: str = ""
+    # Port the data-parallel ranks of a multi-node service coordinate on.
+    data_parallel_rpc_port: int = 13345
 
     @field_validator("number_of_instances")
     @classmethod
@@ -150,13 +194,135 @@ def effective_ray_serve(service: "VllmServiceConfig", total_nodes: int, gpus_per
     return total_nodes > 1 and service.number_of_instances > 1 and tp_pp > max_gpus_per_node
 
 
+class VllmPDTierConfig(VllmServiceConfig):
+    """One tier of a `vllm_pd` service as deployed. Built by the service, never written by a user."""
+
+    nixl_side_channel_port: int
+    server_per_node: bool
+    kv_transfer_config: dict[str, str]
+
+
+# Set on the vllm_pd service, never on a tier: the service derives each tier's value.
+_PD_SERVICE_ONLY_FIELDS = ("server_per_node", "nixl_side_channel_port")
+_DECODE_NIXL_PORT_OFFSET = 1
+
+
+class VllmPDServiceConfig(BaseModelServiceConfig):
+    """Prefill/decode disaggregated vLLM: two tiers behind a vllm-router.
+
+    Deployed as three services named `<name>-prefill`, `<name>-decode` and `<name>`
+    (the router); `driver.policy_model` names the router.
+    """
+
+    type: Literal["vllm_pd"]
+    prefill: VllmServiceConfig
+    decode: VllmServiceConfig
+    # Run an independent server on every node of each tier's pool instead of one data-parallel
+    # engine across them. The router then lists each node as its own endpoint.
+    server_per_node: bool = False
+    # Prefill's NIXL side-channel port; decode uses this plus 1.
+    nixl_side_channel_port: int = 5600
+    prefill_policy: str = "cache_aware"
+    decode_policy: str = "cache_aware"
+    intra_node_data_parallel_size: int = 1
+    # An agentic benchmark holds a request open for a long time; the router must not give up on it.
+    request_timeout_secs: int = 86400
+    log_level: str = "error"
+    kv_connector: str = "NixlConnector"
+    # "fail" surfaces a broken KV transfer instead of silently recomputing the prefill.
+    kv_load_failure_policy: str = "fail"
+    _tiers: dict[str, VllmPDTierConfig] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_tier_defaults(cls, data: Any) -> Any:
+        # A tier inherits the model identity and container, and takes the next ports after
+        # the router's and prefill's, unless it sets its own.
+        if not isinstance(data, dict) or not all(isinstance(data.get(t), dict) for t in ("prefill", "decode")):
+            return data
+        for tier in ("prefill", "decode"):
+            misplaced = [f for f in _PD_SERVICE_ONLY_FIELDS if f in data[tier]]
+            if misplaced:
+                raise ValueError(
+                    f"{', '.join(misplaced)} is set on the {tier} tier. Set it on the vllm_pd service itself; "
+                    "it applies to both tiers."
+                )
+        inherited = {"type": "vllm", **{k: data[k] for k in ("container", "model", "served_model_name") if k in data}}
+        port = data.get("port", cls.model_fields["port"].default)
+        prefill = {**inherited, "port": port + 1, **data["prefill"]}
+        decode = {**inherited, "port": port + 2, **data["decode"]}
+        rpc_port = prefill.get(
+            "data_parallel_rpc_port", VllmServiceConfig.model_fields["data_parallel_rpc_port"].default
+        )
+        decode.setdefault("data_parallel_rpc_port", rpc_port + 1)
+        return {**data, "prefill": prefill, "decode": decode}
+
+    @model_validator(mode="after")
+    def _build_tiers(self) -> "VllmPDServiceConfig":
+        # Built once and kept private: the deploy-only values stay out of the saved config.
+        for name, tier, role, nixl_port in (
+            ("prefill", self.prefill, "kv_producer", self.nixl_side_channel_port),
+            ("decode", self.decode, "kv_consumer", self.nixl_side_channel_port + _DECODE_NIXL_PORT_OFFSET),
+        ):
+            # model_construct: the tier is already validated, and env prefixes must not resolve twice.
+            self._tiers[name] = VllmPDTierConfig.model_construct(
+                _fields_set=tier.model_fields_set,
+                **dict(tier),
+                nixl_side_channel_port=nixl_port,
+                server_per_node=self.server_per_node,
+                kv_transfer_config={
+                    "kv_connector": self.kv_connector,
+                    "kv_role": role,
+                    "kv_load_failure_policy": self.kv_load_failure_policy,
+                },
+            )
+        if self.health_check is None:
+            self.health_check = HealthCheckConfig(port=self.port)
+        elif self.health_check.port is None:
+            self.health_check.port = self.port
+        return self
+
+    def tiers(self, name: str) -> dict[str, VllmPDTierConfig]:
+        return {f"{name}-prefill": self._tiers["prefill"], f"{name}-decode": self._tiers["decode"]}
+
+
 class RayServiceConfig(BaseServiceConfig):
     type: Literal["ray"]
+    # Node pools the cluster spans. The head starts on the driver's node and every
+    # other node of these pools joins it as a worker. Empty: a single-node cluster.
+    node_pools: list[str] = []
+    port: int = 6379
+    # Custom Ray resources advertised by each spanned pool's nodes, keyed by pool,
+    # e.g. {"aux": {"extra_gpu": 4}}. A benchmark asks for these by name when it
+    # manages device placement itself.
+    resources: dict[str, dict[str, float]] = {}
+    num_cpus: int | None = None
+    num_gpus: int | None = None
+    # Raw extra flags appended verbatim to `ray start` on every node (e.g. fixed ports).
+    extra_args: str = ""
+
+    @model_validator(mode="after")
+    def _validate_shape(self) -> "RayServiceConfig":
+        if self.node_pool is not None:
+            raise ValueError(
+                f"A ray service spans `node_pools`, not a single `node_pool`; use node_pools: [{self.node_pool}]."
+            )
+        if len(set(self.node_pools)) != len(self.node_pools):
+            raise ValueError(f"A ray service's node_pools lists a pool more than once: {self.node_pools}.")
+        unspanned = sorted(set(self.resources) - set(self.node_pools))
+        if unspanned:
+            raise ValueError(
+                f"A ray service sets resources for {', '.join(unspanned)}, which it does not span "
+                f"(node_pools: {self.node_pools}). Add the pool to node_pools or drop its resources."
+            )
+        return self
 
 
 # Discriminated union keyed on `type`; Pydantic rejects unknown type values at parse time.
 ServiceConfig = Annotated[
-    Annotated[VllmServiceConfig, Tag("vllm")] | Annotated[RayServiceConfig, Tag("ray")],
+    Annotated[VllmServiceConfig, Tag("vllm")]
+    | Annotated[RayServiceConfig, Tag("ray")]
+    | Annotated[VllmPDServiceConfig, Tag("vllm_pd")],
     Discriminator("type"),
 ]
 
@@ -190,12 +356,56 @@ ComputeConfig = Annotated[
 ]
 
 
+class ResumeConfig(_StrictModel):
+    # Non-timeout failures (job script bugs, OOM, etc.) are resubmitted at most this many
+    # times, so a broken benchmark doesn't requeue forever.
+    max_retries: int = 3
+    # Optional cap on the chain's total accumulated walltime, as a Slurm-style
+    # duration string (e.g. "48:00:00"). None means resume until max_retries is
+    # hit on a non-timeout failure, or the job completes/is cancelled.
+    max_walltime: str | None = None
+
+
 class BenchmarkRunConfig(_StrictModel):
     # Hydra overrides forwarded to `gym eval prepare`. Flattened to +key=value tokens.
     prepare: dict[str, Any] = {}
     # Hydra overrides forwarded to `gym eval run`. policy_model wiring is injected here at
     # validation time so all executors see it uniformly via flatten_run_args.
     run: dict[str, Any] = {}
+    # Shell script the driver runs INSTEAD of `gym eval run`, for a benchmark whose
+    # harness is not Gym's own runner -- one that provisions external machines and
+    # drives Gym from there, for instance. `prepare` still runs first, and the
+    # driver exports NEMO_GYM_BENCH_DIR plus the policy's base URL, model name and
+    # API key (when driver.policy_model is set) so the script can reach the served
+    # model without repeating its address.
+    command: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_command(self) -> "BenchmarkRunConfig":
+        if self.command is not None and self.run:
+            raise ValueError(
+                "A benchmark sets both `command` and `run`, but `run` only configures `gym eval run`, which "
+                "`command` replaces. Fold those settings into the command, or drop it."
+            )
+        if self.command is not None and self.resume_config is not None:
+            raise ValueError(
+                "A benchmark sets both `command` and `resumable`, but a resumed job only passes "
+                "`resume_from_cache` to `gym eval run`, so a `command` would restart from zero. "
+                "Drop `resumable`, or run through `gym eval run`."
+            )
+        return self
+
+    # True enables auto-resume with ResumeConfig defaults; pass a ResumeConfig to tune
+    # max_retries/max_walltime. False (default) leaves fire-and-forget submission unchanged.
+    # Only executors that declare `supports_resumable = True` may set this (see
+    # SubmitConfig validation in submit.py). Not allowed with `command`.
+    resumable: bool | ResumeConfig = False
+
+    @property
+    def resume_config(self) -> ResumeConfig | None:
+        if self.resumable is False:
+            return None
+        return ResumeConfig() if self.resumable is True else self.resumable
 
 
 class GymInstallConfig(_StrictModel):
@@ -203,12 +413,16 @@ class GymInstallConfig(_StrictModel):
     ref: str  # Git tag or commit hash.
 
 
-class DriverConfig(_StrictModel):
+class DriverConfig(_HostEnvRefs, _StrictModel):
     container: str = "python:3.12"
     gym_install: GymInstallConfig | None = None
     # Name of a service in `services:` to use as the policy model. When set, injects
     # policy_base_url/policy_model_name/policy_api_key into each benchmark's run config.
     policy_model: str | None = None
+    # Host in the injected policy_base_url. localhost suits clients on the driver's
+    # node; an agent in a remote sandbox needs an address it can route to, e.g.
+    # "${oc.env:HEAD_NODE_IP}", resolved when the driver runs.
+    policy_host: str = "localhost"
     # Which responses_api_models asset serves as the policy, passed as
     # `--model-type`. Not every benchmark wants the same one: Gym permits exactly
     # one entry under `policy_model.responses_api_models`, so composing
@@ -238,11 +452,75 @@ class JobConfig(_StrictModel):
     output_path: str
 
 
+class OtelConfig(_StrictModel):
+    """An OpenTelemetry collector beside every benchmark job: scrapes each model service's
+    Prometheus `/metrics`, receives OTLP from the job's own processes on :4317/:4318, and ships
+    both to an OTLP/HTTP backend while keeping a copy under `<job dir>/otel/`. On by default, so
+    a run is observable unless it opts out; `endpoint` and `service_name` come from the
+    deployment's own config (a cluster fragment, typically) and are required while enabled."""
+
+    enabled: bool = True
+    # Collector binary: a path on the compute nodes (the release tarball's static `otelcol-contrib`
+    # on shared storage) when `container` is unset, else a path inside `container`.
+    binary: str = "otelcol-contrib"
+    # Optional image for the collector step. Unset runs the binary directly on the node, which is
+    # what enroot-based clusters need: the upstream collector image is distroless, and enroot
+    # cannot start a container without /bin/sh.
+    container: str | None = None
+    # OTLP/HTTP ingest base URL (`/v1/metrics` etc. are appended by the exporter).
+    endpoint: str | None = None
+    # Env var holding the ingest bearer token on the machine running `gym eval submit`. Read at
+    # submit time and forwarded into the job's environment; never written into the job directory.
+    token_env: str = "OTEL_TOKEN"
+    # Sent as the `service.name` resource attribute: the identity the backend routes the token by.
+    service_name: str | None = None
+    # Display identity of the scraped metrics in the backend (`service.name.override`).
+    component: str = "gym-vllm"
+    # Gym's own nemo-lens telemetry; needs `driver.gym_install`, which installs the `telemetry` extra.
+    gym_telemetry: bool = True
+    # Gym span groups to switch on: a preset or comma-separated names (`default`, `verify`, `sandbox`, ...).
+    gym_span_groups: str = "default,verify"
+    # Ship Gym's Python logging as OTel logs too (trace-correlated), through the same collector.
+    gym_logs: bool = True
+    # Node-level exporters that clusters commonly run as system services on every compute node;
+    # scraped on localhost when set, skipped when null. DCGM gives per-GPU activity/memory/power,
+    # node_exporter gives CPU/memory/network/disk. A closed port only logs scrape errors.
+    gpu_metrics_port: int | None = 9400
+    node_metrics_port: int | None = 9100
+    scrape_interval_seconds: int = 15
+    health_check_timeout_seconds: int = 300
+
+    @field_validator("token_env")
+    @classmethod
+    def _validate_token_env(cls, v: str) -> str:
+        if not _ENV_VAR_NAME_RE.match(v):
+            raise ValueError(f"otel.token_env: {v!r} is not a valid environment variable name")
+        return v
+
+    @field_validator("scrape_interval_seconds", "health_check_timeout_seconds")
+    @classmethod
+    def _validate_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"must be >= 1, got {v}")
+        return v
+
+
 class SubmitConfig(_StrictModel):
     services: dict[str, ServiceConfig]
     compute: dict[str, ComputeConfig]
     driver: DriverConfig
     job: JobConfig
+    otel: OtelConfig = OtelConfig()
+
+    @property
+    def deployed_services(self) -> dict[str, ServiceConfig]:
+        """`services` with each vllm_pd service expanded into its two tiers and its router."""
+        deployed: dict[str, ServiceConfig] = {}
+        for name, service in self.services.items():
+            if isinstance(service, VllmPDServiceConfig):
+                deployed.update(service.tiers(name))
+            deployed[name] = service
+        return deployed
 
     @model_validator(mode="after")
     def _resolve_and_validate_placements(self) -> "SubmitConfig":
@@ -256,14 +534,19 @@ class SubmitConfig(_StrictModel):
         total_nodes = (
             sum(p.nodes for p in compute.node_pools.values()) if isinstance(compute, SlurmComputeConfig) else 1
         )
-        is_multi_node = total_nodes > 1
-        gpus_per_node_values = (
-            [p.gpus_per_node for p in compute.node_pools.values() if p.gpus_per_node is not None]
-            if isinstance(compute, SlurmComputeConfig)
-            else []
-        )
 
-        for service_name, service in self.services.items():
+        pool_names = set(compute.node_pools) if isinstance(compute, SlurmComputeConfig) else set()
+
+        for name, service in self.services.items():
+            if isinstance(service, VllmPDServiceConfig):
+                taken = sorted(set(service.tiers(name)) & set(self.services))
+                if taken:
+                    raise ValueError(
+                        f"vllm_pd service '{name}' deploys its tiers as {', '.join(service.tiers(name))}, "
+                        f"but services already has {', '.join(taken)}. Rename one."
+                    )
+
+        for service_name, service in self.deployed_services.items():
             if service.placement is None:
                 service.placement = sole_compute
             elif service.placement not in compute_names:
@@ -272,26 +555,67 @@ class SubmitConfig(_StrictModel):
                     f"({', '.join(sorted(compute_names))})."
                 )
 
+            if isinstance(service, RayServiceConfig):
+                unknown = [pool for pool in service.node_pools if pool not in pool_names]
+                if unknown:
+                    raise ValueError(
+                        f"Service '{service_name}' node_pools {unknown} do not match any node pool of compute "
+                        f"'{service.placement}' ({', '.join(sorted(pool_names)) or 'none declared'})."
+                    )
+
+            if service.node_pool is not None and service.node_pool not in pool_names:
+                raise ValueError(
+                    f"Service '{service_name}' node_pool '{service.node_pool}' does not match any node pool of "
+                    f"compute '{service.placement}' ({', '.join(sorted(pool_names)) or 'none declared'})."
+                )
+
+            if isinstance(service, VllmPDTierConfig) and service.node_pool is None:
+                raise ValueError(
+                    f"Service '{service_name}' is a prefill/decode tier without a node_pool. Each tier needs nodes "
+                    "of its own: the two tiers run side by side and the router addresses each tier by its pool."
+                )
+
             if not isinstance(service, VllmServiceConfig):
                 continue
 
-            is_ray_serve = effective_ray_serve(service, total_nodes, gpus_per_node_values)
+            # A pinned service is sized against its own pool, not the whole job: one node of a
+            # ten-node allocation is a single-node deployment with that pool's GPUs, and judging
+            # it by the allocation total both mis-builds the command and mis-reports idle GPUs.
+            service_pools = (
+                {service.node_pool: compute.node_pools[service.node_pool]}
+                if service.node_pool is not None and isinstance(compute, SlurmComputeConfig)
+                else (compute.node_pools if isinstance(compute, SlurmComputeConfig) else {})
+            )
+            service_nodes = sum(p.nodes for p in service_pools.values()) or total_nodes
+            if isinstance(service, VllmPDTierConfig) and service.server_per_node:
+                if service.number_of_instances != 1:
+                    raise ValueError(
+                        f"Service '{service_name}' runs one server per node (server_per_node), so each node is one "
+                        f"instance; number_of_instances must be 1, got {service.number_of_instances}."
+                    )
+                # Each node serves on its own, so size it as a single-node deployment.
+                service_nodes = 1
+            service_gpus = [p.gpus_per_node for p in service_pools.values() if p.gpus_per_node is not None]
+
+            is_ray_serve = effective_ray_serve(service, service_nodes, service_gpus)
 
             if (
-                is_multi_node
+                service_nodes > 1
                 and service.number_of_instances > 1
-                and service.number_of_instances % total_nodes != 0
+                and service.number_of_instances % service_nodes != 0
                 and not is_ray_serve
             ):
                 raise ValueError(
                     f"Service '{service_name}' has number_of_instances={service.number_of_instances}, which must "
-                    f"be evenly divisible by the number of nodes ({total_nodes}) for multi-node data-parallel "
+                    f"be evenly divisible by the number of nodes ({service_nodes}) for multi-node data-parallel "
                     "deployment - each node hosts an equal share of the data-parallel replicas."
                 )
 
             self._validate_vllm_gpu_footprint(
-                service_name, service, total_nodes, compute, gpus_per_node_values, is_ray_serve
+                service_name, service, service_nodes, service_pools, service_gpus, is_ray_serve
             )
+
+        self._validate_pd_services(compute)
 
         if self.driver.policy_model is not None:
             if self.driver.policy_model not in self.services:
@@ -310,19 +634,41 @@ class SubmitConfig(_StrictModel):
                             f"Benchmark '{bench_name}' run config already sets {conflicts} "
                             f"but driver.policy_model is also set. Remove one."
                         )
-                    benchmark.run["policy_base_url"] = f"http://localhost:{service.port}/v1"
+                    benchmark.run["policy_base_url"] = f"http://{self.driver.policy_host}:{service.port}/v1"
                     benchmark.run["policy_model_name"] = service.served_model_name or service.model
                     # vLLM doesn't require auth; dummy key satisfies clients that require the header.
                     benchmark.run["policy_api_key"] = "dummy"  # pragma: allowlist secret
 
         return self
 
+    def _validate_pd_services(self, compute: "ComputeConfig") -> None:
+        pools = list(compute.node_pools) if isinstance(compute, SlurmComputeConfig) else []
+
+        for name, pd in self.services.items():
+            if not isinstance(pd, VllmPDServiceConfig):
+                continue
+
+            prefill_name, decode_name = pd.tiers(name)
+            if pd.prefill.data_parallel_rpc_port == pd.decode.data_parallel_rpc_port:
+                raise ValueError(
+                    f"Services '{prefill_name}' and '{decode_name}' share data_parallel_rpc_port "
+                    f"{pd.prefill.data_parallel_rpc_port}. Each tier binds the port on its own hosts, so the two "
+                    "tiers need different ones."
+                )
+
+            # The driver reaches the router over localhost from the allocation's first node.
+            if pd.node_pool is not None and pools and pd.node_pool != pools[0]:
+                raise ValueError(
+                    f"vllm_pd service '{name}' pins its router to node_pool '{pd.node_pool}', but the driver reaches "
+                    f"it over localhost and runs on the first node. Pin it to '{pools[0]}' or leave node_pool unset."
+                )
+
     def _validate_vllm_gpu_footprint(
         self,
         service_name: str,
         service: "VllmServiceConfig",
         total_nodes: int,
-        compute: "SlurmComputeConfig",
+        node_pools: dict[str, "NodePool"],
         gpus_per_node_values: list[int],
         is_ray_serve: bool,
     ) -> None:
@@ -335,9 +681,7 @@ class SubmitConfig(_StrictModel):
         if total_nodes > 1 and is_ray_serve:
             # Ray Serve's placement-group scheduler packs the aggregate footprint across the cluster.
             gpus_needed = tp_pp * service.number_of_instances
-            gpus_available = sum(
-                pool.nodes * pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node
-            )
+            gpus_available = sum(pool.nodes * pool.gpus_per_node for pool in node_pools.values() if pool.gpus_per_node)
             footprint = (
                 f"tensor_parallel_size={service.tensor_parallel_size} x "
                 f"pipeline_parallel_size={service.pipeline_parallel_size} x "
@@ -360,9 +704,7 @@ class SubmitConfig(_StrictModel):
         elif total_nodes > 1:
             # Single instance's TP/PP footprint spans the whole allocation via the ray backend.
             gpus_needed = tp_pp
-            gpus_available = sum(
-                pool.nodes * pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node
-            )
+            gpus_available = sum(pool.nodes * pool.gpus_per_node for pool in node_pools.values() if pool.gpus_per_node)
             footprint = (
                 f"tensor_parallel_size={service.tensor_parallel_size} x "
                 f"pipeline_parallel_size={service.pipeline_parallel_size}"

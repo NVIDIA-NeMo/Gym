@@ -1,0 +1,31 @@
+name: widesearch/configs/widesearch_kilocode
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: knowledge
+description: Broad web research with official strict table and item matching using
+  the kilocode harness and Exa search.
+modality: text
+licensing: MIT
+authors:
+- Christian Munley
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../widesearch_kilocode.yaml
+resources_server: widesearch
+agent_server: harness_exa_search
+datasets:
+- name: widesearch
+  type: benchmark
+  jsonl_fpath: benchmarks/widesearch/data/widesearch_benchmark.jsonl
+  prepare_script: benchmarks/widesearch/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

@@ -27,3 +27,11 @@ competitive_coding_challenges_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/competitive_coding_challenges/data/example.jsonl
+
+competitive_coding_challenges_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: competitive_coding_challenges_simple_agent

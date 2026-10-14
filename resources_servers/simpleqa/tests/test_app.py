@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 from pytest import approx, fixture
 
+from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -192,6 +193,10 @@ class TestSimpleQAServer:
             ),
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         )
+
+    async def test_reverify_mode(self, config: SimpleQAConfig) -> None:
+        resources_server = SimpleQAServer(config=config, server_client=MagicMock(spec=ServerClient))
+        assert await resources_server.get_reverify_mode() == ReverifyMode.STATELESS
 
     async def test_verify_correct(self, config: SimpleQAConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)

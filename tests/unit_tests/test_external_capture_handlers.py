@@ -3,6 +3,7 @@
 
 """External capture strategy lifecycle tests."""
 
+import copy
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -137,18 +138,6 @@ def test_handler_prepares_worker_staged_request(
     [
         ({"n": 2}, "requires n=1"),
         ({"offload_params": []}, "offload_params must be an object"),
-        (
-            {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}]}]},
-            "does not support multimodal content",
-        ),
-        (
-            {"messages": [{"role": "user", "content": [{"type": "audio_url", "audio_url": {"url": "data:,"}}]}]},
-            "does not support multimodal content",
-        ),
-        (
-            {"messages": [{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": ""}}]}]},
-            "does not support multimodal content",
-        ),
     ],
 )
 def test_megatron_handler_rejects_invalid_request_contract(request_payload: dict[str, Any], error: str) -> None:
@@ -160,6 +149,36 @@ def test_megatron_handler_rejects_invalid_request_contract(request_payload: dict
             MegatronWorkerCaptureHandler().prepare_request(request_payload)
     finally:
         reset_token_sink(token)
+
+
+@pytest.mark.parametrize(
+    "content_part",
+    [
+        {"type": "image_url", "image_url": {"url": "data:,"}},
+        {"type": "video_url", "video_url": {"url": "data:,"}},
+    ],
+    ids=["image", "video"],
+)
+def test_megatron_handler_admits_multimodal_requests(content_part: dict[str, Any]) -> None:
+    # Media reaches the sink as staging attachments, so a request carrying image or
+    # video parts is admitted exactly like a text request.
+    request_payload = {
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "describe"}, content_part]}],
+    }
+    # prepare_request mutates and returns the same dict; snapshot the messages first.
+    expected_messages = copy.deepcopy(request_payload["messages"])
+    store = InMemoryLineageStore()
+    context = _root_context(store)
+    token = set_token_sink(context)
+    try:
+        payload = MegatronWorkerCaptureHandler().prepare_request(request_payload)
+    finally:
+        reset_token_sink(token)
+
+    assert payload["messages"] == expected_messages
+    assert payload["offload_params"]["ng_capture"] == context.capture_admission.model_dump(mode="json")
+    assert payload["logprobs"] is True
+    assert payload["top_logprobs"] == 0
 
 
 def _staged_coords(**overrides: Any) -> dict[str, Any]:
@@ -302,6 +321,37 @@ async def test_handler_finalization_updates_lineage_and_cleans_transport(handler
         _assert_transport_fields_stripped(payload)
     else:
         _assert_poisoned(manifest, context, payload, case.expected_failure)
+
+
+@pytest.mark.asyncio
+@HANDLER_CLASSES
+@pytest.mark.parametrize("previous_worker_response", [False, True])
+async def test_handler_leaves_synthetic_completion_uncommitted(handler_cls, previous_worker_response) -> None:
+    handler = handler_cls()
+    if previous_worker_response:
+        previous_context = _root_context(InMemoryLineageStore())
+        payload = _transport_payload()
+        payload["ng_commit_coords"] = _staged_coords()
+        await _prepare_and_finalize(handler, previous_context, payload)
+        assert previous_context.committed
+
+    store = InMemoryLineageStore()
+    context = _root_context(store)
+    token = set_token_sink(context)
+    try:
+        # Sending a request does not imply that a worker completion arrived:
+        # context-overflow errors are converted into synthetic completions.
+        handler.prepare_request({})
+        await handler.finalize_response(
+            {"id": "synthetic", "choices": [{"message": {"role": "assistant", "content": None}}]}
+        )
+    finally:
+        reset_token_sink(token)
+
+    assert not context.committed
+    manifest = await store.manifest("rollout-1")
+    assert manifest["records"] == []
+    assert manifest["failures"] == []
 
 
 class _FaultyLedger(InMemoryLineageStore):

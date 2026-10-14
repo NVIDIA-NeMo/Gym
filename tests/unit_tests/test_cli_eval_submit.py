@@ -438,12 +438,55 @@ class TestEvalSubmitResolveOnly:
         config = SubmitConfig.model_validate(
             {"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, "job": JOB}
         )
-        _NoRunExecutor().persist(_record(), config, lambda path, text: written.__setitem__(path.name, text))
+        _NoRunExecutor().persist(_record(), config, lambda path, text, **_: written.__setitem__(path.name, text))
         capsys.readouterr()
 
         _eval_submit(_args(_config_file(tmp_path), resolve_only=True), overrides=[])
 
         assert capsys.readouterr().out == written[RESOLVED_CONFIG_NAME] + "\n"
+
+    def test_host_env_is_a_reference_in_the_record_and_in_resolve_only(self, tmp_path, monkeypatch, capsys):
+        """The record may be read by another account (certification), so a `host:` value is written
+        as its reference, never the resolved secret, and --resolve-only prints the same form."""
+        _capture_submit(monkeypatch)
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        monkeypatch.setenv("GYM_TEST_SECRET", "s3cr3t-value")
+        env = {"API_KEY": "host:GYM_TEST_SECRET", "MODE": "lit:fast", "LATE": "runtime:LATE"}
+        raw = {
+            "services": {"svc": {**SERVICE, "env": env}},
+            "compute": COMPUTE,
+            "driver": {**DRIVER, "env": env},
+            "job": JOB,
+        }
+        config_path = tmp_path / "submit.yaml"
+        config_path.write_text(yaml.dump(raw))
+        config = SubmitConfig.model_validate(yaml.safe_load(config_path.read_text()))
+        assert config.driver.env["API_KEY"] == "s3cr3t-value"  # job.sh still gets the real value
+        written = {}
+
+        class _NoRunExecutor(BaseExecutor):
+            def run(self, config, *, dry_run: bool = False):
+                raise AssertionError("persist() does not go through run()")
+
+        _NoRunExecutor().persist(
+            _record(), config, lambda path, text, **kw: written.__setitem__(path.name, (text, kw))
+        )
+        record_text, record_kwargs = written[RESOLVED_CONFIG_NAME]
+        record = yaml.safe_load(record_text)
+
+        assert "s3cr3t-value" not in record_text
+        assert record_kwargs.get("private") is not True
+        for env_out in (record["driver"]["env"], record["services"]["svc"]["env"]):
+            assert env_out == {"API_KEY": "host:GYM_TEST_SECRET", "MODE": "fast", "LATE": "runtime:LATE"}
+
+        capsys.readouterr()
+        _eval_submit(_args(config_path, resolve_only=True), overrides=[])
+        assert capsys.readouterr().out == record_text + "\n"
+
+        _eval_submit(_args(config_path, resolve_only=True, json_output=True), overrides=[])
+        json_out = capsys.readouterr().out
+        assert "s3cr3t-value" not in json_out
+        assert json.loads(json_out)["driver"]["env"]["API_KEY"] == "host:GYM_TEST_SECRET"
 
     def test_overrides_are_applied_before_printing(self, tmp_path, monkeypatch, capsys):
         _capture_submit(monkeypatch)
@@ -484,6 +527,8 @@ class TestEvalSubmitThroughTheRealCli:
 
     def _fake_executor(self, monkeypatch, record):
         class _FakeExecutor:
+            supports_resumable = False
+
             def run(self, config, *, dry_run: bool = False):
                 return record
 

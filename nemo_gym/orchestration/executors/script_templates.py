@@ -134,11 +134,13 @@ def render_vllm_ray_symmetric_run(inner_cmd: str, total_nodes: int, resource_fla
     )
 
 
-def render_health_check(name: str, port: int, path: str, timeout: int) -> str:
+def render_health_check(name: str, port: int, path: str, timeout: int, host: str = "localhost") -> str:
+    """`host` is emitted verbatim so it may be a shell expansion: a service pinned to
+    a node pool answers on that pool's head, not on the node running this script."""
     return _HEALTH_WAIT_MULTI.format(
         name=name,
         name_upper=bash_var(name),
-        url=f"http://localhost:{port}",
+        url=f"http://{host}:{port}",
         path=path,
         max_attempts=timeout // 5,
     )
@@ -175,13 +177,26 @@ def render_driver_entrypoint(
     repo: str | None,
     ref: str | None,
     prepare_cmd: str | None,
+    command: str | None = None,
+    *,
+    extras: tuple[str, ...] = (),
 ) -> str:
     """Render the srun entrypoint for the driver step.
 
     When either gym_install or prepare is needed, wraps everything in a single
     bash -c so prepare and run happen in the same srun step and container.
+
+    `command` replaces the `gym eval run` invocation for a benchmark whose harness
+    is not Gym's own runner. It is emitted verbatim, so it may be a multi-line
+    script; everything before it (the install, and prepare) is unchanged.
+
+    `extras` are optional-dependency groups installed with the checkout; the server
+    venvs Gym builds copy their telemetry packages from this process, so the driver
+    is where `telemetry` has to be installed for any server to have it.
     """
     preamble: list[str] = []
+    # Double quotes: the whole preamble ends up inside a single-quoted `bash -c` block.
+    install_target = f'".[{",".join(extras)}]"' if extras else "."
 
     if repo and ref:
         # Clone to /tmp rather than the job directory: a checkout plus its .venv
@@ -201,16 +216,22 @@ def render_driver_entrypoint(
             # EXTERNALLY-MANAGED (PEP 668), so no --break-system-packages override needed either.
             "uv venv --seed .venv",
             "source .venv/bin/activate",
-            "uv pip install -e .",
+            f"uv pip install -e {install_target}",
         ]
 
     if prepare_cmd:
         preamble.append(prepare_cmd)
 
-    if not preamble:
-        return '"${GYM_CMD[@]}"'
+    if command is None:
+        if not preamble:
+            return '"${GYM_CMD[@]}"'
+        preamble.append('exec "$@"')
+        body = "\n    ".join(["set -euo pipefail", *preamble])
+        body = escape_for_single_quoted_block(body)
+        return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""
 
-    preamble.append('exec "$@"')
-    body = "\n    ".join(["set -euo pipefail", *preamble])
+    # No GYM_CMD array to hand over: the command IS the final statement, so there
+    # is nothing to `exec "$@"` and no trailing `-- "${GYM_CMD[@]}"`.
+    body = "\n    ".join(["set -euo pipefail", *preamble, command])
     body = escape_for_single_quoted_block(body)
-    return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""
+    return f"bash -c '\n    {body}\n'"

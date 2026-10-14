@@ -26,6 +26,7 @@ class _Agent(SimpleResponsesAPIAgent):
 
 def _seed_request(*, tool_accesses=None) -> AgentSeedSessionRequest:
     return AgentSeedSessionRequest(
+        agent_session_id="agent-session",
         episode_id=EpisodeId(rollout_id="rollout", attempt=2),
         task_id=TaskId(taskset="test", task_id="task"),
         tool_accesses=tool_accesses or [],

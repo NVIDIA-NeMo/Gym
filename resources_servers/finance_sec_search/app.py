@@ -36,7 +36,6 @@ from typing import Any, Dict, List, Literal, Optional
 
 import aiohttp
 import yaml
-from bs4 import BeautifulSoup
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, field_validator
 from starlette.requests import Request
@@ -58,16 +57,24 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
-from resources_servers.finance_sec_search.local_edgar_search import (
+from resources_servers.sec_local_index.edgar_search_service import EdgarSearchService
+from resources_servers.sec_local_index.html_text import html_to_text
+from resources_servers.sec_local_index.live_edgar_search import LiveEdgarSearch
+from resources_servers.sec_local_index.local_edgar_search import (
     LocalEdgarSearch,
     canonical_url_key,
 )
+from resources_servers.sec_local_index.sec_urls import parse_sec_archives_url
 
 
 logger = logging.getLogger(__name__)
 
 FILING_READ_SOURCES = ("cache", "sec-corpus", "live")
 FILING_READ_LOG_INTERVAL_SEC = 1800.0
+
+# The Vals v1 benchmark's evaluation cutoff. Dates beyond it are clamped so a
+# rollout cannot see filings the benchmark's answers do not account for.
+DEFAULT_MAX_END_DATE = "2025-04-07"
 
 # The judge explains first and ends with its verdict as "[[N]]" (#2852).
 _JUDGE_RATING_RE = re.compile(r"\[\[(\d+)\]\]")
@@ -159,9 +166,19 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
         description="Per-rollout wall-clock time budget in seconds. When exceeded, tool calls return an error "
         "asking the model to submit immediately. Set to None to disable.",
     )
+    edgar_search_mode: Optional[Literal["live", "local"]] = Field(
+        default=None,
+        description="Where edgar_search reads filings from. 'live' queries sec-api.io and needs sec_api_key. "
+        "'local' reads local_edgar_index_path and makes no network call. Left unset, edgar_search is "
+        "unavailable. Other tools are unaffected.",
+    )
+    sec_api_key: Optional[str] = Field(
+        default=None,
+        description="sec-api.io key for edgar_search in live mode.",
+    )
     local_edgar_index_path: Optional[str] = Field(
         default=None,
-        description="Read-only SQLite FTS5 index used by edgar_search.",
+        description="Read-only SQLite FTS5 index used by edgar_search in local mode.",
     )
     local_edgar_metrics_dir: Optional[str] = Field(
         default=None,
@@ -170,7 +187,7 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
     local_edgar_metadata_path: Optional[str] = Field(
         default=None,
         description="Metadata sidecar for the local EDGAR index, built by "
-        "scripts/build_local_edgar_metadata.py. Defaults to the index path plus "
+        "resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py. Defaults to the index path plus "
         "'.metadata' when that file exists. Searches are far slower without it.",
     )
     max_end_date: Optional[str] = Field(
@@ -487,20 +504,50 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         self._filing_read_logged_at: Optional[float] = None
 
         self._local_edgar_search: Optional[LocalEdgarSearch] = None
-        if self.config.local_edgar_index_path:
+        self._edgar_search_service: Optional[EdgarSearchService] = None
+        cutoff = self.config.max_end_date or DEFAULT_MAX_END_DATE
+        mode = self.config.edgar_search_mode
+        if mode == "local":
+            if not self.config.local_edgar_index_path:
+                raise ValueError(
+                    "edgar_search_mode is 'local' but local_edgar_index_path is not set. Local mode serves "
+                    "edgar_search entirely from that index; without it every search would fail mid-rollout."
+                )
             self._local_edgar_search = LocalEdgarSearch(
                 self.config.local_edgar_index_path,
-                max_end_date=self.config.max_end_date or "2025-04-07",
+                max_end_date=cutoff,
                 metrics_dir=self.config.local_edgar_metrics_dir,
                 metadata_path=self.config.local_edgar_metadata_path,
             )
+            self._edgar_search_service = EdgarSearchService(
+                self._local_edgar_search,
+                max_end_date=cutoff,
+                on_results=self._record_dump_paths,
+            )
             logger.info(
-                "Local EDGAR search initialized from %s (metadata sidecar: %s)",
+                "edgar_search: local mode, index %s (metadata sidecar: %s, coverage %s)",
                 self.config.local_edgar_index_path,
                 self._local_edgar_search.metadata_path or "none",
+                self._local_edgar_search.coverage,
             )
+        elif mode == "live":
+            if not self.config.sec_api_key:
+                raise ValueError(
+                    "edgar_search_mode is 'live' but sec_api_key is not set. Set the key, or leave "
+                    "edgar_search_mode unset to run without edgar_search."
+                )
+            self._edgar_search_service = EdgarSearchService(
+                LiveEdgarSearch(
+                    self.config.sec_api_key,
+                    session_provider=self._get_session,
+                    max_retries=self.config.max_retries,
+                    request_timeout=self.config.request_timeout,
+                ),
+                max_end_date=cutoff,
+            )
+            logger.info("edgar_search: live mode against sec-api.io")
         else:
-            logger.info("local_edgar_index_path is not configured — edgar_search will be unavailable")
+            logger.info("edgar_search: unavailable — edgar_search_mode is not set")
 
     def _get_session_storage(self, session_id: str) -> Dict[str, str]:
         """Get or create the data storage dict for a session."""
@@ -927,20 +974,14 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
     def _parse_sec_url(self, url: str) -> Optional[Dict[str, str]]:
         """Parse SEC URL to extract CIK, accession number, and document filename."""
-        # URL format: https://www.sec.gov/Archives/edgar/data/{CIK}/{ACCESSION_NODASH}/{document}
-        pattern = r"sec\.gov/Archives/edgar/data/(\d+)/(\d+)/([^?#]*)"
-        match = re.search(pattern, url)
-        if match:
-            cik = match.group(1).zfill(10)
-            acc_nodash = match.group(2)
-            document = match.group(3).strip("/")
-            # Convert to formatted accession: 0001234567-12-123456
-            if len(acc_nodash) == 18:
-                accession = f"{acc_nodash[:10]}-{acc_nodash[10:12]}-{acc_nodash[12:]}"
-            else:
-                accession = acc_nodash
-            return {"cik": cik, "accession_number": accession, "document": document}
-        return None
+        parsed = parse_sec_archives_url(url)
+        if parsed is None:
+            return None
+        return {
+            "cik": parsed.padded_cik,
+            "accession_number": parsed.dashed_accession,
+            "document": parsed.document_path,
+        }
 
     def _url_to_filing_path(self, url: str) -> Optional[Path]:
         """Convert a SEC EDGAR URL to its local cache file path.
@@ -1040,32 +1081,16 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     # ========================================================================
 
     async def edgar_search(self, request: Request, body: EdgarSearchRequest) -> EdgarSearchResponse:
-        """Search the local SQLite EDGAR full-text index."""
+        """Full-text search EDGAR, from the local index or sec-api.io."""
         if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
             return EdgarSearchResponse(results=timeout_msg)
 
-        if self._local_edgar_search is None:
+        if self._edgar_search_service is None:
             return EdgarSearchResponse(
-                results=json.dumps(
-                    {"error": "edgar_search is not available. local_edgar_index_path is not configured."}
-                )
+                results=json.dumps({"error": "edgar_search is not available. edgar_search_mode is not set."})
             )
 
-        try:
-            results = await self._local_edgar_search.search_async(
-                search_query=body.search_query,
-                start_date=body.start_date or "1900-01-01",
-                end_date=body.end_date or self.config.max_end_date or "2025-04-07",
-                top_n_results=body.top_n_results,
-                page=body.page,
-                form_types=body.form_types,
-                ciks=body.ciks,
-            )
-            await self._record_dump_paths(results)
-            return EdgarSearchResponse(results=json.dumps(results, default=str))
-        except Exception as error:
-            logger.warning("edgar_search failed: %s", error)
-            return EdgarSearchResponse(results=json.dumps({"error": str(error)}))
+        return EdgarSearchResponse(results=await self._edgar_search_service.run(body.model_dump()))
 
     # ========================================================================
     # parse_html_page Endpoint
@@ -1074,14 +1099,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     @staticmethod
     def _parse_html_to_text(html_content: str) -> str:
         """Extract plain text from HTML."""
-        soup = BeautifulSoup(html_content, "html.parser")
-        for script_or_style in soup(["script", "style"]):
-            _ = script_or_style.extract()
-
-        text = soup.get_text()
-        lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        return "\n".join(chunk for chunk in chunks if chunk)
+        return html_to_text(html_content)
 
     async def _parse_html_page(self, url: str) -> str:
         """Fetch a URL and extract plain text, reusing the shared session."""
@@ -1550,4 +1568,8 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
+    # Root stays at WARNING: at INFO the HTTP client logs a line per model call.
+    logging.basicConfig(level=logging.WARNING)
+    for _logger_name in (__name__, "resources_servers"):
+        logging.getLogger(_logger_name).setLevel(os.environ.get("NEMO_GYM_LOG_LEVEL", "INFO").upper())
     FinanceAgentResourcesServer.run_webserver()

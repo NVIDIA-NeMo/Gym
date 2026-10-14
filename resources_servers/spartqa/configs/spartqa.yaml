@@ -27,3 +27,11 @@ spartqa_simple_agent:
         type: validation
         jsonl_fpath: resources_servers/spartqa/data/spartqa_test.jsonl
         license: CC-BY-SA-4.0
+
+spartqa_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: spartqa_simple_agent

@@ -118,6 +118,12 @@ def test_concurrent_native_agents_keep_credentials_out_of_tools_and_verifiers(mo
 
         async def request(method, url, **kwargs):
             kwargs.pop("_internal", None)
+            assert (
+                kwargs.pop("_server_name")
+                == {"model": "policy", "resources": "resources", "agent": "agent"}[urlsplit(url).hostname]
+            )
+            assert kwargs.pop("_control") is False
+            kwargs.pop("_resend_after_disconnect", None)
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=apps[urlsplit(url).hostname])) as http:
                 return Response(await http.request(method, url, **kwargs))
 

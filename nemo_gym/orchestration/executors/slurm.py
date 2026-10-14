@@ -17,13 +17,24 @@ import getpass
 import re
 import shlex
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
 from nemo_gym import __version__
-from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
+from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
+from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
+from nemo_gym.orchestration.executors.otel import (
+    COLLECTOR_CONFIG_NAME,
+    COLLECTOR_DIR,
+    otel_active,
+    render_collector_config,
+    resolve_token,
+    validate_destination,
+    validate_gym_telemetry,
+)
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     BenchmarkJob,
@@ -117,6 +128,9 @@ def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
     entries = [("driver", m) for m in config.driver.mounts]
     for name, service in config.services.items():
         entries += [(f"services.{name}", m) for m in service.mounts]
+        if isinstance(service, VllmPDServiceConfig):
+            for tier in ("prefill", "decode"):
+                entries += [(f"services.{name}.{tier}", m) for m in getattr(service, tier).mounts]
     srcs_by_label = [(label, mount.split(":")[0]) for label, mount in entries]
     if not srcs_by_label:
         return
@@ -142,16 +156,29 @@ class SlurmExecutor(BaseExecutor):
     bash inside the sbatch script (no container needed — they just poll HTTP).
     """
 
+    supports_resumable = True
+
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
         compute = next(iter(config.compute.values()))
         cluster = next(iter(config.compute))
         benchmark_names = list(config.driver.benchmarks)
         _validate_benchmark_names(benchmark_names)
+        # The remote lookup overlaps the other validation, staging, the SSH connect and the mount
+        # check; it is joined before anything is copied or queued, so a bad ref still fails first.
+        pool = ThreadPoolExecutor(max_workers=1)
+        ref_check = pool.submit(validate_gym_install_ref, config)
+        pool.shutdown(wait=False)
+        token = None
+        if otel_active(config):
+            validate_destination(config)
+            validate_gym_telemetry(config)
+            token = resolve_token(config)
         now = utc_now()
         gym_job_id = new_gym_job_id(now)
         remote_run_dir = Path(config.job.output_path) / gym_job_id
 
         if dry_run:
+            ref_check.result()
             self._dry_run(config, compute, remote_run_dir)
             return None
 
@@ -159,9 +186,12 @@ class SlurmExecutor(BaseExecutor):
             staging = self._stage(config, compute, remote_run_dir, Path(staging_str))
             with get_connection(compute.hostname) as conn:
                 _validate_mounts(config, conn)
+                ref_check.result()
                 conn.copy(staging, remote_run_dir)
+                token_export = [f"export {config.otel.token_env}={shlex.quote(token)}"] if token is not None else []
                 output = conn.run(
-                    [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
+                    token_export
+                    + [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
                 )
                 record = self._build_record(cluster, compute, gym_job_id, now, remote_run_dir, benchmark_names, output)
                 # Inside the connection, because that is the transport persist()
@@ -217,13 +247,28 @@ class SlurmExecutor(BaseExecutor):
             print(f"[dry-run] sbatch script for benchmark: {name}")
             print(f"{'=' * 60}")
             print(script)
+            if otel_active(config):
+                print(f"\n{'=' * 60}")
+                print(f"[dry-run] {COLLECTOR_DIR}/{COLLECTOR_CONFIG_NAME} for benchmark: {name}")
+                print(f"{'=' * 60}")
+                print(render_collector_config(config, name, remote_run_dir / name))
 
     def _stage(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path, staging: Path) -> Path:
+        # rsync -a copies these modes to the cluster. The temp dir is created 0700, which would
+        # hide the run from other users; job.sh holds resolved secrets, so it stays owner-only.
+        staging.chmod(0o755)
         for name, benchmark in config.driver.benchmarks.items():
             bench_dir = staging / name
             bench_dir.mkdir()
             (bench_dir / "logs").mkdir()
             (bench_dir / "artifacts").mkdir()
             script = build_sbatch_script(config, name, benchmark, compute, remote_run_dir / name)
-            (bench_dir / "job.sh").write_text(script)
+            job_script = bench_dir / "job.sh"
+            job_script.write_text(script)
+            job_script.chmod(0o600)
+            if otel_active(config):
+                (bench_dir / COLLECTOR_DIR).mkdir()
+                (bench_dir / COLLECTOR_DIR / COLLECTOR_CONFIG_NAME).write_text(
+                    render_collector_config(config, name, remote_run_dir / name)
+                )
         return staging

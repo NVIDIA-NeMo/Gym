@@ -54,3 +54,11 @@ deepsearchqa_agent:
           type: benchmark
           jsonl_fpath: benchmarks/deepsearchqa/data/deepsearchqa_benchmark.jsonl
           prepare_script: benchmarks/deepsearchqa/prepare.py
+
+deepsearchqa_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: deepsearchqa_agent

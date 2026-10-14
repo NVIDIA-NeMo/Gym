@@ -214,6 +214,7 @@ def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
 
 
 class HarborAgent(SimpleResponsesAPIAgent):
+    ray_enabled = True
     config: HarborAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)

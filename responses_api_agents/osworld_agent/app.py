@@ -1160,6 +1160,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
 
 
 class OSWorldAgent(SimpleResponsesAPIAgent):
+    ray_enabled = True
     config: OSWorldAgentConfig
     sem: Optional[Semaphore] = None
     model_config = ConfigDict(arbitrary_types_allowed=True)

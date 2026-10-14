@@ -7,10 +7,12 @@ from unittest.mock import MagicMock
 
 import anyio
 import pytest
+from fastapi import Body
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from nemo_gym.base_environment_server import BaseEnvironmentServer, BaseEnvironmentServerConfig, CleanupContext
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
@@ -52,6 +54,9 @@ class _EnvironmentServer(BaseEnvironmentServer[_Request, _Response]):
             task_id=request.task.task_id,
             result=request.task.task_input.value,
         )
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        return AggregateMetrics()
 
 
 def _request() -> _Request:
@@ -118,7 +123,7 @@ def test_failure_response_validates_base_failure_as_protocol_subclass() -> None:
     )
     response = server.failure_response(
         _request(),
-        EpisodeFailure(message="failed", terminal=True),
+        EpisodeFailure(failure_reason="failed", terminal=True),
     )
 
     assert isinstance(response.failure, _ProtocolFailure)
@@ -229,8 +234,8 @@ def test_internal_timeout_error_is_not_reported_as_episode_timeout() -> None:
     response = asyncio.run(server.run_request(_request()))
     assert response.failure is not None
     assert response.failure.terminal is True
-    assert "TimeoutError: dependency timed out" in response.failure.message
-    assert response.failure.message != "Episode timed out"
+    assert "TimeoutError: dependency timed out" in response.failure.failure_reason
+    assert response.failure.failure_reason != "Episode timed out"
 
 
 def test_episode_deadline_returns_retryable_typed_failure() -> None:
@@ -243,7 +248,7 @@ def test_episode_deadline_returns_retryable_typed_failure() -> None:
     server = _TimedOutEnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient))
     response = asyncio.run(server.run_request(_request()))
     assert response.failure is not None
-    assert response.failure.message == "Episode timed out"
+    assert response.failure.failure_reason == "Episode timed out"
     assert response.failure.terminal is False
 
 
@@ -259,7 +264,7 @@ def test_unhandled_error_returns_terminal_typed_failure() -> None:
     response = asyncio.run(server.run_request(_request()))
     assert response.failure is not None
     assert response.failure.terminal is True
-    assert "ValueError: invalid protocol state" in response.failure.message
+    assert "ValueError: invalid protocol state" in response.failure.failure_reason
 
 
 def test_caller_cancellation_waits_for_cleanup() -> None:
@@ -318,3 +323,125 @@ def test_anyio_level_cancellation_waits_for_cleanup() -> None:
 
     anyio.run(run)
     assert cleanup_finished.is_set()
+
+
+@pytest.mark.parametrize("classified", [False, True])
+def test_failure_metadata_survives_the_environment_http_boundary(classified: bool) -> None:
+    class FailureEnvironmentServer(_EnvironmentServer):
+        async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
+            return self.failure_response(
+                request,
+                EpisodeFailure(
+                    failure_reason="Judge unavailable",
+                    terminal=False,
+                    failure_kind="judge_failed" if classified else None,
+                    stage="verification" if classified else None,
+                ),
+            )
+
+    server = FailureEnvironmentServer(config=_environment_server().config, server_client=MagicMock(spec=ServerClient))
+    response = TestClient(server.setup_webserver()).post("/run", json=_request().model_dump(mode="json"))
+    assert response.status_code == 200
+    expected = {"failure_reason": "Judge unavailable", "terminal": False}
+    if classified:
+        expected.update(failure_kind="judge_failed", stage="verification")
+    assert response.json()["failure"] == expected
+    assert response.json()["result"] is None
+
+
+def test_admission_timeout_reports_its_stage_before_running_the_episode() -> None:
+    server = _environment_server(max_concurrent_episodes=1, queue_timeout_seconds=0.01)
+
+    async def run() -> _Response:
+        async with server._admission:
+            return await server.run_request(_request())
+
+    response = asyncio.run(run())
+    assert response.result is None
+    assert response.failure.failure_reason == "Episode admission timed out"
+    assert response.failure.stage == "admission"
+    assert response.failure.terminal is False
+
+
+@pytest.mark.parametrize("records_boundaries", [False, True])
+async def test_the_episodes_of_a_protocol_without_boundaries_are_restarts(records_boundaries: bool) -> None:
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant
+
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class _Blocking(_EnvironmentServer):
+        checkpoint_boundaries = records_boundaries
+
+        async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
+            started.set()
+            await release.wait()
+            return await super().run(request, cleanup)
+
+    config = _environment_server().config
+    server = _Blocking(config=config, server_client=MagicMock(spec=ServerClient))
+    participant = EnvironmentParticipant()
+    server._checkpoint = participant
+    running = asyncio.create_task(server.run_request(_request()))
+    await started.wait()
+
+    report = participant.readiness()
+    release.set()
+    await running
+
+    # A protocol that records no boundaries cannot continue an episode, so it never holds up a checkpoint.
+    assert report.restarts == ([] if records_boundaries else ["rollout-a1"])
+    assert report.blocker_count == (1 if records_boundaries else 0)
+
+
+async def test_a_refused_duplicate_run_leaves_the_live_episode_tracked() -> None:
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym._checkpoint.errors import ControlError
+
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class _Blocking(_EnvironmentServer):
+        checkpoint_boundaries = True
+
+        async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
+            started.set()
+            await release.wait()
+            return await super().run(request, cleanup)
+
+    server = _Blocking(config=_environment_server().config, server_client=MagicMock(spec=ServerClient))
+    participant = EnvironmentParticipant()
+    server._checkpoint = participant
+    running = asyncio.create_task(server.run_request(_request()))
+    await started.wait()
+    with pytest.raises(ControlError, match="already running"):
+        await server.run_request(_request())
+    # The duplicate owned nothing, so the live episode is still tracked: a checkpoint still waits for it.
+    tracked = participant.readiness().blocker_count
+    release.set()
+    await running
+
+    assert tracked == 1
+    assert participant.readiness().blocker_count == 0
+
+
+async def test_an_episode_is_untracked_even_if_its_cleanup_is_cancelled() -> None:
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant
+
+    class _CancelledCleanup(_EnvironmentServer):
+        checkpoint_boundaries = True
+
+        async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
+            async def cancelled() -> None:
+                # A retire's native task.cancel() landing while final cleanup runs.
+                raise asyncio.CancelledError
+
+            cleanup.register_cleanup("cancelled", cancelled)
+            return await super().run(request, cleanup)
+
+    server = _CancelledCleanup(config=_environment_server().config, server_client=MagicMock(spec=ServerClient))
+    participant = EnvironmentParticipant()
+    server._checkpoint = participant
+    with pytest.raises(asyncio.CancelledError):
+        await server.run_request(_request())
+
+    assert participant.readiness().blocker_count == 0
+    assert participant.export_records(None) == []

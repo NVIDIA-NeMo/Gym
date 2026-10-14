@@ -33,6 +33,14 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+# Separator between a namespace tool's group name and a member tool's name when
+# the group is flattened into plain function tools for a chat-completions
+# engine (``nemo_gym.responses_streaming``). Defined here because terminal
+# attribution needs it to strip the group name from a recorded call, and this
+# package must not import the server stack.
+NAMESPACE_TOOL_DELIMITER = "__"
+
+
 # These fields carry token metadata on a served response.
 # ``routed_experts`` is optional for MoE backends.
 TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts")

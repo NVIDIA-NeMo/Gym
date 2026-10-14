@@ -27,8 +27,8 @@ this module provides:
   way, and drops the fields the params model does not know;
 - the response-side synthesizer that re-emits a complete ``NeMoGymResponse`` as the minimal
   Responses SSE event sequence streaming clients require (``response.created`` ->
-  ``response.output_item.done`` per output item -> ``response.completed``), splitting flattened
-  function-call names back into ``namespace`` + ``name`` on the way out.
+  ``response.output_item.done`` per output item -> the matching completed/incomplete/failed
+  terminal event), splitting flattened function-call names back into ``namespace`` + ``name``.
 """
 
 import json
@@ -41,11 +41,10 @@ from openai.types.responses.response_create_params import ToolParam
 from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseInputItem
+from nemo_gym.token_id_capture.records import NAMESPACE_TOOL_DELIMITER
 
 
 LOG = logging.getLogger(__name__)
-
-NAMESPACE_TOOL_DELIMITER = "__"
 
 _PARAM_FIELDS = frozenset(NeMoGymResponseCreateParamsNonStreaming.model_fields)
 _TOOL_ADAPTER = TypeAdapter(ToolParam)
@@ -71,6 +70,43 @@ def flatten_namespace_tools(tools: Any) -> tuple[list[Any], NamespaceMap]:
             flat.append({**sub, "type": "function", "name": joined})
             ns_map[joined] = (namespace, str(sub["name"]))
     return flat, ns_map
+
+
+# The tool types ``drop_hosted_tools`` keeps: the model emits a call and the client runs it.
+# Every other tool type is dropped — the provider-hosted tools (web search, file search, code
+# interpreter, image generation, computer use, remote MCP) and client-executed built-in types
+# such as ``local_shell`` alike.
+_CLIENT_EXECUTED_TOOL_TYPES = frozenset({"function", "custom"})
+
+
+def _tool_kept(tool: Any, *, drop_custom_tools: bool, drop_hosted_tools: bool) -> bool:
+    """Whether a tool spec stays in the request; a dropped one is logged with the reason.
+
+    ``drop_custom_tools`` drops a Responses ``custom`` (free-form) tool. The conversion carries
+    it as a Chat Completions custom tool, which only a backend with free-form tool support
+    accepts; a backend that expresses function tools only would refuse the whole request
+    because of it.
+
+    ``drop_hosted_tools`` drops every tool type other than ``function`` and ``custom``. A backend
+    that serves no hosted tools cannot honor such a spec, and offering it to the model produces
+    calls nothing answers.
+    """
+    tool_type = tool.get("type") if isinstance(tool, dict) else None
+    if tool_type == "custom" and drop_custom_tools:
+        LOG.warning(
+            "Dropping custom tool %r from a streaming /v1/responses request: the backend expresses "
+            "function tools only.",
+            tool.get("name"),
+        )
+        return False
+    if drop_hosted_tools and tool_type not in _CLIENT_EXECUTED_TOOL_TYPES:
+        LOG.warning(
+            "Dropping hosted tool %r from a streaming /v1/responses request: the backend serves no hosted "
+            "tools, so the model sees only tools the client executes.",
+            tool_type,
+        )
+        return False
+    return True
 
 
 def _tool_valid(tool: Any) -> bool:
@@ -105,14 +141,17 @@ def _input_message_text(item: dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def sanitize_streaming_responses_body(body: dict[str, Any]) -> tuple[dict[str, Any], NamespaceMap]:
+def sanitize_streaming_responses_body(
+    body: dict[str, Any], *, drop_custom_tools: bool = False, drop_hosted_tools: bool = False
+) -> tuple[dict[str, Any], NamespaceMap]:
     """Map a streaming-dialect request body onto the strict non-streaming params shape.
 
     Returns the cleaned body dict (ready for ``NeMoGymResponseCreateParamsNonStreaming``
     validation) and the namespace map needed to restore namespaced call names in the
     synthesized SSE response. Tool entries that still fail per-entry validation after
     flattening are dropped with a warning rather than failing the whole request, since a
-    harness's exotic tool is better lost than the rollout.
+    harness's exotic tool is better lost than the rollout. ``drop_custom_tools`` and
+    ``drop_hosted_tools`` drop valid tool specs the backend cannot honor (see ``_tool_kept``).
     """
     body = deepcopy(body)
     # The params model only admits `stream: false` (Gym responses are non-streaming internally);
@@ -125,7 +164,12 @@ def sanitize_streaming_responses_body(body: dict[str, Any]) -> tuple[dict[str, A
     ns_map: NamespaceMap = {}
     if "tools" in body:
         tools, ns_map = flatten_namespace_tools(body.get("tools"))
-        body["tools"] = [tool for tool in tools if _tool_valid(tool)]
+        body["tools"] = [
+            tool
+            for tool in tools
+            if _tool_valid(tool)
+            and _tool_kept(tool, drop_custom_tools=drop_custom_tools, drop_hosted_tools=drop_hosted_tools)
+        ]
 
     # Replayed history: a namespaced call the client echoes back must match the flattened tool
     # name the model actually saw, so the conversation stays self-consistent for the backend.
@@ -134,6 +178,33 @@ def sanitize_streaming_responses_body(body: dict[str, Any]) -> tuple[dict[str, A
         kept_items = []
         carrier_tools: list[Any] = []
         for item in input_items:
+            if isinstance(item, dict) and item.get("type") == "message":
+                content = item.get("content")
+                if (
+                    item.get("role") == "assistant"
+                    and isinstance(content, list)
+                    and content
+                    and isinstance(content[0], dict)
+                    and content[0].get("type") in ("output_text", "refusal")
+                ):
+                    # Codex compaction replays output messages without these
+                    # response-only fields. Fill absent defaults without changing
+                    # text, supplied values, or malformed values such as null.
+                    item.setdefault("id", f"msg_{uuid4().hex}")
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "output_text":
+                            part.setdefault("annotations", [])
+                # Known messages must reach strict validation: silently dropping
+                # malformed history would let the model answer a different task.
+                kept_items.append(item)
+                continue
+            if isinstance(item, dict) and item.get("type") == "reasoning":
+                # Codex 0.144.4 replays complete reasoning content without its ID.
+                # Supply only that missing identifier; retain malformed reasoning
+                # for strict request validation instead of losing model history.
+                item.setdefault("id", f"rs_{uuid4().hex}")
+                kept_items.append(item)
+                continue
             if isinstance(item, dict) and item.get("type") == "function_call" and item.get("namespace"):
                 item["name"] = f"{item.pop('namespace')}{NAMESPACE_TOOL_DELIMITER}{item.get('name')}"
             # Codex's code mode ships tools inside an `additional_tools` input item instead of the
@@ -178,6 +249,12 @@ def sanitize_streaming_responses_body(body: dict[str, Any]) -> tuple[dict[str, A
         # strict chat backends require.
         leading_parts = [body.get("instructions") or ""]
         while kept_items and _is_system_like_message(kept_items[0]):
+            try:
+                _INPUT_ITEM_ADAPTER.validate_python(kept_items[0])
+            except ValidationError:
+                # Keep malformed leading messages for the strict request error,
+                # rather than losing their invalid content while hoisting text.
+                break
             leading_parts.append(_input_message_text(kept_items.pop(0)))
         hoisted = "\n\n".join(part for part in leading_parts if part)
         if hoisted:
@@ -252,22 +329,46 @@ def restore_namespace_tool_calls(items: list[dict], ns_map: NamespaceMap) -> lis
     return restored
 
 
+def _wire_usage(usage: Any) -> Any:
+    """Return the usage object with integer detail counts, as the Responses wire schema types them.
+
+    Gym keeps an unreported cache or reasoning breakdown as ``None`` internally to tell unknown
+    from zero. On the wire those counts are integers, and a strict streaming client (the Codex
+    CLI) that meets ``null`` fails to parse ``response.completed``, treats the stream as
+    disconnected, and re-sends the whole request.
+    """
+    if not isinstance(usage, dict):
+        return usage
+    usage = dict(usage)
+    for group, name in (("input_tokens_details", "cached_tokens"), ("output_tokens_details", "reasoning_tokens")):
+        details = usage.get(group)
+        if details is None:
+            usage[group] = {name: 0}
+        elif isinstance(details, dict) and details.get(name) is None:
+            usage[group] = {**details, name: 0}
+    return usage
+
+
 def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[NamespaceMap] = None) -> Iterator[str]:
     """Re-emit a complete Responses API response object as an SSE event stream.
 
-    Streaming clients build their view of the turn from ``response.output_item.done`` events and
-    treat ``response.completed`` (which carries the response id and usage) as the terminal event,
-    so those two are the required minimum; ``response.created`` is included for clients that wait
-    for an acknowledgement before reading items.
+    Streaming clients build their view of the turn from ``response.output_item.done`` events.
+    The terminal event reflects the response status, retaining partial output, usage and failure
+    details; ``response.created`` is included for clients waiting for an acknowledgement.
     """
+    if "usage" in response_json:
+        response_json = {**response_json, "usage": _wire_usage(response_json["usage"])}
     output_items = restore_namespace_tool_calls(response_json.get("output") or [], ns_map or {})
-
     yield _sse_event(
         {"type": "response.created", "response": {**response_json, "status": "in_progress", "output": []}}
     )
     for index, item in enumerate(output_items):
         yield _sse_event({"type": "response.output_item.done", "output_index": index, "item": item})
-    yield _sse_event({"type": "response.completed", "response": {**response_json, "output": output_items}})
+    terminal_event = {
+        "incomplete": "response.incomplete",
+        "failed": "response.failed",
+    }.get(response_json.get("status"), "response.completed")
+    yield _sse_event({"type": terminal_event, "response": {**response_json, "output": output_items}})
 
 
 def synthesize_responses_failure_sse(message: str, *, code: str = "server_error") -> Iterator[str]:

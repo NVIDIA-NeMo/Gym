@@ -35,20 +35,40 @@ import os
 import re
 import time
 from abc import abstractmethod
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, ClassVar, Iterable, Mapping, Optional
+from typing import Any, AsyncIterator, ClassVar, Iterable, Literal, Mapping, NotRequired, Optional, TypedDict
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
-from fastapi import Body, FastAPI, Request, Response
+from aiohttp import ClientResponseError
+from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
+from nemo_gym._checkpoint.control import install_control_routes, install_participant
+from nemo_gym._checkpoint.model import (
+    CheckpointableLedger,
+    PolicyAdmissionMiddleware,
+    PolicyModelParticipant,
+    attach_capture_context,
+    generation_cut_requester,
+    ledger_removal_refusal,
+    reject_ungated_ledger_writers,
+    worker_control_root,
+)
+from nemo_gym._checkpoint.model_workers import (
+    COORDINATOR_SOCKET_ENV,
+    PolicyCoordinator,
+    PolicyWorkerLink,
+    coordinator_socket_path,
+)
+from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
+from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -64,12 +84,20 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.rollout_observability import (
+    NG_AGENT_OBSERVATIONS_KEY,
+    AgentObservationBundle,
+    ObservationGap,
+    TrajectoryRecord,
+    join_assistant_message_calls,
+    join_model_call_observations,
+)
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
     SimpleServer,
+    is_nemo_gym_fastapi_worker,
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -97,9 +125,32 @@ from nemo_gym.token_id_capture.store import make_token_store
 
 logger = logging.getLogger(__name__)
 
+_CHAT_KEEPALIVE_SECONDS = 15.0
+_SSE_KEEPALIVE = SSE_KEEPALIVE
+
 
 # Stateless; shared by every model server's default /v1/messages handler.
 _ANTHROPIC_CONVERTER = AnthropicConverter()
+
+
+class ModelExecutionOutcome(TypedDict):
+    error_category: NotRequired[str]
+    upstream_attempted: bool
+    response_source: Literal["upstream", "local"] | None
+    upstream_status_code: int | None
+    local_response_reason: str | None
+
+
+def start_model_execution(request: Request, *, upstream_attempted: bool) -> ModelExecutionOutcome:
+    """Keep adapter-owned execution facts separate from the served response and capture settings."""
+    outcome = ModelExecutionOutcome(
+        upstream_attempted=upstream_attempted,
+        response_source=None,
+        upstream_status_code=None,
+        local_response_reason=None,
+    )
+    request.state.nemo_gym_model_execution = outcome
+    return outcome
 
 
 def _request_messages(body: Any) -> list[dict]:
@@ -174,13 +225,39 @@ def _orjson_dispatch_response(content: Any) -> Any:
     if isinstance(content, Response):
         return content
     if isinstance(content, BaseModel):
-        content = content.model_dump(mode="json")
+        content = content.model_dump(mode="json", by_alias=True)
     return Response(content=orjson.dumps(content), media_type="application/json")
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     # Exact successful routes whose responses cannot contain policy-generated content.
     token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
+    drop_hosted_tools: bool = Field(
+        default=False,
+        description=(
+            "Drop every tool type other than ``function`` and ``custom`` from a streaming Responses "
+            "request instead of passing it to the backend. That covers the provider-hosted tools (web "
+            "search, file search, code interpreter, image generation, computer use, remote MCP), which a "
+            "backend that serves none of them cannot honor, and also client-executed built-in types such "
+            "as ``local_shell``. Off by default, which passes every valid tool spec through."
+        ),
+    )
+    drop_custom_tools: bool = Field(
+        default=False,
+        description=(
+            "Drop Responses ``custom`` (free-form) tools from streaming requests instead of converting "
+            "them. A backend that expresses function tools only (a vLLM chat route, for example) answers "
+            "a request carrying one with 422, and the client retries the whole request. Off by default "
+            "so a backend with free-form tool support keeps them."
+        ),
+    )
+    # Only the policy instance drains during a partial-rollout checkpoint.
+    # Judge and simulator instances keep serving so accepted tool and verifier calls can finish.
+    checkpoint_policy: bool = False
+    # Ask inference workers to stage the prefix of each in-flight call at a checkpoint,
+    # so a restored call continues it instead of regenerating.
+    # Requires external token staging on workers that implement the generation-cut endpoint.
+    checkpoint_generation_cuts: bool = False
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -191,6 +268,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     # Subclasses can declare successful metadata or health routes here.
     # Unknown successful routes fail closed during training-token capture.
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
+    # Main process of a multi-worker policy server under checkpointing: coordinates the workers.
+    _policy_coordinator: Optional[PolicyCoordinator] = PrivateAttr(default=None)
 
     async def _finalize_served_response(self, response: Any) -> None:
         """Finalize capture after conversion to the response returned to the client."""
@@ -202,17 +281,38 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             # SSE generators serialize lazily. Finish that work before recording success.
             events = [event.encode("utf-8") if isinstance(event, str) else event for event in events]
             await self._finalize_served_response(response)
-        return StreamingResponse(iter(events), media_type="text/event-stream")
+        return StreamingResponse(
+            iter(events),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:
+        """Allow adapters to retain an explicit upstream-status compatibility policy."""
+        return True
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
+        @app.exception_handler(ClientResponseError)
+        async def upstream_error(request: Request, error: ClientResponseError) -> Response:
+            if not self._should_propagate_upstream_http_error(error):
+                raise error
+            # Preserve the provider's structured error while the buffered response
+            # is still uncommitted, including context limits and rate limits.
+            return Response(
+                content=getattr(error, "response_content", error.message),
+                status_code=error.status,
+                media_type=(error.headers or {}).get("Content-Type", "application/json"),
+            )
+
         self.setup_session_middleware(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        install_model_call_capture(
+        capture_ledger = install_model_call_capture(
             app,
             capture_config,
             model_server_name=self.config.name,
+            assistant_message_header=self.server_client.assistant_message_header(self.config.name),
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
             non_generating_requests=self.non_generating_model_routes
@@ -240,7 +340,89 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.messages", self.messages, model_attributes)
         )
 
+        self.setup_policy_checkpoint(app, capture_ledger)
         return app
+
+    def setup_policy_checkpoint(self, app: FastAPI, capture_ledger: CaptureLedger | None) -> None:
+        global_config_dict = getattr(self.server_client, "global_config_dict", None)
+        settings = checkpoint_settings(global_config_dict)
+        if settings is not None and capture_ledger is not None:
+            # Every model server sharing the run's capture ledger checks, so one outside the gate refuses to start.
+            reject_ungated_ledger_writers(global_config_dict)
+        if settings is None or not self.config.checkpoint_policy:
+            return
+        capture_settings = token_id_capture_config(global_config_dict)
+        if capture_settings is not None and capture_settings.enabled and capture_ledger is None:
+            raise ValueError(
+                "checkpoint_policy with token_id_capture requires external_staging: only the token-free "
+                "capture ledger is checkpointed, and the training framework owns the staged tokens"
+            )
+        if capture_ledger is not None and not isinstance(capture_ledger, CheckpointableLedger):
+            raise ValueError(f"checkpoint_policy requires a checkpointable capture ledger, got {type(capture_ledger)}")
+        cut_requester = None
+        if self.config.checkpoint_generation_cuts:
+            if capture_ledger is None:
+                raise ValueError("checkpoint_generation_cuts requires token_id_capture with external_staging")
+            cut_requester = generation_cut_requester(
+                capture_settings.token_id_capture.resolve_control_auth_token(),
+                control_root=self.generation_cut_control_root,
+            )
+        num_workers = self.config.num_workers or 1
+        if num_workers == 1:
+            participant = PolicyModelParticipant(
+                capture_ledger, server_name=self.config.name, cut_requester=cut_requester
+            )
+            install_participant(
+                app,
+                participant,
+                auth_token=settings.control_auth_token,
+                lease_grace_seconds=settings.lease_grace_seconds,
+                instance_name=self.config.name,
+            )
+            gate = participant.gate
+        elif not is_nemo_gym_fastapi_worker():
+            # The main process of a multi-worker server serves no requests.
+            # It coordinates the workers uvicorn is about to spawn;
+            # they inherit the socket path through the environment.
+            socket_path = coordinator_socket_path()
+            self._policy_coordinator = PolicyCoordinator(
+                capture_ledger,
+                expected_workers=num_workers,
+                instance_name=self.config.name,
+                lease_grace_seconds=settings.lease_grace_seconds,
+                socket_path=socket_path,
+            )
+            self._policy_coordinator.start_in_background()
+            os.environ[COORDINATOR_SOCKET_ENV] = socket_path
+            return
+        else:
+            link = PolicyWorkerLink(
+                socket_path=os.environ[COORDINATOR_SOCKET_ENV],
+                server_name=self.config.name,
+                cut_requester=cut_requester,
+                ledger=capture_ledger,
+            )
+            install_control_routes(app, link.dispatch, auth_token=settings.control_auth_token)
+            original_lifespan = app.router.lifespan_context
+
+            @asynccontextmanager
+            async def lifespan_with_coordinator(application: FastAPI) -> AsyncIterator[Any]:
+                await link.connect()
+                try:
+                    async with original_lifespan(application) as state:
+                        yield state
+                finally:
+                    await link.disconnect()
+
+            app.router.lifespan_context = lifespan_with_coordinator
+            gate = link.gate
+        # Outermost of this app's middleware: a refused call must not register capture intent.
+        app.add_middleware(PolicyAdmissionMiddleware, gate=gate)
+        app.state.nemo_gym_policy_gate = gate
+
+    def generation_cut_control_root(self, base_url: str) -> str:
+        """The URL root where the inference worker serving ``base_url`` takes generation cuts."""
+        return worker_control_root(base_url)
 
     @abstractmethod
     async def chat_completions(
@@ -262,9 +444,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         always do), the request is first sanitized from the streaming wire dialect (extra
         bookkeeping fields, ``namespace`` tool specs — see ``nemo_gym.responses_streaming``),
         delegated to the same ``responses()``, and the complete response is re-emitted as a
-        synthesized Responses SSE event stream. A ``responses()`` failure on this path is turned
-        into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
-        still fails eagerly, before the stream is committed).
+        synthesized Responses SSE event stream. Upstream HTTP errors and ``HTTPException``
+        retain their status before the stream starts. Other ``responses()`` failures become terminal
+        ``response.failed`` events; bad-request validation still fails eagerly.
         """
         if not body.get("stream"):
             params = _validate_responses_params(body)
@@ -273,7 +455,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await self._finalize_served_response(response)
             return dispatched
 
-        cleaned, ns_map = sanitize_streaming_responses_body(body)
+        cleaned, ns_map = sanitize_streaming_responses_body(
+            body,
+            drop_custom_tools=self.config.drop_custom_tools,
+            drop_hosted_tools=self.config.drop_hosted_tools,
+        )
         try:
             params = validate_streaming_responses_params(cleaned)
         except ValidationError as exc:
@@ -287,12 +473,18 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """Serve the same converted response to capture and Responses SSE clients."""
         try:
             response = await self._invoke_responses(request, params)
-            response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
+            response_json = (
+                response.model_dump(mode="json", by_alias=True) if isinstance(response, BaseModel) else dict(response)
+            )
             response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
             return await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
+        except (ClientResponseError, HTTPException):
+            # Generation is buffered: no headers or SSE bytes have been sent yet.
+            # Let the shared HTTP handler retain the upstream error code and body.
+            raise
         except Exception as exc:
-            # The streaming contract is already the response's shape, so a backend failure must be a
-            # terminal response.failed event, not an HTTP 500 the client would see as a broken stream.
+            # Keep the existing terminal-SSE fallback for failures without an
+            # upstream HTTP response to preserve.
             logger.exception("responses() failed while serving a streaming /v1/responses request")
             return StreamingResponse(
                 synthesize_responses_failure_sse(str(exc)),
@@ -310,8 +502,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         sanitized onto that same strict model (drop ``stream``/``stream_options``; see
         ``nemo_gym.chat_streaming``), validated identically, delegated to the same
         ``chat_completions()``, and the complete response is buffered and re-emitted as a
-        synthesized ``chat.completion.chunk`` SSE stream. This is buffer-then-replay, not
-        token-by-token streaming.
+        synthesized ``chat.completion.chunk`` SSE stream. Keepalive comments maintain the
+        connection while the backend computes; model output is still buffer-then-replay.
 
         Only a genuine boolean ``stream: true`` takes the streaming path; any other value
         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
@@ -326,11 +518,73 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         cleaned, include_usage = sanitize_streaming_chat_body(body)
         params = _validate_chat_params(cleaned)
-        completion = await self._invoke_chat_completions(request, params)
-        completion_json = completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
-        return await self._stream_served_response(
-            completion_json,
-            synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
+
+        async def completed_stream(completion: Any) -> StreamingResponse:
+            completion_json = (
+                completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
+            )
+            return await self._stream_served_response(
+                completion_json,
+                synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
+            )
+
+        pending = asyncio.create_task(self._invoke_chat_completions(request, params))
+        try:
+            # StreamingResponse commits HTTP headers before iterating its body.
+            # Wait here so fast backend failures retain normal HTTP error handling.
+            done, _ = await asyncio.wait({pending}, timeout=_CHAT_KEEPALIVE_SECONDS)
+            if done:
+                return await completed_stream(await pending)
+        except BaseException:
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+            raise
+
+        async def events() -> AsyncIterator[str | bytes]:
+            try:
+                # A long silent request can outlive the network's idle timeout even
+                # when both the client and backend allow hours for generation.
+                yield _SSE_KEEPALIVE
+                while not pending.done():
+                    done, _ = await asyncio.wait({pending}, timeout=_CHAT_KEEPALIVE_SECONDS)
+                    if not done:
+                        yield _SSE_KEEPALIVE
+                try:
+                    completion = await pending
+                except Exception as exc:
+                    logger.exception("chat_completions() failed after streaming headers were sent")
+                    status = getattr(exc, "status_code", None) or getattr(exc, "status", None) or 500
+                    detail = exc.detail if isinstance(exc, HTTPException) else "Model request failed"
+                    if isinstance(exc, ClientResponseError):
+                        # Headers are committed; apply the HTTP propagation policy to the SSE error instead.
+                        if self._should_propagate_upstream_http_error(exc):
+                            detail = getattr(exc, "response_content", None) or exc.message
+                            if isinstance(detail, bytes):
+                                detail = detail.decode(errors="replace")
+                        else:
+                            status = 500
+                    error = {
+                        "message": f"HTTP {status}: {detail}",
+                        "type": "server_error" if status >= 500 else "invalid_request_error",
+                        "code": status,
+                    }
+                    yield f"event: error\ndata: {json.dumps({'error': error})}\n\n"
+                    return
+                # Capture finalization and serialization failures must propagate:
+                # treating them as backend SSE errors would hide an invalid capture.
+                response = await completed_stream(completion)
+                async for event in response.body_iterator:
+                    yield event
+            finally:
+                if not pending.done():
+                    pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     async def _invoke_chat_completions(
@@ -721,6 +975,10 @@ class ModelCallRecord(BaseModel):
         default=None,
         description="Client-declared correlation identifier; evidence only, not a security boundary.",
     )
+    client_assistant_message_id: Optional[str] = Field(
+        default=None,
+        description="Persisted client assistant-message ID; retries may share it, model_call_id remains per attempt.",
+    )
 
     # Durable append order, not a causal or semantic order for concurrent calls.
     call_index: int
@@ -730,6 +988,10 @@ class ModelCallRecord(BaseModel):
     status_code: Optional[int] = None
     response_status: Optional[str] = None
     finish_reason: Optional[str] = None
+    upstream_attempted: Optional[bool] = None
+    response_source: Optional[Literal["upstream", "local"]] = None
+    upstream_status_code: Optional[int] = None
+    local_response_reason: Optional[str] = None
 
     # Wall-clock bounds around the downstream ASGI invocation, as UTC Unix timestamps. These are
     # for external trace correlation; durations use the monotonic latency fields below.
@@ -801,6 +1063,11 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
         client_session_id=(
             exchange.get("client_session_id") if isinstance(exchange.get("client_session_id"), str) else None
         ),
+        client_assistant_message_id=(
+            exchange.get("client_assistant_message_id")
+            if isinstance(exchange.get("client_assistant_message_id"), str)
+            else None
+        ),
         call_index=call_index,
         model_ref=exchange.get("model_ref"),
         model=model if isinstance(model, str) else None,
@@ -808,6 +1075,10 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
         status_code=exchange.get("status_code"),
         response_status=response.get("status") if isinstance(response.get("status"), str) else None,
         finish_reason=finish_reason,
+        upstream_attempted=exchange.get("upstream_attempted"),
+        response_source=exchange.get("response_source"),
+        upstream_status_code=exchange.get("upstream_status_code"),
+        local_response_reason=exchange.get("local_response_reason"),
         started_at=exchange.get("started_at"),
         completed_at=exchange.get("completed_at"),
         request=raw_request if isinstance(raw_request, dict) else None,
@@ -1208,6 +1479,7 @@ def _record(
     request_bytes: bytes,
     *,
     client_session_id: Optional[str] = None,
+    client_assistant_message_id: Optional[str] = None,
     rollout_id: str,
     model_call_id: str,
     started_at: float,
@@ -1218,6 +1490,7 @@ def _record(
     latency_ms: float,
     ttft_ms: Optional[float] = None,
     response_raw: Optional[str] = None,
+    execution: Optional[ModelExecutionOutcome] = None,
 ) -> None:
     """Append one exchange (success or failure). Best-effort: never raises."""
     request_body = None
@@ -1248,6 +1521,12 @@ def _record(
         }
         if client_session_id is not None:
             exchange["client_session_id"] = client_session_id
+        if execution is not None:
+            exchange.update(execution)
+            if execution["local_response_reason"] == "context_length_exceeded":
+                exchange["error_category"] = "context_length_exceeded"
+        if client_assistant_message_id is not None:
+            exchange["client_assistant_message_id"] = client_assistant_message_id
         if request_raw is not None:
             exchange["request_raw"] = request_raw
         if response_raw is not None:
@@ -1268,6 +1547,9 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         or not context.external_staging
         or context.capture_admission is None
         or context.committed
+        # A checkpoint gate owns a deferred row: it publishes it when the response starts,
+        # and a call whose response never starts made no answer to record, so it is not poisoned.
+        or context.deferred_commit is not None
         or context.lineage_store is None
     ):
         return
@@ -1318,11 +1600,15 @@ class _CaptureMiddleware:
         delta_records: bool = False,
         external_staging: bool = False,
         token_capture_enabled: bool = False,
+        assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
     ) -> None:
         self._app = app
         self._store = store
         self._model_server_name = model_server_name
+        self._assistant_message_header: bytes | None = (
+            assistant_message_header.lower() if assistant_message_header else None
+        )
         # This store records training tokens for correlated training-capture calls.
         self._token_store = token_store
         # Built from token_id_capture.sink, once, in this process.
@@ -1361,6 +1647,9 @@ class _CaptureMiddleware:
         method = str(scope.get("method") or "").upper()
         dialect = _OBSERVED_PATHS.get(path)
         known_non_generating = (method, path) in self._non_generating_requests
+
+        # State is shared with the handler even through middleware scope copies.
+        request_state = scope.setdefault("state", {})
 
         # Forward when no active store needs this correlated endpoint.
         # The prefix is already stripped.
@@ -1424,12 +1713,21 @@ class _CaptureMiddleware:
                 await _mark_unobserved_incomplete("completed without starting a response")
             return
         if (self._store is None and not capture_wanted) or rollout_from_path is None or dialect is None:
-            await self._app(scope, receive, send)
+            # Publish the id to this handler's current_rollout_id() even on the plain
+            # forward path -- this is the common case for a model server with capture
+            # disabled, and the id is already known here from the prefix above.
+            with rollout_context(rollout_from_path):
+                await self._app(scope, receive, send)
             return
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
+        client_assistant_message_id = (
+            _unique_request_header(scope.get("headers") or [], self._assistant_message_header)
+            if self._assistant_message_header is not None
+            else None
+        )
 
         # Give the model server a token sink keyed to this call.
         # The sink records token ids from the complete response.
@@ -1449,6 +1747,7 @@ class _CaptureMiddleware:
                 admitted_at=time.time(),
             )
             sink_token = set_token_sink(capture_context)
+            attach_capture_context(capture_context)
 
         # Training-only capture has no evaluation record.
         # Persist capture failure before forwarding a terminal event or finishing a JSON response.
@@ -1470,7 +1769,8 @@ class _CaptureMiddleware:
                 await send(message)
 
             try:
-                await self._app(scope, receive, _send_training_only)
+                with rollout_context(rollout_id):
+                    await self._app(scope, receive, _send_training_only)
             finally:
                 await _fail_uncommitted_external_call(capture_context)
                 if sink_token is not None:
@@ -1507,7 +1807,7 @@ class _CaptureMiddleware:
                 state["streaming"] = content_type.startswith(b"text/event-stream")
             elif message_type == "http.response.body":
                 chunk = message.get("body", b"") or b""
-                if chunk and state["ttft_ms"] is None:
+                if chunk and chunk != _SSE_KEEPALIVE and state["ttft_ms"] is None:
                     state["ttft_ms"] = (time.perf_counter() - start) * 1000.0
                 state["body"].extend(chunk)  # buffered for both shapes; SSE is reassembled below
                 if state["streaming"] and chunk and not defer_response:
@@ -1526,7 +1826,8 @@ class _CaptureMiddleware:
                 await send(message)
 
         try:
-            await self._app(scope, _receive, _send)
+            with rollout_context(rollout_id):
+                await self._app(scope, _receive, _send)
         except (Exception, asyncio.CancelledError) as exc:
             completed_at = time.time()
             exception_status, exception_body = _exception_http_details(exc)
@@ -1543,6 +1844,7 @@ class _CaptureMiddleware:
                     self._model_server_name,
                     bytes(request_body),
                     client_session_id=client_session_id,
+                    client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
                     model_call_id=model_call_id,
                     started_at=started_at,
@@ -1553,6 +1855,7 @@ class _CaptureMiddleware:
                     latency_ms=(time.perf_counter() - start) * 1000.0,
                     ttft_ms=state["ttft_ms"],
                     response_raw=upstream_body.decode("utf-8", errors="replace") if upstream_body else None,
+                    execution=request_state.get("nemo_gym_model_execution"),
                 )
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
@@ -1612,6 +1915,7 @@ class _CaptureMiddleware:
                 model_server_name,
                 request_bytes,
                 client_session_id=client_session_id,
+                client_assistant_message_id=client_assistant_message_id,
                 rollout_id=rollout_id,
                 model_call_id=model_call_id,
                 started_at=started_at,
@@ -1622,10 +1926,17 @@ class _CaptureMiddleware:
                 latency_ms=latency_ms,
                 ttft_ms=ttft_ms,
                 response_raw=response_raw,
+                execution=request_state.get("nemo_gym_model_execution"),
             )
 
         try:
-            await asyncio.to_thread(_parse_and_record)
+            # Shielded: cancellation here strands the queued write and the row is
+            # lost silently -- no log line, no incomplete marker. The error path
+            # above already treats CancelledError as recoverable; match it.
+            await asyncio.shield(asyncio.to_thread(_parse_and_record))
+        except asyncio.CancelledError:
+            logger.warning("Model-call capture finalization was cancelled; the write continues detached.")
+            raise
         except Exception:
             logger.warning("Model-call capture finalization failed.", exc_info=True)
         finally:
@@ -1637,11 +1948,12 @@ def install_model_call_capture(
     config: ModelCallCaptureConfig,
     *,
     model_server_name: str | None = None,
+    assistant_message_header: bytes | None = None,
     global_config_dict: Any = None,
     num_workers: int | None = None,
     non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
-) -> None:
-    """Install model-call capture middleware.
+) -> CaptureLedger | None:
+    """Install model-call capture middleware and return the capture ledger when staging is external.
 
     Always strip ``/ng-rollout/<id>/...`` before routing.
     Evaluation capture records requests and responses for that path.
@@ -1687,13 +1999,14 @@ def install_model_call_capture(
         if not isinstance(lineage_store, CaptureLedger):
             raise ValueError(
                 "token_id_capture.external_staging requires the lineage store to implement "
-                "the CaptureLedger protocol (record, record_failure, manifest, has_rows)"
+                "the CaptureLedger protocol (record, record_failure, manifest, has_rows, retire, delete)"
             )
         capture_ledger: CaptureLedger = lineage_store
         install_rollout_control_routes(
             app,
             capture_ledger,
             auth_token=capture_settings.token_id_capture.resolve_control_auth_token(),
+            refuse_removal=lambda: ledger_removal_refusal(app),
         )
 
     owned_endpoints = [
@@ -1721,6 +2034,7 @@ def install_model_call_capture(
     app.add_middleware(
         _CaptureMiddleware,
         store=make_capture_store(config),
+        assistant_message_header=assistant_message_header,
         model_server_name=model_server_name,
         token_store=token_store,
         configured_sink=configured_sink,
@@ -1730,6 +2044,7 @@ def install_model_call_capture(
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,
     )
+    return capture_ledger if external_staging else None
 
 
 # --- Run-level capture helpers (rollout-collection side) ---
@@ -1815,7 +2130,7 @@ def merge_model_call_capture_into_record(
             logger.warning("Could not read model-call capture for rollout %s.", rollout_id, exc_info=True)
             calls = []
             gaps.append(ObservationGap(code="model_call_capture_unreadable"))
-    observations = record.get("ng_agent_observations")
+    observations = record.get(NG_AGENT_OBSERVATIONS_KEY)
     if observations is not None:
         try:
             bundle = AgentObservationBundle.model_validate(observations)
@@ -1834,7 +2149,24 @@ def merge_model_call_capture_into_record(
                     )
                     bundle.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
             bundle = join_model_call_observations(bundle, calls)
-            record["ng_agent_observations"] = bundle.model_dump(mode="json")
+            if any(call.client_assistant_message_id for call in calls):
+                try:
+                    raw_trajectory = record.get("ng_trajectory")
+                    trajectory = (
+                        TrajectoryRecord.model_validate(raw_trajectory) if raw_trajectory is not None else None
+                    )
+                    if trajectory is not None and trajectory.rollout_id != rollout_id:
+                        bundle.gaps.append(ObservationGap(code="assistant_message_call_rollout_mismatch"))
+                    else:
+                        bundle, trajectory = join_assistant_message_calls(bundle, trajectory, calls)
+                        if trajectory is not None:
+                            record["ng_trajectory"] = trajectory.model_dump(mode="json")
+                except Exception:
+                    logger.warning(
+                        "Could not associate assistant message calls for rollout %s.", rollout_id, exc_info=True
+                    )
+                    bundle.gaps.append(ObservationGap(code="assistant_message_call_join_failed"))
+            record[NG_AGENT_OBSERVATIONS_KEY] = bundle.model_dump(mode="json")
         except Exception:
             logger.warning("Could not join agent observations for rollout %s.", rollout_id, exc_info=True)
             gaps.append(ObservationGap(code="agent_observation_join_failed"))
