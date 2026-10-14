@@ -24,6 +24,7 @@ def failure_details(harness: str, output: Path) -> tuple[str, str]:
         scenarios = json.loads((output / "conformance_summary.json").read_text())["harnesses"][harness]["scenarios"]
         if not isinstance(scenarios, list) or not scenarios:
             raise ValueError("No scenarios")
+        scenarios = [s for s in scenarios if s.get("tier", "P0") == "P0"]
         failed = [s for s in scenarios if s["verdict"] != "fulfilled"]
         count = f"{len(failed)} / {len(scenarios)}"
         if not failed:

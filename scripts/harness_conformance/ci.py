@@ -94,14 +94,14 @@ def report(harness: str, *, output: Path, exit_code: int) -> str:
         warning_title = "Harness conformance"
     else:
         status = "passed"
-        message = f"{harness}: all selected conformance requirements are fulfilled."
+        message = f"{harness}: all selected P0 conformance requirements are fulfilled."
     output.mkdir(parents=True, exist_ok=True)
     (output / "ci-result.json").write_text(
         json.dumps({"harness": harness, "sha": os.environ.get("GITHUB_SHA", "local"), "status": status}) + "\n"
     )
     markdown = f"## Harness conformance: {harness}\n\n{message}\n\n"
     count, first = failure_details(harness, output)
-    markdown += f"**Failed scenario checks:** {count}\n\n**First failure:** {first}\n\n"
+    markdown += f"**Failed P0 scenario checks:** {count}\n\n**First failure:** {first}\n\n"
     if status != "passed":
         detail = f"{message} Failed scenario checks: {count}. First failure: {first}"
         print(f"::warning title={warning_title}::{detail}".replace("%", "%25"))

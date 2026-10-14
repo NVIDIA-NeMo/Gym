@@ -129,6 +129,17 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
         for sock in sockets:
             sock.bind(("127.0.0.1", 0))
         config = _config(harness, directory, [s.getsockname()[1] for s in sockets], timeout)
+        if scenario.agent_timeout_seconds is not None:
+            if harness == "hermes":
+                raise ValueError("the legacy Hermes path has no configurable agent run deadline for this scenario")
+            if timeout < scenario.agent_timeout_seconds + 60:
+                raise ValueError(
+                    "--timeout must exceed the agent deadline by at least 60 seconds for setup and cleanup"
+                )
+            agent_config = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
+            agent_config["timeout"] = scenario.agent_timeout_seconds
+            if harness == "codex":
+                agent_config["stream_idle_timeout_ms"] = int(timeout * 1000)
         os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps(config)
         (directory / "launch.json").write_text(json.dumps(config, indent=2) + "\n")
         # Import after the isolated process's config has been injected, like Gym's launcher.

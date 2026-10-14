@@ -5,6 +5,7 @@
 
 from dataclasses import asdict, dataclass, field
 
+from nemo_gym.harness_capabilities.checks import PriorityTier
 from nemo_gym.health.types import Verdict
 
 
@@ -22,8 +23,11 @@ class Scenario:
     usage: bool = True
     http_errors: tuple[int, ...] = ()
     terminal_error: bool = False
+    server_timeout_response: bool = False
     expected_reward: float = 1.0
     steps: bool = True
+    tier: PriorityTier = "P0"
+    agent_timeout_seconds: int | None = None
     health_expectations: dict[str, Verdict] = field(default_factory=dict)
 
     def task(self) -> dict:
@@ -78,6 +82,26 @@ SCENARIOS = (
             # retain a known zero total, even though the failed attempt has no usage.
             "rollout_token_count_mismatch": "healthy",
         },
+    ),
+    Scenario(
+        "model_server_timeout_response",
+        "Return an explicit HTTP 504 timeout on the first model request; check saved timeout evidence only.",
+        evidence=(),
+        tool_steps=0,
+        steps=False,
+        http_errors=(504,),
+        server_timeout_response=True,
+        tier="P1",
+    ),
+    Scenario(
+        "agent_timeout_no_model_output",
+        "The model stays silent until the agent run deadline; the invocation and response must be incomplete.",
+        evidence=("TE-1", "TE-2", "TE-4", "TE-6", "TE-7", "TE-8"),
+        tool_steps=0,
+        expected_reward=0.0,
+        steps=False,
+        agent_timeout_seconds=30,
+        tier="P1",
     ),
     Scenario("verifier_failure", "A completed trajectory receives a known zero reward.", expected_reward=0.0),
 )

@@ -554,3 +554,131 @@ def test_chat_fingerprint_ignores_creation_clock():
     response = {"id": "r", "object": "chat.completion", "created": 123, "choices": []}
     without_clock = {key: value for key, value in response.items() if key != "created"}
     assert _fingerprint(request, 200, response) == _fingerprint(request, 200, without_clock)
+
+
+async def test_timeout_provider_keeps_request_pending_without_reply(tmp_path):
+    import asyncio
+
+    from fastapi import Request
+
+    disconnected = asyncio.Event()
+    probe = Probe(SCENARIO["agent_timeout_no_model_output"], tmp_path)
+    body = json.dumps({"model": "conformance-model", "messages": []}).encode()
+    sent = False
+
+    async def receive():
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": body}
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []}, receive)
+    pending = asyncio.create_task(probe.model(request))
+    try:
+        async with asyncio.timeout(2):
+            while not probe.attempts:
+                await asyncio.sleep(0.01)
+        assert not pending.done()
+        saved = json.loads((tmp_path / "witness.json").read_text())
+        assert saved["attempts"][0]["response_withheld"] is True
+        assert saved["attempts"][0]["response"] is None
+        assert saved["attempts"][0]["status_code"] is None
+        disconnected.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(pending, 2)
+    finally:
+        pending.cancel()
+
+
+async def test_timeout_scenario_rejects_unsupported_legacy_hermes_deadline(tmp_path, monkeypatch):
+    from scripts.harness_conformance import episode
+
+    monkeypatch.setattr(episode, "check_runtime", lambda harness: {})
+    with pytest.raises(ValueError, match="legacy Hermes path has no configurable agent run deadline"):
+        await episode.run_episode(
+            harness="hermes", scenario_name="agent_timeout_no_model_output", directory=tmp_path, timeout=300
+        )
+    witness = json.loads((tmp_path / "witness.json").read_text())
+    assert witness["attempts"] == []
+
+
+@pytest.mark.parametrize("tier", ["P0", "P1"])
+@pytest.mark.parametrize("failure", ["checks", "execution", "checker"])
+def test_diagnostic_scenario_failures_do_not_block_p0(tmp_path, monkeypatch, tier, failure):
+    from dataclasses import replace
+
+    from scripts.harness_conformance import runner
+    from scripts.harness_conformance.feedback import failure_details
+
+    scenario = replace(SCENARIO["agent_timeout_no_model_output"], tier=tier)
+    monkeypatch.setattr(
+        runner,
+        "run_process",
+        lambda *a, **k: {
+            "returncode": int(failure == "execution" and k["directory"].name == scenario.name),
+            "timed_out": False,
+        },
+    )
+
+    def inspect(scenario, directory, execution):
+        if scenario.name == "tool_success":
+            return {"scenario": scenario.name, "tier": "P0", "exercised": True, "verdict": "fulfilled", "evidence": {}}
+        if failure == "checker":
+            raise ValueError("invalid artifact")
+        return {
+            "scenario": scenario.name,
+            "tier": tier,
+            "exercised": failure != "execution",
+            "verdict": "not_fulfilled",
+            "evidence": {},
+            "execution": execution,
+            "issues": ["timeout outcome missing"],
+        }
+
+    monkeypatch.setattr(runner, "inspect_episode", inspect)
+    output = tmp_path / "run"
+    summary, code = run_suite(
+        harnesses=["pi"], scenarios=(SCENARIO["tool_success"], scenario), output=output, timeout=1
+    )
+    assert code == (0 if tier == "P1" else 1 if failure == "checks" else 2)
+    assert (summary["verdict"] == "fulfilled") == (tier == "P1")
+    saved = json.loads((output / "pi" / scenario.name / "scenario_result.json").read_text())
+    assert saved["verdict"] == "not_fulfilled"
+    assert saved["tier"] == tier
+    assert failure_details("pi", output)[0] == ("0 / 1" if tier == "P1" else "1 / 2")
+    assert f"{scenario.name} ({tier})" in (output / "conformance_report.md").read_text()
+
+
+@pytest.mark.parametrize("dialect", ["chat/completions", "responses"])
+@pytest.mark.parametrize("bundle_name", ["rollouts.jsonl", "rollouts_failures.jsonl"])
+def test_server_timeout_response_is_retained_without_requiring_retry(tmp_path, dialect, bundle_name):
+    scenario = SCENARIO["model_server_timeout_response"]
+    probe = Probe(scenario, tmp_path)
+    body = {"model": "probe", "messages" if dialect == "chat/completions" else "input": []}
+    with TestClient(probe.model_app()) as client:
+        response = client.post(f"/ng-rollout/0-0/v1/{dialect}", json=body)
+    assert response.status_code == 504
+    assert response.json()["error"]["type"] == "model_timeout"
+    # No retry or verifier is needed to satisfy the recording contract.
+    call = {
+        "model_call_id": "c1",
+        "request": body,
+        "response": response.json(),
+        "response_metadata": {"status_code": 504, "response_id": None},
+    }
+    (tmp_path / bundle_name).write_text(json.dumps({"ng_trajectory": {"model_calls": [call]}}) + "\n")
+    result = inspect_episode(scenario, tmp_path, {"returncode": 1, "timed_out": False})
+    assert result["verdict"] == "fulfilled"
+    assert result["delivery"] == ("rollout" if bundle_name == "rollouts.jsonl" else "failure_record")
+    assert result["health_report"] is None
+    assert {c["id"] for c in result["checks"]} == {"model.timeout_stimulus", "model.timeout_retained"}
+    assert not probe.finished and not probe.verifications
+    assert all(c["tier"] == "P1" for c in result["checks"])
+    # Missing timeout evidence fails the P1 scenario; suite gating is tested separately.
+    (tmp_path / bundle_name).write_text(json.dumps({"ng_trajectory": {}}) + "\n")
+    result = inspect_episode(scenario, tmp_path, {"returncode": 1, "timed_out": False})
+    assert result["verdict"] == "not_fulfilled"
+    assert result["behavioral_status"] == "fail"
+    assert next(c for c in result["checks"] if c["id"] == "model.timeout_retained")["status"] == "fail"
