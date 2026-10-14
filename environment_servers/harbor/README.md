@@ -37,15 +37,22 @@ are an authoring error (a terminal `stage: verification` failure) because Gym re
 
 ## Supported task behavior
 
+Supported today: single-step tasks with a prebuilt `docker_image` or a base-image-only Dockerfile
+(`FROM` plus `WORKDIR`/`ENV`/`LABEL`; `USER` is parsed, and an agent user override is rejected at seed);
+shared verifier mode, and separate verifier mode in `[verifier.environment].docker_image` or, without
+one, the task image (the agent's `/logs/artifacts` and `artifacts` entries are copied into the verifier
+sandbox first). Dockerfile builds, Compose environments, multi-step tasks and in-sandbox MCP tools come
+in later milestones.
+
 | Setting or feature | Behavior in this layer |
 | --- | --- |
 | Image | Prebuilt `environment.docker_image`, or a base-image-only Dockerfile (`FROM`, literal absolute `WORKDIR`, `ENV`, `LABEL`). Dockerfile builds are deferred. |
-| Verification | Single-step, shared-sandbox verification. Explicit `verifier.environment_mode = "separate"` or a separate verifier environment is rejected at seed. |
+| Verification | Single-step verification, shared or separate. A separate verifier runs in `[verifier.environment].docker_image`, else in the task image, for the episode-sized sandbox lifetime; a verifier that needs a `tests/Dockerfile` build is rejected at seed. |
 | Users | The image's default user and `verifier.user` are supported. Explicit `agent.user` and Dockerfile `USER` overrides are rejected at seed because sandbox access cannot yet carry the agent user. This layer has no oracle-specific exemption. |
 | Environment variables | Whole-value `${VAR}` and `${VAR:-default}` templates in environment and verifier variables resolve from the server's host environment at use time. Missing required values fail the episode before provisioning. Resolved values are not added to dataset rows, task snapshots, or the episode result. A task can still print its own environment into verifier logs. |
 | Prebuilt-image input files | `environment/` contents are uploaded to the workdir when the task has a prebuilt image and no `Dockerfile` or Compose definition. File modes are preserved. |
 | Network restrictions | Public networking only. Restricted network modes, host allowlists and deny rules are rejected by the loader rather than silently ignored. |
-| Artifacts and hooks | Verifier logs are downloaded. Artifact `exclude` rules and shared-mode collect hooks are not implemented in this layer. |
+| Artifacts and hooks | Verifier logs are downloaded. `[[verifier.collect]]` hooks run in the agent's sandbox in both modes (a non-zero exit warns, a hook the sandbox cannot run masks). In separate mode `/logs/artifacts` and the `artifacts` entries are copied into the verifier, each under its own staging root, with their `exclude` rules applied, replacing what the verifier image ships at those paths; a probe the sandbox cannot answer masks rather than counting as an absent artifact. Sidecar hooks and artifacts are not collected yet. |
 | Image ENTRYPOINT | No Harbor-compatible entrypoint lifecycle is guaranteed; startup follows the selected Gym sandbox provider. Tasks must not rely on an entrypoint running. |
 | Other features | Multi-step tasks, in-sandbox MCP tools, Windows and TPU environments are unsupported. |
 
