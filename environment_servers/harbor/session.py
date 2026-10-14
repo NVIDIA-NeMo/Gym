@@ -13,6 +13,8 @@ access to the agent. The module sits below the verifier so that verifier code ca
 HarborSession without importing the server.
 """
 
+import json
+import logging
 import os
 import re
 import shlex
@@ -21,15 +23,20 @@ from dataclasses import dataclass
 from fastapi import HTTPException
 
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.transfer import exec_as_root, upload_dir
 from nemo_gym.tasks.harbor import HarborTask
 
 
+LOGGER = logging.getLogger(__name__)
+
 VERIFIER_LOGS_DIR = "/logs/verifier"
 AGENT_LOGS_DIR = "/logs/agent"
 ARTIFACTS_DIR = "/logs/artifacts"
+
+TASK_CONTEXT_DIR = "/tmp/.nemo-gym"
+TASK_CONTEXT_FILE = f"{TASK_CONTEXT_DIR}/task.json"
 
 
 @dataclass
@@ -43,8 +50,46 @@ class HarborSession:
     workdir: str
     # The episode key the sandbox is owned under (see ``_sandboxes``).
     session_id: str
+    provider_ref: str
+    compose: AsyncSandboxCompose | None = None
     # Separate verification stops the agent's sandbox before test.sh runs; cleanup must not stop it twice.
     agent_sandbox_stopped: bool = False
+    # In a Compose group the agent's own container is stopped before the sidecars' hooks run (see ``stop_main``).
+    main_stopped: bool = False
+
+    def service(self, name: str | None) -> AsyncSandbox:
+        """The sandbox of a Compose service; ``None`` or ``"main"`` is the agent's own."""
+        if name in (None, "main"):
+            return self.sandbox
+        if self.compose is None or name not in self.compose.services:
+            raise KeyError(f"No Compose service {name!r} in this task")
+        return self.compose.services[name]
+
+    async def stop_main(self) -> None:
+        """Stop the agent's own container, leaving a Compose group's sidecars running.
+
+        Harbor collects in phases: the main container's hooks and artifacts, then its stop, then the
+        sidecars' hooks and artifacts, so nothing the agent left running can change a sidecar's
+        state while it is read. Without a group this is the whole agent side.
+        """
+        if self.compose is None:
+            await self.stop_agent_side()
+            return
+        if not self.main_stopped:
+            await self.sandbox.stop()
+            self.main_stopped = True
+
+    async def stop_agent_side(self) -> None:
+        """Stop the agent's sandbox, and its sidecars when the task is a Compose group."""
+        if self.agent_sandbox_stopped:
+            return
+        if self.compose is not None:
+            # A main container stopped by ``stop_main`` is skipped: a sandbox stop is idempotent.
+            await self.compose.stop()
+        else:
+            await self.sandbox.stop()
+        # Only a stop that succeeded releases the episode's final cleanup from stopping again.
+        self.agent_sandbox_stopped = True
 
 
 _ENV_TEMPLATE = re.compile(r"\$\{([^}:]+)(?::-(.*))?\}")
@@ -106,12 +151,51 @@ class HarborSessionMixin:
             )
         ):
             await upload_dir(sandbox, environment_dir, workdir)
+        # Harbor mounts /logs into the agent's container; tasks may write to /logs/artifacts during the
+        # episode. Best effort: an image that runs as a non-root user without the capability to switch
+        # to root cannot create top-level folders, and the agent may still not need them.
+        logs = await exec_as_root(
+            sandbox,
+            f"mkdir -p {AGENT_LOGS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR} "
+            f"&& chmod 777 {AGENT_LOGS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR}",
+            timeout_s=60,
+        )
+        if logs.return_code != 0:
+            LOGGER.warning(
+                f"{task.task_id}: could not create /logs folders in the agent sandbox: {logs.stderr or logs.stdout}"
+            )
         return workdir
+
+    async def _write_task_context(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
+        """Leave the task's in-sandbox tool declarations where a harness can read them.
+
+        ``/tmp/.nemo-gym/task.json`` carries ``mcp_servers`` (Harbor's ``[[environment.mcp_servers]]``)
+        and ``skills_dir``. Harnesses that know how to talk to task MCP servers from inside the sandbox
+        read it at session start; nothing in the episode protocol needs to change for that.
+        """
+        environment = task.config.environment
+        if not environment.mcp_servers and not environment.skills_dir:
+            return
+        context = {
+            "mcp_servers": [server.model_dump(mode="json") for server in environment.mcp_servers],
+            "skills_dir": environment.skills_dir,
+        }
+        payload = shlex.quote(json.dumps(context))
+        # Root first, falling back to the default user on sandboxes that cannot switch identities; /tmp
+        # is writable either way, and the modes only need the agent's own user to read the file.
+        result = await exec_as_root(
+            sandbox,
+            f"mkdir -p {TASK_CONTEXT_DIR} && printf %s {payload} > {TASK_CONTEXT_FILE} "
+            f"&& (chmod 755 {TASK_CONTEXT_DIR} && chmod 644 {TASK_CONTEXT_FILE} || true)",
+            timeout_s=60,
+        )
+        if result.return_code:
+            raise RuntimeError(f"Could not write {TASK_CONTEXT_FILE}: {result.stderr or result.stdout}")
 
     async def _sandbox_access(self, session: HarborSession) -> SandboxAccess:
         return SandboxAccess(
             connection=DirectSandboxConnection(
-                provider_config_ref=self.config.sandbox_provider,
+                provider_config_ref=session.provider_ref,
                 descriptor=await session.sandbox.serialize(),
             ),
             workdir=session.workdir,

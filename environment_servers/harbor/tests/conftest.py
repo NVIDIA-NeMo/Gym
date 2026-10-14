@@ -94,6 +94,9 @@ class FakeSandbox:
     async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
         self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user})
         if "test.sh" in command:
+            if "timeout" not in command:
+                # Harbor's `chmod +x` on test.sh before the run, or a separate verifier's probe for the file.
+                return SandboxExecResult(stdout="", stderr="", return_code=0)
             if self.wrapper_ran and self.test_result.error_type != "timeout":
                 start = 1_700_000_000
                 self.verifier_files.setdefault(
@@ -419,3 +422,45 @@ class AgentSandbox(FakeSandbox):
         assert (artifacts / "01" / "app" / "output").is_symlink()
         assert (artifacts / "02" / "app" / "output" / "report.json").read_bytes() == b'{"ok": true}'
         assert list(victim.iterdir()) == []
+
+
+COMPOSE_YAML = """
+services:
+  main:
+    image: org/agent:1
+  api:
+    image: org/api:1
+    expose: ["3080"]
+  kafka:
+    image: org/kafka:1
+"""
+
+IMAGE_CONFIGS = {
+    "org/agent:1": {
+        "os": "linux",
+        "architecture": "amd64",
+        "image": "org/agent@sha256:" + "a" * 64,
+        "config": {},
+    },
+    "org/api:1": {
+        "os": "linux",
+        "architecture": "amd64",
+        "image": "org/api@sha256:" + "b" * 64,
+        "config": {"Cmd": ["serve"]},
+    },
+    "org/kafka:1": {
+        "os": "linux",
+        "architecture": "amd64",
+        "image": "org/kafka@sha256:" + "c" * 64,
+        "config": {"Cmd": ["kafka"], "User": "appuser"},
+    },
+}
+
+
+class FakeCompose:
+    def __init__(self, services):
+        self.services = services
+        self.stopped = False
+
+    async def stop(self):
+        self.stopped = True

@@ -13,13 +13,20 @@ this module's globals, which is where tests patch them.
 """
 
 import asyncio
+import json
 import math
+import tempfile
+from dataclasses import replace
+from pathlib import Path
 from typing import Any, Awaitable
+
+import yaml
 
 from environment_servers.harbor.session import resolve_env_templates
 from environment_servers.harbor.verifier import _verifier_image, _verifier_key
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxSpec
+from nemo_gym.sandbox.compose_config import adapt_non_root_sidecars, opensandbox_shm_labels, resolve_compose
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.tasks.harbor import HarborTask
@@ -35,7 +42,10 @@ class HarborSeedTimeoutError(RuntimeError):
     """The sandbox was not ready within `sandbox_ready_timeout_s`: a provider-side seed failure, retried."""
 
 
-def _sandbox_resources(environment: HarborEnvironment) -> dict[str, Any]:
+COMPOSE_IMAGES_FILE = "compose-images.json"
+
+
+def _sandbox_resources(environment: HarborEnvironment, *, request_gpu_type: bool = False) -> dict[str, Any]:
     resources: dict[str, Any] = {}
     if environment.cpus is not None:
         resources["cpu"] = environment.cpus
@@ -45,9 +55,14 @@ def _sandbox_resources(environment: HarborEnvironment) -> dict[str, Any]:
         resources["disk_gib"] = max(1, math.ceil(environment.storage_mb / 1024))
     if environment.gpus:
         resources["gpu"] = environment.gpus
-        if environment.gpu_types:
+        if environment.gpu_types and request_gpu_type:
             resources["gpu_type"] = environment.gpu_types[0]
     return resources
+
+
+def _needs_gpu(task: HarborTask) -> bool:
+    verifier_environment = task.config.verifier.environment
+    return bool(task.config.environment.gpus or (verifier_environment is not None and verifier_environment.gpus))
 
 
 class HarborSandboxMixin:
@@ -81,7 +96,7 @@ class HarborSandboxMixin:
         else:
             task_env = environment.env
         metadata = (
-            resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
+            resolve_provider_metadata(self._provider_ref(task), global_config_dict)
             | self.config.sandbox_metadata
             | {"nemo_gym_environment_server": self.config.name, "harbor_task": task.task_id[:63], "harbor_role": role}
         )
@@ -92,23 +107,39 @@ class HarborSandboxMixin:
                 + self.config.sandbox_ttl_slack_s
             )
         # The override replaces only the keys it names, so a GPU task routed to the GPU provider keeps `gpu`.
-        resources = _sandbox_resources(environment) | (self.config.sandbox_resources_override or {})
-        env = dict(self.config.sandbox_env) | resolve_env_templates(task_env)
+        resources = _sandbox_resources(environment, request_gpu_type=self.config.request_gpu_type) | (
+            self.config.sandbox_resources_override or {}
+        )
+        env = (
+            dict(self.config.sandbox_env)
+            | self.config.sandbox_env_by_task.get(task.task_id, {})
+            | resolve_env_templates(task_env)
+        )
         if self.config.derive_cpu_env:
             env = cpu_cap_env(resources.get("cpu")) | env
+        provider_options = dict(self.config.sandbox_provider_options)
+        resolved_image = self._rewrite_image(image or task.image)
+        if resolved_image != (image or task.image) and self.config.image_rewrite_auth:
+            provider_options["image_auth"] = dict(self.config.image_rewrite_auth)
         return SandboxSpec(
-            image=image or task.image,
+            image=resolved_image,
             ttl_s=ttl,
             ready_timeout_s=self.config.sandbox_ready_timeout_s,
             workdir=workdir,
             env=env,
             metadata=metadata,
             resources=resources,
-            provider_options=dict(self.config.sandbox_provider_options),
+            provider_options=provider_options,
         )
 
+    def _provider_ref(self, task: HarborTask) -> str:
+        """Which top-level sandbox block runs this task: the GPU one when the task declares GPUs."""
+        if self.config.gpu_sandbox_provider and _needs_gpu(task):
+            return self.config.gpu_sandbox_provider
+        return self.config.sandbox_provider
+
     async def _create_sandbox(self, task: HarborTask, workdir: str | None, *, episode_key: str) -> AsyncSandbox:
-        provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
+        provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         sandbox = AsyncSandbox(provider_config)
         self._sandboxes[episode_key] = sandbox
         await sandbox.start(self._sandbox_spec(task, workdir))
@@ -139,6 +170,87 @@ class HarborSandboxMixin:
                 f"(sandbox_ready_timeout_s={self.config.sandbox_ready_timeout_s:g} plus {SEED_CREATE_GRACE_S:g}s grace)"
             ) from exc
 
+    def _compose_image_configs(self, task: HarborTask) -> dict[str, Any]:
+        path = self.config.compose_image_configs
+        if path is None:
+            candidate = task.path.parent / COMPOSE_IMAGES_FILE
+            if not candidate.is_file():
+                raise RuntimeError(
+                    f"Compose task {task.task_id!r} needs recorded image configurations: set "
+                    f"`compose_image_configs` or place compose-images.json at {candidate}"
+                )
+            path = candidate
+        return json.loads(Path(path).read_text())
+
+    def _compose_document(self, task: HarborTask) -> dict[str, Any]:
+        """The published overlay resolved against recorded image metadata, ready for the Compose adapter."""
+        compose_file = next(
+            task.path / "environment" / name
+            for name in ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
+            if (task.path / "environment" / name).is_file()
+        )
+        image_configs = self._compose_image_configs(task)
+        document = resolve_compose(yaml.safe_load(compose_file.read_text()), task.image, image_configs)
+        adapt_non_root_sidecars(document, image_configs)
+        provider = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
+        if "opensandbox" in provider:
+            opensandbox_shm_labels(document)
+        sidecars = {a.service for a in task.config.artifacts} | {h.service for h in task.config.verifier.collect}
+        missing = sidecars - {None, "main"} - set(document["services"])
+        if missing:
+            raise RuntimeError(
+                f"Artifacts or collect hooks name Compose services that do not exist: {sorted(missing)}"
+            )
+        return document
+
+    def _write_compose_document(self, task: HarborTask) -> tuple[dict[str, Any], Path]:
+        """Resolve the task's Compose document and write it where the adapter reads it (blocking file work)."""
+        document = self._compose_document(task)
+        # Episode IDs are opaque caller input, never host paths: the document gets a fresh folder.
+        self._artifacts_dir.mkdir(parents=True, exist_ok=True)
+        path = Path(tempfile.mkdtemp(prefix="compose-", dir=self._artifacts_dir)) / "compose.yaml"
+        path.write_text(yaml.safe_dump(document, sort_keys=False))
+        return document, path
+
+    async def _compose_document_for(self, task: HarborTask) -> tuple[dict[str, Any], Path]:
+        """The resolved document and its compose.yaml, parsed and written once per task digest.
+
+        The document is the same for every episode of a task (the published overlay, the recorded image
+        metadata and the provider block do not change under a running server), so the YAML and JSON
+        reads and the write happen once, in a thread; concurrent first episodes share the one resolution,
+        and a failed one is forgotten so the next episode tries again.
+        """
+        key = (task.path, task.digest)
+        pending = self._compose_documents.get(key)
+        if pending is None:
+            pending = asyncio.create_task(asyncio.to_thread(self._write_compose_document, task))
+            self._compose_documents[key] = pending
+
+            def forget_failed(done: asyncio.Task[tuple[dict[str, Any], Path]]) -> None:
+                if done.cancelled() or done.exception() is not None:
+                    self._compose_documents.pop(key, None)
+
+            pending.add_done_callback(forget_failed)
+        return pending.result() if pending.done() else await asyncio.shield(pending)
+
+    async def _create_compose(self, task: HarborTask, episode_key: str) -> AsyncSandboxCompose:
+        """Start the task's Compose group; the ``main`` service is the agent's sandbox."""
+        document, path = await self._compose_document_for(task)
+        main_spec = self._sandbox_spec(task, task.workdir)
+        sidecar_spec = replace(
+            main_spec, resources={}, env={}, provider_options=dict(self.config.sandbox_provider_options)
+        )
+        compose = AsyncSandboxCompose(
+            resolve_provider_config(self._provider_ref(task), get_global_config_dict()),
+            path,
+            service_specs={name: main_spec if name == "main" else sidecar_spec for name in document["services"]},
+            timeout_s=self.config.sandbox_ready_timeout_s,
+        )
+        # Ownership starts before start(): a group that fails half-way is still stopped whole.
+        self._sandboxes[episode_key] = compose
+        await compose.start()
+        return compose
+
     async def _create_verifier_sandbox(self, task: HarborTask, *, episode_key: str | None = None) -> AsyncSandbox:
         """A separate verifier runs in its own sandbox, sized by ``[verifier.environment]``.
 
@@ -148,10 +260,13 @@ class HarborSandboxMixin:
         """
         environment = task.config.verifier.environment or task.config.environment
         spec = self._sandbox_spec(task, None, environment=environment, image=_verifier_image(task), role="verifier")
-        provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
+        provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         sandbox = AsyncSandbox(provider_config)
         if episode_key is not None:
             # Owned from before start(), like the agent's sandbox, so a failed or interrupted stop is retried.
             self._sandboxes[_verifier_key(episode_key)] = sandbox
         await self._within_ready_deadline(sandbox.start(spec))
         return sandbox
+
+    def _rewrite_image(self, image: str | None) -> str | None:
+        return self.config.image_rewrites.get(image, image) if image else image

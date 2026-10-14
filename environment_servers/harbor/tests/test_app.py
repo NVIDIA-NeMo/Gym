@@ -7,9 +7,11 @@ import io
 import json
 import shutil
 import tarfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+import yaml
 from aiohttp import ClientResponseError, RequestInfo
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
@@ -17,9 +19,12 @@ from yarl import URL
 
 from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S
 from environment_servers.harbor.tests.conftest import (
+    COMPOSE_YAML,
+    IMAGE_CONFIGS,
     SEPARATE_TOML,
     TASK_TOML,
     AgentSandbox,
+    FakeCompose,
     FakeSandbox,
     archive_of,
     episode,
@@ -120,7 +125,7 @@ class TestEpisode:
         real_exec = sandbox.exec
 
         async def exec_recording_closes(command, **kwargs):
-            if "test.sh" in command:
+            if "test.sh" in command and "timeout" in command:
                 closes_before_verify.append(client.paths().count("/v1/agent_sessions/close"))
             return await real_exec(command, **kwargs)
 
@@ -276,8 +281,9 @@ class TestSetupCommands:
         assert response.failure is None, response.failure
         commands = [call["command"] for call in sandbox.execs]
         assert commands[0] == "mkdir -p /app"
-        assert commands[1:3] == server.config.sandbox_setup_commands
-        assert all(call["user"] == "root" for call in sandbox.execs[1:3])
+        # The /logs folders come right after the workdir; operator setup commands follow, as root.
+        assert commands[2:4] == server.config.sandbox_setup_commands
+        assert all(call["user"] == "root" for call in sandbox.execs[2:4])
         # The harness only gets its session once the sandbox is fully set up.
         assert server.server_client.calls
 
@@ -297,6 +303,20 @@ class TestSetupCommands:
 
 
 class TestSeedWorkdirAndResources:
+    async def test_seed_creates_the_logs_folders_and_per_task_env(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.config.sandbox_env_by_task = {"hello": {"CIRCLE_NODE_TOTAL": "3"}, "other": {"X": "1"}}
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        assert (await run_episode(server, task)).failure is None
+        commands = [c["command"] for c in sandbox.execs]
+        assert commands[0] == "mkdir -p /app"
+        logs = next(c for c in sandbox.execs if "/logs/artifacts" in c["command"])
+        assert "chmod 777 /logs/agent /logs/verifier /logs/artifacts" in logs["command"] and logs["user"] == "root"
+        spec = server._sandbox_spec(task, "/app")
+        assert spec.env["CIRCLE_NODE_TOTAL"] == "3" and "X" not in spec.env
+
     async def test_image_workdir_used_when_task_sets_none(self, tmp_path, monkeypatch):
         server, task, sandbox, created = make_server(tmp_path, monkeypatch)
         # A task with a real Dockerfile and a prebuilt image declares no workdir; the image's WORKDIR is used.
@@ -581,7 +601,7 @@ class TestVerify:
         assert result.reward == 1.0 and result.mask_sample is False and result.failure_kind is None
         assert result.verifier_rewards == {"reward": 1.0} and result.verifier_return_code == 0
 
-        run = next(call for call in sandbox.execs if "test.sh" in call["command"])
+        run = next(call for call in sandbox.execs if "test.sh" in call["command"] and "timeout" in call["command"])
         assert run["command"] == verifier_command(120)
         # The portable short form (`--signal=` fails on BusyBox), guarded so a missing wrapper exits 127
         # before anything is redirected, and followed by the exit record the server reads the deadline from.
@@ -626,6 +646,10 @@ class TestVerify:
         )
         assert task.user is None
         assert response.result.reward == 1.0 and response.result.failure_kind is None
+        # Harbor's `chmod +x` on test.sh is root's as well; set it aside so the lines below read the run itself.
+        chmod = next(call for call in sandbox.execs if call["command"] == "chmod +x /tests/test.sh")
+        assert chmod["user"] == "root"
+        sandbox.execs.remove(chmod)
         prepare = next(
             call for call in sandbox.execs if "chmod 777" in call["command"] and "/tests" in call["command"]
         )
@@ -682,7 +706,7 @@ class TestVerify:
         assert result.reward == 0.0 and result.failure_kind == "harbor:verifier_timeout"
         assert result.mask_sample is False
         # A sub-second budget is rounded up to one whole second: `timeout 0` would mean no limit at all.
-        run = next(call for call in sandbox.execs if "test.sh" in call["command"])
+        run = next(call for call in sandbox.execs if "test.sh" in call["command"] and "timeout" in call["command"])
         assert "timeout -s KILL 1 bash /tests/test.sh" in run["command"]
 
     async def test_exit_137_before_the_deadline_keeps_the_reward(self, tmp_path, monkeypatch):
@@ -751,7 +775,7 @@ class TestVerify:
     async def test_sandbox_runtime_failure_masks(self, tmp_path, monkeypatch):
         class BrokenLaunch(FakeSandbox):
             async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
-                if "test.sh" in command:
+                if "test.sh" in command and "timeout" in command:
                     return SandboxExecResult(stdout=None, stderr="gone", return_code=125, error_type="sandbox")
                 return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
 
@@ -906,7 +930,7 @@ class TestSeparateVerification:
         )
         assert any(c["command"] == prepare for c in verifier.execs)
         run = next(c for c in verifier.execs if "test.sh" in c["command"] and "timeout" in c["command"])
-        assert run["command"] == f"chmod +x /tests/test.sh; {verifier_command(300)}"
+        assert run["command"] == verifier_command(300)
         assert (run["env"], run["user"], run["cwd"]) == ({"CHECK": "strict"}, "root", None)
         assert run["timeout_s"] == 300 + server.config.verifier_grace_s
         assert verifier.stopped
@@ -1041,6 +1065,294 @@ class TestSeparateVerification:
         assert agent.archives["/app/output"] in verifier.uploaded_archives
         assert not list(artifacts.glob("*.tar.gz")) and not list((artifacts / "00").rglob("null"))
         assert created == ["hello"] and agent.stopped and verifier.stopped
+
+
+COMPOSE_TOML = """
+schema_version = "1.4"
+
+artifacts = [{ source = "/var/log/api", service = "api" }]
+
+[verifier]
+timeout_sec = 300.0
+environment_mode = "separate"
+
+[verifier.environment]
+docker_image = "org/verifier:1"
+
+[[verifier.collect]]
+command = "dump-topics > /logs/artifacts/topics.txt"
+service = "kafka"
+
+[agent]
+timeout_sec = 120.0
+
+[environment]
+docker_image = "org/agent:1"
+cpus = 1
+skills_dir = "/app/.skills"
+
+[[environment.mcp_servers]]
+name = "playwright"
+transport = "sse"
+url = "http://api:3080/sse"
+
+[environment.healthcheck]
+command = "test -f /tmp/ready"
+interval_sec = 0.01
+start_interval_sec = 0.01
+timeout_sec = 5.0
+retries = 3
+"""
+
+
+@dataclass
+class HealthySandbox(AgentSandbox):
+    """Main service whose healthcheck passes on the third probe."""
+
+    probes: int = 0
+
+    async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        if command == "test -f /tmp/ready":
+            self.probes += 1
+            self.execs.append({"command": command, "user": user})
+            return SandboxExecResult(stdout="", stderr="", return_code=0 if self.probes >= 3 else 1)
+        return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+
+@dataclass
+class MainWatchingSandbox(AgentSandbox):
+    """A sidecar that notes, at each collect hook and artifact lookup, whether the main container was stopped."""
+
+    main: FakeSandbox | None = None
+    main_stopped_when_seen: list[bool] = field(default_factory=list)
+
+    async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        if "dump-topics" in command or command.startswith("if [ -d "):
+            self.main_stopped_when_seen.append(self.main.stopped)
+        return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+
+def _record_stop(stops: list[str], name: str, sandbox: FakeSandbox):
+    async def stop():
+        stops.append(name)
+        sandbox.stopped = True
+
+    return stop
+
+
+class TestComposeAndRouting:
+    def compose_server(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        (task.path / "task.toml").write_text(COMPOSE_TOML)
+        (task.path / "environment" / "docker-compose.yaml").write_text(COMPOSE_YAML)
+        (task.path.parent / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict",
+            lambda: {"sandbox": {"opensandbox": {}}, "sandbox_gpu": {"opensandbox": {}}},
+        )
+        main, api, kafka = HealthySandbox(), FakeSandbox(), FakeSandbox()
+        compose = FakeCompose({"main": main, "api": api, "kafka": kafka})
+        documents = []
+        verifier = FakeSandbox()
+
+        async def start_compose(task, episode_key):
+            documents.append(server._compose_document(task))
+            return compose
+
+        async def create_verifier(task, *, episode_key=None):
+            server._sandboxes[f"{episode_key}/verifier"] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_create_compose", start_compose)
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        return server, task, compose, documents, verifier
+
+    async def test_compose_task_seeds_a_group_and_leaves_task_context(self, tmp_path, monkeypatch):
+        server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        document = documents[0]
+        assert set(document["services"]) == {"main", "api", "kafka"}
+        # The non-root sidecar keeps its image user and gets no host injection.
+        assert "user" not in document["services"]["kafka"] and document["services"]["kafka"]["x-sandbox"] == {
+            "hosts": []
+        }
+        main = compose.services["main"]
+        # The healthcheck was polled until it passed, then the task context was written for the harness.
+        assert main.probes == 3
+        context_write = next(c for c in main.execs if "/tmp/.nemo-gym/task.json" in c["command"])
+        assert context_write["user"] == "root"
+        assert "playwright" in context_write["command"] and "/app/.skills" in context_write["command"]
+        # Everything above happened before the harness got its session.
+        seed = server.server_client.seed_bodies()[0]
+        assert seed["sandbox_access"]["connection"]["provider_config_ref"] == "sandbox"
+
+    async def test_separate_verifier_collects_from_sidecars_and_stops_the_group(self, tmp_path, monkeypatch):
+        server, task, compose, _, verifier = self.compose_server(tmp_path, monkeypatch)
+        main = compose.services["main"]
+        api = compose.services["api"] = MainWatchingSandbox(
+            main=main, present={"/var/log/api": "dir"}, archives={"/var/log/api": archive_of({"api.log": "ok"})}
+        )
+        kafka = compose.services["kafka"] = MainWatchingSandbox(main=main)
+
+        result = (await run_episode(server, task)).result
+
+        assert result.reward == 1.0, result
+        hook = next(c for c in kafka.execs if "dump-topics" in c["command"])
+        assert hook["command"].startswith("sh -c ")
+        # Harbor's phased collection: the agent's container was already stopped when the sidecar hook ran
+        # and when the sidecar's artifact was looked up, while the sidecars themselves were still up.
+        assert kafka.main_stopped_when_seen == [True] and api.main_stopped_when_seen == [True]
+        assert any("/var/log/api" in c["command"] for c in api.execs)
+        # The main container's own /logs/artifacts was looked up (before it was stopped: it answered).
+        assert any(c["command"].startswith("if [ -d /logs/artifacts") for c in main.execs)
+        assert compose.stopped and verifier.stopped
+        # The group left the ownership table when it was stopped; the final cleanup had nothing to do.
+        assert not server._sandboxes and not server._sessions
+
+    async def test_a_separate_verifier_without_sidecar_work_stops_the_agent_side_once(self, tmp_path, monkeypatch):
+        server, task, compose, _, verifier = self.compose_server(tmp_path, monkeypatch)
+        toml = COMPOSE_TOML.replace('artifacts = [{ source = "/var/log/api", service = "api" }]\n', "").replace(
+            '[[verifier.collect]]\ncommand = "dump-topics > /logs/artifacts/topics.txt"\nservice = "kafka"\n', ""
+        )
+        (task.path / "task.toml").write_text(toml)
+        task = load_task(task.path)
+        assert not task.config.artifacts and not task.config.verifier.collect
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        stops: list[str] = []
+        compose.services["main"].stop = _record_stop(stops, "main", compose.services["main"])
+        original_stop = compose.stop
+
+        async def stop_group():
+            stops.append("group")
+            await original_stop()
+
+        compose.stop = stop_group
+
+        result = (await run_episode(server, task)).result
+
+        assert result.reward == 1.0, result
+        # Main is stopped on its own first, then the group once; nothing stops a second time.
+        assert stops == ["main", "group"] and verifier.stopped
+
+    async def test_a_check_started_inside_the_start_period_is_not_a_counted_failure(self, tmp_path, monkeypatch):
+        toml = (
+            TASK_TOML + '\n[environment.healthcheck]\ncommand = "test -f /tmp/ready"\nstart_period_sec = 0.05\n'
+            "start_interval_sec = 0.01\ninterval_sec = 0.01\nretries = 1\n"
+        )
+        server, task, _, _ = make_server(tmp_path, monkeypatch, toml=toml)
+
+        @dataclass
+        class SlowFirstProbe(FakeSandbox):
+            probes: int = 0
+
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                self.probes += 1
+                if self.probes == 1:
+                    # The attempt begins inside the start period and ends after it, failing.
+                    await asyncio.sleep(0.1)
+                    return SandboxExecResult(stdout="", stderr="", return_code=1)
+                return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+        sandbox = SlowFirstProbe()
+        # With retries = 1 a counted failure would raise here; Harbor decides the start period before the attempt.
+        await server._wait_healthy(sandbox, task)
+        assert sandbox.probes == 2
+        # After the start period a failing attempt counts, and retries = 1 ends the wait.
+        late = SlowFirstProbe(probes=5)
+        late.spec_env = {}
+
+        async def failing(command, **kwargs):
+            return SandboxExecResult(stdout="", stderr="", return_code=1)
+
+        late.exec = failing
+        await asyncio.sleep(0.06)
+        with pytest.raises(RuntimeError, match="Healthcheck failed 1 times"):
+            await server._wait_healthy(late, task)
+
+    async def test_compose_document_is_resolved_and_written_once_per_task(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        (task.path / "environment" / "docker-compose.yaml").write_text(COMPOSE_YAML)
+        (task.path.parent / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
+        task = load_task(task.path)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        parses: list[str] = []
+        resolve = server._compose_document
+
+        def counting(task):
+            parses.append(task.task_id)
+            if parses == ["hello"]:
+                raise RuntimeError("compose-images.json unreadable")
+            return resolve(task)
+
+        monkeypatch.setattr(server, "_compose_document", counting)
+        # A failed resolution is not cached: the next episode tries again.
+        with pytest.raises(RuntimeError, match="unreadable"):
+            await server._compose_document_for(task)
+        first, second = await asyncio.gather(server._compose_document_for(task), server._compose_document_for(task))
+        third = await server._compose_document_for(task)
+        # Concurrent first episodes shared one resolution, later ones reuse it: one parse, one file.
+        assert parses == ["hello", "hello"] and first is second is third
+        document, path = first
+        assert set(document["services"]) == {"main", "api", "kafka"}
+        assert yaml.safe_load(path.read_text()) == document and path.is_relative_to(server._artifacts_dir)
+
+    async def test_gpu_tasks_route_to_the_gpu_provider(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        (task.path / "task.toml").write_text(TASK_TOML.replace("cpus = 1", 'cpus = 1\ngpus = 1\ngpu_types = ["H100"]'))
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        server.config.gpu_sandbox_provider = "sandbox_gpu"
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict",
+            lambda: {"sandbox": {"opensandbox": {}}, "sandbox_gpu": {"opensandbox": {}}},
+        )
+        assert server._provider_ref(task) == "sandbox_gpu"
+        spec = server._sandbox_spec(task, "/app")
+        assert spec.resources.gpu == 1 and spec.resources.gpu_type is None
+        server.config.request_gpu_type = True
+        assert server._sandbox_spec(task, "/app").resources.gpu_type == "H100"
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        seed = server.server_client.seed_bodies()[0]
+        assert seed["sandbox_access"]["connection"]["provider_config_ref"] == "sandbox_gpu"
+
+    async def test_failed_healthcheck_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
+        server, task, compose, _, _ = self.compose_server(tmp_path, monkeypatch)
+        compose.services["main"].probes = -100  # never reaches 3 within 3 retries
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and not response.failure.terminal
+        assert "Healthcheck failed" in response.failure.failure_reason
+        assert compose.stopped and not server._sandboxes
+
+
+def test_image_rewrites_apply_to_agent_and_verifier_images(tmp_path, monkeypatch):
+    server, task, _, _ = make_server(tmp_path, monkeypatch)
+    (task.path / "task.toml").write_text(SEPARATE_TOML)
+    task = load_task(task.path)
+    server.config.image_rewrites = {"org/agent:1": "mirror/agent:derived", "org/verifier:1": "mirror/verifier:derived"}
+    monkeypatch.setattr(
+        "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+    )
+    server.config.image_rewrite_auth = {"username": "u", "password": "p"}
+    spec = server._sandbox_spec(task, "/app")
+    assert spec.image == "mirror/agent:derived" and spec.provider_options["image_auth"] == {
+        "username": "u",
+        "password": "p",
+    }
+    server.config.image_rewrites = {}
+    assert "image_auth" not in server._sandbox_spec(task, "/app").provider_options
+    server.config.image_rewrites = {"org/agent:1": "mirror/agent:derived", "org/verifier:1": "mirror/verifier:derived"}
+    verifier = server._sandbox_spec(
+        task, None, environment=task.config.verifier.environment, image=_verifier_image(task), role="verifier", ttl=1
+    )
+    assert verifier.image == "mirror/verifier:derived"
 
 
 class TestSeedGuards:

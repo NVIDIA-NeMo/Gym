@@ -11,11 +11,19 @@ from types import SimpleNamespace
 
 import pytest
 
-import environment_servers.harbor.verifier as verifier
 from environment_servers.harbor import session, verifier
-from environment_servers.harbor.tests.conftest import FakeSandbox, make_server, run_episode
+from environment_servers.harbor.tests.conftest import (
+    SEPARATE_TOML,
+    TASK_TOML,
+    AgentSandbox,
+    FakeSandbox,
+    make_server,
+    run_episode,
+)
 from environment_servers.harbor.tests.test_review_regressions import during_turn
+from environment_servers.harbor.verifier import verifier_command
 from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.tasks.harbor import load_task
 
 
 class LocalSandbox:
@@ -99,7 +107,7 @@ async def test_non_finite_numeric_reward_is_measured_zero(tmp_path, monkeypatch,
     result = (await run_episode(server, task)).result
     assert result.reward == 0 and result.mask_sample is False
     assert result.failure_kind == "harbor:invalid_reward"
-    assert sum("test.sh" in call["command"] for call in sandbox.execs) == 1
+    assert sum("test.sh" in call["command"] and "timeout" in call["command"] for call in sandbox.execs) == 1
 
 
 @pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
@@ -133,7 +141,7 @@ async def test_timeout_retains_logs_and_is_measured_zero(tmp_path, monkeypatch):
     assert result.failure_kind == "harbor:verifier_timeout"
     assert result.verifier_return_code == 124
     assert "checkpoint" in (Path(result.verifier_logs_dir) / "test-stdout.txt").read_text()
-    assert sum("test.sh" in call["command"] for call in sandbox.execs) == 1
+    assert sum("test.sh" in call["command"] and "timeout" in call["command"] for call in sandbox.execs) == 1
 
 
 async def test_optional_diagnostic_transfer_failure_preserves_score(tmp_path, monkeypatch):
@@ -189,7 +197,7 @@ async def test_episode_ids_never_name_verifier_folders(tmp_path, monkeypatch, id
     assert logs.parent == root.resolve() and rollout not in logs.name
     assert (logs / "reward.txt").read_text() == "1\n"
     assert sentinel.read_text() == "untouched"
-    assert sum("test.sh" in call["command"] for call in sandbox.execs) == 1
+    assert sum("test.sh" in call["command"] and "timeout" in call["command"] for call in sandbox.execs) == 1
 
 
 async def test_artifact_root_redirected_after_startup_cannot_receive_verifier_files(tmp_path, monkeypatch):
@@ -256,3 +264,96 @@ async def test_artifact_directory_creation_failure_is_a_storage_failure(tmp_path
     assert str(server._artifacts_dir) in result.failure_reason
     assert server._artifacts_dir.read_text() == "a file blocks the output directory"
     assert not any("test.sh" in call["command"] for call in sandbox.execs)
+
+
+def _run_index(commands: list[str]) -> int:
+    """The test.sh run itself (the `timeout` wrapper), not the `chmod +x` before it or a probe for the file."""
+    return next(i for i, c in enumerate(commands) if "timeout" in c and "test.sh" in c)
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+async def test_test_sh_alone_is_made_executable_as_root_and_the_package_modes_stay(
+    tmp_path, monkeypatch, verifier_tree
+):
+    """Harbor's verifier rule: upload the package as it is, `chmod +x` the test script as root because it is a
+    `.sh`, run it as the verifier user, chown nothing, widen nothing. A package built under umask 077 (0600
+    files) ends up with a 0700 test.sh and every other file as it was, readable by root alone."""
+    root, logs, tests = verifier_tree
+
+    class Recording(LocalSandbox):
+        def __init__(self):
+            self.execs: list[dict] = []
+
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+            self.execs.append({"command": command, "user": user})
+            return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+    toml = TASK_TOML.replace("[verifier]\n", '[verifier]\nuser = "tester"\n')
+    server, task, _, _ = make_server(tmp_path, monkeypatch, toml=toml)
+    package = task.path / "tests"
+    (package / "test.sh").write_text(f"#!/bin/bash\necho 1 > {shlex.quote(str(logs / 'verifier/reward.txt'))}\n")
+    (package / "helper.sh").write_text("echo helper\n")
+    (package / "data.txt").write_text("fixture\n")
+    for name, mode in (("test.sh", 0o600), ("helper.sh", 0o600), ("data.txt", 0o400)):
+        (package / name).chmod(mode)
+    sandbox = Recording()
+    previous_umask = os.umask(0o077)
+    try:
+        outcome = await server._run_verifier(
+            SimpleNamespace(task=task, sandbox=sandbox, workdir=str(root), entrypoint=None)
+        )
+    finally:
+        os.umask(previous_umask)
+        await server.shutdown()
+
+    assert outcome["reward"] == 1 and not outcome.get("mask_sample", False)
+    commands = [c["command"] for c in sandbox.execs]
+    unpack = next(i for i, c in enumerate(commands) if "tar -xzf" in c)
+    chmod = commands.index(f"chmod +x {tests}/test.sh")
+    run = _run_index(commands)
+    # Upload, then the chmod as its own root exec, then the run as the verifier user with no chmod in it.
+    assert unpack < chmod < run
+    assert sandbox.execs[chmod]["user"] == "root" and sandbox.execs[run]["user"] == "tester"
+    assert commands[run] == verifier_command(120)
+    modes = {name: stat.S_IMODE((tests / name).stat().st_mode) for name in ("test.sh", "helper.sh", "data.txt")}
+    assert modes == {"test.sh": 0o700, "helper.sh": 0o600, "data.txt": 0o400}
+
+
+@pytest.mark.parametrize("image_owns_tests", [False, True])
+async def test_separate_verifier_chmods_test_sh_as_root_then_runs_it_as_the_verifier_user(
+    tmp_path, monkeypatch, image_owns_tests
+):
+    """The same rule in a separate verifier, with the upload (Harbor's default) and without it (the image owns
+    /tests, Harbor's skip_tests_upload): the chmod runs either way, as Harbor runs it either way."""
+
+    class Verifier(FakeSandbox):
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+            if image_owns_tests and command.startswith("if [ -d /tests/test.sh ]"):
+                self.execs.append({"command": command, "user": user})
+                return SandboxExecResult(stdout="file\n", stderr="", return_code=0)
+            return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+    agent = AgentSandbox()
+    server, task, _, _ = make_server(tmp_path, monkeypatch, agent)
+    (task.path / "task.toml").write_text(SEPARATE_TOML.replace('user = "root"', 'user = "tester"'))
+    task = load_task(task.path)
+    server.config.tasksets["ds"].tasks["hello"] = task.digest
+    verifier = Verifier()
+
+    async def create_verifier(task, *, episode_key=None):
+        server._sandboxes[f"{episode_key}/verifier"] = verifier
+        return verifier
+
+    monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+
+    result = (await run_episode(server, task)).result
+
+    assert result is not None and result.reward == 1.0 and result.verifier_mode == "separate"
+    commands = [c["command"] for c in verifier.execs]
+    uploads = [i for i, c in enumerate(commands) if "tar -xzf" in c and "-C /tests;" in c]
+    chmod = commands.index("chmod +x /tests/test.sh")
+    run = _run_index(commands)
+    assert (uploads == []) is image_owns_tests
+    assert all(i < chmod for i in uploads) and chmod < run
+    assert verifier.execs[chmod]["user"] == "root" and verifier.execs[run]["user"] == "tester"
+    assert commands[run] == verifier_command(300)
