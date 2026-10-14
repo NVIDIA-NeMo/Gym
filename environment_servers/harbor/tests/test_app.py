@@ -17,6 +17,7 @@ from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from yarl import URL
 
+from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S
 from environment_servers.harbor.tests.conftest import (
     SOLVE_SH,
     TASK_TOML,
@@ -25,7 +26,14 @@ from environment_servers.harbor.tests.conftest import (
     make_server,
     run_episode,
 )
-from environment_servers.harbor.verifier import parse_reward_file, select_reward
+from environment_servers.harbor.verifier import (
+    EXIT_RECORD_NAME,
+    TIMEOUT_WRAPPER_GUARD,
+    parse_exit_record,
+    parse_reward_file,
+    select_reward,
+    verifier_command,
+)
 from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.tasks.harbor import load_task
@@ -84,6 +92,25 @@ class TestRewardFile:
     def test_boolean_rewards_match_harbor(self, tmp_path):
         (tmp_path / "reward.json").write_text('{"passed": true, "failed": false}')
         assert parse_reward_file(tmp_path) == ({"passed": 1.0, "failed": 0.0}, None)
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("137 1700000000 1700000120\n", (137, 120)),
+            ("0 1700000000 1700000001", (0, 1)),
+            # An image without `date` leaves empty timestamps: the exit code is still known.
+            ("137  \n", (137, None)),
+            ("137 x y", (137, None)),
+            ("", None),
+            ("nope", None),
+        ],
+    )
+    def test_exit_record(self, tmp_path, text, expected):
+        (tmp_path / EXIT_RECORD_NAME).write_text(text)
+        assert parse_exit_record(tmp_path) == expected
+
+    def test_exit_record_missing(self, tmp_path):
+        assert parse_exit_record(tmp_path) is None
 
     def test_non_utf8_bytes_do_not_raise(self, tmp_path):
         (tmp_path / "reward.txt").write_bytes(b"\xff\xfe1\n")
@@ -254,6 +281,113 @@ class TestEpisode:
         assert spec.metadata["nemo_gym_environment_server"] == "harbor_environment_server"
 
 
+class TestSetupCommands:
+    async def test_setup_commands_run_as_root_after_workdir(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.config.sandbox_setup_commands = ["sed -i s/a/b/ /etc/apt/sources.list", "apt-get update || true"]
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        commands = [call["command"] for call in sandbox.execs]
+        assert commands[0] == "mkdir -p /app"
+        assert commands[1:3] == server.config.sandbox_setup_commands
+        assert all(call["user"] == "root" for call in sandbox.execs[1:3])
+        # The harness only gets its session once the sandbox is fully set up.
+        assert server.server_client.calls
+
+    async def test_failing_setup_command_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
+        class Failing(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if command == "false":
+                    return SandboxExecResult(stdout="", stderr="nope", return_code=1)
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, Failing())
+        server.config.sandbox_setup_commands = ["false"]
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and not response.failure.terminal
+        assert "nope" in response.failure.failure_reason and sandbox.stopped
+        assert server.server_client.calls == []
+
+
+class TestSeedWorkdirAndResources:
+    async def test_image_workdir_used_when_task_sets_none(self, tmp_path, monkeypatch):
+        server, task, sandbox, created = make_server(tmp_path, monkeypatch)
+        # A task with a real Dockerfile and a prebuilt image declares no workdir; the image's WORKDIR is used.
+        (task.path / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\nRUN true\n")
+        (task.path / "task.toml").write_text(TASK_TOML.replace("cpus = 1", 'docker_image = "org/task:1"\ncpus = 1'))
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        assert task.workdir is None
+
+        class PwdSandbox(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if command == "pwd":
+                    return SandboxExecResult(stdout="/work\n", stderr="", return_code=0)
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        pwd_sandbox = PwdSandbox()
+
+        async def create(task, workdir, *, episode_key=None):
+            created.append((task.task_id, workdir))
+            return pwd_sandbox
+
+        monkeypatch.setattr(server, "_create_sandbox", create)
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert created == [("hello", None)]
+        assert server.server_client.seed_bodies()[0]["sandbox_access"]["workdir"] == "/work"
+
+    async def test_root_workdir_is_neither_created_nor_handed_over(self, tmp_path, monkeypatch):
+        """An image whose WORKDIR is `/` with a user override: `/` keeps root's ownership."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch, dockerfile="FROM ubuntu:24.04\nUSER runner\n")
+        assert task.user == "runner" and task.workdir is None
+
+        class RootPwdSandbox(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if command == "pwd":
+                    return SandboxExecResult(stdout="/\n", stderr="", return_code=0)
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        def workdir_commands(sandbox) -> list[str]:
+            # The /logs folders are prepared by the same helper; only the working directory commands matter here.
+            return [call["command"] for call in sandbox.execs if "/logs" not in call["command"]]
+
+        sandbox = RootPwdSandbox()
+        assert await server._prepare_workdir(sandbox, task, None) == "/"
+        # Only the `pwd` probe ran (answered above the recording fake): no `mkdir -p /`, no `chown ... /`.
+        assert workdir_commands(sandbox) == []
+
+        # A named directory below the root is still created and handed over.
+        named = RootPwdSandbox()
+        assert await server._prepare_workdir(named, task, "/work") == "/work"
+        assert workdir_commands(named) == ["mkdir -p /work && chown runner /work"]
+
+    def test_resources_override_and_cpu_env(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        spec = server._sandbox_spec(task, "/app")
+        assert spec.resources.cpu == 1.0 and spec.env["OMP_NUM_THREADS"] == "1"
+
+        server.config.sandbox_resources_override = {"cpu": 4, "memory_mib": 16384, "disk_gib": 30}
+        spec = server._sandbox_spec(task, "/app")
+        assert (spec.resources.cpu, spec.resources.memory_mib, spec.resources.disk_gib) == (4.0, 16384, 30)
+        assert spec.env["OMP_NUM_THREADS"] == "4"
+
+        # The override merges over the task's resources, so a GPU request survives a CPU/memory override.
+        task.config.environment.gpus = 1
+        task.config.environment.gpu_types = ["H100"]
+        spec = server._sandbox_spec(task, "/app")
+        assert spec.resources.gpu == 1 and spec.resources.cpu == 4.0
+        task.config.environment.gpus = None
+        task.config.environment.gpu_types = None
+
+        server.config.derive_cpu_env = False
+        assert "OMP_NUM_THREADS" not in server._sandbox_spec(task, "/app").env
+
+
 class TestAgentStage:
     async def test_lost_agent_seed_is_a_retryable_agent_failure_and_stops_the_sandbox(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
@@ -344,8 +478,18 @@ class TestVerify:
         assert result.verifier_rewards == {"reward": 1.0} and result.verifier_return_code == 0
 
         run = next(call for call in sandbox.execs if "test.sh" in call["command"])
-        assert run["command"] == "bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1"
-        assert run["cwd"] == "/app" and run["timeout_s"] == 120.0
+        assert run["command"] == verifier_command(120)
+        # The portable short form (`--signal=` fails on BusyBox), guarded so a missing wrapper exits 127
+        # before anything is redirected, and followed by the exit record the server reads the deadline from.
+        assert run["command"].startswith(f"{TIMEOUT_WRAPPER_GUARD}; start=$(date +%s); ")
+        assert (
+            "timeout -s KILL 120 bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1; rc=$?; " in run["command"]
+        )
+        assert run["command"].endswith('echo "$rc $start $(date +%s)" > /logs/verifier/.ng-exit; exit $rc')
+        assert "--signal" not in run["command"]
+        assert run["cwd"] == "/app"
+        # The exec itself is bounded by the budget plus the grace period; the provider keeps it alive that long.
+        assert run["timeout_s"] == 120 + server.config.verifier_grace_s
         commands = [call["command"] for call in sandbox.execs]
         wipe = next(i for i, command in enumerate(commands) if "-mindepth 1 -delete" in command)
         upload = next(i for i, command in enumerate(commands) if "tar -xzf" in command and "/tests" in command)
@@ -418,19 +562,96 @@ class TestVerify:
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
         assert response.result.reward == 0.0 and response.result.failure_kind == "harbor:invalid_reward"
 
-    async def test_verifier_timeout_scores_zero(self, tmp_path, monkeypatch):
+    async def test_verifier_timeout_when_exit_code_never_appears(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(
-            test_result=SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout")
+            verifier_files={},
+            test_result=SandboxExecResult(stdout=None, stderr=None, return_code=125, error_type="timeout"),
+        )
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, sandbox)
+        server.config.verifier_grace_s = 0
+        (task.path / "task.toml").write_text(
+            TASK_TOML.replace("timeout_sec = 120.0\n\n[agent]", "timeout_sec = 0.01\n\n[agent]")
+        )
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        result = (await run_episode(server, task)).result
+        assert result.reward == 0.0 and result.failure_kind == "harbor:verifier_timeout"
+        assert result.mask_sample is False
+        # A sub-second budget is rounded up to one whole second: `timeout 0` would mean no limit at all.
+        run = next(call for call in sandbox.execs if "test.sh" in call["command"])
+        assert "timeout -s KILL 1 bash /tests/test.sh" in run["command"]
+
+    async def test_exit_137_before_the_deadline_keeps_the_reward(self, tmp_path, monkeypatch):
+        """A grader that writes its reward and then ends 137 (a killed helper under `wait`) did not time out."""
+        sandbox = FakeSandbox(
+            verifier_files={"reward.txt": "1\n"},
+            test_result=SandboxExecResult(stdout="", stderr="", return_code=137),
+            test_elapsed=5,
         )
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
-        assert response.result.reward == 0.0 and response.result.mask_sample is False
+        result = response.result
+        assert result.reward == 1.0 and result.mask_sample is False and result.failure_kind is None
+        assert result.verifier_return_code == 137
+
+    async def test_exit_137_at_the_deadline_without_a_reward_is_a_timeout(self, tmp_path, monkeypatch):
+        sandbox = FakeSandbox(
+            verifier_files={"test-stdout.txt": "still running"},
+            test_result=SandboxExecResult(stdout="", stderr="", return_code=137),
+            test_elapsed=120,
+        )
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.reward == 0.0 and result.mask_sample is False
+        assert result.failure_kind == "harbor:verifier_timeout"
+        assert "still running" in result.failure_reason
+
+    async def test_reward_written_before_the_kill_still_counts(self, tmp_path, monkeypatch):
+        sandbox = FakeSandbox(
+            verifier_files={"reward.txt": "0.5\n"},
+            test_result=SandboxExecResult(stdout="", stderr="", return_code=137),
+            test_elapsed=120,
+        )
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        assert response.result.reward == 0.5 and response.result.failure_kind is None
+
+    async def test_exit_137_without_timestamps_falls_back_to_the_exit_code(self, tmp_path, monkeypatch):
+        """An image without `date` leaves no elapsed time: 137 then means the timer, as before."""
+        sandbox = FakeSandbox(
+            verifier_files={EXIT_RECORD_NAME: "137  \n"},
+            test_result=SandboxExecResult(stdout="", stderr="", return_code=137),
+        )
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
         assert response.result.failure_kind == "harbor:verifier_timeout"
 
-    async def test_sandbox_runtime_failure_masks(self, tmp_path, monkeypatch):
+    async def test_missing_timeout_wrapper_masks_the_sample(self, tmp_path, monkeypatch):
+        """BusyBox without `timeout`, or an image without `bash`: the guard exits 127 before test.sh starts."""
         sandbox = FakeSandbox(
-            test_result=SandboxExecResult(stdout=None, stderr="gone", return_code=125, error_type="sandbox")
+            verifier_files={},
+            test_result=SandboxExecResult(stdout="", stderr="", return_code=127),
+            wrapper_ran=False,
         )
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.reward == 0.0 and result.mask_sample is True
+        assert result.failure_kind == "verifier_error"
+        assert "could not be started" in result.failure_reason and "exit 127" in result.failure_reason
+
+    async def test_test_sh_exiting_127_itself_is_measured(self, tmp_path, monkeypatch):
+        """The wrapper ran: a script that ends 127 (a missing command of its own) is an ordinary measured zero."""
+        sandbox = FakeSandbox(verifier_files={}, test_result=SandboxExecResult(stdout="", stderr="", return_code=127))
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.mask_sample is False and result.failure_kind == "harbor:missing_reward"
+        assert result.verifier_return_code == 127
+
+    async def test_sandbox_runtime_failure_masks(self, tmp_path, monkeypatch):
+        class BrokenLaunch(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if "test.sh" in command:
+                    return SandboxExecResult(stdout=None, stderr="gone", return_code=125, error_type="sandbox")
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, BrokenLaunch())
         assert response.result.reward == 0.0 and response.result.mask_sample is True
         assert response.result.failure_kind == "verifier_error"
 
@@ -489,7 +710,7 @@ class TestOwnership:
 
 
 class TestSeedGuards:
-    """Defects from the first cluster run: a seed the episode deadline cancels leaves its sandbox to the cleanup."""
+    """Defects from the first cluster run: requests above limits, and a create the ready timeout did not bound."""
 
     async def test_cancelled_seed_leaves_the_stop_to_the_bounded_cleanup(self, tmp_path, monkeypatch):
         """The episode deadline fires during setup while the provider's stop hangs.
@@ -529,6 +750,40 @@ class TestSeedGuards:
         release.set()
         await server.shutdown()
         assert sandbox.stopped and not server._sandboxes
+
+    async def test_seed_gives_up_on_a_create_at_the_ready_timeout(self, tmp_path, monkeypatch):
+        """The configured ready timeout is a seed deadline, whatever the provider's own retry budget."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch, sandbox_ready_timeout_s=0.05)
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.SEED_CREATE_GRACE_S", 0.0)
+        stopped = []
+
+        class Hanging:
+            async def stop(self):
+                stopped.append(True)
+
+        async def hang(task, workdir, *, episode_key):
+            server._sandboxes[episode_key] = Hanging()
+            await asyncio.get_running_loop().create_future()
+
+        monkeypatch.setattr(server, "_create_sandbox", hang)
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and not response.failure.terminal
+        assert "not ready within 0.05s" in response.failure.failure_reason
+        assert "sandbox_ready_timeout_s=0.05" in response.failure.failure_reason
+        assert stopped == [True] and not server._sandboxes
+        assert server.server_client.calls == []
+        assert SEED_CREATE_GRACE_S > 0
+
+    async def test_a_providers_own_timeout_inside_the_deadline_is_reported_as_is(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch, sandbox_ready_timeout_s=100)
+
+        async def provider_timeout(task, workdir, *, episode_key):
+            raise TimeoutError("Timed out creating OpenSandbox sandbox after 100s")
+
+        monkeypatch.setattr(server, "_create_sandbox", provider_timeout)
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and not response.failure.terminal
+        assert "Timed out creating OpenSandbox sandbox after 100s" in response.failure.failure_reason
 
 
 class TestOracleSolution:

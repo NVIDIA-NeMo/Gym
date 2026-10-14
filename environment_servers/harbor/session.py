@@ -87,13 +87,22 @@ class HarborSessionMixin:
 
     """
 
-    async def _prepare_workdir(self, sandbox: AsyncSandbox, task: HarborTask, workdir: str) -> None:
-        commands = [f"mkdir -p {shlex.quote(workdir)}"]
-        if task.user:
-            commands.append(f"chown {shlex.quote(task.user)} {shlex.quote(workdir)}")
-        result = await exec_as_root(sandbox, " && ".join(commands), timeout_s=60)
-        if result.return_code != 0:
-            raise RuntimeError(f"Could not prepare {workdir}: {result.stderr or result.stdout}")
+    async def _prepare_workdir(self, sandbox: AsyncSandbox, task: HarborTask, workdir: str | None) -> str:
+        """Create the working directory, or resolve the image's own WORKDIR when the task sets none."""
+        if workdir is None:
+            result = await sandbox.exec("pwd", timeout_s=60)
+            if result.return_code != 0 or not (result.stdout or "").strip():
+                raise RuntimeError(f"Could not resolve the image working directory: {result.stderr or result.stdout}")
+            workdir = (result.stdout or "").strip().splitlines()[-1]
+        if workdir != "/":
+            # Only a directory the task or image named below the root is created and, with a user
+            # override, handed over; an image whose WORKDIR is `/` must keep root's ownership of it.
+            commands = [f"mkdir -p {shlex.quote(workdir)}"]
+            if task.user:
+                commands.append(f"chown {shlex.quote(task.user)} {shlex.quote(workdir)}")
+            result = await exec_as_root(sandbox, " && ".join(commands), timeout_s=60)
+            if result.return_code != 0:
+                raise RuntimeError(f"Could not prepare {workdir}: {result.stderr or result.stdout}")
         environment_dir = task.path / "environment"
         if (
             task.config.environment.docker_image
@@ -104,6 +113,7 @@ class HarborSessionMixin:
             )
         ):
             await upload_dir(sandbox, environment_dir, workdir)
+        return workdir
 
     def _agent_implementation(self) -> str | None:
         """The implementation behind the configured agent instance: the one key under its ``responses_api_agents``.

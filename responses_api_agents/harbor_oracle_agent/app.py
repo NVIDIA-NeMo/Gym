@@ -15,6 +15,7 @@ A task without ``solution/solve.sh`` is not failed: the oracle returns a respons
 ``oracle=unvalidated`` and does nothing in the sandbox.
 """
 
+import math
 from dataclasses import dataclass
 from time import time
 from typing import Any
@@ -24,6 +25,7 @@ from fastapi import Body, HTTPException, Request
 from pydantic import Field
 
 from environment_servers.harbor.session import SOLUTION_DIR
+from environment_servers.harbor.verifier import TIMEOUT_WRAPPER_GUARD
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -49,10 +51,17 @@ from nemo_gym.sandbox.providers import create_provider
 
 
 SOLVE_SCRIPT = f"{SOLUTION_DIR}/solve.sh"
+SOLVE_LOG_DIR = "/logs/agent"
+# Harbor's oracle writes its output under this name, so tools written for Harbor find the log.
+SOLVE_LOG = f"{SOLVE_LOG_DIR}/oracle.txt"
+# Extra time the exec may wait after the in-container `timeout` should have fired.
+SOLVE_GRACE_S = 60.0
 ORACLE_METADATA_KEY = "oracle"
 ORACLE_STATUS_SOLVED = "solved"
 ORACLE_STATUS_UNVALIDATED = "unvalidated"
 ORACLE_STATUS_FAILED = "failed"
+# `oracle_error_type` when solve.sh never started: the image has no `timeout` or `bash`.
+ORACLE_ERROR_WRAPPER = "wrapper"
 
 
 class OracleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -156,20 +165,30 @@ class OracleAgent(SimpleResponsesAPIAgent):
 
         timeout = session.timeout_s
         env = {"DEBIAN_FRONTEND": "noninteractive", **session.env}
+        await session.sandbox.exec(f"mkdir -p {SOLVE_LOG_DIR} && chmod 777 {SOLVE_LOG_DIR}", cwd="/", timeout_s=60)
+        # One bounded exec: the provider keeps the command alive for `timeout_s`, and `timeout`
+        # inside the container stops the solution itself (a sub-second budget still gets a whole
+        # second: `timeout 0` means no limit). Output goes to a file we tail.
         result = await session.sandbox.exec(
-            f"bash {SOLVE_SCRIPT}",
+            f"{TIMEOUT_WRAPPER_GUARD}; "
+            f"timeout -s KILL {max(1, math.ceil(timeout))} bash {SOLVE_SCRIPT} > {SOLVE_LOG} 2>&1",
             cwd=session.workdir,
             env=env,
-            timeout_s=timeout,
+            timeout_s=timeout + SOLVE_GRACE_S,
             user=session.user,
             preserve_background_services=True,
         )
         tail = self.config.output_tail_chars
-        output = "\n".join(part for part in ((result.stdout or "")[-tail:], (result.stderr or "")[-tail:]) if part)
+        # `tail` fails when the log does not exist: the guard exited before the redirection created it.
+        log = await session.sandbox.exec(f"tail -c {tail} {SOLVE_LOG} 2>/dev/null", cwd="/", timeout_s=60)
+        output = "\n".join(part for part in ((log.stdout or "")[-tail:], (result.stderr or "")[-tail:]) if part)
         status = ORACLE_STATUS_SOLVED if result.return_code == 0 else ORACLE_STATUS_FAILED
         extra = {"oracle_return_code": str(result.return_code)}
         if result.error_type:
             extra["oracle_error_type"] = result.error_type
+        elif result.return_code == 127 and log.return_code != 0:
+            extra["oracle_error_type"] = ORACLE_ERROR_WRAPPER
+            output = output or "solve.sh could not be started: timeout wrapper or bash missing (exit 127)"
         return self._response(body, status, output or f"solve.sh exited with {result.return_code}", extra)
 
     @staticmethod

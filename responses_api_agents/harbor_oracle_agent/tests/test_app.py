@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import math
 from dataclasses import dataclass, field
 from unittest.mock import MagicMock
 
@@ -18,11 +19,14 @@ from responses_api_agents.harbor_oracle_agent.app import OracleAgent, OracleAgen
 class FakeSandbox:
     """The sandbox the environment server seeded, with the solution already at ``/solution`` when ``solution`` is set.
 
-    ``result`` is what solve.sh produced.
+    ``result`` is what solve.sh produced: its stdout and stderr both land in the log the oracle tails.
+    ``log_present=False`` models the guard exiting before the redirection created the log (no ``timeout``
+    or ``bash`` in the image).
     """
 
     result: SandboxExecResult = SandboxExecResult(stdout="Done!\n", stderr="", return_code=0)
     solution: bool = True
+    log_present: bool = True
     execs: list[dict] = field(default_factory=list)
     uploads: list[str] = field(default_factory=list)
     disconnected: bool = False
@@ -43,7 +47,16 @@ class FakeSandbox:
         if command == "test -f /solution/solve.sh":
             return SandboxExecResult(stdout="", stderr="", return_code=0 if self.solution else 1)
         if "solve.sh" in command:
-            return self.result
+            # solve.sh output is redirected to a file in the sandbox, so the exec itself carries only the
+            # exit code and the provider's own error type.
+            return SandboxExecResult(
+                stdout="", stderr="", return_code=self.result.return_code, error_type=self.result.error_type
+            )
+        if command.startswith("tail -c"):
+            if not self.log_present:
+                return SandboxExecResult(stdout="", stderr="tail: cannot open", return_code=1)
+            log = (self.result.stdout or "") + (self.result.stderr or "")
+            return SandboxExecResult(stdout=log, stderr="", return_code=0)
         return SandboxExecResult(stdout="", stderr="", return_code=0)
 
     async def upload(self, local_path, remote_path):
@@ -133,9 +146,14 @@ def test_oracle_runs_the_solution_the_server_placed_in_the_borrowed_sandbox(monk
     probe = sandbox.execs[0]
     assert (probe["command"], probe["user"]) == ("test -f /solution/solve.sh", "runner")
     run = solve_run(sandbox)
-    assert run["command"] == "bash /solution/solve.sh"
-    # The budget is the seed's agent_timeout_sec.
-    assert run["timeout_s"] == 120.0
+    # The portable short form (`--signal=` fails on BusyBox), guarded so a missing wrapper exits 127 before
+    # the log is created; the log carries Harbor's oracle name.
+    assert run["command"] == (
+        f"{module.TIMEOUT_WRAPPER_GUARD}; timeout -s KILL 120 bash /solution/solve.sh > /logs/agent/oracle.txt 2>&1"
+    )
+    assert "--signal" not in run["command"]
+    # The budget is the seed's agent_timeout_sec; the exec outlives the in-container `timeout` by the grace.
+    assert run["timeout_s"] == 120 + 60
     assert (run["cwd"], run["user"]) == ("/app", "runner")
     # The `[solution].env` the server resolved travels in the sandbox access, under Harbor's oracle default.
     assert run["env"] == {"DEBIAN_FRONTEND": "noninteractive", "GREETING": "hi"}
@@ -169,7 +187,7 @@ def test_task_without_solution_is_unvalidated_not_failed(monkeypatch):
 
     assert payload["metadata"] == {"oracle": "unvalidated"}
     assert "solve.sh" in payload["output"][0]["content"][0]["text"]
-    # Only the probe ran: nothing was executed or uploaded.
+    # Only the probe ran: no log folder was prepared, nothing was executed or uploaded.
     assert [call["command"] for call in sandbox.execs] == ["test -f /solution/solve.sh"]
     assert sandbox.uploads == []
 
@@ -200,7 +218,49 @@ def test_failing_solution_is_reported(monkeypatch):
 
     assert payload["metadata"]["oracle"] == "failed"
     assert payload["metadata"]["oracle_return_code"] == "2"
+    assert "oracle_error_type" not in payload["metadata"]
+    # stderr is redirected into the log, so the failure's own diagnostics reach the report.
     assert "boom" in payload["output"][0]["content"][0]["text"]
+
+
+def test_provider_error_type_is_reported(monkeypatch):
+    sandbox = FakeSandbox(result=SandboxExecResult(stdout="", stderr="", return_code=137, error_type="timeout"))
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    payload = client.post("/v1/responses", json=RESPONSES_BODY).json()
+
+    assert payload["metadata"]["oracle"] == "failed"
+    assert payload["metadata"]["oracle_error_type"] == "timeout"
+    assert "solve.sh exited with 137" in payload["output"][0]["content"][0]["text"]
+
+
+def test_missing_timeout_wrapper_is_a_wrapper_error_not_a_solution_failure(monkeypatch):
+    """The guard exits 127 before the log exists: the image lacks `timeout` or `bash`, solve.sh never ran."""
+    sandbox = FakeSandbox(result=SandboxExecResult(stdout="", stderr="", return_code=127), log_present=False)
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    payload = client.post("/v1/responses", json=RESPONSES_BODY).json()
+
+    assert payload["metadata"]["oracle"] == "failed"
+    assert payload["metadata"]["oracle_error_type"] == "wrapper"
+    assert "could not be started" in payload["output"][0]["content"][0]["text"]
+
+
+def test_solution_exiting_127_itself_is_a_solution_failure(monkeypatch):
+    sandbox = FakeSandbox(result=SandboxExecResult(stdout="", stderr="foo: not found", return_code=127))
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    payload = client.post("/v1/responses", json=RESPONSES_BODY).json()
+
+    assert payload["metadata"]["oracle"] == "failed"
+    assert "oracle_error_type" not in payload["metadata"]
+    assert "foo: not found" in payload["output"][0]["content"][0]["text"]
 
 
 def test_seed_requires_sandbox_access(monkeypatch):
@@ -229,7 +289,7 @@ def test_legacy_run_route_is_not_supported(monkeypatch):
     assert response.status_code == 501
 
 
-@pytest.mark.parametrize("cap,expected", [(None, 7200.0), (8000.0, 7200.0), (60.0, 60.0)])
+@pytest.mark.parametrize("cap,expected", [(None, 7200.0), (8000.0, 7200.0), (60.0, 60.0), (0.5, 0.5)])
 def test_solve_uses_the_seeds_timeout_unless_explicitly_capped(monkeypatch, cap, expected):
     agent, sandbox, _ = make_agent(monkeypatch)
     if cap is not None:
@@ -237,7 +297,11 @@ def test_solve_uses_the_seeds_timeout_unless_explicitly_capped(monkeypatch, cap,
     client = TestClient(agent.setup_webserver())
     assert client.post("/v1/agent_sessions", json=seed_body(timeout=7200.0)).status_code == 200
     assert client.post("/v1/responses", json=RESPONSES_BODY).status_code == 200
-    assert solve_run(sandbox)["timeout_s"] == expected
+    # The exec outlives the in-container `timeout` by the grace period.
+    run = solve_run(sandbox)
+    assert run["timeout_s"] == expected + 60.0
+    # The in-container budget is a whole number of seconds, never 0 (which would mean no limit).
+    assert f"timeout -s KILL {max(1, math.ceil(expected))} bash" in run["command"]
 
 
 def test_transient_disconnect_is_retried_by_base_session_lifecycle(monkeypatch):
