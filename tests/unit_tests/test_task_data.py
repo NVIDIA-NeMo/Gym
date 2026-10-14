@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel
 
 from nemo_gym.config_types import (
+    EnvironmentServerInstanceConfig,
     ResourcesServerInstanceConfig,
     ResponsesAPIAgentServerInstanceConfig,
 )
@@ -284,6 +285,33 @@ class TestOwningResourcesServerImpl:
         agent = self._agent("a", {"type": "resources_servers", "name": "missing"})
         assert TrainDataProcessor._owning_resources_server_impl(agent, [agent]) is None
 
+    def _env(self, name, impl, agent_name):
+        return EnvironmentServerInstanceConfig(
+            name=name,
+            server_type_config_dict=OmegaConf.create({}),
+            environment_servers={
+                impl: {"entrypoint": "app.py", "agent_server": {"type": "responses_api_agents", "name": agent_name}}
+            },
+        )
+
+    def test_environment_server_that_names_the_agent_owns_its_data(self):
+        # The Harbor layout: datasets on the agent block, episodes driven by the environment server.
+        agent = self._agent("harbor_oracle", None)
+        env = self._env("harbor_env", "harbor", "harbor_oracle")
+        other = self._env("other_env", "other", "someone_else")
+        assert TrainDataProcessor._owning_environment_server_impl(agent, [other, agent, env]) == "harbor"
+        assert TrainDataProcessor._schema_home_for(agent, [other, agent, env]) == ("harbor", "environment_servers")
+        # Nothing names the agent: it falls back to its own folder.
+        assert TrainDataProcessor._schema_home_for(agent, [other, agent]) == ("simple_agent", "responses_api_agents")
+
+    def test_resources_server_reference_wins_over_an_environment_server(self):
+        rs = self._rs("bench_rs", "mcqa")
+        agent = self._agent("bench_agent", {"type": "resources_servers", "name": "bench_rs"})
+        env = self._env("env", "harbor", "bench_agent")
+        assert TrainDataProcessor._schema_home_for(agent, [agent, rs, env]) == ("mcqa", "resources_servers")
+        dangling = self._agent("dangling", {"type": "resources_servers", "name": "missing"})
+        assert TrainDataProcessor._schema_home_for(dangling, [dangling, env]) is None
+
 
 class TestShippedSchemas:
     """CI enforcement for every committed task_data.py (resources servers and agents)."""
@@ -417,6 +445,32 @@ class TestSelfContainedAgentSchemaFallback:
         validator = TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent])
         assert validator is not None
         assert validator.report.server_name == "tau2"
+
+    def test_agent_driven_by_an_environment_server_uses_that_servers_schema(self, tmp_path, monkeypatch):
+        env_dir = tmp_path / "environment_servers" / "harbor"
+        env_dir.mkdir(parents=True)
+        (env_dir / "task_data.py").write_text(
+            "from pydantic import BaseModel, ConfigDict\n"
+            "class TaskData(BaseModel):\n"
+            "    model_config = ConfigDict(extra='allow')\n"
+            "    ng_digest: str\n"
+        )
+        (tmp_path / "responses_api_agents" / "oracle_agent").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        agent = self._agent("oracle_agent", None)
+        env = EnvironmentServerInstanceConfig(
+            name="harbor_env",
+            server_type_config_dict=OmegaConf.create({}),
+            environment_servers={
+                "harbor": {
+                    "entrypoint": "app.py",
+                    "agent_server": {"type": "responses_api_agents", "name": "oracle_agent_instance"},
+                }
+            },
+        )
+        validator = TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent, env])
+        assert validator is not None
+        assert validator.report.server_name == "harbor"
 
     def test_agent_without_rs_reference_and_no_schema_is_skipped(self, tmp_path, monkeypatch):
         (tmp_path / "responses_api_agents" / "tau2").mkdir(parents=True)

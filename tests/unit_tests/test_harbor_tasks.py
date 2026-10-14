@@ -322,20 +322,21 @@ class TestMaterialize:
         )
         assert config["environment_routing_mode"] == "taskset"
         assert config["environment_server_routes"] == {"ds": "harbor_ds_environment"}
-        resources = config["harbor_ds_resources_server"]["resources_servers"]["harbor"]
-        assert resources["tasksets"]["ds"]["folder"] == str(folder.resolve())
-        assert resources["tasksets"]["ds"]["tasks"] == {"a": tasks[0].digest, "b": tasks[1].digest}
-        assert resources["datasets"][0]["jsonl_fpath"] == str(rows_path.resolve())
+        assert config["harbor_ds_environment"]["_inherit_from"] == "harbor_environment_server"
+        environment = config["harbor_ds_environment"]["environment_servers"]["harbor"]
+        assert environment["tasksets"]["ds"]["folder"] == str(folder.resolve())
+        assert environment["tasksets"]["ds"]["tasks"] == {"a": tasks[0].digest, "b": tasks[1].digest}
+        assert environment["agent_server"] == {"type": "responses_api_agents", "name": "harbor_ds_agent"}
         # Verifier logs land beside the rollouts, not under the server's own folder.
-        assert resources["artifacts_dir"] == str((tmp_path / "out" / "verifier").resolve())
+        assert environment["artifacts_dir"] == str((tmp_path / "out" / "verifier").resolve())
         agent = config["harbor_ds_agent"]
         assert agent["_inherit_from"] == "hermes_agent"
-        assert (
-            agent["responses_api_agents"]["hermes_agent"]["resources_server"]["name"] == "harbor_ds_resources_server"
-        )
+        # Rollout collection finds datasets on agent and resources blocks, so the rows are declared on the agent.
+        assert agent["responses_api_agents"]["hermes_agent"]["datasets"][0]["jsonl_fpath"] == str(rows_path.resolve())
+        assert agent["responses_api_agents"]["hermes_agent"]["datasets"][0]["type"] == "validation"
+        assert "resources_server" not in agent["responses_api_agents"]["hermes_agent"]
         assert agent["responses_api_agents"]["hermes_agent"]["enabled_toolsets"] == ["terminal"]
-        environment = config["harbor_ds_environment"]["environment_servers"]["single_agent_turn"]
-        assert environment["agent_server"]["name"] == "harbor_ds_agent"
+        assert "resources_servers" not in " ".join(config)
 
 
 class TestTasksetMapping:
@@ -602,7 +603,8 @@ class TestCli:
         assert not any(token.startswith("+agent_name") for token in tokens)
         config_paths = next(token for token in tokens if token.startswith("+config_paths="))
         assert str(config_path.resolve()) in config_paths
-        assert "single_agent_turn/configs/single_agent_turn.yaml" in config_paths
+        assert "environment_servers/harbor/configs/harbor.yaml" in config_paths
+        assert "resources_servers" not in config_paths
         assert "opensandbox/configs/opensandbox.yaml" in config_paths
         parsed = OverridesParser.create().parse_overrides(tokens)
         output = next(token.value() for token in parsed if token.key_or_group == "output_jsonl_fpath")
@@ -865,7 +867,7 @@ def test_config_overlays_win_after_real_loading_and_inheritance(tmp_path):
     prepared = prepare_target(str(task.parent), output_root=tmp_path / "out")
     overlay = tmp_path / "overlay.yaml"
     overlay.write_text(
-        "hermes_agent:\n  responses_api_agents:\n    hermes_agent:\n      max_turns: 71\nsingle_agent_turn:\n  environment_servers:\n    single_agent_turn:\n      default_episode_timeout_seconds: 1234\n"
+        "hermes_agent:\n  responses_api_agents:\n    hermes_agent:\n      max_turns: 71\nharbor_environment_server:\n  environment_servers:\n    harbor:\n      default_episode_timeout_seconds: 1234\n"
     )
     _, tokens = build_run(prepared, resolve_agent("hermes"), sandbox=None, overrides=[f"+config_paths=[{overlay}]"])
     paths_token = next(t for t in _merge_config_paths(tokens) if t.startswith("+config_paths="))
@@ -875,7 +877,10 @@ def test_config_overlays_win_after_real_loading_and_inheritance(tmp_path):
     config = OmegaConf.merge(*configs)
     parser._recursively_swap_keys(config)
     assert config.harbor_ds_agent.responses_api_agents.hermes_agent.max_turns == 71
-    assert config.harbor_ds_environment.environment_servers.single_agent_turn.default_episode_timeout_seconds == 1234
+    environment = config.harbor_ds_environment.environment_servers.harbor
+    assert environment.default_episode_timeout_seconds == 1234
+    # The generated instance keeps the shipped defaults it does not override.
+    assert environment.cleanup_timeout_seconds == 180 and environment.sandbox_provider == "sandbox"
 
 
 @pytest.mark.parametrize("skip", [False, True])
@@ -946,6 +951,15 @@ def test_all_unloadable_tasks_still_record_reasons(tmp_path):
     assert "task.toml" in skipped["bad"]
 
 
+def test_harbor_task_data_schema_names_the_digest_key():
+    """The schema module may import only pydantic, so the key is spelled out; keep it equal to DIGEST_KEY."""
+    from environment_servers.harbor.task_data import TaskData
+
+    assert TaskData.model_fields["ng_digest"].alias == DIGEST_KEY
+    data = TaskData.model_validate({DIGEST_KEY: "abc", "other": 1})
+    assert data.ng_digest == "abc" and data.model_dump(by_alias=True)[DIGEST_KEY] == "abc"
+
+
 @pytest.mark.parametrize("taskset", ["ds", "terminal-bench-2.0", "trial=1", "中文=1"])
 def test_generated_run_passes_full_config_validation(tmp_path, monkeypatch, taskset):
     import sys
@@ -955,7 +969,7 @@ def test_generated_run_passes_full_config_validation(tmp_path, monkeypatch, task
     from nemo_gym.cli.main import _merge_config_paths
     from nemo_gym.global_config import GlobalConfigDictParser, get_global_config_dict
     from nemo_gym.rollout_collection import E2ERolloutCollectionConfig
-    from nemo_gym.tasks.harbor.materialize import resources_server_instance
+    from nemo_gym.tasks.harbor.materialize import agent_instance, environment_server_instance
 
     write_task(tmp_path / taskset / "a")
     prepared = prepare_target(str(tmp_path / taskset), output_root=tmp_path / "out")
@@ -974,9 +988,10 @@ def test_generated_run_passes_full_config_validation(tmp_path, monkeypatch, task
     monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
     config = get_global_config_dict()
     servers = GlobalConfigDictParser().filter_for_server_instance_configs(config)
-    resources = next(server for server in servers if server.name == resources_server_instance(taskset))
-    assert resources.get_inner_run_server_config().domain is not None
-    assert resources.datasets[0].name == taskset
+    environment = next(server for server in servers if server.name == environment_server_instance(taskset))
+    assert environment.get_inner_run_server_config().agent_server["name"] == agent_instance(taskset)
+    agent = next(server for server in servers if server.name == agent_instance(taskset))
+    assert agent.datasets[0].name == taskset
     run = E2ERolloutCollectionConfig.model_validate(config)
     assert run.environment_routing_mode == "taskset"
     assert taskset in run.environment_server_routes
@@ -1049,15 +1064,11 @@ def test_duplicate_task_ids_are_rejected_before_rows_or_mapping_are_written(tmp_
 def test_generated_instance_names_are_override_safe_and_collision_free():
     from hydra.core.override_parser.overrides_parser import OverridesParser
 
-    from nemo_gym.tasks.harbor.materialize import (
-        agent_instance,
-        environment_server_instance,
-        resources_server_instance,
-    )
+    from nemo_gym.tasks.harbor.materialize import agent_instance, environment_server_instance
 
     tasksets = ["terminal-bench-2.0", "terminal-bench-2_0", "terminal-bench-2_2e0", "ds-1.0", "ds-2.0", "中文", "a b"]
     parser = OverridesParser.create()
-    for instance in (agent_instance, environment_server_instance, resources_server_instance):
+    for instance in (agent_instance, environment_server_instance):
         names = [instance(taskset) for taskset in tasksets]
         assert len(set(names)) == len(tasksets)
         for name in names:
