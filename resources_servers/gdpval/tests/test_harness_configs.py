@@ -49,3 +49,5 @@ def test_harness_replaces_stirrup_and_reaches_the_task_tools_over_mcp(path):
     )
     agents = [name for name, value in config.items() if isinstance(value, dict) and "responses_api_agents" in value]
     assert agents == [benchmark.agent_name]
+    # gym env start and gym env prefetch read the first key of every top-level mapping.
+    assert all(value for value in config.values() if isinstance(value, dict))
