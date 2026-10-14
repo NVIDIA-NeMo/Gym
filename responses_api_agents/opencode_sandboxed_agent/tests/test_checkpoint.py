@@ -9,6 +9,8 @@ until its task is done or it is signalled. The resources server is faked at the 
 import asyncio
 import json
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -138,12 +140,24 @@ class FakeSandbox:
         # The n-th launch (1-based) and later finish on their own instead of blocking.
         self.finish_runs_after = finish_runs_after
         self.upload = AsyncMock()
+        self.fast_poll_scopes = 0
+        self.fast_poll_entries = 0
+
+    @contextmanager
+    def checkpoint_exec_polling(self) -> Iterator[None]:
+        self.fast_poll_scopes += 1
+        self.fast_poll_entries += 1
+        try:
+            yield
+        finally:
+            self.fast_poll_scopes -= 1
 
     async def exec(self, command: str, timeout_s: float | None = None, env: Any = None, **_: Any) -> Any:
         self.commands.append(command)
         if not self.resources.sandbox_running:
             raise RuntimeError("sandbox is stopped")
         if "[o]pencode run" in command:
+            assert self.fast_poll_scopes == 1
             self.killed.set()
             return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
         if "opencode run" in command or f"python3 {_REMOTE_RESUME_HELPER}" in command:

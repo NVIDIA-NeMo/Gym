@@ -1242,6 +1242,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             park_task.cancel()
         if exec_task.done():
             return exec_task.result()
+        with sandbox.checkpoint_exec_polling():
+            await self._interrupt_opencode(sandbox, exec_task)
+
+    async def _interrupt_opencode(self, sandbox: AsyncSandbox, exec_task: asyncio.Future[Any]) -> None:
+        """Stop OpenCode using the existing signals and grace periods, then park the rollout."""
         print("Checkpoint requested: interrupting OpenCode in the sandbox", file=sys.stderr)
         for signal_name, grace_s in (("INT", _INTERRUPT_GRACE_S), ("KILL", _KILL_GRACE_S)):
             try:
