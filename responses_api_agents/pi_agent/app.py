@@ -79,6 +79,20 @@ LOG = logging.getLogger(__name__)
 MCP_SETUP_ERROR_EXIT_CODE = 78  # Must match gym_mcp.mjs (EX_CONFIG).
 # gym_mcp.mjs prefixes each tool name with its server name and accepts only these characters.
 _MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
+    """Rename gym_mcp.mjs' ``<server>_<tool>`` to Gym's ``mcp__<server>__<tool>``, which Gym strips before verify.
+
+    The server part is matched against the granted names, longest first, so one name that extends another cannot
+    capture its tools.
+    """
+    for server in sorted(server_names, key=len, reverse=True):
+        if name.startswith(f"{server}_"):
+            return f"mcp__{server}__{name[len(server) + 1 :]}"
+    return name
+
+
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
@@ -491,7 +505,19 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     sandbox_bash_timeout_seconds: int = Field(default=900, gt=0)
     sandbox_mcp_timeout_seconds: float = Field(
-        default=300, gt=0, allow_inf_nan=False, description="Timeout of each call to a granted MCP tool."
+        default=300,
+        ge=0.001,
+        # Node timers overflow above 2**31 - 1 ms.
+        le=2_147_483,
+        allow_inf_nan=False,
+        description="Timeout of each call to a granted MCP tool.",
+    )
+    finish_tool_names: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Granted MCP tools, by their name on the server, whose successful call ends a sandbox session's run, "
+            "like Stirrup's finish tools."
+        ),
     )
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
@@ -687,6 +713,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 "headers": access.connection.headers,
                 "timeout": round(self.config.sandbox_mcp_timeout_seconds * 1000),
                 "required": access.required,
+                "terminal_tools": list(self.config.finish_tool_names),
             }
             for access in self.effective_tool_accesses(request)
             if isinstance(access, MCPToolAccess)
@@ -820,11 +847,21 @@ class PiAgent(SimpleResponsesAPIAgent):
         terminal_error = None
         context_overflow = False
         stop_reasons = []
+        mcp_setup_failure = None
+        skipped_mcp_servers = []
+        tool_results_since_assistant = []
         for _, event in events:
             if event.get("type") == "ng_pi_outcome":
                 context_overflow = event.get("context_overflow") is True
+            elif event.get("type") == "ng_gym_mcp_setup_failed":
+                mcp_setup_failure = str(event.get("error") or "")
+            elif event.get("type") == "ng_gym_mcp_server_skipped":
+                skipped_mcp_servers.append(f"{event.get('server')}: {event.get('error')}")
             message = event.get("message") or {}
+            if event.get("type") == "message_end" and message.get("role") == "toolResult":
+                tool_results_since_assistant.append(message)
             if event.get("type") == "message_end" and message.get("role") == "assistant":
+                tool_results_since_assistant = []
                 for part in message.get("content") or []:
                     if part.get("type") == "thinking" and part.get("thinking"):
                         output.append(
@@ -863,13 +900,28 @@ class PiAgent(SimpleResponsesAPIAgent):
             terminal_error = None
         error = cleanup["error"] or terminal_error
         if mcp_servers and cleanup["return_code"] == MCP_SETUP_ERROR_EXIT_CODE:
-            error = error or "Required Gym MCP tools could not be initialized"
+            cause = f": {mcp_setup_failure}" if mcp_setup_failure else ""
+            error = error or f"Required Gym MCP tools could not be initialized{cause}"
+        # gym_mcp.mjs ends the run on a successful finish tool call, so the last assistant turn stops for tool use.
+        ended_on_finish_tool = bool(
+            stop_reasons
+            and stop_reasons[-1] == "toolUse"
+            and tool_results_since_assistant
+            and all(
+                (result.get("details") or {}).get("terminal") is True and not result.get("isError")
+                for result in tool_results_since_assistant
+            )
+        )
         if cleanup["return_code"] not in (None, 0) and not cleanup["timed_out"] and not model_limit:
             error = error or f"Pi exited with code {cleanup['return_code']}"
         if not stop_reasons:
             cached_tokens = None
             error = error or "Pi produced no assistant result"
-        elif stop_reasons[-1] not in ("stop", "length", "error", "aborted") and not cleanup["timed_out"]:
+        elif (
+            stop_reasons[-1] not in ("stop", "length", "error", "aborted")
+            and not cleanup["timed_out"]
+            and not ended_on_finish_tool
+        ):
             error = error or "Pi ended without a terminal assistant result"
         incomplete = (
             cleanup["timed_out"] or model_limit or (stop_reasons and stop_reasons[-1] in ("length", "aborted"))
@@ -881,7 +933,13 @@ class PiAgent(SimpleResponsesAPIAgent):
             created_at=int(time()),
             model=self.config.model,
             object="response",
-            output=output,
+            # Verifiers see Gym's MCP naming; the model's own names stay in the observations and model calls.
+            output=[
+                item.model_copy(update={"name": _gym_mcp_tool_name(item.name, list(mcp_servers))})
+                if getattr(item, "type", None) == "function_call"
+                else item
+                for item in output
+            ],
             status="failed" if error else "incomplete" if incomplete else "completed",
             error={"code": "server_error", "message": error} if error else None,
             tool_choice=body.tool_choice,
@@ -926,6 +984,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         if cleanup["return_code"] is None:
             state.observations.gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
         state.observations.gaps.append(ObservationGap(code="reasoning_token_usage_unavailable"))
+        state.observations.gaps.extend(
+            ObservationGap(code="mcp_server_skipped", detail=detail) for detail in skipped_mcp_servers
+        )
         if cached_tokens is None:
             state.observations.gaps.append(
                 ObservationGap(

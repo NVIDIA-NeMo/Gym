@@ -119,3 +119,47 @@ test("an optional server whose tools collide registers none of them", async (t) 
   await registerGymTools(a, { tavily: { ...f.config, required: false } });
   assert.deepEqual(a.tools, []);
 });
+
+test("a terminal tool ends the run after a successful call", async (t) => {
+  const f = await fixture(t);
+  const a = agent();
+  await registerGymTools(a, { tavily: { ...f.config, terminal_tools: ["web_search"] } });
+  const ended = await a.tools[0].execute("a", { query: "x" });
+  assert.equal(ended.terminate, true);
+  assert.deepEqual(ended.details, { terminal: true });
+  const b = agent();
+  await registerGymTools(b, { tavily: f.config });
+  const continued = await b.tools[0].execute("b", { query: "x" });
+  assert.equal(continued.terminate, undefined);
+  assert.deepEqual(continued.details, {});
+});
+
+test("a failed terminal tool call does not end the run", async (t) => {
+  const f = await fixture(t, (body, _req, res) => {
+    if (body.method !== "tools/call") return false;
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { isError: true, content: [{ type: "text", text: "Files do not exist" }] } }));
+    return true;
+  });
+  const a = agent();
+  await registerGymTools(a, { tavily: { ...f.config, terminal_tools: ["web_search"] } });
+  await assert.rejects(a.tools[0].execute("a", { query: "x" }), /Files do not exist/);
+});
+
+test("names the failed server and reports a skipped optional one on stdout", async (t) => {
+  // A port that was just released refuses connections (fetch blocks low ports such as 1 outright).
+  const closed = createServer();
+  await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
+  const { port } = closed.address();
+  await new Promise((resolve) => closed.close(resolve));
+  const unreachable = { url: `http://127.0.0.1:${port}/mcp`, headers: {}, timeout: 1000 };
+  await assert.rejects(registerGymTools(agent(), { gdpval: unreachable }), /^Error: gdpval: fetch failed \(ECONNREFUSED\)$/);
+  const lines = [];
+  const write = process.stdout.write;
+  process.stdout.write = (chunk) => (lines.push(String(chunk)), true);
+  t.after(() => { process.stdout.write = write; });
+  await registerGymTools(agent(), { extra: { ...unreachable, required: false } });
+  process.stdout.write = write;
+  assert.deepEqual(lines.map((line) => JSON.parse(line)), [
+    { type: "ng_gym_mcp_server_skipped", server: "extra", error: "fetch failed (ECONNREFUSED)" },
+  ]);
+});
