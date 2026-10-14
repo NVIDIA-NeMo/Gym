@@ -155,8 +155,10 @@ async def download_dir(
 async def remote_kind(sandbox: AsyncSandbox, path: str) -> str | None:
     """``"dir"``, ``"file"`` or ``None`` for a path inside the sandbox."""
     quoted = shlex.quote(path)
-    result = await sandbox.exec(
-        f"if [ -d {quoted} ]; then echo dir; elif [ -e {quoted} ]; then echo file; else echo none; fi", timeout_s=60
+    result = await _exec_as_root(
+        sandbox,
+        f"if [ -d {quoted} ]; then echo dir; elif [ -e {quoted} ]; then echo file; else echo none; fi",
+        timeout_s=60,
     )
     kind = (result.stdout or "").strip().splitlines()[-1:] or ["none"]
     return None if result.return_code or kind[0] == "none" else kind[0]
@@ -176,12 +178,18 @@ async def download_path(
 
 
 async def upload_path(sandbox: AsyncSandbox, source: Path, target: str, *, timeout_s: float = 600) -> None:
-    """Copy a local file or directory into the sandbox at ``target``, creating parents."""
+    """Restore a collected file or directory into the sandbox at ``target``.
+
+    The directory that receives it is made world-writable, as Harbor does when it restores
+    artifacts: verifiers drop privileges before running agent output and need to write next to it.
+    """
+    directory = target if source.is_dir() else str(PurePosixPath(target).parent)
+    result = await _exec_as_root(
+        sandbox, f"mkdir -p {shlex.quote(directory)} && chmod 777 {shlex.quote(directory)}", timeout_s=60
+    )
+    if result.return_code:
+        raise SandboxTransferError(f"Could not create {directory}: {result.stderr or result.stdout}")
     if source.is_dir():
         await upload_dir(sandbox, source, target, timeout_s=timeout_s)
-        return
-    parent = str(PurePosixPath(target).parent)
-    result = await sandbox.exec(f"mkdir -p {shlex.quote(parent)}", timeout_s=60)
-    if result.return_code:
-        raise SandboxTransferError(f"Could not create {parent}: {result.stderr or result.stdout}")
-    await sandbox.upload(source, target)
+    else:
+        await sandbox.upload(source, target)
