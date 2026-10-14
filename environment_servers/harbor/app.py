@@ -67,6 +67,7 @@ from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnRequest, SingleAgentTurnResult
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
@@ -75,7 +76,6 @@ from nemo_gym.tasks.harbor.task import HarborTaskError
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_WORKDIR = "/app"
 TESTS_DIR = "/tests"
 VERIFIER_LOGS_DIR = "/logs/verifier"
 AGENT_LOGS_DIR = "/logs/agent"
@@ -85,6 +85,13 @@ VERIFIER_STDOUT = f"{VERIFIER_LOGS_DIR}/test-stdout.txt"
 VERIFIER_TIMEOUT_KIND = "harbor:verifier_timeout"
 MISSING_REWARD_KIND = "harbor:missing_reward"
 INVALID_REWARD_KIND = "harbor:invalid_reward"
+# Added to `sandbox_ready_timeout_s` for the seed's own deadline on the create: room for the provider to
+# report and clean up a create that hit its (equal) budget before the seed gives up on it.
+SEED_CREATE_GRACE_S = 30.0
+
+
+class HarborSeedTimeoutError(RuntimeError):
+    """The sandbox was not ready within `sandbox_ready_timeout_s`: a provider-side seed failure, retried."""
 
 
 class HarborEpisodeResult(SingleAgentTurnResult):
@@ -97,6 +104,7 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     verifier_rewards: dict[str, float] | None = None
     verifier_return_code: int | None = None
     verifier_logs_dir: str | None = None
+    verifier_seconds: float | None = None
 
 
 class HarborEpisodeResponse(BaseEpisodeResponse[HarborEpisodeResult]):
@@ -130,6 +138,20 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     sandbox_ttl_slack_s: float = Field(default=900, ge=0)
     sandbox_provider_options: dict[str, Any] = Field(default_factory=dict)
     sandbox_metadata: dict[str, str] = Field(default_factory=dict)
+    # Replaces the task's declared cpus, memory_mb and storage_mb when set (keys: cpu, memory_mib, disk_gib).
+    # Used to run a benchmark at fixed resources, for example to compare against another server.
+    sandbox_resources_override: dict[str, Any] | None = None
+    # Export CPU-count env vars (OMP_NUM_THREADS and friends) matching the sandbox CPU limit.
+    derive_cpu_env: bool = True
+    # Operator environment for every sandbox; a task's own `[environment.env]` wins.
+    sandbox_env: dict[str, str] = Field(default_factory=dict)
+    # Shell commands run as root in every new sandbox before the agent sees it, for repairs the
+    # operator owns rather than the task (for example pointing an end-of-life distro at an archive).
+    # A failing command fails the seed as a retryable episode failure.
+    sandbox_setup_commands: list[str] = Field(default_factory=list)
+    sandbox_setup_timeout_s: float = Field(default=600, gt=0)
+    # Extra seconds granted to `test.sh` beyond `[verifier].timeout_sec` before the in-container `timeout` kills it.
+    verifier_grace_s: float = Field(default=30, ge=0)
     # Verifier logs are downloaded here, one fresh folder per verification.
     artifacts_dir: Path | None = None
 
@@ -344,7 +366,7 @@ class HarborEnvironmentServer(
 
     # -- sandbox ---------------------------------------------------------------------------
 
-    def _sandbox_spec(self, task: HarborTask, workdir: str) -> SandboxSpec:
+    def _sandbox_spec(self, task: HarborTask, workdir: str | None) -> SandboxSpec:
         global_config_dict = get_global_config_dict()
         metadata = (
             resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
@@ -356,25 +378,56 @@ class HarborEnvironmentServer(
             + self.config.cleanup_timeout_seconds
             + self.config.sandbox_ttl_slack_s
         )
+        # The override replaces only the keys it names, so a GPU task routed to the GPU provider keeps `gpu`.
+        resources = _sandbox_resources(task) | (self.config.sandbox_resources_override or {})
+        env = dict(self.config.sandbox_env) | resolve_env_templates(task.env)
+        if self.config.derive_cpu_env:
+            env = cpu_cap_env(resources.get("cpu")) | env
         return SandboxSpec(
             image=task.image,
             ttl_s=ttl,
             ready_timeout_s=self.config.sandbox_ready_timeout_s,
             workdir=workdir,
-            env=resolve_env_templates(task.env),
+            env=env,
             metadata=metadata,
-            resources=_sandbox_resources(task),
+            resources=resources,
             provider_options=dict(self.config.sandbox_provider_options),
         )
 
-    async def _create_sandbox(self, task: HarborTask, workdir: str, *, episode_key: str) -> AsyncSandbox:
+    async def _create_sandbox(self, task: HarborTask, workdir: str | None, *, episode_key: str) -> AsyncSandbox:
         provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
         sandbox = AsyncSandbox(provider_config)
         self._sandboxes[episode_key] = sandbox
         await sandbox.start(self._sandbox_spec(task, workdir))
         return sandbox
 
-    async def _prepare_workdir(self, sandbox: AsyncSandbox, task: HarborTask, workdir: str) -> None:
+    async def _create_sandbox_within_deadline(self, task: HarborTask, episode_key: str) -> AsyncSandbox:
+        """``_create_sandbox`` bounded by the configured ready timeout, whatever the provider's retry budget.
+
+        The provider retries a create on its own schedule and its request may block as long as the cluster
+        takes to allocate the pod; `sandbox_ready_timeout_s` is this server's promise, so it is enforced
+        here too. The timeout is a provider-side seed failure, retried like any other.
+        """
+        deadline_s = self.config.sandbox_ready_timeout_s + SEED_CREATE_GRACE_S
+        deadline = asyncio.timeout(deadline_s)
+        try:
+            async with deadline:
+                return await self._create_sandbox(task, task.workdir, episode_key=episode_key)
+        except TimeoutError as exc:
+            if not deadline.expired():
+                raise
+            raise HarborSeedTimeoutError(
+                f"the sandbox was not ready within {deadline_s:g}s "
+                f"(sandbox_ready_timeout_s={self.config.sandbox_ready_timeout_s:g} plus {SEED_CREATE_GRACE_S:g}s grace)"
+            ) from exc
+
+    async def _prepare_workdir(self, sandbox: AsyncSandbox, task: HarborTask, workdir: str | None) -> str:
+        """Create the working directory, or resolve the image's own WORKDIR when the task sets none."""
+        if workdir is None:
+            result = await sandbox.exec("pwd", timeout_s=60)
+            if result.return_code != 0 or not (result.stdout or "").strip():
+                raise RuntimeError(f"Could not resolve the image working directory: {result.stderr or result.stdout}")
+            workdir = (result.stdout or "").strip().splitlines()[-1]
         commands = [f"mkdir -p {shlex.quote(workdir)}"]
         if task.user:
             commands.append(f"chown {shlex.quote(task.user)} {shlex.quote(workdir)}")
@@ -391,6 +444,17 @@ class HarborEnvironmentServer(
             )
         ):
             await upload_dir(sandbox, environment_dir, workdir)
+        return workdir
+
+    async def _run_setup_commands(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
+        for command in self.config.sandbox_setup_commands:
+            # Root first, like every other setup step; sandboxes that cannot switch users fall back.
+            result = await _exec_as_root(sandbox, command, timeout_s=self.config.sandbox_setup_timeout_s)
+            if result.return_code != 0:
+                raise RuntimeError(
+                    f"Sandbox setup command failed for {task.task_id!r} (exit {result.return_code}): "
+                    f"{(result.stderr or result.stdout or '')[-500:]}"
+                )
 
     async def _sandbox_access(self, session: HarborSession) -> SandboxAccess:
         return SandboxAccess(
@@ -573,11 +637,11 @@ class HarborEnvironmentServer(
                 raise HTTPException(
                     503, f"A sandbox of a previous attempt of this episode could not be stopped yet: {exc}"
                 ) from exc
-        workdir = task.workdir or DEFAULT_WORKDIR
         try:
-            sandbox = await self._create_sandbox(task, workdir, episode_key=episode_key)
+            sandbox = await self._create_sandbox_within_deadline(task, episode_key)
             self._sandboxes[episode_key] = sandbox
-            await self._prepare_workdir(sandbox, task, workdir)
+            workdir = await self._prepare_workdir(sandbox, task, task.workdir)
+            await self._run_setup_commands(sandbox, task)
         except BaseException as exc:
             try:
                 await self._stop_sandbox(episode_key)
@@ -635,6 +699,7 @@ class HarborEnvironmentServer(
         task = session.task
         sandbox = session.sandbox
         settings = task.config.verifier
+        started = asyncio.get_running_loop().time()
         try:
             # Episode IDs are opaque caller input, never host paths. Reserve a fresh directory
             # so neither traversal nor stale output from a reused ID can supply verifier files.
@@ -673,16 +738,24 @@ class HarborEnvironmentServer(
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
             await upload_dir(sandbox, task.path / "tests", TESTS_DIR)
+            # One plain exec for the whole run. The provider keeps it alive for as long as
+            # `timeout_s` says (OpenSandbox polls a background command, Docker streams), and
+            # `timeout` inside the container is the cap that stops the tests themselves.
+            # Commands must not be left running after the exec returns: OpenSandbox reaps
+            # them when the command completes, so a background launch never finishes.
+            budget = int(settings.timeout_sec)
             result = await sandbox.exec(
-                f"bash {TESTS_DIR}/test.sh > {VERIFIER_STDOUT} 2>&1",
+                f"timeout --signal=KILL {budget} bash {TESTS_DIR}/test.sh > {VERIFIER_STDOUT} 2>&1",
                 cwd=session.workdir,
                 env=resolve_env_templates(settings.env),
-                timeout_s=settings.timeout_sec,
+                timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
                 user=settings.user,
             )
+            # `timeout` exits 137 when it had to kill test.sh; a provider that gave up first reports "timeout".
+            timed_out = result.error_type == "timeout" or result.return_code == 137
             if result.error_type not in (None, "timeout"):
                 return self._masked(failure_kinds.VERIFIER_ERROR, f"test.sh could not run: {result.error_type}")
-            if result.error_type != "timeout":
+            if not timed_out:
                 # Reward transfer is required; optional diagnostics cannot invalidate a measured score.
                 await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, names=("reward.json", "reward.txt"))
                 rewards, problem = parse_reward_file(logs_dir)
@@ -694,15 +767,22 @@ class HarborEnvironmentServer(
 
         # Absolute, so the row names a folder that exists from wherever the run was launched; the server
         # process runs from its own folder, where a relative artifacts_dir would otherwise resolve.
-        extras = {"verifier_return_code": result.return_code, "verifier_logs_dir": str(Path(logs_dir).resolve())}
+        extras = {
+            "verifier_return_code": result.return_code,
+            "verifier_logs_dir": str(Path(logs_dir).resolve()),
+            "verifier_seconds": round(asyncio.get_running_loop().time() - started, 1),
+        }
+        # Keep whatever the verifier wrote, including on a timeout, so a slow test.sh can be diagnosed.
         try:
             await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, skip_unsafe=True)
         except Exception:
             LOGGER.warning("Could not collect optional verifier logs for %s", task.task_id, exc_info=True)
-        if result.error_type == "timeout":
+        if timed_out:
             return (
                 self._measured(
-                    0.0, VERIFIER_TIMEOUT_KIND, f"test.sh exceeded [verifier].timeout_sec={settings.timeout_sec}"
+                    0.0,
+                    VERIFIER_TIMEOUT_KIND,
+                    f"test.sh exceeded [verifier].timeout_sec={settings.timeout_sec}; tail: {_stdout_tail(logs_dir)}",
                 )
                 | extras
             )
