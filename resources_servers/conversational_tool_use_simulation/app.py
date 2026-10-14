@@ -432,7 +432,6 @@ class ConversationalToolUseVerifyRequest(BaseVerifyRequest):
 class ConversationalToolUseVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
-    instance_config: Dict[str, Any] = Field(default_factory=lambda: {"mask_sample": False})
     terminal_state: Optional[str] = None
     result: ConversationalToolUseResult
     trajectory_invalid_reasons: List[str] = Field(default_factory=list)
@@ -1373,7 +1372,7 @@ Return type in JSON Schema format: {return_type}
                 "failure_labels": state.failure_labels,
                 "judge_generation_error": state.judge_generation_error,
                 "judge_diagnostics": state.judge_diagnostics,
-                "instance_config": {"mask_sample": self._should_mask_sample(state)},
+                "mask_sample": self._should_mask_sample(state),
                 "result": self._trajectory_result(state),
             }
         )
@@ -1884,7 +1883,7 @@ Return type in JSON Schema format: {return_type}
             try:
                 response = await self._call_judge_model(
                     model_server=self.config.judge_model_server,
-                    params=self.config.judge_responses_create_params,
+                    params=self._judge_params(Evaluation),
                     messages=[
                         NeMoGymEasyInputMessage(role="system", content=system_message),
                         NeMoGymEasyInputMessage(role="user", content=user_message),
@@ -1921,7 +1920,7 @@ Return type in JSON Schema format: {return_type}
             try:
                 response = await self._call_judge_model(
                     model_server=self.config.judge_model_server,
-                    params=self.config.judge_responses_create_params,
+                    params=self._judge_params(UserAgentEnvironmentEvaluation),
                     messages=[
                         NeMoGymEasyInputMessage(role="system", content=system_message),
                         NeMoGymEasyInputMessage(role="user", content=user_message),
@@ -1955,6 +1954,22 @@ Return type in JSON Schema format: {return_type}
             responses=response_objects,
         )
         return None, agent_verification_result, None
+
+    def _judge_params(self, output_model: type[BaseModel]) -> NeMoGymResponseCreateParamsNonStreaming:
+        """Constrain the judge reply to ``output_model``'s JSON schema unless the config sets ``text`` itself.
+
+        The prompt also shows the schema, but without a decoding constraint some judges answer with the
+        instance wrapped in ``{"properties": ...}`` or with unquoted strings, which fail validation.
+        """
+        params = self.config.judge_responses_create_params
+        if params.text is not None:
+            return params
+        schema_format = {
+            "type": "json_schema",
+            "name": output_model.__name__,
+            "schema": output_model.model_json_schema(),
+        }
+        return params.model_copy(update={"text": {"format": schema_format}})
 
     def _system_messages(self, state: ConversationSessionState) -> Dict[Source | TrajectoryEvaluationType, str]:
         domain_policy = state.policy

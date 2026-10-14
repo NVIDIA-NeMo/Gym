@@ -17,7 +17,10 @@ import hashlib
 import json
 import logging
 import os
+import time
+from contextlib import nullcontext
 from copy import deepcopy
+from types import SimpleNamespace
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
@@ -30,6 +33,9 @@ from yarl import URL
 
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
+from nemo_gym._checkpoint.control import CheckpointRequest
+from nemo_gym._checkpoint.generation_cut import GenerationCutInventory, GenerationCutPrefixAck, GenerationCutReceipt
+from nemo_gym._checkpoint.model import PolicyModelParticipant, generation_cut_requester
 from nemo_gym.openai_utils import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     NeMoGymAsyncOpenAI,
@@ -6340,6 +6346,103 @@ class TestEndpointFile:
             server._maybe_rebind_endpoint()
 
 
+@mark.parametrize(
+    ("control_urls", "expected_routes"),
+    [
+        (
+            None,
+            {
+                "http://worker-0:8000/ng-control/v1/generation-cut": ["call-0"],
+                "http://worker-1:8000/ng-control/v1/generation-cut": ["call-1"],
+            },
+        ),
+        (
+            ["http://control-0:9000", "http://control-1:9000/"],
+            {
+                "http://control-0:9000/ng-control/v1/generation-cut": ["call-0"],
+                "http://control-1:9000/ng-control/v1/generation-cut": ["call-1"],
+            },
+        ),
+        (["http://control-0:9000"], None),
+    ],
+    ids=["own-route", "control-url", "misaligned-control-url"],
+)
+@mark.asyncio
+async def test_generation_cut_reaches_each_owning_backend(
+    monkeypatch: MonkeyPatch,
+    control_urls: list[str] | None,
+    expected_routes: dict[str, list[str]] | None,
+) -> None:
+    with nullcontext() if expected_routes else raises(ValueError, match="one control URL per base_url"):
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="policy",
+            base_url=["http://worker-0:8000/v1", "http://worker-1:8000/v1"],
+            generation_cut_control_url=control_urls,
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+        )
+    if expected_routes is None:
+        return
+    model = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+    participant = PolicyModelParticipant(
+        server_name="policy",
+        cut_requester=generation_cut_requester("t", control_root=model.generation_cut_control_root),
+    )
+    for index, client in enumerate(model._clients):
+        ticket = participant.gate.enter(f"rollout-{index}")
+        ticket.backend = client.base_url
+        ticket.capture = CaptureContext(
+            rollout_id=f"rollout-{index}", model_call_id=f"call-{index}", token_sink=None, request_items=[]
+        )
+    routes: dict[str, list[str]] = {}
+
+    async def fake_request(**kwargs: Any) -> SimpleNamespace:
+        worker_inventory = GenerationCutInventory.model_validate(kwargs["json"])
+        routes[kwargs["url"]] = [prefix.model_call_id for prefix in worker_inventory.active_prefixes]
+        receipt = GenerationCutReceipt(
+            checkpoint_id=worker_inventory.checkpoint_id,
+            cut_id=f"worker-{worker_inventory.inventory_digest}",
+            inventory_digest=worker_inventory.inventory_digest,
+            inventory=worker_inventory,
+            backend_snapshot_id=f"tq-{worker_inventory.inventory_digest}",
+            prefixes=tuple(
+                GenerationCutPrefixAck(
+                    **prefix.model_dump(mode="json"),
+                    disposition="durable_prefix",
+                    cut_kind="active_prefix",
+                    frozen_buffer_id="buffer-1",
+                    staging_keys=(f"prefix-{prefix.ticket_id}",),
+                    prefix_token_count=5,
+                    prefix_digest="a" * 64,
+                    effective_output_limit=128,
+                )
+                for prefix in worker_inventory.active_prefixes
+            ),
+        )
+        return SimpleNamespace(payload=receipt.model_dump(mode="json"))
+
+    async def fake_raise_for_status(_response: SimpleNamespace) -> None:
+        return None
+
+    async def fake_get_response_json(response: SimpleNamespace) -> dict[str, Any]:
+        return response.payload
+
+    monkeypatch.setattr("nemo_gym.server_utils.request", fake_request)
+    monkeypatch.setattr("nemo_gym.server_utils.raise_for_status", fake_raise_for_status)
+    monkeypatch.setattr("nemo_gym.server_utils.get_response_json", fake_get_response_json)
+
+    await participant.close_admission(CheckpointRequest(checkpoint_id="checkpoint-1", deadline_ts=time.time() + 5))
+
+    assert routes == expected_routes
+    assert {ticket.cut.disposition for ticket in participant.gate.tickets} == {"durable_prefix"}
+
+
 class TestPrefixSupply:
     """Supply a verified parent's exact tokens to the engine.
 
@@ -6969,6 +7072,84 @@ class TestPrefixSupplyRejectsResponsesNative:
             )
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Responses request fields with no Chat Completions representation
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestUnrepresentableRequestFields:
+    """``drop_unrepresentable_request_fields`` decides what the server does with a Responses
+    request field that the Chat Completions conversion cannot express.
+
+    ``include`` stands for the whole group here: it names extra fields the provider is asked to
+    report on the response object, so it changes nothing about what the model generates.
+    """
+
+    BODY = {"input": "hi", "include": ["reasoning.encrypted_content"]}
+
+    @staticmethod
+    def _client(monkeypatch: MonkeyPatch, *, drop: bool) -> tuple[TestClient, dict[str, Any]]:
+        """A test client for a model server, plus the dict that records the converted chat params."""
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="vllm_model",
+            base_url="http://localhost:9999/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy-model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            drop_unrepresentable_request_fields=drop,
+        )
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        captured: dict[str, Any] = {}
+
+        async def _capture(self, request, create_params):
+            captured["value"] = create_params
+            return NeMoGymChatCompletion(
+                id="chatcmpl-123",
+                choices=[
+                    NeMoGymChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=NeMoGymChatCompletionMessage(role="assistant", content="hello"),
+                    )
+                ],
+                created=FIXED_TIME,
+                model="dummy-model",
+                object="chat.completion",
+            )
+
+        monkeypatch.setattr(VLLMModel, "chat_completions", _capture)
+        return TestClient(server.setup_webserver()), captured
+
+    def test_refused_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        client, _ = self._client(monkeypatch, drop=False)
+
+        with raises(NotImplementedError, match="include"):
+            client.post("/v1/responses", json=self.BODY)
+
+    def test_dropped_when_configured(self, monkeypatch: MonkeyPatch) -> None:
+        client, captured = self._client(monkeypatch, drop=True)
+
+        assert client.post("/v1/responses", json=self.BODY).status_code == 200
+        assert "include" not in captured["value"].model_dump(exclude_unset=True)
+        assert captured["value"].messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
+
+    def test_dropped_on_the_streaming_path_too(self, monkeypatch: MonkeyPatch) -> None:
+        # Codex always sends `stream: true`; the streaming dispatch sanitizes the body and then
+        # runs the same conversion, so the switch applies there as well.
+        client, captured = self._client(monkeypatch, drop=True)
+
+        response = client.post("/v1/responses", json={**self.BODY, "stream": True})
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert "event: response.completed" in response.text
+        assert "include" not in captured["value"].model_dump(exclude_unset=True)
+
+
 class TestPreserveEnvelopeIdFollowsCaptureContext:
     """The served envelope id is kept per request, not per server."""
 
@@ -7003,3 +7184,36 @@ class TestPreserveEnvelopeIdFollowsCaptureContext:
             assert model._preserve_envelope_id() is False
         finally:
             reset_token_sink(token)
+
+
+def _control_url_config(**overrides: Any) -> VLLMModelConfig:
+    return VLLMModelConfig(
+        **{
+            "host": "0.0.0.0",
+            "port": 8080,
+            "entrypoint": "",
+            "name": "policy",
+            "base_url": ["http://worker-0:8000/v1"],
+            "generation_cut_control_url": ["http://control-0:9000"],
+            "api_key": "dummy_key",  # pragma: allowlist secret
+            "model": "dummy_model",
+            "return_token_id_information": False,
+            "uses_reasoning_parser": False,
+            "uses_interleaved_reasoning": False,
+        }
+        | overrides
+    )
+
+
+def test_generation_cut_control_urls_are_refused_with_an_endpoint_file() -> None:
+    # The endpoint file moves the backends to base URLs that no control URL is listed for.
+    with raises(ValueError, match="cannot be used with endpoint_file"):
+        _control_url_config(endpoint_file="/tmp/endpoint")
+
+
+def test_a_backend_without_a_control_url_fails_its_cut_instead_of_guessing_a_root() -> None:
+    model = VLLMModel(config=_control_url_config(), server_client=MagicMock(spec=ServerClient))
+
+    assert model.generation_cut_control_root("http://worker-0:8000/v1") == "http://control-0:9000"
+    with raises(ValueError, match="no generation_cut_control_url is configured for backend http://worker-9:8000/v1"):
+        model.generation_cut_control_root("http://worker-9:8000/v1")

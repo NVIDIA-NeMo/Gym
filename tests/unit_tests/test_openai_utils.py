@@ -34,6 +34,7 @@ import orjson
 import pytest
 from aiohttp import ClientResponseError, ClientTimeout
 from openai.types.chat import ChatCompletionToolChoiceOptionParam
+from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.completion_create_params import CompletionCreateParamsNonStreaming
 from openai.types.responses import (
     EasyInputMessage,
@@ -48,6 +49,7 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseReasoningItem,
 )
+from openai.types.responses.response import Response
 from openai.types.responses.response_create_params import ResponseCreateParamsBase, ToolChoice, ToolParam
 from openai.types.responses.response_input_item import (
     AdditionalTools as InputAdditionalTools,
@@ -1363,6 +1365,34 @@ class TestNeMoGymChatCompletionSchemas:
         assert round_tripped == completion
         assert isinstance(completion.choices[0].message.tool_calls[0], NeMoGymChatCompletionMessageCustomToolCall)
 
+    def test_accepts_provider_specific_service_tier(self) -> None:
+        """Third-party providers return tier strings outside the SDK's fixed enum.
+
+        The SDK ``ChatCompletion.service_tier`` is a closed ``Literal``, so a
+        non-OpenAI value would otherwise fail validation and turn the model
+        server response into a 500.
+        """
+        payload = {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-test",
+            "service_tier": "on-demand",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "hi"},
+                }
+            ],
+        }
+        with pytest.raises(ValidationError):
+            ChatCompletion.model_validate(payload)
+
+        completion = NeMoGymChatCompletion.model_validate(payload)
+
+        assert completion.service_tier == "on-demand"
+
 
 class TestNeMoGymFunctionCallOutput:
     @pytest.mark.parametrize(
@@ -2539,3 +2569,43 @@ def test_requests_with_sdk_iterable_fields_encode_copy_and_dump_repeatedly(model
         assert orjson.loads(orjson.dumps(params.model_dump(exclude_unset=True))) == payload
         assert params.model_dump(mode="json", exclude_unset=True) == payload
     assert orjson.loads(orjson.dumps(params.model_copy(deep=True).model_dump(exclude_unset=True))) == payload
+
+
+def test_response_accepts_provider_specific_service_tier() -> None:
+    """Third-party providers return tier strings outside the SDK's fixed enum.
+
+    The SDK ``Response.service_tier`` is a closed ``Literal``, so a
+    non-OpenAI value would otherwise fail validation and turn the model
+    server response into a 500.
+    """
+    payload = _response_with_output([]) | {"service_tier": "on-demand"}
+
+    with pytest.raises(ValidationError):
+        Response.model_validate(payload)
+
+    response = NeMoGymResponse.model_validate(payload)
+
+    assert response.service_tier == "on-demand"
+
+
+def test_chat_request_drops_litellm_provider_specific_fields_from_history() -> None:
+    from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+
+    params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+        {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+                    ],
+                    "provider_specific_fields": {"refusal": None},
+                },
+            ]
+        }
+    )
+
+    assert "provider_specific_fields" not in params.messages[1]
+    assert params.messages[1]["tool_calls"][0]["function"]["name"] == "bash"
