@@ -358,6 +358,19 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
     capsys: pytest.CaptureFixture[str],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    from types import SimpleNamespace
+    from uuid import UUID
+
+    from omegaconf import OmegaConf
+
+    import nemo_gym.rollout_recovery as recovery
+
+    client = SimpleNamespace(
+        global_config_dict=OmegaConf.create({"synthetic-agent": {"responses_api_agents": {"impl": {}}}})
+    )
+    monkeypatch.setattr(rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: client)
+    # Hold run identity fixed while comparing the effect of health checks.
+    monkeypatch.setattr(recovery, "uuid4", lambda: UUID(int=1))
     monkeypatch.setattr(rollout_collection, "get_global_config_dict", lambda: {})
     source = {
         "responses_create_params": {"input": []},
@@ -419,11 +432,12 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
             "failures": output_path.with_name("rollouts_failures.jsonl").read_bytes(),
             "metrics": output_path.with_name("rollouts_aggregate_metrics.json").read_bytes(),
         }
-        assert (run_dir / "quality_summary.json").exists() is not disabled
-        assert (run_dir / "rollout_verdicts.jsonl").exists() is not disabled
+        assert (run_dir / "quality_summary.json").exists() is (not disabled)
+        assert (run_dir / "rollout_verdicts.jsonl").exists() is (not disabled)
         if not disabled:
-            assert stdout.rstrip().endswith(str(run_dir / "quality_summary.json"))
-            assert stdout.index("Finished rollout collection") < stdout.index("Rollout health")
+            assert "Finished rollout collection" in stdout
+            assert "Rollout health checks skipped" not in stdout
+            assert not caplog.records
 
     assert artifacts[False] == artifacts[True]
 
@@ -1758,3 +1772,17 @@ def test_usage_still_reports_incorrect_invocation_total(tmp_path: Path) -> None:
         "capture_prompt": 8,
         "capture_completion": 5,
     }
+
+
+def test_health_cli_reports_history_error_without_traceback(monkeypatch, capsys):
+    def unavailable(*args, **kwargs):
+        raise health.JournalHealthUnavailable("Export selected results with gym eval aggregate.")
+
+    monkeypatch.setattr(cli_eval, "health_check_rollouts", unavailable)
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "health-check", "/tmp/example-run"])
+    with pytest.raises(SystemExit) as error:
+        cli_main.main()
+    assert error.value.code != 0
+    output = capsys.readouterr()
+    assert "Export selected results" in output.err
+    assert "Traceback" not in output.err

@@ -1783,8 +1783,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         The returned payload carries routing flags read by the rollout
         dispatcher (``nemo_gym.rollout_collection``):
 
-        - ``_ng_no_persist=True`` for ``kill_shaped``: not written anywhere;
-          resume's set-difference on the main jsonl re-dispatches the task.
+        - ``_ng_no_persist=True`` for ``kill_shaped`` is a legacy consumer hint.
+          Gym's manifest-backed collector persists the failure without a score;
+          redispatch is subject to the run's recorded-failure budget.
         - ``_ng_failure_terminal=True`` for ``skipped`` and ``permanent``:
           one sidecar entry, never retried because unchanged input cannot help.
         - Otherwise (``legitimate``, ``transient``, ``incomplete``,
@@ -1851,8 +1852,8 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             payload["error_class"] = error_class
             payload[NG_FAILURE_CLASS_KEY] = error_class
             if error_class == "kill_shaped":
-                # Don't persist: resume's set-difference on the main jsonl
-                # naturally re-dispatches. Bounded across hops by per-task timeout.
+                # Legacy consumers may suppress persistence. Gym's manifest-backed
+                # collector records this failure and counts it toward the retry budget.
                 payload[NG_NO_PERSIST_KEY] = True
             elif error_class in {"skipped", "permanent"}:
                 # The sample is unusable or the unchanged request is guaranteed

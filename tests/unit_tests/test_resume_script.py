@@ -98,7 +98,8 @@ def test_rendered_prologue_is_valid_bash(resume, tmp_path):
 
 _FAKE_SACCT = """#!/bin/bash
 echo call >> "$FAKE_LOG_DIR/sacct_calls"
-if [[ "$*" == *ElapsedRaw* ]]; then echo "${FAKE_ELAPSED:-}"; else echo "${FAKE_STATE:-}"; fi
+if [[ "$*" == *ElapsedRaw* ]]; then echo "${FAKE_ELAPSED:-}";
+elif [[ "$*" == *ExitCode* ]]; then echo "${FAKE_EXIT:-1:0}"; else echo "${FAKE_STATE:-}"; fi
 """
 _FAKE_SBATCH = """#!/bin/bash
 echo "$*" >> "$FAKE_LOG_DIR/sbatch_calls"
@@ -106,7 +107,9 @@ echo "Submitted batch job 999"
 """
 
 
-def _run_prologue(tmp_path, resume: ResumeConfig, prev_state: str | None) -> subprocess.CompletedProcess:
+def _run_prologue(
+    tmp_path, resume: ResumeConfig, prev_state: str | None, *, exit_code: str = "1:0"
+) -> subprocess.CompletedProcess:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     for name, body in (("sacct", _FAKE_SACCT), ("sbatch", _FAKE_SBATCH), ("sleep", "#!/bin/bash\n")):
@@ -121,6 +124,7 @@ def _run_prologue(tmp_path, resume: ResumeConfig, prev_state: str | None) -> sub
         "SLURM_JOB_ID": "200",
         "FAKE_LOG_DIR": str(tmp_path),
         "FAKE_STATE": prev_state or "",
+        "FAKE_EXIT": exit_code,
         "FAKE_ELAPSED": "60" if prev_state else "",
     }
     return subprocess.run(args, cwd=tmp_path, env=env, capture_output=True, text=True)
@@ -158,3 +162,19 @@ def test_successor_is_killed_if_its_dependency_can_never_be_met(tmp_path):
     sbatch_args = (tmp_path / "sbatch_calls").read_text()
     assert "--dependency=afternotok:200" in sbatch_args
     assert "--kill-on-invalid-dep=yes" in sbatch_args
+
+
+@pytest.mark.parametrize("exit_code,continues", [("75:0", True), ("76:0", False)])
+def test_incomplete_evaluation_chain_obeys_retryability(tmp_path, exit_code, continues):
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=0), "FAILED", exit_code=exit_code)
+    assert result.returncode == 0, result.stdout
+    assert ("REACHED_WORK" in result.stdout) is continues
+    assert (tmp_path / "sbatch_calls").exists() is continues
+    assert not (tmp_path / ".gym_infra_retries").exists()
+
+
+def test_retryable_evaluation_still_obeys_walltime_cap(tmp_path):
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="00:01:00"), "FAILED", exit_code="75:0")
+    assert result.returncode == 0
+    assert "REACHED_WORK" not in result.stdout
+    assert not (tmp_path / "sbatch_calls").exists()
