@@ -34,6 +34,7 @@ from typing import Any, Callable, Optional
 
 from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
+from nemo_gym.telemetry.setup import is_metrics_exporter_active
 
 
 #: Span attribute carrying Gym's existing rollout correlation id.
@@ -103,7 +104,8 @@ def traced_verify_endpoint(handler: Callable, static_attributes: Optional[dict] 
 
     @wraps(handler)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        if not is_span_group_enabled(GymSpanGroup.VERIFY):
+        # The span follows the `verify` span group and the metrics follow the metrics exporter, independently.
+        if not (is_span_group_enabled(GymSpanGroup.VERIFY) or is_metrics_exporter_active()):
             return await handler(*args, **kwargs)
 
         started = time.perf_counter()
@@ -134,7 +136,8 @@ def traced_rollout_endpoint(handler: Callable, static_attributes: Optional[dict]
 
     @wraps(handler)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        if not is_span_group_enabled(GymSpanGroup.ROLLOUT):
+        # The span follows the `rollout` span group and the metric follows the metrics exporter, independently.
+        if not (is_span_group_enabled(GymSpanGroup.ROLLOUT) or is_metrics_exporter_active()):
             return await handler(*args, **kwargs)
 
         started = time.perf_counter()

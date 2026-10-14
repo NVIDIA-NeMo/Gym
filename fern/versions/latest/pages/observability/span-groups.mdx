@@ -7,6 +7,11 @@ A span group is a named switch that decides whether a set of spans exists at all
 let you trade detail against volume without changing code, and they are checked before any
 instrumentation work happens, so a disabled group costs almost nothing.
 
+Span groups choose spans only. Metrics depend on whether a metrics exporter is active, not on
+which groups are enabled, so `gym.verify.*`, `gym.rollout.duration_ms`,
+`gym.rollout.completed_total`, and the sandbox metrics are reported even under the `default`
+preset, which leaves the `verify` and `sandbox` groups off.
+
 ## Presets
 
 Set `span_groups` to a preset name:

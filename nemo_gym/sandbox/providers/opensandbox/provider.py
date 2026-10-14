@@ -43,9 +43,8 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
-from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
-from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.telemetry.setup import is_metrics_exporter_active
 
 
 LOGGER = logging.getLogger(__name__)
@@ -320,7 +319,7 @@ def _log_create_retry(retry_state: Any) -> None:
         sleep_s,
         exception,
     )
-    if is_span_group_enabled(GymSpanGroup.SANDBOX):
+    if is_metrics_exporter_active():
         record_sandbox_create_retry(provider="opensandbox")
 
 

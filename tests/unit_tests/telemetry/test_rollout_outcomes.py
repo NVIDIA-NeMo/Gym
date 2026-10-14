@@ -6,7 +6,6 @@ import pytest
 
 from nemo_gym import rollout_collection
 from nemo_gym.telemetry import gym_metrics
-from nemo_gym.telemetry.span_groups import GymSpanGroup
 from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics  # noqa: F401 - fixture
 
 
@@ -28,8 +27,8 @@ def _key(**attrs):
     return tuple(sorted(attrs.items()))
 
 
-def _rollout_group_only(monkeypatch):
-    monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: group == GymSpanGroup.ROLLOUT)
+def _metrics_exporting(monkeypatch, exporting=True):
+    monkeypatch.setattr(rollout_collection, "is_metrics_exporter_active", lambda: exporting)
 
 
 def test_outcomes_are_counted_with_bounded_failure_attributes(collected_metrics):  # noqa: F811
@@ -58,8 +57,10 @@ def test_outcomes_are_counted_with_bounded_failure_attributes(collected_metrics)
     }
 
 
-def test_driver_helper_reads_the_record_and_respects_the_span_group(collected_metrics, monkeypatch):  # noqa: F811
-    _rollout_group_only(monkeypatch)
+def test_driver_helper_follows_the_metrics_exporter_not_the_span_group(collected_metrics, monkeypatch):  # noqa: F811
+    _metrics_exporting(monkeypatch)
+    # Span groups choose spans only: with every group off, the counter still records.
+    monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: False)
     rollout_collection._record_rollout_outcome({"reward": 1.0}, "scored", "env")
     rollout_collection._record_rollout_outcome(
         {
@@ -71,7 +72,9 @@ def test_driver_helper_reads_the_record_and_respects_the_span_group(collected_me
         "failed",
         "env",
     )
-    monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: False)
+    # Without a metrics exporter it records nothing, even with every span group on.
+    monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: True)
+    _metrics_exporting(monkeypatch, False)
     rollout_collection._record_rollout_outcome({"reward": 1.0}, "scored", "env")
     assert _by_attrs(collected_metrics) == {
         _key(**{OUTCOME: "scored", DISPATCH: "env"}): 1,
@@ -88,7 +91,7 @@ def test_driver_helper_reads_the_record_and_respects_the_span_group(collected_me
 
 
 def test_an_unregistered_kind_is_bucketed(collected_metrics, monkeypatch):  # noqa: F811
-    _rollout_group_only(monkeypatch)
+    _metrics_exporting(monkeypatch)
     for kind in ("connect to 10.0.0.7:8000 refused after 3 retries", "session_lost", "tb4:sandbox_gone"):
         rollout_collection._record_rollout_outcome(
             {rollout_collection.NG_FAILURE_CLASS_KEY: "infrastructure_error", "failure_kind": kind}, "failed", "env"
@@ -101,7 +104,7 @@ def test_an_unregistered_kind_is_bucketed(collected_metrics, monkeypatch):  # no
 
 
 def test_failure_fields_on_a_scored_row_are_not_labels(collected_metrics, monkeypatch):  # noqa: F811
-    _rollout_group_only(monkeypatch)
+    _metrics_exporting(monkeypatch)
     rollout_collection._record_rollout_outcome(
         {"reward": 0.0, "failure_kind": "verifier_error", "_ng_failure_type": "StaleEcho"}, "scored", "env"
     )

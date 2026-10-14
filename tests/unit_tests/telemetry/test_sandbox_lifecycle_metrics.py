@@ -76,9 +76,23 @@ async def test_failed_create_records_no_startup_sample(collected_metrics, sandbo
 
 
 @pytest.mark.asyncio
-async def test_sandbox_group_off_records_no_durations(collected_metrics, monkeypatch):  # noqa: F811
+async def test_sandbox_records_no_durations_without_the_group_or_a_metrics_exporter(collected_metrics, monkeypatch):  # noqa: F811
     monkeypatch.setattr(sandbox_api, "is_span_group_enabled", lambda group: False)
+    monkeypatch.setattr(sandbox_api, "is_metrics_exporter_active", lambda: False)
     sandbox = AsyncSandbox(FakeSandboxProvider(), SandboxSpec(image="img"))
     await sandbox.start()
     await sandbox.exec("echo hi")
     assert STARTUP not in collected_metrics() and EXEC not in collected_metrics()
+
+
+@pytest.mark.asyncio
+async def test_sandbox_metrics_follow_the_exporter_with_the_group_off(collected_metrics, monkeypatch):  # noqa: F811
+    """The `sandbox` span group is off in the default preset; its metrics must not depend on it."""
+    monkeypatch.setattr(sandbox_api, "is_span_group_enabled", lambda group: False)
+    monkeypatch.setattr(sandbox_api, "is_metrics_exporter_active", lambda: True)
+    sandbox = AsyncSandbox(FakeSandboxProvider(), SandboxSpec(image="img"))
+    await sandbox.start()
+    await sandbox.exec("echo hi")
+    await sandbox.stop()
+    exported = collected_metrics()
+    assert [p.count for p in exported[STARTUP]] == [1] and [p.count for p in exported[EXEC]] == [1]

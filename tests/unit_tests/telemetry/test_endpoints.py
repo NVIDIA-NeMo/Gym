@@ -258,7 +258,7 @@ async def test_verify_records_a_failure_when_the_handler_raises(enabled_groups, 
     assert recorded_metrics == [("verify", False)]
 
 
-async def test_verify_records_nothing_when_the_group_is_disabled(recorded_metrics):
+async def test_verify_records_nothing_without_the_group_or_a_metrics_exporter(recorded_metrics):
     async def verify():
         return {}
 
@@ -286,12 +286,35 @@ async def test_rollout_duration_is_recorded_even_when_the_rollout_fails(enabled_
     assert [name for name, _ in recorded_metrics] == ["rollout"]
 
 
-async def test_rollout_endpoint_records_nothing_when_disabled(recorded_metrics):
+async def test_rollout_endpoint_records_nothing_without_the_group_or_a_metrics_exporter(recorded_metrics):
     async def run():
         return {}
 
     await traced_rollout_endpoint(run)()
     assert recorded_metrics == []
+
+
+async def test_metrics_follow_the_exporter_when_every_span_group_is_off(recorded_metrics, monkeypatch):
+    """Span groups choose spans only.
+
+    The default preset leaves `verify` off, and verification is still measured.
+    """
+    from nemo.lens.state import is_span_group_enabled as lens_is_span_group_enabled
+
+    from nemo_gym.telemetry import endpoints
+
+    monkeypatch.setattr(endpoints, "is_metrics_exporter_active", lambda: True)
+    assert not lens_is_span_group_enabled(GymSpanGroup.VERIFY)
+
+    async def verify():
+        return {"reward": 1.0}
+
+    async def run():
+        return {}
+
+    await traced_verify_endpoint(verify)()
+    await traced_rollout_endpoint(run)()
+    assert [name for name, _ in recorded_metrics] == ["verify", "rollout"]
 
 
 def test_telemetry_handle_is_not_required(recorded_metrics):
