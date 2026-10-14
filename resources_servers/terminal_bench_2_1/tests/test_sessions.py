@@ -518,16 +518,20 @@ async def test_expired_record_waiter_joins_replacement_lock(setup, monkeypatch: 
     await old.lock.acquire()
     waiting = asyncio.create_task(server.seed_session(request, seed))
     try:
-        await asyncio.sleep(0)
-        assert not waiting.done()
-        now = 301
-        current = await server.seed_session(request, seed)
+        try:
+            await asyncio.sleep(0)
+            assert not waiting.done()
+            now = 301
+            current = await asyncio.wait_for(server.seed_session(request, seed), timeout=5)
+        finally:
+            old.lock.release()
+        assert await asyncio.wait_for(waiting, timeout=5) == current
+        assert server._session_id_to_state[seed.resources_session_id] is not old
+        server._create_sandbox.assert_awaited_once()
     finally:
-        old.lock.release()
-    assert await waiting == current
-    assert server._session_id_to_state[seed.resources_session_id] is not old
-    server._create_sandbox.assert_awaited_once()
-    await server.close_resources_session(close_body(seed))
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+        await server.close_resources_session(close_body(seed))
 
 
 async def test_failed_close_keeps_fence_and_owner_past_retry_window(setup, monkeypatch: pytest.MonkeyPatch) -> None:

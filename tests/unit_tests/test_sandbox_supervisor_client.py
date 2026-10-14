@@ -205,6 +205,28 @@ async def test_terminal_negative_receipt_preserves_failure_without_signalling_a_
     sandbox.exec.assert_not_awaited()
 
 
+async def test_stop_surfaces_terminal_negative_receipt_created_after_initial_check(session):
+    sandbox, session_dir = session
+    receipt_path = session_dir / CLEANUP_RECEIPT_FILE
+    receipt = {"cleanup_confirmed": False, "return_code": -9, "timed_out": True, "error": "descendants remain"}
+    assert not receipt_path.exists()
+
+    async def stop(*args, **kwargs):
+        # The first read sees no receipt; stopping the supervisor publishes its
+        # final failure. This must take the same typed failure path as an early receipt.
+        receipt_path.write_text(json.dumps(receipt))
+        return SandboxExecResult("", "", 0)
+
+    sandbox.exec = AsyncMock(side_effect=stop)
+    with pytest.raises(HarnessTerminationError, match="descendants remain") as failure:
+        await stop_and_confirm_cleanup(
+            sandbox, session_dir=str(session_dir), workdir=str(session_dir.parent), timeout=1, harness="test"
+        )
+    assert failure.value.receipt == receipt
+    sandbox.exec.assert_awaited_once()
+    assert json.loads(receipt_path.read_text()) == receipt
+
+
 @pytest.mark.parametrize("timeout,close_timeout", [(1, 0.3), (2700, 30), (21600, 300)])
 def test_supervision_timeouts_reserve_cleanup_and_provider_margin(timeout, close_timeout):
     cleanup_timeout, provider_timeout = supervision_timeouts(timeout=timeout, close_timeout=close_timeout)

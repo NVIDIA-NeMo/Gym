@@ -1336,9 +1336,8 @@ async def test_close_confirms_cleanup_before_provider_cancellation(local_session
         cli_pid, task_pid, wrapper_pid = processes
         assert not Path(f"/proc/{cli_pid}").exists()
         assert not Path(f"/proc/{wrapper_pid}").exists()
-        # The borrowed sandbox owner keeps task processes alive until sandbox teardown.
-        task_stat = Path(f"/proc/{task_pid}/stat").read_text()
-        assert task_stat.split(") ", 1)[1].split()[0] not in {"Z", "X"}
+        # The in-flight detached tool is drained before borrowed-session release.
+        assert not Path(f"/proc/{task_pid}").exists()
         state.session.sandbox.disconnect.assert_awaited_once()
         state.session.sandbox.stop.assert_not_awaited()
     finally:

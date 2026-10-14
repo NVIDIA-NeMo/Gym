@@ -237,14 +237,14 @@ An explicit wall or model-output limit returns partial output as `incomplete`; u
 raise HTTP 502 even when a useful patch exists. Do not infer rollout success from reward alone. Close returns the captured observations,
 including salvaged transcript evidence after cancellation.
 
-A Linux supervisor stops and reaps the harness process group for each activation.
-Shell-tool commands can run in separate sessions and survive CLI exit or timeout;
-a confirmed receipt does not prove that those commands have stopped changing task files.
-The current OpenClaw launcher can also respawn the agent outside the supervised group,
-so a hard stop can leave that agent running. Processes outside the group, including
-services from completed tool calls, remain for the sandbox owner to stop: Resources after
-verification or episode failure, or the agent when closing its own sandbox. Ownership
-does not change process supervision.
+The supervisor stops live harness-group processes and reaps its children. On timeout
+or close it preserves children already adopted before the stop, typically services from
+completed tools, and drains newly adopted children within the cleanup deadline, including
+tools in separate sessions. The sandbox owner stops the preserved services later.
+Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
+those processes may still change task files. The stop-time cutoff also has adoption/PID
+races and cannot classify later service forks. It is not a security boundary.
+The sandbox launcher sets `OPENCLAW_NO_RESPAWN=1` to keep the CLI in the supervised group.
 Services must use task-owned files rather than the temporary agent session directory. Close is serialized and checks the receipt, process handle,
 adapter-owned file removal, and disconnect before succeeding. Unknown launch outcomes and missing
 or negative termination evidence block verification. Missing evidence remains retryable;
@@ -263,10 +263,7 @@ and finite. The shared `session_close_retry_window_seconds` bounds close receipt
 
 Session state is process-local. Keep requests on one worker. Missing evidence or failed release
 retains the session for retry. Releasing a final failed activation does not make it gradable.
-Cached runtime files remain until Resources destroys the sandbox. The supervisor stops
-foreground group members; processes outside the group, including ordinary shell-tool
-sessions, remain the sandbox owner's responsibility. This is not a security boundary
-against hostile task code.
+Cached runtime files and preserved task services remain until Resources destroys the sandbox.
 
 This path is eval-only. Working inference does not establish training token-ID/logprob support.
 A tool-and-verifier smoke is required for the actual image/model configuration before review;

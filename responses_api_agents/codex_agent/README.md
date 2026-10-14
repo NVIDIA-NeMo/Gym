@@ -138,14 +138,16 @@ Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
 `worker_exit_code_unavailable` observation gaps. Positive cleanup confirmation remains
 required; the adapter validates the captured terminal events without inventing an exit code.
 
-One shared Linux supervisor per activation fences delayed launches and bounds harness
-termination and reaps its process group. Shell-tool commands can run in separate sessions
-and survive CLI exit or timeout; a confirmed receipt does not prove that those commands
-have stopped changing task files. Processes outside the group, including services from
-completed tool calls, remain for the sandbox owner to stop: Resources after verification
-or episode failure, or the agent when closing its own sandbox. Ownership
-does not change process supervision. Services must not depend on the agent's temporary
-session files. Close confirms the receipt before cancelling provider execution,
+One shared Linux supervisor per activation fences delayed launches.
+The supervisor stops live harness-group processes and reaps its children. On timeout
+or close it preserves children already adopted before the stop, typically services from
+completed tools, and drains newly adopted children within the cleanup deadline, including
+tools in separate sessions. The sandbox owner stops the preserved services later.
+Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
+those processes may still change task files. The stop-time cutoff also has adoption/PID
+races and cannot classify later service forks. It is not a security boundary.
+Services must use task-owned files rather than the temporary agent session directory.
+Close confirms the receipt before cancelling provider execution,
 then removes adapter-owned files and disconnects. Missing/negative termination evidence
 blocks verification. Missing evidence stays retryable; a final negative receipt releases
 the borrowed connection without making the failed activation gradable. The borrowing

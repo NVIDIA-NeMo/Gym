@@ -77,6 +77,7 @@ class Sandbox:
             "error": None,
         }
         self.runtime_info = {"hostname": "task-container", "pid": 123}
+        self.task_environment_receipt = "ready\n"
         self.events = events()
         self.blocked = False
         self.started = asyncio.Event()
@@ -130,6 +131,8 @@ class Sandbox:
         await self.exited.wait()
         self.files[f"{self.directory}/cleanup.json"] = json.dumps(self.result)
         self.files[f"{self.directory}/runtime.json"] = json.dumps(self.runtime_info)
+        if self.task_environment_receipt is not None:
+            self.files[f"{self.directory}/task-environment.ready"] = self.task_environment_receipt
         self.files[f"{self.directory}/export.json"] = self.events
         return 0
 
@@ -1334,3 +1337,18 @@ async def test_disconnected_waiter_and_identical_retry_share_one_activation(setu
     assert await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")) == original
     sandbox.launch.assert_awaited_once()
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+@pytest.mark.parametrize("receipt", [None, "", "partial", "ready"])
+async def test_missing_task_environment_hook_rejects_otherwise_valid_result(setup, receipt):
+    agent, sandbox = setup
+    sandbox.task_environment_receipt = receipt
+    request, session_id, task = await activate(agent, sandbox)
+    state = active_sessions(agent)[session_id]
+    with pytest.raises(RuntimeError, match="task environment initialization was not confirmed"):
+        await task
+    assert state.session.cleanup["cleanup_confirmed"] is True
+    assert state.session.artifacts is None
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()

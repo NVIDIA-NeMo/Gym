@@ -29,6 +29,8 @@ def run(params: RunnerInput) -> int:
     """Run the CLI with isolated files and wait for it before returning captured output."""
     directory = Path(params["directory"])
     (directory / "runtime.json").write_text(json.dumps({"hostname": os.uname().nodename, "pid": os.getpid()}))
+    # Never accept an initialization receipt left by an earlier invocation.
+    (directory / "task-environment.ready").unlink(missing_ok=True)
     # Save only task-directory variables for the shell.env hook, before CLI overrides.
     task_home = os.environ.get("HOME") or str(Path.home())
     task_env = {"HOME": task_home}

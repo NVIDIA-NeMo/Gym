@@ -16,7 +16,7 @@ For Environment Server execution, implement these `SimpleResponsesAPIAgent` hook
   an `AgentSessionState`. If setup fails and cleanup cannot finish, raise
   `AgentSessionSetupError(state, error=original_error)` so close can retry cleanup.
 - `_close_agent_session_state(state)`: stop the harness process group, collect observations,
-  and release the session. Explicitly detached task services remain for the sandbox owner.
+  and release the session. Preserved task services remain for the sandbox owner.
   Missing termination evidence remains retryable; a final negative receipt fails the activation
   and skips verification while close releases the borrowed connection.
 
@@ -30,6 +30,14 @@ When using the shared process supervisor, confirm its cleanup receipt before can
 provider's exec request. Cancellation can kill the provider's entire process group, including
 the supervisor when it is already the group leader (as with the local provider).
 `setsid()` alone does not guarantee cleanup; the close ordering does.
+
+The shared supervisor stops live harness-group processes and reaps its children. Before
+signalling a timed-out or closing harness, it records already adopted children, typically
+services from completed tools. It preserves those outside the harness group and drains
+newly adopted children within the cleanup deadline, including tools in separate sessions.
+After natural CLI exit, unfinished tools in separate sessions cannot be distinguished
+from services. Adoption races, PID reuse, and later service forks also limit this cutoff;
+it is not a security boundary or a guarantee that task state cannot change.
 
 ## Tools in Agent vs. Resources Server
 

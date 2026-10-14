@@ -88,7 +88,8 @@ def test_supervisor_rejects_invalid_deadlines(tmp_path: Path, timeout: str) -> N
 @pytest.mark.parametrize("detached", [False, True])
 def test_only_detached_services_survive_harness_group_termination(tmp_path: Path, ending: str, detached: bool) -> None:
     # The isolated parent emulates the sandbox owner and reaps every test process.
-    # Only explicitly detached services survive normal and interrupted exits.
+    # A completed tool leaves a service adopted before interruption. Only
+    # explicitly detached services survive normal and interrupted exits.
     driver = r"""
 import ctypes, json, os, pathlib, signal, subprocess, sys, time, urllib.request
 assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
@@ -102,6 +103,11 @@ service.write_text("from http.server import HTTPServer, BaseHTTPRequestHandler\n
                   "server = HTTPServer(('127.0.0.1', 0), Handler)\n"
                   "Path('port').write_text(str(server.server_port))\n"
                   "server.serve_forever()\n")
+tool = root / 'tool.py'
+tool.write_text("import pathlib,subprocess,sys\n"
+                "child = subprocess.Popen([sys.executable, 'service.py'], stdout=subprocess.DEVNULL, "
+                "stderr=subprocess.DEVNULL, start_new_session=" + str(detached) + ")\n"
+                "pathlib.Path('service.pid').write_text(str(child.pid))\n")
 worker = root / 'worker.py'
 worker.write_text("import os, pathlib, signal, subprocess, sys, time\n"
                  "def checkpoint(*_):\n"
@@ -111,13 +117,12 @@ worker.write_text("import os, pathlib, signal, subprocess, sys, time\n"
                  "if ending in ('timeout', 'cancel', 'grace'): signal.signal(signal.SIGTERM, checkpoint)\n"
                  "if ending == 'stubborn': signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
                  "pathlib.Path('worker.pid').write_text(str(os.getpid()))\n"
-                 "child = subprocess.Popen([sys.executable, 'service.py'], stdout=subprocess.DEVNULL, "
-                 "stderr=subprocess.DEVNULL, start_new_session=" + str(detached) + ")\n"
-                 "pathlib.Path('service.pid').write_text(str(child.pid))\n"
+                 "subprocess.run([sys.executable, 'tool.py'], check=True)\n"
                  "deadline = time.monotonic() + 5\n"
                  "while not pathlib.Path('port').exists():\n"
-                 "    assert child.poll() is None and time.monotonic() < deadline\n"
+                 "    assert time.monotonic() < deadline\n"
                  "    time.sleep(0.01)\n"
+                 "pathlib.Path('ready').touch()\n"
                  "signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})\n"
                  "if ending == 'crash': raise SystemExit(7)\n"
                  "if ending == 'killed': os.kill(os.getpid(), signal.SIGKILL)\n"
@@ -134,7 +139,7 @@ try:
         sys.executable, str(worker), ending], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if ending == 'cancel':
         deadline = time.monotonic() + 5
-        while not (root / 'port').exists():
+        while not (root / 'ready').exists():
             assert process.poll() is None and time.monotonic() < deadline
             time.sleep(0.01)
         process.send_signal(signal.SIGTERM)
@@ -200,35 +205,50 @@ if (root / 'service.pid').exists():
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
 @pytest.mark.parametrize("cooperative", [True, False])
-def test_foreground_tool_cannot_mutate_task_after_confirmed_receipt(tmp_path: Path, cooperative: bool) -> None:
+@pytest.mark.parametrize("detached", [False, True])
+@pytest.mark.parametrize("ending", ["timeout", "cancel"])
+def test_foreground_tool_cannot_mutate_task_after_confirmed_receipt(
+    tmp_path: Path, cooperative: bool, detached: bool, ending: str
+) -> None:
     runner = SUPERVISOR.parents[2] / "responses_api_agents/pi_agent/sandbox_runner.py"
     # A separate owner reaps any escaped process even when this regression fails.
     driver = r"""
 import ctypes, json, os, pathlib, signal, subprocess, sys, time
 assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
 supervisor, runner, root, cooperative = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3]), sys.argv[4] == 'True'
-tool = "import pathlib,time\nwhile not pathlib.Path('release').exists(): time.sleep(.01)\npathlib.Path('mutated').touch()"
+detached, ending = sys.argv[5] == 'True', sys.argv[6]
+writer = "import pathlib,time\nwhile not pathlib.Path('release').exists(): time.sleep(.01)\npathlib.Path('mutated').touch()"
+# A second detached generation exercises repeated adoption after the tool dies.
+tool = ("import pathlib,subprocess,sys,time\n"
+        "child=subprocess.Popen([sys.executable,'-c'," + repr(writer) + "],start_new_session=True)\n"
+        "pathlib.Path('writer.pid').write_text(str(child.pid))\nchild.wait()\n")
 cli = ("import pathlib,signal,subprocess,sys\n"
        + ("" if cooperative else "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n")
-       + "child=subprocess.Popen([sys.executable,'-c'," + repr(tool) + "])\n"
+       + "child=subprocess.Popen([sys.executable,'-c'," + repr(tool) + "], start_new_session=" + str(detached) + ")\n"
        + "pathlib.Path('tool.pid').write_text(str(child.pid))\nchild.wait()\n")
 params = {'directory': str(root), 'cwd': str(root), 'env': {}, 'prompt': 'task',
           'command': [sys.executable, '-c', cli]}
 (root / 'input.json').write_text(json.dumps(params))
 process = None
 try:
-    process = subprocess.Popen([sys.executable, '-I', supervisor, '--timeout', '1', '--cleanup-timeout', '.3',
+    process = subprocess.Popen([sys.executable, '-I', supervisor, '--timeout', '1' if ending == 'timeout' else '10', '--cleanup-timeout', '.3',
         '--receipt', str(root / 'cleanup.json'), '--', sys.executable, '-I', runner, str(root / 'input.json')],
         cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.monotonic() + 5
+    while not (root / 'writer.pid').exists():
+        assert process.poll() is None and time.monotonic() < deadline
+        time.sleep(.01)
+    if ending == 'cancel': process.send_signal(signal.SIGTERM)
     stdout, stderr = process.communicate(timeout=10)
     assert process.returncode == 0, (stdout, stderr)
     receipt = json.loads((root / 'cleanup.json').read_text())
-    assert receipt['cleanup_confirmed'] and receipt['timed_out'], receipt
+    assert receipt['cleanup_confirmed'] and receipt['timed_out'] == (ending == 'timeout'), receipt
     assert (root / 'tool.pid').exists(), 'foreground tool never started'
     (root / 'release').touch()
     time.sleep(.2)
     assert not (root / 'mutated').exists(), 'foreground tool wrote after termination receipt'
     assert not pathlib.Path('/proc/' + (root / 'tool.pid').read_text()).exists(), 'tool was not reaped'
+    assert not pathlib.Path('/proc/' + (root / 'writer.pid').read_text()).exists(), 'writer was not reaped'
 finally:
     if process is not None and process.poll() is None:
         process.kill(); process.wait(timeout=5)
@@ -240,7 +260,18 @@ finally:
     except ChildProcessError: pass
 """
     result = subprocess.run(
-        [sys.executable, "-I", "-c", driver, str(SUPERVISOR), str(runner), str(tmp_path), str(cooperative)],
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            driver,
+            str(SUPERVISOR),
+            str(runner),
+            str(tmp_path),
+            str(cooperative),
+            str(detached),
+            ending,
+        ],
         capture_output=True,
         text=True,
         errors="replace",
@@ -421,3 +452,71 @@ finally:
     assert summary["error"] == "Harness launch failed: launch handle lost after process creation"
     assert summary["cleanup_confirmed"] is False
     assert summary["child_alive"] is True
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc zombie state")
+def test_zombie_group_owned_by_other_parent_is_terminated(tmp_path: Path) -> None:
+    # Keep our own child unreaped. The helper cannot reap another parent's zombie,
+    # but it must not confuse that zombie with a process still able to write.
+    child = subprocess.Popen([sys.executable, "-I", "-c", "pass"], start_new_session=True)
+    try:
+        deadline = time.monotonic() + 5
+        stat = Path(f"/proc/{child.pid}/stat")
+        while stat.read_text().rsplit(")", 1)[1].split()[0] != "Z":
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        os.killpg(child.pid, 0)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "import runpy,sys; runpy.run_path(sys.argv[1])['_reap_process_group'](int(sys.argv[2]), 0.1)",
+                str(SUPERVISOR),
+                str(child.pid),
+            ],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=5,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert stat.read_text().rsplit(")", 1)[1].split()[0] == "Z"
+    finally:
+        child.wait(timeout=5)
+
+
+def test_unreadable_group_state_does_not_confirm_termination(monkeypatch: pytest.MonkeyPatch) -> None:
+    supervisor = runpy.run_path(str(SUPERVISOR))
+    monkeypatch.setattr(os, "killpg", lambda *_: None)
+    monkeypatch.setattr(os, "waitpid", lambda *_: (0, 0))
+    monkeypatch.setattr(Path, "iterdir", lambda _: iter([Path("/proc/123")]))
+
+    def unreadable(*_: object) -> str:
+        raise PermissionError("Cannot read process state")
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    with pytest.raises(PermissionError, match="Cannot read process state"):
+        supervisor["_reap_process_group"](123, 0.1)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
+def test_missing_pre_stop_snapshot_does_not_confirm_termination(tmp_path: Path) -> None:
+    driver = """
+import json,runpy,sys
+supervise = runpy.run_path(sys.argv[1])['_supervise']
+def unavailable():
+    raise OSError('children unavailable')
+supervise.__globals__['_child_pids'] = unavailable
+receipt = supervise([sys.executable, '-c', 'import time; time.sleep(60)'], timeout=.1, cleanup_timeout=.1)
+assert receipt['cleanup_confirmed'] is False, receipt
+assert 'Cannot identify pre-stop adopted children' in receipt['error'], receipt
+"""
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", driver, str(SUPERVISOR)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr

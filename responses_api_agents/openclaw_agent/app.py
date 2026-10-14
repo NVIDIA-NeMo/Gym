@@ -713,6 +713,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 "OPENCLAW_TELEMETRY": "0",
                 "CLAWHUB_DISABLE_TELEMETRY": "1",
                 "OPENCLAW_EXEC_SHELL_SNAPSHOT": "0",
+                # The supervisor must retain the CLI in its process group.
+                "OPENCLAW_NO_RESPAWN": "1",
             },
         }
         try:

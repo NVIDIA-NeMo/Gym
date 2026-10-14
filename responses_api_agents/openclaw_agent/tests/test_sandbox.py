@@ -271,6 +271,7 @@ def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeou
             assert "--timeout 900" in sandbox.launch.await_args.kwargs["command"]
             assert "timeout" not in payload
             assert "PATH" not in payload["env"]
+            assert payload["env"]["OPENCLAW_NO_RESPAWN"] == "1"
             assert "HOME" not in payload["env"]
             assert not any(key.startswith("XDG_") for key in payload["env"])
             models = json.loads(sandbox.files[f"{sandbox.directory}/home/.openclaw/openclaw.json"])

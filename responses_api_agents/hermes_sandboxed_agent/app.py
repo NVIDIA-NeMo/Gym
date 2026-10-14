@@ -27,6 +27,7 @@ from responses_api_agents.hermes_sandboxed_agent.runner import classify_stop, sp
 
 
 LOG = logging.getLogger(__name__)
+MAX_OUTPUT_BYTES = 1024 * 1024
 
 
 class HermesSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
@@ -148,6 +149,31 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         raise HTTPException(400, "Use /run: Hermes requires a resources-server seeded sandbox")
 
+    async def _download_output_tail(self, sandbox: AsyncSandbox, *, remote: str, local: Path) -> str:
+        # Bound bytes inside the sandbox: downloading first still permits unbounded
+        # transfer and memory use when a task service keeps writing diagnostics.
+        script = (
+            "import sys\n"
+            f"limit = {MAX_OUTPUT_BYTES}\n"
+            "marker = b'[Hermes output truncated; showing tail]\\n'\n"
+            "with open(sys.argv[1], 'rb') as source, open(sys.argv[2], 'wb') as target:\n"
+            "    size = source.seek(0, 2)\n"
+            "    prefix = marker if size > limit else b''\n"
+            "    count = min(size, limit - len(prefix))\n"
+            "    source.seek(size - count)\n"
+            "    target.write(prefix + source.read(count))\n"
+        )
+        bounded = f"{remote}/output.tail.log"
+        copied = await sandbox.exec(
+            f"{quote(self.config.runtime_python)} -I -c {quote(script)} "
+            f"{quote(remote + '/output.log')} {quote(bounded)}",
+            timeout_s=30,
+        )
+        if copied.return_code or copied.error_type:
+            raise RuntimeError(f"Could not bound Hermes output: {copied}")
+        await sandbox.download(bounded, local / "output.log")
+        return (local / "output.log").read_text(errors="replace")
+
     async def _run_in_sandbox(self, sandbox, body, rollout_id):
         started = monotonic()
         run_id = uuid4().hex
@@ -213,8 +239,7 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             # Detached services can inherit worker output. A file prevents them
             # from keeping the provider's response pipe open after termination.
             try:
-                await sandbox.download(f"{remote}/output.log", local / "output.log")
-                stdout += (local / "output.log").read_text(errors="replace")
+                stdout += await self._download_output_tail(sandbox, remote=remote, local=local)
             except Exception:
                 LOG.warning("Could not retrieve Hermes supervisor output; artifacts: %s", local, exc_info=True)
             await sandbox.download(f"{remote}/cleanup.json", local / "cleanup.json")

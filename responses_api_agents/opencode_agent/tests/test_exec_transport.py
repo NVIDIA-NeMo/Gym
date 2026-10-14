@@ -116,11 +116,19 @@ def payload(state, code, timeout=0.5):
 async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_path, ending):
     state, provider, workdir = make_session(tmp_path)
     provider.worker_pid = workdir / "worker.pid"
+    # Complete the tool before interruption so its detached service is already adopted.
+    tool = (
+        "import pathlib,subprocess,sys; "
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],"
+        "start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+        "pathlib.Path('child.pid').write_text(str(p.pid))"
+    )
     code = (
         "import os,subprocess,sys,time,pathlib; "
+        f"pathlib.Path({state.session.session_dir!r},'task-environment.ready').write_text('ready\\n'); "
         "pathlib.Path('worker.pid').write_text(str(os.getpid())); "
-        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
-        "pathlib.Path('child.pid').write_text(str(p.pid)); "
+        f"subprocess.run([sys.executable,'-c',{tool!r}],check=True); "
+        "pathlib.Path('ready').touch(); "
         + {"natural": "print('{}')", "crash": "raise SystemExit(7)"}.get(ending, "time.sleep(60)")
     )
     deadline = 0.5 if ending == "timeout" else 60
@@ -129,7 +137,7 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
     )
     try:
         async with asyncio.timeout(5):
-            while not (workdir / "child.pid").exists():
+            while not (workdir / "ready").exists():
                 await asyncio.sleep(0.01)
         if ending == "cancel":
             task.cancel()

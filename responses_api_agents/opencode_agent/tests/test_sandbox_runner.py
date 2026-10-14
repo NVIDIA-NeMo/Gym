@@ -97,16 +97,22 @@ def test_worker_io_and_runtime_are_independent_of_cleanup(tmp_path, monkeypatch,
 @pytest.mark.parametrize("ending", ["natural", "timeout", "cancel"])
 def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
     try:
+        # A completed tool leaves its detached service adopted before close.
+        tool = (
+            "import pathlib,subprocess,sys; "
+            "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],"
+            "start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+            "pathlib.Path('child.pid').write_text(str(p.pid))"
+        )
         code = (
             "import subprocess,sys,time,pathlib; "
-            "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
-            "pathlib.Path('child.pid').write_text(str(p.pid)); "
-            + ("time.sleep(60)" if ending != "natural" else "pass")
+            f"subprocess.run([sys.executable,'-c',{tool!r}],check=True); "
+            "pathlib.Path('ready').touch(); " + ("time.sleep(60)" if ending != "natural" else "pass")
         )
         process = launch(tmp_path, code)
         if ending == "cancel":
             for _ in range(200):
-                if (tmp_path / "child.pid").exists():
+                if (tmp_path / "ready").exists():
                     break
                 time.sleep(0.01)
             process.send_signal(signal.SIGTERM)

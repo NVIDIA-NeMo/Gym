@@ -110,10 +110,15 @@ Completed parser reports follow Pro's required-pass rule, including empty report
 execution failures or unusable parser output remain inconclusive.
 The agent inherits Gym's standard aggregation; Slurm reporting includes coverage.
 
-The runner confirms that its worker process group has stopped before verification.
-Processes that leave that group, including detached services, remain until the
-sandbox owner tears it down; group termination cannot guarantee that those processes
-have stopped changing task files. Missing termination confirmation skips verification and stops
+The supervisor stops live harness-group processes and reaps its children. On timeout
+or close it preserves children already adopted before the stop, typically services from
+completed tools, and drains newly adopted children within the cleanup deadline, including
+tools in separate sessions. The sandbox owner stops the preserved services later.
+Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
+those processes may still change task files. The stop-time cutoff also has adoption/PID
+races and cannot classify later service forks. It is not a security boundary.
+Supervisor diagnostics retain at most the last 1 MiB, including a truncation marker.
+Missing termination confirmation skips verification and stops
 the task sandbox. Resources cleanup retains failed handles for retry; final agent
 cleanup is bounded by `cleanup_timeout` (default 120 seconds per attempt) and does
 not replace a received verifier result. Cleanup is cooperative, not a security

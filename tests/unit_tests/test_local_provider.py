@@ -78,8 +78,7 @@ async def test_supervisor_deadline_finishes_before_provider_hard_timeout(tmp_pat
         assert receipt["return_code"] == -signal.SIGKILL
         assert receipt["error"] is None
         child_pid = int((tmp_path / "child.pid").read_text())
-        os.kill(child_pid, 0)
-        assert Path(f"/proc/{child_pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        assert not Path(f"/proc/{child_pid}").exists(), "in-flight detached tool survived"
     finally:
         if (tmp_path / "child.pid").exists():
             try:

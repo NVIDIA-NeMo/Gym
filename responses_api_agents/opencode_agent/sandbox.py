@@ -161,6 +161,13 @@ class OpenCodeSandboxSession(AgentSessionState):
             runtime = None
         self.runtime_info = parse_runtime_info(runtime)
         try:
+            if await self.read_text("task-environment.ready") != "ready\n":
+                raise ValueError("Invalid task environment initialization receipt")
+        except Exception as error:
+            raise RuntimeError(
+                format_sandbox_error("OpenCode task environment initialization was not confirmed", stderr=self.stderr)
+            ) from error
+        try:
             return await self.read_text("export.json")
         except Exception as error:
             logs = await self.session.read_output_log()

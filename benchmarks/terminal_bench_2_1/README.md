@@ -156,13 +156,19 @@ a successful smoke, and one task does not establish a benchmark baseline.
 
 ## Tasks that start services
 
-The supervisor stops and reaps the harness process group before capture or verification.
-Shell-tool commands can run in separate sessions, so a confirmed receipt does not prove
-that all foreground tools have stopped after CLI exit or timeout. Those commands may
-still change task files during verification. Processes outside the group, including
-services from completed tool calls, remain until Resources closes the sandbox after
-verification or episode failure. Unconfirmed harness termination blocks verification;
-a final failure receipt still lets agent close release its connection for owner teardown.
+The supervisor stops live processes in the harness group and reaps its children before
+capture or verification. On timeout or close, it first records its already adopted
+children, typically services from completed tool calls. It then stops the harness and
+repeatedly drains newly adopted children, including in-flight tools in separate sessions,
+within the cleanup deadline. Earlier adopted services outside the harness group remain
+for Resources to stop after verification or episode failure.
+
+Natural CLI exit has no such cutoff: unfinished tools in separate sessions cannot be
+distinguished from services and may still change task files. Adoption races, PID reuse,
+and a preserved service orphaning more children during cleanup also limit this rule.
+A confirmed receipt is not a guarantee that the sandbox is idle or a security boundary.
+Unconfirmed termination blocks verification; a final failure receipt still lets agent
+close release its connection for owner teardown.
 
 Tool shells retain the task HOME and XDG directories, so home-directory deliverables
 remain available to verification. Harness configuration and transcripts stay in a private
@@ -178,6 +184,8 @@ A file-producing smoke does not validate this service-dependent behavior.
 Resources retains completed close receipts for `session_close_retry_window_seconds`
 (default 300 seconds); retries do not extend the window. Pending setup or failed stops
 retain their handles. Close fences an in-progress setup before waiting for its lock,
-so setup finishing after a close timeout tears its sandbox down. Shutdown attempts
-session stops concurrently, but process termination can interrupt them; the configured
-provider TTL remains the backstop for abandoned sandboxes.
+so setup finishing after a close timeout attempts its own bounded teardown. If that
+attempt fails after the final close callback is cancelled, there is no durable automatic
+retry. The server retains the fence and handle for an explicit close retry or shutdown;
+provider TTL can stop the abandoned sandbox but does not purge the in-memory record.
+Shutdown attempts session stops concurrently, but process termination can interrupt them.

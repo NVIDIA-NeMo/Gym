@@ -4,6 +4,9 @@
 import asyncio
 import json
 import shlex
+import shutil
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,6 +17,7 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.hermes_sandboxed_agent.app import (
+    MAX_OUTPUT_BYTES,
     HermesSandboxedAgent,
     HermesSandboxedAgentConfig,
     HermesSandboxedRunRequest,
@@ -185,13 +189,15 @@ async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypat
             side_effect=[
                 SandboxExecResult(return_code=0, stdout="/app\n", stderr=""),
                 SandboxExecResult(return_code=0, stdout="ran", stderr="INFO:run_agent:Starting turn\n"),
+                SandboxExecResult(return_code=0, stdout="", stderr=""),
             ]
         ),
         upload=AsyncMock(),
     )
 
     async def download(remote, local):
-        if remote.endswith("/output.log"):
+        assert not remote.endswith("/output.log"), "must bound the log before downloading"
+        if remote.endswith("/output.tail.log"):
             local.write_bytes(b"worker diagnostics\xff\n")
             return
         if remote.endswith("/cleanup.json"):
@@ -218,7 +224,8 @@ async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypat
     assert params["max_tokens"] == 128
     assert params["instructions"] == "Keep the public API"
     assert "patch" not in params and "test_patch" not in params and "api_key" not in params
-    command = sandbox.exec.call_args.args[0]
+    launch = sandbox.exec.call_args_list[1]
+    command = launch.args[0]
     assert " -I " in command
     assert "/output.log" in command and "2>&1" in command
     assert {call.args[0].name for call in sandbox.upload.await_args_list} == {
@@ -229,12 +236,51 @@ async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypat
     command_args = shlex.split(command)
     assert any(arg.endswith("/process_supervisor.py") for arg in command_args)
     assert float(command_args[command_args.index("--timeout") + 1]) == agent.config.sandbox_timeout
-    assert sandbox.exec.call_args.kwargs["timeout_s"] > agent.config.sandbox_timeout + 3 * DEFAULT_CLEANUP_TIMEOUT
-    assert sandbox.exec.call_args.kwargs["cwd"].startswith("/tmp/nemo-hermes-")
+    assert launch.kwargs["timeout_s"] > agent.config.sandbox_timeout + 3 * DEFAULT_CLEANUP_TIMEOUT
+    assert launch.kwargs["cwd"].startswith("/tmp/nemo-hermes-")
     assert metrics["hermes_finished"] and response.status == "completed"
     persisted = json.loads(uploaded.with_name("agent_result.json").read_text())
     assert persisted["stdout"] == "ranworker diagnostics\ufffd\n"
     assert persisted["stderr"] == "INFO:run_agent:Starting turn\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("large", [False, True])
+async def test_output_is_bounded_before_download_with_quoted_paths_and_binary_bytes(agent, tmp_path, large):
+    remote = tmp_path / "remote's log files"
+    remote.mkdir()
+    local = tmp_path / "local output"
+    local.mkdir()
+    python = tmp_path / "python's executable"
+    python.symlink_to(sys.executable)
+    agent.config.runtime_python = str(python)
+    payload = (b"old logs\n" * MAX_OUTPUT_BYTES if large else b"") + b"latest diagnostics\xff\n"
+    (remote / "output.log").write_bytes(payload)
+    transferred = []
+
+    async def execute(command, **kwargs):
+        process = await asyncio.create_subprocess_exec(
+            "sh", "-c", command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=5)
+        return SandboxExecResult(stdout.decode(errors="replace"), stderr.decode(errors="replace"), process.returncode)
+
+    async def download(source, destination):
+        assert Path(source) != remote / "output.log"
+        assert Path(source).stat().st_size <= MAX_OUTPUT_BYTES
+        transferred.append(Path(source))
+        shutil.copyfile(source, destination)
+
+    output = await agent._download_output_tail(
+        SimpleNamespace(exec=execute, download=download), remote=str(remote), local=local
+    )
+    marker = b"[Hermes output truncated; showing tail]\n"
+    expected = marker + payload[-(MAX_OUTPUT_BYTES - len(marker)) :] if large else payload
+    assert (local / "output.log").read_bytes() == expected
+    assert output == expected.decode(errors="replace")
+    assert output.endswith("latest diagnostics\ufffd\n")
+    assert transferred == [remote / "output.tail.log"]
+    assert (remote / "output.log").stat().st_size == len(payload)
 
 
 @pytest.mark.asyncio
@@ -244,6 +290,7 @@ async def test_missing_result_preserves_process_failure(agent, monkeypatch):
             side_effect=[
                 SandboxExecResult(return_code=0, stdout="/app\n", stderr=""),
                 SandboxExecResult(return_code=125, stdout="", stderr="deadline expired", error_type="timeout"),
+                SandboxExecResult(return_code=0, stdout="", stderr=""),
             ]
         ),
         upload=AsyncMock(),
@@ -402,6 +449,7 @@ async def test_timeout_recovers_checkpoint_and_keeps_verifier_eligible_trajector
             side_effect=[
                 SandboxExecResult(return_code=0, stdout="/app\n", stderr=""),
                 SandboxExecResult(return_code=125, stdout="", stderr="deadline expired", error_type="timeout"),
+                SandboxExecResult(return_code=0, stdout="", stderr=""),
             ]
         ),
         upload=AsyncMock(),
@@ -490,6 +538,7 @@ async def test_missing_or_uncertain_cleanup_never_returns_a_verifier_eligible_re
         exec=AsyncMock(
             side_effect=[
                 SandboxExecResult(return_code=0, stdout="/app\n", stderr=""),
+                SandboxExecResult(return_code=0, stdout="", stderr=""),
                 SandboxExecResult(return_code=0, stdout="", stderr=""),
             ]
         ),
