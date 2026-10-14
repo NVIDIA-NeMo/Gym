@@ -82,6 +82,25 @@ MCP_SETUP_ERROR_EXIT_CODE = 78  # Must match gym_mcp.mjs (EX_CONFIG).
 _MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]+")
 
 
+def _ends_on_finish_tool(messages: list[Any]) -> bool:
+    """True when the run's last assistant turn called only finish tools, which gym_mcp.mjs marks terminal.
+
+    Pi ends a run after a tool batch only when every result in it is terminal, so the last assistant
+    message then stops for tool use and no final answer follows.
+    """
+    results = []
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "assistant":
+            break
+        if message.get("role") == "toolResult":
+            results.append(message)
+    return bool(results) and all(
+        (result.get("details") or {}).get("terminal") is True and not result.get("isError") for result in results
+    )
+
+
 def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
     """Rename gym_mcp.mjs' ``<server>_<tool>`` to Gym's ``mcp__<server>__<tool>``, which Gym strips before verify.
 
@@ -293,6 +312,8 @@ def _build_pi_observations(
                     "aborted": "incomplete",
                     "length": "incomplete",
                 }.get(stop_reason, "unknown")
+                if stop_reason == "toolUse" and _ends_on_finish_tool(terminal_messages):
+                    invocation_status = "completed"
         elif event_type == "tool_execution_start" and isinstance(call_id, str):
             starts[call_id] = (observed_at, tool_name)
         elif event_type == "tool_execution_end" and isinstance(call_id, str):
@@ -516,8 +537,8 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     finish_tool_names: list[str] = Field(
         default_factory=list,
         description=(
-            "Granted MCP tools, by their name on the server, whose successful call ends a sandbox session's run, "
-            "like Stirrup's finish tools."
+            "Granted MCP tools, by their name on the server, whose successful call ends a sandbox session's run "
+            "when every tool call of that turn is one of them."
         ),
     )
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
@@ -854,7 +875,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         stop_reasons = []
         mcp_setup_failure = None
         skipped_mcp_servers = []
-        tool_results_since_assistant = []
+        messages = []
         for _, event in events:
             if event.get("type") == "ng_pi_outcome":
                 context_overflow = event.get("context_overflow") is True
@@ -863,10 +884,9 @@ class PiAgent(SimpleResponsesAPIAgent):
             elif event.get("type") == "ng_gym_mcp_server_skipped":
                 skipped_mcp_servers.append(f"{event.get('server')}: {event.get('error')}")
             message = event.get("message") or {}
-            if event.get("type") == "message_end" and message.get("role") == "toolResult":
-                tool_results_since_assistant.append(message)
+            if event.get("type") == "message_end":
+                messages.append(message)
             if event.get("type") == "message_end" and message.get("role") == "assistant":
-                tool_results_since_assistant = []
                 for part in message.get("content") or []:
                     if part.get("type") == "thinking" and part.get("thinking"):
                         output.append(
@@ -907,16 +927,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         if mcp_servers and cleanup["return_code"] == MCP_SETUP_ERROR_EXIT_CODE:
             cause = f": {mcp_setup_failure}" if mcp_setup_failure else ""
             error = error or f"Required Gym MCP tools could not be initialized{cause}"
-        # gym_mcp.mjs ends the run on a successful finish tool call, so the last assistant turn stops for tool use.
-        ended_on_finish_tool = bool(
-            stop_reasons
-            and stop_reasons[-1] == "toolUse"
-            and tool_results_since_assistant
-            and all(
-                (result.get("details") or {}).get("terminal") is True and not result.get("isError")
-                for result in tool_results_since_assistant
-            )
-        )
+        ended_on_finish_tool = bool(stop_reasons and stop_reasons[-1] == "toolUse" and _ends_on_finish_tool(messages))
         if cleanup["return_code"] not in (None, 0) and not cleanup["timed_out"] and not model_limit:
             error = error or f"Pi exited with code {cleanup['return_code']}"
         if not stop_reasons:
