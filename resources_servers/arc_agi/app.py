@@ -90,7 +90,6 @@ def _parse_grid(text: str) -> Optional[List[List[int]]]:
 
 
 class ARCAGIResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ARCAGIResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

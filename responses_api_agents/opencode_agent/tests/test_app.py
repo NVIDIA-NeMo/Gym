@@ -758,7 +758,12 @@ class TestConfigYaml:
 @pytest.mark.parametrize(
     "exit_code,status", [(0, "completed"), (7, "failed"), (-15, "failed"), (None, "unknown"), (True, "unknown")]
 )
-def test_bash_exit_code_is_execution_outcome(tmp_path: Path, exit_code: int | None, status: str) -> None:
+@pytest.mark.parametrize("sandboxed", [False, True])
+def test_bash_exit_code_is_execution_outcome(
+    tmp_path: Path, exit_code: int | None, status: str, sandboxed: bool
+) -> None:
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
     db = _session_db(
         tmp_path,
         [
@@ -780,8 +785,21 @@ def test_bash_exit_code_is_execution_outcome(tmp_path: Path, exit_code: int | No
             )
         ],
     )
-    bundle = _parse_opencode_session(db, "fallback")
+    parser = parse_opencode_observations if sandboxed else _parse_opencode_session
+    bundle = parser(db, "fallback")
     tool = _tool_calls(bundle)[0]
     assert tool.status == status
     assert tool.error_type == ("tool_error" if status == "failed" else None)
     assert any(gap.code == "tool_outcome_unavailable" for gap in bundle.gaps) == (status == "unknown")
+
+
+@pytest.mark.parametrize("override,expected", [({}, {"field": "reasoning_content"}), ({"interleaved": True}, True)])
+def test_gym_provider_preserves_interleaved_override(override: dict, expected: dict | bool) -> None:
+    agent = _make_agent(
+        model="policy",
+        model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        opencode_config={"provider": {"nemo": {"models": {"policy": override}}}},
+    )
+    with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+        config = agent._build_opencode_config("1-2")
+    assert config["provider"]["nemo"]["models"]["policy"]["interleaved"] == expected

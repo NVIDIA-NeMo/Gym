@@ -979,6 +979,7 @@ async def test_default_config_collects_through_environment_run(setup, monkeypatc
         def __init__(self, body, *, cookie=None):
             self.body = json.dumps(body).encode()
             self.cookies = {} if cookie is None else {"session": SimpleNamespace(value=cookie)}
+            self.headers = {}
 
         async def read(self):
             return self.body

@@ -1,0 +1,5 @@
+-e nemo-gym[dev] @ ../..
+# Upstream chemistry verification (BSD-3-Clause), matching the validated runtime.
+rdkit==2026.3.6
+# Upstream ranking metrics (BSD-3-Clause).
+scikit-learn==1.9.1
