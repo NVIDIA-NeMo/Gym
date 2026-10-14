@@ -1863,6 +1863,10 @@ class _CaptureMiddleware:
             for message in deferred_response_messages:
                 await send(message)
 
+        # Claimed before the call is forwarded, for its whole lifetime. A claim taken only at
+        # write time does not exist while the call is in flight, so a reader can look, see nothing
+        # outstanding, and snapshot the rollout before the row lands.
+        self._store.mark_pending(rollout_id, model_call_id)
         try:
             with rollout_context(rollout_id):
                 await self._app(scope, _receive, _send)
@@ -1898,6 +1902,7 @@ class _CaptureMiddleware:
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
             finally:
+                self._store.clear_pending(rollout_id, model_call_id)
                 await _fail_uncommitted_external_call(capture_context)
                 await _flush_deferred_response()
             raise
@@ -1970,9 +1975,6 @@ class _CaptureMiddleware:
             finally:
                 store.clear_pending(rollout_id, model_call_id)
 
-        # Claimed before the write is queued: a shielded write runs detached, so without a
-        # claim the reader cannot tell a row that is still coming from one that never will.
-        store.mark_pending(rollout_id, model_call_id)
         try:
             # Shielded: cancellation here strands the queued write and the row is
             # lost silently -- no log line, no incomplete marker. The error path

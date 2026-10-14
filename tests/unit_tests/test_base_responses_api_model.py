@@ -2094,3 +2094,62 @@ def test_clear_captures_for_rollouts_drops_stale_pending_claims(tmp_path):
     clear_model_call_captures_for_rollouts([{"_ng_task_index": 5, "_ng_rollout_index": 0}], [tmp_path])
 
     assert store.has_pending("5-0") is False
+
+
+def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
+    """The claim must exist for the call's whole lifetime, not just its write.
+
+    A claim taken at write time does not exist yet while the call is in flight, so a reader can
+    poll, see nothing outstanding, and snapshot the rollout before the row lands.
+    """
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware, await_model_call_capture_quiescence
+
+    store = CaptureStore(tmp_path)
+
+    async def run() -> None:
+        in_flight = asyncio.Event()
+        release = asyncio.Event()
+
+        async def app(scope, receive, send) -> None:
+            del scope
+            await receive()
+            in_flight.set()
+            await release.wait()
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b'{"id":"resp-1"}', "more_body": False})
+
+        async def receive() -> dict:
+            return {"type": "http.request", "body": b'{"input":"x"}', "more_body": False}
+
+        async def send(_message: dict) -> None:
+            pass
+
+        task = asyncio.create_task(
+            _CaptureMiddleware(
+                app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
+            )(
+                {
+                    "type": "http",
+                    "path": "/ng-rollout/r-inflight/v1/responses",
+                    "raw_path": b"/ng-rollout/r-inflight/v1/responses",
+                    "headers": [(b"x-assistant-message-id", b"assistant-inflight")],
+                },
+                receive,
+                send,
+            )
+        )
+        await in_flight.wait()
+        # The row is not on disk yet, so only the claim can tell a reader to wait.
+        assert store.read("r-inflight") == []
+        assert store.has_pending("r-inflight") is True
+        assert await await_model_call_capture_quiescence("r-inflight", [tmp_path], timeout_s=0.05) is False
+
+        release.set()
+        await task
+        assert await await_model_call_capture_quiescence("r-inflight", [tmp_path], timeout_s=5.0) is True
+        assert store.has_pending("r-inflight") is False
+        assert len(store.read("r-inflight")) == 1
+
+    asyncio.run(run())
