@@ -18,6 +18,7 @@ from responses_api_agents.agentic_vbench_agent.harbor_runner import (
     JUDGE_PROTOCOLS,
     TYPING_DIAGNOSTIC,
     container_endpoint,
+    stage_assembly_judge_guard,
     stage_judge,
 )
 
@@ -69,6 +70,72 @@ def make_task(root: Path, task_toml: str) -> Path:
     (tests / "judge.py").write_text("ORIGINAL JUDGE\n")
     (tests / "test.sh").write_text(f"set -euo pipefail\n{{\n  {TYPING_DIAGNOSTIC}\n}} | tee diag.txt\n")
     return task
+
+
+ASSEMBLY_JUDGE = '''import json
+
+
+def _zero(reason):
+    return {"reward": 0.0, "reason": reason}
+
+
+def score(solution_json):
+    sol = json.loads(solution_json.read_text())
+
+    segments = sol.get("segments")
+    if not isinstance(segments, list):
+        return _zero("solution.json: segments not a list")
+    return {"reward": len(segments) / 4}
+'''
+
+
+def test_assembly_judge_guard_scores_non_object_manifest_zero(tmp_path: Path) -> None:
+    task = make_task(tmp_path / "tasks/agentic_vbench_assembly", JUDGED_TASK)
+    source_judge = task / "steps/solve/tests/judge.py"
+    source_judge.write_text(ASSEMBLY_JUDGE)
+    output = tmp_path / "output"
+    output.mkdir()
+
+    staged = stage_assembly_judge_guard(
+        task,
+        staging=tmp_path / "staging",
+        output=output,
+    )
+
+    namespace = {}
+    exec((staged / "steps/solve/tests/judge.py").read_text(), namespace)
+    bare_list = tmp_path / "bare-list.json"
+    bare_list.write_text('[{"source": "3"}]')
+    scalar_segment = tmp_path / "scalar-segment.json"
+    scalar_segment.write_text('{"segments": [3]}')
+    valid_object = tmp_path / "valid-object.json"
+    valid_object.write_text('{"segments": [{"source": "3"}, {"source": "4"}]}')
+    assert namespace["score"](bare_list) == {
+        "reward": 0.0,
+        "reason": "solution.json: expected an object with a segments list",
+    }
+    assert namespace["score"](scalar_segment) == {
+        "reward": 0.0,
+        "reason": "solution.json: segment entries must be objects",
+    }
+    assert namespace["score"](valid_object) == {"reward": 0.5}
+    assert source_judge.read_text() == ASSEMBLY_JUDGE
+    provenance = json.loads((output / "assembly_judge_guard.json").read_text())
+    assert provenance["original_judge_sha256"] == hashlib.sha256(ASSEMBLY_JUDGE.encode()).hexdigest()
+    assert provenance["staged_judge_sha256"] != provenance["original_judge_sha256"]
+
+
+def test_assembly_judge_guard_rejects_unexpected_pinned_parser(tmp_path: Path) -> None:
+    task = make_task(tmp_path / "tasks/agentic_vbench_assembly", JUDGED_TASK)
+    with pytest.raises(ValueError, match="unexpected manifest parser"):
+        stage_assembly_judge_guard(task, staging=tmp_path / "staging", output=tmp_path)
+
+
+def test_assembly_judge_guard_leaves_other_families_unstaged(tmp_path: Path) -> None:
+    task = make_task(tmp_path / "tasks/agentic_vbench_repair", JUDGED_TASK)
+    staged = stage_assembly_judge_guard(task, staging=tmp_path / "staging", output=tmp_path)
+    assert staged == task
+    assert not (tmp_path / "staging").exists()
 
 
 def test_hub_judge_is_verifier_only(tmp_path: Path) -> None:

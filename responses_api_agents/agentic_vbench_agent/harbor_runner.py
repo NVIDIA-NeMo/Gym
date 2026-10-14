@@ -226,6 +226,58 @@ NATIVE_JUDGE_ENV = {"ANTHROPIC_API_KEY", "GEMINI_API_KEY"}
 # rootless containers must not abort the verifier under pipefail.
 TYPING_DIAGNOSTIC = "find / -name 'typing_extensions*' 2>/dev/null | head -20"
 
+_ASSEMBLY_FAMILY = "agentic_vbench_assembly"
+_ASSEMBLY_MANIFEST_ANCHOR = '''    segments = sol.get("segments")
+    if not isinstance(segments, list):
+        return _zero("solution.json: segments not a list")
+'''
+_ASSEMBLY_MANIFEST_GUARD = '''    if not isinstance(sol, dict):
+        return _zero("solution.json: expected an object with a segments list")
+
+'''
+_ASSEMBLY_SEGMENTS_GUARD = '''    if not all(isinstance(segment, dict) for segment in segments):
+        return _zero("solution.json: segment entries must be objects")
+'''
+
+
+def stage_assembly_judge_guard(task_path: Path, *, staging: Path, output: Path) -> Path:
+    """Make the pinned assembly judge reject a non-object manifest with reward zero.
+
+    The upstream judge calls ``sol.get`` immediately after ``json.loads``. A model
+    can therefore create valid JSON with the wrong top-level shape (for example, a
+    bare list), which raises ``AttributeError`` instead of producing the same zero
+    reward as every other malformed manifest. Stage only assembly tasks and insert
+    the missing type check; valid-object scoring remains byte-for-byte unchanged.
+    """
+    if task_path.parent.name != _ASSEMBLY_FAMILY:
+        return task_path
+
+    staged = staging / task_path.name
+    shutil.copytree(task_path, staged)
+    judge = staged / "steps/solve/tests/judge.py"
+    source = judge.read_text()
+    if source.count(_ASSEMBLY_MANIFEST_ANCHOR) != 1:
+        raise ValueError(f"Pinned assembly judge has an unexpected manifest parser: {task_path}")
+    replacement = _ASSEMBLY_MANIFEST_GUARD + _ASSEMBLY_MANIFEST_ANCHOR + _ASSEMBLY_SEGMENTS_GUARD
+    judge.write_text(source.replace(_ASSEMBLY_MANIFEST_ANCHOR, replacement))
+
+    def digest(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    (output / "assembly_judge_guard.json").write_text(
+        json.dumps(
+            {
+                "source_task": str(task_path),
+                "reason": "non-object solution manifests score zero instead of crashing the verifier",
+                "original_judge_sha256": digest(task_path / "steps/solve/tests/judge.py"),
+                "staged_judge_sha256": digest(judge),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return staged
+
 
 def stage_judge(task_path: Path, *, staging: Path, output: Path, protocol: str) -> Path:
     """Copy a natively judged task with its judge routed through NVIDIA Inference Hub.
@@ -358,6 +410,12 @@ def main() -> None:
     from harbor.models.job.config import JobConfig
 
     task_path = args.task_path.resolve(strict=True)
+    runtime_root = args.runtime_root.resolve()
+    task_path = stage_assembly_judge_guard(
+        task_path,
+        staging=runtime_root / "assembly-judge-task",
+        output=args.output,
+    )
     env = dict(os.environ)
     if args.judge_protocol:
         from dotenv import dotenv_values
@@ -373,7 +431,7 @@ def main() -> None:
         env["NVINFERENCE_API_KEY"] = key
         task_path = stage_judge(
             task_path,
-            staging=args.runtime_root.resolve() / "judge-task",
+            staging=runtime_root / "judge-task",
             output=args.output,
             protocol=args.judge_protocol,
         )
@@ -382,7 +440,7 @@ def main() -> None:
         job_config(
             task_path=task_path,
             output=args.output.resolve(strict=True),
-            runtime_root=args.runtime_root.resolve(),
+            runtime_root=runtime_root,
             model=args.model,
             endpoint=args.endpoint,
             context_tokens=args.context_tokens,
