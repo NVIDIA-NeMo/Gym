@@ -29,9 +29,9 @@ gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
 # Gym benchmark config this recipe builds on.
 benchmark_config: benchmarks/livecodebench/v6_2408_2505/cascade.yaml
 
-# Test cases run 8 at a time by default, each with a 10 s limit. The published run allowed
-# 256 at once on a large machine; raise it only if you have the cores, or tests slowed down
-# by contention time out and score 0.
+# Solutions are graded 8 at a time by default, each test with a 10 s limit. The published run
+# graded 256 at once; raise it only if you have the cores, or tests slowed down by contention
+# time out and score 0.
 # livecodebench_v6_cascade_code_gen_resources_server:
 #   resources_servers:
 #     code_gen:

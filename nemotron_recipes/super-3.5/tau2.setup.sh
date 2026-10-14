@@ -17,3 +17,7 @@
 # reads to the published run's commits; Gym otherwise follows branches of the repo.
 export NEMO_GYM_TAU2_BENCH_DATA_REF=7245a8f6f12a6046e3443b120428dcb695fe1f6e
 export NEMO_GYM_TAU2_BENCH_REF=346f74d9752f80af8ca3e083467bafcee961bd74
+
+# Tau2 and Tau3 share the agent's data folder, and Gym reuses it if present: clear it so this
+# run fetches its own pinned data (Gym re-creates it on start).
+rm -rf responses_api_agents/tau2/tau2_data

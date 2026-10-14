@@ -40,9 +40,9 @@ benchmark_config:
 policy_model:
   responses_api_models:
     vllm_model:
-      # The published run's values, set by Gym on every request (the agent asks for max_tokens
-      # 262144). Its num_workers and max_output_tokens are left out: not Chat Completions
-      # fields, and stricter endpoints reject them.
+      # The published run's values, set by Gym on every request. Its num_workers and
+      # max_output_tokens are left out: not Chat Completions fields, and stricter endpoints
+      # reject them.
       sampling_overrides:
         temperature: 1.0
         top_p: 0.95

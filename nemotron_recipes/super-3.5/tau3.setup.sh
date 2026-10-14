@@ -16,3 +16,7 @@
 # Sourced by run.sh before `gym eval prepare`. Pins the tau2-bench tasks to the published run's
 # commit; Gym otherwise follows a branch of the repo.
 export NEMO_GYM_TAU2_BENCH_DATA_REF=7245a8f6f12a6046e3443b120428dcb695fe1f6e
+
+# Tau2 and Tau3 share the agent's data folder, and Gym reuses it if present: clear it so this
+# run fetches its own pinned data (Gym re-creates it on start).
+rm -rf responses_api_agents/tau2/tau2_data

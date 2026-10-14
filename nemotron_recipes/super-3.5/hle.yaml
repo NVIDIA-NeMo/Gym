@@ -33,9 +33,8 @@
 # evaluator_rollouts_failures.jsonl; RESUME=1 retries it (the model answers again; 3 attempts
 # in all by default).
 #
-# The dataset is not pinned to a revision: Gym loads the latest cais/hle test split and keeps
-# the questions without an image, of which there were 2,158 when the published number was
-# produced. A different question count means a different question set.
+# Dataset: latest cais/hle test split, not pinned; 2,158 text-only questions at the published
+# run.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d

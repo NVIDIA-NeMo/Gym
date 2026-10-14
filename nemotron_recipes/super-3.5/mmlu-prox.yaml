@@ -24,13 +24,12 @@
 #
 # Set in .env: POLICY_API_KEY
 #
-# The published run's served context capped each answer, thinking included, at about 32,768
-# tokens (1.2% of answers reached it). max_output_tokens below caps it the same way, so serve
-# the model as for the other recipes.
+# The published run's served context (32,768 tokens) capped each answer, thinking included (1.2%
+# of answers reached it). max_output_tokens below sets the same cap, slightly looser as the
+# prompt no longer counts against it, so serve the model as for the other recipes.
 #
-# The dataset is not pinned to a revision: Gym loads the latest li-lab/MMLU-ProX, which had
-# 117,590 questions for these languages when the published number was produced. A different
-# question count means a different question set.
+# Dataset: latest li-lab/MMLU-ProX, not pinned; 117,590 questions in these languages at the
+# published run.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
@@ -40,6 +39,6 @@ benchmark_config: benchmarks/mmlu_prox/config.yaml
 responses_create_params:
   max_output_tokens: 32768
 
-# The published run's 10 languages; the benchmark default prepares more.
+# The benchmark default prepares 29 languages.
 prepare_script_args:
   languages: [en, de, es, fr, it, ja, zh, hi, pt, ko]

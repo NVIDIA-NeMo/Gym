@@ -28,18 +28,15 @@
 # recipe only) serving gpt-5.6-luna on Chat Completions (<base_url>/chat/completions). The
 # endpoint must accept Gym's judge request as it is: max_tokens 32768, temperature 0.0 and top_p
 # 1.0 next to reasoning_effort medium. Gym always sends these three; config can change their
-# values (and then no longer matches the published run) but cannot drop them. The published
-# run's OpenAI-compatible gateway accepted them; OpenAI's own API is expected to reject
-# max_tokens and temperature for this reasoning model, so use an endpoint that accepts or drops
-# them.
+# values (and then no longer matches the published run) but cannot drop them. If your endpoint
+# rejects them, use one that accepts or drops them.
 #
 # An answer whose judge call fails is left out of the score and written to
 # evaluator_rollouts_failures.jsonl; RESUME=1 retries it (the model answers again; 3 attempts
 # in all by default).
 #
-# The dataset is not pinned to a revision: Gym loads the latest
-# ArtificialAnalysis/AA-Omniscience-Public, which had 600 questions when the published number
-# was produced. A different question count means a different question set.
+# Dataset: latest ArtificialAnalysis/AA-Omniscience-Public, not pinned; 600 questions at the
+# published run.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
@@ -82,9 +79,7 @@ genrm_model:
       # At most 32 judge calls in flight; lower it if your endpoint rate-limits.
       max_concurrent_requests: 32
 
-# Judge output cap (the benchmark default is 2048). Gym also sends the benchmark's
-# temperature 0.0 and top_p 1.0; whether the judge samples with them depends on the
-# endpoint.
+# Judge output cap (the benchmark default is 2048).
 omniscience_omniscience_resources_server:
   resources_servers:
     omniscience:

@@ -83,7 +83,7 @@ search key).
 Each recipe is one YAML file, `<benchmark>.yaml`, naming the Gym commit
 (`gym_commit`) and Gym benchmark config (`benchmark_config`) it builds on, plus whatever
 that benchmark needs beyond the shared settings in [`common.yaml`](./common.yaml): thinking
-on, temperature 1.0, top-p 0.95 and no output cap (CritPt sets its run's cap). `run.sh`
+on, temperature 1.0, top-p 0.95 and no output cap (recipes whose run had one set it). `run.sh`
 loads the benchmark config, the model config, `common.yaml` and the recipe, in that order,
 each overriding the ones before.
 
@@ -293,7 +293,7 @@ Each task runs in its own Ubuntu VM, in Docker on the machine that runs Gym. You
   usually by being in the `kvm` group).
 - About 16 GB of RAM per VM running at once: 4 by default, `PARALLEL` changes it.
 - Room for the VM disk: `run.sh` downloads it on the first run with Gym's own script (about
-  11 GB download, 24.5 GB on disk, checksum verified) into `OSWORLD_VM_DIR`, by default
+  12 GB download, 24.5 GB on disk, checksum verified) into `OSWORLD_VM_DIR`, by default
   `docker_vm_data` in the Gym repo root. Later runs only re-check the checksum.
 
 ### GDPval-AA v2
@@ -318,7 +318,7 @@ You do **not** need to install the document-generation stack yourself. The agent
 deliverables inside the sandbox, and the image already carries LibreOffice plus `python-docx`,
 `openpyxl` and the rest. Its Python packages are pinned; its Debian packages take the current
 Debian 13 point release, so a later build differs from the published run's image by security
-updates only. On aarch64, five pinned packages that ship only x86_64 wheels are left out.
+updates only. On aarch64, five pinned packages are left out.
 
 **2. Root.** The sandbox is started with `--home /root`, which an ordinary user cannot enter.
 Office deliverables are also converted to PDF on the host — not in the sandbox — and the
@@ -389,8 +389,9 @@ search key.
 #### Reproducing our numbers
 
 We ran comparison mode: deliverables judged against all twelve reference models above, fitted
-in two stages, graded by the three-judge panel. The closest you can get is to generate those
-twelve reference sets yourself and run the same way: same method, same anchors, same scale.
+in two stages, graded by the judge panel (at this Gym commit, every call goes to
+gemini-3.1-pro-preview). The closest you can get is to generate those twelve reference sets
+yourself and run the same way: same method, same anchors, same scale.
 
 That is also the expensive path: twelve reference sets means twelve full 220-task agentic runs
 before you score your own. Rubric mode is one run and no references. It gives a self-contained

@@ -23,15 +23,13 @@
 #
 # Set in .env: POLICY_API_KEY
 #
-# The dataset is not pinned to a revision: Gym loads the latest MathArena/apex-shortlist,
-# which had 47 problems when the published number was produced. A different problem count
-# means a different problem set.
+# Dataset: latest MathArena/apex-shortlist, not pinned; 47 problems at the published run.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
 # Gym benchmark config this recipe builds on.
 benchmark_config: benchmarks/apex_shortlist/config.yaml
 
-# 16 samples per problem, each sent with its own seed.
+# Each sample is sent with its own seed.
 num_repeats: 16
 num_repeats_add_seed: true

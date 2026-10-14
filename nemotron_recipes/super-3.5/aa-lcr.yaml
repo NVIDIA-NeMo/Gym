@@ -31,8 +31,7 @@
 # score and written to evaluator_rollouts_failures.jsonl; RESUME=1 retries it (the model
 # answers again; 3 attempts in all by default).
 #
-# The dataset is pinned: the benchmark config loads ArtificialAnalysis/AA-LCR at revision
-# 9a77ef5.
+# Dataset: ArtificialAnalysis/AA-LCR, pinned to revision 9a77ef5 by Gym's prepare script.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: 5a7dd6fe6c3d348005922f1a3d4f87215e3ca15a

@@ -31,8 +31,9 @@
 # (<base_url>/chat/completions).
 #
 # run.sh first sources tau3.setup.sh, which pins the tasks
-# (https://github.com/bxyu-nvidia/tau2-bench) to the published run's commit, 7245a8f6. The tau2
-# package and the agent's data come from branch bxyu/nemo_gym_stable, as in that run.
+# (https://github.com/bxyu-nvidia/tau2-bench) to the published run's commit, 7245a8f6, and
+# clears agent data left by an earlier tau2 or tau3 run. The tau2 package and the agent's data
+# then come from branch bxyu/nemo_gym_stable, as in that run.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: 538886bff48f31a1567670fd5ed29c9ddfea59dd

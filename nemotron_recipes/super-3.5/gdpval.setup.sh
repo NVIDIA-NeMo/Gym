@@ -31,8 +31,8 @@ if [ -n "${PARALLEL:-}" ]; then
   EXTRA_ARGS+=("++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.concurrency=$PARALLEL")
 fi
 
-# Reference models and the ratings the published ELO was fitted against (Artificial Analysis
-# GDPval-AA v2). Pinned: newer ratings would move the score off the published scale.
+# Reference models and the ratings the published ELO was fitted against, as in the published
+# run. Pinned: newer ratings would move the score off the published scale.
 GDPVAL_REF_ELOS="deepseek_v4_flash_0731=1468 deepseek_v4_pro=1223 inkling_small=1191 glm51_fp8=1181
   kimi_k26=1115 nemotron3_ultra=1091 qwen36_35b=992 qwen35_122b=925 qwen35_397b=905
   gptoss_120b=745 gemma4_26b=713 qwen3_30b_thinking=274"

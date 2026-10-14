@@ -57,9 +57,8 @@ default_host: 172.17.0.1
 # low. The published run used 1024 on NVIDIA's cluster.
 num_samples_in_parallel: 16
 
-# OpenCode comes from your own copy (OPENCODE_DIR in .env; reproducibility.md has the download),
-# as in the published run, not downloaded inside each task container: many task images have no
-# curl. Both folders are mounted read-only into every sandbox.
+# OpenCode from your own copy, as in the published run, not downloaded per task: many task
+# images have no curl.
 swebench_multilingual_opencode_resources_server:
   resources_servers:
     swebench:

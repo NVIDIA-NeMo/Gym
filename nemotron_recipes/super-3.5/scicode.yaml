@@ -52,8 +52,7 @@ scicode_benchmark_agent:
 scicode_benchmark_resources_server:
   resources_servers:
     scicode:
-      # The numeric reference values the test cases are checked against (scicode.setup.sh
-      # checks the file is readable).
+      # The numeric reference values the test cases are checked against.
       test_data_fpath: ${oc.env:TEST_DATA}
       # Each sub-step's code may run for up to 300 s against its test cases (default 30 s).
       timeout_secs: 300

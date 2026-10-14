@@ -25,14 +25,12 @@
 # Set in .env: POLICY_API_KEY, JUDGE_API_KEY, EXA_API_KEY
 #
 # Needs a judge endpoint (judge_base_url in env.yaml, or browsecomp_judge_base_url for this
-# recipe only) serving GLM-5.1 on Chat Completions (<base_url>/chat/completions), and an Exa API
-# key (https://exa.ai).
+# recipe only) serving GLM-5.1 on Chat Completions (<base_url>/chat/completions).
 #
 # run.sh first sources browsecomp.setup.sh, which selects all 1,266 questions (Gym's default
 # is a 400-question subset) and points the search at the domain exclude list.
 #
-# The run uses Exa's "deep" search, which costs more per query than its default; the
-# published run made about 33 searches per question.
+# The published run made about 33 tool calls (searches and page reads) per question.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: 0a287243543020c1cc23f76f6004fcf3c83fc4a9
@@ -55,7 +53,7 @@ browsecomp_benchmark_resources_server:
       # Exa's multi-step research search, as the published run used (Gym's default is auto).
       exa_search_type: deep
       # Domains search skips: the NVIDIA opt-out registry the published run used (same 47
-      # domains). Absolute path from browsecomp.setup.sh: the server runs in its own directory.
+      # domains); the path comes from browsecomp.setup.sh.
       exclude_domains_file_path: ${oc.env:BROWSECOMP_EXCLUDE_DOMAINS}
 
 browsecomp_benchmark_agent:
