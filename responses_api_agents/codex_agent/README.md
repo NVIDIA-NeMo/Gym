@@ -74,9 +74,10 @@ A new pairing does not need another combined preset.
 ## Runtime and model requirements
 
 Use a pinned `codex_version` (default **0.144.4**), direct `SandboxAccess`,
-and an absolute task workdir disjoint from the adapter directories. Required Resources HTTP/MCP
-tools are rejected; Codex supplies its own tools. The task sandbox supplies isolation, so
-`sandbox_mode` must be `danger-full-access`. No Codex CLI is required on the agent-server host.
+and an absolute task workdir disjoint from the adapter directories. Codex supplies its own shell and
+file tools. Sessions also accept MCP tool grants (see [Gym MCP tools](#gym-mcp-tools)); required
+direct HTTP grants are rejected. The task sandbox supplies isolation, so `sandbox_mode` must be
+`danger-full-access`. No Codex CLI is required on the agent-server host.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.
 
 The installer accepts Linux x86_64/aarch64 glibc and x86_64 musl/Alpine with Python 3.8+.
@@ -107,7 +108,7 @@ context-management controls, not generation budgets.
 Input is a string or one text user message, optionally preceded by a system/developer message.
 Configured `system_prompt`, request `instructions`, and that preceding message become Codex
 developer instructions in that order. Unsupported conversation/multimodal input, required
-external tools, provider overrides, and extra host config are rejected before activation.
+direct HTTP tools, provider overrides, and extra host config are rejected before activation.
 
 Request `max_output_tokens`, `temperature`, `top_p`, reasoning controls, and unsupported tool
 policies are rejected rather than ignored. Codex cannot enforce these request-level controls
@@ -293,12 +294,15 @@ codex_agent:
 - `cwd`: working root handed to `codex exec --cd`. `null` creates a fresh temp dir per request and removes it afterwards
 - `stream_idle_timeout_ms`: provider stream idle budget. Gym model servers emit the synthesized SSE only once the full response is computed, so this must cover an entire generation; `null` defaults it to `timeout * 1000`
 - `extra_config`: extra `config.toml` content deep-merged over the generated base config — add MCP servers, feature flags, `model_verbosity`, etc. Per-rollout Gym MCP entries take precedence on name collisions
+- `mcp_tool_timeout_seconds`: per-call timeout for Gym MCP tools, written as `tool_timeout_sec`; a call that runs longer returns an error to the model. `null` leaves the setting out and the CLI's own default applies
 
 For the full set of Codex config options see the [Codex configuration reference](https://developers.openai.com/codex/config).
 
 ## Gym MCP tools
 
-When the resources server exposes Gym-owned MCP tools (an `MCPResourcesServer` returning MCP metadata from `/seed_session`), the agent writes a per-rollout `mcp_servers` entry into the generated config.toml: a streamable HTTP server pointing at the resources server's `/mcp` endpoint, with the per-rollout session token carried on a custom header via `http_headers`. Codex advertises these tools to the model as a `namespace` tool spec; the Gym model server flattens them to plain `<namespace>__<tool>` functions on the way in and splits the names back on the way out, so third-party models can call them.
+When the resources server exposes Gym-owned MCP tools (an `MCPResourcesServer` returning MCP metadata from `/seed_session`), the agent writes a per-rollout `mcp_servers` entry into the generated config.toml: a streamable HTTP server pointing at the resources server's `/mcp` endpoint, with the per-rollout session token carried on a custom header via `http_headers`. Codex advertises these tools to the model as a `namespace` tool spec named `mcp__<server>`; the Gym model server flattens them to plain `mcp__<server>__<tool>` functions on the way in and splits the names back on the way out, so third-party models can call them. Codex also adds its MCP resource helper tools (`list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`) whenever an MCP server is configured.
+
+Sessions use the same entries for each MCP tool grant, for example the grant an Environment Server with `resources_tool_transports: [mcp]` passes. A required grant is written with `required = true`: if its server does not connect, Codex stops before the first model call and the activation fails. An optional grant that does not connect is left out of the tool list. Grant names must contain only letters, digits, `-` and `_`, which Codex requires of MCP server names. The sandbox must reach the granted URL, usually the Resources Server's `/mcp` endpoint. The session token in each grant is readable inside the sandbox and gives access only to that episode's tools.
 
 ## Skills evaluation
 
