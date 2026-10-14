@@ -7,8 +7,10 @@ import hashlib
 import json
 import time
 import uuid
+from io import BytesIO
 from pathlib import Path
 
+from PIL import Image
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr, model_validator
 
 from nemo_gym.base_resources_server import (
@@ -133,9 +135,18 @@ class Vision2CodeServer(SimpleResourcesServer):
                 # Gym starts servers from their component directory; committed examples
                 # use repository-relative paths so they remain portable across checkouts.
                 reference_path = Path(__file__).resolve().parents[2] / reference_path
-            raw, _, width, height = read_reference(reference_path)
+            raw, mime, width, height = read_reference(reference_path)
             if hashlib.sha256(raw).hexdigest() != ref.sha256 or (width, height) != (ref.width, ref.height):
                 raise ValueError("Reference changed since task preparation; regenerate the JSONL")
+            source_path = directory / "image.png"
+            if mime == "image/png":
+                source_path.write_bytes(raw)
+            else:
+                with Image.open(BytesIO(raw)) as source:
+                    if source.mode == "CMYK":
+                        source = source.convert("RGB")
+                    source.save(source_path, format="PNG")
+            result.artifacts["source_image"] = str(source_path)
             stage = "render"
             provider = {
                 "enroot": {

@@ -6,7 +6,10 @@ import argparse
 import base64
 import hashlib
 import json
+import sys
+from io import BytesIO
 from pathlib import Path
+from time import monotonic
 
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
@@ -28,22 +31,27 @@ class Reference(BaseModel):
 def read_reference(path: Path) -> tuple[bytes, str, int, int]:
     """Validate a supported, single-frame reference without changing its pixels."""
     raw = path.read_bytes()
-    with Image.open(path) as im:
+    with Image.open(BytesIO(raw)) as im:
         if im.format not in {"PNG", "JPEG", "WEBP", "GIF"} or getattr(im, "n_frames", 1) != 1:
             raise ValueError(f"Unsupported reference image: {path}")
         mime = Image.MIME[im.format]
         width, height = im.size
         im.verify()
-    with Image.open(path) as im:
+    with Image.open(BytesIO(raw)) as im:
         im.load()
     return raw, mime, width, height
 
 
 def prepare(manifest: Path, output: Path) -> int:
     """Validate the complete manifest before replacing the destination JSONL."""
+    started = last_report = monotonic()
+    print(f"Reading manifest: {manifest}", file=sys.stderr, flush=True)
+    lines = manifest.read_text().splitlines()
+    total = sum(bool(line.strip()) for line in lines)
+    print(f"Validating and encoding {total} images...", file=sys.stderr, flush=True)
     rows = []
     seen = set()
-    for number, line in enumerate(manifest.read_text().splitlines(), 1):
+    for number, line in enumerate(lines, 1):
         if not line.strip():
             continue
         item = json.loads(line)
@@ -94,10 +102,25 @@ def prepare(manifest: Path, output: Path) -> int:
                 "verifier_metadata": ref.model_dump(),
             }
         )
+        completed = len(rows)
+        now = monotonic()
+        if completed == 1 or completed % 100 == 0 or completed == total or now - last_report >= 5:
+            elapsed = now - started
+            rate = completed / max(elapsed, 1e-9)
+            eta = (total - completed) / rate
+            print(
+                f"Images {completed}/{total} ({completed / total:.1%}) | "
+                f"elapsed {elapsed:.1f}s | {rate:.2f} images/s | ETA {eta:.0f}s | last: {path.name}",
+                file=sys.stderr,
+                flush=True,
+            )
+            last_report = now
     if not rows:
         raise ValueError("Manifest is empty")
     output.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Serializing and writing {len(rows)} tasks to {output}...", file=sys.stderr, flush=True)
     output.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    print(f"Finished in {monotonic() - started:.1f}s", file=sys.stderr, flush=True)
     return len(rows)
 
 
