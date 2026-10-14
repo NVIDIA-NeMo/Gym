@@ -170,6 +170,9 @@ class FakeAgentClient(ServerClient):
     fail_with: dict = {}
     slow_path: str | None = None
     observations: dict | None = None
+    trajectory: dict | None = None
+    # What the seed response declares: a harness that reads the task's MCP servers and skills directory.
+    supports_task_tool_context: bool = True
     turn_response: dict | None = None
     # Called when the harness takes its turn, between the seed and the verification of an episode.
     turn_hooks: list = []
@@ -191,9 +194,20 @@ class FakeAgentClient(ServerClient):
             raise self.fail_with.pop(url_path)
         if url_path == "/v1/agent_sessions":
             AgentSeedSessionRequest.model_validate(body)
-            return _Response({"agent_session_id": body["agent_session_id"]})
+            return _Response(
+                {
+                    "agent_session_id": body["agent_session_id"],
+                    "supports_task_tool_context": self.supports_task_tool_context,
+                }
+            )
         if url_path == "/v1/agent_sessions/close":
-            return _Response({"agent_session_id": body["agent_session_id"], "agent_observations": self.observations})
+            return _Response(
+                {
+                    "agent_session_id": body["agent_session_id"],
+                    "agent_observations": self.observations,
+                    "trajectory": self.trajectory,
+                }
+            )
         if url_path.endswith("/v1/responses"):
             return _Response(self.turn_response or agent_response().model_dump(mode="json"))
         raise AssertionError(f"unexpected agent call {url_path}")

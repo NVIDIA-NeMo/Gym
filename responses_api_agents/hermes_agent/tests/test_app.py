@@ -343,7 +343,7 @@ class TestSanity:
         hermes = HermesAgent(config=_config(num_workers=2), server_client=MagicMock(spec=ServerClient))
         hermes._initialize_agent_session_state = AsyncMock()
 
-        with pytest.raises(ValueError, match="sessions require num_workers=1"):
+        with pytest.raises(HTTPException) as error:
             await hermes.seed_agent_session(
                 SimpleNamespace(session={}),
                 AgentSeedSessionRequest(
@@ -352,6 +352,8 @@ class TestSanity:
                     task_id=TaskId(taskset="test", task_id="task"),
                 ),
             )
+        assert error.value.status_code == 422
+        assert "sessions require num_workers=1" in error.value.detail
 
         hermes._initialize_agent_session_state.assert_not_awaited()
 

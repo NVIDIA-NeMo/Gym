@@ -569,8 +569,10 @@ class TestApp:
             task_id=TaskId(taskset="example", task_id="0"),
         )
 
-        with pytest.raises(ValueError, match="sessions require num_workers=1"):
+        with pytest.raises(HTTPException) as error:
             await server.seed_agent_session(MagicMock(session={}), body)
+        assert error.value.status_code == 422
+        assert "sessions require num_workers=1" in error.value.detail
 
     async def test_agent_session_without_a_grant_refuses_tool_calls(self, monkeypatch: MonkeyPatch) -> None:
         # The configured resources_server has no session for this episode, so a tool call must not fall back to it.

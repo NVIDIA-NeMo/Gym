@@ -93,6 +93,7 @@ from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_pr
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
+    NG_TRAJECTORY_KEY,
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
@@ -231,7 +232,6 @@ _NO_RESULT_FAILURE_CLASSES = frozenset(
         ENVIRONMENT_SERVER_FAILURE_CLASS,
     }
 )
-NG_TRAJECTORY_KEY = "ng_trajectory"
 NG_PERF_KEY = "ng_perf"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
@@ -367,8 +367,13 @@ def _is_episode_response(result: Any) -> bool:
 
 
 def _is_collector_key(key: str) -> bool:
-    """Keys rollout collection writes itself; an Environment Server result must not use them."""
-    return key.startswith("_ng_") or key in (NG_TRAJECTORY_KEY, "ng_model_call_capture", NG_PERF_KEY)
+    """Keys rollout collection writes itself; an Environment Server result must not use them.
+
+    ``ng_trajectory`` is not one of them: it is the producer's slot, where an Environment Server forwards
+    the harness's own turns from its session close (as an agent's ``/run`` result does), and the collector
+    replaces it with the canonical projection built from those turns.
+    """
+    return key.startswith("_ng_") or key in ("ng_model_call_capture", NG_PERF_KEY)
 
 
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:

@@ -93,7 +93,15 @@ def needs_environment_server(instance: dict) -> bool:
     # An omitted binding can inherit Resources and must still migrate.
     if (
         agent_type
-        in {"hermes_agent", "pi_agent", "codex_agent", "openclaw_agent", "opencode_agent", "harbor_oracle_agent"}
+        in {
+            "hermes_agent",
+            "pi_agent",
+            "codex_agent",
+            "openclaw_agent",
+            "opencode_agent",
+            "harbor_oracle_agent",
+            "terminus_2_sandboxed_agent",
+        }
         and resources_server is None
     ):
         return False

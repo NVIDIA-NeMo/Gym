@@ -9831,9 +9831,9 @@ class TestEnvironmentServerRouting:
         assert nested["verification"] == {"reward": 1.0}
 
     def test_episode_result_may_not_use_collector_keys(self) -> None:
-        reply = self._native_identity("a") | {"result": {"reward": 1.0, "ng_trajectory": {}}}
+        reply = self._native_identity("a") | {"result": {"reward": 1.0, "ng_perf": {}}}
 
-        with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_trajectory'\]"):
+        with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_perf'\]"):
             nemo_gym.rollout_collection._episode_record(reply)
 
     def test_episode_result_from_a_failed_judge_keeps_its_failure_class(self) -> None:
@@ -9858,9 +9858,18 @@ class TestEnvironmentServerRouting:
             nemo_gym.rollout_collection._episode_record(reply)
 
     def test_failed_judge_result_may_not_use_other_collector_keys(self) -> None:
-        result = {"reward": 0.0, NG_FAILURE_CLASS_KEY: "judge_failed", "ng_trajectory": {}}
-        with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_trajectory'\]"):
+        result = {"reward": 0.0, NG_FAILURE_CLASS_KEY: "judge_failed", "ng_perf": {}}
+        with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_perf'\]"):
             nemo_gym.rollout_collection._episode_record(self._native_identity("a") | {"result": result})
+
+    def test_episode_result_keeps_the_harness_trajectory_for_the_collector(self) -> None:
+        """``ng_trajectory`` is the producer slot: an Environment Server forwards the harness's own turns there."""
+        trajectory = {"task_id": "a", "rollout_id": "0-a", "turns": []}
+        reply = self._native_identity("a") | {"result": {"reward": 1.0, NG_TRAJECTORY_KEY: trajectory}}
+
+        record = nemo_gym.rollout_collection._episode_record(reply)
+
+        assert record[NG_TRAJECTORY_KEY] == trajectory and record["reward"] == 1.0
 
     def test_episode_detection_needs_object_identities_and_an_object_failure(self) -> None:
         """An agent reply echoing identity fields as strings is not an episode reply; a bad failure is an error."""

@@ -41,7 +41,12 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
 )
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, AgentObservationBundle
+from nemo_gym.rollout_observability import (
+    NG_AGENT_OBSERVATIONS_KEY,
+    NG_TRAJECTORY_KEY,
+    AgentObservationBundle,
+    TrajectoryRecord,
+)
 from nemo_gym.server_utils import (
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,
@@ -130,6 +135,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             if continuation.get("observations")
             else None
         )
+        trajectory = (
+            TrajectoryRecord.model_validate(continuation["trajectory"]) if continuation.get("trajectory") else None
+        )
         verification = (
             SingleAgentTurnResult.model_validate(continuation["result"]) if continuation.get("result") else None
         )
@@ -206,10 +214,14 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                         partial_response=agent_response,
                     ) from error
             observations = close.agent_observations
+            trajectory = close.trajectory
             stage = "verify"
 
         def dumped_observations() -> dict | None:
             return observations.model_dump(mode="json") if observations else None
+
+        def dumped_trajectory() -> dict | None:
+            return trajectory.model_dump(mode="json") if trajectory else None
 
         if stage == "verify":
             await self.checkpoint_boundary(
@@ -219,6 +231,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     "handles": handles.model_dump(),
                     "response": agent_response.model_dump(mode="json"),
                     "observations": dumped_observations(),
+                    "trajectory": dumped_trajectory(),
                 },
             )
             async with self.checkpoint_step(request, handles.resources_verify):
@@ -235,6 +248,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 "handles": handles.model_dump(),
                 "result": verification.model_dump(mode="json"),
                 "observations": dumped_observations(),
+                "trajectory": dumped_trajectory(),
             },
         )
 
@@ -243,7 +257,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         return SingleAgentTurnResponse(
             episode_id=request.episode_id,
             task_id=request.task.task_id,
-            result=verification.model_copy(update={NG_AGENT_OBSERVATIONS_KEY: observations}),
+            result=verification.model_copy(
+                update={NG_AGENT_OBSERVATIONS_KEY: observations, NG_TRAJECTORY_KEY: trajectory}
+            ),
         )
 
     async def _seed_resources(

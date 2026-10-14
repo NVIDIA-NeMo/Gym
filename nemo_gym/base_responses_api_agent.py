@@ -56,7 +56,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -110,11 +110,15 @@ class AgentSeedSessionRequest(BaseModel):
 
 
 class AgentSeedSessionResponse(BaseModel):
-    """Confirm the caller-assigned agent session identifier."""
+    """Confirm the caller-assigned agent session identifier and declare what the harness can use."""
 
     model_config = ConfigDict(extra="forbid")
 
     agent_session_id: str
+    # Whether the harness drives the task's own tool declarations (Harbor's ``[[environment.mcp_servers]]``
+    # and ``skills_dir``). An environment server refuses such a task to a harness that does not, instead of
+    # running it without its tools.
+    supports_task_tool_context: bool = False
 
 
 class AgentCloseSessionRequest(BaseModel):
@@ -133,6 +137,14 @@ class AgentCloseSessionResponse(BaseModel):
 
     agent_session_id: str
     agent_observations: AgentObservationBundle | None = None
+    trajectory: TrajectoryRecord | None = Field(
+        default=None,
+        description=(
+            "The harness's own account of the run's decisions: the turns it took and the model calls behind "
+            "each. Without it rollout collection rebuilds turns from every captured model call, so helper calls "
+            "(context recovery, summarization) count as decisions and the step counts are lost."
+        ),
+    )
     resources_cookies: dict[str, str] | None = Field(
         default=None,
         description=(
@@ -383,7 +395,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             # This agent cannot capture the session, so the episode that seeds it starts over after a crash.
             response.headers[CHECKPOINT_RESTART_HEADER] = "1"
         if self.config.num_workers not in (None, 1):
-            raise ValueError("Agent sessions require num_workers=1")
+            # A 422: the environment server records the seed as a terminal failure instead of retrying a
+            # misconfiguration on every episode. Harnesses that serve sessions also refuse it at startup.
+            raise HTTPException(422, "Agent sessions require num_workers=1")
         current = self._agent_session_id_from_request(request)
         if current is not None and current != body.agent_session_id:
             raise HTTPException(409, "agent_session_id does not match the session cookie")
@@ -416,7 +430,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             elif record.state.request != body:
                 raise HTTPException(409, "agent_session_id is already bound to another seed request")
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
-            return AgentSeedSessionResponse(agent_session_id=body.agent_session_id)
+            return AgentSeedSessionResponse(
+                agent_session_id=body.agent_session_id,
+                supports_task_tool_context=self.supports_task_tool_context(),
+            )
 
     async def close_agent_session(
         self,
@@ -514,6 +531,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         record = self._session_records.get(agent_session_id)
         if record is not None and record.close_response is None:
             self._session_records.pop(agent_session_id, None)
+
+    def supports_task_tool_context(self) -> bool:
+        """Whether this harness uses the task's own tool declarations.
+
+        Harbor tasks declare ``[[environment.mcp_servers]]`` and ``skills_dir``. A harness that drives them
+        from inside the sandbox answers True, and the seed response carries the answer to the environment
+        server, which refuses such a task to a harness that would run it without its tools.
+        """
+        return False
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
         """Validate grants and initialize harness state.

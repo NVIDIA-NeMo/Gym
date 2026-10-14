@@ -24,7 +24,10 @@ This is an environment server: one `/run` call owns one whole episode, and no re
 A task that cannot be set up is a handled episode failure with `stage: seed`: terminal when the task or row
 is at fault (unknown task, changed folder, unsupported settings), retryable when the sandbox provider failed.
 A harness that cannot be seeded, fails its turn or fails to close is `stage: agent` or `stage: cleanup`, with
-its observations and any usable response attached. Verification never runs before the harness has let go.
+its observations and any usable response attached. A task that declares `[[environment.mcp_servers]]` or
+`skills_dir` is a terminal `stage: agent` failure unless the harness declared `supports_task_tool_context` in
+its seed response: running it without its tools would score a silent zero. Verification never runs before the
+harness has let go.
 
 When `test.sh` ran, the sample counts. A missing or invalid reward file scores 0 with a `failure_kind`.
 Only a required infrastructure failure (sandbox lost, reward transfer failed) sets `mask_sample`.
@@ -109,7 +112,8 @@ were not exercised by these examples.
 To run the bundled tasks with Hermes and a configured sandbox provider and model:
 
 ```bash
-gym eval run environment_servers/harbor/data/tasks --agent hermes --config <provider-and-model.yaml>
+gym eval run environment_servers/harbor/data/tasks --agent hermes_agent --sandbox opensandbox \
+  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
 The loader generates the task mapping and dataset rows for that run.
