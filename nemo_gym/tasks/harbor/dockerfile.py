@@ -22,8 +22,10 @@ with a live ``$`` in it. A Dockerfile whose resolution depends on the base image
 line, a reference to a variable the Dockerfile did not set, a relative first ``WORKDIR``)
 raises :class:`ImageConfigRequired` when no configuration is given.
 
-An empty ``ENTRYPOINT []`` or ``CMD []`` is accepted and ignored: the sandbox provider
-runs its own entrypoint. Anything else (``COPY``, ``ADD``, multi-stage ``FROM``,
+An empty ``CMD []`` is accepted and ignored. An empty ``ENTRYPOINT []`` is accepted and
+recorded (``entrypoint_cleared``): the sandbox provider starts the image with its own keepalive
+either way, and the Harbor environment server runs the base image's recorded ``Entrypoint``
+beside it unless the Dockerfile cleared it. Anything else (``COPY``, ``ADD``, multi-stage ``FROM``,
 ``ARG``-templated images, heredoc ``RUN``, ``RUN --mount``, a real ``ENTRYPOINT`` or
 ``CMD``, ``HEALTHCHECK``, ``EXPOSE``, ``VOLUME``, ``SHELL``, ``STOPSIGNAL``) needs a
 real build, which is not part of this loader yet; :class:`DockerfileNeedsBuild` names
@@ -78,6 +80,10 @@ class BaseImageConfig:
     env: dict[str, str] = field(default_factory=dict)
     workdir: str | None = None
     user: str | None = None
+    # ``Entrypoint`` as recorded (``None`` when absent or empty) and the raw ``Healthcheck`` block, what
+    # Docker starts the image with; the Harbor environment server reproduces both beside its keepalive.
+    entrypoint: tuple[str, ...] | None = None
+    healthcheck: dict[str, Any] | None = None
     shell: tuple[str, ...] = DEFAULT_SHELL
 
     @classmethod
@@ -98,10 +104,16 @@ class BaseImageConfig:
         for item in config.get("Env") or []:
             key, _, value = str(item).partition("=")
             env[key] = value
+        entrypoint = config.get("Entrypoint")
+        healthcheck = config.get("Healthcheck")
         return cls(
             env=env,
             workdir=config.get("WorkingDir") or None,
             user=config.get("User") or None,
+            entrypoint=tuple(str(part) for part in entrypoint)
+            if isinstance(entrypoint, list) and entrypoint
+            else None,
+            healthcheck=dict(healthcheck) if isinstance(healthcheck, Mapping) and healthcheck else None,
             shell=tuple(config.get("Shell") or DEFAULT_SHELL),
         )
 
@@ -112,13 +124,15 @@ class BaseImage:
 
     ``env`` holds the keys the Dockerfile's ``ENV`` lines set, with their resolved final
     values; ``workdir`` and ``user`` are the resolved final values (``None`` when neither
-    the Dockerfile nor a given base image configuration sets them).
+    the Dockerfile nor a given base image configuration sets them). ``entrypoint_cleared``
+    is whether the Dockerfile wrote ``ENTRYPOINT []``, so the base image's entrypoint must not run.
     """
 
     image: str
     workdir: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     user: str | None = None
+    entrypoint_cleared: bool = False
 
 
 @dataclass(frozen=True)
@@ -174,6 +188,8 @@ class Dockerfile:
     image: str
     # ``(INSTRUCTION, arguments)`` for every line after ``FROM``, in order.
     instructions: tuple[tuple[str, str], ...] = ()
+    # The Dockerfile wrote ``ENTRYPOINT []``: the image starts without the base image's entrypoint.
+    entrypoint_cleared: bool = False
 
     @property
     def has_runs(self) -> bool:
@@ -380,6 +396,21 @@ def has_heredoc(command: str) -> bool:
     return any(_HEREDOC_WORD.match(word) for word in words)
 
 
+def dockerfile_has_heredoc(text: str) -> bool:
+    """Whether any ``RUN``, ``COPY`` or ``ADD`` instruction of a Dockerfile opens a heredoc.
+
+    Each instruction's arguments are judged as :func:`has_heredoc` judges one line, word by word as BuildKit
+    does, so ``RUN cat > /x << 'EOF'`` (a space before the delimiter, which BuildKit does not read as a heredoc
+    either) is not one. The body lines of a heredoc are not instructions, but they are only ever reached once
+    the opening line has already answered.
+    """
+    for line in _logical_lines(text):
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0].upper() in ("RUN", "COPY", "ADD") and has_heredoc(parts[1]):
+            return True
+    return False
+
+
 def _run_command(arguments: str) -> str:
     """The validated arguments of a ``RUN`` line: a shell-form line, or the exec-form JSON array as written."""
     if arguments.startswith("--"):
@@ -401,6 +432,7 @@ def parse_dockerfile(text: str) -> Dockerfile:
     """Read a pull-mode or overlay-mode Dockerfile; raise :class:`DockerfileNeedsBuild` for anything else."""
     image: str | None = None
     instructions: list[tuple[str, str]] = []
+    entrypoint_cleared = False
     for line in _logical_lines(text):
         parts = line.split(None, 1)
         instruction = parts[0].upper()
@@ -429,13 +461,16 @@ def parse_dockerfile(text: str) -> Dockerfile:
             instructions.append((instruction, arguments))
         elif instruction == "LABEL":
             pass
-        elif instruction in ("ENTRYPOINT", "CMD") and _json_array(arguments) == []:
-            pass  # an emptied entrypoint changes nothing: the sandbox provider runs its own
+        elif instruction == "ENTRYPOINT" and _json_array(arguments) == []:
+            # The base image's entrypoint is not to run; the sandbox provider starts its own keepalive anyway.
+            entrypoint_cleared = True
+        elif instruction == "CMD" and _json_array(arguments) == []:
+            pass  # CMD is replaced by the keepalive command whatever it was
         else:
             raise DockerfileNeedsBuild(f"{instruction}")
     if image is None:
         raise DockerfileNeedsBuild("no FROM instruction")
-    return Dockerfile(image=image, instructions=tuple(instructions))
+    return Dockerfile(image=image, instructions=tuple(instructions), entrypoint_cleared=entrypoint_cleared)
 
 
 def resolve_dockerfile(dockerfile: Dockerfile, base: BaseImageConfig | None = None) -> OverlayImage:
@@ -502,6 +537,7 @@ def resolve_dockerfile(dockerfile: Dockerfile, base: BaseImageConfig | None = No
         workdir=workdir,
         env=declared,
         user=user,
+        entrypoint_cleared=dockerfile.entrypoint_cleared,
         runs=tuple(runs),
         workdirs=tuple(workdirs),
     )
@@ -527,4 +563,10 @@ def base_image_only(text: str, base: BaseImageConfig | None = None) -> BaseImage
     if parsed.has_runs:
         return None
     resolved = resolve_dockerfile(parsed, base)
-    return BaseImage(image=resolved.image, workdir=resolved.workdir, env=resolved.env, user=resolved.user)
+    return BaseImage(
+        image=resolved.image,
+        workdir=resolved.workdir,
+        env=resolved.env,
+        user=resolved.user,
+        entrypoint_cleared=resolved.entrypoint_cleared,
+    )

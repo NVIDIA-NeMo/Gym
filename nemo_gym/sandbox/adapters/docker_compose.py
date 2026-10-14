@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.compose_config import unsupported_compose_fields
 from nemo_gym.sandbox.providers import SandboxSpec, create_provider
 from nemo_gym.sandbox.providers.base import (
     SupportsSandboxEndpoint,
@@ -48,7 +49,9 @@ class AsyncSandboxCompose:
     """Start services from a Compose YAML file and own their sandbox lifecycle.
 
     Deployment settings stay in the provider and optional ``service_specs``.
-    Compose fields override the corresponding spec fields.
+    Compose fields override the corresponding spec fields, except ``environment``: a spec's ``env`` is
+    the caller's host-resolved override for that service and wins over the service's Compose
+    ``environment`` (see ``_prepare``).
     """
 
     def __init__(
@@ -90,9 +93,11 @@ class AsyncSandboxCompose:
     def _validate(self) -> list[str]:
         if not isinstance(self.document, Mapping):
             raise ValueError("Compose requires a mapping")
-        unknown = set(self.document) - {"name", "services", "networks", "volumes"}
-        if unknown:
-            raise NotImplementedError(f"Unsupported Compose fields: {sorted(unknown)}")
+        # The field allow-list is shared with prepare (``nemo_gym.tasks.harbor.cli``), which reports a refused
+        # field per task before any sandbox exists; here it is the last line before provisioning.
+        refused = unsupported_compose_fields(self.document)
+        if refused:
+            raise NotImplementedError(refused[0])
         services = self.document.get("services")
         if not isinstance(services, Mapping) or not services:
             raise ValueError("Compose requires a non-empty services mapping")
@@ -118,30 +123,6 @@ class AsyncSandboxCompose:
                     raise ValueError(f"Service {name!r}: resolve {field} to a list of mappings upstream")
             if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", name):
                 raise ValueError(f"Invalid Compose service name: {name!r}")
-            unknown = set(service) - {
-                "image",
-                "entrypoint",
-                "command",
-                "environment",
-                "working_dir",
-                "user",
-                "depends_on",
-                "healthcheck",
-                "expose",
-                "ports",
-                "networks",
-                "volumes",
-                "cpus",
-                "mem_limit",
-                "labels",
-                "restart",
-                "network_mode",
-                "cap_add",
-                "shm_size",
-                "x-sandbox",
-            }
-            if unknown:
-                raise NotImplementedError(f"Service {name!r}: unsupported Compose fields {sorted(unknown)}")
             if service.get("restart", "no") != "no":
                 raise NotImplementedError(f"Service {name!r}: restart policies are unsupported")
             if not service.get("image"):
@@ -305,7 +286,18 @@ class AsyncSandboxCompose:
                 "spec": replace(
                     spec,
                     image=image,
-                    env={**spec.env, **env},
+                    # The spec's env is the caller's host-resolved override and wins over the service's Compose
+                    # ``environment``. This is Harbor's order for ``main``: its Docker environment appends the
+                    # task's Compose file and then its own env override file, ``{services: {main: {environment:
+                    # _startup_env()}}}`` (harbor 0.22.0 ``environments/docker/docker.py`` 363-370,
+                    # ``environments/docker/__init__.py`` 20-25), and ``_startup_env`` is the task's
+                    # ``[environment].env`` resolved on the host (``environments/base.py`` 278-285). Compose
+                    # merges later files over earlier ones per key, so a ``${X:-}`` in the task file that
+                    # interpolated to empty never hides the host value. The Harbor server passes ``main`` a
+                    # spec env already layered image ENV < this file's ``environment`` < ``[environment].env``,
+                    # so an image ENV it carries does not climb above the file. Harbor's override names ``main``
+                    # only; callers pass an empty env for sidecars, which keep their Compose ``environment``.
+                    env={**env, **spec.env},
                     workdir=service.get("working_dir", spec.workdir),
                     resources=resources,
                     ports=tuple(dict.fromkeys(ports)),

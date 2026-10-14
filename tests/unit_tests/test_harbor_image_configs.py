@@ -26,7 +26,7 @@ from nemo_gym.tasks.harbor.image_configs import (
     record_base_images,
     record_compose_images,
 )
-from nemo_gym.tasks.harbor.task import discover_tasks
+from nemo_gym.tasks.harbor.task import HarborTaskError, discover_tasks, write_json_record
 
 
 MAIN_IMAGE = "harborframework/terminal-bench:ctr-environment-abc@sha256:" + "a" * 64
@@ -896,3 +896,42 @@ class TestRecordBaseImages:
         assert "task(s) a, b" in message
         assert "library/redis: registry returned HTTP 404 for manifests/missing" in message
         assert not (tmp_path / "compose-images.json").exists()
+
+
+class TestRecordImageConfigsUnderTheLock:
+    """D2: compose-images.json is merged and replaced under its sidecar lock; the registry is asked outside it."""
+
+    def test_an_entry_another_process_recorded_during_the_lookup_is_kept(self, tmp_path):
+        write_task(tmp_path, "ctr", compose=COMPOSE)
+        record_path = tmp_path / "compose-images.json"
+        competitor = {
+            "architecture": "arm64",
+            "config": {},
+            "config_digest": "sha256:other",
+            "os": "linux",
+            "record_version": 2,
+        }
+
+        class RacingClient(FakeClient):
+            def image_config(self, reference: str) -> dict:
+                # Another process records the same reference, and one more, while this lookup is in flight.
+                if reference == "redis:7-alpine":
+                    write_json_record(record_path, {"redis:7-alpine": competitor, "busybox:1": competitor})
+                return super().image_config(reference)
+
+        client = RacingClient()
+        assert record_compose_images(discover_tasks(tmp_path), tmp_path, client=client) == record_path
+        recorded = json.loads(record_path.read_text())
+        # Neither writer's entries are lost, and the first recording of a reference is the one kept.
+        assert sorted(recorded) == sorted([MAIN_IMAGE, SIDECAR_IMAGE, "redis:7-alpine", "busybox:1"])
+        assert recorded["redis:7-alpine"] == competitor and recorded["busybox:1"] == competitor
+        assert recorded[MAIN_IMAGE]["image"] == MAIN_IMAGE
+        assert client.resolved == [MAIN_IMAGE, SIDECAR_IMAGE, "redis:7-alpine"]
+        assert (tmp_path / "compose-images.json.lock").is_file()
+        assert not [path for path in tmp_path.iterdir() if path.name.endswith(".tmp")]
+
+    def test_a_record_file_that_stays_invalid_is_reported_by_name(self, tmp_path):
+        write_task(tmp_path, "ctr", compose=COMPOSE)
+        (tmp_path / "compose-images.json").write_text('{"redis:7-alpine": {"os": "linux"')
+        with pytest.raises(HarborTaskError, match=r"compose-images\.json is not valid JSON \(read twice"):
+            record_compose_images(discover_tasks(tmp_path), tmp_path, client=FakeClient())

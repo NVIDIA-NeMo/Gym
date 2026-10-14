@@ -12,8 +12,11 @@ rows were materialized (see ``nemo_gym.tasks.harbor``).
 - seed: check the row's digest against the mapping and the folder, start the task's
   image as a sandbox through the configured provider, run the ``RUN`` lines of an
   overlay-mode Dockerfile with the ``ENV``, ``WORKDIR`` and ``USER`` the loader resolved for
-  each (see ``nemo_gym.tasks.harbor.dockerfile``), create the working directory. A ``RUN``
-  line that fails is a terminal seed failure (the task's Dockerfile does not apply); a
+  each (see ``nemo_gym.tasks.harbor.dockerfile``), create the working directory, start the
+  image's recorded ``ENTRYPOINT`` beside the provider's keepalive the way Harbor's Compose files
+  leave it running (with ``sh -c "sleep infinity"`` as its arguments), then wait for the image's
+  healthcheck and the task's. A ``RUN`` line that fails, or an entrypoint that exits non-zero
+  before the hand-over, is a terminal seed failure (the task's Dockerfile does not apply); a
   provider that cannot run one is retryable;
 - agent: open an agent session on the configured agent server, handing it a
   ``SandboxAccess`` for that sandbox, post the task's ``responses_create_params`` to it,
@@ -34,6 +37,7 @@ import json
 import logging
 import math
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -90,9 +94,14 @@ from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgent
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
 from nemo_gym.tasks.harbor.dockerfile import DEFAULT_SHELL, OverlayRun
-from nemo_gym.tasks.harbor.image_configs import load_compose_document
-from nemo_gym.tasks.harbor.models import HarborArtifact, HarborEnvironment
-from nemo_gym.tasks.harbor.task import HarborTaskError
+from nemo_gym.tasks.harbor.image_configs import (
+    load_compose_document,
+    without_main_build,
+    without_pull_policy,
+    without_restated_main_build,
+)
+from nemo_gym.tasks.harbor.models import HarborArtifact, HarborEnvironment, HarborHealthcheck
+from nemo_gym.tasks.harbor.task import BUILT_IMAGES_FILE, HarborTaskError
 
 
 LOGGER = logging.getLogger(__name__)
@@ -141,6 +150,150 @@ class HarborOverlayError(RuntimeError):
 
 class HarborOverlayUnavailable(RuntimeError):
     """The sandbox provider could not run an overlay step at all (not the step failing): retry elsewhere."""
+
+
+# Where the launcher keeps the image entrypoint's markers and log inside the sandbox, the way the Compose adapter
+# keeps a service's; world-writable so an entrypoint that runs as the image's user can write them.
+ENTRYPOINT_DIR = "/tmp/.nemo-gym-entrypoint"
+ENTRYPOINT_LOG = f"{ENTRYPOINT_DIR}/log"
+# The entrypoint's arguments: what Harbor's Compose files give it in place of CMD (``command: sh -c "sleep infinity"``).
+ENTRYPOINT_ARGS = ("sh", "-c", "sleep infinity")
+# How long the launcher waits for its started marker before the provider is judged unable to run it.
+ENTRYPOINT_START_TIMEOUT_S = 60.0
+ENTRYPOINT_POLL_INTERVAL_S = 0.5
+# The entrypoint's output, collected best effort into the verification's logs folder, and the exit status
+# it had recorded by the time the agent's sandbox was verified.
+ENTRYPOINT_LOG_NAME = "entrypoint-stdout.txt"
+VERIFIER_ENTRYPOINT_LOG_NAME = "verifier-entrypoint-stdout.txt"
+ENTRYPOINT_EXIT_NAME = "entrypoint-exit.txt"
+# The image entrypoint exited non-zero after the seed: during the rollout (when the exec holding it returned),
+# or in the separate verifier's fresh sandbox. Under Harbor the container would have died and the trial errored.
+ENTRYPOINT_FAILED_KIND = "harbor:entrypoint_failed"
+
+
+class HarborEntrypointError(RuntimeError):
+    """The image's ``ENTRYPOINT`` exited non-zero at start; the task cannot be set up."""
+
+
+class HarborEntrypointUnavailable(RuntimeError):
+    """The sandbox provider could not run the entrypoint launcher at all (not the entrypoint failing): retry."""
+
+
+@dataclass
+class EntrypointLaunch:
+    """The image entrypoint running in a sandbox: its argv and the exec that holds it open."""
+
+    argv: list[str]
+    process: asyncio.Task
+    # The entrypoint returned 0 without running its keepalive argument (warned once, then left alone).
+    returned: bool = False
+    # The provider ended the holding exec while no exit status was recorded (logged once; see _check_entrypoint).
+    noticed: bool = False
+
+
+_SHELLS = frozenset({"sh", "bash", "dash"})
+_KEEPALIVE_PROGRAMS = frozenset({"sleep", "tail"})
+# A shell script that is one sleep or tail command (``sleep infinity``, ``exec tail -f /dev/null``) or loops
+# over a sleep. A compound script that starts with one (``sleep 5; service redis-server start``) does work and runs.
+_KEEPALIVE_SCRIPT = re.compile(r"^\s*(?:exec\s+)?(?:sleep|tail)\s+[^;&|\n]*$")
+_KEEPALIVE_LOOP = re.compile(r"^\s*while\s+(?:true|:)\s*;\s*do\s+sleep\s+\S+\s*;?\s*done\s*;?\s*$")
+
+
+def is_keepalive_entrypoint(argv: list[str] | tuple[str, ...]) -> bool:
+    """Whether ``argv`` only keeps a container alive, which the sandbox's own keepalive already does."""
+    if not argv:
+        return False
+    if posixpath.basename(argv[0]) in _KEEPALIVE_PROGRAMS:
+        return True
+    if len(argv) == 3 and posixpath.basename(argv[0]) in _SHELLS and argv[1] == "-c":
+        script = argv[2]
+        return bool(_KEEPALIVE_SCRIPT.match(script) or _KEEPALIVE_LOOP.match(script))
+    return False
+
+
+def entrypoint_to_run(task: HarborTask) -> list[str] | None:
+    """The image ``ENTRYPOINT`` the seed starts beside the keepalive, or ``None`` when nothing is to run.
+
+    Nothing runs for a Compose task (the adapter runs ``main``'s entrypoint), an image whose recorded
+    configuration has no entrypoint or none is recorded (a prebuilt ``docker_image``: today's behaviour),
+    a Dockerfile that cleared it with ``ENTRYPOINT []``, and an entrypoint that is itself a keepalive.
+    """
+    if task.needs_compose or not task.entrypoint:
+        return None
+    argv = list(task.entrypoint)
+    return None if is_keepalive_entrypoint(argv) else argv
+
+
+def entrypoint_script(argv: list[str], runtime: str = ENTRYPOINT_DIR) -> str:
+    """The ``run.sh`` that marks the start, runs ``argv`` with Harbor's arguments and records the exit status."""
+    command = shlex.join([*argv, *ENTRYPOINT_ARGS])
+    return f"touch {runtime}/started\n{command}\nstatus=$?\nprintf '%s' \"$status\" > {runtime}/exit\n"
+
+
+def image_healthcheck_settings(record: Mapping[str, Any] | None) -> HarborHealthcheck | None:
+    """The recorded Dockerfile ``HEALTHCHECK`` as the settings the seed polls, or ``None`` when it has none.
+
+    Docker records ``Test`` as ``["CMD", ...]`` or ``["CMD-SHELL", script]`` (``["NONE"]`` or empty
+    disables it) and the durations in nanoseconds, absent when the Dockerfile left Docker's defaults.
+    """
+    if not record:
+        return None
+    test = record.get("Test") or []
+    if not test or test[0] == "NONE":
+        return None
+    if test[0] == "CMD-SHELL" and len(test) == 2:
+        command = str(test[1])
+    elif test[0] == "CMD" and len(test) > 1:
+        command = shlex.join(str(part) for part in test[1:])
+    else:
+        return None
+
+    def seconds(key: str, default: float) -> float:
+        value = record.get(key)
+        return value / 1_000_000_000 if value else default
+
+    return HarborHealthcheck(
+        command=command,
+        interval_sec=seconds("Interval", 30.0),
+        timeout_sec=seconds("Timeout", 30.0),
+        start_period_sec=seconds("StartPeriod", 0.0),
+        start_interval_sec=seconds("StartInterval", 5.0),
+        retries=int(record.get("Retries") or 3),
+    )
+
+
+async def _cancel_entrypoint(launch: EntrypointLaunch | None) -> None:
+    """End the exec that holds the entrypoint open; the sandbox is stopped right after."""
+    if launch is None:
+        return
+    launch.process.cancel()
+    await asyncio.gather(launch.process, return_exceptions=True)
+
+
+def _launch_outcome(launch: EntrypointLaunch) -> str | None:
+    """How the exec holding the entrypoint ended, or ``None`` while it is still held open."""
+    process = launch.process
+    if not process.done():
+        return None
+    if process.cancelled():
+        return "cancelled"
+    error = process.exception()
+    if error is not None:
+        return f"{type(error).__name__}: {error}"
+    result = process.result()
+    return result.error_type or f"exit {result.return_code}"
+
+
+def _launch_returned(launch: EntrypointLaunch) -> bool:
+    """Whether the holding exec returned on its own: ``run.sh`` ran to its end, so the entrypoint had exited.
+
+    A provider that capped the exec (docker's ``exec.default_timeout_s``, OpenSandbox's request timeout
+    without ``background_exec``) reports ``error_type`` instead, and the entrypoint may well be running still.
+    """
+    process = launch.process
+    if not process.done() or process.cancelled() or process.exception() is not None:
+        return False
+    return process.result().error_type is None
 
 
 class HarborEpisodeResult(SingleAgentTurnResult):
@@ -216,6 +369,8 @@ class HarborSession:
     session_id: str
     provider_ref: str
     compose: AsyncSandboxCompose | None = None
+    # The image entrypoint the seed started beside the keepalive, cancelled before the sandbox is stopped.
+    entrypoint: EntrypointLaunch | None = None
     # Separate verification stops the agent's sandbox before test.sh runs; cleanup must not stop it twice.
     agent_sandbox_stopped: bool = False
     # In a Compose group the agent's own container is stopped before the sidecars' hooks run (see ``stop_main``).
@@ -247,6 +402,7 @@ class HarborSession:
         """Stop the agent's sandbox, and its sidecars when the task is a Compose group."""
         if self.agent_sandbox_stopped:
             return
+        await _cancel_entrypoint(self.entrypoint)
         if self.compose is not None:
             # A main container stopped by ``stop_main`` is skipped: a sandbox stop is idempotent.
             await self.compose.stop()
@@ -360,7 +516,7 @@ def select_reward(rewards: dict[str, float]) -> float | None:
     return None
 
 
-def _is_root(user: str | None) -> bool:
+def _is_root(user: str | int | None) -> bool:
     """Whether ``user`` runs with uid 0, whatever group it names."""
     return user is None or str(user).split(":")[0] in ("root", "0")
 
@@ -371,16 +527,23 @@ def _is_plain_root(user: str | None) -> bool:
 
 
 async def _exec_as_root_user(
-    sandbox: AsyncSandbox, command: str, *, configured_user: str | None, cwd: str = "/", timeout_s: float = 60
+    sandbox: AsyncSandbox,
+    command: str,
+    *,
+    configured_user: str | None,
+    spec_user: str | int | None = None,
+    cwd: str | None = "/",
+    timeout_s: float = 60,
 ):
-    """Run ``command`` as root.
+    """Run ``command`` as root (``cwd=None`` is the sandbox's default directory).
 
-    ``configured_user`` is the user the sandbox runs commands as by default: the OCI ``User``
-    of the image the sandbox started from (``HarborTask.sandbox_user``), which is not the
-    Dockerfile's final ``USER`` or ``[agent].user``. Only a non-root default needs the
-    ``user="root"`` override; root images keep the plain exec path every provider supports.
+    ``configured_user`` is the OCI ``User`` of the image the sandbox started from
+    (``HarborTask.sandbox_user``); ``spec_user`` is the default the sandbox was created with
+    (``SandboxSpec.user``, the Dockerfile's final ``USER`` or ``[agent].user``), which the sandbox
+    facade applies to every exec that names no user. Only when both are root does the plain exec
+    path, which every provider supports, already run as root; otherwise ``user="root"`` is asked for.
     """
-    user = None if _is_root(configured_user) else "root"
+    user = None if _is_root(configured_user) and _is_root(spec_user) else "root"
     return await sandbox.exec(command, cwd=cwd, timeout_s=timeout_s, user=user)
 
 
@@ -439,6 +602,59 @@ def _exec_user(user: str) -> str | int:
     return int(user) if user.isdigit() else user
 
 
+# ``(task id, user)`` pairs whose dropped group was warned about: the server resolves a task's user per episode.
+_WARNED_GROUPS: set[tuple[str, str]] = set()
+
+
+def _normalised_user(task: HarborTask, user: str | None) -> str | None:
+    """A default exec user (a Dockerfile's final ``USER`` or ``[agent].user``) as the sandbox facade may install
+    it. Root is ``None`` (the plain exec path every provider supports) unless the image itself starts as another
+    user, where it has to be asked for by name; ``0`` is spelled ``root``, as providers that switch by name take
+    it; a ``name:group`` keeps the name alone, with one warning, as the sandbox API has no group switch. A numeric
+    uid passes through for :meth:`HarborEnvironmentServer._set_default_user` to resolve to a name."""
+    if user is None:
+        return None
+    name, _, group = str(user).partition(":")
+    if group and (task.task_id, str(user)) not in _WARNED_GROUPS:
+        _WARNED_GROUPS.add((task.task_id, str(user)))
+        LOGGER.warning(
+            f"{task.task_id}: user {user!r}: the sandbox API switches user by name only; group {group!r} is not applied"
+        )
+    if name in ("root", "0"):
+        return None if _is_root(task.sandbox_user) else "root"
+    return name
+
+
+def _creation_user(task: HarborTask, user: str | None) -> str | None:
+    """The default a sandbox in the task image is created with: :func:`_normalised_user`, except a numeric uid,
+    which no provider should get raw (OpenSandbox would ``su`` to it); it is resolved by name once the sandbox
+    runs, in :meth:`HarborEnvironmentServer._set_default_user`."""
+    name = _normalised_user(task, user)
+    return None if name is not None and name.isdigit() else name
+
+
+def _verifier_user(task: HarborTask) -> str | int | None:
+    """The user ``test.sh`` runs as, named explicitly because the sandbox's default may be ``[agent].user``:
+    ``[verifier].user`` when set, else the sandbox's own default for a separate verifier in another image
+    (that image's ``USER``, which :meth:`HarborEnvironmentServer._sandbox_spec` leaves in place, never the task
+    image's), else the task image's own ``USER`` (what ``docker compose exec`` gives Harbor, a numeric one as a
+    uid), else root when an agent override is installed and the image's ``USER`` is not recorded (Harbor's
+    environment default), else the sandbox's own default."""
+    settings = task.config.verifier
+    if settings.user is not None:
+        return settings.user
+    if not task.config.is_shared_verifier and not _verifier_runs_task_image(task):
+        # Another image: its own USER is already the sandbox's default (see `_sandbox_spec`), never the task image's.
+        return None
+    user = task.entrypoint_user
+    if user is None:
+        return "root" if task.user is not None else None
+    name, _, _ = str(user).partition(":")
+    return int(name) if name.isdigit() else name
+
+
+
+
 def _output_tail(result: SandboxExecResult, limit: int = OVERLAY_OUTPUT_TAIL) -> str:
     text = "\n".join(part.rstrip() for part in (result.stdout, result.stderr) if part and part.strip())
     return text[-limit:] if text else "(no output)"
@@ -470,6 +686,16 @@ def _verifier_image(task: HarborTask) -> str | None:
     if environment is None:
         return task.image
     return None
+
+
+def _verifier_runs_task_image(task: HarborTask) -> bool:
+    """A separate verifier that Gym runs in the task's own image, which then gets that image's start.
+
+    Harbor builds such a verifier from ``tests/Dockerfile`` and only ``up --wait``s it; this layer has no
+    build for it and verifies in the task image instead, so that image's entrypoint and ``HEALTHCHECK``
+    are Gym's substitute for the verifier image's own.
+    """
+    return not task.config.is_shared_verifier and task.image is not None and _verifier_image(task) == task.image
 
 
 def _sandbox_resources(environment: HarborEnvironment, *, request_gpu_type: bool = False) -> dict[str, Any]:
@@ -555,6 +781,8 @@ class HarborEnvironmentServer(
         session = self._sessions.get(episode_key)
         if sandbox is not None:
             if session is None or not session.agent_sandbox_stopped:
+                if session is not None:
+                    await _cancel_entrypoint(session.entrypoint)
                 await sandbox.stop()
             del self._sandboxes[episode_key]
         self._sessions.pop(episode_key, None)
@@ -580,8 +808,8 @@ class HarborEnvironmentServer(
             shutil.copytree(folder, snapshot, symlinks=True)
             # Dataset-level files live beside the task folders and the loader reads them from the
             # task's parent, so the snapshot gets copies at the same relative place: the dataset's
-            # own settings (dataset.toml) and the recorded image configurations.
-            for name in (DATASET_FILE, COMPOSE_IMAGES_FILE):
+            # own settings (dataset.toml), the recorded image configurations and the built images.
+            for name in (DATASET_FILE, COMPOSE_IMAGES_FILE, BUILT_IMAGES_FILE):
                 sidecar = folder.parent / name
                 if sidecar.is_file():
                     shutil.copy2(sidecar, snapshot_root / name)
@@ -667,6 +895,14 @@ class HarborEnvironmentServer(
         resources = _sandbox_resources(environment, request_gpu_type=self.config.request_gpu_type) | (
             self.config.sandbox_resources_override or {}
         )
+        # The default for every exec in the task's own image: the Dockerfile's final USER (or [agent].user)
+        # for the agent, the image's own USER for a separate verifier in that image, independent of
+        # [agent].user. A separate verifier in another image keeps that image's own default. An overlay task
+        # starts without it, because its RUN lines may be what creates the user, and a numeric uid is never
+        # the facade's raw default; `_set_default_user` installs the normalised default once the sandbox runs.
+        default = task.entrypoint_user if role == "verifier" else task.user
+        in_task_image = (image is None or image == task.image) and not task.overlay
+        user = _creation_user(task, default) if in_task_image else None
         return SandboxSpec(
             image=image or task.image,
             ttl_s=ttl,
@@ -676,6 +912,7 @@ class HarborEnvironmentServer(
             metadata=metadata,
             resources=resources,
             provider_options=self._provider_options_within(resources, task, role),
+            user=user,
         )
 
     def _provider_options_within(self, resources: Mapping[str, Any], task: HarborTask, role: str) -> dict[str, Any]:
@@ -764,7 +1001,20 @@ class HarborEnvironmentServer(
         """The published overlay resolved against recorded image metadata, ready for the Compose adapter."""
         image_configs = self._compose_image_configs(task)
         # The same reader prepare used: env_file inlined and ${VAR} resolved from the task, not the process.
-        document = resolve_compose(load_compose_document(task), task.image, image_configs)
+        document = load_compose_document(task)
+        # The sandbox has no pull step to configure, so ``pull_policy`` is dropped from every service. Prepare
+        # ran the adapter's field check on this same document (``nemo_gym.tasks.harbor.cli``).
+        document = without_pull_policy(document)
+        if task.built_image is not None:
+            # Prepare built main from this file; the recorded image stands in for its build: section.
+            document = without_main_build(document)
+        else:
+            # A pull or overlay task's main build: that only restates Harbor's own build of the Dockerfile is
+            # dropped; a key that would change the image is the task's error, which prepare already reported.
+            document, reason = without_restated_main_build(task, document)
+            if reason is not None:
+                raise HarborTaskError(f"{task.task_id}: {reason}")
+        document = resolve_compose(document, task.image, image_configs)
         adapt_non_root_sidecars(document, image_configs)
         provider = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         if "opensandbox" in provider:
@@ -813,8 +1063,24 @@ class HarborEnvironmentServer(
         # An overlay task's main service starts without the task workdir, as its single sandbox would (see
         # `_create_sandbox_within_deadline`); the sidecars derive from it and start in their images' own.
         main_spec = self._sandbox_spec(task, None if task.overlay else task.workdir)
+        # Sidecars keep their own image's default user; the task's USER belongs to the main image only.
         sidecar_spec = replace(
-            main_spec, resources={}, env={}, provider_options=dict(self.config.sandbox_provider_options)
+            main_spec, resources={}, env={}, user=None, provider_options=dict(self.config.sandbox_provider_options)
+        )
+        # Harbor's order for main: image ENV (baked in, or the Dockerfile ENV the loader folded into task.env for a
+        # pull or overlay task) < the task's Compose file < Harbor's env override file, which holds only the
+        # host-resolved [environment].env (harbor 0.22.0 environments/docker/docker.py 363-370, environments/base.py
+        # 278-285). _sandbox_spec's env is task.env, the image layer with [environment].env already over it; the
+        # file goes between the two here, and the adapter applies the whole spec env over the file (``{**env,
+        # **spec.env}``), which leaves exactly those three layers in that order.
+        compose_env = {
+            key: str(value)
+            for key, value in ((document["services"].get("main") or {}).get("environment") or {}).items()
+            if value is not None
+        }
+        main_spec = replace(
+            main_spec,
+            env={**main_spec.env, **compose_env, **resolve_env_templates(task.config.environment.env or {})},
         )
         compose = AsyncSandboxCompose(
             resolve_provider_config(self._provider_ref(task), get_global_config_dict()),
@@ -827,7 +1093,62 @@ class HarborEnvironmentServer(
         await compose.start()
         return compose
 
-    async def _apply_overlay(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
+    async def _set_default_user(
+        self, sandbox: AsyncSandbox, task: HarborTask, names: dict[str, str], *, role: str = "agent"
+    ) -> None:
+        """Make the task's user (the image's own ``USER`` for a separate verifier, see :func:`_sandbox_spec`)
+        the sandbox's default for every exec, once it exists in the sandbox, normalised as
+        :func:`_normalised_user` says.
+
+        A digit-only ``USER`` is resolved to its name with ``getent`` (``names`` is what the overlay
+        already looked up), because OpenSandbox and PTY sessions switch user by name. When the uid
+        names no user it is installed as the integer uid, with a warning: OpenSandbox's plain exec then
+        takes its native ``uid=`` path and Docker's ``--user`` is unchanged, while OpenSandbox's PTY path
+        (which resolves an int with ``id -nu``) and Daytona still cannot run as a uid with no passwd entry
+        and fail with their own error naming it.
+        """
+        user: str | int | None = _normalised_user(task, task.entrypoint_user if role == "verifier" else task.user)
+        if user is None:
+            return
+        if user.isdigit():
+            name = await self._user_name(sandbox, task, user, names)
+            user = name if name is not None else int(user)
+        sandbox.set_default_user(user)
+
+    async def _user_name(self, sandbox: AsyncSandbox, task: HarborTask, uid: str, names: dict[str, str]) -> str | None:
+        """The name of ``uid`` in the image, looked up once with ``getent``; ``None`` (warned once) when it has none."""
+        if uid not in names:
+            # Asked for as root explicitly whenever the sandbox's current default is another user.
+            lookup = await _exec_as_root_user(
+                sandbox,
+                f"getent passwd {shlex.quote(uid)} | cut -d: -f1",
+                configured_user=task.sandbox_user,
+                spec_user=sandbox.default_user,
+            )
+            lines = (lookup.stdout or "").strip().splitlines()
+            names[uid] = lines[-1] if lookup.return_code == 0 and lines and lines[-1] else ""
+            if not names[uid]:
+                LOGGER.warning(
+                    f"{task.task_id}: USER {uid} names no user in {task.image}; providers that switch user by name "
+                    "cannot run commands as it"
+                )
+        return names[uid] or None
+
+    async def _image_user_name(self, sandbox: AsyncSandbox, task: HarborTask, names: dict[str, str]) -> str | None:
+        """The user the image starts as (its recorded ``User``; ``None`` is root), by name when it was numeric.
+
+        It is what the entrypoint and the image ``HEALTHCHECK`` run as. Docker runs a numeric ``User``
+        without a passwd entry; a provider that switches user by name cannot, so the number stays
+        (with :meth:`_user_name`'s warning) and the launcher's own failure then names the cause.
+        """
+        user = task.entrypoint_user
+        if not _is_numeric_user(user):
+            return user
+        uid, _, group = str(user).partition(":")
+        name = await self._user_name(sandbox, task, uid, names)
+        return user if name is None else name + (f":{group}" if group else "")
+
+    async def _apply_overlay(self, sandbox: AsyncSandbox, task: HarborTask) -> dict[str, str]:
         """Run the Dockerfile ``RUN`` lines the loader recorded, in order, before anything else uses the sandbox.
 
         Each line runs with the ``ENV``, ``WORKDIR`` and ``USER`` the loader resolved for it, the
@@ -844,20 +1165,22 @@ class HarborEnvironmentServer(
         output: the task's Dockerfile does not apply, so retrying would not help. A provider that
         cannot run a step at all raises :class:`HarborOverlayUnavailable` instead, so the seed is retried.
         """
+        user_names: dict[str, str] = {}
         if not task.overlay:
-            return
+            return user_names
         budget = task.config.environment.build_timeout_sec
         loop = asyncio.get_running_loop()
         deadline = loop.time() + budget
         total = len(task.overlay)
         prepared_workdirs: set[str] = {"/"}  # the root always exists; every other WORKDIR is made once
-        user_names: dict[str, str] = {}
 
         async def as_root(command: str, label: str, what: str) -> SandboxExecResult:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise HarborOverlayError(f"{label} not run: [environment].build_timeout_sec={budget} is used up")
-            result = await _exec_as_root_user(sandbox, command, configured_user=task.sandbox_user, timeout_s=remaining)
+            result = await _exec_as_root_user(
+                sandbox, command, configured_user=task.sandbox_user, spec_user=task.user, timeout_s=remaining
+            )
             _check_overlay_result(result, label, what, budget)
             return result
 
@@ -894,7 +1217,7 @@ class HarborEnvironmentServer(
             if _is_root(user):
                 # Root with a group of its own included: the group stays on the WORKDIR, the line runs as root.
                 result = await _exec_as_root_user(
-                    sandbox, command, configured_user=task.sandbox_user, timeout_s=remaining
+                    sandbox, command, configured_user=task.sandbox_user, spec_user=task.user, timeout_s=remaining
                 )
             else:
                 result = await sandbox.exec(command, cwd="/", timeout_s=remaining, user=_exec_user(user))
@@ -902,27 +1225,287 @@ class HarborEnvironmentServer(
         # WORKDIR instructions after the last RUN line exist in the built image too.
         for instruction in workdirs:
             await make_workdir(instruction.path, instruction.user, f"after RUN line {total}/{total}")
+        return user_names
 
-    async def _wait_healthy(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
-        """Poll the task's ``[environment.healthcheck]`` until it passes or its retries run out."""
-        check = task.config.environment.healthcheck
-        if check is None:
+    async def _start_entrypoint(
+        self, sandbox: AsyncSandbox, task: HarborTask, user: str | None, *, prepared_workdir: str | None = None
+    ) -> EntrypointLaunch | None:
+        """Start the image's ``ENTRYPOINT`` beside the keepalive, as Harbor's Compose start leaves it running.
+
+        Harbor starts the image with ``command: sh -c "sleep infinity"``, which replaces CMD only, so the
+        entrypoint is PID 1 with that as its arguments, as the image's user, in its working directory.
+        Gym's providers start their own keepalive instead, so the same process is started here as a
+        long-lived exec through a ``run.sh`` that records a started marker, the exit status and the
+        output under :data:`ENTRYPOINT_DIR`, the way the Compose adapter starts a service. ``user`` is
+        the image's user by name (:meth:`_image_user_name`). For a Dockerfile the loader resolved (not a
+        built image, which holds its ``WorkingDir``) the entrypoint's working directory is created as
+        ``docker build`` would when it is not ``prepared_workdir``, the one the seed made. The call
+        returns once the marker exists and the first exit probe has passed (:meth:`_check_entrypoint`).
+        A launcher that ends before the marker exists is classified as an overlay step is: the provider
+        could not run it (:class:`HarborEntrypointUnavailable`, retried), or its own shell failed (a
+        ``su`` or ``chdir`` for the image's user or directory: :class:`HarborEntrypointError`, terminal).
+        """
+        argv = entrypoint_to_run(task)
+        if argv is None:
+            return None
+        made = await _exec_as_root(sandbox, f"mkdir -p {ENTRYPOINT_DIR} && chmod 777 {ENTRYPOINT_DIR}", timeout_s=60)
+        if made.return_code:
+            raise HarborEntrypointUnavailable(f"could not create {ENTRYPOINT_DIR}: {made.stderr or made.stdout}")
+        # The recorded User and WorkingDir, named explicitly: `[agent].user` and `[environment].workdir` shape
+        # the sandbox's defaults for the commands run beside the entrypoint, not the entrypoint itself.
+        cwd = task.entrypoint_workdir or "/"
+        if task.built_image is None and task.entrypoint_workdir and task.entrypoint_workdir != prepared_workdir:
+            # The Dockerfile's final WORKDIR, which `docker build` creates in the image; only a RUN line after it
+            # made the overlay create it, and the seed makes the task's workdir, which may be another.
+            workdir = await _exec_as_root_user(
+                sandbox, overlay_workdir_command(cwd, user), configured_user=task.sandbox_user, spec_user=task.user
+            )
+            if workdir.error_type is not None:
+                raise HarborEntrypointUnavailable(f"WORKDIR {cwd} could not be created: {workdir.error_type}")
+            if workdir.return_code:
+                raise HarborEntrypointError(
+                    f"WORKDIR {cwd} for ENTRYPOINT {shlex.join(argv)} could not be created; "
+                    f"output tail: {_output_tail(workdir)}"
+                )
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "run.sh"
+            path.write_text(entrypoint_script(argv))
+            await sandbox.upload(path, f"{ENTRYPOINT_DIR}/run.sh")
+        command = f"sh {ENTRYPOINT_DIR}/run.sh >{ENTRYPOINT_LOG} 2>&1 </dev/null"
+        if _is_root(user):
+            run = _exec_as_root_user(
+                sandbox, command, configured_user=task.sandbox_user, spec_user=task.user, cwd=cwd, timeout_s=None
+            )
+        else:
+            run = sandbox.exec(command, cwd=cwd, timeout_s=None, user=user)
+        # The exec is held open for as long as the provider allows: some providers reap background children as
+        # soon as their launching shell exits. Docker caps it at `exec.default_timeout_s` and OpenSandbox without
+        # `operations.background_exec` at `connection.request_timeout_s`; past that the process is untracked
+        # (noticed and logged by `_check_entrypoint`). It is cancelled before the sandbox is stopped.
+        launch = EntrypointLaunch(argv=argv, process=asyncio.create_task(run))
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + ENTRYPOINT_START_TIMEOUT_S
+            while True:
+                finished = launch.process.done()
+                started = await sandbox.exec(f"test -f {ENTRYPOINT_DIR}/started", timeout_s=60)
+                if started.return_code == 0:
+                    break
+                if finished:
+                    error = launch.process.exception()
+                    if error is not None:
+                        raise HarborEntrypointUnavailable(f"the entrypoint launcher could not run: {error}") from error
+                    outcome = launch.process.result()
+                    if outcome.error_type is None and outcome.return_code != 0:
+                        # `touch started` is run.sh's first line, in a world-writable folder: the launcher's own
+                        # shell (`su`, `chdir`, `sh`) never reached the script. The image's fault, as a RUN
+                        # line's non-zero exit is; another sandbox would repeat it.
+                        raise HarborEntrypointError(
+                            f"the launcher for ENTRYPOINT {shlex.join(argv)} (as {user or 'root'} in {cwd}) exited "
+                            f"{outcome.return_code} before starting it; output tail: {_output_tail(outcome)}"
+                        )
+                    raise HarborEntrypointUnavailable(
+                        f"the entrypoint launcher exited before starting: "
+                        f"{outcome.error_type or outcome.stderr or outcome.stdout or 'no output'}"
+                    )
+                if loop.time() >= deadline:
+                    raise HarborEntrypointUnavailable(
+                        f"the entrypoint launcher did not start within {ENTRYPOINT_START_TIMEOUT_S:g}s"
+                    )
+                await asyncio.sleep(ENTRYPOINT_POLL_INTERVAL_S)
+            await self._check_entrypoint(sandbox, task, launch)
+        except BaseException:
+            await _cancel_entrypoint(launch)
+            raise
+        return launch
+
+    async def _entrypoint_exit_status(self, sandbox: AsyncSandbox) -> str | None:
+        """What ``run.sh`` recorded as the entrypoint's exit status, or ``None`` while it has not exited."""
+        probe = await sandbox.exec(
+            f"if test -f {ENTRYPOINT_DIR}/exit; then cat {ENTRYPOINT_DIR}/exit; fi", timeout_s=60
+        )
+        if probe.return_code:
+            raise HarborEntrypointUnavailable(
+                f"cannot read the entrypoint's exit status: {probe.stderr or probe.stdout}"
+            )
+        return (probe.stdout or "").strip() or None
+
+    async def _entrypoint_output_tail(self, sandbox: AsyncSandbox) -> str:
+        tail = await sandbox.exec(f"tail -c {OVERLAY_OUTPUT_TAIL} {ENTRYPOINT_LOG}", timeout_s=60)
+        return (tail.stdout or "").strip() or "(no output)"
+
+    @staticmethod
+    def _notice_launcher_end(task: HarborTask, launch: EntrypointLaunch) -> None:
+        """Log once when the provider ended the exec holding the entrypoint while it had not exited.
+
+        Docker's exec returns ``timeout`` at ``exec.default_timeout_s`` with the process still running,
+        OpenSandbox's foreground exec at ``connection.request_timeout_s``: from then on the entrypoint
+        is untracked (its exit file is still probed), and the cancel at stop has nothing to end.
+        """
+        if launch.noticed:
             return
+        outcome = _launch_outcome(launch)
+        if outcome is None:
+            return
+        launch.noticed = True
+        LOGGER.warning(
+            "%s: the exec holding ENTRYPOINT %s ended (%s) before the entrypoint exited: the provider capped it, "
+            "so the process is no longer tracked (OpenSandbox deployments need operations.background_exec for "
+            "long-lived launchers)",
+            task.task_id,
+            shlex.join(launch.argv),
+            outcome,
+        )
+
+    async def _check_entrypoint(self, sandbox: AsyncSandbox, task: HarborTask, launch: EntrypointLaunch) -> None:
+        """Fail the seed when the entrypoint has exited non-zero; warn once when it returned 0.
+
+        Under Harbor an entrypoint that returns ends the container and ``up --wait`` fails the trial
+        either way. A non-zero status is the task's fault (:class:`HarborEntrypointError`, with the
+        output tail). A zero status means it returned without running its keepalive argument: the
+        sandbox's own keepalive is still up, so the episode goes on, the one deliberate leniency.
+        """
+        if launch.returned:
+            return
+        status = await self._entrypoint_exit_status(sandbox)
+        if status is None:
+            self._notice_launcher_end(task, launch)
+            return
+        output = await self._entrypoint_output_tail(sandbox)
+        if status != "0":
+            raise HarborEntrypointError(f"ENTRYPOINT {shlex.join(launch.argv)} exited {status}; output tail: {output}")
+        launch.returned = True
+        LOGGER.warning(
+            "%s: ENTRYPOINT %s exited 0 without running its keepalive argument (under Harbor the container would have "
+            "exited); continuing with the sandbox's own keepalive. Output tail: %s",
+            task.task_id,
+            shlex.join(launch.argv),
+            output,
+        )
+
+    async def _entrypoint_died_during_rollout(
+        self, sandbox: AsyncSandbox, task: HarborTask, launch: EntrypointLaunch, logs_dir: Path
+    ) -> str | None:
+        """Read the entrypoint's exit status back after the rollout; the reason to mask the sample when it died.
+
+        Under Harbor the entrypoint is PID 1: when it exits the container dies and the trial errors
+        instead of scoring. Here the keepalive outlives it, so the status is read from the runtime folder
+        and kept as :data:`ENTRYPOINT_EXIT_NAME` beside the output. That folder is world-writable (a
+        non-root entrypoint writes the markers) and the agent had the sandbox, so the file alone does not
+        void a rollout: the sample is masked only when the exec holding the entrypoint returned on its own
+        (``run.sh`` finished, so the entrypoint had exited) and the status is non-zero. A status the exec
+        does not corroborate is logged as an error and the sample is scored. A zero status gets the seed's
+        leniency. Nothing here fails the verification: a probe that cannot run is logged.
+        """
+        if launch.returned:
+            return None
+        try:
+            status = await self._entrypoint_exit_status(sandbox)
+        except Exception:
+            LOGGER.warning("Could not read the entrypoint's exit status for %s", task.task_id, exc_info=True)
+            return None
+        if status is None:
+            self._notice_launcher_end(task, launch)
+            return None
+        try:
+            (logs_dir / ENTRYPOINT_EXIT_NAME).write_text(status + "\n")
+        except OSError:
+            LOGGER.warning("Could not record the entrypoint's exit status for %s", task.task_id, exc_info=True)
+        argv = shlex.join(launch.argv)
+        if status == "0":
+            launch.returned = True
+            LOGGER.warning(
+                "%s: ENTRYPOINT %s exited 0 during the rollout without running its keepalive argument (under Harbor "
+                "the container would have exited); the sample is scored",
+                task.task_id,
+                argv,
+            )
+            return None
+        try:
+            output = await self._entrypoint_output_tail(sandbox)
+        except Exception:
+            output = "(unavailable)"
+        if _launch_returned(launch):
+            LOGGER.error(
+                "Image ENTRYPOINT %s exited %s during the rollout for %s; the sample is masked (under Harbor the "
+                "container would have died). Output tail: %s",
+                argv,
+                status,
+                task.task_id,
+                output,
+            )
+            return f"Image ENTRYPOINT {argv} exited {status} during the rollout; output tail: {output}"
+        LOGGER.error(
+            "%s: ENTRYPOINT %s has exit status %s recorded, but the exec holding it did not return (%s): scored, "
+            "not masked; the status is kept as %s. Output tail: %s",
+            task.task_id,
+            argv,
+            status,
+            _launch_outcome(launch) or "still held",
+            ENTRYPOINT_EXIT_NAME,
+            output,
+        )
+        return None
+
+    async def _wait_healthy(
+        self,
+        sandbox: AsyncSandbox,
+        task: HarborTask,
+        entrypoint: EntrypointLaunch | None = None,
+        *,
+        user: str | None = None,
+        task_check: bool = True,
+    ) -> None:
+        """Poll the image's ``HEALTHCHECK``, then the task's ``[environment.healthcheck]``, until each passes.
+
+        That is Harbor's order: ``up --wait`` gates on the image HEALTHCHECK, then ``run_healthcheck()``
+        runs the task's, before the agent user is set. Both run as the container's user (``user``, the
+        image's ``User`` by name; ``None`` is root): the daemon runs the image check in the image
+        ``WorkingDir``, Harbor's exec runs the task check in the task workdir. ``task_check=False`` leaves
+        the task's check out (the separate verifier's sandbox, where Harbor never runs it). An entrypoint
+        started by the seed is probed before every attempt, so one that dies fails fast with its output
+        instead of waiting out the retries. A check that never passes is a retryable seed failure.
+        """
+        checks: list[tuple[str, HarborHealthcheck, str | None]] = []
+        # A Compose task's main service already waited for its recorded healthcheck in the adapter.
+        image_check = None if task.needs_compose else image_healthcheck_settings(task.image_healthcheck)
+        if image_check is not None:
+            checks.append((" (the image HEALTHCHECK)", image_check, task.entrypoint_workdir or "/"))
+        if task_check and task.config.environment.healthcheck is not None:
+            checks.append(("", task.config.environment.healthcheck, None))
         loop = asyncio.get_running_loop()
-        grace_until = loop.time() + check.start_period_sec
-        failures = 0
-        while True:
-            # Decided before the attempt, as Harbor does: a check that starts inside the start period and
-            # fails after it has ended is still a start-period attempt, not a counted failure.
-            in_grace = loop.time() < grace_until
-            result = await sandbox.exec(check.command, timeout_s=check.timeout_sec + 5)
-            if result.return_code == 0:
-                return
-            if not in_grace:
-                failures += 1
-                if failures >= check.retries:
-                    raise RuntimeError(f"Healthcheck failed {check.retries} times: {check.command!r}")
-            await asyncio.sleep(check.start_interval_sec if in_grace else check.interval_sec)
+        for label, check, cwd in checks:
+            grace_until = loop.time() + check.start_period_sec
+            failures = 0
+            while True:
+                # Decided before the attempt, as Harbor does: a check that starts inside the start period and
+                # fails after it has ended is still a start-period attempt, not a counted failure.
+                in_grace = loop.time() < grace_until
+                if entrypoint is not None:
+                    await self._check_entrypoint(sandbox, task, entrypoint)
+                if _is_root(user):
+                    result = await _exec_as_root_user(
+                        sandbox,
+                        check.command,
+                        configured_user=task.sandbox_user,
+                        spec_user=task.user,
+                        cwd=cwd,
+                        timeout_s=check.timeout_sec + 5,
+                    )
+                else:
+                    result = await sandbox.exec(check.command, cwd=cwd, timeout_s=check.timeout_sec + 5, user=user)
+                if result.return_code == 0:
+                    break
+                if not in_grace:
+                    failures += 1
+                    if failures >= check.retries:
+                        ended = ""
+                        if entrypoint is not None and entrypoint.noticed:
+                            ended = f" after the exec holding the entrypoint ended ({_launch_outcome(entrypoint)})"
+                        raise RuntimeError(
+                            f"Healthcheck failed {check.retries} times: {check.command!r}{label}{ended}"
+                        )
+                await asyncio.sleep(check.start_interval_sec if in_grace else check.interval_sec)
 
     async def _write_task_context(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
         """Leave the task's in-sandbox tool declarations where a harness can read them.
@@ -1216,6 +1799,7 @@ class HarborEnvironmentServer(
                     503, f"A sandbox of a previous attempt of this episode could not be stopped yet: {exc}"
                 ) from exc
         compose: AsyncSandboxCompose | None = None
+        launch: EntrypointLaunch | None = None
         try:
             if task.needs_compose:
                 compose = await self._create_compose(task, episode_key)
@@ -1234,18 +1818,30 @@ class HarborEnvironmentServer(
                 provider_ref=self._provider_ref(task),
                 compose=compose,
             )
-            await self._apply_overlay(sandbox, task)
+            names = await self._apply_overlay(sandbox, task)
+            await self._set_default_user(sandbox, task, names)
+            image_user = await self._image_user_name(sandbox, task, names)
+            # The working directory and /logs exist before the entrypoint starts, as Harbor's bind mounts do.
             session.workdir = await self._prepare_workdir(sandbox, task, task.workdir)
-            await self._wait_healthy(sandbox, task)
+            launch = session.entrypoint = await self._start_entrypoint(
+                sandbox, task, image_user, prepared_workdir=session.workdir
+            )
+            await self._wait_healthy(sandbox, task, launch, user=image_user)
             await self._write_task_context(sandbox, task)
-        except HarborOverlayError as exc:
-            # The task's own Dockerfile failed to apply: a task error, not a sandbox one.
+            if launch is not None:
+                # The last look before the hand-over: an entrypoint that died during the seed's remaining steps
+                # (a setup script failing after its first lines) is a seed failure, not a rollout on an empty task.
+                await self._check_entrypoint(sandbox, task, launch)
+        except (HarborOverlayError, HarborEntrypointError) as exc:
+            # The task's own Dockerfile (or the image it built) failed to apply: a task error, not a sandbox one.
+            what = "Dockerfile overlay" if isinstance(exc, HarborOverlayError) else "Image ENTRYPOINT"
             try:
+                await _cancel_entrypoint(launch)
                 await self._stop_sandbox(episode_key)
             except Exception:
-                LOGGER.exception("Failed to stop Harbor sandbox after a failed overlay")
-            LOGGER.error("Dockerfile overlay failed for %s: %s", task.task_id, exc)
-            raise HTTPException(422, f"Dockerfile overlay failed for {task.task_id!r}: {exc}") from exc
+                LOGGER.exception("Failed to stop Harbor sandbox after a failed %s", what.lower())
+            LOGGER.error("%s failed for %s: %s", what, task.task_id, exc)
+            raise HTTPException(422, f"{what} failed for {task.task_id!r}: {exc}") from exc
         except BaseException as exc:
             if not isinstance(exc, Exception):
                 # Cancellation (the episode deadline fired): the registered `close_sandbox` cleanup stops
@@ -1253,6 +1849,7 @@ class HarborEnvironmentServer(
                 # since the deadline cancels only once, and hold the episode key for as long as the stop.
                 raise
             try:
+                await _cancel_entrypoint(launch)
                 await self._stop_sandbox(episode_key)
             except Exception:
                 LOGGER.exception("Failed to stop Harbor sandbox after failed seed")
@@ -1318,14 +1915,20 @@ class HarborEnvironmentServer(
         return logs_dir
 
     async def _collect_reward(
-        self, sandbox: AsyncSandbox, task: HarborTask, logs_dir: Path
+        self,
+        sandbox: AsyncSandbox,
+        task: HarborTask,
+        logs_dir: Path,
+        *,
+        entrypoint_log: str | None = None,
     ) -> tuple[tuple[int, int | None] | None, dict[str, float] | None, str | None]:
         """Download the reward files and the wrapper's exit record, then whatever else the verifier wrote.
 
         The reward and the exit record are the required transfer, whatever the exit code: a grader may
         have written its reward before a late exit, and a timed-out run's partial logs are still worth
-        keeping. Optional diagnostics cannot invalidate a measured score. Returns the exit record (None
-        when the wrapper never reached its end), the rewards and the reward problem.
+        keeping. Optional diagnostics cannot invalidate a measured score. With ``entrypoint_log``, the
+        sandbox's entrypoint output lands under that name too. Returns the exit record (None when the
+        wrapper never reached its end), the rewards and the reward problem.
         """
         await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, names=("reward.json", "reward.txt", EXIT_RECORD_NAME))
         exit_record = parse_exit_record(logs_dir)
@@ -1334,7 +1937,19 @@ class HarborEnvironmentServer(
             await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, skip_unsafe=True)
         except Exception:
             LOGGER.warning("Could not collect optional verifier logs for %s", task.task_id, exc_info=True)
+        if entrypoint_log is not None:
+            await self._collect_entrypoint_log(sandbox, task, logs_dir / entrypoint_log)
         return exit_record, rewards, problem
+
+    async def _collect_entrypoint_log(self, sandbox: AsyncSandbox, task: HarborTask, target: Path) -> None:
+        """Keep the entrypoint's output with the verification's logs; best effort, never a masked sample."""
+        try:
+            kind = await download_path(sandbox, ENTRYPOINT_LOG, target)
+        except Exception:
+            LOGGER.warning("Could not collect the entrypoint log for %s", task.task_id, exc_info=True)
+            return
+        if kind is None:
+            LOGGER.warning("%s: no entrypoint log at %s to collect", task.task_id, ENTRYPOINT_LOG)
 
     async def _run_separate_verifier(self, session: HarborSession) -> dict[str, Any]:
         """Harbor's separate mode: collect the agent's artifacts, stop its sandbox, verify in a fresh one.
@@ -1358,6 +1973,7 @@ class HarborEnvironmentServer(
             )
         artifacts_dir = logs_dir / "artifacts"
         verifier: AsyncSandbox | None = None
+        verifier_entrypoint: EntrypointLaunch | None = None
         try:
             main_hooks = [hook for hook in settings.collect if _is_main_service(hook.service)]
             sidecar_hooks = [hook for hook in settings.collect if not _is_main_service(hook.service)]
@@ -1367,6 +1983,10 @@ class HarborEnvironmentServer(
             sidecar_artifacts = [(i, artifact) for i, artifact in artifacts if not _is_main_service(artifact.service)]
             await self._run_collect_hooks(session, main_hooks)
             restored = await self._download_artifacts(session, main_artifacts, artifacts_dir)
+            died = None
+            if session.entrypoint is not None:
+                await self._collect_entrypoint_log(session.sandbox, task, logs_dir / ENTRYPOINT_LOG_NAME)
+                died = await self._entrypoint_died_during_rollout(session.sandbox, task, session.entrypoint, logs_dir)
             # Harbor's phased collection: the agent's own container is stopped before the sidecars' hooks
             # run and their artifacts are read, so no agent process can change a sidecar's state meanwhile.
             await session.stop_main()
@@ -1376,11 +1996,19 @@ class HarborEnvironmentServer(
             # The episode key stays reserved until the episode's final cleanup, which releases it without
             # stopping the agent side again.
             await session.stop_agent_side()
+            if died is not None:
+                return self._masked(ENTRYPOINT_FAILED_KIND, died) | {"verifier_logs_dir": str(logs_dir.resolve())}
 
             verifier = await self._create_verifier_sandbox(task, episode_key=session.session_id)
+            names: dict[str, str] = {}
             if _verifier_gets_overlay(task):
                 # The verifier runs in the task's own image, so it needs the same overlay as the agent did.
-                await self._apply_overlay(verifier, task)
+                names = await self._apply_overlay(verifier, task)
+            if _verifier_runs_task_image(task):
+                # Its default is that image's own USER, never [agent].user, resolved by name once it exists.
+                await self._set_default_user(verifier, task, names, role="verifier")
+            # The verifier's /logs folders exist before its entrypoint starts, as in the seed and as Harbor's
+            # /logs/verifier bind mount does; /tests and the artifacts follow, as Harbor uploads them after start.
             prepare = await _exec_as_root(
                 verifier,
                 f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR} && chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR}",
@@ -1388,23 +2016,39 @@ class HarborEnvironmentServer(
             )
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
+            if _verifier_runs_task_image(task):
+                # Harbor builds a separate verifier from tests/Dockerfile (or runs [verifier.environment]'s
+                # docker_image) and only `up --wait`s it. This verifier runs in the task image instead, so that
+                # image's entrypoint and HEALTHCHECK stand in for the verifier image's own start; the task's
+                # [environment.healthcheck] is not run here, as Harbor does not run it in the verifier.
+                image_user = await self._image_user_name(verifier, task, names)
+                verifier_entrypoint = await self._start_entrypoint(verifier, task, image_user)
+                await self._wait_healthy(verifier, task, verifier_entrypoint, user=image_user, task_check=False)
             # A prebuilt verifier image usually ships /tests already, with the modes its tests expect.
             # Only upload the package's tests when the image has none, as the old server did.
             if await remote_kind(verifier, f"{TESTS_DIR}/test.sh") is None:
                 await upload_dir(verifier, task.path / "tests", TESTS_DIR)
             for host, source in restored:
                 await upload_path(verifier, host, source)
+            if verifier_entrypoint is not None:
+                # The last look before test.sh, in a fresh sandbox the agent never had: its exit status is trusted.
+                await self._check_entrypoint(verifier, task, verifier_entrypoint)
             # A sub-second task budget still gets one whole second: `timeout 0` would mean no limit.
             budget = max(1, math.ceil(settings.timeout_sec))
             result = await verifier.exec(
                 f"chmod +x {TESTS_DIR}/test.sh; {verifier_command(budget)}",
                 env=resolve_env_templates(settings.env),
                 timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
-                user=settings.user,
+                user=_verifier_user(task),
             )
             if result.error_type not in (None, "timeout"):
                 return self._masked(failure_kinds.VERIFIER_ERROR, f"test.sh could not run: {result.error_type}")
-            exit_record, rewards, problem = await self._collect_reward(verifier, task, logs_dir)
+            exit_record, rewards, problem = await self._collect_reward(
+                verifier,
+                task,
+                logs_dir,
+                entrypoint_log=VERIFIER_ENTRYPOINT_LOG_NAME if verifier_entrypoint is not None else None,
+            )
             if exit_record is None and result.error_type != "timeout":
                 # The wrapper never reached its end: the guard found no `timeout` or `bash` (exit 127
                 # before any redirection), or the shell itself could not run. test.sh never started.
@@ -1419,10 +2063,15 @@ class HarborEnvironmentServer(
             # The rollout is complete; losing the verifier's sandbox to its overlay must not discard it.
             LOGGER.error(f"Dockerfile overlay failed in the verifier sandbox for {task.task_id}: {exc}")
             return self._masked(OVERLAY_FAILED_KIND, f"Dockerfile overlay failed in the verifier sandbox: {exc}")
+        except HarborEntrypointError as exc:
+            # Likewise for the task image's entrypoint failing in the verifier's fresh sandbox.
+            LOGGER.error(f"Image ENTRYPOINT failed in the verifier sandbox for {task.task_id}: {exc}")
+            return self._masked(ENTRYPOINT_FAILED_KIND, f"Image ENTRYPOINT failed in the verifier sandbox: {exc}")
         except Exception as exc:
             LOGGER.exception(f"Separate verification infrastructure failed for {task.task_id}")
             return self._masked(failure_kinds.PROVIDER_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
         finally:
+            await _cancel_entrypoint(verifier_entrypoint)
             # Owned from before start(): a create that failed or timed out is released here too.
             if _verifier_key(session.session_id) in self._sandboxes:
                 try:
@@ -1521,6 +2170,11 @@ class HarborEnvironmentServer(
                 f"Could not create verifier logs under {self._artifacts_dir}: {type(exc).__name__}: {exc}",
             )
         try:
+            if session.entrypoint is not None:
+                died = await self._entrypoint_died_during_rollout(sandbox, task, session.entrypoint, logs_dir)
+                if died is not None:
+                    await self._collect_entrypoint_log(sandbox, task, logs_dir / ENTRYPOINT_LOG_NAME)
+                    return self._masked(ENTRYPOINT_FAILED_KIND, died) | {"verifier_logs_dir": str(logs_dir.resolve())}
             await self._run_collect_hooks(session, settings.collect)
             # Replace agent-planted directory links before cleanup: find does not follow its starting
             # symlink, while tar does. Unlink /logs first without touching its former target.
@@ -1553,11 +2207,16 @@ class HarborEnvironmentServer(
                 cwd=session.workdir,
                 env=resolve_env_templates(settings.env),
                 timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
-                user=settings.user,
+                user=_verifier_user(task),
             )
             if result.error_type not in (None, "timeout"):
                 return self._masked(failure_kinds.VERIFIER_ERROR, f"test.sh could not run: {result.error_type}")
-            exit_record, rewards, problem = await self._collect_reward(sandbox, task, logs_dir)
+            exit_record, rewards, problem = await self._collect_reward(
+                sandbox,
+                task,
+                logs_dir,
+                entrypoint_log=ENTRYPOINT_LOG_NAME if session.entrypoint is not None else None,
+            )
             if exit_record is None and result.error_type != "timeout":
                 # The wrapper never reached its end: the guard found no `timeout` or `bash` (exit 127
                 # before any redirection), or the shell itself could not run. test.sh never started.

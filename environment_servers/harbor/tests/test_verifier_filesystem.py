@@ -79,7 +79,9 @@ async def test_linked_verifier_roots_cannot_preserve_planted_success(tmp_path, m
         f"  bash {shlex.quote(str(tests / 'helper.sh'))}\nelse\n  echo 0\nfi "
         f"> {shlex.quote(str(logs / 'verifier' / 'reward.txt'))}\n"
     )
-    outcome = await server._run_verifier(SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root)))
+    outcome = await server._run_verifier(
+        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None)
+    )
     assert outcome["reward"] == 0
     assert not outcome.get("mask_sample", False)
     assert not tests.is_symlink() and not logs.is_symlink() and not (logs / "verifier").is_symlink()
@@ -109,7 +111,9 @@ async def test_unsafe_diagnostic_link_does_not_mask_valid_reward(tmp_path, monke
         f"ln -s {shlex.quote(str(outside))} {shlex.quote(str(logs / 'verifier/diagnostic-link'))}\n"
         "echo useful-output\n"
     )
-    outcome = await server._run_verifier(SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root)))
+    outcome = await server._run_verifier(
+        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None)
+    )
     assert outcome["reward"] == 1 and not outcome.get("mask_sample", False)
     artifacts = Path(outcome["verifier_logs_dir"])
     assert not (artifacts / "diagnostic-link").exists()
@@ -152,7 +156,7 @@ async def test_optional_diagnostic_transfer_failure_preserves_score(tmp_path, mo
         await download(source, target)
 
     monkeypatch.setattr(sandbox, "download", fail_diagnostics)
-    outcome = await server._run_verifier(SimpleNamespace(task=task, sandbox=sandbox, workdir="/app"))
+    outcome = await server._run_verifier(SimpleNamespace(task=task, sandbox=sandbox, workdir="/app", entrypoint=None))
     assert calls == 2
     assert outcome["reward"] == 1 and not outcome.get("mask_sample", False)
     await server.shutdown()
@@ -167,7 +171,9 @@ async def test_unsafe_reward_link_still_masks_transfer_failure(tmp_path, monkeyp
     (task.path / "tests/test.sh").write_text(
         f"ln -s {shlex.quote(str(outside))} {shlex.quote(str(logs / 'verifier/reward.txt'))}\n"
     )
-    outcome = await server._run_verifier(SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root)))
+    outcome = await server._run_verifier(
+        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None)
+    )
     assert outcome["reward"] == 0 and outcome["mask_sample"] is True
     assert not list(server._artifacts_dir.rglob("reward.txt"))
     await server.shutdown()
@@ -238,7 +244,9 @@ async def test_verifier_logs_preserve_directory_permissions_after_transfers(
     try:
         expected = server._artifacts_dir / "ordinary-directory"
         expected.mkdir()
-        outcome = await server._run_verifier(SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root)))
+        outcome = await server._run_verifier(
+            SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None)
+        )
     finally:
         os.umask(previous_umask)
         await server.shutdown()

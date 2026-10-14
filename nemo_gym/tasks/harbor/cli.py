@@ -18,28 +18,60 @@ import fnmatch
 import json
 import logging
 import math
+import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from nemo_gym import component_search_roots
+from nemo_gym import _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError
 from nemo_gym.path_utils import failures_path_for, materialized_path_for
+from nemo_gym.sandbox.compose_config import unsupported_compose_fields
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE, read_dataset_config
 from nemo_gym.tasks.harbor.digest import DIGEST_KEY
 from nemo_gym.tasks.harbor.hub import HubError, datasets_dir, fetch_ref, is_hub_ref
-from nemo_gym.tasks.harbor.image_configs import record_base_images, record_compose_images
+from nemo_gym.tasks.harbor.image_build import (
+    BUILD_TOOLS,
+    DEFAULT_PLATFORM,
+    REPOSITORY_ENV,
+    BuildError,
+    BuildPlanEntry,
+    ImageBuilder,
+    build_images,
+    plan_builds,
+    recorded_image_mismatch,
+)
+from nemo_gym.tasks.harbor.image_configs import (
+    COMPOSE_FILE_NAMES,
+    ImageConfigError,
+    compose_file,
+    load_compose_document,
+    record_base_images,
+    record_compose_images,
+    without_main_build,
+    without_pull_policy,
+    without_restated_main_build,
+)
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
-from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError, discover_tasks, is_task_folder
+from nemo_gym.tasks.harbor.task import (
+    HarborTask,
+    HarborTaskError,
+    discover_tasks,
+    is_task_folder,
+    read_built_images,
+    read_image_configs,
+)
 
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_ROOT = Path("results/harbor")
+IMAGES_FILE = "images.json"
 ENVIRONMENT_SERVER_CONFIG = "environment_servers/harbor/configs/harbor.yaml"
 ORACLE_AGENT = "oracle_agent"
 # Harnesses that call the Gym model server from inside the task sandbox, where 127.0.0.1 is the container
@@ -76,6 +108,116 @@ AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
 }
 
 
+# The top-level configuration block that sets Dockerfile builds up, and the settings it takes.
+BUILDS_KEY = "builds"
+BUILD_SETTINGS = ("tool", "repository", "platform", "enabled")
+HYDRA_QUIET_OVERRIDES = (
+    "hydra.run.dir=.",
+    "hydra.output_subdir=null",
+    "hydra/job_logging=none",
+    "hydra/hydra_logging=none",
+)
+
+
+@dataclass(frozen=True)
+class BuildOptions:
+    """How prepare treats Dockerfiles outside pull and overlay mode: the ``builds:`` configuration block.
+
+    ``tool`` builds them (buildah, podman or docker; default: the first one on PATH that fits, see
+    :func:`nemo_gym.tasks.harbor.image_build.detect_tool`). ``repository`` is the registry path built
+    images are pushed under (default: the ``NEMO_GYM_BUILD_REPOSITORY`` variable; unset keeps them local
+    in the Docker daemon). ``platform`` is passed to the tool (default ``linux/amd64``). With ``enabled``
+    false nothing is built, and the tasks that need a build are skipped with the loader's message.
+    """
+
+    enabled: bool = True
+    tool: str | None = None
+    repository: str | None = None
+    platform: str | None = None
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any] | None) -> "BuildOptions":
+        """The ``builds:`` block of a merged configuration dict, applied over the defaults.
+
+        ``config`` is the merged global configuration (``env.yaml``, ``--config`` files and
+        ``++builds.<setting>=<value>`` overrides) or any dict shaped like it; a missing block keeps
+        every default. Unknown settings and values of the wrong type are refused.
+        """
+        block = (config or {}).get(BUILDS_KEY)
+        if block is None:
+            block = {}
+        if not isinstance(block, Mapping):
+            raise ValueError(f"`{BUILDS_KEY}` must be a mapping of {', '.join(BUILD_SETTINGS)}; got {block!r}")
+        unknown = sorted(set(block) - set(BUILD_SETTINGS))
+        if unknown:
+            raise ValueError(
+                f"Unknown `{BUILDS_KEY}` setting(s) {', '.join(unknown)}; expected {', '.join(BUILD_SETTINGS)}"
+            )
+        enabled = block.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError(f"`{BUILDS_KEY}.enabled` must be true or false; got {enabled!r}")
+        tool = _build_setting(block, "tool")
+        if tool is not None and tool not in BUILD_TOOLS:
+            raise ValueError(f"`{BUILDS_KEY}.tool` must be one of {', '.join(BUILD_TOOLS)}; got {tool!r}")
+        return cls(
+            enabled=enabled,
+            tool=tool,
+            repository=_build_setting(block, "repository") or os.environ.get(REPOSITORY_ENV) or None,
+            platform=_build_setting(block, "platform"),
+        )
+
+
+def _build_setting(block: Mapping[str, Any], name: str) -> str | None:
+    value = block.get(name)
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"`{BUILDS_KEY}.{name}` must be a string; got {value!r}")
+    return value
+
+
+def build_options_from_overrides(overrides: list[str]) -> BuildOptions:
+    """Read the ``builds:`` block from the configuration the command line names, before the run config exists.
+
+    Preparation builds images before the run config can be written, so the global configuration is not
+    composed yet. This merges the sources the user controls, in the global config's order (the files
+    the ``+config_paths`` tokens name, from ``--config`` and the asset selectors, then ``env.yaml``, then
+    the ``+``/``++`` overrides), and reads the block from the result. The full global config is still
+    parsed once, at dispatch, with the run config added.
+    """
+    from omegaconf import OmegaConf
+    from omegaconf.errors import InterpolationResolutionError
+
+    from nemo_gym.global_config import (
+        CONFIG_PATHS_KEY_NAME,
+        GlobalConfigDictParser,
+        _load_config_yaml,
+        translate_interpolation_error,
+    )
+
+    parser = GlobalConfigDictParser()
+    saved_argv = sys.argv
+    # A side-effect-free Hydra parse: no outputs/<date>/<time> run folder and no logging reconfiguration,
+    # which the one parse at dispatch keeps as its own.
+    sys.argv = [saved_argv[0], *overrides, *HYDRA_QUIET_OVERRIDES]
+    try:
+        cli = parser.parse_global_config_dict_from_cli()
+    finally:
+        sys.argv = saved_argv
+    OmegaConf.set_struct(cli, False)
+    dotenv_path = _resolve_under_cwd_or_install("env.yaml")
+    dotenv = _load_config_yaml(dotenv_path) if dotenv_path.exists() else OmegaConf.create({})
+    config_paths = OmegaConf.merge(dotenv, cli).get(CONFIG_PATHS_KEY_NAME) or []
+    _, extra_configs = parser.load_extra_config_paths([str(path) for path in config_paths])
+    merged = OmegaConf.merge(*extra_configs, dotenv, cli)
+    block = merged.get(BUILDS_KEY)
+    try:
+        resolved = OmegaConf.to_container(block, resolve=True) if block is not None else None
+    except InterpolationResolutionError as exc:
+        raise translate_interpolation_error(exc) from exc
+    return BuildOptions.from_config({BUILDS_KEY: resolved})
+
+
 @dataclass(frozen=True)
 class PreparedTaskset:
     taskset: str
@@ -84,6 +226,8 @@ class PreparedTaskset:
     rows_path: Path
     output_dir: Path
     skipped: dict[str, str] = field(default_factory=dict)
+    # Every distinct image the prepared tasks start from, for pre-pulling.
+    images: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -93,6 +237,74 @@ class AgentSelection:
     impl_name: str
     # The harness calls the model server from inside the task sandbox (see ``IN_SANDBOX_AGENTS``).
     runs_in_sandbox: bool = False
+
+
+REFUSED_NOTE = " (the sandbox Compose adapter does not start them)"
+
+
+def unsupported_compose_fields_error(task: HarborTask) -> HarborTaskError | None:
+    """Why the sandbox Compose adapter would refuse ``task``'s document at seed, or ``None`` when it starts it.
+
+    The document checked is the one the server hands the adapter (``environment_servers/harbor/app.py``,
+    ``_compose_document``): interpolated and ``env_file``-inlined by the loader, ``pull_policy`` dropped from
+    every service, ``main``'s ``build:`` dropped when the task runs from its recorded built image or when it
+    only restates Harbor's own build of the task's Dockerfile (:func:`without_restated_main_build`; a build
+    key Gym cannot apply without a build is this task's reason). A field no provider starts (``deploy``,
+    ``extra_hosts``, ``platform``, a sidecar ``build:``) is then a per-task reason naming the service and the
+    field, recorded in ``skipped.json`` like a task that does not load, instead of a failure of every episode
+    at seed.
+    """
+    path = compose_file(task)
+    document = load_compose_document(task)
+    if path is None or document is None:
+        return None
+    document = without_pull_policy(document)
+    if task.built_image is not None:
+        document = without_main_build(document)
+    else:
+        document, reason = without_restated_main_build(task, document)
+        if reason is not None:
+            return HarborTaskError(f"{path.name}: {reason}")
+    refused = unsupported_compose_fields(document)
+    if not refused:
+        return None
+    return HarborTaskError(f"{path.name}: {'; '.join(refused)}{REFUSED_NOTE}")
+
+
+def refused_before_build(plan: list[BuildPlanEntry]) -> dict[str, HarborTaskError]:
+    """The field refusals of the tasks ``plan`` would build, read from their Compose files before any build runs.
+
+    :func:`unsupported_compose_fields_error` is the authoritative check, on the loader's document once the
+    tasks load. This one needs only key names, which interpolation and ``env_file`` inlining do not add, so it
+    reads the raw file the way the loader's document will look: ``pull_policy`` dropped, ``main``'s ``build:``
+    dropped (the task is about to be built and will run from its recorded image) and ``env_file`` set aside,
+    as the loader folds it into ``environment``. A task it names is neither built nor pushed for an image no
+    episode would start, and a build that would fail for it cannot stop the preparation. A file that does not
+    parse is left to the loader to report in its own words.
+    """
+    refused: dict[str, HarborTaskError] = {}
+    for entry in plan:
+        path = next((entry.context / name for name in COMPOSE_FILE_NAMES if (entry.context / name).is_file()), None)
+        if path is None:
+            continue
+        try:
+            document = yaml.safe_load(path.read_text()) or {}
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            continue
+        if not isinstance(document, dict):
+            continue
+        document = without_main_build(without_pull_policy(document))
+        services = document.get("services")
+        if isinstance(services, dict):
+            for name, service in services.items():
+                if isinstance(service, dict) and "env_file" in service:
+                    services[name] = {key: value for key, value in service.items() if key != "env_file"}
+        messages = unsupported_compose_fields(document)
+        if messages:
+            refused.update(
+                dict.fromkeys(entry.tasks, HarborTaskError(f"{path.name}: {'; '.join(messages)}{REFUSED_NOTE}"))
+            )
+    return refused
 
 
 def _write_skipped(output_dir: Path, errors: dict[str, HarborTaskError]) -> None:
@@ -108,18 +320,25 @@ def prepare_target(
     refresh_registry: bool = False,
     exclude: list[str] | None = None,
     only: list[str] | None = None,
+    build: BuildOptions | None = None,
     rows_name: str = "tasks.jsonl",
 ) -> PreparedTaskset:
     """Fetch (for hub references) and load the tasks, then write the rows file.
 
     A task folder that does not load is skipped with a warning (and listed in
-    ``PreparedTaskset.skipped``) so the rest of the dataset still prepares.
+    ``PreparedTaskset.skipped``) so the rest of the dataset still prepares; so is a task whose
+    image fails to build or whose Compose file does not resolve, with the build's or the
+    resolver's reason.
 
     Tasks matching an ``exclude`` glob, or not matching an ``only`` glob, are left out of the
-    rows and listed on stdout. ``rows_name`` names the rows file inside the taskset's output folder:
-    a run scopes it to its agent, so two agents prepared with different selections on one taskset
-    keep their own rows.
+    rows and listed on stdout. Dockerfiles outside pull and overlay mode are built once and
+    recorded before the tasks load, as ``build`` (the ``builds:`` configuration block) says; the
+    default builds locally with docker, and pushes with the first tool on PATH when a repository
+    is named. ``rows_name`` names the rows file inside the taskset's output folder: a run scopes
+    it to its agent, so two agents prepared with different selections on one taskset keep their
+    own rows.
     """
+    build = build or BuildOptions()
     if is_hub_ref(target):
         folder = fetch_ref(target, refresh_registry=refresh_registry)
         print(f"Fetched {target} into {folder}")
@@ -141,14 +360,27 @@ def prepare_target(
     )
     if images is not None:
         print(f"Base image configurations recorded in {images}")
+    unbuilt: dict[str, str] = {}
+    if folder.is_dir():
+        unbuilt = _build_dockerfiles(folder, build, select=None if is_task_folder(folder) else selected)
     output_dir = Path(output_root) / taskset
     output_dir.mkdir(parents=True, exist_ok=True)
     errors: dict[str, HarborTaskError] = {}
     try:
         loaded = discover_tasks(folder, skipped=errors)
-    finally:
-        # Keep the omitted IDs and reasons even when no task in the dataset loads.
-        _write_skipped(output_dir, errors)
+    except HarborTaskError:
+        if not unbuilt:
+            # Keep the omitted IDs and reasons even when no task in the dataset loads.
+            _write_skipped(output_dir, errors)
+            raise
+        # Nothing loaded, and the builds that failed are the reason to report below, not the loader's message.
+        loaded = []
+    # A task whose image failed to build is left out with the build's reason; the loader's own message for it
+    # (its Dockerfile needs a build that is not recorded) says less.
+    for task_id, reason in unbuilt.items():
+        errors[task_id] = HarborTaskError(reason)
+    loaded = [task for task in loaded if task.task_id not in unbuilt]
+    _write_skipped(output_dir, errors)
     _check_dataset_task_keys(folder, loaded, errors)
     tasks, skipped = select_tasks(loaded, exclude, only)
     # A left-out task that did not load (its base image was not recorded) is left out, not reported as broken.
@@ -161,14 +393,43 @@ def prepare_target(
     for task_id, reason in sorted(skipped):
         print(f"Skipping {task_id}: {reason}")
     if not tasks:
-        raise ValueError(f"No runnable task left in {folder}")
-    images = record_compose_images(tasks, tasks[0].path.parent)
+        raise _no_runnable_task(folder, errors)
+    # A Compose file that does not resolve leaves its task out the same way; the others' images are still recorded.
+    unresolved: dict[str, str] = {}
+    images = record_compose_images(tasks, tasks[0].path.parent, skipped=unresolved)
+    if unresolved:
+        for task_id, reason in unresolved.items():
+            errors[task_id] = HarborTaskError(reason)
+            logger.warning("Skipping task %s: %s", task_id, reason)
+        tasks = [task for task in tasks if task.task_id not in unresolved]
+        _write_skipped(output_dir, errors)
+        if not tasks:
+            raise _no_runnable_task(folder, errors)
     if images is not None:
         print(f"Compose image configurations recorded in {images}")
+    # The Compose adapter's field check, per task and before any sandbox exists: a field it does not start is
+    # a skipped task with the field named, as an unloadable task is, not a seed failure of every episode.
+    refused = {task.task_id: error for task in tasks if (error := unsupported_compose_fields_error(task))}
+    if refused:
+        errors.update(refused)
+        _write_skipped(output_dir, errors)
+        for task_id, error in refused.items():
+            logger.warning("Skipping task %s: %s", task_id, error)
+        tasks = [task for task in tasks if task.task_id not in refused]
+        if not tasks:
+            raise _no_runnable_task(folder, errors)
     rows_path = output_dir / rows_name
     write_rows(tasks, taskset, rows_path)
     skipped_note = f", skipped {len(errors)}" if errors else ""
     print(f"Materialized {len(tasks)} task(s) from {folder} into {rows_path}{skipped_note}")
+    # Every distinct image a run starts, for pre-pulling onto the sandbox hosts before it: the task images, the
+    # Compose sidecars' (as recorded, the pinned reference the sandbox gets) and the separate verifiers'.
+    distinct = run_images(tasks, read_image_configs(tasks[0].path.parent))
+    (output_dir / IMAGES_FILE).write_text(json.dumps(list(distinct), indent=2) + "\n")
+    if distinct:
+        print(f"Images: {len(distinct)} distinct, listed in {output_dir / IMAGES_FILE}")
+        for image in distinct:
+            print(f"  {image}")
     return PreparedTaskset(
         taskset=taskset,
         folder=folder,
@@ -176,7 +437,124 @@ def prepare_target(
         rows_path=rows_path,
         output_dir=output_dir,
         skipped={task_id: str(error) for task_id, error in errors.items()},
+        images=distinct,
     )
+
+
+def run_images(tasks: list[HarborTask], image_configs: Mapping[str, Any]) -> tuple[str, ...]:
+    """Every distinct image a run of ``tasks`` starts, sorted: each task's image, the image of a separate
+    verifier (``[verifier.environment].docker_image``) and every Compose service image, the last as the
+    recorded configuration pins it (``compose-images.json``, what ``resolve_compose`` hands the sandbox),
+    else as written when it has no record."""
+    images: set[str] = set()
+    for task in tasks:
+        if task.image:
+            images.add(task.image)
+        verifier_environment = task.config.verifier.environment
+        if (
+            not task.config.is_shared_verifier
+            and verifier_environment is not None
+            and verifier_environment.docker_image
+        ):
+            images.add(verifier_environment.docker_image)
+        document = load_compose_document(task) if task.needs_compose else None
+        for service in ((document or {}).get("services") or {}).values():
+            reference = (service or {}).get("image")
+            if reference:
+                record = image_configs.get(reference)
+                images.add(str(record.get("image") or reference) if isinstance(record, dict) else reference)
+    return tuple(sorted(images))
+
+
+def _listed(reasons: Mapping[str, object]) -> str:
+    """``reasons`` (task id to why it was left out) as indented lines; a reason that starts with its task id says it once."""
+    return "".join(f"\n  {task_id}: {str(reason).removeprefix(f'{task_id}: ')}" for task_id, reason in reasons.items())
+
+
+def _no_runnable_task(folder: Path, errors: Mapping[str, object]) -> ValueError:
+    """The error of a preparation that keeps no task, listing every task left out and why."""
+    return ValueError(f"No runnable task left in {folder}" + (f"; left out:{_listed(errors)}" if errors else ""))
+
+
+def _build_dockerfiles(folder: Path, build: BuildOptions, *, select) -> dict[str, str]:
+    """Build and record the images of the selected tasks whose Dockerfile needs a build.
+
+    With builds disabled, the tasks that need one are left for the loader to skip with its
+    message, and a recorded image that does not fit the run (another platform, or local when the run
+    pushes) leaves its tasks out with the reason, as the enabled path would rebuild it. When every context
+    has a usable record nothing is built and no build tool is looked for. Otherwise a missing builder stops
+    the preparation, naming the tasks. A failed build does not:
+    each context is built on its own, and the tasks of one that fails are returned by id with the
+    reason, for the caller to leave out the way it leaves out a task that does not load. A planned task
+    whose Compose file the sandbox adapter would refuse whatever the build gave (:func:`refused_before_build`)
+    is returned the same way, and its context is neither built nor pushed.
+    """
+    plan = plan_builds(folder, select=select)
+    refused = {task_id: str(error) for task_id, error in refused_before_build(plan).items()}
+    plan = [entry for entry in plan if not any(task_id in refused for task_id in entry.tasks)]
+    if not plan:
+        return refused
+    # A recorded image is reused when it fits this run (pushed when the run pushes, of the requested platform),
+    # with builds enabled or not; the check is build_images' own.
+    parent = folder.parent if is_task_folder(folder) else folder
+    recorded, image_configs = read_built_images(parent), read_image_configs(parent)
+    platform = build.platform or DEFAULT_PLATFORM
+    reusable: dict[str, str] = {}
+    unusable: dict[str, str] = {}
+    for entry in plan:
+        if entry.digest not in recorded:
+            continue
+        why = recorded_image_mismatch(
+            recorded[entry.digest], image_configs, repository=build.repository, platform=platform
+        )
+        (reusable if why is None else unusable)[entry.digest] = why or recorded[entry.digest]["image"]
+    if not build.enabled:
+        unbuilt = [task for entry in plan if entry.digest not in recorded for task in entry.tasks[:3]]
+        if unbuilt:
+            print(
+                f"Skipping Dockerfile builds ({BUILDS_KEY}.enabled is false); tasks that need one are left out: "
+                + ", ".join(unbuilt)
+            )
+        # A record that does not fit the run is no better than none: its tasks are left out with the reason.
+        mismatched: dict[str, str] = {}
+        for entry in plan:
+            if entry.digest in unusable:
+                image = recorded[entry.digest]["image"]
+                reason = f"recorded image {image} cannot be used: {unusable[entry.digest]}; builds are disabled"
+                print(f"Skipping {', '.join(entry.tasks[:3])}: {reason}")
+                mismatched.update(dict.fromkeys(entry.tasks, reason))
+        return {**refused, **mismatched}
+    needs_build = [entry for entry in plan if entry.digest not in reusable]
+    if not needs_build:
+        # Nothing to build, so no build tool is needed: a host with every image recorded prepares without one.
+        for entry in plan:
+            print(f"Built image recorded for {', '.join(entry.tasks[:3])}: {reusable[entry.digest]}")
+        return refused
+    names = ", ".join(task for entry in needs_build for task in entry.tasks[:3])
+    try:
+        builder = ImageBuilder(tool=build.tool, repository=build.repository, platform=build.platform)
+    except BuildError as exc:
+        raise ValueError(
+            f"Could not build the Dockerfile image(s) for task(s) {names}: {exc} (set {BUILDS_KEY}.enabled to false "
+            "to run with recorded images only)"
+        ) from exc
+    results = []
+    failures: dict[str, str] = {}
+    for entry in plan:
+        # One build_images call per context, so a failure stops that context only and the rest still build.
+        tasks = set(entry.tasks)
+        try:
+            results += build_images(folder, builder=builder, select=lambda name: name in tasks)
+        except BuildError as exc:
+            reason = f"Could not build the Dockerfile image(s) for task(s) {', '.join(entry.tasks[:3])}: {exc}"
+            failures.update(dict.fromkeys(entry.tasks, reason))
+    if results:
+        pushed = sum(1 for result in results if result.pushed)
+        print(
+            f"Built {len(results)} image(s) with {results[0].tool}"
+            + (f", pushed {pushed}" if pushed else ", kept local")
+        )
+    return {**refused, **failures}
 
 
 def _check_dataset_task_keys(folder: Path, loaded: list[HarborTask], errors: dict[str, HarborTaskError]) -> None:
@@ -354,18 +732,21 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
     except (ValueError, OSError, yaml.YAMLError) as exc:
         args._parser.error(str(exc))
     try:
+        # The `builds:` block comes from the configuration the command names; the run config does not exist yet.
+        build = build_options_from_overrides(overrides)
         prepared = prepare_target(
             args.target,
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
+            build=build,
             rows_name=_rows_name(agent),
         )
-    except (HarborTaskError, HubError, ValueError, OSError) as exc:
+    except (HarborTaskError, HubError, BuildError, ImageConfigError, ConfigError, ValueError, OSError) as exc:
         args._parser.error(str(exc))
     if prepared.skipped and not getattr(args, "skip_unloadable", False):
         args._parser.error(
-            f"{len(prepared.skipped)} task(s) could not load; see {prepared.output_dir / 'skipped.json'}. "
-            "Use --skip-unloadable to explicitly run only the loadable subset."
+            f"{len(prepared.skipped)} task(s) could not load (see {prepared.output_dir / 'skipped.json'}):"
+            f"{_listed(prepared.skipped)}\nUse --skip-unloadable to explicitly run only the loadable subset."
         )
     try:
         config_path, tokens = build_run(prepared, agent, sandbox=sandbox, overrides=overrides)
@@ -461,9 +842,19 @@ def validate_target(args: argparse.Namespace, overrides: list[str]) -> None:
             output_root=DEFAULT_OUTPUT_ROOT / "validation",
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
+            build=build_options_from_overrides(overrides),
             rows_name=_rows_name(agent),
         )
-    except (HarborTaskError, HubError, ValueError, OSError, yaml.YAMLError) as exc:
+    except (
+        HarborTaskError,
+        HubError,
+        BuildError,
+        ImageConfigError,
+        ConfigError,
+        ValueError,
+        OSError,
+        yaml.YAMLError,
+    ) as exc:
         args._parser.error(str(exc))
     unvalidated = [task.task_id for task in prepared.tasks if not task.has_solution]
     prepared = replace(prepared, tasks=[task for task in prepared.tasks if task.has_solution])
