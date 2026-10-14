@@ -105,3 +105,59 @@ def test_looping_prose_does_not_become_an_answer_prefix():
 def test_later_markers_are_considered_across_languages():
     assert extract_answer("अंतिम उत्तर: A\nFinal answer: B", "MCQ")[0] == "B"
     assert extract_answer("Final answer: B\nअंतिम उत्तर: A", "MCQ")[0] == "A"
+
+
+@pytest.mark.parametrize(
+    "text,kind,expected",
+    [
+        ("Final Answer: (C), as it yields a valid configuration.", "MCQ", "C"),
+        ("Final Answer: (A), (B), (D) are correct; (C) is not correct.", "MCQ(multiple)", "ABD"),
+        ("A is correct and B is correct", "MCQ(multiple)", "AB"),
+        ("Final answer: A is correct and B is correct", "MCQ(multiple)", "AB"),
+        ("either A or B is correct", "MCQ", "None"),
+        ("Final answer: either A or B is correct", "MCQ(multiple)", "None"),
+        ("Final answer: A is correct; A is not correct", "MCQ", "None"),
+        ("Final answer: A is correct and B is correct", "MCQ", "None"),
+        ("Final answer: (B) is not correct", "MCQ", "None"),
+        ("Final answer: 1,000", "Integer", "None"),
+        ("Final answer: 2, 3", "Integer", "None"),
+        ("Final answer: The value is 2 + 3", "Integer", "5"),
+        ("the value of m is 2 and the value of n is 5", "Integer", "None"),
+        ("Final answer: The value is 2 + x", "Numeric", "None"),
+        ("Final answer: 2; 3", "Numeric", "None"),
+        ("Final answer: 2 widgets", "Numeric", "None"),
+        ("Final answer: (2 + 3)", "Integer", "5"),
+        ("Final answer: m = 2 and n = 5", "Integer", "None"),
+        ("Final answer: m = 2 n = 5", "Integer", "None"),
+        ("Final answer: The value of m is 2 and the value of n is 5", "Integer", "None"),
+        ("Final answer: The value is 2 / x", "Numeric", "None"),
+        ("Final answer: 2 kg and 3 m", "Numeric", "None"),
+        ("Final answer: 2, the value is 5", "Integer", "None"),
+        ("Final answer: 2; n = 5", "Integer", "None"),
+        ("Final answer: (B) wrong because of symmetry", "MCQ", "None"),
+        ("अंतिम उत्तर: (B) अभिक्रिया ऊष्माक्षेपी है", "MCQ", "B"),
+        ("अंतिम उत्तर: (B) किया गया", "MCQ", "B"),
+        ("حتمی جواب: (B) کیا گیا", "MCQ", "B"),
+        ("अंतिम उत्तर: (A) या (B)", "MCQ", "None"),
+        ("حتمی جواب: (A) یا (B)", "MCQ", "None"),
+        ("अंतिम उत्तर: (B) सही नहीं है", "MCQ", "None"),
+    ],
+)
+def test_review_regressions(text, kind, expected):
+    answer, method = extract_answer(text, kind)
+    assert answer == expected
+    assert (method == "unparsed") == (expected == "None")
+
+
+@pytest.mark.parametrize("word", ["अभिक्रिया", "किया", "दिया", "کیا", "دیا", "या\u0301", "\u0301یا", "या\u200d"])
+def test_uncertainty_substrings_with_combining_marks_are_not_words(word):
+    from resources_servers.jeebench.extraction import uncertain
+
+    assert not uncertain(word)
+
+
+@pytest.mark.parametrize("word", ["या", "अथवा", "नहीं", "یا", "either", "not"])
+def test_standalone_uncertainty_words_with_punctuation(word):
+    from resources_servers.jeebench.extraction import uncertain
+
+    assert uncertain(f"({word})")

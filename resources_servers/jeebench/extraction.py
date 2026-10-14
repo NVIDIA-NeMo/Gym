@@ -15,7 +15,7 @@ import unicodedata
 from collections.abc import Callable
 
 
-PARSER_VERSION = "indic-formats-v2.6"
+PARSER_VERSION = "indic-formats-v2.7"
 MAX_PAYLOAD_CHARS = 4096
 # Answer/option vocabulary covers the fourteen languages in the Indic campaign.
 ANSWER_WORDS = (
@@ -93,6 +93,7 @@ COPULAS = (
     "होता है",
     "होती है",
     "হ'ল",
+    "হ’ল",
     "হল",
     "হয়",
     "হৈছে",
@@ -240,10 +241,25 @@ VALUE_WORDS = (
     "تعداد",
 )
 UNCERTAIN = re.compile(
-    r"\b(?:or|maybe|perhaps|uncertain|might|either|not|neither|incorrect|false)\b"
-    r"|या|अथवा|नहीं|गलत|অথবা|ভুল|અથવા|ಅಥವಾ|അല്ലെങ്കിൽ|ଅଥବା|ਜਾਂ|அல்லது|లేదా|یا",
+    r"or|maybe|perhaps|uncertain|might|either|not|neither|incorrect|false"
+    r"|या|अथवा|नहीं|गलत|অথবা|ভুল|અથવા|ಅಥವಾ|അല്ലെങ്കിൽ|ଅଥବା|ਜਾਂ|அல்லது|లేదా|یا|" + NEGATIVE_PATTERN,
     re.IGNORECASE,
 )
+
+
+def uncertain(text: str) -> bool:
+    """Match whole words, including combining marks and Indic/Arabic joiners."""
+
+    def word_char(char: str) -> bool:
+        return bool(char) and (unicodedata.category(char)[0] in "LMN" or char in "_\u200c\u200d")
+
+    return any(
+        not word_char(text[m.start() - 1] if m.start() else "")
+        and not word_char(text[m.end()] if m.end() < len(text) else "")
+        for m in UNCERTAIN.finditer(text)
+    )
+
+
 LOCAL_WORDS = "|".join(sorted(map(re.escape, ANSWER_WORDS + OPTION_WORDS), key=len, reverse=True))
 ENGLISH_MARKER = re.compile(
     r"(?i)\b(?:(?:final\s+|correct\s+)?answers?|correct\s+(?:options?|choices?|statements?))"
@@ -341,10 +357,6 @@ def numeric_value(text: str) -> str | None:
         return None
 
 
-SCALAR_LITERAL = (
-    rf"(?:\\(?:dfrac|tfrac|frac)\{{[^{{}}]+\}}\{{[^{{}}]+\}}|{NUMBER}\s*/\s*{NUMBER}|{NUMBER})"
-    r"(?:\s*(?:\\times|\\cdot|×|\*)\s*10(?:\^\{[+-]?\d+\}|\^[+-]?\d+))?"
-)
 COPULA_PATTERN = "|".join(sorted(map(re.escape, COPULAS), key=len, reverse=True))
 VALUE_PATTERN = "|".join(sorted(map(re.escape, VALUE_WORDS), key=len, reverse=True))
 POSITIVE_PATTERN = "|".join(sorted(map(re.escape, POSITIVE_WORDS), key=len, reverse=True))
@@ -358,24 +370,20 @@ CONCLUSION_PATTERN = re.compile(
 
 
 def scalar_prefix(text: str, kind: str, normalize: Callable[[str, str], str | None]) -> str | None:
-    """Read one scalar at the start of an explicitly selected payload."""
+    """Require a complete scalar expression; never discard a numeric suffix."""
     text = clean_math(text).lstrip(" :：=≈~")
-    text = re.sub(r"^\([^()]{0,80}\)\s*[:：]?\s*", "", text)
-    match = re.match(SCALAR_LITERAL, text)
-    if not match:
-        return None
-    number = numeric_value(match[0])
-    answer = normalize(number, kind) if number is not None else None
-    if answer is None:
-        return None
-    suffix = text[match.end() :].lstrip()
-    # A selected scalar may be followed by a unit, terminator, or explanation.
-    if not suffix or suffix.startswith((".", "।", "۔", ",", ";", ")", "(", "%")):
-        return answer
-    unit_end = re.match(r"(?:\\?[A-Za-z°Ω]+(?:\^?\{?[+-]?\d+\}?)?[\s·*/,-]*)+", suffix)
-    if unit_end:
-        rest = suffix[unit_end.end() :].lstrip()
-        if not rest or rest.startswith((".", "।", "۔", ",", ";", ")", "(")):
+    number = numeric_value(text.removesuffix("%"))
+    if number is not None:
+        return normalize(number, kind)
+    # Accept only these redundant annotations, not arbitrary prose or a second value.
+    annotation = re.fullmatch(
+        r"(.+?)[.।۔]\s*\((?:([0-9]+) is a non-negative integer|[A-Za-z]\s*=\s*([0-9]+))\.?\)", text
+    )
+    if annotation:
+        number = numeric_value(annotation[1])
+        answer = normalize(number, kind) if number is not None else None
+        repeated = normalize(annotation[2] or annotation[3], kind)
+        if answer is not None and repeated is not None and float(answer) == float(repeated):
             return answer
     return None
 
@@ -383,37 +391,33 @@ def scalar_prefix(text: str, kind: str, normalize: Callable[[str, str], str | No
 def explicit_scalar(
     text: str, kind: str, normalize: Callable[[str, str], str | None], *, allow_assignment: bool = True
 ) -> str | None:
-    """Extract a scalar from an answer/value assertion, never from free calculations."""
+    """Extract one complete value assertion; reject multiple asserted quantities."""
     if len(text) > MAX_PAYLOAD_CHARS:
         return None
     text = clean_math(text).strip()
-    if UNCERTAIN.search(text):
+    if uncertain(text):
         return None
     answer = scalar_prefix(text, kind, normalize)
     if answer is not None:
         return answer
-    relations = []
     relation = re.compile(
-        rf"(?:{VALUE_PATTERN})(?:\s*(?:=|≈|:)|[^\n.!?।۔=]{{0,60}}?(?:{COPULA_PATTERN}))\s*({SCALAR_LITERAL})",
+        rf"(?:{VALUE_PATTERN})(?:\s*(?:=|≈|:)|[^\n.!?।۔=]{{0,60}}?(?:{COPULA_PATTERN}))\s*(?=[+\-\d.(\\])",
         re.I,
     )
-    for match in relation.finditer(text):
-        number = numeric_value(match[1])
-        answer = normalize(number, kind) if number is not None else None
-        if answer is not None:
-            relations.append(answer)
+    relations = list(relation.finditer(text))
     if relations:
-        return relations[-1]
-    # A short scalar assignment in a selected answer is also explicit.
+        if len(relations) != 1 or re.search(NUMBER, text[: relations[0].start()]):
+            return None
+        return scalar_prefix(text[relations[0].end() :], kind, normalize)
     if not allow_assignment:
         return None
-    assignments = []
-    for match in re.finditer(rf"(?<![\w])(?:[A-Za-zΑ-ω]\w*(?:_\{{?\w+\}}?)?)\s*(?:=|≈)\s*({SCALAR_LITERAL})", text):
-        number = numeric_value(match[1])
-        answer = normalize(number, kind) if number is not None else None
-        if answer is not None:
-            assignments.append(answer)
-    return assignments[-1] if len(set(assignments)) == 1 else None
+    assignments = list(re.finditer(r"(?<![\w])(?:[A-Za-zΑ-ω]\w*(?:_\{?\w+\}?)?)\s*(?:=|≈)\s*", text))
+    if len(assignments) != 1:
+        return None
+    prefix = CONCLUSION_PATTERN.sub("", text[: assignments[0].start()]).strip(" ,:।۔.")
+    if prefix:
+        return None
+    return scalar_prefix(text[assignments[0].end() :], kind, normalize)
 
 
 def _roman_to_option(match: re.Match[str]) -> str:
@@ -431,41 +435,71 @@ def explicit_choices(
     direct = normalize(text, kind)
     if direct is not None:
         return direct
-    label = r"(?:[\[(]\s*[A-Da-d]\s*[\])]|(?<![A-Za-z])[A-Da-d](?![A-Za-z]))"
-    connector = r"(?:\s*(?:,|;|&|\\&|/|(?:" + "|".join(map(re.escape, CONNECTORS)) + r"))\s*)"
+    # Bare lowercase letters in prose (especially the article "a") are not labels.
+    label = r"(?:[\[(]\s*[A-Da-d]\s*[\])]|(?<!\w)(?-i:[A-D])(?!\w))"
+    connector = r"(?:\s*(?:,|&|\\&|/|(?:" + "|".join(map(re.escape, CONNECTORS)) + r"))\s*)"
     labels = label + r"(?:" + connector + label + r")*"
 
     def normalize_labels(value: str) -> str | None:
-        found = re.findall(r"[\[(]\s*([A-Da-d])\s*[\])]|(?<![A-Za-z])([A-Da-d])(?![A-Za-z])", value)
+        found = re.findall(r"[\[(]\s*([A-Da-d])\s*[\])]|(?<!\w)([A-D])(?!\w)", value)
         value = "".join((left or right).upper() for left, right in found)
-        return normalize(value, kind) if value else None
+        return normalize(value, "MCQ(multiple)") if value else None
 
-    candidates = []
-    for pattern in (
-        re.compile(rf"({labels})\s*(?:(?:{COPULA_PATTERN})\s*)?(?:{POSITIVE_PATTERN})", re.I),
-        re.compile(
-            rf"(?:{POSITIVE_PATTERN})\s*(?:{OPTION_PATTERN})?\s*(?:(?:{COPULA_PATTERN})\s*)?[:：-]?\s*({labels})",
+    text = CONCLUSION_PATTERN.sub("", text).strip(" ,:।۔.")
+    text = re.sub(r"(?i)^(?:after discussion\s+)?I conclude(?: that)?\s+", "", text)
+    # Split only between assertions, never within an option list.
+    clauses = re.split(rf";|(?<=[a-z])\s*(?:,|\band\b)(?=\s*{label}\s+(?:{COPULA_PATTERN}))", text)
+    yes, no = set(), set()
+    for clause in clauses:
+        clause = clause.strip(" ,:।۔.")
+        negative = re.fullmatch(
+            rf"({labels})\s+(?:(?:{COPULA_PATTERN})\s+)?(?:{NEGATIVE_PATTERN})(?!\w)"
+            rf"(?:\s+(?:{POSITIVE_PATTERN}|{COPULA_PATTERN}))*[.।۔]*",
+            clause,
             re.I,
-        ),
-        re.compile(
-            rf"\b(?:this|it|answer|result)\b\s*(?:(?:{COPULA_PATTERN})\s*)"
-            rf"(?:the\s+)?(?:{OPTION_PATTERN})\s*[:：-]?\s*({labels})",
+        )
+        if negative:
+            no.update(normalize_labels(negative[1]) or "")
+            continue
+        if uncertain(clause):
+            return None
+        positive = re.fullmatch(
+            rf"({labels})\s+(?:(?:{COPULA_PATTERN})\s+)?(?:{POSITIVE_PATTERN})(?!\w)"
+            rf"(?:\s+(?:{COPULA_PATTERN}))*[.।۔]*",
+            clause,
             re.I,
-        ),
-    ):
-        for match in pattern.finditer(text):
-            answer = normalize_labels(match[1])
-            if answer is not None:
-                candidates.append((match.start(), answer))
-    if selected:
-        # A boxed/final payload can contain an inflected or misspelled option
-        # noun between an explicit correctness word and the selected labels.
-        pattern = re.compile(rf"(?:{POSITIVE_PATTERN})[^()\[\]\n]{{0,60}}?({labels})", re.I)
-        for match in pattern.finditer(text):
-            answer = normalize_labels(match[1])
-            if answer is not None:
-                candidates.append((match.start(), answer))
-    return max(candidates)[1] if candidates else None
+        )
+        if positive:
+            yes.update(normalize_labels(positive[1]) or "")
+            continue
+        # A positive introductory phrase must lead directly to the selected list.
+        prefix = re.fullmatch(
+            rf"(?:{POSITIVE_PATTERN})(?!\w)\s*(?:{OPTION_PATTERN})?\s*"
+            rf"(?:(?:{COPULA_PATTERN})\s*)?[:：-]?\s*({labels})[.।۔]*",
+            clause,
+            re.I,
+        )
+        if prefix:
+            yes.update(normalize_labels(prefix[1]) or "")
+            continue
+        # Inflected Indic nouns are allowed only before an explicitly bracketed list.
+        local_prefix = re.fullmatch(
+            rf"(?:{POSITIVE_PATTERN})(?!\w)[^A-Za-z0-9()\[\]\n]*\s*({labels})[.।۔]*", clause, re.I
+        )
+        if local_prefix:
+            yes.update(normalize_labels(local_prefix[1]) or "")
+            continue
+        leading = re.match(rf"({labels})(.*)$", clause, re.S)
+        if selected and leading:
+            tail = leading[2].strip(" ,:।۔.")
+            # Preserve a selected list before its explanation, but never hide another label.
+            if not re.search(label, tail) and not uncertain(tail):
+                yes.update(normalize_labels(leading[1]) or "")
+                continue
+        return None
+    if not yes or yes & no:
+        return None
+    return normalize("".join(sorted(yes)), kind)
 
 
 def payload_answer(
@@ -482,7 +516,7 @@ def payload_answer(
         # A scalar equation can state its value on the right of the last equality.
         # Do not accept lists of assignments, inequalities, or prose alternatives.
         equation = re.sub(r"\\(?:approx|simeq)(?![A-Za-z])|≈", "=", text)
-        if "=" in equation and not re.search(r"[,;<>]|\\(?:leq?|geq?|pm)\b|\b(?:or|and)\b", equation):
+        if equation.count("=") == 1 and not re.search(r"[,;<>]|\\(?:leq?|geq?|pm)\b|\b(?:or|and)\b", equation):
             left, right = equation.rsplit("=", 1)
             words = re.findall(r"(?<!\\)\b[A-Za-z]{3,}\b", left)
             allowed = {
@@ -516,7 +550,7 @@ def payload_answer(
                 "left",
                 "right",
             }
-            if all(word in allowed for word in words):
+            if all(word in allowed for word in words) and not re.search(r"[^\x00-\x7fΑ-ω]", left):
                 text = right.strip()
         number = numeric_value(text)
         answer = normalize(number, kind) if number is not None else None
@@ -526,57 +560,7 @@ def payload_answer(
     text = re.sub(r"(?i)^(?:(?:the\s+)?(?:correct\s+)?(?:options?|choices?|answers?)\s*(?:are|is|:)?)\s*", "", text)
     text = re.sub(r"^(?:(?:सही|अंतिम|केवल|correct)\s+)?(?:" + LOCAL_WORDS + r"|कथन)\s*[:：]?\s*", "", text)
     text = re.sub(rf"^(?:(?:{COPULA_PATTERN})|হ'ল)\s*[:：-]?\s*", "", text, flags=re.I)
-    text = re.sub(r"(?i)\b(?:" + "|".join(CONNECTORS) + r")\b", ",", text)
-    # Explicit positive/negative lists in the same answer (common in Indic prose).
-    clauses = re.fullmatch(
-        r"([A-Da-d\s,()\[\]&]+)\s+(?:सही|सत्य)\s*(?:हैं|है)?[;।.]\s*"
-        r"(?:विकल्प\s+|कथन\s+)?([A-Da-d\s,()\[\]&]+)\s+(?:गलत|असत्य)\s*(?:हैं|है)?[।.]*",
-        text,
-    )
-    if clauses:
-        yes = normalize(clauses[1], "MCQ(multiple)")
-        no = normalize(clauses[2], "MCQ(multiple)")
-        if yes and no and not set(yes) & set(no):
-            return normalize(yes, kind)
-        return None
-    # The enclosing marker may already say "correct options", leaving a
-    # payload of only the positive list followed by an explicit negative list.
-    if ";" in text:
-        yes_text, no_text = text.split(";", 1)
-        no_match = re.match(
-            rf"([A-Da-d\s,(){{}}\[\]&]+)\s+(?:{NEGATIVE_PATTERN})(?:\s+(?:{COPULA_PATTERN}))?",
-            no_text.strip(),
-            re.I,
-        )
-        yes = normalize(yes_text, "MCQ(multiple)")
-        no = normalize(no_match[1], "MCQ(multiple)") if no_match else None
-        if yes and no and not set(yes) & set(no):
-            return normalize(yes, kind)
-    # A positive assertion after a pure option list is still an explicit selection.
-    positive = re.fullmatch(
-        r"([A-Da-d\s,;(){}\[\]&]+)\s+(?:(?:are|is)\s+(?:the\s+)?correct(?:\s+(?:options?|answers?))?"
-        r"|(?:सभी\s+)?(?:सही|सत्य)\s*(?:हैं|है)?|हैं|है|only|হয়|সঠিক|ശരിയാണ്|சரியானவை|సరైనవి)\s*[.।۔]*",
-        text,
-        re.I,
-    )
-    if positive:
-        text = positive[1]
-    choices = explicit_choices(text, kind, normalize, selected=True)
-    if choices is not None:
-        return choices
-    if UNCERTAIN.search(text):
-        return None
-    # TeX spacing and escaped ampersands occur in multi-select lists.
-    text = text.replace(r"\&", "&")
-    direct = normalize(text, kind)
-    if direct is not None:
-        return direct
-    # Explicit single option followed by its description; reject another label.
-    match = re.match(r"^(?:\(([A-Da-d])\)|\[([A-Da-d])\]|([A-Da-d])\s*[.):–—-])(?:\s+|$)(.*)$", text, re.S)
-    if match and not re.search(r"\([A-Da-d]\)|\[[A-Da-d]\]|\b[A-D][.)](?:\s|$)", match[4]):
-        answer = next(group for group in match.groups()[:3] if group).upper()
-        return normalize(answer, kind)
-    return None
+    return explicit_choices(text.replace(r"\&", "&"), kind, normalize, selected=True)
 
 
 def match_option_text(payload: str, question: str) -> str | None:
@@ -728,13 +712,6 @@ def extract_formatted_answer(
     # Simple English conclusions with an explicit scalar, rather than arbitrary
     # last-number heuristics. Unsupported prose is left for manual extraction.
     if kind in {"Numeric", "Integer"}:
-        match = re.search(
-            r"(?i)\b(?:value|answer|result|minimum|maximum|product|sum|number|mass)\b[^\n]*?\bis\s+(.+)$", final
-        )
-        if match:
-            answer = payload_answer(match[1], kind, normalize, question=question)
-            if answer is not None:
-                return answer, "concluding_value"
         # A final 'Thus, r^2 = 2' is a stated value, not a request to solve r.
         conclusion = re.sub(r"(?i)^(?:thus|hence|therefore|so|अतः|इसलिए)\s*[,，:]?\s*", "", final)
         if conclusion != final:

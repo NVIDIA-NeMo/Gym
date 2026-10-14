@@ -13,7 +13,8 @@ from resources_servers.jeebench.rescore_campaign import digest
 from resources_servers.jeebench.scoring import compute_score
 
 
-def audit(output: Path) -> dict:
+def audit(output: Path, *, write_report: bool = True) -> dict:
+    """Check current artifacts; optionally avoid rewriting an existing attestation."""
     if not (output / "COMPLETE").exists():
         raise ValueError("Rescore has not completed")
     report = json.loads((output / "summary.json").read_text())
@@ -35,6 +36,8 @@ def audit(output: Path) -> dict:
         corrected = output / source["model"] / source["language"] / "rollouts.jsonl"
         if digest(original) != source["source_sha256"] or digest(corrected) != source["corrected_sha256"]:
             raise ValueError(f"Artifact hash mismatch: {corrected}")
+        if digest(original.parent / "validation.json") != source["source_validation_sha256"]:
+            raise ValueError(f"Validation hash mismatch: {original}")
         count = 0
         with original.open() as before, corrected.open() as after:
             for old_line, new_line in zip_longest(before, after):
@@ -85,7 +88,8 @@ def audit(output: Path) -> dict:
             "model aggregates independently recomputed",
         ],
     }
-    (output / "integrity_audit.json").write_text(json.dumps(result, indent=2) + "\n")
+    if write_report:
+        (output / "integrity_audit.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
 
 

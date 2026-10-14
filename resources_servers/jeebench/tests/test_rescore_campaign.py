@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import shutil
 
 import pytest
 
@@ -148,4 +149,63 @@ def test_monotonic_rescore_requires_audited_baseline(tmp_path, completed_campaig
     rows = [json.loads(line) for line in (output / "model/hi/rollouts.jsonl").read_text().splitlines()]
     assert [row["extracted_answer"] for row in rows] == ["A", "A", "None"]
     assert calls == [""]  # Only the unresolved reasoning-only response is revisited.
+    assert audit(output)["rows_checked"] == 3
+
+
+def test_baseline_from_different_generations_is_rejected(tmp_path, completed_campaign):
+    campaign, rows, _ = completed_campaign
+    baseline = tmp_path / "baseline"
+    rescore(campaign, baseline)
+    audit(baseline)
+    current = tmp_path / "current"
+    shutil.copytree(campaign, current)
+    rows[0]["response"]["output"][0]["content"][0]["text"] = "Final answer: B"
+    (current / "model/hi/rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    # The old campaign remains valid, but cannot attest a new generation of the same task.
+    assert audit(baseline)["status"] == "passed"
+    output = tmp_path / "rejected"
+    with pytest.raises(ValueError, match="Baseline source does not match"):
+        rescore(current, output, baseline_corrected=baseline)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("artifact", ["source", "corrected", "validation", "code", "aggregate"])
+def test_baseline_is_reaudited_before_reuse(tmp_path, completed_campaign, artifact):
+    campaign, _, _ = completed_campaign
+    baseline = tmp_path / "baseline"
+    rescore(campaign, baseline)
+    audit(baseline)
+    paths = {
+        "source": campaign / "model/hi/rollouts.jsonl",
+        "corrected": baseline / "model/hi/rollouts.jsonl",
+        "validation": campaign / "model/hi/validation.json",
+        "code": baseline / "code/extraction.py",
+    }
+    if artifact == "aggregate":
+        path = baseline / "summary.json"
+        report = json.loads(path.read_text())
+        report["models"]["model"]["score"] = 100
+        path.write_text(json.dumps(report))
+    else:
+        path = paths[artifact]
+        path.write_text(path.read_text() + "\n")
+    output = tmp_path / "rejected"
+    with pytest.raises(ValueError):
+        rescore(campaign, output, baseline_corrected=baseline)
+    assert not output.exists()
+
+
+def test_baseline_answers_come_from_verified_rollouts_not_changes(tmp_path, completed_campaign):
+    campaign, _, _ = completed_campaign
+    baseline = tmp_path / "baseline"
+    rescore(campaign, baseline)
+    audit(baseline)
+    changes = baseline / "model/hi/changes.jsonl"
+    changes.write_text(
+        json.dumps({"task_id": "correct", "answer": "B", "method": "boxed", "extraction_failed": False}) + "\n"
+    )
+    output = tmp_path / "next"
+    rescore(campaign, output, baseline_corrected=baseline)
+    rows = [json.loads(line) for line in (output / "model/hi/rollouts.jsonl").read_text().splitlines()]
+    assert [row["extracted_answer"] for row in rows] == ["A", "A", "None"]
     assert audit(output)["rows_checked"] == 3

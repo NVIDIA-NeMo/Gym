@@ -60,6 +60,7 @@ def rescore(campaign: Path, output: Path, *, baseline_corrected: Path | None = N
     if not shards:
         raise ValueError("No completed language shards found")
     baseline_report = None
+    baseline_sources = {}
     if baseline_corrected is not None:
         if not (baseline_corrected / "COMPLETE").exists():
             raise ValueError(f"Incomplete corrected baseline: {baseline_corrected}")
@@ -67,6 +68,22 @@ def rescore(campaign: Path, output: Path, *, baseline_corrected: Path | None = N
         baseline_audit = baseline_corrected / "integrity_audit.json"
         if not baseline_audit.exists() or json.loads(baseline_audit.read_text()).get("status") != "passed":
             raise ValueError(f"Corrected baseline has no passing integrity audit: {baseline_corrected}")
+        # A prior attestation is not evidence that its artifacts are still unchanged.
+        from resources_servers.jeebench.audit_rescore import audit
+
+        audit(baseline_corrected, write_report=False)
+        for entry in baseline_report["sources"]:
+            key = (entry["model"], entry["language"])
+            if key in baseline_sources:
+                raise ValueError(f"Duplicate baseline shard: {key}")
+            baseline_sources[key] = entry
+        for shard in shards:
+            key = (shard.parent.name, shard.name)
+            entry = baseline_sources.get(key)
+            if entry is None or digest(shard / "rollouts.jsonl") != entry["source_sha256"]:
+                raise ValueError(f"Baseline source does not match current shard: {shard}")
+            if digest(shard / "validation.json") != entry["source_validation_sha256"]:
+                raise ValueError(f"Baseline validation does not match current shard: {shard}")
     output.mkdir(parents=True, exist_ok=False)
     provenance = output / "code"
     provenance.mkdir()
@@ -85,19 +102,29 @@ def rescore(campaign: Path, output: Path, *, baseline_corrected: Path | None = N
     manifests = []
     for shard in shards:
         model, lang = shard.parent.name, shard.name
-        baseline_changes = {}
+        baseline_rows = {}
         if baseline_corrected is not None:
-            baseline_shard = baseline_corrected / model / lang
-            if not (baseline_shard / "summary.json").exists():
-                raise ValueError(f"Corrected baseline is missing shard: {model}/{lang}")
-            with (baseline_shard / "changes.jsonl").open() as handle:
-                baseline_changes = {entry["task_id"]: entry for line in handle if (entry := json.loads(line))}
+            baseline_path = baseline_corrected / model / lang / "rollouts.jsonl"
+            baseline_hash = baseline_sources[(model, lang)]["corrected_sha256"]
+            if digest(baseline_path) != baseline_hash:
+                raise ValueError(f"Baseline changed after audit: {baseline_path}")
+            with baseline_path.open() as handle:
+                for line in handle:
+                    entry = json.loads(line)
+                    identity = entry["verifier_metadata"]["task_id"]
+                    if identity in baseline_rows:
+                        raise ValueError(f"Duplicate baseline task: {identity}")
+                    baseline_rows[identity] = entry
+            if set(baseline_rows) != inputs[lang] or digest(baseline_path) != baseline_hash:
+                raise ValueError(f"Incomplete or changed baseline shard: {baseline_path}")
         validation_path = shard / "validation.json"
         validation = json.loads(validation_path.read_text())
         if any(validation.get(key) != "passed" for key in ("post_thinking_scoring_audit", "sampling_audit")):
             raise ValueError(f"Missing passing audits: {shard}")
         source = shard / "rollouts.jsonl"
         before_hash = digest(source)
+        if baseline_corrected is not None and before_hash != baseline_sources[(model, lang)]["source_sha256"]:
+            raise ValueError(f"Baseline source does not match current shard: {shard}")
         destination = output / model / lang
         destination.mkdir(parents=True)
         seen = set()
@@ -121,11 +148,10 @@ def rescore(campaign: Path, output: Path, *, baseline_corrected: Path | None = N
                     )
                 final = visible_answer(row["response"])
                 # Gold is accessed for scoring only AFTER answer extraction.
-                baseline = baseline_changes.get(identity)
-                baseline_failed = baseline["extraction_failed"] if baseline else row["extraction_failed"]
-                if baseline_corrected is not None and not baseline_failed:
-                    answer = baseline["answer"] if baseline else row["extracted_answer"]
-                    method = baseline["method"] if baseline else row["extraction_method"]
+                baseline = baseline_rows.get(identity)
+                if baseline is not None and not baseline["extraction_failed"]:
+                    answer = baseline["extracted_answer"]
+                    method = baseline["extraction_method"]
                 else:
                     answer, method = extract_answer(final, meta["question_type"], question=row.get("question", ""))
                 score = compute_score(meta["gold"], answer, meta["question_type"])
