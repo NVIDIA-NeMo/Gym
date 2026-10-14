@@ -257,7 +257,9 @@ class SupportsSandboxBackgroundServices(Protocol):
         command: str,
         *,
         cwd: str | None = None,
+        env: dict[str, str] | None = None,
         timeout_s: int | float | None = None,
+        user: str | int | None = None,
     ) -> SandboxExecResult: ...
 
 

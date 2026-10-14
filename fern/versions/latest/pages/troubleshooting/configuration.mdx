@@ -269,10 +269,11 @@ Start it with: `gym env start`. If it is already running on a different host or 
 **When**: `gym eval run --no-serve` collects against servers that are already running, and found nothing
 listening at the head server address in its config. Either no `gym env start` is running, or it was started
 with a different head server address than this command is using. That address is `head_server.host` /
-`head_server.port` (default `127.0.0.1:11000`). When `head_server.host` is not set, the host is the machine's
-IP address if [`use_absolute_ip`](/reference/configuration#multi-node-configuration) is `true`, and otherwise
-`default_host` (default `127.0.0.1`), so a `gym env start` run with either setting can listen on a different
-address than a command run without it.
+`head_server.port` (default `127.0.0.1:11000`). When `head_server.host` is not set, an explicit
+`default_host` takes precedence. If neither host setting is supplied,
+[`use_absolute_ip`](/reference/configuration#multi-node-configuration) selects the machine's resolved IP
+address when `true`, or `127.0.0.1` when `false`. A `gym env start` run with different host settings can
+therefore listen on a different address than the collecting command expects.
 
 **Fix**: Check which head server address `gym env start` used (from its config and overrides), then run
 `gym env status` with matching overrides before concluding that nothing is running. `gym env status` only

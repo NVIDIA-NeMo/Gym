@@ -1621,7 +1621,7 @@ contested: second_inner
         hydra_main_mock.return_value = hydra_main_wrapper
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
-        expected_ip = "abcd ip"
+        expected_ip = "192.0.2.20"
         gethostbyname_mock = MagicMock(return_value=expected_ip)
         monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", gethostbyname_mock)
 
@@ -3496,3 +3496,33 @@ class TestRolloutRunLabels:
 
         assert labels == {"judge": "judge", "judge_twin": "judge_twin", "grader": "grader"}
         assert label_runs(dict(reversed(list(agent_by_key.items())))) == labels
+
+
+@mark.parametrize("default_host", [None, "192.0.2.20"])
+@mark.parametrize("resolved", [None, "127.0.1.1", "0.0.0.0"])
+def test_absolute_ip_honors_explicit_host_and_reports_unusable_hostname(monkeypatch, default_host, resolved):
+    from socket import gaierror
+
+    from nemo_gym.config_types import ConfigError
+
+    resolver = (
+        MagicMock(side_effect=gaierror("hostname does not resolve"))
+        if resolved is None
+        else MagicMock(return_value=resolved)
+    )
+    monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", resolver)
+    settings = {"use_absolute_ip": True}
+    if default_host:
+        settings["default_host"] = default_host
+    parse_config = GlobalConfigDictParserConfig(
+        initial_global_config_dict=OmegaConf.create(settings),
+        skip_load_from_cli=True,
+        skip_load_from_dotenv=True,
+    )
+    if default_host:
+        config = GlobalConfigDictParser().parse(parse_config)
+        assert config.head_server.host == default_host
+        resolver.assert_not_called()
+    else:
+        with raises(ConfigError, match="default_host=.*reachable from the sandbox"):
+            GlobalConfigDictParser().parse(parse_config)
