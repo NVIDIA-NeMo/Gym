@@ -35,6 +35,7 @@ LOGGER = logging.getLogger(__name__)
 
 VERIFIER_LOGS_DIR = "/logs/verifier"
 AGENT_LOGS_DIR = "/logs/agent"
+ARTIFACTS_DIR = "/logs/artifacts"
 # Where the oracle finds the task's reference solution: Harbor's oracle copies ``solution/`` here
 # (0.22.0 ``agents/oracle.py``, ``EnvironmentPaths.solution_dir``) and runs ``solve.sh`` from it.
 SOLUTION_DIR = "/solution"
@@ -49,6 +50,10 @@ class HarborSession:
     identity: tuple[EpisodeId, TaskId]
     sandbox: AsyncSandbox
     workdir: str
+    # The episode key the sandbox is owned under (see ``_sandboxes``).
+    session_id: str
+    # Separate verification stops the agent's sandbox before test.sh runs; cleanup must not stop it twice.
+    agent_sandbox_stopped: bool = False
     # Environment the harness runs its commands with, handed over in its sandbox access: the host-resolved
     # ``[solution].env`` when the harness is the oracle, nothing otherwise.
     agent_env: dict[str, str] = field(default_factory=dict)

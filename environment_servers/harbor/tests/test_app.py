@@ -19,9 +19,12 @@ from yarl import URL
 
 from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S
 from environment_servers.harbor.tests.conftest import (
+    SEPARATE_TOML,
     SOLVE_SH,
     TASK_TOML,
+    AgentSandbox,
     FakeSandbox,
+    archive_of,
     episode,
     make_server,
     run_episode,
@@ -29,6 +32,7 @@ from environment_servers.harbor.tests.conftest import (
 from environment_servers.harbor.verifier import (
     EXIT_RECORD_NAME,
     TIMEOUT_WRAPPER_GUARD,
+    _verifier_image,
     parse_exit_record,
     parse_reward_file,
     select_reward,
@@ -37,6 +41,7 @@ from environment_servers.harbor.verifier import (
 from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.tasks.harbor import load_task
+from nemo_gym.tasks.harbor.models import HarborEnvironment
 
 
 def uploaded_file(sandbox, name: str) -> list[bytes]:
@@ -803,6 +808,210 @@ class TestOwnership:
         assert sandbox.stops == 1
         assert not server._sandboxes
 
+    async def test_a_collect_hook_the_sandbox_cannot_run_masks(self, tmp_path, monkeypatch):
+        class HookLost(AgentSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if command.startswith("cp /app/state.db"):
+                    return SandboxExecResult(
+                        stdout="", stderr="container gone", return_code=None, error_type="sandbox"
+                    )
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        agent = HookLost()
+        server, task, _, _ = make_server(tmp_path, monkeypatch, agent, toml=SEPARATE_TOML)
+        result = (await run_episode(server, task)).result
+        assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+        assert "collect hook could not run: sandbox" in result.failure_reason and agent.stopped
+
+    async def test_shared_mode_runs_collect_hooks_before_preparing_tests(self, tmp_path, monkeypatch):
+        toml = (
+            TASK_TOML
+            + '\n[[verifier.collect]]\ncommand = "cp /app/state.db /logs/artifacts/state.db"\nuser = "root"\n'
+        )
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml)
+        result = (await run_episode(server, task)).result
+        assert result.reward == 1.0 and result.verifier_mode == "shared"
+        commands = [c["command"] for c in sandbox.execs]
+        hook = commands.index("cp /app/state.db /logs/artifacts/state.db")
+        prepare = next(i for i, command in enumerate(commands) if "-mindepth 1 -delete" in command)
+        assert hook < prepare
+        assert sandbox.execs[hook]["user"] == "root" and sandbox.execs[hook]["cwd"] == "/app"
+        assert sandbox.execs[hook]["timeout_s"] == 60 + 30
+
+
+class TestSeparateVerification:
+    def prepared(self, tmp_path, monkeypatch, *, toml=SEPARATE_TOML, verifier=None, agent=None):
+        agent = agent or AgentSandbox()
+        server, task, _, _ = make_server(tmp_path, monkeypatch, agent)
+        (task.path / "task.toml").write_text(toml)
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        verifier = verifier or FakeSandbox()
+        created = []
+
+        async def create_verifier(task, *, episode_key=None):
+            assert agent.stopped, "the agent sandbox must be stopped before the verifier is created"
+            created.append(task.task_id)
+            server._sandboxes[f"{episode_key}/verifier"] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        return server, task, agent, verifier, created
+
+    async def test_collects_artifacts_then_verifies_in_a_fresh_sandbox(self, tmp_path, monkeypatch):
+        server, task, agent, verifier, created = self.prepared(tmp_path, monkeypatch)
+
+        response = await run_episode(server, task)
+
+        result = response.result
+        assert result is not None, response.failure
+        assert result.reward == 1.0 and result.verifier_mode == "separate"
+        assert created == ["hello"]
+        # The main-container collect hook ran in the agent sandbox; the sidecar hook was skipped.
+        hooks = [c for c in agent.execs if "state.db" in c["command"] or "kafka-dump" in c["command"]]
+        assert [h["command"] for h in hooks] == ["cp /app/state.db /logs/artifacts/state.db"]
+        # /logs/artifacts (a directory) and the report (a file) were pulled from the agent sandbox, each
+        # under its own staging root. Verifier logs live in a fresh per-verification folder; the row names it.
+        artifacts = Path(result.verifier_logs_dir) / "artifacts"
+        assert (artifacts / "00" / "logs" / "artifacts" / "state.db").read_text() == "db"
+        assert (artifacts / "01" / "app" / "output" / "report.json").read_bytes() == b'{"ok": true}'
+        # ...the agent sandbox was stopped before test.sh ran, and the verifier got tests plus artifacts back.
+        assert agent.stopped
+        # tests/, /logs/artifacts and the report all travel as archives, so the report keeps its mode bits.
+        assert len(verifier.uploads) == 3 and all(remote.endswith(".tar.gz") for _, remote in verifier.uploads)
+        unpacked = [c["command"] for c in verifier.execs if "tar -xzf" in c["command"]]
+        assert any("-C /logs/artifacts;" in c for c in unpacked) and any("-C /app/output;" in c for c in unpacked)
+        # The two artifacts reach the verifier as the very archives the agent sandbox packed (the modes the agent
+        # left, not the host staging copy's widened ones), extracted there by root tar; the staged trees stay as
+        # diagnostics and the archives are gone once restored.
+        assert agent.archives["/logs/artifacts"] in verifier.uploaded_archives
+        assert agent.archives["/app/output"] in verifier.uploaded_archives
+        assert sorted(p.name for p in artifacts.iterdir()) == ["00", "01"]
+        # A restored directory replaces what the image ships there and is world-writable, as Harbor leaves
+        # it, so a verifier that drops privileges can still write scratch files next to the agent's output.
+        assert any(
+            c["command"]
+            == "mkdir -p /logs/artifacts && find /logs/artifacts -mindepth 1 -delete && chmod 777 /logs/artifacts"
+            for c in verifier.execs
+        )
+        assert any(c["command"] == "mkdir -p /app/output && chmod 777 /app/output" for c in verifier.execs)
+        run = next(c for c in verifier.execs if "test.sh" in c["command"] and "timeout" in c["command"])
+        assert run["command"] == f"chmod +x /tests/test.sh; {verifier_command(300)}"
+        assert (run["env"], run["user"], run["cwd"]) == ({"CHECK": "strict"}, "root", None)
+        assert run["timeout_s"] == 300 + server.config.verifier_grace_s
+        assert verifier.stopped
+        # The episode's final cleanup found nothing left to stop: the agent sandbox is no longer owned.
+        assert not server._sandboxes and not server._sessions
+
+    def test_sandbox_spec_applies_dockerfile_env(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(
+            tmp_path, monkeypatch, dockerfile="FROM ubuntu:24.04\nWORKDIR /app\nENV FOO=bar\nENV MODE=image\n"
+        )
+        (task.path / "task.toml").write_text(TASK_TOML + '\n[environment.env]\nMODE = "toml"\n')
+        task = load_task(task.path)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+
+        spec = server._sandbox_spec(task, "/app")
+
+        # Dockerfile ENV reaches the agent's sandbox, and task.toml [environment.env] wins over it.
+        assert spec.env["FOO"] == "bar" and spec.env["MODE"] == "toml"
+
+        verifier_environment = HarborEnvironment(docker_image="org/verifier:1", env={"ONLY": "verifier"})
+        verifier_spec = server._sandbox_spec(task, None, environment=verifier_environment, role="verifier")
+        assert "FOO" not in verifier_spec.env and verifier_spec.env["ONLY"] == "verifier"
+
+    def test_verifier_sandbox_spec_uses_the_verifier_environment(self, tmp_path, monkeypatch):
+        server, task, _, _, _ = self.prepared(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        spec = server._sandbox_spec(
+            task,
+            None,
+            environment=task.config.verifier.environment,
+            image=_verifier_image(task),
+            role="verifier",
+            ttl=42,
+        )
+        assert spec.image == "org/verifier:1"
+        assert (spec.resources.cpu, spec.resources.memory_mib) == (2, 4096)
+        assert spec.ttl_s == 42 and spec.metadata["harbor_role"] == "verifier"
+
+    async def test_seed_rejects_a_verifier_that_must_be_built(self, tmp_path, monkeypatch):
+        server, task, _, created = make_server(tmp_path, monkeypatch)
+        toml = SEPARATE_TOML.replace('docker_image = "org/verifier:1"\n', "")
+        (task.path / "task.toml").write_text(toml)
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and response.failure.terminal
+        assert "tests/Dockerfile" in response.failure.failure_reason and created == []
+
+    async def test_verifier_failure_masks_and_stops_both_sandboxes(self, tmp_path, monkeypatch):
+        class Broken(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                raise RuntimeError("verifier sandbox lost")
+
+        broken = Broken()
+        server, task, agent, verifier, _ = self.prepared(tmp_path, monkeypatch, verifier=broken)
+        result = (await run_episode(server, task)).result
+        assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+        assert agent.stopped and verifier.stopped
+
+    async def test_a_collect_hook_that_times_out_warns_and_collection_goes_on(self, tmp_path, monkeypatch, caplog):
+        """Harbor's hooks are best effort: one that runs past its timeout is logged, never an outage. The artifacts
+        are still collected, the verifier runs and the sample is scored."""
+
+        class HookSlow(AgentSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if command.startswith("cp /app/state.db"):
+                    return SandboxExecResult(stdout="", stderr="", return_code=None, error_type="timeout")
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        agent = HookSlow()
+        server, task, _, verifier, created = self.prepared(tmp_path, monkeypatch, agent=agent)
+        with caplog.at_level("WARNING"):
+            result = (await run_episode(server, task)).result
+        assert result.reward == 1.0 and not result.mask_sample, result.failure_reason
+        assert "collect hook timed out after 10s: 'cp /app/state.db /logs/artifacts/state.db'" in caplog.text
+        assert created == ["hello"] and agent.archives["/logs/artifacts"] in verifier.uploaded_archives
+        assert any("test.sh" in c["command"] and "timeout" in c["command"] for c in verifier.execs)
+        assert agent.stopped and verifier.stopped
+
+    @pytest.mark.parametrize("member", ["device_node", "long_name"])
+    async def test_an_artifact_tree_this_host_cannot_hold_is_not_collected_and_does_not_mask(
+        self, tmp_path, monkeypatch, caplog, member
+    ):
+        """Real archive extraction with a simulated provider: a character device in the agent's tree raised
+        PermissionError and a 300-character name ENAMETOOLONG out of the per-artifact handler, masking the sample
+        as provider_unavailable. Both are the agent's tree: that artifact is skipped, the other is restored and the
+        verifier scores."""
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            if member == "device_node":
+                info = tarfile.TarInfo(name="./null")
+                info.type, info.devmajor, info.devminor = tarfile.CHRTYPE, 1, 3
+            else:
+                info = tarfile.TarInfo(name="./" + "n" * 300)
+                info.size = 2
+            tar.addfile(info, io.BytesIO(b"ok") if member == "long_name" else None)
+        agent = AgentSandbox(
+            archives={"/logs/artifacts": buffer.getvalue(), "/app/output": archive_of({"report.json": "{}"})}
+        )
+        server, task, _, verifier, created = self.prepared(tmp_path, monkeypatch, agent=agent)
+        with caplog.at_level("WARNING"):
+            result = (await run_episode(server, task)).result
+        assert result.reward == 1.0 and not result.mask_sample, result.failure_reason
+        assert "artifact '/logs/artifacts' not collected" in caplog.text
+        artifacts = Path(result.verifier_logs_dir) / "artifacts"
+        # Nothing of the refused artifact reached the verifier or stayed behind as an archive; the report did.
+        assert agent.archives["/logs/artifacts"] not in verifier.uploaded_archives
+        assert agent.archives["/app/output"] in verifier.uploaded_archives
+        assert not list(artifacts.glob("*.tar.gz")) and not list((artifacts / "00").rglob("null"))
+        assert created == ["hello"] and agent.stopped and verifier.stopped
+
 
 class TestSeedGuards:
     """Defects from the first cluster run: requests above limits, and a create the ready timeout did not bound."""
@@ -868,6 +1077,42 @@ class TestSeedGuards:
         assert stopped == [True] and not server._sandboxes
         assert server.server_client.calls == []
         assert SEED_CREATE_GRACE_S > 0
+
+    async def test_separate_verifier_create_is_bounded_by_the_ready_timeout(self, tmp_path, monkeypatch):
+        """The same deadline bounds the verifier's create: the finished rollout is kept, masked, not held
+        for the provider's retry budget."""
+        agent = AgentSandbox()
+        server, task, _, _ = make_server(tmp_path, monkeypatch, agent, sandbox_ready_timeout_s=0.05)
+        (task.path / "task.toml").write_text(SEPARATE_TOML)
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.SEED_CREATE_GRACE_S", 0.0)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        stopped = []
+
+        class HangingStart:
+            def __init__(self, provider_config):
+                pass
+
+            async def start(self, spec):
+                await asyncio.get_running_loop().create_future()
+
+            async def stop(self):
+                stopped.append(True)
+
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandbox", HangingStart)
+        started = asyncio.get_running_loop().time()
+        response = await run_episode(server, task)
+        assert asyncio.get_running_loop().time() - started < 5
+        assert response.failure is None, response.failure
+        result = response.result
+        assert result.reward == 0.0 and result.mask_sample is True
+        assert result.failure_kind == "provider_unavailable"
+        assert "HarborSeedTimeoutError: the sandbox was not ready within 0.05s" in result.failure_reason
+        # The agent's sandbox was stopped before the verifier's create; the verifier's entry is released too.
+        assert agent.stopped and stopped == [True] and not server._sandboxes
 
     async def test_a_providers_own_timeout_inside_the_deadline_is_reported_as_is(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch, sandbox_ready_timeout_s=100)

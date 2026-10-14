@@ -33,7 +33,7 @@ import shutil
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
@@ -42,7 +42,7 @@ from pydantic import BaseModel, ConfigDict, Field, PositiveFloat
 
 from environment_servers.harbor.sandboxes import HarborSandboxMixin
 from environment_servers.harbor.session import HarborSession, HarborSessionMixin, resolve_env_templates
-from environment_servers.harbor.verifier import HarborVerificationMixin
+from environment_servers.harbor.verifier import HarborVerificationMixin, _verifier_image, _verifier_key
 from nemo_gym import RESULTS_DIR
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
@@ -63,7 +63,9 @@ from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.transfer import exec_as_root
+from nemo_gym.sandbox.transfer import (
+    exec_as_root,
+)
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnRequest, SingleAgentTurnResult
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
@@ -84,6 +86,8 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     verifier_return_code: int | None = None
     verifier_logs_dir: str | None = None
     verifier_seconds: float | None = None
+    # "shared": test.sh ran in the agent's sandbox; "separate": in its own sandbox from [verifier.environment].
+    verifier_mode: Literal["shared", "separate"] | None = None
 
 
 class HarborEpisodeResponse(BaseEpisodeResponse[HarborEpisodeResult]):
@@ -191,10 +195,17 @@ class HarborEnvironmentServer(
     # -- lifecycle -------------------------------------------------------------------------
 
     async def _stop_sandbox(self, episode_key: str) -> None:
-        """Stop the episode's sandbox; a failed stop keeps it owned for the next attempt or shutdown."""
+        """Stop the episode's sandbox; a failed stop keeps it owned for the next attempt or shutdown.
+
+        Separate verification stops the agent's sandbox itself (``HarborSession.stop_agent_side``) while the
+        episode key stays reserved, so a redelivered episode cannot start a second sandbox under it; the
+        reservation is released here without a second stop.
+        """
         sandbox = self._sandboxes.get(episode_key)
+        session = self._sessions.get(episode_key)
         if sandbox is not None:
-            await sandbox.stop()
+            if session is None or not session.agent_sandbox_stopped:
+                await sandbox.stop()
             del self._sandboxes[episode_key]
         self._sessions.pop(episode_key, None)
 
@@ -296,7 +307,13 @@ class HarborEnvironmentServer(
         # Register before anything is provisioned, so a cancelled or timed-out seed still stops what it started.
         # Final cleanup runs after run() returns, outside the episode deadline, and retries a failed stop at shutdown.
         async def close_sandbox() -> None:
-            await self._stop_sandbox(episode_key)
+            try:
+                await self._stop_sandbox(episode_key)
+            finally:
+                # A separate verifier owned under the derived key (started, or interrupted while starting)
+                # belongs to this episode too.
+                if _verifier_key(episode_key) in self._sandboxes:
+                    await self._stop_sandbox(_verifier_key(episode_key))
 
         cleanup.register_cleanup("harbor episode key", release_key)
         cleanup.register_cleanup("harbor sandbox", close_sandbox)
@@ -449,20 +466,29 @@ class HarborEnvironmentServer(
             raise HTTPException(
                 422, f"Task {task.task_id!r} declares no image; sandbox-less tasks are not supported yet"
             )
-        if not task.config.is_shared_verifier:
-            raise HTTPException(422, "Separate verification is not supported yet")
+        if not task.config.is_shared_verifier and _verifier_image(task) is None:
+            raise HTTPException(
+                422,
+                f"Task {task.task_id!r} needs a separate verifier built from tests/Dockerfile; "
+                "only prebuilt verifier images are supported yet",
+            )
         if task.user is not None:
             raise HTTPException(422, "Agent user overrides ([agent].user or Dockerfile USER) are not supported yet")
         # Fail before provisioning; retain templates in the snapshot and resolve at use time.
         resolve_env_templates(task.env)
         resolve_env_templates(task.config.verifier.env)
+        if task.config.verifier.environment is not None:
+            resolve_env_templates(task.config.verifier.environment.env)
         if self._shutting_down:
             raise HTTPException(503, "Environment server is shutting down")
-        if episode_key in self._sandboxes:
-            # Left by a finished attempt whose stop failed (run() refuses the key while an attempt is live).
-            # Retry the stop here; the repeat goes ahead only once the old sandbox is gone.
+        for stale_key in (episode_key, _verifier_key(episode_key)):
+            if stale_key not in self._sandboxes:
+                continue
+            # Left by a finished attempt whose stop failed (run() refuses the key while an attempt is live):
+            # the agent's sandbox or its separate verifier. Retry the stop here; the repeat goes ahead only
+            # once the old sandbox is gone.
             try:
-                await self._stop_sandbox(episode_key)
+                await self._stop_sandbox(stale_key)
             except Exception as exc:
                 LOGGER.exception(f"Could not stop the sandbox of a previous attempt of {episode_key}")
                 raise HTTPException(
@@ -491,6 +517,7 @@ class HarborEnvironmentServer(
             identity=(request.episode_id, request.task.task_id),
             sandbox=sandbox,
             workdir=workdir,
+            session_id=episode_key,
         )
         self._sessions[episode_key] = session
         return session

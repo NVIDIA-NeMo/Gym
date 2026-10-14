@@ -181,6 +181,13 @@ class HarborSolution(HarborSettings):
     env: dict[str, str] = Field(default_factory=dict)
 
 
+# The verifier's own directories in the sandbox: the uploaded tests and where test.sh writes its reward. An
+# artifact there would hand the agent the grader's files when a separate verifier restores it, so the loader
+# refuses it (and the environment server refuses the same paths again at the restore). /logs is not listed:
+# it holds the agent's own folders too, and the server empties /logs/verifier again after restoring it.
+PROTECTED_ARTIFACT_SOURCES = ("/tests", "/logs/verifier")
+
+
 class HarborArtifact(HarborSettings):
     """One ``artifacts`` entry: a path copied out of the agent's sandbox after it finishes.
 
@@ -206,6 +213,18 @@ class HarborArtifact(HarborSettings):
                 raise ValueError(f"Artifact paths must stay inside the sandbox and the artifacts folder: {path!r}")
         if self.destination and PurePosixPath(self.destination).is_absolute():
             raise ValueError(f"Artifact destination must be relative: {self.destination!r}")
+        if self.source.startswith("/"):
+            # One leading slash: POSIX lets "//x" name something other than "/x", and the server compares the
+            # sandbox paths it guards by their text, so the spelling is settled here (a trailing slash stays).
+            self.source = "/" + self.source.lstrip("/")
+        source = PurePosixPath(self.source)
+        tests, verifier_logs = (PurePosixPath(path) for path in PROTECTED_ARTIFACT_SOURCES)
+        if source.is_relative_to(tests) or tests.is_relative_to(source) or source.is_relative_to(verifier_logs):
+            replaced = tests if source.is_relative_to(tests) or tests.is_relative_to(source) else verifier_logs
+            raise ValueError(
+                f"Artifact source {self.source!r} would replace the verifier's {replaced} in a separate verifier "
+                "and cannot be restored there"
+            )
         return self
 
     @property

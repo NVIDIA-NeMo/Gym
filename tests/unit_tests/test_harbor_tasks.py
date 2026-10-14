@@ -661,6 +661,25 @@ class TestSeparateVerifierFields:
             HarborTaskConfig.model_validate({"artifacts": ["/app/../etc/passwd"]})
         with pytest.raises(ValueError, match="relative"):
             HarborTaskConfig.model_validate({"artifacts": [{"source": "/a", "destination": "/abs"}]})
+        # The verifier's own directories are refused as sources, by any spelling, and a source's leading slashes
+        # are settled to one at load (a trailing slash stays: tasks declare `/app/output/`).
+        for source in ("/tests", "/tests/test.sh", "//tests", "/", "/logs/verifier", "/logs/verifier/reward.json"):
+            settled = "/" + source.lstrip("/")
+            with pytest.raises(ValueError, match=f"{settled!r} would replace the verifier's /(tests|logs/verifier) "):
+                HarborTaskConfig.model_validate({"artifacts": [source]})
+        with pytest.raises(ValueError, match="'/logs/verifier/' would replace the verifier's /logs/verifier"):
+            HarborTaskConfig.model_validate({"artifacts": [{"source": "//logs/verifier/", "service": "api"}]})
+        accepted = HarborTaskConfig.model_validate(
+            {"artifacts": ["//logs", "/logs/", "/tests-data", "/logs/verifier-cache", "/app/output/", "relative"]}
+        )
+        assert [a.source for a in accepted.artifacts] == [
+            "/logs",
+            "/logs/",
+            "/tests-data",
+            "/logs/verifier-cache",
+            "/app/output/",
+            "relative",
+        ]
 
 
 class TestCli:

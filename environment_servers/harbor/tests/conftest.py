@@ -306,3 +306,139 @@ def episode(task, *, rollout="r1", attempt=0, digest=None, task_id="hello", task
 
 async def run_episode(server: HarborEnvironmentServer, task, **kwargs) -> HarborEpisodeResponse:
     return await server.run_request(episode(task, **kwargs))
+
+
+SEPARATE_TOML = """
+schema_version = "1.4"
+
+artifacts = ["/app/output/report.json", { source = "/var/log/api", service = "api" }]
+
+[verifier]
+timeout_sec = 300.0
+user = "root"
+environment_mode = "separate"
+
+[verifier.env]
+CHECK = "strict"
+
+[verifier.environment]
+docker_image = "org/verifier:1"
+cpus = 2
+memory_mb = 4096
+
+[[verifier.collect]]
+command = "cp /app/state.db /logs/artifacts/state.db"
+timeout_sec = 10.0
+
+[[verifier.collect]]
+command = "kafka-dump"
+service = "kafka"
+
+[agent]
+timeout_sec = 120.0
+
+[environment]
+docker_image = "org/agent:1"
+cpus = 1
+"""
+
+
+@dataclass
+class AgentSandbox(FakeSandbox):
+    """The agent's sandbox in separate mode: holds /logs/artifacts and one report file.
+
+    ``archives`` maps a folder the server archives (``tar ... -C <folder>`` or ``cd <folder>``) to the
+    archive bytes the fake hands back for it; ``probe_result`` replaces every probe answer when set.
+    """
+
+    present: dict[str, str] = field(
+        default_factory=lambda: {"/logs/artifacts": "dir", "/app/output/report.json": "file"}
+    )
+    archives: dict[str, bytes] = field(
+        default_factory=lambda: {
+            "/logs/artifacts": archive_of({"state.db": "db"}),
+            "/app/output": archive_of({"report.json": '{"ok": true}'}),
+        }
+    )
+    probe_result: SandboxExecResult | None = None
+    archived: list[str] = field(default_factory=list)
+
+    async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user})
+        if command.startswith("if [ -d "):
+            if self.probe_result is not None:
+                return self.probe_result
+            path = command.split("if [ -d ")[1].split(" ]")[0].strip("'")
+            return SandboxExecResult(stdout=self.present.get(path, "none") + "\n", stderr="", return_code=0)
+        if "tar -czf" in command:
+            marker = " -C " if " -C " in command else "cd "
+            self.archived.append(command.split(marker)[1].split(" ")[0].strip("'"))
+        self.execs.pop()  # recorded again by the base fake
+        return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+    async def download(self, remote_path, local_path):
+        Path(local_path).write_bytes(self.archives[self.archived[-1]])
+
+    async def test_a_probe_the_sandbox_cannot_answer_masks_but_absence_does_not(self, tmp_path, monkeypatch):
+        server, task, agent, verifier, created = self.prepared(tmp_path, monkeypatch)
+        agent.probe_result = SandboxExecResult(
+            stdout="", stderr="container gone", return_code=125, error_type="sandbox"
+        )
+        result = (await run_episode(server, task)).result
+        # The outage is Gym's, not an empty artifact: masked, and no verifier was started for it.
+        assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+        assert "Could not probe /logs/artifacts: sandbox" in result.failure_reason
+        assert created == [] and verifier.execs == [] and agent.stopped
+
+        server, task, agent, verifier, _ = self.prepared(tmp_path, monkeypatch)
+        agent.probe_result = SandboxExecResult(stdout="none\n", stderr="", return_code=0)
+        result = (await run_episode(server, task)).result
+        # A plain "none" is still absence: nothing restored, the verifier runs and scores.
+        assert result.reward == 1.0 and not result.mask_sample
+        assert not any("tar -xzf" in c["command"] and "/logs/artifacts" in c["command"] for c in verifier.execs)
+
+    async def test_artifact_exclusions_reach_the_archive_command(self, tmp_path, monkeypatch):
+        toml = SEPARATE_TOML.replace(
+            'artifacts = ["/app/output/report.json", { source = "/var/log/api", service = "api" }]',
+            'artifacts = [{ source = "/app/build", exclude = ["node_modules", "./cache", "*.log"] }]',
+        )
+        agent = AgentSandbox(
+            present={"/logs/artifacts": "dir", "/app/build": "dir"},
+            archives={"/logs/artifacts": archive_of({}), "/app/build": archive_of({"a.out": "elf"})},
+        )
+        server, task, _, _, _ = self.prepared(tmp_path, monkeypatch, toml=toml, agent=agent)
+        result = (await run_episode(server, task)).result
+        assert result.reward == 1.0, result.failure_reason
+        build = next(c["command"] for c in agent.execs if "tar -czf" in c["command"] and "/app/build" in c["command"])
+        # Verbatim, unanchored, as Harbor passes them: `node_modules` at any depth, `./cache` at the top only.
+        assert " --exclude=node_modules --exclude=./cache --exclude='*.log' -C /app/build ." in build
+        artifacts_archive = next(
+            c["command"] for c in agent.execs if "tar -czf" in c["command"] and "/logs/artifacts" in c["command"]
+        )
+        assert "--exclude" not in artifacts_archive
+
+    async def test_each_artifact_stages_under_its_own_root(self, tmp_path, monkeypatch):
+        """A link kept from one artifact is never a path component of another artifact's destination."""
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            link = tarfile.TarInfo(name="./output")
+            link.type, link.linkname = tarfile.SYMTYPE, str(victim)
+            tar.addfile(link)
+        toml = SEPARATE_TOML.replace(
+            'artifacts = ["/app/output/report.json", { source = "/var/log/api", service = "api" }]',
+            'artifacts = ["/app", "/app/output/report.json"]',
+        )
+        agent = AgentSandbox(
+            present={"/logs/artifacts": "none", "/app": "dir", "/app/output/report.json": "file"},
+            archives={"/app": buffer.getvalue(), "/app/output": archive_of({"report.json": '{"ok": true}'})},
+        )
+        server, task, _, _, _ = self.prepared(tmp_path, monkeypatch, toml=toml, agent=agent)
+        result = (await run_episode(server, task)).result
+        assert result.reward == 1.0, result.failure_reason
+        artifacts = Path(result.verifier_logs_dir) / "artifacts"
+        # The link travelled as a link under the first artifact's root; the report landed under the second.
+        assert (artifacts / "01" / "app" / "output").is_symlink()
+        assert (artifacts / "02" / "app" / "output" / "report.json").read_bytes() == b'{"ok": true}'
+        assert list(victim.iterdir()) == []
