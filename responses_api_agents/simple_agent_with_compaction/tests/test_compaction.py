@@ -4,42 +4,48 @@
 import subprocess
 import sys
 
-from responses_api_agents.simple_agent_with_compaction.compaction import (
+from nemo_gym.context_management.config import (
     ContextGuardConfig,
-    ContextMeasurements,
-    HistoryController,
     HistoryPolicyConfig,
-    IdentityHistoryPolicy,
     ImageRecencyConfig,
     ReasoningRecencyConfig,
-    RecencyHistoryPolicy,
     RecencyHistoryPolicyConfig,
-    SemanticHistory,
+)
+from nemo_gym.context_management.controller import (
+    HistoryController,
     TurnChunkedHistoryController,
     build_guard_outcome_records,
-    build_history_policy,
-    capture_observed_completion,
-    descriptor_is_append_compatible,
     evaluate_context_guards,
-    materialize_history_view,
+)
+from nemo_gym.context_management.history import (
+    ContextMeasurements,
+    SemanticHistory,
     normalize_semantic_items,
-    ordered_media_is_append_compatible,
-    register_history_policy,
     register_semantic_part_kind,
-    unregister_history_policy,
     unregister_semantic_part_kind,
+)
+from nemo_gym.context_management.materialization import (
+    descriptor_is_append_compatible,
+    materialize_history_view,
+)
+from nemo_gym.context_management.policies import (
+    IdentityHistoryPolicy,
+    RecencyHistoryPolicy,
+    build_history_policy,
+    register_history_policy,
+    unregister_history_policy,
 )
 
 
 def test_context_compaction_modules_import_independently() -> None:
     for module_name in (
-        "responses_api_agents.simple_agent_with_compaction.compaction",
-        "responses_api_agents.simple_agent_with_compaction.compaction.config",
-        "responses_api_agents.simple_agent_with_compaction.compaction.controller",
-        "responses_api_agents.simple_agent_with_compaction.compaction.history",
-        "responses_api_agents.simple_agent_with_compaction.compaction.materialization",
-        "responses_api_agents.simple_agent_with_compaction.compaction.policies",
-        "responses_api_agents.simple_agent_with_compaction.compaction.session",
+        "nemo_gym.context_management",
+        "nemo_gym.context_management.config",
+        "nemo_gym.context_management.controller",
+        "nemo_gym.context_management.history",
+        "nemo_gym.context_management.materialization",
+        "nemo_gym.context_management.policies",
+        "nemo_gym.context_management.client",
     ):
         subprocess.run(
             [sys.executable, "-c", f"import {module_name}"],
@@ -210,9 +216,8 @@ def test_recency_protects_initial_images_and_keeps_latest_three_groups():
         "repeat A",
         "latest E",
     ]
-    assert len(view.media_ids) == 5
-    assert view.media_ids[0] == view.media_ids[3]
-    assert len(history.media_arena) == 5
+    assert len(view.image_part_ids) == 5
+    assert view.image_part_ids[0] != view.image_part_ids[3]
     assert plan.decision.omitted_part_count == 1
     assert len(plan.decision.protected_part_ids) == 1
     assert len(plan.decision.changed_part_ranges) == 1
@@ -490,41 +495,6 @@ def test_agent_owned_semantic_part_kind_can_be_registered():
         unregister_semantic_part_kind("agent_private_state")
 
 
-def test_semantic_events_reference_media_without_copying_payload():
-    history = SemanticHistory("rollout-media")
-    history.append_items(
-        [_observation("screen", "data:image/png;base64,UNIQUE_PAYLOAD")],
-        turn_id=0,
-        is_initial_context=True,
-    )
-
-    event_image = history.events[0].item["content"][0]
-    assert event_image == {
-        "type": "input_image",
-        "_nemo_gym_media_id": history.events[0].parts[0].media_id,
-    }
-    assert "UNIQUE_PAYLOAD" not in repr(history.events)
-    assert "UNIQUE_PAYLOAD" in repr(history.media_arena.resolve(history.events[0].parts[0].media_id))
-
-    view = materialize_history_view(history, IdentityHistoryPolicy().plan(history, decision_turn=0))
-    assert _image_urls(view.items) == ["data:image/png;base64,UNIQUE_PAYLOAD"]
-
-
-def test_media_arena_deduplicates_repeated_payload_across_linear_events():
-    history = SemanticHistory("rollout-repeated-media")
-    repeated = _observation("same screen", "data:image/png;base64,REPEATED_PAYLOAD")
-
-    for turn_id in range(100):
-        history.append_items([repeated], turn_id=turn_id)
-
-    assert len(history.events) == 100
-    assert len(history.media_arena) == 1
-    assert "REPEATED_PAYLOAD" not in repr(history.events)
-    assert {part.media_id for _, part in history.parts if part.kind == "image"} == {
-        history.events[0].parts[0].media_id
-    }
-
-
 def test_identity_view_matches_normalized_source_items():
     history = SemanticHistory("rollout-identity")
     initial = _observation("initial", "data:image/png;base64,A")
@@ -552,7 +522,6 @@ def test_identity_controller_emits_no_boundary_for_append_only_turns():
     assert first.boundary is None
     assert not first.append_compatible
     assert first.context_epoch == 0
-    assert first.segment_index == 0
     controller.acknowledge(first)
 
     history.append_items(
@@ -564,7 +533,6 @@ def test_identity_controller_emits_no_boundary_for_append_only_turns():
     assert second.boundary is None
     assert second.append_compatible
     assert second.context_epoch == 0
-    assert second.segment_index == 0
     controller.acknowledge(second)
     assert controller.boundary_events == ()
 
@@ -593,12 +561,10 @@ def test_recency_controller_keeps_boundary_pending_until_acknowledged():
     assert prepared.boundary.removed_media_count == 1
     assert prepared.boundary.omitted_part_count == 1
     assert prepared.context_epoch == 1
-    assert prepared.segment_index == 1
 
     retry = controller.prepare(applies_to_step=2)
     assert retry.boundary is prepared.boundary
     assert retry.context_epoch == prepared.context_epoch
-    assert retry.segment_index == prepared.segment_index
     assert controller.pending_boundary is prepared.boundary
     controller.acknowledge(retry)
     assert controller.pending_boundary is None
@@ -659,96 +625,6 @@ def test_pending_boundary_rejects_changed_retry_view():
         assert "changed before acknowledgement" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("a retry may not change its pending request view")
-
-
-def test_ordered_media_prefix_is_part_of_append_compatibility():
-    assert ordered_media_is_append_compatible(("A",), ("A", "B"))
-    assert not ordered_media_is_append_compatible(("A",), ("B", "A"))
-    assert not ordered_media_is_append_compatible(None, ("A",))
-
-
-def test_capture_observed_completion_preserves_exact_evidence_and_media_order():
-    history = SemanticHistory("rollout-evidence")
-    history.append_items(
-        [_observation("initial", "A", "B")],
-        turn_id=0,
-        is_initial_context=True,
-    )
-    view = materialize_history_view(
-        history,
-        IdentityHistoryPolicy().plan(history, decision_turn=1),
-    )
-    observed = capture_observed_completion(
-        [
-            {
-                "role": "assistant",
-                "type": "message",
-                "content": "answer",
-                "prompt_token_ids": [1, 2],
-                "generation_token_ids": [3, 4],
-                "generation_log_probs": [-0.1, -0.2],
-            }
-        ],
-        rollout_id=history.rollout_id,
-        turn_id=1,
-        media_ids=view.media_ids,
-        policy_decision=view.decision,
-        prepared_request_id="prepared-request-1",
-        context_epoch=0,
-        segment_index=0,
-        segment_id="segment-0",
-        expected_append_compatible=False,
-        compaction_event_id=None,
-        generation_contract_id="generation-contract-1",
-    )
-
-    assert observed.prompt_token_ids == (1, 2)
-    assert observed.sampled_token_ids == (3, 4)
-    assert observed.sampled_logprobs == (-0.1, -0.2)
-    assert observed.media_ids == view.media_ids
-    assert observed.context_epoch == 0
-    assert observed.policy_output_spans[0].start == 0
-    assert observed.policy_output_spans[0].end == 2
-    assert [item.media_id for item in observed.media_occurrences] == list(view.media_ids)
-    assert observed.evidence_source == "generation_response"
-
-
-def test_capture_observed_completion_rejects_misaligned_logprobs():
-    history = SemanticHistory("rollout-bad-evidence")
-    history.append_items([_observation("initial", "A")], turn_id=0)
-    view = materialize_history_view(
-        history,
-        IdentityHistoryPolicy().plan(history, decision_turn=1),
-    )
-
-    try:
-        capture_observed_completion(
-            [
-                {
-                    "role": "assistant",
-                    "type": "message",
-                    "content": "answer",
-                    "prompt_token_ids": [1],
-                    "generation_token_ids": [2, 3],
-                    "generation_log_probs": [-0.1],
-                }
-            ],
-            rollout_id=history.rollout_id,
-            turn_id=1,
-            media_ids=view.media_ids,
-            policy_decision=view.decision,
-            prepared_request_id="prepared-request-1",
-            context_epoch=0,
-            segment_index=0,
-            segment_id="segment-0",
-            expected_append_compatible=False,
-            compaction_event_id=None,
-            generation_contract_id="generation-contract-1",
-        )
-    except ValueError as exc:
-        assert "length mismatch" in str(exc)
-    else:  # pragma: no cover
-        raise AssertionError("misaligned generation evidence must fail closed")
 
 
 def test_guard_evaluation_records_admission_after_compaction():
@@ -868,7 +744,7 @@ def test_hundred_turn_chunked_recency_stays_bounded_and_accounts_for_every_actio
     active_image_counts = []
     for turn in range(1, 101):
         prepared = controller.prepare(applies_to_step=turn)
-        active_image_counts.append(len(prepared.view.media_ids))
+        active_image_counts.append(len(prepared.view.image_part_ids))
         controller.acknowledge_action(
             prepared,
             action_id=f"action-{turn}",
@@ -898,4 +774,3 @@ def test_hundred_turn_chunked_recency_stays_bounded_and_accounts_for_every_actio
     assert max(active_image_counts) <= 5
     # Semantic history retains every unique payload even though the
     # materialized model view remains bounded.
-    assert len(history.media_arena) == 100

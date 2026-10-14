@@ -115,6 +115,10 @@ _CUSTODY_FIELDS = (
     "output_fingerprint",
     "continuation_fingerprint",
     "fingerprint_version",
+    "output_items",
+    "response_status",
+    "finish_reason",
+    "last_output_item",
 )
 
 
@@ -142,6 +146,13 @@ def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[s
         "output_fingerprint": record.output_fingerprint or None,
         "continuation_fingerprint": record.continuation_fingerprint or None,
         "fingerprint_version": record.fingerprint_version,
+        "replay": record.replay.model_dump() if record.replay is not None else None,
+        "output_items": [item.model_dump() for item in record.output_items]
+        if record.output_items is not None
+        else None,
+        "response_status": record.response_status,
+        "finish_reason": record.finish_reason,
+        "last_output_item": record.last_output_item,
     }
 
 
@@ -165,7 +176,12 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
 
     records = []
     failures = []
+    completed = {row["model_call_id"] for row in rows if row.get("staging_key")}
+    attempted = list(dict.fromkeys(row["model_call_id"] for row in rows if row.get("intent")))
+    pending = [row["model_call_id"] for row in rows if row.get("intent") and row["model_call_id"] not in completed]
     for row in rows:
+        if row.get("intent"):
+            continue
         if row.get("failure_reason") is not None:
             failures.append(
                 ManifestFailure(
@@ -216,10 +232,30 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     fingerprint_version=int(row.get("fingerprint_version") or 0),
                     # Set on rows a checkpoint restore carried over from an earlier attempt.
                     capture_key=row.get("capture_key"),
+                    replay=row.get("replay"),
+                    output_items=row.get("output_items"),
+                    response_status=row.get("response_status"),
+                    finish_reason=row.get("finish_reason"),
+                    last_output_item=row.get("last_output_item"),
                 )
             )
-    manifest = RolloutManifest(rollout_id=rollout_id, records=records, failures=failures)
+    manifest = RolloutManifest(
+        rollout_id=rollout_id,
+        records=records,
+        failures=failures,
+        attempted_call_ids=attempted,
+        pending_call_ids=pending,
+    )
     return manifest.model_dump(mode="json")
+
+
+def _validate_sequential_intent(rollout_id: str, rows: list[dict], expected_latest_call_id: str | None) -> None:
+    manifest = _manifest_from_rows(rollout_id, rows)
+    if manifest["pending_call_ids"] or manifest["failures"]:
+        raise ValueError("Sequential capture has a pending or failed call")
+    latest = manifest["records"][-1]["model_call_id"] if manifest["records"] else None
+    if latest != expected_latest_call_id:
+        raise ValueError("Ledger changed before dispatch; concurrent calls are unsupported")
 
 
 @dataclass
@@ -487,6 +523,11 @@ class InMemoryLineageStore:
     def is_process_shared(self) -> bool:
         return False
 
+    async def begin_call(self, rollout_id: str, model_call_id: str, expected_latest_call_id: str | None) -> None:
+        rows = self._ledgers.setdefault(rollout_id, [])
+        _validate_sequential_intent(rollout_id, rows, expected_latest_call_id)
+        rows.append({"model_call_id": model_call_id, "intent": True})
+
     async def record(self, commit: CaptureLedgerCommit) -> None:
         # Custody rows are token-free (mirrors FileLineageStore): the chain
         # hash covers continuity, so the index keeps tokens only for
@@ -500,7 +541,9 @@ class InMemoryLineageStore:
         # Write-once per model call (CaptureLedger contract): an identical
         # replay is a no-op, any differing field is a conflict. Checked on the
         # full custody row, not just the columns the lineage index keeps.
-        existing = next((r for r in rows if r.get("model_call_id") == record.model_call_id), None)
+        existing = next(
+            (r for r in rows if r.get("model_call_id") == record.model_call_id and not r.get("intent")), None
+        )
         if existing is not None:
             if existing != row:
                 raise ValueError(f"conflicting lineage record for model call {record.model_call_id}")
@@ -1005,6 +1048,15 @@ class FileLineageStore(IncrementalLineageStore):
             chain_hash=str(record.get("chain_hash") or ""),
         )
 
+    async def begin_call(self, rollout_id: str, model_call_id: str, expected_latest_call_id: str | None) -> None:
+        await asyncio.to_thread(self._begin_call, rollout_id, model_call_id, expected_latest_call_id)
+
+    def _begin_call(self, rollout_id: str, model_call_id: str, expected_latest_call_id: str | None) -> None:
+        with self._locked(rollout_id):
+            rows = self._read(rollout_id)
+            _validate_sequential_intent(rollout_id, rows, expected_latest_call_id)
+            self._append(rollout_id, {"model_call_id": model_call_id, "intent": True}, rows)
+
     async def record(self, commit: CaptureLedgerCommit) -> None:
         await asyncio.to_thread(self._record, commit)
 
@@ -1027,7 +1079,11 @@ class FileLineageStore(IncrementalLineageStore):
             if not records and self._is_retired(commit.rollout_id):
                 _log_late_write_dropped(commit.rollout_id, model_call_id, commit.record.staging_key)
                 return
-            matches = [existing for existing in records if existing["model_call_id"] == model_call_id]
+            matches = [
+                existing
+                for existing in records
+                if existing["model_call_id"] == model_call_id and not existing.get("intent")
+            ]
             if matches:
                 if matches[0] != record:
                     raise ValueError(f"conflicting lineage record for model call {model_call_id}")
