@@ -711,6 +711,12 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
 
         run_target(args, overrides)
         return
+    if getattr(args, "only_tasks", None) or getattr(args, "exclude_tasks", None):
+        # Register-only flags: without a TARGET nothing consumes them, and a silently ignored selection
+        # would run every task.
+        args._parser.error(
+            "--only-tasks and --exclude-tasks apply to a task TARGET; pass a Harbor task folder or harbor: reference"
+        )
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     dispatch(target, overrides)
 
@@ -737,6 +743,22 @@ SANDBOX = Flag(
         "--sandbox",
         metavar="PROVIDER",
         help="Sandbox provider for task containers (e.g. opensandbox, docker). Used with a task TARGET.",
+    ),
+)
+
+EXCLUDE_TASKS = Flag(
+    register=lambda p: p.add_argument(
+        "--exclude-tasks",
+        metavar="PATTERNS",
+        help="Comma-separated task names or globs to leave out of a task TARGET (e.g. `fp8-*,jax-speedrun-gpu`).",
+    ),
+)
+
+ONLY_TASKS = Flag(
+    register=lambda p: p.add_argument(
+        "--only-tasks",
+        metavar="PATTERNS",
+        help="Comma-separated task names or globs; only matching tasks of a task TARGET run.",
     ),
 )
 
@@ -971,6 +993,8 @@ COMMANDS = {
             SEARCH_DIR,
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent tasks."),
             _value_flag("limit", "limit", "Maximum number of tasks to validate."),
+            EXCLUDE_TASKS,
+            ONLY_TASKS,
             # Quoted: a file name with parentheses or commas is not a Hydra expression.
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",), quote=True),
         ),
@@ -1162,6 +1186,8 @@ COMMANDS = {
             AGENT_TYPE,
             ALLOW_UNSUPPORTED_PAIRING,
             _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),
+            EXCLUDE_TASKS,
+            ONLY_TASKS,
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),
