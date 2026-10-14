@@ -456,5 +456,7 @@ def test_pinned_cli_fails_when_a_required_mcp_server_is_unreachable(tmp_path: Pa
         model_server.server_close()
         model_thread.join(timeout=2)
     assert result.returncode != 0, result.stdout + result.stderr
-    assert "required MCP" in result.stdout + result.stderr
+    # The adapter's stderr-tail error path relies on both: no turn starts, and the reason is on stderr.
+    assert not any(json.loads(line).get("type") == "turn.started" for line in result.stdout.splitlines())
+    assert "required MCP servers failed to initialize" in result.stderr
     assert not requests, "the model must not be called without the required tools"

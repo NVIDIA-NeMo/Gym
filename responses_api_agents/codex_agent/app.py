@@ -1048,12 +1048,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if error and not reported_model_error:
             if not started:
                 # Startup failures, such as a required MCP server that did not connect, are reported only on stderr.
-                try:
-                    stderr = (await state.read_text("stderr.log")).strip()
-                except Exception:
-                    stderr = ""
+                stderr = await self._startup_stderr_tail(state)
                 if stderr:
-                    error = f"{error}; stderr: {stderr[-_STDERR_TAIL_CHARS:]}"
+                    error = f"{error}; stderr: {stderr}"
             raise HTTPException(502, f"Codex execution failed: {error}")
         terminal = next((event for _, event in reversed(events) if event.get("type") == "turn.failed"), {})
         if state.model_attempts:
@@ -1087,6 +1084,24 @@ class CodexAgent(SimpleResponsesAPIAgent):
         )
 
         return self.report_outcome(response, terminal)
+
+    async def _startup_stderr_tail(self, state: CodexSandboxSession) -> str:
+        """The end of Codex's stderr, with the session's MCP grant headers redacted; empty if unreadable.
+
+        Codex can copy an MCP server's error body to stderr, and such a body may echo the request headers.
+        """
+        try:
+            stderr = await asyncio.wait_for(
+                state.read_text("stderr.log"), timeout=self.config.session_close_timeout_seconds
+            )
+        except Exception:
+            return ""
+        for access in self.effective_tool_accesses(state.request):
+            if isinstance(access, MCPToolAccess):
+                for value in access.connection.headers.values():
+                    if value:
+                        stderr = stderr.replace(value, "[redacted]")
+        return stderr.strip()[-_STDERR_TAIL_CHARS:]
 
     def _resolve_call_base_url(self, rollout_id: Optional[str]) -> str:
         """Provider base_url for the CLI's model calls (Codex appends ``/responses`` to it).
