@@ -114,7 +114,7 @@ def test_validate_reads_effective_output_and_preserves_evaluation_artifacts(
     assert seen == ["nemo_gym.cli.eval:e2e_rollout_collection"]
     assert config_path.read_bytes() == original_config
     assert json.loads(stale.read_text())["reward"] == 1.0
-    assert (tmp_path / "results/harbor/validation/ds/run_config.yaml").is_file()
+    assert (tmp_path / "results/harbor/validation/ds/run_config_oracle_agent.yaml").is_file()
 
 
 @pytest.mark.parametrize("oracle_status", ["solved", "failed"])
