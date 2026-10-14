@@ -13,9 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# GPQA Diamond (no tools): 198 questions x 8 repeats. Reported: accuracy.
+# GPQA Diamond (no tools): 198 questions x 8 repeats.
 #
 #   nemotron_recipes/super-3.5/run.sh gpqa
+#
+# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
+# gpqa_mcqa_simple_agent. Tech report rows:
+#   GPQAD: key_metrics["pass@1[avg-of-8]/accuracy"]
 #
 # Set in .env: POLICY_API_KEY, HF_TOKEN
 #

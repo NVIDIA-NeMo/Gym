@@ -16,10 +16,14 @@
 # GDPval-AA v2 (agentic): 220 real-world work tasks (reports, spreadsheets, slide decks, ...).
 # The model works as Gym's Stirrup agent, up to 250 turns per task, in a sandbox where it can
 # run code, read and write files and search the web; its result is a set of files, the
-# deliverable. A panel of judge models scores the deliverables. Reported: ELO (see the
-# scoring modes below).
+# deliverable. A panel of judge models scores the deliverables.
 #
 #   nemotron_recipes/super-3.5/run.sh gdpval
+#
+# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
+# gdpval_stirrup_agent. Tech report rows:
+#   GDPVal-AA-v2 ELO: agent_metrics["comparison/stage_1/eval_elo"]
+#   GDPVal-AA-v2 norm ELO: agent_metrics["comparison/stage_1/normalized_elo"]
 #
 # Set in .env: POLICY_API_KEY, GDPVAL_JUDGE_API_KEY, TAVILY_API_KEY
 #

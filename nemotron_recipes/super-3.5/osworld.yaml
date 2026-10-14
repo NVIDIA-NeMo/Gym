@@ -16,9 +16,12 @@
 # OSWorld-Verified (computer use): 361 desktop tasks x 3 repeats. Each task runs in its own
 # Ubuntu VM; the model sees screenshots and acts with mouse/keyboard commands for up to 100
 # steps, then OSWorld's own checker scores the result from 0 to 1 (partial credit kept).
-# Reported: raw_reward_rate, 100 x the mean score.
 #
 #   nemotron_recipes/super-3.5/run.sh osworld
+#
+# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
+# osworld_nano_omni_agent. Tech report rows:
+#   OSWorld: key_metrics["osworld/raw_reward_rate"]
 #
 # Set in .env: POLICY_API_KEY
 #

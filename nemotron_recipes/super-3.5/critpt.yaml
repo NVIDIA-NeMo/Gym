@@ -13,13 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# CritPt (no tools): 70 research-level physics problems x 5 repeats. Each rollout has two
-# turns: a derivation, then the problem's Python template filled in with the answer. The
-# Artificial Analysis (AA) API grades the templates in batches of all 70 problems against
-# private test cases, and every rollout in a batch gets that batch's accuracy as its reward.
-# Reported: mean accuracy.
+# CritPt (no tools): 70 research-level physics problems x 5 repeats. Each rollout has two turns:
+# a derivation, then the problem's Python template filled in with the answer. The Artificial
+# Analysis (AA) API grades the templates in batches of all 70 problems against private test
+# cases, and every rollout in a batch gets that batch's accuracy as its reward.
 #
 #   nemotron_recipes/super-3.5/run.sh critpt
+#
+# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
+# critpt_benchmark_agent. The tech report shows these x100:
+#   CritPt: key_metrics["mean/accuracy"]
 #
 # Set in .env: POLICY_API_KEY, ARTIFICIAL_ANALYSIS_API_KEY
 #

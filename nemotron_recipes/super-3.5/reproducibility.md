@@ -243,9 +243,9 @@ changes it), with up to 4 CPUs and 16 GB of memory each, so keep `PARALLEL` with
 machine has. Task images come from Docker Hub: run `docker login` first to avoid its pull
 limits.
 
-Gym clones the tasks from
-[harbor-framework/terminal-bench-2-1](https://github.com/harbor-framework/terminal-bench-2-1),
-not pinned to a commit; the published run used `36d417f`.
+The tasks come from
+[harbor-framework/terminal-bench-2-1](https://github.com/harbor-framework/terminal-bench-2-1);
+`terminal-bench-2.1.setup.sh` pins them to the published run's commit, `36d417f5`.
 
 ### OSWorld-Verified
 
@@ -364,6 +364,11 @@ positioning against published models.
 in rubric mode only: comparison mode samples each stage's tasks from the whole benchmark.
 
 ## What to expect from your numbers
+
+**Where the published numbers are.** Table 10 of the tech report. Each recipe's header names the
+metric to compare (`Score:`): the key in
+`evaluator_rollouts_aggregate_metrics.json` behind each of its rows in that table. A published
+number is the mean of two runs, except CritPt, BrowseComp and AA-Omniscience (one run each).
 
 **Run the whole benchmark.** Every recipe except CritPt can be cut short for a smoke test
 with `LIMIT`. A limited run tells you the setup works. It is not a score, and should not be

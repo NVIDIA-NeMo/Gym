@@ -13,11 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# SWE-bench Multilingual: 300 real GitHub issues in other programming languages x 3 repeats.
-# The OpenCode agent fixes each one inside a container holding the project; the project's
-# tests decide. Reported: mean reward.
+# SWE-bench Multilingual: 300 real GitHub issues in other programming languages x 3 repeats. The
+# OpenCode agent fixes each one inside a container holding the project; the project's tests
+# decide.
 #
 #   nemotron_recipes/super-3.5/run.sh swebench-multilingual
+#
+# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
+# swebench_multilingual_opencode_sandboxed_agent. The tech report shows these x100:
+#   SWE-bench Multilingual: key_metrics["mean/reward"]
 #
 # Set in .env: POLICY_API_KEY, OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY, OPENCODE_DIR
 #

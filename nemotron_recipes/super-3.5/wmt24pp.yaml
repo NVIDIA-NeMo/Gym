@@ -13,11 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# WMT24++ (no tools): 960 English sentences translated into 9 languages, 8,640 translations,
-# one sample each. Scored by xCOMET-XXL, plus spBLEU and chrF. Reported: COMET averaged over
-# the 9 languages.
+# WMT24++ (no tools): 960 English sentences translated into 9 languages, 8,640 translations, one
+# sample each. Scored by xCOMET-XXL, plus spBLEU and chrF.
 #
 #   nemotron_recipes/super-3.5/run.sh wmt24pp
+#
+# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
+# wmt24pp_wmt_translation_simple_agent. Tech report rows:
+#   WMT24pp COMET: key_metrics["xx->xx/comet"]
 #
 # Set in .env: POLICY_API_KEY, HF_TOKEN
 #

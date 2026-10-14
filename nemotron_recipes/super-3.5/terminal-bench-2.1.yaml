@@ -14,9 +14,13 @@
 # limitations under the License.
 #
 # Terminal-Bench 2.1: 89 terminal tasks x 8 repeats. The Terminus-2 agent works in a tmux
-# session inside each task's container; the task's tests decide. Reported: mean reward.
+# session inside each task's container; the task's tests decide.
 #
 #   nemotron_recipes/super-3.5/run.sh terminal-bench-2.1
+#
+# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
+# terminal_bench_2_1_terminus_2_sandboxed_agent. The tech report shows these x100:
+#   Terminal-Bench 2.1: key_metrics["mean/reward"]
 #
 # Set in .env: POLICY_API_KEY, OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY
 #
@@ -24,8 +28,8 @@
 # per concurrent task and OpenSandbox self-hosted on your machine (the published run used
 # NVIDIA's hosted instance). Setup: reproducibility.md, "Terminal-Bench 2.1".
 #
-# The tasks are not pinned to a revision: Gym clones the latest
-# github.com/harbor-framework/terminal-bench-2-1 (the published run used 36d417f).
+# run.sh first sources terminal-bench-2.1.setup.sh, which pins the tasks
+# (github.com/harbor-framework/terminal-bench-2-1) to the published run's commit, 36d417f5.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: 2581db977d602a12f9d7cb39d851d6d5d19ba140

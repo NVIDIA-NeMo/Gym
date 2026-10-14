@@ -15,10 +15,13 @@
 #
 # IFBench (no tools): 300 prompts x 8 repeats, each with one or more verifiable output
 # constraints (57 instruction types). A response's reward is the fraction of the prompt's
-# instructions it follows, checked strictly by AllenAI's IFBench rules; there is no judge
-# model. Reported: mean reward.
+# instructions it follows, checked strictly by AllenAI's IFBench rules; there is no judge model.
 #
 #   nemotron_recipes/super-3.5/run.sh ifbench
+#
+# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
+# ifbench_benchmark_simple_agent. The tech report shows these x100:
+#   IFBench: key_metrics["mean/reward"]
 #
 # Set in .env: POLICY_API_KEY
 #

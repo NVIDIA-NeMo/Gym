@@ -14,11 +14,14 @@
 # limitations under the License.
 #
 # AA-LCR v1.1 (long context, no tools): 100 questions x 16 repeats, each asked over a full set
-# of documents. A judge model (gpt-5.6-luna, reasoning effort medium) marks each answer
-# CORRECT or INCORRECT against the official one, as a JSON verdict. Reported: mean reward over
-# the judged answers.
+# of documents. A judge model (gpt-5.6-luna, reasoning effort medium) marks each answer CORRECT
+# or INCORRECT against the official one, as a JSON verdict.
 #
 #   nemotron_recipes/super-3.5/run.sh aa-lcr
+#
+# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
+# aalcr_benchmark_simple_agent. The tech report shows these x100:
+#   AA-LCR: agent_metrics["mean/reward"]
 #
 # Set in .env: POLICY_API_KEY, AALCR_JUDGE_API_KEY
 #

@@ -13,13 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Tau3-Banking (Artificial Analysis setup): 97 customer-service tasks x 8 repeats. The model
-# is a bank agent with BM25 + grep search over the bank's documents and a set of account
-# tools; a user-simulator model (gpt-5.4-mini-2026-03-17) plays the customer. A task scores 1
-# if the final account state and the agent's statements match the task's expected outcome.
-# Reported: macro_average.
+# Tau3-Banking (Artificial Analysis setup): 97 customer-service tasks x 8 repeats. The model is
+# a bank agent with BM25 + grep search over the bank's documents and a set of account tools; a
+# user-simulator model (gpt-5.4-mini-2026-03-17) plays the customer. A task scores 1 if the
+# final account state and the agent's statements match the task's expected outcome.
 #
 #   nemotron_recipes/super-3.5/run.sh tau3
+#
+# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
+# tau2_banking_knowledge_bm25_grep_artificial_analysis_agent. The tech report shows these x100:
+#   Tau3 Banking: key_metrics["macro_average"]
 #
 # Set in .env: POLICY_API_KEY, TAU3_USER_SIMULATOR_API_KEY
 #
@@ -28,13 +31,9 @@
 # (<tau3_user_simulator_base_url>/chat/completions). Gym builds the tau2 agent's venv on the
 # first run.
 #
-# The code and tasks are not pinned: Gym installs the tau2 code from branch
-# bxyu/nemo_gym_stable of https://github.com/bxyu-nvidia/tau2-bench and prepares the tasks
-# from its branch edobrowolska/jk/bxyu-nemo-gym-data-upstream-main-tau3. When the published
-# number was produced they were at 60c2a0db and ce4013b. Check with:
-#
-#   git ls-remote https://github.com/bxyu-nvidia/tau2-bench bxyu/nemo_gym_stable \
-#       edobrowolska/jk/bxyu-nemo-gym-data-upstream-main-tau3
+# run.sh first sources tau3.setup.sh, which pins the tasks
+# (https://github.com/bxyu-nvidia/tau2-bench) to the published run's commit, 7245a8f6. The tau2
+# package and the agent's data come from branch bxyu/nemo_gym_stable, as in that run.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: 538886bff48f31a1567670fd5ed29c9ddfea59dd

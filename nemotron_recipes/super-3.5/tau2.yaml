@@ -15,9 +15,15 @@
 #
 # Tau2 (retail, airline, telecom): 278 customer-service tasks x 8 repeats. A user-simulator
 # model (Qwen3-235B-A22B-Instruct-2507-FP8) plays the customer; a task scores 1 if the final
-# state matches the expected outcome. Reported: reward per domain.
+# state matches the expected outcome.
 #
 #   nemotron_recipes/super-3.5/run.sh tau2
+#
+# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
+# tau2_benchmark_agent. The tech report shows these x100:
+#   Tau2 Retail: key_metrics["retail/reward"]
+#   Tau2 Airline: key_metrics["airline/reward"]
+#   Tau2 Telecom: key_metrics["telecom/reward"]
 #
 # Set in .env: POLICY_API_KEY, TAU2_USER_SIMULATOR_API_KEY
 #
@@ -25,8 +31,9 @@
 # tau2_user_simulator_api_key) serving Qwen3-235B-A22B-Instruct-2507-FP8 on Chat Completions
 # (<tau2_user_simulator_base_url>/chat/completions).
 #
-# The code and tasks are not pinned: Gym installs them from branches of
-# https://github.com/bxyu-nvidia/tau2-bench, as for tau3.yaml.
+# run.sh first sources tau2.setup.sh, which pins the tasks and the data the agent reads
+# (https://github.com/bxyu-nvidia/tau2-bench) to the published run's commits, 7245a8f6 and
+# 346f74d9. The tau2 package is installed from branch bxyu/nemo_gym_stable, as in that run.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: 538886bff48f31a1567670fd5ed29c9ddfea59dd

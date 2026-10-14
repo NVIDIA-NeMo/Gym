@@ -13,12 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# HLE (text-only): Humanity's Last Exam without the image questions (no tools), 2,158
-# questions, one sample each. A judge model (gpt-5.6-luna, reasoning effort medium) compares
-# each final answer with the reference using the official HLE judge prompt (yes/no).
-# Reported: the fraction judged correct.
+# HLE (text-only): Humanity's Last Exam without the image questions (no tools), 2,158 questions,
+# one sample each. A judge model (gpt-5.6-luna, reasoning effort medium) compares each final
+# answer with the reference using the official HLE judge prompt (yes/no).
 #
 #   nemotron_recipes/super-3.5/run.sh hle
+#
+# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
+# hle_equivalence_llm_judge_simple_agent. The tech report shows these x100:
+#   HLE (no tools, text-only): agent_metrics["mean/reward"]
 #
 # Set in .env: POLICY_API_KEY, HF_TOKEN, HLE_JUDGE_API_KEY
 #

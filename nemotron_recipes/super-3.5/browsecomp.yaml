@@ -13,11 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# BrowseComp (web-browsing agent): all 1,266 questions, one sample each. The model searches
-# the web through Exa, reads the pages it finds and answers; a judge model (GLM-5.1) compares
-# the answer with the reference. Reported: the fraction judged correct.
+# BrowseComp (web-browsing agent): all 1,266 questions, one sample each. The model searches the
+# web through Exa, reads the pages it finds and answers; a judge model (GLM-5.1) compares the
+# answer with the reference.
 #
 #   nemotron_recipes/super-3.5/run.sh browsecomp
+#
+# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
+# browsecomp_benchmark_agent. The tech report shows these x100:
+#   BrowseComp: key_metrics["mean/reward"]
 #
 # Set in .env: POLICY_API_KEY, BROWSECOMP_JUDGE_API_KEY, EXA_API_KEY
 #

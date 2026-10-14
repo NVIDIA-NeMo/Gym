@@ -13,11 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# LiveCodeBench v6 (no tools, cascade prompt): 454 problems from 2024-08-01 to 2025-06-01
-# x 3 repeats. Gym runs the model's code against each problem's test cases locally; a rollout
-# scores 1 only if every test passes. Reported: the fraction of rollouts that pass.
+# LiveCodeBench v6 (no tools, cascade prompt): 454 problems from 2024-08-01 to 2025-06-01 x 3
+# repeats. Gym runs the model's code against each problem's test cases locally; a rollout scores
+# 1 only if every test passes.
 #
 #   nemotron_recipes/super-3.5/run.sh livecodebench
+#
+# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
+# livecodebench_v6_cascade_code_gen_simple_agent. Tech report rows:
+#   LiveCodeBench v6: key_metrics["pass@1[avg-of-3]/accuracy"]
 #
 # Set in .env: POLICY_API_KEY
 
