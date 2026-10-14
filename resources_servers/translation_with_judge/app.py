@@ -180,10 +180,9 @@ class TranslationWithJudgeResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class TranslationWithJudgeRunRequest(BaseRunRequest):
-    # Mirrors the curriculum dataset's own row schema (see
-    # prepare_translation_curriculum.py) rather than inventing separate field
-    # names -- ``prompt`` is the same messages list wrapped into
-    # ``responses_create_params.input``, kept here too for provenance.
+    # Mirrors the row schema `prepare_example.py` builds data/example.jsonl with,
+    # rather than inventing separate field names -- ``prompt`` is the same messages
+    # list wrapped into ``responses_create_params.input``, kept here too for provenance.
     prompt: List[Dict[str, Any]]
     solution: str
     # The raw sentence to translate, with no instruction wrapping -- verify() sends this
