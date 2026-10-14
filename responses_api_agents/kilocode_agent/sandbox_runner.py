@@ -14,6 +14,7 @@ def main() -> int:
     """Run Kilo in the task workdir while keeping all adapter files in its session directory."""
     directory = Path(sys.argv[1])
     workdir = sys.argv[2]
+    (directory / "runtime.json").write_text(json.dumps({"hostname": os.uname().nodename, "pid": os.getpid()}))
     payload = json.loads((directory / "input.json").read_text())
     env = dict(os.environ)
     # Do not inherit provider credentials or configuration overrides from the image.

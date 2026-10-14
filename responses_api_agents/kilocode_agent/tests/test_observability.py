@@ -193,3 +193,34 @@ def test_native_child_errors_survive_observation_capture(tmp_path: Path) -> None
         if isinstance(record, AgentInvocation) and record.invocation_id == "child"
     )
     assert child.status == "failed" and child.error_type == "APIError"
+
+
+@pytest.mark.parametrize(
+    "metadata,status,gap",
+    [({"exit": 0}, "completed", False), ({"exit": 1}, "failed", False), ({}, "unknown", True)],
+)
+def test_bash_outcome_follows_exit_code_not_lifecycle(tmp_path: Path, metadata: dict, status: str, gap: bool) -> None:
+    sessions = family()[2:]
+    sessions[0]["info"]["parentID"] = None
+    sessions[0]["messages"][1]["parts"].append(
+        {
+            "id": "bash-part",
+            "type": "tool",
+            "tool": "bash",
+            "callID": "bash-call",
+            "state": {
+                "status": "completed",
+                "input": {"command": "pytest"},
+                "output": "1 failed",
+                "metadata": metadata,
+                "time": {"start": 1000, "end": 1500},
+            },
+        }
+    )
+    path = tmp_path / "kilo.db"
+    database(path, sessions)
+    observations, _ = read_kilo_observations(path, fallback_invocation_id="gym")
+    bash = next(record for record in observations.records if isinstance(record, ToolCallObservation))
+    assert bash.status == status
+    assert bash.error_type == ("tool_error" if status == "failed" else None)
+    assert ("tool_outcome_unavailable" in {g.code for g in observations.gaps}) is gap

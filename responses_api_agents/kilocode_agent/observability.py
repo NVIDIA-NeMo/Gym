@@ -12,7 +12,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap
-from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+# opencode_agent's parser also maps bash outcomes from exit codes; opencode_sandboxed_agent is being retired.
+from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
 
 
 def read_kilo_observations(

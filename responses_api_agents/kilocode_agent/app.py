@@ -28,6 +28,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
+from openai.types.responses import ResponseError
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr
 
 from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
@@ -63,8 +64,9 @@ from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_agents.kilocode_agent.observability import read_kilo_observations
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession
-from responses_api_agents.kilocode_agent.setup_kilo import ensure_kilo
+from responses_api_agents.kilocode_agent.setup_kilocode import ensure_kilo
 
 
 LOG = logging.getLogger(__name__)
@@ -342,6 +344,13 @@ class KiloCodeAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     finished_naturally: bool = False
+    ng_agent_observations: Optional[AgentObservationBundle] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+
+# Carries local observations from the /run self-call's response to /run; never sent to the verifier.
+_INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
 class KiloCodeAgent(SimpleResponsesAPIAgent):
@@ -406,6 +415,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         state = KiloSandboxSession(
             request=body,
             provider_name=provider.name,
+            sandbox_id=sandbox.sandbox_id,
             session=SandboxSession(
                 sandbox=sandbox,
                 session_dir=session_dir,
@@ -442,7 +452,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
     def _sandbox_observations(self, state: KiloSandboxSession) -> AgentObservationBundle:
         """Annotate the persisted session tree with the root run's outcome and sandbox identity."""
         artifacts = state.session.artifacts
-        sandbox = SandboxObservation(role="agent", provider=state.provider_name)
+        sandbox = SandboxObservation(role="agent", provider=state.provider_name, sandbox_id=state.sandbox_id)
         if artifacts is None:
             sandbox.error_type = "artifact_capture_failed"
             return AgentObservationBundle(
@@ -469,6 +479,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                     record.status = "incomplete"
                 record.error_type = record.error_type or error_type
                 record.duration_ms = artifacts.wall_time_s * 1000 if artifacts.wall_time_s is not None else None
+        if artifacts.runner_hostname is None or artifacts.runner_pid is None:
+            observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if state.session.cleanup is not None and state.session.cleanup["return_code"] is None:
             observations.gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
         observations.records.append(sandbox)
@@ -526,6 +538,9 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             # A generic openai-compatible provider aimed at the Gym model server. setdefault
             # throughout so a config that wants to override any of this still can; only baseURL is
             # forced, since it is resolved per run and a stale one would silently bypass Gym.
+            # Evaluation rollouts do not need an auxiliary model call to title the session (it also
+            # consumes scripted replies in conformance probes); kilo_config can turn it back on.
+            config.setdefault("agent", {}).setdefault("title", {}).setdefault("disable", True)
             provider = config.setdefault("provider", {}).setdefault("nemo", {})
             provider.setdefault("npm", "@ai-sdk/openai-compatible")
             options = provider.setdefault("options", {})
@@ -552,17 +567,17 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             return
         (work_dir / "kilo.json").write_text(json.dumps(config, indent=2))
 
-    def _env(self, data_home: str, config_home: str, model_base_url: str = "") -> dict[str, str]:
+    def _env(self, data_home: str, config_home: str, model_base_url: str = "", db: str = ":memory:") -> dict[str, str]:
         # Per-run isolation. KILO_NO_DAEMON=1 forces a fresh embedded server (kilo's daemon client is
-        # enabled iff this is unset), so concurrent rollouts share no daemon db/state. KILO_DB=:memory:
-        # keeps sessions ephemeral (we read stdout, not the db). XDG_DATA_HOME/XDG_CONFIG_HOME point
+        # enabled iff this is unset), so concurrent rollouts share no daemon db/state. KILO_DB is
+        # per run: a file in the run dir when observations are read from it, else :memory:. XDG_DATA_HOME/XDG_CONFIG_HOME point
         # inside the run dir so global ~/.local/share/kilo and ~/.config/kilo never leak in. Indexing
         # is handled by --pure (see _build_command), not here: KILO_DISABLE_CODEBASE_INDEXING only
         # triggers on the literal value "vscode-no-workspace", not a truthy one, so it is unusable.
         env = {
             **os.environ,
             "KILO_NO_DAEMON": "1",
-            "KILO_DB": ":memory:",
+            "KILO_DB": db,
             "XDG_DATA_HOME": data_home,
             "XDG_CONFIG_HOME": config_home,
         }
@@ -610,8 +625,12 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
 
     async def _run_kilo(
         self, instruction: str, system_prompt: Optional[str], rollout_id: Optional[str] = None
-    ) -> tuple[list[Any], dict[str, int], str]:
-        """Run one headless kilo run. Returns (output_items, usage, model_name)."""
+    ) -> tuple[str, str, int | None, bool, AgentObservationBundle | None, NeMoGymResponseUsage | None]:
+        """Run one headless kilo run.
+
+        Returns (stdout, stderr, exit_code, timed_out, observations, usage). Observations and the database's
+        usage are read only for rollout-prefixed calls, the only ones that report them.
+        """
         async with self._local_install_lock:
             if not self._local_runtime_ready:
                 await asyncio.to_thread(ensure_kilo, self.config.kilo_version)
@@ -625,31 +644,53 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         config_home.mkdir(parents=True, exist_ok=True)
         model_base_url = self._resolve_model_base_url(rollout_id)
         self._write_kilo_config(project_dir, model_base_url)
-        env = self._env(str(data_home), str(config_home), model_base_url)
+        db_path = data_home / "kilo.db"
+        env = self._env(
+            str(data_home), str(config_home), model_base_url, db=str(db_path) if rollout_id else ":memory:"
+        )
         cmd = self._build_command(project_dir, prompt)
 
+        # File-backed output keeps the events written before a timeout or cancellation kill.
+        stdout_path, stderr_path = work_dir / "stdout.jsonl", work_dir / "stderr.log"
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(project_dir),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-                start_new_session=True,
-            )
+            with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(project_dir),
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=stdout,
+                    stderr=stderr,
+                    env=env,
+                    start_new_session=True,
+                )
+            timed_out = False
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
+                await asyncio.wait_for(proc.wait(), timeout=self.config.timeout)
             except asyncio.TimeoutError:
-                self._kill_process_group(proc)
-                await proc.communicate()
+                timed_out = True
                 LOG.warning("kilo timed out after %ds", self.config.timeout)
-                return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model
-
-            if proc.returncode not in (0, None):
-                LOG.warning("kilo exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
-
-            output_items, usage = parse_kilo_events(stdout.decode(errors="replace"))
-            return output_items, usage, self.config.model
+                self._kill_process_group(proc)
+                await proc.wait()
+            except BaseException:
+                # A cancelled request must not leave Kilo running.
+                self._kill_process_group(proc)
+                raise
+            observations, usage = None, None
+            if rollout_id:
+                try:
+                    observations, usage = await asyncio.to_thread(
+                        read_kilo_observations, db_path, fallback_invocation_id=rollout_id
+                    )
+                except Exception:
+                    LOG.warning("Kilo session database unavailable; retaining CLI output", exc_info=True)
+            return (
+                stdout_path.read_bytes().decode(errors="replace"),
+                stderr_path.read_bytes().decode(errors="replace"),
+                proc.returncode,
+                timed_out,
+                observations,
+                usage,
+            )
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -681,6 +722,38 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             ):
                 raise HTTPException(422, "Kilo sandbox input supports text only")
 
+    def _response_from_events(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        stdout: str,
+        *,
+        timed_out: bool,
+        failure: str | None,
+        diagnostics: str,
+    ) -> tuple[NeMoGymResponse, str | None]:
+        """Build the response from Kilo's events, with the reason the run failed (None when it did not)."""
+        error, length_stop = _scan_run_events(stdout)
+        output_items, usage = parse_kilo_events(stdout)
+        if error is not None:
+            problem = f"Kilo reported an execution error: {error}; {diagnostics}"
+        elif failure is not None:
+            problem = f"{failure}: {diagnostics}"
+        elif timed_out and not output_items and not any(usage.values()):
+            # Kilo retries a model it cannot reach until the deadline, without events. A timeout here
+            # means an unreachable or failed model server, not the model's own partial work.
+            problem = (
+                "Kilo timed out before any model call completed; check that Kilo can reach the model server: "
+                f"{diagnostics}"
+            )
+        elif not output_items and not (timed_out or length_stop):
+            problem = "Kilo completed without any trajectory events"
+        else:
+            problem = None
+        response = self._build_response(
+            body, output_items, usage, self.config.model, incomplete=timed_out or length_stop
+        )
+        return response, problem
+
     async def _sandbox_response(
         self, state: KiloSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, *, rollout_id: str
     ) -> NeMoGymResponse:
@@ -709,18 +782,25 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 timeout=self.config.timeout,
                 close_timeout=self.config.session_close_timeout_seconds,
             )
-        # API/CLI failures must remain execution failures, rather than reaching the verifier as zeros.
-        error, length_stop = _scan_run_events(artifacts.stdout)
-        if error is not None:
-            raise RuntimeError(f"Kilo reported an execution error: {error}; {artifacts.stderr[-4096:]}")
-        failure = _runtime_failure(artifacts, state.session.cleanup)
-        if failure is not None:
-            raise RuntimeError(f"{failure}: {artifacts.stderr[-4096:]}")
-        incomplete = state.session.cleanup["timed_out"] or length_stop
-        output_items, usage = parse_kilo_events(artifacts.stdout)
-        if not output_items and not incomplete:
-            raise RuntimeError("Kilo completed without any trajectory events")
-        response = self._build_response(body, output_items, usage, self.config.model, incomplete=incomplete)
+        response, problem = self._response_from_events(
+            body,
+            artifacts.stdout,
+            timed_out=bool(state.session.cleanup and state.session.cleanup["timed_out"]),
+            failure=_runtime_failure(artifacts, state.session.cleanup),
+            diagnostics=artifacts.log_tail or artifacts.stderr[-4096:],
+        )
+        if problem is not None:
+            # Native sessions must not hand a failed run to the verifier, where it would score as a zero.
+            raise RuntimeError(problem)
+        response.metadata = {
+            "harness_execution": "sandbox",
+            **(
+                {"harness_hostname": artifacts.runner_hostname, "harness_pid": str(artifacts.runner_pid)}
+                if artifacts.runner_hostname is not None and artifacts.runner_pid is not None
+                else {}
+            ),
+            "kilo_version": str(self.config.kilo_version),
+        }
         if artifacts.usage is not None:
             response.usage = artifacts.usage.model_copy(deep=True)
         else:
@@ -765,9 +845,42 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         # run() reaches this handler through the /ng-rollout/<id> self-call route, which carries the
         # correlation id kilo's model calls are tagged with. Absent on a direct /v1/responses call.
         rollout_id = request.path_params.get("rollout_id")
-        output_items, usage, model_name = await self._run_kilo(user_message, system_prompt, rollout_id)
-
-        return self._build_response(body, output_items, usage, model_name)
+        stdout, stderr, exit_code, timed_out, observations, db_usage = await self._run_kilo(
+            user_message, system_prompt, rollout_id
+        )
+        response, problem = self._response_from_events(
+            body,
+            stdout,
+            timed_out=timed_out,
+            failure=None if timed_out or exit_code == 0 else f"Kilo exited {exit_code}",
+            diagnostics=stderr[-4096:],
+        )
+        if problem is not None:
+            # The legacy /run path still verifies (the conformance convention), so a failed run is
+            # marked failed rather than passed off as a completed answer.
+            LOG.warning("Kilo run failed: %s", problem[:500])
+            response.status = "failed"
+            response.error = ResponseError(code="server_error", message=problem[:2000])
+        if db_usage is not None:
+            response.usage = db_usage
+        if not isinstance(rollout_id, str):
+            return response
+        if observations is None:
+            observations = AgentObservationBundle(
+                source="kilocode",
+                records=[AgentInvocation(invocation_id=rollout_id)],
+                gaps=[ObservationGap(code="agent_artifact_unavailable")],
+            )
+        for record in observations.records:
+            if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
+                if problem is not None:
+                    record.status = "failed"
+                elif response.status == "incomplete":
+                    record.status = "incomplete"
+        observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
+        if timed_out:
+            observations.gaps.append(ObservationGap(code="agent_run_timeout"))
+        return response.model_copy(update={_INTERNAL_OBSERVATIONS_KEY: observations.model_dump(mode="json")})
 
     def _build_response(
         self,
@@ -843,6 +956,10 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             await raise_for_status(agent_resp)
             cookies = agent_resp.cookies
             agent_resp_json = await get_response_json(agent_resp)
+            raw_observations = agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None)
+            observations = (
+                AgentObservationBundle.model_validate(raw_observations) if isinstance(raw_observations, dict) else None
+            )
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -863,7 +980,9 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
 
             return KiloCodeAgentVerifyResponse.model_validate(
-                verify_json | {"turns_used": turns, "finished_naturally": naturally}
+                verify_json
+                | {"turns_used": turns, "finished_naturally": naturally}
+                | ({"ng_agent_observations": observations} if observations is not None else {})
             )
 
 

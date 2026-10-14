@@ -20,6 +20,7 @@ from responses_api_agents.kilocode_agent.observability import read_kilo_observat
 
 
 LOG = logging.getLogger(__name__)
+LOG_TAIL_BYTES = 4096
 
 
 def _sandbox_prepare_command(workdir: str, directory: str) -> str:
@@ -64,6 +65,11 @@ class KiloArtifacts:
     observations: AgentObservationBundle | None = None
     usage: NeMoGymResponseUsage | None = None
     wall_time_s: float | None = None
+    # Kilo logs model-connection errors only to its own log file, never to stdout or stderr.
+    log_tail: str = ""
+    # Runner identity in the sandbox, for checking that the harness did not run on the host.
+    runner_hostname: str | None = None
+    runner_pid: int | None = None
 
 
 @dataclass
@@ -72,6 +78,7 @@ class KiloSandboxSession(AgentSessionState):
 
     session: SandboxSession[KiloArtifacts]
     provider_name: str | None = None
+    sandbox_id: str | None = None
     started_at: float | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
@@ -138,6 +145,15 @@ class KiloSandboxSession(AgentSessionState):
             LOG.warning("Kilo exit diagnostics unavailable; retaining partial CLI output", exc_info=True)
             raw = None
         exit_code = raw if type(raw) is int else None
+        try:
+            runtime = json.loads(await read_text(self.session.sandbox, path=f"{directory}/runtime.json"))
+        except Exception:
+            runtime = None
+        hostname = runtime.get("hostname") if isinstance(runtime, dict) else None
+        pid = runtime.get("pid") if isinstance(runtime, dict) else None
+        log_tail = ""
+        if self.session.cleanup is not None and self.session.cleanup["timed_out"]:
+            log_tail = await self._read_log_tail()
         observations, usage = None, None
         try:
             if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
@@ -172,13 +188,34 @@ class KiloSandboxSession(AgentSessionState):
             observations=observations,
             usage=usage,
             wall_time_s=wall_time_s,
+            log_tail=log_tail,
+            runner_hostname=hostname if isinstance(hostname, str) else None,
+            runner_pid=pid if type(pid) is int else None,
         )
+
+    async def _read_log_tail(self) -> str:
+        """Return the end of Kilo's newest log, which names errors such as an unreachable model."""
+        logs = quote(f"{self.session.session_dir}/data/kilo/log")
+        try:
+            result = await self.session.sandbox.exec(
+                f'log=$(ls -t -- {logs}/*.log 2>/dev/null | head -n 1) && [ -n "$log" ] '
+                f'&& tail -c {LOG_TAIL_BYTES} -- "$log"',
+                cwd="/",
+                timeout_s=30,
+            )
+        except Exception:
+            LOG.warning("Kilo log unavailable", exc_info=True)
+            return ""
+        if result.return_code != 0 or result.error_type:
+            return ""
+        return result.stdout or ""
 
     async def close(self, *, timeout: float) -> None:
         """Confirm remote cleanup and capture output before cancelling activation waiters."""
         await self.session.close(timeout=timeout)
         if self.task is not None:
-            if not self.task.done():
+            # A retried close must not cancel again: that would interrupt the activation's own cleanup.
+            if not self.task.done() and not self.task.cancelling():
                 self.task.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(self.task), timeout=timeout)

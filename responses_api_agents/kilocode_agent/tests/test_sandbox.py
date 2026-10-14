@@ -146,7 +146,7 @@ def test_missing_database_reports_gap_and_keeps_sandbox_outcome() -> None:
         "completed",
         1.5,
     )
-    assert [gap.code for gap in observations.gaps] == ["agent_artifact_unavailable"]
+    assert [gap.code for gap in observations.gaps] == ["agent_artifact_unavailable", "runtime_info_unavailable"]
 
 
 def test_failed_capture_reports_capture_gap() -> None:
@@ -202,6 +202,7 @@ async def test_seed_selects_owner_and_installs_in_sandbox(borrowed: bool) -> Non
         kilo_version="7.4.15", sandbox_provider="sandbox", sandbox_config={"image": "test"}
     )
     sandbox = AsyncMock()
+    sandbox.sandbox_id = "sbx-1"
     sandbox.exec.return_value = SandboxExecResult(return_code=0, stdout="", stderr="")
     provider = AsyncMock()
     with (
@@ -216,6 +217,7 @@ async def test_seed_selects_owner_and_installs_in_sandbox(borrowed: bool) -> Non
         session = await agent._seed_agent_session_state(seed(borrowed=borrowed))
     assert session.session.owns_sandbox is not borrowed
     assert session.session.workdir == ("/repo" if borrowed else "/app")
+    assert session.sandbox_id == "sbx-1"
     install.assert_awaited_once_with(version="7.4.15", timeout=900)
     host_install.assert_not_called()
     if borrowed:
@@ -358,6 +360,7 @@ TEXT = '{"type":"text","part":{"text":"partial"}}'
     [
         (0, receipt(), '{"type":"text","part":{"text":"55"}}', "completed"),
         (None, receipt(return_code=-15, timed_out=True), TEXT, "incomplete"),
+        (None, receipt(return_code=-15, timed_out=True), "", "error"),
         (None, receipt(return_code=1), "", "error"),
         (None, receipt(return_code=1), TEXT, "error"),
         (None, receipt(error="cleanup: lost"), TEXT, "error"),
@@ -390,6 +393,88 @@ async def test_sandbox_output_and_failures(
         config = json.loads(staged["config"])
         assert config["provider"]["nemo"]["options"]["baseURL"].endswith("/ng-rollout/rollout-1-a2/v1")
         assert config["provider"]["nemo"]["models"]["m"]["interleaved"]["field"] == "reasoning_content"
+
+
+CONNECT_ERROR = 'level=ERROR message="stream error" error.error="AI_APICallError: Cannot connect to API"'
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    ["", '{"type":"step_finish","part":{"id":"p1","tokens":{"input":0,"output":0},"reason":"stop"}}'],
+)
+async def test_timeout_before_any_model_call_is_an_execution_failure(stdout: str) -> None:
+    """Kilo retries an unreachable model until the deadline; that must not be graded as the model's zero."""
+    agent = _make_model_server_agent(model="m")
+    session = state()
+    session.session.cleanup = receipt(return_code=-15, timed_out=True)
+    artifacts = KiloArtifacts(stdout=stdout, stderr="migration done", exit_code=None, log_tail=CONNECT_ERROR)
+    session.session.execute = AsyncMock(return_value=artifacts)
+    with pytest.raises(RuntimeError, match="before any model call completed.*Cannot connect to API"):
+        await agent._sandbox_response(
+            session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
+        )
+
+
+@pytest.mark.parametrize("timed_out", [True, False])
+async def test_artifacts_keep_kilo_log_tail_only_after_timeout(timed_out: bool) -> None:
+    session = state()
+    session.session.cleanup = receipt(return_code=-15 if timed_out else 0, timed_out=timed_out)
+    session.session.sandbox.exec.side_effect = [
+        SandboxExecResult(stdout=CONNECT_ERROR, stderr="", return_code=0),
+        SandboxExecResult(stdout="", stderr="no database", return_code=1),
+    ]
+    with patch(f"{TRANSPORT}.read_text", side_effect=["", "diagnostic", RuntimeError("not written")]):
+        artifacts = await session.collect_artifacts()
+    assert artifacts.log_tail == (CONNECT_ERROR if timed_out else "")
+    if timed_out:
+        log_command = session.session.sandbox.exec.await_args_list[0].args[0]
+        assert "/tmp/nemo-gym-kilo-sessions/test/data/kilo/log" in log_command
+
+
+async def test_runner_identity_reaches_response_metadata() -> None:
+    agent = _make_model_server_agent(model="m", kilo_version="7.4.15")
+    session = state()
+    with patch(
+        f"{TRANSPORT}.read_text", side_effect=[TEXT, "", "0", json.dumps({"hostname": "sandbox-7", "pid": 42})]
+    ):
+        artifacts = await session.collect_artifacts()
+    assert (artifacts.runner_hostname, artifacts.runner_pid) == ("sandbox-7", 42)
+    session.session.execute = AsyncMock(return_value=artifacts)
+    session.session.artifacts = artifacts
+    response = await agent._sandbox_response(
+        session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
+    )
+    assert response.metadata == {
+        "harness_execution": "sandbox",
+        "harness_hostname": "sandbox-7",
+        "harness_pid": "42",
+        "kilo_version": "7.4.15",
+    }
+    session.sandbox_id = "sbx-1"
+    observations = agent._sandbox_observations(session)
+    assert "runtime_info_unavailable" not in {gap.code for gap in observations.gaps}
+    assert observations.records[-1].sandbox_id == "sbx-1"
+
+
+async def test_retried_close_does_not_interrupt_a_cancelling_activation() -> None:
+    session = state()
+    session.session.close = AsyncMock()
+    cleaned = asyncio.Event()
+
+    async def activation() -> None:
+        try:
+            await asyncio.sleep(100)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)
+            cleaned.set()
+            raise
+
+    session.task = asyncio.create_task(activation())
+    await asyncio.sleep(0)
+    session.task.cancel()
+    await asyncio.sleep(0)
+    await session.close(timeout=1)
+    assert cleaned.is_set() and session.task.cancelled()
 
 
 @pytest.mark.parametrize("exit_code", [0, 3])
@@ -430,6 +515,8 @@ def test_standalone_runner_executes_in_task_directory(tmp_path: Path, exit_code:
     assert not (repo / "kilo.json").exists()
     assert (directory / "stderr.log").read_bytes() == b"diagnostic\xff"
     assert json.loads((directory / "exit.json").read_text()) == exit_code
+    runtime = json.loads((directory / "runtime.json").read_text())
+    assert runtime["hostname"] == os.uname().nodename and runtime["pid"] != os.getpid()
 
 
 def test_timeout_and_cli_errors_have_explicit_sandbox_outcomes() -> None:

@@ -24,11 +24,16 @@ gym eval run --no-serve --agent kilocode_math_agent \
 
 Per request the agent writes `kilo.json` into an isolated run dir and runs one `kilo run --auto
 --pure --format json`, then parses the streamed JSON events for the trajectory. The subprocess runs
-with `KILO_NO_DAEMON=1` (fresh embedded server per run — no shared daemon), `KILO_DB=:memory:`
-(ephemeral sessions), and per-run `XDG_DATA_HOME`/`XDG_CONFIG_HOME` pointed inside the run dir, so
-runs don't share state and the global `~/.config/kilo` never bleeds in. `--pure` runs without
-external plugins, so codebase indexing never starts. The project `kilo.json` written into the run dir
-supplies the provider and permissions.
+with `KILO_NO_DAEMON=1` (fresh embedded server per run — no shared daemon), a per-run session
+database (`KILO_DB`; a file in the run dir for `/run` rollouts, whose observations are read from it
+before the run dir is removed, else `:memory:`), and per-run `XDG_DATA_HOME`/`XDG_CONFIG_HOME`
+pointed inside the run dir, so runs don't share state and the global `~/.config/kilo` never bleeds
+in. `--pure` runs without external plugins, so codebase indexing never starts. The project
+`kilo.json` written into the run dir supplies the provider and permissions.
+
+A local run that fails (a CLI/API error event, a nonzero exit, or a timeout before any model call
+completed) returns a `failed` response with the reason in `error`; `/run` still verifies it, as the
+other local harnesses do. A timeout after model output returns an `incomplete` response.
 
 ## Model server
 
@@ -96,7 +101,7 @@ a config that uses `_inherit_from` cannot add new keys to `models`.
 - `repo_dir`: optional persistent project dir to run in (default: ephemeral per-request dir)
 - `thinking`: passes `--thinking` when true (only then are `reasoning` events emitted/captured)
 - `system_prompt`: prepended to the user message
-- `setup_timeout`: reserved, currently unused
+- `setup_timeout`: seconds for installing Node and Kilo into the task sandbox at session setup; unused locally
 - `timeout`: seconds for the `kilo run` call (the only runaway bound — Kilo has no `--max-turns`)
 - `extra_args`: extra flags appended to `kilo run`
 - `kilo_config`: written to `kilo.json` in the run dir (OpenCode-compatible schema)
@@ -197,8 +202,12 @@ Requests carry one text user message, optionally preceded by a system/developer 
 request fields, model overrides, `repo_dir`, `extra_args` and `env` are rejected. Identical
 activation retries join the running task; session close owns cancellation.
 
-CLI/API errors and nonzero exits raise, so the episode fails instead of scoring zero. A killed run
-or a `length` stop returns an `incomplete` response. Observations come from a snapshot of Kilo's
-SQLite database (root and child sessions, tool timing, usage), annotated with the root outcome and
-a sandbox record; if the snapshot is unavailable, a coverage gap is reported. Token IDs and
-logprobs are not available.
+CLI/API errors and nonzero exits raise, so the episode fails instead of scoring zero (local runs
+mark them `failed` instead; see Quick start). A killed run
+or a `length` stop returns an `incomplete` response, except a run that times out before any model
+call completes: Kilo retries an unreachable model server without reporting it, so that run raises
+with the end of Kilo's log instead. Observations come from a snapshot of Kilo's
+SQLite database (root and child sessions, tool calls with timing and bash exit status, usage),
+annotated with the root outcome and a sandbox record; if the snapshot is unavailable, a coverage gap
+is reported. The response metadata records the sandbox runner's hostname and PID and the Kilo
+version. Token IDs and logprobs are not available.
