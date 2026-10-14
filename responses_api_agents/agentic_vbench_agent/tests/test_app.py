@@ -170,6 +170,7 @@ async def test_cancelled_http_wait_does_not_cancel_episode(
 async def test_policy_server_endpoint_and_served_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app, "get_server_url", lambda name: f"http://10.0.0.9:6100/{name}")
     delegation_prompt = "You may delegate suitable subtasks."
+    subagent_prompt = "Return a concise result before the output limit."
     agent = make_agent(
         tmp_path,
         monkeypatch,
@@ -181,6 +182,7 @@ async def test_policy_server_endpoint_and_served_model(tmp_path: Path, monkeypat
         opencode_training_mode="subagent",
         opencode_subagents_enabled=True,
         opencode_delegation_prompt=delegation_prompt,
+        opencode_subagent_prompt=subagent_prompt,
     )
     endpoint, model = agent._model_endpoint(request())
     assert endpoint == "http://10.0.0.9:6100/policy_model/v1"
@@ -210,6 +212,7 @@ async def test_policy_server_endpoint_and_served_model(tmp_path: Path, monkeypat
     assert command[command.index("--training-mode") + 1] == "subagent"
     assert "--subagents" in command
     assert command[command.index("--delegation-prompt") + 1] == delegation_prompt
+    assert command[command.index("--subagent-prompt") + 1] == subagent_prompt
     assert "--max-turns" not in command
     assert verified.reward == 1
     assert verified.equal_family_reward == pytest.approx(25 / 18)
@@ -426,6 +429,7 @@ def test_training_config_resolves_from_environment(monkeypatch: pytest.MonkeyPat
     assert config.model_context_tokens == 20480 and config.model_output_capability_tokens == 4096
     assert config.max_turns == 12 and config.backend == "remote" and config.judge_protocol == "nvinference-hybrid"
     assert config.opencode_delegation_prompt is None
+    assert config.opencode_subagent_prompt is None
     assert config.benchmark_root is None and config.credentials_file is None
     monkeypatch.setenv("AGENTIC_VBENCH_DELEGATION_PROMPT", "You may delegate suitable subtasks.")
     prompted = OmegaConf.to_container(
@@ -434,3 +438,10 @@ def test_training_config_resolves_from_environment(monkeypatch: pytest.MonkeyPat
     assert prompted["agentic_vbench_agent"]["responses_api_agents"]["agentic_vbench_agent"][
         "opencode_delegation_prompt"
     ] == "You may delegate suitable subtasks."
+    monkeypatch.setenv("AGENTIC_VBENCH_SUBAGENT_PROMPT", "Return a concise result.")
+    child_prompted = OmegaConf.to_container(
+        OmegaConf.load(Path(__file__).parents[1] / "configs/agentic_vbench_train.yaml"), resolve=True
+    )
+    assert child_prompted["agentic_vbench_agent"]["responses_api_agents"]["agentic_vbench_agent"][
+        "opencode_subagent_prompt"
+    ] == "Return a concise result."

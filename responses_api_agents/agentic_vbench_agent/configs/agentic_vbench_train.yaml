@@ -50,6 +50,8 @@ agentic_vbench_agent:
       # Recipe-level instruction: preserves the verbatim benchmark prompt while
       # making the initial subagent smoke reliably exercise task delegation.
       opencode_delegation_prompt: ${oc.env:AGENTIC_VBENCH_DELEGATION_PROMPT,null}
+      # Independent child instruction; the general child cannot delegate again.
+      opencode_subagent_prompt: ${oc.env:AGENTIC_VBENCH_SUBAGENT_PROMPT,null}
       train_compaction_summaries: ${oc.env:AGENTIC_VBENCH_TRAIN_COMPACTION_SUMMARIES,true}
       capture_proxy_host: ${oc.env:AGENTIC_VBENCH_CAPTURE_PROXY_HOST,null}
       datasets:

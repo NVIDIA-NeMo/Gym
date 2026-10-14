@@ -109,6 +109,9 @@ class AgenticVBenchConfig(BaseResponsesAPIAgentConfig):
     # Optional primary-agent instruction used by the dedicated subagent-training
     # recipe. It does not alter the benchmark prompt or verifier metadata.
     opencode_delegation_prompt: str | None = None
+    # Optional instruction for the depth-one ``general`` child. Keeping this
+    # separate avoids asking a child whose task tool is denied to delegate.
+    opencode_subagent_prompt: str | None = None
     # Address the task container uses to reach this server's capture proxy; derived
     # from the route to the policy server when unset.
     capture_proxy_host: str | None = None
@@ -346,6 +349,8 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 command.extend(["--subagent-max-active", str(self.config.opencode_subagent_max_active)])
             if self.config.opencode_delegation_prompt is not None:
                 command.extend(["--delegation-prompt", self.config.opencode_delegation_prompt])
+            if self.config.opencode_subagent_prompt is not None:
+                command.extend(["--subagent-prompt", self.config.opencode_subagent_prompt])
             try:
                 exit_code = await run_process(command, output, runtime, self._env)
             except asyncio.CancelledError:

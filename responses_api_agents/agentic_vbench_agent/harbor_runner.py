@@ -57,6 +57,7 @@ def job_config(
     subagent_max_depth: int = 1,
     subagent_max_active: int | None = None,
     delegation_prompt: str | None = None,
+    subagent_prompt: str | None = None,
 ) -> dict:
     """Create a single-attempt Harbor job using OpenCode's compatible provider.
 
@@ -77,6 +78,8 @@ def job_config(
     OpenCode's side model call that names the session. ``delegation_prompt`` adds
     a run-level instruction to the primary agent without modifying the pinned
     benchmark prompt; it is valid only when the subagent tool is enabled.
+    ``subagent_prompt`` gives the depth-one ``general`` child a run-level
+    instruction, independently of the primary agent's delegation instruction.
     """
     if not 0 < output_tokens < context_tokens:
         raise ValueError("Output token limit must be positive and smaller than context")
@@ -129,6 +132,12 @@ def job_config(
             raise ValueError("Delegation prompt must not be empty")
         if not subagents_enabled:
             raise ValueError("Delegation prompt requires subagents")
+    if subagent_prompt is not None:
+        subagent_prompt = subagent_prompt.strip()
+        if not subagent_prompt:
+            raise ValueError("Subagent prompt must not be empty")
+        if not subagents_enabled:
+            raise ValueError("Subagent prompt requires subagents")
     if subagents_enabled:
         if subagent_max_depth != 1:
             raise ValueError("Subagent training requires depth-one delegation (subagent_max_depth=1)")
@@ -158,6 +167,7 @@ def job_config(
             "mode": "subagent",
             "permission": {"*": "allow", "task": "deny"},
             **({"steps": max_turns} if max_turns is not None else {}),
+            **({"prompt": subagent_prompt} if subagent_prompt is not None else {}),
         }
         agents["explore"] = {"disable": True}
     else:
@@ -337,6 +347,11 @@ def main() -> None:
         default=None,
         help="Primary-agent instruction encouraging useful delegation (subagent mode only)",
     )
+    parser.add_argument(
+        "--subagent-prompt",
+        default=None,
+        help="Instruction for depth-one general children (subagent mode only)",
+    )
     args = parser.parse_args()
     if importlib.metadata.version("harbor") != "0.6.6":
         raise RuntimeError("AgenticVBench requires upstream harbor==0.6.6")
@@ -385,6 +400,7 @@ def main() -> None:
             subagent_max_depth=args.subagent_max_depth,
             subagent_max_active=args.subagent_max_active,
             delegation_prompt=args.delegation_prompt,
+            subagent_prompt=args.subagent_prompt,
         )
     )
     config_path = args.output / "harbor_job.json"

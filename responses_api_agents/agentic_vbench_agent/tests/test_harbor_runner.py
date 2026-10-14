@@ -457,11 +457,12 @@ def test_job_config_denies_task_tool_without_subagents(tmp_path):
 
 def test_job_config_subagent_mode_configures_depth_one_children(tmp_path):
     prompt = "You may delegate suitable subtasks to subagents when useful."
+    child_prompt = "Return a concise bounded result before the output limit."
     cfg = harbor_runner.job_config(
         task_path=tmp_path, output=tmp_path / "out", runtime_root=tmp_path / "rt", model="m",
         endpoint="http://10.0.0.1:8000/v1", context_tokens=65536, output_tokens=8192, backend="remote", max_turns=32,
         training_mode="subagent", subagents_enabled=True, compaction_auto=False, compaction_prune=False,
-        delegation_prompt=prompt,
+        delegation_prompt=prompt, subagent_prompt=child_prompt,
     )
     opencode = cfg["agents"][0]["kwargs"]["opencode_config"]
     assert opencode["permission"] == {"*": "allow", "task": "allow"}
@@ -469,6 +470,7 @@ def test_job_config_subagent_mode_configures_depth_one_children(tmp_path):
         "mode": "subagent",
         "permission": {"*": "allow", "task": "deny"},
         "steps": 32,
+        "prompt": child_prompt,
     }
     assert opencode["agent"]["explore"] == {"disable": True}
     assert opencode["agent"]["build"] == {"steps": 32, "prompt": prompt}
@@ -489,7 +491,13 @@ def test_job_config_subagent_mode_rejects_compaction_and_mismatched_flags(tmp_pa
         harbor_runner.job_config(**common, training_mode="subagent", subagents_enabled=True, subagent_max_depth=2)
     with pytest.raises(ValueError, match="requires subagents"):
         harbor_runner.job_config(**common, delegation_prompt="You may delegate")
+    with pytest.raises(ValueError, match="requires subagents"):
+        harbor_runner.job_config(**common, subagent_prompt="Be concise")
     with pytest.raises(ValueError, match="must not be empty"):
         harbor_runner.job_config(
             **common, training_mode="subagent", subagents_enabled=True, delegation_prompt="  "
+        )
+    with pytest.raises(ValueError, match="must not be empty"):
+        harbor_runner.job_config(
+            **common, training_mode="subagent", subagents_enabled=True, subagent_prompt="  "
         )
