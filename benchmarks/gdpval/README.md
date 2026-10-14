@@ -422,6 +422,11 @@ gym eval run \
   them under the names the harness gives MCP tools.
 - The rows come from `data/gdpval_benchmark_harness_neutral.jsonl`, written by `prepare_harness_neutral.py`: the same
   tasks without the tool list, which session harnesses reject, rendered with `prompts/harness-neutral.yaml`.
+- The harness calls the model server and the resources server's `/mcp` endpoint from inside the sandbox, so pass
+  `++use_absolute_ip=true` when the servers' default addresses are not reachable from it.
+- Harnesses compact their context when the model server reports a context-length error. Gym's `openai_model` returns
+  upstream errors as HTTP 500 unless `propagate_upstream_http_status_codes` lists the status (vLLM uses 400); without
+  that, a long episode fails at the context limit instead of compacting.
 - The prompt and the harness differ from the certified Stirrup setup, so these are not AA v2 scores.
 
 ## Multi-judge panel
