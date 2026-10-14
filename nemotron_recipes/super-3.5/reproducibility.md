@@ -106,12 +106,13 @@ benchmark setting there would silently replace the published one.
 
 Reproducing these numbers depends on the model being served the right way. Check the
 [model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16)
-for the authoritative serving guidance.
+for the authoritative serving guidance; the command below is what these recipes were
+validated with.
 
-The published runs served the model with vLLM 0.30.0, on one node of 4 GPUs per server:
+The published runs served the model with vLLM 0.30.0 (public image: `vllm/vllm-openai:v0.30.0`;
+the model card's examples use `v0.31.0`), on one node of 4 GPUs per server:
 
 ```bash
-# TODO: confirm public vLLM version and flags before release.
 vllm serve nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 \
   --served-model-name nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 --port 8000 \
   --tensor-parallel-size 4 --enable-expert-parallel \
@@ -124,8 +125,7 @@ vllm serve nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 \
   --max-model-len 262144 --max-num-seqs 1024 --max-num-batched-tokens 135680 \
   --limit-mm-per-prompt '{"image":128,"video":1}' --video-pruning-rate 0.5 \
   --media-io-kwargs '{"video":{"fps":2,"num_frames":256}}' \
-  --skip-mm-profiling --mm-encoder-attn-backend TORCH_SDPA \
-  --hf-overrides '{"architectures":["NemotronH_Super_Omni_Reasoning_V3"],"use_thumbnail":false,"vision_config":{"args":{"model":"vit_huge_patch16_224","min_num_patches":1024,"max_num_patches":13312,"num_cls_tokens":3,"num_registers":7,"summary_idxs":[0,1]}},"norm_mean":[0.48145466,0.4578275,0.40821073],"norm_std":[0.26862954,0.26130258,0.27577711]}'
+  --skip-mm-profiling --mm-encoder-attn-backend TORCH_SDPA
 ```
 
 Every recipe except SWE-bench and Terminal-Bench 2.1 (below) was run against this. MMLU-ProX and
@@ -396,9 +396,11 @@ in rubric mode only: comparison mode samples each stage's tasks from the whole b
 ## What to expect from your numbers
 
 **Where the published numbers are.** Table 10 of the Nemotron 3.5 Super tech report. Each
-recipe's header names the metric to compare (`Score:`): the key in
-`evaluator_rollouts_aggregate_metrics.json` behind each of its rows in that table. A published
-number is the mean of two runs, except CritPt, BrowseComp and AA-Omniscience (one run each).
+recipe's header (`Tech report …`) names the metric behind each of its rows there: a key under
+`key_metrics` or `agent_metrics` of the named agent, i.e. of the entry in
+`evaluator_rollouts_aggregate_metrics.json` whose `agent_ref.name` matches. Keys marked x100
+are fractions that the report shows as percentages. A published number is the mean of two
+runs, except CritPt, BrowseComp and AA-Omniscience (one run each).
 
 **Run the whole benchmark.** Every recipe except CritPt can be cut short for a smoke test
 with `LIMIT`. A limited run tells you the setup works. It is not a score, and should not be

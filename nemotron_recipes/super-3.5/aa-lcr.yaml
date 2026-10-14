@@ -19,9 +19,8 @@
 #
 #   nemotron_recipes/super-3.5/run.sh aa-lcr
 #
-# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
-# aalcr_benchmark_simple_agent. The tech report shows these x100:
-#   AA-LCR: agent_metrics["mean/reward"]
+# Tech report "AA-LCR": mean/reward x100
+#   (agent_metrics of aalcr_benchmark_simple_agent)
 #
 # Set in .env: POLICY_API_KEY, AALCR_JUDGE_API_KEY
 #

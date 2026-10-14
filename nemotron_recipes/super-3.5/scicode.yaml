@@ -18,10 +18,9 @@
 #
 #   nemotron_recipes/super-3.5/run.sh scicode
 #
-# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
-# scicode_benchmark_agent. The tech report shows these x100:
-#   SciCode (subtask): key_metrics["mean/subtask_accuracy"]
-#   SciCode (problem): key_metrics["mean/problem_accuracy"]
+# Tech report, x100 (key_metrics of scicode_benchmark_agent):
+#   SciCode (subtask): mean/subtask_accuracy
+#   SciCode (problem): mean/problem_accuracy
 #
 # Set in .env: POLICY_API_KEY, TEST_DATA
 #

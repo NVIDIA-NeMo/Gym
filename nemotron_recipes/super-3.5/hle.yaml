@@ -19,9 +19,8 @@
 #
 #   nemotron_recipes/super-3.5/run.sh hle
 #
-# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
-# hle_equivalence_llm_judge_simple_agent. The tech report shows these x100:
-#   HLE (no tools, text-only): agent_metrics["mean/reward"]
+# Tech report "HLE (no tools, text-only)": mean/reward x100
+#   (agent_metrics of hle_equivalence_llm_judge_simple_agent)
 #
 # Set in .env: POLICY_API_KEY, HF_TOKEN, HLE_JUDGE_API_KEY
 #

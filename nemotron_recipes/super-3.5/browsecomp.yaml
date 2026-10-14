@@ -19,9 +19,8 @@
 #
 #   nemotron_recipes/super-3.5/run.sh browsecomp
 #
-# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
-# browsecomp_benchmark_agent. The tech report shows these x100:
-#   BrowseComp: key_metrics["mean/reward"]
+# Tech report "BrowseComp": mean/reward x100
+#   (key_metrics of browsecomp_benchmark_agent)
 #
 # Set in .env: POLICY_API_KEY, BROWSECOMP_JUDGE_API_KEY, EXA_API_KEY
 #

@@ -18,9 +18,8 @@
 #
 #   nemotron_recipes/super-3.5/run.sh apex-shortlist
 #
-# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
-# apex_shortlist_math_with_judge_simple_agent. The tech report shows these x100:
-#   Apex-Shortlist: agent_metrics["mean/reward"]
+# Tech report "Apex-Shortlist": mean/reward x100
+#   (agent_metrics of apex_shortlist_math_with_judge_simple_agent)
 #
 # Set in .env: POLICY_API_KEY
 #

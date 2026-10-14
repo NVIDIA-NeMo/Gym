@@ -19,9 +19,8 @@
 #
 #   nemotron_recipes/super-3.5/run.sh osworld
 #
-# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
-# osworld_nano_omni_agent. Tech report rows:
-#   OSWorld: key_metrics["osworld/raw_reward_rate"]
+# Tech report "OSWorld": osworld/raw_reward_rate
+#   (key_metrics of osworld_nano_omni_agent)
 #
 # Set in .env: POLICY_API_KEY
 #

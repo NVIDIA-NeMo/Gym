@@ -20,10 +20,9 @@
 #
 #   nemotron_recipes/super-3.5/run.sh gdpval
 #
-# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
-# gdpval_stirrup_agent. Tech report rows:
-#   GDPVal-AA-v2 ELO: agent_metrics["comparison/stage_1/eval_elo"]
-#   GDPVal-AA-v2 norm ELO: agent_metrics["comparison/stage_1/normalized_elo"]
+# Tech report (agent_metrics of gdpval_stirrup_agent):
+#   GDPVal-AA-v2 ELO: comparison/stage_1/eval_elo
+#   GDPVal-AA-v2 norm ELO: comparison/stage_1/normalized_elo
 #
 # Set in .env: POLICY_API_KEY, GDPVAL_JUDGE_API_KEY, TAVILY_API_KEY
 #

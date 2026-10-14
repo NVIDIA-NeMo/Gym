@@ -19,9 +19,8 @@
 #
 #   nemotron_recipes/super-3.5/run.sh livecodebench
 #
-# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
-# livecodebench_v6_cascade_code_gen_simple_agent. Tech report rows:
-#   LiveCodeBench v6: key_metrics["pass@1[avg-of-3]/accuracy"]
+# Tech report "LiveCodeBench v6": pass@1[avg-of-3]/accuracy
+#   (key_metrics of livecodebench_v6_cascade_code_gen_simple_agent)
 #
 # Set in .env: POLICY_API_KEY
 

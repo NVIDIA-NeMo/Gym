@@ -20,9 +20,8 @@
 #
 #   nemotron_recipes/super-3.5/run.sh graphwalks
 #
-# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
-# graphwalks_benchmark_simple_agent. Tech report rows:
-#   GraphWalks (≤1M): key_metrics["pass@1/accuracy"]
+# Tech report "GraphWalks (≤1M)": pass@1/accuracy
+#   (key_metrics of graphwalks_benchmark_simple_agent)
 #
 # Set in .env: POLICY_API_KEY
 #

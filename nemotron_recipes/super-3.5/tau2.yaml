@@ -19,11 +19,10 @@
 #
 #   nemotron_recipes/super-3.5/run.sh tau2
 #
-# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
-# tau2_benchmark_agent. The tech report shows these x100:
-#   Tau2 Retail: key_metrics["retail/reward"]
-#   Tau2 Airline: key_metrics["airline/reward"]
-#   Tau2 Telecom: key_metrics["telecom/reward"]
+# Tech report, x100 (key_metrics of tau2_benchmark_agent):
+#   Tau2 Retail: retail/reward
+#   Tau2 Airline: airline/reward
+#   Tau2 Telecom: telecom/reward
 #
 # Set in .env: POLICY_API_KEY, TAU2_USER_SIMULATOR_API_KEY
 #

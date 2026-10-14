@@ -18,11 +18,9 @@
 #
 #   nemotron_recipes/super-3.5/run.sh omniscience
 #
-# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
-# omniscience_omniscience_simple_agent. Tech report rows:
-#   AA-Omniscience Accuracy: key_metrics["pass@1[avg-of-10]/judge_correct"]
-#   AA-Omniscience Non-Hallucination: 100 minus
-#     key_metrics["pass@1[avg-of-10]/judge_omni_hallucination"]
+# Tech report AA-Omniscience (key_metrics of omniscience_omniscience_simple_agent):
+#   Accuracy: pass@1[avg-of-10]/judge_correct
+#   Non-Hallucination: 100 - pass@1[avg-of-10]/judge_omni_hallucination
 #
 # Set in .env: POLICY_API_KEY, OMNISCIENCE_JUDGE_API_KEY
 #

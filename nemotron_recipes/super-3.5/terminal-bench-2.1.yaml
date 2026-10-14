@@ -18,9 +18,8 @@
 #
 #   nemotron_recipes/super-3.5/run.sh terminal-bench-2.1
 #
-# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
-# terminal_bench_2_1_terminus_2_sandboxed_agent. The tech report shows these x100:
-#   Terminal-Bench 2.1: key_metrics["mean/reward"]
+# Tech report "Terminal-Bench 2.1": mean/reward x100
+#   (key_metrics of terminal_bench_2_1_terminus_2_sandboxed_agent)
 #
 # Set in .env: POLICY_API_KEY, OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY
 #

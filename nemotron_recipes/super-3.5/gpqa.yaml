@@ -17,9 +17,8 @@
 #
 #   nemotron_recipes/super-3.5/run.sh gpqa
 #
-# Score: in evaluator_rollouts_aggregate_metrics.json, the entry of agent
-# gpqa_mcqa_simple_agent. Tech report rows:
-#   GPQAD: key_metrics["pass@1[avg-of-8]/accuracy"]
+# Tech report "GPQAD": pass@1[avg-of-8]/accuracy
+#   (key_metrics of gpqa_mcqa_simple_agent)
 #
 # Set in .env: POLICY_API_KEY, HF_TOKEN
 #
