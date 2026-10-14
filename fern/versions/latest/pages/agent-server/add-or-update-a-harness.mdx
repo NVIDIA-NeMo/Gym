@@ -192,6 +192,7 @@ The base class in [`nemo_gym/base_responses_api_agent.py`](https://github.com/NV
 - **Activation identity.** Reject an activation whose rollout path does not match the seeded `episode_id.capture_key`.
 - **Retained close.** A successful close response, including its observations, is replayed for `session_close_retry_window_seconds` (default 300). If harness termination cannot be confirmed yet, the session state is kept so that close can retry. A final termination failure is released instead; see [Harness termination](#harness-termination).
 - **Setup failure.** If seed fails and its cleanup cannot finish, raise `AgentSessionSetupError(state, error=...)`. The base class keeps the partial state for close and never activates it.
+- **Deterministic errors.** Return a 4xx status, usually 422, for errors that a retry cannot fix, such as an unsupported sandbox connection, an unusable required grant, or an invalid request. The Environment Server treats 5xx responses as retryable, so a deterministic 500 seeds the episode again, including a new sandbox, on every attempt.
 
 Close must return `agent_observations` even when activation failed. When no observations were captured, return a bundle with an `ObservationGap` such as `observation_capture_failed`. Return `resources_cookies` only if the harness changed the Resources Server's cookie jar through tool calls. `None` or an empty jar keeps the cookies from the Resources Server's seed.
 
@@ -246,7 +247,7 @@ A harness can get tools from two sources:
 
 | Transport | Grant type | What the adapter receives |
 | --- | --- | --- |
-| `direct_http` | `DirectHTTPToolAccess` | The Resources Server base URL and session cookies, for trusted Python agents that call typed tool routes. |
+| `direct_http` | `DirectHTTPToolAccess` | The Resources Server base URL and session cookies, for trusted Python agents that call typed tool routes. The cookies identify the episode's Resources Server session, so they also reach its routes other than tools. |
 | `mcp` | `MCPToolAccess` | A streamable-HTTP MCP endpoint, usually the Resources Server's `/mcp`, with the headers returned by the Resources Server's seed. |
 
 Grants in the agent configuration's `tool_accesses` are merged with the episode's grants by name. Call `effective_tool_accesses(body)` to get the merged list. The grant types are defined in [`nemo_gym/tool_access.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/tool_access.py).
@@ -256,8 +257,9 @@ An adapter must handle grants as follows:
 - At seed, reject any **required** grant that the harness cannot use, with HTTP 422. An optional grant can be skipped. Never silently ignore a required grant.
 - Reject grant names that collide with the names of built-in tools or toolsets.
 - Fail before the first model call if a required MCP server does not connect. The sandbox must be able to reach the granted URL.
+- Return grant tool results to the model as tool output. Tool routes return JSON values, often objects: serialize any value the harness cannot take directly instead of validating it as tool arguments, so that a call that succeeded is not reported to the model as a failure.
 - On close, disconnect tool clients without stopping the remote server.
-- Assume that grant headers and tokens are readable inside the sandbox. A grant must only give access to that episode's tools.
+- Assume that grant headers and tokens are readable inside the sandbox. A grant must only give access to that episode's tools. When the harness runs inside the sandbox, keep `direct_http` session cookies out of files the model can read, for example by deleting the staged input once the runner has loaded it.
 
 The current adapters support the following tool sources:
 
@@ -292,6 +294,8 @@ Adapter configurations extend `BaseResponsesAPIAgentConfig`. Native session adap
 | `token_id_capture` | Enable for opaque external harnesses whose output has no token IDs, when collecting training data. |
 
 The Environment Server (`single_agent_turn`) binds the pair with `resources_server`, `agent_server`, and `resources_tool_transports`. Its base configuration also sets `max_concurrent_episodes`, `queue_timeout_seconds`, and the episode and cleanup timeouts.
+
+The episode timeout, `default_episode_timeout_seconds`, covers the whole episode: Resources Server seed, runtime installation, the harness run, agent close, and verification. Set it above the harness's own run timeout plus those budgets, or the deadline fires before verification. Set `max_concurrent_episodes` and `queue_timeout_seconds` to admit episodes at the rate the agent can run them. Admission waits before the deadline starts; without it, every row starts its sandbox at once and waits inside its own deadline.
 
 With [#3902](https://github.com/NVIDIA-NeMo/Gym/pull/3902), `cleanup_timeout_seconds` bounds each cleanup callback, such as agent close or Resources Server close, rather than the whole final cleanup. Agent close can spend up to `session_close_timeout_seconds` on each of its stop, collection, and release phases, so keep that total within the Environment Server's limit. A close that the Environment Server cancels leaves the sandbox to its owner's teardown or the provider TTL.
 
@@ -487,7 +491,7 @@ Organize a new adapter under `responses_api_agents/<harness>/`. The adapter's `s
 | --- | --- |
 | `app.py` | Gym endpoints and configuration; request validation and mapping; session hooks; response and observation conversion; dispatch to host or sandbox execution. |
 | `sandbox.py` | A harness-specific session state class that composes `SandboxSession`. It installs the runtime at seed, stages input in `stage_activation()`, collects artifacts, and holds harness-specific state and diagnostics. |
-| `sandbox_runner.py` | Reads the staged input, invokes the harness SDK or CLI, writes native output and optional process diagnostics, and keeps partial output where the harness supports it. |
+| `sandbox_runner.py` | Reads the staged input, invokes the harness SDK or CLI, writes native output and optional process diagnostics, and keeps partial output where the harness supports it. Handles `SIGTERM` by stopping the harness and writing that partial output before it exits, because the supervisor sends `SIGTERM` at the deadline and on close. |
 | `install_<harness>_runtime.sh` or an existing harness-specific installer | Installs the pinned harness and its private dependencies, then checks that they run. Keep installation out of the activation path. |
 | `tests/` | Host dispatch, session setup, request semantics, output parsing, installation, and lifecycle regressions. |
 
@@ -681,9 +685,9 @@ Run the installation check at every seed, and reuse a compatible runtime if one 
 
 1. Detect the target sandbox's OS, CPU architecture, libc, runtime prerequisites, and execution permissions. Select artifacts for that target, because an executable found on the Agent Server host may not run there. For example, `uv_for_sandbox()` probes the sandbox before it chooses a `uv` build.
 2. Check any preinstalled, mounted, or previously installed runtime against the pinned version and a health check that runs it. The existence of a directory does not prove the runtime is ready.
-3. Verify the checksums of pinned artifacts on the Agent Server host, upload them through the sandbox file API, and run the harness's installer in a private directory outside the task repository. Preserve the task's interpreters and libraries.
+3. Verify the checksums of pinned artifacts on the Agent Server host, upload them through the sandbox file API, and run the harness's installer in a private directory outside the task repository. Preserve the task's interpreters and libraries. If the installer resolves packages, constrain the harness's dependencies to the versions the adapter is tested with, for example with a constraints file generated from the agent environment; an exact pin on the harness alone lets its dependencies change between episodes.
 4. Mark the runtime as ready only after installation and its health check succeed. Handle partial installations and concurrent setup without exposing an incomplete runtime. On failure, keep the commands, exit codes, and logs.
-5. For offline support, provide the complete dependency set, including bootstrap interpreters, package dependencies, and native libraries. Uploading a CLI or ripgrep alone is not enough if the installer still downloads other dependencies.
+5. For offline support, provide the complete dependency set, including bootstrap interpreters, package dependencies, and native libraries. Uploading a CLI or ripgrep alone is not enough if the installer still downloads other dependencies. If it does download them, document that the sandbox needs network access to the package index.
 
 <Warning>
 Every supervised harness needs a compatible Python 3 interpreter inside the sandbox, including standalone binaries such as Codex and OpenCode. Pass it explicitly as `SandboxCommand.python`.
@@ -768,7 +772,7 @@ This termination contract landed in [#3902](https://github.com/NVIDIA-NeMo/Gym/p
 
 The supervisor starts the harness in a new process group and enables child-subreaper mode so it can adopt orphaned descendants of the harness. How it stops processes depends on how the harness ends:
 
-- **Timeout or stop.** Before it signals the harness, the supervisor records the children it has already adopted, typically services left by completed tool calls. It sends `SIGTERM`, waits for the grace period, and kills and reaps the harness process group. It then repeatedly kills and reaps every newly adopted child that is not in that record, including in-flight tool commands in their own sessions and the children they orphan, until none remain or the cleanup deadline passes. The recorded services outside the harness group survive.
+- **Timeout or stop.** Before it signals the harness, the supervisor records the children it has already adopted, typically services or unfinished background jobs left by completed tool calls. It sends `SIGTERM`, waits for the grace period, and kills and reaps the harness process group. It then repeatedly kills and reaps every newly adopted child that is not in that record, including in-flight tool commands in their own sessions and the children they orphan, until none remain or the cleanup deadline passes. The recorded services outside the harness group survive.
 - **Natural exit.** The supervisor kills and reaps the harness process group. It has no earlier point at which to separate services from tools, so tool commands that are still running in their own sessions are left alone.
 
 Shell-tool commands can run in their own sessions, so a harness-group kill alone may not reach them. A background process left by a completed tool, even a plain `server &`, can then survive as a task service. Detachment depends on the harness and launch path: OpenClaw's [pinned child adapter](https://github.com/openclaw/openclaw/blob/e085fa1a3ffd32d0ea6917e1e6fb4ecbffbb77d2/src/process/supervisor/adapters/child.ts#L50-L100) disables detachment when `OPENCLAW_SERVICE_MARKER` is nonblank and can fall back to spawning with `detached: false`. Commands on those paths can remain in the harness group and stop at close.
@@ -779,6 +783,7 @@ Shell-tool commands can run in their own sessions, so a harness-group kill alone
 - A process adopted just before the stop is preserved as a service.
 - A PID can be reused during the stop window.
 - A preserved service can orphan more children during cleanup.
+- Descendants that stay parented by a preserved process are not drained, including work an in-flight tool hands to it, such as a command sent to an existing `tmux` server.
 
 Services survive until the sandbox owner tears down the sandbox: the Resources Server after verification or episode failure, or the agent when it closes an owned sandbox.
 
@@ -789,6 +794,7 @@ A task service that must survive the harness needs to:
 - Detach its process group and standard streams, for example with `subprocess.Popen(start_new_session=True)`, stdin from `/dev/null`, and stdout and stderr in task-owned log files. `nohup ... &` alone is not portable across harnesses, because a shell deadline or a process-group stop can still end the service.
 - Keep its data in task-owned files, not in the agent's session directory, which agent close removes.
 - Be reachable before the tool call that starts it finishes.
+- Be adopted before the stop: let the process that launched it exit before the harness deadline or stop. A service still parented by an in-flight tool is adopted only when that tool exits or is killed during the stop, and is drained with the in-flight tools.
 
 Redirect supervisor and harness output to a file, as `supervised_launch_command()` does with `output.log`. A surviving service that inherits the provider's output pipe keeps provider exec open until its hard timeout.
 
