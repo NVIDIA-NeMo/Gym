@@ -53,21 +53,35 @@ def test_supervisor_reaps_detached_tools_and_preserves_term_grace(tmp_path: Path
         "signal.signal(signal.SIGTERM, checkpoint if sys.argv[1] == 'grace' else signal.SIG_IGN)\n"
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
         "pathlib.Path('pids.json').write_text(json.dumps([os.getpid(), child.pid]))\n"
+        # Take the deadline's SIGTERM only now, after the handler and the detached child exist.
+        "signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})\n"
         "if sys.argv[1] == 'crash':\n"
         "    raise SystemExit(7)\n"
         "if sys.argv[1] != 'normal':\n"
         "    time.sleep(60)\n"
     )
     timeout = 0.8 if ending in ("timeout", "grace") else 10
+    launcher = [sys.executable, "-I"]
+    if ending in ("timeout", "grace"):
+        # The deadline can fire before a slow worker has started.
+        # Blocking SIGTERM across exec keeps that signal pending until the worker unblocks it.
+        # The test never signals the supervisor in these cases, so the block does not change its own handling.
+        launcher += [
+            "-c",
+            "import os, signal, sys; signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM});"
+            " os.execv(sys.executable, [sys.executable, '-I', *sys.argv[1:]])",
+        ]
+    # The grace bound only stops a hung checkpoint.
+    # The worker exits as soon as it has saved.
+    cleanup_timeout = 10 if ending == "grace" else 0.5
     process = subprocess.Popen(
         [
-            sys.executable,
-            "-I",
+            *launcher,
             str(uploaded),
             "--timeout",
             str(timeout),
             "--cleanup-timeout",
-            "0.5",
+            str(cleanup_timeout),
             "--receipt",
             str(tmp_path / "cleanup.json"),
             "--",
@@ -149,8 +163,10 @@ def test_provider_group_kill_leaves_supervisor_alive_to_reap_worker(tmp_path: Pa
             sys.executable,
             "-I",
             str(SUPERVISOR),
+            # A deadline that fired before the group kill would skip the case under test.
+            # The test stops the supervisor itself once the group is gone.
             "--timeout",
-            "1",
+            "60",
             "--cleanup-timeout",
             "0.2",
             "--receipt",
@@ -158,33 +174,41 @@ def test_provider_group_kill_leaves_supervisor_alive_to_reap_worker(tmp_path: Pa
             "--",
             sys.executable,
             "-c",
-            "import os, pathlib, time; pathlib.Path('worker.pid').write_text(str(os.getpid())); time.sleep(60)",
+            # Publish both PIDs by rename so the test never reads a created but still empty file.
+            "import json, os, pathlib, time; pathlib.Path('pids.tmp').write_text(json.dumps([os.getppid(), os.getpid()]));"
+            " os.replace('pids.tmp', 'pids.json'); time.sleep(60)",
         ],
         cwd=tmp_path,
         start_new_session=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    pids = []
     try:
-        deadline = time.monotonic() + 5
-        while not (tmp_path / "worker.pid").exists() and time.monotonic() < deadline:
+        deadline = time.monotonic() + 30
+        while not (tmp_path / "pids.json").exists() and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert (tmp_path / "worker.pid").exists()
-        worker_pid = int((tmp_path / "worker.pid").read_text())
+        # The worker exists, so the supervisor has already left the provider group.
+        pids = json.loads((tmp_path / "pids.json").read_text())
+        supervisor_pid, worker_pid = pids
         os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+        # SIGKILL takes effect before any later signal, so a supervisor killed with the group cannot handle this one.
+        os.kill(supervisor_pid, signal.SIGTERM)
         process.communicate(timeout=10)
         receipt = json.loads((tmp_path / "cleanup.json").read_text())
-        assert receipt["timed_out"] is True
+        assert receipt["timed_out"] is False
         assert receipt["cleanup_confirmed"] is True
+        assert receipt["error"] is None
         with pytest.raises(ProcessLookupError):
             os.kill(worker_pid, 0)
     finally:
         if process.poll() is None:
             process.kill()
         process.wait(timeout=5)
-        if (tmp_path / "worker.pid").exists():
+        for pid in reversed(pids):
             try:
-                os.kill(int((tmp_path / "worker.pid").read_text()), signal.SIGKILL)
+                os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
 

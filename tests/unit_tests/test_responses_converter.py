@@ -1508,6 +1508,41 @@ def test_chat_completion_to_response_envelope_id(
     assert response.id == expected_id
 
 
+@pytest.mark.parametrize(
+    ("provider_tier", "request_tier", "expected_tier"),
+    [
+        ("on-demand", None, "on-demand"),
+        ("on-demand", "default", "on-demand"),
+        (None, "priority", "priority"),
+        (None, None, None),
+    ],
+)
+def test_chat_completion_to_response_service_tier(
+    converter: ResponsesConverter, provider_tier: str | None, request_tier: str | None, expected_tier: str | None
+) -> None:
+    response = converter.chat_completion_to_response(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+            model="test-model", input="hello", service_tier=request_tier
+        ),
+        chat_completion=NeMoGymChatCompletion(
+            id="chatcmpl-tier",
+            created=0,
+            model="test-model",
+            object="chat.completion",
+            service_tier=provider_tier,
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content="hi"),
+                )
+            ],
+        ),
+    )
+
+    assert response.service_tier == expected_tier
+
+
 def test_chat_completion_to_response_preserves_unknown_usage_details(converter: ResponsesConverter):
     response = converter.chat_completion_to_response(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(model="", input="hello"),
@@ -1793,6 +1828,35 @@ def test_downconverting_null_responses_only_fields_treats_them_as_absent(convert
     converted = converter.responses_to_chat_completion_create_params(params)
 
     assert converted.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
+
+
+def test_downconverting_replayed_turn_merges_text_and_tool_call(converter: ResponsesConverter):
+    # A harness replays a prior model turn as separate items: the assistant message (possibly
+    # without annotations, as the Codex CLI sends it) and the function call. They must fold back
+    # into one assistant chat message with the text kept and the tool-call id unchanged.
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+            {
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Let me inspect the workload first."}],
+            },
+            {"type": "function_call", "call_id": "chatcmpl-tool-KNOWN0000", "name": "exec_command", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "chatcmpl-tool-KNOWN0000", "output": "ok"},
+        ]
+    )
+
+    converted = converter.responses_to_chat_completion_create_params(params)
+
+    assert [m["role"] for m in converted.messages] == ["user", "assistant", "tool"]
+    assistant = converted.messages[1]
+    assert assistant["content"] == "Let me inspect the workload first."
+    assert [(c["id"], c["function"]["name"]) for c in assistant["tool_calls"]] == [
+        ("chatcmpl-tool-KNOWN0000", "exec_command")
+    ]
+    assert converted.messages[2]["tool_call_id"] == "chatcmpl-tool-KNOWN0000"
 
 
 def test_downconverting_json_object_text_format(converter: ResponsesConverter):

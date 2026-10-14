@@ -36,6 +36,7 @@ TRAJECTORY_RESULT_FIELDS = {
     "terminal_state",
     "user_verification_result",
 }
+MASKED_FAILURE_LABELS = {"user_failure", "tool_failure", "verification_generation_error"}
 SOURCE_NAME_BY_PROFILE = {
     "general": "conversational_tool_use_general",
     "proactive": "conversational_tool_use_proactive",
@@ -78,6 +79,8 @@ def test_example_rollouts_match_current_conversation_result_contract() -> None:
         assert trajectory["terminal_state"] == row["terminal_state"]
         assert 0 <= trajectory["prefill_message_count"] <= len(trajectory["messages"])
         assert 0 <= trajectory["continuation_start_index"] <= len(trajectory["messages"])
+        assert "instance_config" not in row
+        assert row["mask_sample"] is bool(MASKED_FAILURE_LABELS & set(row["failure_labels"]))
         assert not [
             message
             for message in trajectory["messages"]

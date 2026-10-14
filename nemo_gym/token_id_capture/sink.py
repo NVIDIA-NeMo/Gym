@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -58,7 +59,7 @@ from nemo_gym.token_id_capture.records import (
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from nemo_gym.token_id_capture.staging.records import CaptureAdmission
+    from nemo_gym.token_id_capture.staging.records import CaptureAdmission, CaptureLedgerCommit
 
 # Wire field names between the Gym model server and a framework inference
 # worker: the typed admission rides the engine-bound request under
@@ -118,6 +119,16 @@ class CaptureContext:
     # A normal worker completion was received, even if its acknowledgement is
     # missing. Synthetic guard/overflow completions leave this false.
     external_worker_response_seen: bool = False
+    # Lets a checkpoint participant amend this call's admission before dispatch,
+    # for example to continue a restored generation cut.
+    # Set per call; never process-global.
+    admission_hook: Callable[[CaptureContext, CaptureAdmission], CaptureAdmission] | None = None
+    # Set by a checkpoint gate in front of this call.
+    # The gate then publishes the ledger row when the response starts,
+    # so no row exists for an answer that is held back or never sent.
+    publish_on_delivery: bool = False
+    # The ledger row that finalization left for the gate to publish; kept after publication.
+    deferred_commit: CaptureLedgerCommit | None = None
 
     @property
     def parent_call_id(self) -> str | None:
