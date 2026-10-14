@@ -134,8 +134,41 @@ The loader generates the task mapping and dataset rows for that run.
 `harbor:<dataset>[@<version>]` resolves the Harbor registry and fetches the task folders into Gym's shared
 datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `./datasets`). `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`
 fetches a package-store dataset instead (for example `harbor:terminal-bench/terminal-bench@4.0.0`): every task
-package is downloaded by content hash into `<name>-<tag>/`, checked against Gym's task digest and recorded in
+package is downloaded by content hash into `<name>/` (`latest`), `<name>-<tag>/` or `<name>-<12 digest chars>/` (a digest pin), checked against Gym's task digest and recorded in
 `manifest.toml`. A local task folder, or a folder of task folders, works the same way.
+
+## Compose template variables and `env_file`
+
+A task's `environment/docker-compose.yaml` may use Compose interpolation. Prepare resolves it from the task
+alone, never from the process environment, so a dataset resolves the same way on every deployment. The
+server reads the file through the same resolver at seed.
+
+Harbor's infrastructure variables are defined for every task and win over the task's own:
+
+| Variable | Value |
+|---|---|
+| `MAIN_IMAGE_NAME` | the resolved task image |
+| `CONTEXT_DIR` | the task's `environment/` folder |
+| `PREBUILT_IMAGE_NAME` | `[environment].docker_image`, when declared |
+| `CPUS`, `MEMORY` | `[environment].cpus` and `memory_mb` (as `<n>m`), when declared |
+| `HOST_VERIFIER_LOGS_PATH`, `HOST_AGENT_LOGS_PATH`, `HOST_ARTIFACTS_PATH` | `/logs/verifier`, `/logs/agent`, `/logs/artifacts` |
+| `ENV_VERIFIER_LOGS_PATH`, `ENV_AGENT_LOGS_PATH`, `ENV_ARTIFACTS_PATH` | the same `/logs` paths |
+
+`[environment].env` supplies the task's own variables. Their values are interpolated against the
+infrastructure variables first, so a value like `${ASK_HUMAN_BACKEND:-litellm_proxy}` resolves to its default.
+The forms `${VAR}`, `${VAR:-default}`, `${VAR-default}`, `${VAR:?error}`, `${VAR:+alternative}`, `$VAR` and `$$`
+are supported, and a default may itself contain an interpolation. A variable with neither a value nor a
+default fails prepare with its name. A dollar that is not an interpolation is literal.
+
+A service's `env_file` entries are read at prepare, after interpolation, so a path may use `${CONTEXT_DIR}`.
+The file must sit under the task's `environment/` folder: an absolute path outside it, a path that climbs
+out, or a symlink fails prepare with the path. Its `KEY=value` lines are inlined into the service's
+`environment` and taken literally, quotes and inline comments handled as Compose does, and a `$` in a value
+is never interpolated. The service's own `environment` wins over its files. Every service's `environment` becomes a mapping of
+strings. A bare `NAME` entry in a list-form `environment` takes the task variable of that name and is
+dropped when there is none. A missing
+file fails prepare with its name unless the entry says `required: false`. Error messages name the file and
+the line number and never repeat a line's content.
 
 ## Where settings live
 
