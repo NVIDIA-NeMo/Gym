@@ -46,10 +46,14 @@ gym eval run --no-serve \
   -o rollouts.jsonl --limit 3 --concurrency 3
 ```
 
-The collector calls Environment Server `/run`: seed Resources, seed the agent, call its
-rollout-prefixed `/v1/responses`, close the agent, verify, then close Resources. Prepared
-flat rows use `single_agent_turn_legacy` with this native session lifecycle; no additional
-materialization script is needed. Collection does not call the agent's compatibility `/run`.
+Environment Server is the default entry point for rollout execution. With the single-agent
+session-based configuration, the collector calls Environment Server `/run`: seed Resources,
+seed the agent, call its rollout-prefixed `/v1/responses`, close the agent, verify, then close Resources. Prepared
+flat rows use `single_agent_turn_legacy`, an input/output adapter over `single_agent_turn`.
+This composition is benchmark-independent: Environment Server owns the episode sequence.
+For tasks with a Resources-owned sandbox, the harness borrows that sandbox.
+The adapter converts row formats; execution uses Resources/Agent session APIs. Collection
+does not call the agent's compatibility `/run`. No additional materializer is needed.
 Pass the same configuration to startup and `--no-serve` collection; collection does not
 inherit routing settings from the running servers.
 
@@ -79,8 +83,9 @@ POSIX sh installs missing Python and Bash using apt-get or apk when running as r
 before invoking the Bash runtime installer; otherwise the image must provide them.
 The pinned Node 22.19.0 build has no arm64 musl binary.
 Older Alpine images use a checksum-verified private C++ library for Node. Runtime files live
-under `/tmp/nemo-gym-codex-node-*`, and session HOME/cache/config live under
-`/tmp/nemo-gym-codex-sessions/*`. Task Python, Node, libraries, and PATH are preserved.
+under `/tmp/nemo-gym-codex-node-*`, and private `CODEX_HOME` configuration lives under
+`/tmp/nemo-gym-codex-sessions/*`. Task HOME, XDG directories, Python, Node, libraries,
+and PATH are preserved.
 Installation errors retain the command, exit status, stdout, and stderr. Runtime compatibility
 must still be checked on actual task images; a mocked installer test is not image validation.
 
@@ -121,10 +126,32 @@ last `session_close_retry_window_seconds` (default 300 seconds) without renewal 
 Stale cookies never fall back to host execution. State is process-local; Resources/provider
 own sandbox expiry and crash recovery. There is no separate per-agent session-expiry timer.
 
-One shared Linux supervisor per activation fences delayed launches and kills/reaps detached
-tool descendants. Close confirms its cleanup receipt before cancelling provider execution,
-then removes adapter-owned files and disconnects. Missing/negative cleanup evidence blocks
-verification and retains state for retry. The borrowing agent never destroys the sandbox.
+Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, shared with Hermes.
+The adapter stages its worker input and collects its own output. The shared session
+uploads the supervisor at activation and owns its control files and log access; the common lifecycle
+confirms process cleanup, captures artifacts, then releases the provider connection or
+owned sandbox. Concurrent closes share that work; missing evidence or failed release remains retryable,
+and interrupted activations keep captured observations after session files are removed.
+`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.py`
+runs inside the sandbox. Benchmark Resources session identity/verdict state stays separate.
+Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
+`worker_exit_code_unavailable` observation gaps. Positive cleanup confirmation remains
+required; the adapter validates the captured terminal events without inventing an exit code.
+
+One shared Linux supervisor per activation fences delayed launches.
+The supervisor stops live harness-group processes and reaps its children. On timeout
+or close it preserves children already adopted before the stop, typically services from
+completed tools, and drains newly adopted children within the cleanup deadline, including
+tools in separate sessions. The sandbox owner stops the preserved services later.
+Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
+those processes may still change task files. The stop-time cutoff also has adoption/PID
+races and cannot classify later service forks. It is not a security boundary.
+Services must use task-owned files rather than the temporary agent session directory.
+Close confirms the receipt before cancelling provider execution,
+then removes adapter-owned files and disconnects. Missing/negative termination evidence
+blocks verification. Missing evidence stays retryable; a final negative receipt releases
+the borrowed connection without making the failed activation gradable. The borrowing
+agent never destroys the sandbox.
 Cleanup coordinates lifecycle; it is not a security boundary against hostile task code.
 
 Responses and close observations preserve text, reasoning, tool events, partial output,
@@ -276,7 +303,7 @@ When the resources server exposes Gym-owned MCP tools (an `MCPResourcesServer` r
 
 ## Skills evaluation
 
-Skills are evaluated as a run-level variable, not a dataset field — point `skills.path` at a directory of [Agent Skills standard](https://agentskills.io/specification) skill directories on `gym eval run`, and the agent stages them into each request's `CODEX_HOME/skills/`, where Codex's native skill discovery picks them up:
+Skills are evaluated as a run-level variable, not a dataset field — point `skills.path` at a directory of [Agent Skills standard](https://agentskills.io/specification) skill directories on `gym eval run`, and the agent stages them into each request's `CODEX_HOME/skills/`, where Codex's built-in skill discovery picks them up:
 
 ```bash
 gym eval run --agent reasoning_gym_codex_agent \

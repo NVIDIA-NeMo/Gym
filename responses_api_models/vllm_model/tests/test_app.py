@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 from contextlib import nullcontext
 from copy import deepcopy
@@ -24,6 +25,7 @@ from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
 from aiohttp import ClientResponseError, RequestInfo
+from fastapi import Response
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
 from pytest import MonkeyPatch, mark, raises
@@ -67,6 +69,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     PermanentEndpointError,
 )
+from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.token_id_capture import (
@@ -80,6 +83,13 @@ from nemo_gym.token_id_capture import (
 )
 from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
 from nemo_gym.token_id_capture.staging.records import CaptureAdmission
+from responses_api_agents.simple_agent.app import (
+    ModelServerRef,
+    ResourcesServerRef,
+    SimpleAgent,
+    SimpleAgentConfig,
+    SimpleAgentRunRequest,
+)
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
@@ -1237,6 +1247,135 @@ class TestApp:
             "ClientResponseError(status=400, message='Bad Request', method='POST', "
             "url='http://vllm.test/v1/chat/completions')"
         )
+
+    @staticmethod
+    def _provider_reply(finish_reason: str) -> dict:
+        return {
+            "id": "chatcmpl-provider",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy_model",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": finish_reason,
+                    "message": {"role": "assistant", "content": "18"},
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    @mark.parametrize("responses_api", [False, True])
+    @mark.parametrize("finish_reason", ["abort", "length", "stop"])
+    def test_provider_abort_is_an_error_before_response_conversion(
+        self, monkeypatch: MonkeyPatch, responses_api: bool, finish_reason: str
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        provider_reply = self._provider_reply(finish_reason)
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(return_value=provider_reply)
+        server._clients = [provider]
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/responses" if responses_api else "/v1/chat/completions",
+            json={"input": [{"role": "user", "content": "hi"}], "max_output_tokens": 4096}
+            if responses_api
+            else {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4096},
+        )
+        assert provider.create_chat_completion.call_args.kwargs["max_tokens"] == 4096
+        if finish_reason == "abort":
+            assert response.status_code == 503
+            assert response.json()["detail"] == {
+                "type": "provider_cancelled",
+                "finish_reason": "abort",
+                "request_id": "chatcmpl-provider",
+                "message": "vLLM cancelled the generation; retry the rollout.",
+            }
+            assert "incomplete_details" not in response.json()
+            assert "output" not in response.json()
+            assert provider_reply["choices"][0]["finish_reason"] == "abort"
+        else:
+            assert response.status_code == 200
+            if responses_api:
+                assert response.json()["status"] == ("incomplete" if finish_reason == "length" else "completed")
+                assert response.json()["incomplete_details"] == (
+                    {"reason": "max_output_tokens"} if finish_reason == "length" else None
+                )
+            else:
+                assert response.json()["choices"][0]["finish_reason"] == finish_reason
+
+    async def test_provider_abort_skips_scoring_and_can_be_retried(self, monkeypatch: MonkeyPatch) -> None:
+        model = self._setup_server(monkeypatch)
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(
+            side_effect=[self._provider_reply("abort"), self._provider_reply("stop")]
+        )
+        model._clients = [provider]
+        model_app = model.setup_webserver()
+        model.setup_exception_middleware(model_app)
+        model_client = TestClient(model_app)
+        transport = MagicMock(spec=ServerClient, global_config_dict={})
+        agent = SimpleAgent(
+            config=SimpleAgentConfig(
+                host="127.0.0.1",
+                port=8080,
+                name="agent",
+                entrypoint="",
+                model_server=ModelServerRef(type="responses_api_models", name="model"),
+                resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+            ),
+            server_client=transport,
+        )
+        request = MagicMock(cookies={}, path_params={}, headers={})
+        verify = AsyncMock()
+
+        def reply(payload: dict, status: int = 200) -> MagicMock:
+            result = MagicMock(ok=status < 400, status=status, cookies={})
+            result.read = AsyncMock(return_value=json.dumps(payload).encode())
+            result.content.read = result.read
+            if status >= 400:
+                result.raise_for_status.side_effect = ClientResponseError(
+                    MagicMock(real_url="http://model/v1/responses"), (), status=status
+                )
+            return result
+
+        async def post(*, server_name, url_path, json, cookies):
+            if server_name == "model":
+                result = model_client.post(url_path, json=json.model_dump(exclude_none=True))
+                return reply(result.json(), result.status_code)
+            if url_path == "/seed_session":
+                return reply({})
+            if server_name == "agent":
+                result = await agent.responses(request, Response(), json)
+                return reply(result.model_dump())
+            assert url_path == "/verify"
+            await verify(json)
+            return reply({**json, "reward": 1.0})
+
+        transport.post = AsyncMock(side_effect=post)
+        body = SimpleAgentRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "hi"}], max_output_tokens=4096
+            )
+        )
+        with raises(ClientResponseError) as error:
+            await agent.run(request, body)
+        verify.assert_not_awaited()
+        failure = _agent_request_failure_row(error.value, error.value.status)
+        assert "provider_cancelled" in failure["_ng_failure_response_body"]
+        assert "abort" in failure["_ng_failure_response_body"]
+        assert "reward" not in failure and "response" not in failure
+        assert not is_terminal_failure(failure)
+
+        # Resuming the same task makes a fresh generation; only that successful
+        # response is sent to the verifier and can become a scored result.
+        result = await agent.run(request, body)
+        verify.assert_awaited_once()
+        assert result.response.status == "completed"
+        assert result.response.incomplete_details is None
+        assert result.reward == 1.0
+        assert provider.create_chat_completion.await_count == 2
 
     def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
@@ -6380,6 +6519,7 @@ class TestEndpointFile:
 
     def test_publish_rebinds_clients_and_clears_sessions(self, tmp_path) -> None:
         (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
+        os.utime(tmp_path / "endpoint.txt", (1000, 1000))
         server = self._make_server(tmp_path, endpoint_check_interval_s=3600.0)
         server._session_id_to_client["session-on-old-host"] = server._clients[0]
 
@@ -6395,6 +6535,7 @@ class TestEndpointFile:
         # Within endpoint_check_interval_s the filesystem is left alone, so a
         # fresh publish is only seen once the window is over.
         (tmp_path / "endpoint.txt").write_text("http://newer-host:8712/v1\n")
+        os.utime(tmp_path / "endpoint.txt", (1001, 1001))
         server._maybe_rebind_endpoint()
         assert server.config.base_url == ["http://new-host:8712/v1"]
         server._endpoint_last_check_at = None  # window over: the next call re-checks
@@ -6434,6 +6575,7 @@ class TestEndpointFile:
         assert server.config.base_url == ["http://placeholder:8712/v1"]
         now = 1100.0
         endpoint_file.write_text("")  # empty is as unpublished as missing: no clock reset
+        os.utime(endpoint_file, (now, now))
         server._maybe_rebind_endpoint()
         now = 1301.0  # past the grace COUNTED FROM 1000, proving the empty write reset nothing
         with raises(RuntimeError, match="no longer published"):
@@ -6441,6 +6583,8 @@ class TestEndpointFile:
 
         endpoint_file.write_text("http://placeholder:8712/v1\n")  # republish on the SAME host
         now = 1301.5  # within the check window: the publish is not seen yet, the raise stays loud
+        # Explicit mtimes keep rapid writes distinct on coarse-resolution filesystems.
+        os.utime(endpoint_file, (now, now))
         with raises(RuntimeError, match="no longer published"):
             server._maybe_rebind_endpoint()
         now = 1311.5  # next window: heals with no rebind needed
@@ -7181,6 +7325,84 @@ class TestPrefixSupplyRejectsResponsesNative:
                 supply_prefix_token_ids=True,
                 is_responses_native=True,
             )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Responses request fields with no Chat Completions representation
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestUnrepresentableRequestFields:
+    """``drop_unrepresentable_request_fields`` decides what the server does with a Responses
+    request field that the Chat Completions conversion cannot express.
+
+    ``include`` stands for the whole group here: it names extra fields the provider is asked to
+    report on the response object, so it changes nothing about what the model generates.
+    """
+
+    BODY = {"input": "hi", "include": ["reasoning.encrypted_content"]}
+
+    @staticmethod
+    def _client(monkeypatch: MonkeyPatch, *, drop: bool) -> tuple[TestClient, dict[str, Any]]:
+        """A test client for a model server, plus the dict that records the converted chat params."""
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="vllm_model",
+            base_url="http://localhost:9999/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy-model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            drop_unrepresentable_request_fields=drop,
+        )
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        captured: dict[str, Any] = {}
+
+        async def _capture(self, request, create_params):
+            captured["value"] = create_params
+            return NeMoGymChatCompletion(
+                id="chatcmpl-123",
+                choices=[
+                    NeMoGymChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=NeMoGymChatCompletionMessage(role="assistant", content="hello"),
+                    )
+                ],
+                created=FIXED_TIME,
+                model="dummy-model",
+                object="chat.completion",
+            )
+
+        monkeypatch.setattr(VLLMModel, "chat_completions", _capture)
+        return TestClient(server.setup_webserver()), captured
+
+    def test_refused_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        client, _ = self._client(monkeypatch, drop=False)
+
+        with raises(NotImplementedError, match="include"):
+            client.post("/v1/responses", json=self.BODY)
+
+    def test_dropped_when_configured(self, monkeypatch: MonkeyPatch) -> None:
+        client, captured = self._client(monkeypatch, drop=True)
+
+        assert client.post("/v1/responses", json=self.BODY).status_code == 200
+        assert "include" not in captured["value"].model_dump(exclude_unset=True)
+        assert captured["value"].messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
+
+    def test_dropped_on_the_streaming_path_too(self, monkeypatch: MonkeyPatch) -> None:
+        # Codex always sends `stream: true`; the streaming dispatch sanitizes the body and then
+        # runs the same conversion, so the switch applies there as well.
+        client, captured = self._client(monkeypatch, drop=True)
+
+        response = client.post("/v1/responses", json={**self.BODY, "stream": True})
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert "event: response.completed" in response.text
+        assert "include" not in captured["value"].model_dump(exclude_unset=True)
 
 
 class TestPreserveEnvelopeIdFollowsCaptureContext:

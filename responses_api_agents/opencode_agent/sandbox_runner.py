@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Capture OpenCode output; the shared process supervisor owns deadlines and cleanup."""
+"""Capture OpenCode output; the supervisor bounds execution; the sandbox owner stops task services."""
 
 from __future__ import annotations
 
@@ -26,9 +26,22 @@ class RunnerInput(TypedDict):
 
 
 def run(params: RunnerInput) -> int:
-    """Run the harness with isolated files and let the supervisor reap descendants."""
+    """Run the CLI with isolated files and wait for it before returning captured output."""
     directory = Path(params["directory"])
     (directory / "runtime.json").write_text(json.dumps({"hostname": os.uname().nodename, "pid": os.getpid()}))
+    # Never accept an initialization receipt left by an earlier invocation.
+    (directory / "task-environment.ready").unlink(missing_ok=True)
+    # Save only task-directory variables for the shell.env hook, before CLI overrides.
+    task_home = os.environ.get("HOME") or str(Path.home())
+    task_env = {"HOME": task_home}
+    for key, suffix in (
+        ("XDG_DATA_HOME", ".local/share"),
+        ("XDG_CONFIG_HOME", ".config"),
+        ("XDG_CACHE_HOME", ".cache"),
+        ("XDG_STATE_HOME", ".local/state"),
+    ):
+        task_env[key] = os.environ.get(key) or str(Path(task_home) / suffix)
+    (directory / "task-env.json").write_text(json.dumps(task_env))
     for key in ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
         if key in params["env"]:
             Path(params["env"][key]).mkdir(parents=True, exist_ok=True)
@@ -53,14 +66,21 @@ def run(params: RunnerInput) -> int:
             stdout=stdout,
             stderr=stderr,
         )
-        while True:
-            if stopping:
-                process.terminate()
-                stopping = False
-            try:
-                return process.wait(timeout=0.05)
-            except subprocess.TimeoutExpired:
-                pass
+        try:
+            while True:
+                if stopping:
+                    process.terminate()
+                    stopping = False
+                try:
+                    return process.wait(timeout=0.05)
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            # An I/O/capture error must not leave the CLI changing the task.
+            # Only stop our direct CLI; task services belong to the sandbox owner.
+            if process.poll() is None:
+                process.kill()
+            process.wait()
 
 
 def snapshot(directory: Path) -> None:

@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -16,7 +17,7 @@ from nemo_gym.agent_utils import process_supervisor
 from responses_api_agents.openclaw_agent import sandbox_runner
 
 
-linux_only = pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper and /proc required")
+linux_only = pytest.mark.skipif(sys.platform != "linux", reason="Linux process supervision required")
 
 
 def launch(tmp_path, code, *, timeout=3, python=sys.executable, env=None, supervised=True):
@@ -94,25 +95,39 @@ def test_worker_io_and_runtime_are_independent_of_cleanup(tmp_path, monkeypatch,
 
 @linux_only
 @pytest.mark.parametrize("ending", ["natural", "timeout", "cancel"])
-def test_detached_descendants_are_gone_before_receipt(tmp_path, ending):
-    code = (
-        "import subprocess,sys,time,pathlib; "
-        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
-        "pathlib.Path('child.pid').write_text(str(p.pid)); " + ("time.sleep(60)" if ending != "natural" else "pass")
-    )
-    process = launch(tmp_path, code)
-    if ending == "cancel":
-        for _ in range(200):
-            if (tmp_path / "child.pid").exists():
-                break
-            time.sleep(0.01)
-        process.send_signal(signal.SIGTERM)
-    summary = result(tmp_path, process)
-    assert summary["cleanup_confirmed"] is True
-    assert summary["timed_out"] is (ending == "timeout")
-    assert set(summary) == {"return_code", "timed_out", "cleanup_confirmed", "error"}
-    with pytest.raises(ProcessLookupError):
-        os.kill(int((tmp_path / "child.pid").read_text()), 0)
+def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
+    try:
+        # A completed tool leaves its detached service adopted before close.
+        tool = (
+            "import pathlib,subprocess,sys; "
+            "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],"
+            "start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+            "pathlib.Path('child.pid').write_text(str(p.pid))"
+        )
+        code = (
+            "import subprocess,sys,time,pathlib; "
+            f"subprocess.run([sys.executable,'-c',{tool!r}],check=True); "
+            "pathlib.Path('ready').touch(); " + ("time.sleep(60)" if ending != "natural" else "pass")
+        )
+        process = launch(tmp_path, code)
+        if ending == "cancel":
+            for _ in range(200):
+                if (tmp_path / "ready").exists():
+                    break
+                time.sleep(0.01)
+            process.send_signal(signal.SIGTERM)
+        summary = result(tmp_path, process)
+        assert summary["cleanup_confirmed"] is True
+        assert summary["timed_out"] is (ending == "timeout")
+        assert set(summary) == {"return_code", "timed_out", "cleanup_confirmed", "error"}
+        pid = int((tmp_path / "child.pid").read_text())
+        assert Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    finally:
+        if (tmp_path / "child.pid").exists():
+            try:
+                os.kill(int((tmp_path / "child.pid").read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 @linux_only
