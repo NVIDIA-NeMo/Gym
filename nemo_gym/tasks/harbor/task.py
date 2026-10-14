@@ -3,12 +3,20 @@
 
 """Load one task folder, or a folder of task folders, from disk."""
 
+import hashlib
+import json
 import logging
 import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from nemo_gym.tasks.harbor.dataset_config import (
+    GymDatasetConfig,
+    GymTaskOverride,
+    apply_dataset_config,
+    read_dataset_config,
+)
 from nemo_gym.tasks.harbor.digest import content_hash
 from nemo_gym.tasks.harbor.dockerfile import base_image_only
 from nemo_gym.tasks.harbor.models import HarborTaskConfig
@@ -105,6 +113,13 @@ def load_task(path: Path) -> HarborTask:
         config = HarborTaskConfig.model_validate(data)
     except (OSError, ValueError) as exc:
         raise HarborTaskError(f"{path / TASK_FILE}: {exc}") from exc
+    # The dataset's own settings sit beside the task folders and shape the effective task.toml.
+    try:
+        dataset = read_dataset_config(path.parent)
+        config = apply_dataset_config(config, path.name, dataset)
+    except ValueError as exc:
+        raise HarborTaskError(str(exc)) from exc
+
     phases = {"environment": config.environment, "agent": config.agent, "verifier": config.verifier}
     if config.verifier.environment is not None:
         phases["verifier.environment"] = config.verifier.environment
@@ -127,6 +142,13 @@ def load_task(path: Path) -> HarborTask:
         instruction = read_instruction(instruction_path)
     except (OSError, UnicodeDecodeError) as exc:
         raise HarborTaskError(f"{instruction_path}: {exc}") from exc
+    if not config.is_shared_verifier and not config.artifacts:
+        # Harbor accepts this shape: the separate verifier still receives /logs/artifacts.
+        logger.warning(
+            "%s uses separate verification but declares no artifacts; the verifier grades a fresh container "
+            "that receives only what the agent writes under /logs/artifacts",
+            path / TASK_FILE,
+        )
 
     environment = config.environment
     image = environment.docker_image
@@ -153,7 +175,7 @@ def load_task(path: Path) -> HarborTask:
         user = str(config.agent.user)
 
     try:
-        digest = content_hash(path)
+        digest = task_digest(content_hash(path), dataset, path.name)
     except (OSError, ValueError) as exc:
         raise HarborTaskError(f"{path}: {exc}") from exc
 
@@ -168,6 +190,22 @@ def load_task(path: Path) -> HarborTask:
         env=env,
         user=user,
     )
+
+
+def task_digest(folder_digest: str, dataset: GymDatasetConfig, task_id: str) -> str:
+    """The digest a task is materialized and served under: its folder's content hash plus the dataset slice applied to it.
+
+    ``dataset.toml``'s ``[gym]`` table changes the effective task without touching the folder, so the
+    defaults and the task's own override are folded in whenever the table is not empty. A dataset
+    without a ``[gym]`` table keeps the plain folder hash, which is also what the package store checks.
+    """
+    if dataset.is_empty:
+        return folder_digest
+    applied = {
+        "defaults": dataset.defaults.model_dump(mode="json"),
+        "task": (dataset.tasks.get(task_id) or GymTaskOverride()).model_dump(mode="json"),
+    }
+    return hashlib.sha256(f"{folder_digest}\n{json.dumps(applied, sort_keys=True)}".encode()).hexdigest()
 
 
 def discover_tasks(root: Path, *, skipped: dict[str, HarborTaskError] | None = None) -> list[HarborTask]:

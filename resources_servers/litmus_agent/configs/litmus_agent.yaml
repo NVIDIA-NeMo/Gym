@@ -29,9 +29,11 @@ litmus_agent:
             request_timeout_s: 300
             use_server_proxy: true
           create:
+            # Capped at ready_timeout_s below per create.
             request_timeout_s: 1200
-            # Must exceed ready_timeout_s below: this bounds the whole create
-            # call, which includes the readiness wait.
+            # Bounds one create attempt as configured: the request plus the
+            # readiness wait, which starts once the request returns. Unset, it
+            # defaults to the capped request timeout plus ready_timeout_s plus 30 s.
             timeout_s: 1500
             skip_health_check: false
             retries: 10
