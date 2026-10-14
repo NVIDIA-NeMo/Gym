@@ -152,9 +152,7 @@ _RESOLVER_UNAVAILABLE_NOTED = [False]
 
 
 # Reasons Gym's resolvers give; a custom resolver's other reasons are counted as ``other``.
-_RESOLUTION_REASONS = frozenset(
-    {"resolver_unavailable", "lookup_error", "not_attempted", "no_match", "ambiguous", "attribution_error"}
-)
+_RESOLUTION_REASONS = frozenset({"resolver_unavailable", "lookup_error", "not_attempted", "no_match", "ambiguous"})
 
 
 def _count_resolution(status_value: str, reason: str | None = None) -> None:
@@ -264,6 +262,8 @@ async def resolve_parent(request_messages: list | None) -> None:
             ParentResolutionStatus.UNRESOLVED,
             reason="lookup_error",
         )
+        # Metric only: the resolution counts above have always covered completed lookups, not failed ones.
+        capture_metrics.count(f"parent_{ParentResolutionStatus.UNRESOLVED.value}", "lookup_error")
     resolved_match = context.parent_resolution.match if context.parent_resolution is not None else None
     if resolved_match is not None:
         context.parent_staging_chain = list(resolved_match.staging_chain)
@@ -412,6 +412,7 @@ async def capture_tokens(
                 ParentResolutionStatus.UNRESOLVED,
                 reason="not_attempted",
             )
+            capture_metrics.count(f"parent_{ParentResolutionStatus.UNRESOLVED.value}", "not_attempted")
         entry = TokenEntry(
             rollout_id=context.rollout_id,
             model_call_id=context.model_call_id,
@@ -477,6 +478,7 @@ async def commit_entry(
                 ParentResolutionStatus.UNRESOLVED,
                 reason="not_attempted",
             )
+            capture_metrics.count(f"parent_{ParentResolutionStatus.UNRESOLVED.value}", "not_attempted")
         # The digest always describes the full sequence.
         # Delta storage changes representation, not lineage identity.
         # The parent decision is persisted with the same sink write.

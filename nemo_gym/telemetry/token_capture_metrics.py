@@ -17,7 +17,7 @@
 
 Token capture runs on every captured model call, so recording must stay cheap and the number of
 exported series must stay small at scale (one exporter per server worker, many servers per job).
-Call sites reach these instruments through ``nemo_gym.token_id_capture.metrics``, which is a no-op
+Call sites reach these instruments through ``nemo_gym.token_id_capture.capture_metrics``, which is a no-op
 unless a metrics exporter is active.
 
 Instruments
