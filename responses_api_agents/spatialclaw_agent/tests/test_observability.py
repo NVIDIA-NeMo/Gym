@@ -134,7 +134,9 @@ def test_native_execution_failure_and_partial_evidence_survive(tmp_path):
     assert bundle.gaps[0].code == "agent_artifact_record_unparseable"
 
 
-@pytest.mark.parametrize("failure_kind", ["agent_timeout", "agent_run_error", "verifier_error"])
+@pytest.mark.parametrize(
+    "failure_kind", ["agent_timeout", "agent_run_error", "verifier_error", "spatialclaw:model_request_rejected"]
+)
 async def test_infrastructure_failure_is_masked_and_preserves_observations(monkeypatch, failure_kind):
     client = MagicMock(spec=ServerClient)
     client.post = AsyncMock(return_value=MagicMock(cookies={}))
@@ -155,16 +157,68 @@ async def test_infrastructure_failure_is_masked_and_preserves_observations(monke
     }
     response["_ng_agent_observations"] = observations
     if failure_kind != "verifier_error":
-        response["_ng_agent_failure"] = {"failure_kind": failure_kind, "failure_reason": "injected outage"}
+        response["_ng_agent_failure"] = {
+            "failure_kind": failure_kind,
+            "failure_reason": "injected outage",
+            "mask_sample": failure_kind != "spatialclaw:model_request_rejected",
+        }
     monkeypatch.setattr("responses_api_agents.spatialclaw_agent.app.raise_for_status", AsyncMock())
     monkeypatch.setattr(
         "responses_api_agents.spatialclaw_agent.app.get_response_json",
-        AsyncMock(side_effect=[response, RuntimeError("scorer unavailable")]),
+        AsyncMock(
+            side_effect=[
+                response,
+                {
+                    "responses_create_params": {"input": "question"},
+                    "response": {key: value for key, value in response.items() if not key.startswith("_ng_")},
+                    "reward": 0.0,
+                    "evaluation_completed": True,
+                }
+                if failure_kind == "spatialclaw:model_request_rejected"
+                else RuntimeError("scorer unavailable"),
+            ]
+        ),
     )
     result = await SpatialClawAgent(config=agent_config(), server_client=client).run(
         SimpleNamespace(cookies={}), SpatialClawAgentRunRequest(responses_create_params={"input": "question"})
     )
-    assert result.mask_sample and result.reward == 0
+    assert result.mask_sample == (failure_kind != "spatialclaw:model_request_rejected")
+    assert result.reward == 0
     assert result.failure_kind == failure_kind
     assert result.ng_agent_observations.records[0].invocation_id == "session"
-    assert client.post.await_count == (3 if failure_kind == "verifier_error" else 2)
+    assert client.post.await_count == (
+        3 if failure_kind in {"verifier_error", "spatialclaw:model_request_rejected"} else 2
+    )
+
+
+def test_native_conversation_and_unknown_response_identity_are_retained(tmp_path):
+    session = "conversation"
+    trace = tmp_path / f"session-{session}" / "trace.jsonl"
+    trace.parent.mkdir()
+    events = [
+        {"event_type": "init", "system_prompt": "native instructions", "instruction": "question"},
+        {"event_type": "plan", "plan_text": "inspect the views"},
+        {"event_type": "llm_call", "raw_response": 'ReturnAnswer("A")'},
+        {"event_type": "feedback", "feedback_text": "Answer submitted"},
+    ]
+    trace.write_text("".join(json.dumps(event) + "\n" for event in events))
+    journal = tmp_path / "gym-model-responses.jsonl"
+    journal.write_text(json.dumps({"response_id": None, "usage": {"prompt_tokens": 1}}) + "\n")
+    assert response_usage(journal) is None
+    bundle = read_observations(
+        tmp_path,
+        session,
+        model_ref=agent_config().model_server,
+        result={"termination_reason": "max_steps"},
+        failure=None,
+        duration_ms=1,
+    )
+    assert [item.role for item in bundle.records[0].conversation] == [
+        "system",
+        "user",
+        "assistant",
+        "assistant",
+        "user",
+    ]
+    assert bundle.records[0].stop_reason == "max_iterations"
+    assert bundle.gaps[0].code == "model_response_id_unavailable"

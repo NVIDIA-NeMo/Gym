@@ -65,7 +65,7 @@ def read_observations(
     *,
     model_ref: ModelServerRef,
     result: dict[str, Any],
-    failure: dict[str, str] | None,
+    failure: dict[str, Any] | None,
     duration_ms: float,
 ) -> AgentObservationBundle:
     """Translate native events, without guessing model/tool joins from their order.
