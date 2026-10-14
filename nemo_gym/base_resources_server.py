@@ -12,9 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import functools
+import logging
 from abc import abstractmethod
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
+from urllib.parse import urlparse
 
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
@@ -28,15 +31,16 @@ if TYPE_CHECKING:
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import validate_failure_kind
+from nemo_gym.global_config import VERIFICATION_EVENTS_URL_KEY_NAME
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.rollout_correlation import RolloutContextMiddleware
+from nemo_gym.rollout_correlation import RolloutContextMiddleware, current_rollout_id
 from nemo_gym.sandbox.access import SandboxAccess
-from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer, request
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 
 
@@ -238,6 +242,42 @@ class ResourcesCloseSessionResponse(BaseModel):
     resources_session_id: str
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_log = logging.getLogger(__name__)
+
+
+def verification_events_url(global_config_dict: Any) -> Optional[str]:
+    """The configured loopback URL for verification events, or None. Other hosts are refused."""
+    url = global_config_dict.get(VERIFICATION_EVENTS_URL_KEY_NAME) if global_config_dict is not None else None
+    if not url:
+        return None
+    parsed = urlparse(str(url))
+    if parsed.scheme != "http" or parsed.hostname not in _LOOPBACK_HOSTS:
+        raise ValueError(f"`{VERIFICATION_EVENTS_URL_KEY_NAME}` must be an http loopback URL, got {url!r}")
+    return str(url)
+
+
+def notify_verification_started(handler: Any, url: Optional[str], server_name: str) -> Any:
+    """Before verifying, tell `url` which rollout's verification starts, so a caller knows its agent has finished.
+
+    Best effort: a failed notification is logged and never changes the verification.
+    """
+    if url is None:
+        return handler
+
+    @functools.wraps(handler)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        event = {"event": "verification_started", "rollout_id": current_rollout_id(), "server": server_name}
+        try:
+            response = await request(method="POST", url=url, json=event)
+            response.release()
+        except Exception:
+            _log.warning("verification event to %s failed", url, exc_info=True)
+        return await handler(*args, **kwargs)
+
+    return wrapper
+
+
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
 
@@ -250,10 +290,15 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.post("/seed_session")(self.seed_session)
         app.post("/close_session")(self.close_resources_session)
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
+        events_url = verification_events_url(getattr(self.server_client, "global_config_dict", None))
         app.post("/verify")(
-            traced_verify_endpoint(
-                judge_failsafe(self.verify),
-                static_attributes={"nemo.gym.server.name": self.config.name},
+            notify_verification_started(
+                traced_verify_endpoint(
+                    judge_failsafe(self.verify),
+                    static_attributes={"nemo.gym.server.name": self.config.name},
+                ),
+                events_url,
+                self.config.name,
             )
         )
         app.post("/aggregate_metrics")(self.aggregate_metrics)

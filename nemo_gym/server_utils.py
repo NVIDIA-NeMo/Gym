@@ -80,6 +80,7 @@ from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     UVICORN_TIMEOUT_WORKER_HEALTHCHECK,
+    VERIFICATION_EVENTS_URL_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
@@ -906,8 +907,11 @@ class ServerClient(BaseModel):
 
         # Checkpointing needs every model and resources call attributed to its rollout attempt,
         # so it carries the rollout prefix even when observability is off.
+        # Verification events name their rollout, so /verify carries the rollout prefix for them too.
         attribute_rollout = (
-            self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False) or self.checkpoint_enabled()
+            self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False)
+            or self.checkpoint_enabled()
+            or bool(self.global_config_dict.get(VERIFICATION_EVENTS_URL_KEY_NAME))
         )
         server_entry = self.global_config_dict.get(server_name)
         rollout_id = current_rollout_id()
