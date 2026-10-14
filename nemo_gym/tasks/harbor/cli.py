@@ -7,13 +7,14 @@ Preparation writes, under ``results/harbor/<taskset>/``:
 
 - ``tasks.jsonl``: one materialized row per loadable task;
 - ``skipped.json``: omitted task IDs and reasons (empty when all tasks load);
-- ``run_config.yaml``: the agent and environment server blocks.
+- ``run_config_<agent>.yaml``: the agent and environment server blocks.
 
 Then the ordinary end-to-end rollout collection runs with that config plus the
 selected agent, environment server and model configs.
 """
 
 import argparse
+import fnmatch
 import json
 import logging
 import math
@@ -95,11 +96,16 @@ def prepare_target(
     *,
     output_root: Path = DEFAULT_OUTPUT_ROOT,
     refresh_registry: bool = False,
+    exclude: list[str] | None = None,
+    only: list[str] | None = None,
 ) -> PreparedTaskset:
     """Fetch (for hub references) and load the tasks, then write the rows file.
 
     A task folder that does not load is skipped with a warning (and listed in
     ``PreparedTaskset.skipped``) so the rest of the dataset still prepares.
+
+    Tasks matching an ``exclude`` glob, and Compose tasks (which the harbor environment server
+    cannot run yet), are left out of the rows and listed on stdout.
     """
     if is_hub_ref(target):
         folder = fetch_ref(target, refresh_registry=refresh_registry)
@@ -119,6 +125,11 @@ def prepare_target(
         )
     for task_id, error in errors.items():
         logger.warning("Skipping task %s: %s", task_id, error)
+    tasks, skipped = select_tasks(tasks, exclude or [], only)
+    for task_id, reason in skipped:
+        print(f"Skipping {task_id}: {reason}")
+    if not tasks:
+        raise ValueError(f"No runnable task left in {folder}")
     rows_path = output_dir / "tasks.jsonl"
     write_rows(tasks, taskset, rows_path)
     skipped_note = f", skipped {len(errors)}" if errors else ""
@@ -137,6 +148,30 @@ def runs_in_sandbox(impl_name: str, impl_config: Any) -> bool:
     """Whether the harness behind ``impl_name`` calls the model server from inside the task sandbox."""
     declares_sandbox_url = isinstance(impl_config, dict) and SANDBOX_MODEL_BASE_URL_KEY in impl_config
     return declares_sandbox_url or impl_name in IN_SANDBOX_AGENTS
+
+
+def select_tasks(
+    tasks: list[HarborTask], exclude: list[str], only: list[str] | None = None
+) -> tuple[list[HarborTask], list[tuple[str, str]]]:
+    """Split tasks into the ones to run and ``(task_id, reason)`` pairs left out."""
+    kept: list[HarborTask] = []
+    skipped: list[tuple[str, str]] = []
+    for task in tasks:
+        pattern = next((p for p in exclude if fnmatch.fnmatchcase(task.task_id, p)), None)
+        if only and not any(fnmatch.fnmatchcase(task.task_id, p) for p in only):
+            skipped.append((task.task_id, "not in --only-tasks"))
+        elif pattern is not None:
+            skipped.append((task.task_id, f"excluded by --exclude-tasks {pattern!r}"))
+        elif task.needs_compose:
+            skipped.append((task.task_id, "Compose environments are not supported yet"))
+        else:
+            kept.append(task)
+    return kept, skipped
+
+
+def _patterns(args: argparse.Namespace, name: str) -> list[str]:
+    raw = getattr(args, name, None) or ""
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 def resolve_agent(agent: str) -> AgentSelection:
@@ -228,7 +263,8 @@ def build_run(
     config["output_jsonl_fpath"] = str(prepared.output_dir / "rollouts.jsonl")
     if agent.runs_in_sandbox:
         config[USE_ABSOLUTE_IP_KEY] = True
-    config_path = prepared.output_dir / "run_config.yaml"
+    # One file per agent, so a validate and an eval run on the same taskset do not overwrite each other.
+    config_path = prepared.output_dir / f"run_config_{agent.instance_name}.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
 
     config_paths = [config_path.resolve(), agent.config_path, _config_path(ENVIRONMENT_SERVER_CONFIG)]
@@ -260,8 +296,12 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
     except (ValueError, OSError, yaml.YAMLError) as exc:
         args._parser.error(str(exc))
     try:
-        prepared = prepare_target(args.target)
-    except (HarborTaskError, HubError, OSError) as exc:
+        prepared = prepare_target(
+            args.target,
+            exclude=_patterns(args, "exclude_tasks"),
+            only=_patterns(args, "only_tasks"),
+        )
+    except (HarborTaskError, HubError, ValueError, OSError) as exc:
         args._parser.error(str(exc))
     if prepared.skipped and not getattr(args, "skip_unloadable", False):
         args._parser.error(
@@ -292,7 +332,12 @@ def validate_target(args: argparse.Namespace, overrides: list[str]) -> None:
         sandbox = getattr(args, "sandbox", None)
         if sandbox is not None:
             resolve_sandbox_config(sandbox)
-        prepared = prepare_target(args.target, output_root=DEFAULT_OUTPUT_ROOT / "validation")
+        prepared = prepare_target(
+            args.target,
+            output_root=DEFAULT_OUTPUT_ROOT / "validation",
+            exclude=_patterns(args, "exclude_tasks"),
+            only=_patterns(args, "only_tasks"),
+        )
     except (HarborTaskError, HubError, ValueError, OSError, yaml.YAMLError) as exc:
         args._parser.error(str(exc))
     unvalidated = [task.task_id for task in prepared.tasks if not task.has_solution]
