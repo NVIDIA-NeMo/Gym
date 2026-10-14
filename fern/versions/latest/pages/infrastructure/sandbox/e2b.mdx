@@ -60,6 +60,7 @@ sandbox:
       template: null
       template_map: {}
       timeout_s: 3600.0
+      auto_resume: false
       secure: true
       allow_internet_access: true
       strict_resources: false
@@ -142,8 +143,11 @@ suitable template prepared through E2B tooling.
 
 ## Timeouts and Reconnection
 
-`SandboxSpec.ttl_s` controls the remote sandbox lifetime. Treat it as a cleanup backstop and
-still call `stop()` or use a context manager so the sandbox is killed as soon as work finishes.
+`SandboxSpec.ttl_s` controls the remote sandbox lifetime. With the default
+`create.auto_resume: false`, the sandbox is deleted when it elapses: treat it as a cleanup
+backstop and still call `stop()` or use a context manager so the sandbox is killed as soon as
+work finishes. With `auto_resume: true` it pauses instead; see
+[AgentENV auto-pause and auto-resume](#agentenv-auto-pause-and-auto-resume).
 
 `SandboxSpec.ready_timeout_s` overrides the E2B create request timeout. The SDK retains an
 explicit create timeout on the returned sandbox connection; the shipped
@@ -164,8 +168,8 @@ rather than starting a new one.
 
 Create is not automatically retried because an ambiguous failure could allocate two billable
 sandboxes. Rate-limit responses are returned without automatic retries so callers can choose
-their backoff window. Close retries transient kill failures, treats an expired sandbox as
-already closed, and clears the local handle only after confirmed cleanup. Serialized handles
+their backoff window. Close retries transient kill failures, deletes paused sandboxes, treats a
+sandbox that is already gone as closed, and clears the local handle only after confirmed cleanup. Serialized handles
 carry the E2B sandbox ID for reconnection through another configured provider instance. E2B's
 public connect operation may extend a near-expiry sandbox to its SDK-default connection lifetime
 (300 seconds in E2B 2.36).
@@ -201,24 +205,31 @@ rejected explicitly. E2B's ConnectRPC command streams keep their SDK-owned pyqwe
 
 ## AgentENV auto-pause and auto-resume
 
-Set `e2b.create.auto_resume: true` in your provider configuration to enable
-auto-pause and auto-resume on AgentENV. At the sandbox timeout, AgentENV pauses the VM,
-releasing CPU and memory while retaining its state. The next sandbox proxy request
-resumes the same VM, including its files and running processes.
+`e2b.create.auto_resume` selects what happens when a sandbox reaches its timeout:
 
-Set `e2b.create.auto_resume: false` to disable automatic resume and delete the
-sandbox at timeout. Gym couples these settings so disabling resume cannot leave
-a sandbox paused indefinitely. The generic E2B profile leaves `auto_resume: null`,
-which preserves the SDK/service defaults. This requires a deployment that supports
-the E2B lifecycle API.
+| Value | Timeout action |
+| --- | --- |
+| `false` (default) | Delete the sandbox. |
+| `true` | Pause the VM, keeping its files and processes; the next sandbox request resumes it (AgentENV). |
+| `null` | Send no lifecycle and leave the action to the SDK and server. |
 
-`create.timeout_s` controls the initial timeout, and `SandboxSpec.ttl_s` overrides
-it per sandbox. It is a lifetime deadline, not an idle-traffic timer: choose a
-value appropriate for long-running commands. AgentENV's proxy currently applies
-an `EnsureMinimum(300s)` timeout when it automatically resumes a sandbox; a shorter
-initial timeout does not change that server-side floor. See the
-[AgentENV proxy contract](https://github.com/kvcache-ai/AgentENV/blob/main/docs/src/internals/proxy-design.md#paused-sandbox-auto-resume).
+Avoid `null` on AgentENV. E2B 2.36–2.41 send kill-on-timeout when no lifecycle is given, but
+2.42 and later (including the locked 2.46) omit the fields. AgentENV then pauses the sandbox
+without auto-resume and never evicts it, so a crashed or cancelled run leaks paused VMs. The
+lifecycle settings require a deployment that supports the E2B lifecycle API.
 
-Status checks use the control plane and report `paused` without waking the VM.
-Explicit close still deletes the sandbox, including paused sandboxes. Auto-pause
-preserves storage; it does not replace cleanup after a completed or crashed run.
+`create.timeout_s` controls the initial timeout, and `SandboxSpec.ttl_s` overrides it per
+sandbox. It is a lifetime deadline, not an idle-traffic timer: choose a value appropriate for
+long-running commands. With `auto_resume: true`, note these AgentENV behaviors (see the
+[proxy contract](https://github.com/kvcache-ai/AgentENV/blob/f9a39636caa3d234bbb96d2406685d7a6d3dabc4/docs/src/internals/proxy-design.md#paused-sandbox-auto-resume)):
+
+- After an automatic resume, the sandbox gets at least the operator's minimum timeout
+  (default 300 seconds), counted from the resume. A shorter initial timeout does not change it.
+- Requests that arrive while the VM is pausing or resuming fail immediately with HTTP 410, so a
+  call at the timeout boundary can fail even with auto-resume enabled.
+- Attaching to a sandbox wakes it: `connect()` sends the SDK's 300-second default timeout,
+  which replaces the stored timeout, so later automatic resumes also get only 300 seconds.
+
+Status checks use the control plane and report `paused` without waking the VM. Explicit close
+still deletes the sandbox, including paused sandboxes. Auto-pause preserves storage; it does
+not replace cleanup after a completed or crashed run.

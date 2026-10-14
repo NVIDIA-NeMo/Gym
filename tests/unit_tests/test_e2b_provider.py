@@ -1061,6 +1061,14 @@ def test_invalid_config_values_are_rejected(section: str, config: dict[str, obje
         E2BProvider(**{section: config})
 
 
+async def test_create_kills_at_timeout_by_default() -> None:
+    # E2B 2.42+ omits lifecycle fields unless asked, and AgentENV then pauses timed-out
+    # sandboxes forever; the default must request deletion explicitly.
+    provider = E2BProvider(create={"template": "base"})
+    handle = await provider.create(_spec(ttl_s=60))
+    assert handle.raw.create_kwargs["lifecycle"] == {"on_timeout": "kill", "auto_resume": False}
+
+
 @pytest.mark.parametrize("auto_resume", [None, True, False])
 async def test_create_lifecycle_policy(auto_resume: bool | None) -> None:
     provider = E2BProvider(create={"template": "base", "auto_resume": auto_resume})
@@ -1141,3 +1149,46 @@ async def test_status_control_plane_failure_is_unknown(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(handle.raw, "get_info", unavailable)
     assert await provider.status(handle) is SandboxStatus.UNKNOWN
+
+
+@pytest.mark.parametrize(("state", "expected"), [("running", SandboxStatus.RUNNING), ("paused", SandboxStatus.PAUSED)])
+async def test_real_sdk_status_only_reads_control_plane(
+    monkeypatch: pytest.MonkeyPatch, state: str, expected: SandboxStatus
+) -> None:
+    pytest.importorskip("e2b")
+    import json
+
+    import httpx
+
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
+
+    sandbox = {"templateID": "base", "sandboxID": "sbx-1", "clientID": "client", "envdVersion": "0.2.0"}
+    requests: list[tuple[str, str]] = []
+
+    async def fake_api(self, request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.method == "POST" and request.url.path.endswith("/sandboxes"):
+            return httpx.Response(201, json=sandbox, request=request)
+        if request.method == "GET" and request.url.path.endswith("/sandboxes/sbx-1"):
+            detail = {
+                **sandbox,
+                "startedAt": "2026-01-01T00:00:00Z",
+                "endAt": "2026-01-01T01:00:00Z",
+                "cpuCount": 2,
+                "memoryMB": 1024,
+                "diskSizeMB": 1024,
+                "state": state,
+            }
+            return httpx.Response(200, content=json.dumps(detail), request=request)
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", _REAL_PROVIDER_REQUIRE_E2B_SDK)
+    monkeypatch.setattr(GymAiohttpTransport, "handle_async_request", fake_api)
+    provider = E2BProvider(connection={"api_key": "test-key", "validate_api_key": False}, create={"template": "base"})
+    handle = await provider.create(_spec())
+    requests.clear()
+
+    assert await provider.status(handle) is expected
+    # Only the control-plane GET: an envd health check would resume a paused sandbox.
+    assert [method for method, _ in requests] == ["GET"]
+    assert requests[0][1].endswith("/sandboxes/sbx-1")

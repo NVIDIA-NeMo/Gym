@@ -166,8 +166,9 @@ class E2BCreateConfig:
     # Sandbox timeout in seconds; the lifecycle policy selects pause or kill.
     # ``SandboxSpec.ttl_s`` overrides it per sandbox.
     timeout_s: float | None = 3600.0
-    # True pauses/resumes; False kills at timeout; None preserves SDK defaults.
-    auto_resume: bool | None = field(default=None, kw_only=True)
+    # True pauses/resumes; False kills at timeout; None sends no lifecycle. E2B 2.42+ then leaves
+    # the choice to the server, and AgentENV pauses without resume and never evicts the sandbox.
+    auto_resume: bool | None = field(default=False, kw_only=True)
     allow_internet_access: bool = True
     secure: bool = True
     # Raise instead of warning when a spec requests resources E2B cannot apply
