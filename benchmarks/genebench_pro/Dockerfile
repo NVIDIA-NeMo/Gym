@@ -1,5 +1,3 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 ARG UBUNTU_VERSION=24.04
 ARG NVM_VERSION=0.40.2
 ARG NODE_MAJOR_VERSION=22
