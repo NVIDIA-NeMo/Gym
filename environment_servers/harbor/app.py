@@ -36,11 +36,12 @@ import shutil
 import tarfile
 import tempfile
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Awaitable, Literal
 from uuid import uuid4
 
+import yaml
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, PositiveFloat
@@ -50,6 +51,7 @@ from environment_servers.harbor.sandbox_io import (
     _exec_as_root,
     download_dir,
     download_path,
+    remote_kind,
     upload_dir,
     upload_path,
 )
@@ -72,8 +74,9 @@ from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_conf
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
+from nemo_gym.sandbox.compose_config import adapt_non_root_sidecars, opensandbox_shm_labels, resolve_compose
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
@@ -89,6 +92,9 @@ TESTS_DIR = "/tests"
 VERIFIER_LOGS_DIR = "/logs/verifier"
 AGENT_LOGS_DIR = "/logs/agent"
 ARTIFACTS_DIR = "/logs/artifacts"
+COMPOSE_IMAGES_FILE = "compose-images.json"
+TASK_CONTEXT_DIR = "/tmp/.nemo-gym"
+TASK_CONTEXT_FILE = f"{TASK_CONTEXT_DIR}/task.json"
 VERIFIER_STDOUT = f"{VERIFIER_LOGS_DIR}/test-stdout.txt"
 
 # Namespaced failure kinds for outcomes the shared vocabulary does not name.
@@ -155,12 +161,27 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     sandbox_resources_override: dict[str, Any] | None = None
     # Export CPU-count env vars (OMP_NUM_THREADS and friends) matching the sandbox CPU limit.
     derive_cpu_env: bool = True
+    # Environment for one task's sandbox only, keyed by task id; a task's own `[environment.env]` wins.
+    sandbox_env_by_task: dict[str, dict[str, str]] = Field(default_factory=dict)
     # Operator environment for every sandbox; a task's own `[environment.env]` wins.
     sandbox_env: dict[str, str] = Field(default_factory=dict)
     # Shell commands run as root in every new sandbox before the agent sees it, for repairs the
     # operator owns rather than the task (for example pointing an end-of-life distro at an archive).
     # A failing command fails the seed as a retryable episode failure.
     sandbox_setup_commands: list[str] = Field(default_factory=list)
+    # Provider block for tasks that declare GPUs (agent or verifier); None runs them on `sandbox_provider`.
+    gpu_sandbox_provider: str | None = None
+    # Pass a task's `gpu_types` to the provider. Off: deployments without that filter reject it.
+    request_gpu_type: bool = False
+    # Replace a task's image reference with another (for example a mirror, or a derived image that adds
+    # the world-writable `/solution` and `/logs` folders Harbor provides through mounts). Keys and values
+    # are full image references; task folders stay untouched.
+    image_rewrites: dict[str, str] = Field(default_factory=dict)
+    # Registry credentials (`username`, `password`) sent only for sandboxes whose image was rewritten.
+    image_rewrite_auth: dict[str, str] | None = None
+    # Recorded OCI configuration for Compose images (`{image_ref: {os, architecture, image, config}}`).
+    # None looks for `compose-images.json` next to the taskset's task folders.
+    compose_image_configs: Path | None = None
     sandbox_setup_timeout_s: float = Field(default=600, gt=0)
     # Extra seconds granted to `test.sh` beyond `[verifier].timeout_sec` before the in-container `timeout` kills it.
     verifier_grace_s: float = Field(default=30, ge=0)
@@ -179,8 +200,29 @@ class HarborSession:
     workdir: str
     # The episode key the sandbox is owned under (see ``_sandboxes``).
     session_id: str
+    provider_ref: str
+    compose: AsyncSandboxCompose | None = None
     # Separate verification stops the agent's sandbox before test.sh runs; cleanup must not stop it twice.
     agent_sandbox_stopped: bool = False
+
+    def service(self, name: str | None) -> AsyncSandbox:
+        """The sandbox of a Compose service; ``None`` or ``"main"`` is the agent's own."""
+        if name in (None, "main"):
+            return self.sandbox
+        if self.compose is None or name not in self.compose.services:
+            raise KeyError(f"No Compose service {name!r} in this task")
+        return self.compose.services[name]
+
+    async def stop_agent_side(self) -> None:
+        """Stop the agent's sandbox, and its sidecars when the task is a Compose group."""
+        if self.agent_sandbox_stopped:
+            return
+        if self.compose is not None:
+            await self.compose.stop()
+        else:
+            await self.sandbox.stop()
+        # Only a stop that succeeded releases the episode's final cleanup from stopping again.
+        self.agent_sandbox_stopped = True
 
 
 _ENV_TEMPLATE = re.compile(r"\$\{([^}:]+)(?::-(.*))?\}")
@@ -256,7 +298,7 @@ def _verifier_image(task: HarborTask) -> str | None:
     return None
 
 
-def _sandbox_resources(environment: HarborEnvironment) -> dict[str, Any]:
+def _sandbox_resources(environment: HarborEnvironment, *, request_gpu_type: bool = False) -> dict[str, Any]:
     resources: dict[str, Any] = {}
     if environment.cpus is not None:
         resources["cpu"] = environment.cpus
@@ -266,9 +308,14 @@ def _sandbox_resources(environment: HarborEnvironment) -> dict[str, Any]:
         resources["disk_gib"] = max(1, math.ceil(environment.storage_mb / 1024))
     if environment.gpus:
         resources["gpu"] = environment.gpus
-        if environment.gpu_types:
+        if environment.gpu_types and request_gpu_type:
             resources["gpu_type"] = environment.gpu_types[0]
     return resources
+
+
+def _needs_gpu(task: HarborTask) -> bool:
+    verifier_environment = task.config.verifier.environment
+    return bool(task.config.environment.gpus or (verifier_environment is not None and verifier_environment.gpus))
 
 
 class HarborEnvironmentServer(
@@ -285,7 +332,7 @@ class HarborEnvironmentServer(
         # Seeded sessions, by episode key; listed here until the sandbox is stopped.
         self._sessions: dict[str, HarborSession] = {}
         # Ownership starts before sandbox.start(), and ends only after stop() succeeds.
-        self._sandboxes: dict[str, AsyncSandbox] = {}
+        self._sandboxes: dict[str, AsyncSandbox | AsyncSandboxCompose] = {}
         self._tasks: dict[tuple[Path, str], asyncio.Task[HarborTask]] = {}
         self._snapshots = tempfile.TemporaryDirectory(prefix="nemo-gym-harbor-tasks-")
         self._shutting_down = False
@@ -355,6 +402,11 @@ class HarborEnvironmentServer(
         try:
             snapshot = snapshot_root / folder.name
             shutil.copytree(folder, snapshot, symlinks=True)
+            # The dataset-level image record lives beside the task folders; a Compose task reads it
+            # from its parent, so the snapshot gets a copy at the same relative place.
+            images = folder.parent / COMPOSE_IMAGES_FILE
+            if images.is_file():
+                shutil.copy2(images, snapshot_root / COMPOSE_IMAGES_FILE)
             task = load_task(snapshot)
             if task.digest != expected:
                 raise HTTPException(
@@ -418,7 +470,7 @@ class HarborEnvironmentServer(
         else:
             task_env = environment.env
         metadata = (
-            resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
+            resolve_provider_metadata(self._provider_ref(task), global_config_dict)
             | self.config.sandbox_metadata
             | {"nemo_gym_environment_server": self.config.name, "harbor_task": task.task_id[:63], "harbor_role": role}
         )
@@ -429,23 +481,42 @@ class HarborEnvironmentServer(
                 + self.config.sandbox_ttl_slack_s
             )
         # The override replaces only the keys it names, so a GPU task routed to the GPU provider keeps `gpu`.
-        resources = _sandbox_resources(environment) | (self.config.sandbox_resources_override or {})
-        env = dict(self.config.sandbox_env) | resolve_env_templates(task_env)
+        resources = _sandbox_resources(environment, request_gpu_type=self.config.request_gpu_type) | (
+            self.config.sandbox_resources_override or {}
+        )
+        env = (
+            dict(self.config.sandbox_env)
+            | self.config.sandbox_env_by_task.get(task.task_id, {})
+            | resolve_env_templates(task_env)
+        )
         if self.config.derive_cpu_env:
             env = cpu_cap_env(resources.get("cpu")) | env
+        provider_options = dict(self.config.sandbox_provider_options)
+        resolved_image = self._rewrite_image(image or task.image)
+        if resolved_image != (image or task.image) and self.config.image_rewrite_auth:
+            provider_options["image_auth"] = dict(self.config.image_rewrite_auth)
         return SandboxSpec(
-            image=image or task.image,
+            image=resolved_image,
             ttl_s=ttl,
             ready_timeout_s=self.config.sandbox_ready_timeout_s,
             workdir=workdir,
             env=env,
             metadata=metadata,
             resources=resources,
-            provider_options=dict(self.config.sandbox_provider_options),
+            provider_options=provider_options,
         )
 
+    def _rewrite_image(self, image: str | None) -> str | None:
+        return self.config.image_rewrites.get(image, image) if image else image
+
+    def _provider_ref(self, task: HarborTask) -> str:
+        """Which top-level sandbox block runs this task: the GPU one when the task declares GPUs."""
+        if self.config.gpu_sandbox_provider and _needs_gpu(task):
+            return self.config.gpu_sandbox_provider
+        return self.config.sandbox_provider
+
     async def _create_sandbox(self, task: HarborTask, workdir: str | None, *, episode_key: str) -> AsyncSandbox:
-        provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
+        provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         sandbox = AsyncSandbox(provider_config)
         self._sandboxes[episode_key] = sandbox
         await sandbox.start(self._sandbox_spec(task, workdir))
@@ -476,6 +547,106 @@ class HarborEnvironmentServer(
                 f"(sandbox_ready_timeout_s={self.config.sandbox_ready_timeout_s:g} plus {SEED_CREATE_GRACE_S:g}s grace)"
             ) from exc
 
+    def _compose_image_configs(self, task: HarborTask) -> dict[str, Any]:
+        path = self.config.compose_image_configs
+        if path is None:
+            candidate = task.path.parent / COMPOSE_IMAGES_FILE
+            if not candidate.is_file():
+                raise RuntimeError(
+                    f"Compose task {task.task_id!r} needs recorded image configurations: set "
+                    f"`compose_image_configs` or place compose-images.json at {candidate}"
+                )
+            path = candidate
+        return json.loads(Path(path).read_text())
+
+    def _compose_document(self, task: HarborTask) -> dict[str, Any]:
+        """The published overlay resolved against recorded image metadata, ready for the Compose adapter."""
+        compose_file = next(
+            task.path / "environment" / name
+            for name in ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
+            if (task.path / "environment" / name).is_file()
+        )
+        image_configs = self._compose_image_configs(task)
+        document = resolve_compose(yaml.safe_load(compose_file.read_text()), task.image, image_configs)
+        adapt_non_root_sidecars(document, image_configs)
+        provider = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
+        if "opensandbox" in provider:
+            opensandbox_shm_labels(document)
+        sidecars = {a.service for a in task.config.artifacts} | {h.service for h in task.config.verifier.collect}
+        missing = sidecars - {None, "main"} - set(document["services"])
+        if missing:
+            raise RuntimeError(
+                f"Artifacts or collect hooks name Compose services that do not exist: {sorted(missing)}"
+            )
+        return document
+
+    async def _create_compose(self, task: HarborTask, episode_key: str) -> AsyncSandboxCompose:
+        """Start the task's Compose group; the ``main`` service is the agent's sandbox."""
+        document = self._compose_document(task)
+        # Episode IDs are opaque caller input, never host paths: the document gets a fresh folder.
+        self._artifacts_dir.mkdir(parents=True, exist_ok=True)
+        path = Path(tempfile.mkdtemp(prefix="compose-", dir=self._artifacts_dir)) / "compose.yaml"
+        path.write_text(yaml.safe_dump(document, sort_keys=False))
+        main_spec = self._sandbox_spec(task, task.workdir)
+        sidecar_spec = replace(
+            main_spec, resources={}, env={}, provider_options=dict(self.config.sandbox_provider_options)
+        )
+        compose = AsyncSandboxCompose(
+            resolve_provider_config(self._provider_ref(task), get_global_config_dict()),
+            path,
+            service_specs={name: main_spec if name == "main" else sidecar_spec for name in document["services"]},
+            timeout_s=self.config.sandbox_ready_timeout_s,
+        )
+        # Ownership starts before start(): a group that fails half-way is still stopped whole.
+        self._sandboxes[episode_key] = compose
+        await compose.start()
+        return compose
+
+    async def _wait_healthy(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
+        """Poll the task's ``[environment.healthcheck]`` until it passes or its retries run out."""
+        check = task.config.environment.healthcheck
+        if check is None:
+            return
+        loop = asyncio.get_running_loop()
+        grace_until = loop.time() + check.start_period_sec
+        failures = 0
+        while True:
+            result = await sandbox.exec(check.command, timeout_s=check.timeout_sec + 5)
+            if result.return_code == 0:
+                return
+            in_grace = loop.time() < grace_until
+            if not in_grace:
+                failures += 1
+                if failures >= check.retries:
+                    raise RuntimeError(f"Healthcheck failed {check.retries} times: {check.command!r}")
+            await asyncio.sleep(check.start_interval_sec if in_grace else check.interval_sec)
+
+    async def _write_task_context(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
+        """Leave the task's in-sandbox tool declarations where a harness can read them.
+
+        ``/tmp/.nemo-gym/task.json`` carries ``mcp_servers`` (Harbor's ``[[environment.mcp_servers]]``)
+        and ``skills_dir``. Harnesses that know how to talk to task MCP servers from inside the sandbox
+        read it at session start; nothing in the episode protocol needs to change for that.
+        """
+        environment = task.config.environment
+        if not environment.mcp_servers and not environment.skills_dir:
+            return
+        context = {
+            "mcp_servers": [server.model_dump(mode="json") for server in environment.mcp_servers],
+            "skills_dir": environment.skills_dir,
+        }
+        payload = shlex.quote(json.dumps(context))
+        # Root first, falling back to the default user on sandboxes that cannot switch identities; /tmp
+        # is writable either way, and the modes only need the agent's own user to read the file.
+        result = await _exec_as_root(
+            sandbox,
+            f"mkdir -p {TASK_CONTEXT_DIR} && printf %s {payload} > {TASK_CONTEXT_FILE} "
+            f"&& (chmod 755 {TASK_CONTEXT_DIR} && chmod 644 {TASK_CONTEXT_FILE} || true)",
+            timeout_s=60,
+        )
+        if result.return_code:
+            raise RuntimeError(f"Could not write {TASK_CONTEXT_FILE}: {result.stderr or result.stdout}")
+
     async def _create_verifier_sandbox(self, task: HarborTask, *, episode_key: str | None = None) -> AsyncSandbox:
         """A separate verifier runs in its own sandbox, sized by ``[verifier.environment]``."""
         environment = task.config.verifier.environment or task.config.environment
@@ -487,7 +658,7 @@ class HarborEnvironmentServer(
             role="verifier",
             ttl=task.config.verifier.timeout_sec + self.config.sandbox_ttl_slack_s,
         )
-        provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
+        provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         sandbox = AsyncSandbox(provider_config)
         if episode_key is not None:
             # Owned from before start(), like the agent's sandbox, so a failed or interrupted stop is retried.
@@ -518,6 +689,19 @@ class HarborEnvironmentServer(
             )
         ):
             await upload_dir(sandbox, environment_dir, workdir)
+        # Harbor mounts /logs into the agent's container; tasks may write to /logs/artifacts during the
+        # episode. Best effort: an image that runs as a non-root user without the capability to switch
+        # to root cannot create top-level folders, and the agent may still not need them.
+        logs = await _exec_as_root(
+            sandbox,
+            f"mkdir -p {AGENT_LOGS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR} "
+            f"&& chmod 777 {AGENT_LOGS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR}",
+            timeout_s=60,
+        )
+        if logs.return_code != 0:
+            LOGGER.warning(
+                f"{task.task_id}: could not create /logs folders in the agent sandbox: {logs.stderr or logs.stdout}"
+            )
         return workdir
 
     async def _run_setup_commands(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
@@ -533,7 +717,7 @@ class HarborEnvironmentServer(
     async def _sandbox_access(self, session: HarborSession) -> SandboxAccess:
         return SandboxAccess(
             connection=DirectSandboxConnection(
-                provider_config_ref=self.config.sandbox_provider,
+                provider_config_ref=session.provider_ref,
                 descriptor=await session.sandbox.serialize(),
             ),
             workdir=session.workdir,
@@ -726,11 +910,29 @@ class HarborEnvironmentServer(
                 raise HTTPException(
                     503, f"A sandbox of a previous attempt of this episode could not be stopped yet: {exc}"
                 ) from exc
+        compose: AsyncSandboxCompose | None = None
         try:
-            sandbox = await self._create_sandbox_within_deadline(task, episode_key)
-            self._sandboxes[episode_key] = sandbox
-            workdir = await self._prepare_workdir(sandbox, task, task.workdir)
+            if task.needs_compose:
+                compose = await self._create_compose(task, episode_key)
+                self._sandboxes[episode_key] = compose
+                sandbox = compose.services["main"]
+            else:
+                sandbox = await self._create_sandbox_within_deadline(task, episode_key)
+                self._sandboxes[episode_key] = sandbox
+            session = HarborSession(
+                task=task,
+                taskset=request.task.task_id.taskset,
+                identity=(request.episode_id, request.task.task_id),
+                sandbox=sandbox,
+                workdir="",
+                session_id=episode_key,
+                provider_ref=self._provider_ref(task),
+                compose=compose,
+            )
+            session.workdir = await self._prepare_workdir(sandbox, task, task.workdir)
             await self._run_setup_commands(sandbox, task)
+            await self._wait_healthy(sandbox, task)
+            await self._write_task_context(sandbox, task)
         except BaseException as exc:
             try:
                 await self._stop_sandbox(episode_key)
@@ -740,14 +942,6 @@ class HarborEnvironmentServer(
                 raise
             LOGGER.exception("Sandbox setup failed for %s", task.task_id)
             raise HTTPException(503, f"Could not set up sandbox for {task.task_id!r}: {exc}") from exc
-        session = HarborSession(
-            task=task,
-            taskset=request.task.task_id.taskset,
-            identity=(request.episode_id, request.task.task_id),
-            sandbox=sandbox,
-            workdir=workdir,
-            session_id=episode_key,
-        )
         self._sessions[episode_key] = session
         return session
 
@@ -848,22 +1042,26 @@ class HarborEnvironmentServer(
         verifier: AsyncSandbox | None = None
         try:
             for hook in settings.collect:
-                if hook.service not in (None, "main"):
-                    LOGGER.warning(
-                        f"{task.task_id}: collect hook for sidecar {hook.service!r} skipped (no Compose yet)"
-                    )
+                try:
+                    sandbox = session.service(hook.service)
+                except KeyError as exc:
+                    LOGGER.warning(f"{task.task_id}: collect hook skipped: {exc}")
                     continue
-                result = await session.sandbox.exec(
-                    hook.command, cwd=session.workdir, timeout_s=hook.timeout_sec + 30, user=hook.user
+                main = hook.service in (None, "main")
+                result = await sandbox.exec(
+                    hook.command if main else f"sh -c {shlex.quote(hook.command)}",
+                    cwd=session.workdir if main else None,
+                    timeout_s=hook.timeout_sec + 30,
+                    user=hook.user,
                 )
                 if result.return_code:
                     LOGGER.warning(f"{task.task_id}: collect hook exited {result.return_code}: {hook.command!r}")
             restored: list[tuple[Path, str]] = []
             for artifact in _collected_artifacts(task):
-                if artifact.service not in (None, "main"):
-                    LOGGER.warning(
-                        f"{task.task_id}: artifact {artifact.source!r} on sidecar {artifact.service!r} skipped"
-                    )
+                try:
+                    sandbox = session.service(artifact.service)
+                except KeyError as exc:
+                    LOGGER.warning(f"{task.task_id}: artifact {artifact.source!r} skipped: {exc}")
                     continue
                 host = artifacts_dir / artifact.host_path
                 # Best effort per artifact, as Harbor collects them: what the agent left behind (an
@@ -872,7 +1070,7 @@ class HarborEnvironmentServer(
                 # another sandbox, not the host. Anything else (a lost sandbox, a full disk, a dropped
                 # connection) is Gym's outage and still masks.
                 try:
-                    kind = await download_path(session.sandbox, artifact.source, host, links="keep")
+                    kind = await download_path(sandbox, artifact.source, host, links="keep")
                 except (
                     SandboxTransferError,
                     tarfile.TarError,
@@ -884,11 +1082,10 @@ class HarborEnvironmentServer(
                     continue
                 if kind is not None:
                     restored.append((host, artifact.source))
-            # Harbor stops the agent's container before the verifier starts; nothing may keep running.
+            # Harbor stops the agent's containers before the verifier starts; nothing may keep running.
             # The episode key stays reserved until the episode's final cleanup, which releases it without
             # stopping the agent side again.
-            await session.sandbox.stop()
-            session.agent_sandbox_stopped = True
+            await session.stop_agent_side()
 
             verifier = await self._create_verifier_sandbox(task, episode_key=session.session_id)
             prepare = await _exec_as_root(
@@ -898,7 +1095,10 @@ class HarborEnvironmentServer(
             )
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
-            await upload_dir(verifier, task.path / "tests", TESTS_DIR)
+            # A prebuilt verifier image usually ships /tests already, with the modes its tests expect.
+            # Only upload the package's tests when the image has none, as the old server did.
+            if await remote_kind(verifier, f"{TESTS_DIR}/test.sh") is None:
+                await upload_dir(verifier, task.path / "tests", TESTS_DIR)
             for host, source in restored:
                 await upload_path(verifier, host, source)
             budget = int(settings.timeout_sec)
