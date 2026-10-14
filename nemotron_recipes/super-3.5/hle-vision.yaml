@@ -13,29 +13,45 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# HLE (full): Humanity's Last Exam with images (no tools), all 2500 questions, text and image,
-# one sample each, graded by a gpt-5.6-luna judge. Needs a policy endpoint that accepts image
-# inputs, HF_TOKEN (gated dataset) and the judge endpoint in env.yaml, as for hle.yaml.
+# HLE (full): Humanity's Last Exam with images (no tools), all 2,500 questions, text and image,
+# one sample each. A judge model (gpt-5.6-luna, reasoning effort medium) compares each final
+# answer with the reference using the official HLE judge prompt (yes/no). Reported: the
+# fraction judged correct.
 #
 #   nemotron_recipes/super-3.5/run.sh hle-vision
 #
-# Set in .env: HF_TOKEN, HLE_JUDGE_API_KEY
+# Set in .env: POLICY_API_KEY, HF_TOKEN, HLE_JUDGE_API_KEY
 #
-# The dataset is not pinned: Gym loads the latest cais/hle test split (2500 questions when the
-# published number was produced).
+# Needs a policy endpoint that accepts image inputs, HF_TOKEN (gated dataset; accept its terms
+# on the Hugging Face Hub first) and the judge endpoint in env.yaml (hle_judge_base_url,
+# hle_judge_api_key) serving gpt-5.6-luna on the Responses API (<hle_judge_base_url>/responses).
+#
+# An answer whose judge call fails is left out of the score and written to
+# evaluator_rollouts_failures.jsonl; RESUME=1 retries it (the model answers again; 3 attempts
+# in all by default).
+#
+# The dataset is not pinned to a revision: Gym loads the latest cais/hle test split, which had
+# 2,500 questions when the published number was produced. A different question count means a
+# different question set.
 
+# Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
+# Gym benchmark config this recipe builds on, plus the Gym file that defines the judge
+# server (judge_model).
 benchmark_config:
   - benchmarks/hle/config_vision.yaml
   - resources_servers/labbench2_vlm/configs/judge_model_openai.yaml
 
-# Judge: same model, settings and env.yaml keys as hle.yaml.
+# Judge: gpt-5.6-luna at reasoning effort medium, as in hle.yaml. Endpoint and key come from
+# env.yaml; set hle_judge_model_name there only if your provider serves this model under a
+# different id.
 judge_model:
   responses_api_models:
     openai_model:
       openai_base_url: ${hle_judge_base_url}
       openai_api_key: ${hle_judge_api_key}
       openai_model: ${oc.select:hle_judge_model_name,gpt-5.6-luna}
+      # As the published run sent it.
       extra_body:
         reasoning_effort: medium
 hle_vision_equivalence_llm_judge_resources_server:

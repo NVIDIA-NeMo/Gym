@@ -20,16 +20,19 @@
 #
 #   nemotron_recipes/super-3.5/run.sh osworld
 #
-# Set in .env: nothing beyond the shared keys (see .env.example).
+# Set in .env: POLICY_API_KEY
 #
-# Needs Linux x86_64 with Docker, read/write /dev/kvm and about 16 GB RAM per VM running at
-# once (4 by default). run.sh first sources osworld.setup.sh, which downloads the VM disk
-# once (Gym's own script: ~11 GB download, 24.5 GB on disk, checksum verified).
+# Needs a policy endpoint that accepts image inputs, and Linux x86_64 with Docker, read/write
+# /dev/kvm and about 16 GB RAM per VM running at once (4 by default). Details:
+# reproducibility.md, "OSWorld-Verified".
+#
+# run.sh first sources osworld.setup.sh, which downloads the VM disk once (Gym's own script:
+# ~11 GB download, 24.5 GB on disk, checksum verified) and points the agent at it.
 #
 # The 361 tasks (osworld_tasks.jsonl, next to this file) are OSWorld's own no-Google-Drive set
 # (evaluation_examples/test_nogdrive.json) from https://github.com/xlang-ai/OSWorld at commit
-# 6d2973a (2026-06-08), unchanged apart from Gym's row format; Apache 2.0. The published run used
-# exactly these; OSWorld has since revised the checks of 53 of them.
+# 6d2973a (2026-06-08), unchanged apart from Gym's row format; Apache 2.0. The published run
+# used exactly these; OSWorld has since revised the checks of 53 of them.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: 7f724e17332b6ebcfa9d4494546bdc0ea149fc90

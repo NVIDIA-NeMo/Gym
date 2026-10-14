@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 # Sourced by run.sh before `gym eval prepare`.
-# All 1266 questions; without this, Gym's prepare script writes a 400-question subset.
+# All 1,266 questions; without this, Gym's prepare script writes a 400-question subset.
 export BROWSECOMP_RUN_FULL=1
 # Absolute path for browsecomp.yaml: the search server runs in its own directory.
 export BROWSECOMP_EXCLUDE_DOMAINS="$PWD/$RECIPES/browsecomp_exclude_domains.json"

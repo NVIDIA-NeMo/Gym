@@ -14,11 +14,11 @@
 # limitations under the License.
 #
 # APEX Shortlist (no tools): 47 problems x 16 repeats. The final \boxed{} answer is graded
-# symbolically against the reference; there is no judge model.
+# symbolically against the reference; there is no judge model. Reported: accuracy.
 #
 #   nemotron_recipes/super-3.5/run.sh apex-shortlist
 #
-# Set in .env: nothing beyond the shared keys (see .env.example).
+# Set in .env: POLICY_API_KEY
 #
 # The dataset is not pinned to a revision: Gym loads the latest MathArena/apex-shortlist,
 # which had 47 problems when the published number was produced. A different problem count

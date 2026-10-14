@@ -13,23 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# AA-LCR v1.1 (long-context reasoning, no tools): 100 questions x 16 repeats, each asked over
-# a full set of documents. A judge model (gpt-5.6-luna, medium reasoning effort) marks each
-# answer CORRECT or INCORRECT against the official one, as a JSON verdict; the score is the
-# mean reward over the judged answers.
+# AA-LCR v1.1 (long context, no tools): 100 questions x 16 repeats, each asked over a full set
+# of documents. A judge model (gpt-5.6-luna, reasoning effort medium) marks each answer
+# CORRECT or INCORRECT against the official one, as a JSON verdict. Reported: mean reward over
+# the judged answers.
 #
 #   nemotron_recipes/super-3.5/run.sh aa-lcr
 #
-# Set in .env: AALCR_JUDGE_API_KEY
+# Set in .env: POLICY_API_KEY, AALCR_JUDGE_API_KEY
 #
-# Needs the judge endpoint in env.yaml (aalcr_judge_base_url, aalcr_judge_api_key); the
-# endpoint must serve gpt-5.6-luna through the OpenAI Responses API
-# (<aalcr_judge_base_url>/responses). The benchmark config pins the dataset
-# (ArtificialAnalysis/AA-LCR at revision 9a77ef5).
+# Needs the judge endpoint in env.yaml (aalcr_judge_base_url, aalcr_judge_api_key) serving
+# gpt-5.6-luna on the Responses API (<aalcr_judge_base_url>/responses).
 #
 # An answer whose judge call fails, or whose verdict is not that JSON, is left out of the
 # score and written to evaluator_rollouts_failures.jsonl; RESUME=1 retries it (the model
 # answers again; 3 attempts in all by default).
+#
+# The dataset is pinned: the benchmark config loads ArtificialAnalysis/AA-LCR at revision
+# 9a77ef5.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: 5a7dd6fe6c3d348005922f1a3d4f87215e3ca15a

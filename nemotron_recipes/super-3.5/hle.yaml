@@ -13,25 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Humanity's Last Exam, text-only (no tools): 2158 questions, one sample each. A judge
-# model compares each final answer with the reference using the official HLE judge prompt
-# (yes/no); the score is the fraction judged correct.
+# HLE (text-only): Humanity's Last Exam without the image questions (no tools), 2,158
+# questions, one sample each. A judge model (gpt-5.6-luna, reasoning effort medium) compares
+# each final answer with the reference using the official HLE judge prompt (yes/no).
+# Reported: the fraction judged correct.
 #
 #   nemotron_recipes/super-3.5/run.sh hle
 #
-# Set in .env: HF_TOKEN, HLE_JUDGE_API_KEY
+# Set in .env: POLICY_API_KEY, HF_TOKEN, HLE_JUDGE_API_KEY
 #
-# Needs HF_TOKEN (gated dataset; accept the terms on the Hub first) and the judge endpoint in
-# env.yaml (hle_judge_base_url, hle_judge_api_key); the endpoint must serve gpt-5.6-luna on the
-# Responses API (Gym posts to <hle_judge_base_url>/responses).
+# Needs HF_TOKEN (gated dataset; accept its terms on the Hugging Face Hub first) and the judge
+# endpoint in env.yaml (hle_judge_base_url, hle_judge_api_key) serving gpt-5.6-luna on the
+# Responses API (<hle_judge_base_url>/responses).
 #
 # An answer whose judge call fails is left out of the score and written to
 # evaluator_rollouts_failures.jsonl; RESUME=1 retries it (the model answers again; 3 attempts
 # in all by default).
 #
-# The dataset is not pinned to a revision: Gym loads the latest cais/hle test split and
-# keeps the questions without an image, of which there were 2158 when the published number
-# was produced. A different question count means a different question set.
+# The dataset is not pinned to a revision: Gym loads the latest cais/hle test split and keeps
+# the questions without an image, of which there were 2,158 when the published number was
+# produced. A different question count means a different question set.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d

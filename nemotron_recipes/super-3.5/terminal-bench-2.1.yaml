@@ -13,19 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Terminal-Bench 2.1: 89 terminal tasks x 8 repeats. The Terminus-2 agent works in a tmux session
-# inside each task's container; the task's tests decide. Needs Docker (task images come from
-# Docker Hub; log in to avoid pull limits) and ~4 CPU / 16 GB per concurrent task.
+# Terminal-Bench 2.1: 89 terminal tasks x 8 repeats. The Terminus-2 agent works in a tmux
+# session inside each task's container; the task's tests decide. Reported: mean reward.
 #
 #   nemotron_recipes/super-3.5/run.sh terminal-bench-2.1
 #
-# Set in .env: OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY
+# Set in .env: POLICY_API_KEY, OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY
 #
-# Runs in OpenSandbox, the sandbox the published run used (NVIDIA's hosted instance), self-hosted
-# on your machine: reproducibility.md has the setup. Gym clones the tasks
-# from github.com/harbor-framework/terminal-bench-2-1 (unpinned; the published run used 36d417f).
+# Needs Docker (task images come from Docker Hub; log in to avoid pull limits), ~4 CPU / 16 GB
+# per concurrent task and OpenSandbox self-hosted on your machine (the published run used
+# NVIDIA's hosted instance). Setup: reproducibility.md, "Terminal-Bench 2.1".
+#
+# The tasks are not pinned to a revision: Gym clones the latest
+# github.com/harbor-framework/terminal-bench-2-1 (the published run used 36d417f).
 
+# Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: 2581db977d602a12f9d7cb39d851d6d5d19ba140
+# Gym benchmark config this recipe builds on.
 benchmark_config:
   - benchmarks/terminal_bench_2_1/terminus_2.yaml
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml

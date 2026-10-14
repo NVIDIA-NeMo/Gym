@@ -13,28 +13,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Tau2 (retail, airline, telecom): 278 customer-service tasks x 8 repeats. A user-simulator model
-# plays the customer; a task scores 1 if the final state matches the expected outcome.
+# Tau2 (retail, airline, telecom): 278 customer-service tasks x 8 repeats. A user-simulator
+# model (Qwen3-235B-A22B-Instruct-2507-FP8) plays the customer; a task scores 1 if the final
+# state matches the expected outcome. Reported: reward per domain.
 #
 #   nemotron_recipes/super-3.5/run.sh tau2
 #
-# Set in .env: TAU2_USER_SIMULATOR_API_KEY
+# Set in .env: POLICY_API_KEY, TAU2_USER_SIMULATOR_API_KEY
 #
 # Needs the simulator endpoint in env.yaml (tau2_user_simulator_base_url,
-# tau2_user_simulator_api_key); the endpoint must serve Qwen3-235B-A22B-Instruct-2507-FP8 on
-# <tau2_user_simulator_base_url>/chat/completions. Gym installs the tau2 code and data from
-# https://github.com/bxyu-nvidia/tau2-bench (unpinned branches, as for tau3.yaml).
+# tau2_user_simulator_api_key) serving Qwen3-235B-A22B-Instruct-2507-FP8 on Chat Completions
+# (<tau2_user_simulator_base_url>/chat/completions).
+#
+# The code and tasks are not pinned: Gym installs them from branches of
+# https://github.com/bxyu-nvidia/tau2-bench, as for tau3.yaml.
 
+# Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: 538886bff48f31a1567670fd5ed29c9ddfea59dd
+# Gym benchmark config this recipe builds on.
 benchmark_config: benchmarks/tau2/configs/tau2.yaml
 
 policy_model:
   responses_api_models:
     vllm_model:
-      sequential_reasoning_allowed: false  # as in the published run (Gym's default is true)
+      # As in the published run (Gym's default is true): a conversation that ends with
+      # reasoning but no answer is not sent back to the model to continue.
+      sequential_reasoning_allowed: false
 
 # User simulator: Qwen3-235B-A22B-Instruct-2507-FP8 instead of the benchmark default (gpt-5.2).
-# Set tau2_user_simulator_model_name in env.yaml only if your provider uses another id.
+# Endpoint and key come from env.yaml; set tau2_user_simulator_model_name there only if your
+# provider serves this model under a different id.
 tau2_benchmark_agent:
   responses_api_agents:
     tau2:

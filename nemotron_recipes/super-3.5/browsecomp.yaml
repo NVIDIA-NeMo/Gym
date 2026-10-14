@@ -13,26 +13,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# BrowseComp (web-browsing agent): all 1266 questions, one sample each. The model searches
+# BrowseComp (web-browsing agent): all 1,266 questions, one sample each. The model searches
 # the web through Exa, reads the pages it finds and answers; a judge model (GLM-5.1) compares
-# the answer with the reference. Reported: mean/reward, the fraction judged correct.
+# the answer with the reference. Reported: the fraction judged correct.
 #
 #   nemotron_recipes/super-3.5/run.sh browsecomp
 #
-# Set in .env: EXA_API_KEY, BROWSECOMP_JUDGE_API_KEY
+# Set in .env: POLICY_API_KEY, BROWSECOMP_JUDGE_API_KEY, EXA_API_KEY
 #
-# Needs an Exa API key (EXA_API_KEY; env.yaml -> exa_api_key) and the judge endpoint in
-# env.yaml (browsecomp_judge_base_url, browsecomp_judge_api_key) serving GLM-5.1 on Chat
-# Completions. The run uses Exa's "deep" search, which costs more per query than its default;
-# the published run made about 33 searches per question. run.sh first sources
-# browsecomp.setup.sh.
+# Needs the judge endpoint in env.yaml (browsecomp_judge_base_url, browsecomp_judge_api_key)
+# serving GLM-5.1 on Chat Completions (<browsecomp_judge_base_url>/chat/completions), and an
+# Exa API key (https://exa.ai).
+#
+# run.sh first sources browsecomp.setup.sh, which selects all 1,266 questions (Gym's default
+# is a 400-question subset) and points the search at the domain exclude list.
+#
+# The run uses Exa's "deep" search, which costs more per query than its default; the
+# published run made about 33 searches per question.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: 0a287243543020c1cc23f76f6004fcf3c83fc4a9
+# Gym benchmark config this recipe builds on.
 benchmark_config: benchmarks/browsecomp/config.yaml
 
-# Judge: GLM-5.1, the benchmark's own judge, on your endpoint. Set browsecomp_judge_model_name
-# in env.yaml only if your provider serves it under a different id.
+# Judge: GLM-5.1, the benchmark's own judge. Endpoint and key come from env.yaml; set
+# browsecomp_judge_model_name there only if your provider serves this model under a different id.
 judge_model:
   responses_api_models:
     vllm_model:

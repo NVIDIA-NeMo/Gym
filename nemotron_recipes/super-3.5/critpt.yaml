@@ -17,23 +17,20 @@
 # turns: a derivation, then the problem's Python template filled in with the answer. The
 # Artificial Analysis (AA) API grades the templates in batches of all 70 problems against
 # private test cases, and every rollout in a batch gets that batch's accuracy as its reward.
+# Reported: mean accuracy.
 #
 #   nemotron_recipes/super-3.5/run.sh critpt
 #
-# Set in .env: ARTIFICIAL_ANALYSIS_API_KEY
+# Set in .env: POLICY_API_KEY, ARTIFICIAL_ANALYSIS_API_KEY
 #
-# Needs ARTIFICIAL_ANALYSIS_API_KEY (https://artificialanalysis.ai/documentation#critpt-api):
-# one key, or '[key1,key2]' to switch keys when one is rate-limited. A full run makes 5
-# grading calls.
+# Needs an AA API key (https://artificialanalysis.ai/documentation#critpt-api): one key, or
+# '[key1,key2]' to switch keys when one is rate-limited. A full run makes 5 grading calls.
+# Details: reproducibility.md, "CritPt".
 #
 # Serve the model with a context length (--max-model-len) that fits the prompt plus 245,760
 # output tokens: each turn asks for that many. vLLM rejects a turn that does not fit the
 # context, and Gym records the rejected turn as an empty answer, scored 0 without an error.
 # With a shorter context every turn fails this way, so check that output_tokens is above 0.
-#
-# The dataset is not pinned to a revision: Gym loads the latest CritPt-Benchmark/CritPt,
-# which had 70 problems when the published number was produced. A different problem count
-# means a different problem set.
 #
 # Leave PARALLEL unset (or at 350 or more). A rollout holds its slot until its batch is
 # graded, so with fewer slots no batch ever fills, and the run fails once the 6 h verify
@@ -45,6 +42,10 @@
 # verify_timeout_seconds below and run `LIMIT=1 nemotron_recipes/super-3.5/run.sh
 # critpt-smoke`. That is one AA call with the other 69 problems sent empty: it shows the
 # setup works, but it is not a score.
+#
+# The dataset is not pinned to a revision: Gym loads the latest CritPt-Benchmark/CritPt,
+# which had 70 problems when the published number was produced. A different problem count
+# means a different problem set.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: 1e668906d2e69a9e8ee9aaafc60050a4025d9688

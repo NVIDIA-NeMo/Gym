@@ -14,12 +14,12 @@
 # limitations under the License.
 #
 # LiveCodeBench v6 (no tools, cascade prompt): 454 problems from 2024-08-01 to 2025-06-01
-# x 3 repeats. Gym runs the model's code against each problem's test cases locally; a
-# rollout scores 1 only if every test passes.
+# x 3 repeats. Gym runs the model's code against each problem's test cases locally; a rollout
+# scores 1 only if every test passes. Reported: the fraction of rollouts that pass.
 #
 #   nemotron_recipes/super-3.5/run.sh livecodebench
 #
-# Set in .env: nothing beyond the shared keys (see .env.example).
+# Set in .env: POLICY_API_KEY
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d

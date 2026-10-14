@@ -18,11 +18,15 @@
 # Reported: subtask accuracy (sub-steps that pass) and problem accuracy (problems whose
 # sub-steps all pass).
 #
-# Needs SciCode's ~1 GB test_data.h5, pointed at by TEST_DATA (reproducibility.md, "SciCode"):
+#   nemotron_recipes/super-3.5/run.sh scicode
 #
-#   TEST_DATA=/path/to/test_data.h5 nemotron_recipes/super-3.5/run.sh scicode
+# Set in .env: POLICY_API_KEY, TEST_DATA
 #
-# Set in .env: TEST_DATA
+# Needs SciCode's ~1 GB test_data.h5; set TEST_DATA to its absolute path (reproducibility.md,
+# "SciCode" has the download).
+#
+# run.sh first sources scicode.setup.sh, which checks that the file is readable: otherwise
+# every test case fails and the run scores 0 without an error.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: e446e4f415b9cde0e95bb813c85e9e3e23f5d893

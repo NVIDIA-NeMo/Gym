@@ -14,19 +14,26 @@
 # limitations under the License.
 #
 # WMT24++ (no tools): 960 English sentences translated into 9 languages, 8,640 translations,
-# one sample each. Scored by xCOMET-XXL (reported: COMET averaged over the 9 languages), plus
-# spBLEU and chrF.
+# one sample each. Scored by xCOMET-XXL, plus spBLEU and chrF. Reported: COMET averaged over
+# the 9 languages.
 #
 #   nemotron_recipes/super-3.5/run.sh wmt24pp
 #
-# Set in .env: HF_TOKEN
+# Set in .env: POLICY_API_KEY, HF_TOKEN
 #
-# Scoring runs xCOMET-XXL on this machine's GPUs, one copy per GPU: 43 GB of weights plus room
-# for the batch (comet_batch_size below). By default it uses every GPU with 75 GB free; to
-# include GPUs with less, list the GPUs to use in CUDA_VISIBLE_DEVICES. On Slurm it is set to
-# all your job's GPUs, so point it at the GPUs vLLM does not use.
-# run.sh first sources wmt24pp.setup.sh, which sets this up and downloads the model once (gated
-# on the Hugging Face Hub: accept its terms, and set HF_TOKEN).
+# Needs HF_TOKEN (the scorer model is gated; accept its terms on the Hugging Face Hub first)
+# and GPUs for scoring: xCOMET-XXL runs on this machine, one copy per GPU, 43 GB of weights
+# plus room for the batch (comet_batch_size below). By default it uses every GPU with 75 GB
+# free; to include GPUs with less, list the GPUs to use in CUDA_VISIBLE_DEVICES. On Slurm it
+# is set to all your job's GPUs, so point it at the GPUs vLLM does not use. Details:
+# reproducibility.md, "WMT24++".
+#
+# run.sh first sources wmt24pp.setup.sh, which sets this up and downloads the scorer model
+# once.
+#
+# The published run served the model with a shorter context, which also caps each
+# translation, thinking included; to match it, serve as in reproducibility.md, "Serving the
+# model".
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d

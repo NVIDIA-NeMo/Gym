@@ -13,20 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# SWE-bench Pro (public set): 731 harder, larger tasks x 3 repeats. The OpenCode agent fixes each
-# one inside a container holding the project; the project's tests decide. Needs Docker (task images
-# come from Docker Hub; log in to avoid pull limits) and ~4 CPU / 30 GB per concurrent task.
+# SWE-bench Pro (public set): 731 harder, larger tasks x 3 repeats. The OpenCode agent fixes
+# each one inside a container holding the project; the project's tests decide. Reported: mean
+# reward.
 #
 #   nemotron_recipes/super-3.5/run.sh swebench-pro
 #
-# Set in .env: OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY, OPENCODE_DIR
+# Set in .env: POLICY_API_KEY, OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY, OPENCODE_DIR
 #
-# Runs in OpenSandbox, the sandbox the published run used (NVIDIA's hosted instance), self-hosted
-# on your machine: reproducibility.md has the setup. Serve the model with
-# --enable-auto-tool-choice --tool-call-parser qwen3_coder as well as --reasoning-parser
-# nemotron_v3.
+# Needs Docker (task images come from Docker Hub; log in to avoid pull limits), ~4 CPU / 30 GB per
+# concurrent task, OpenSandbox self-hosted on your machine (the published run used NVIDIA's
+# hosted instance) and your own copy of OpenCode in OPENCODE_DIR. Setup for both:
+# reproducibility.md, "SWE-bench Verified, Multilingual and Pro".
 
+# Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: 1e668906d2e69a9e8ee9aaafc60050a4025d9688
+# Gym benchmark config this recipe builds on.
 benchmark_config:
   - benchmarks/swebench/pro/opencode.yaml
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
@@ -63,8 +65,14 @@ swebench_pro_opencode_resources_server:
       sandbox_config:
         provider_options:
           volumes:
-            - {name: opencode, host: {path: "${oc.env:OPENCODE_DIR}"}, mount_path: /opt/opencode, read_only: true}
-            - {name: recipes, host: {path: "${oc.env:RECIPES_DIR}"}, mount_path: /opt/recipes, read_only: true}
+            - name: opencode
+              host: {path: "${oc.env:OPENCODE_DIR}"}
+              mount_path: /opt/opencode
+              read_only: true
+            - name: recipes
+              host: {path: "${oc.env:RECIPES_DIR}"}
+              mount_path: /opt/recipes
+              read_only: true
 swebench_pro_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:

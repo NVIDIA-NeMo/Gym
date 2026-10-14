@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# GPQA Diamond (no tools): 198 questions x 8 repeats, scored by accuracy.
+# GPQA Diamond (no tools): 198 questions x 8 repeats. Reported: accuracy.
 #
 #   nemotron_recipes/super-3.5/run.sh gpqa
 #
-# Set in .env: HF_TOKEN
+# Set in .env: POLICY_API_KEY, HF_TOKEN
 #
-# Needs HF_TOKEN (gated dataset; accept the terms on the Hub first).
+# Needs HF_TOKEN (gated dataset; accept its terms on the Hugging Face Hub first).
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d

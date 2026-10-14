@@ -14,12 +14,13 @@
 # limitations under the License.
 #
 # IFBench (no tools): 300 prompts x 8 repeats, each with one or more verifiable output
-# constraints (57 instruction types). The reward is the fraction of a prompt's instructions
-# the response follows, checked strictly by AllenAI's IFBench rules; there is no judge model.
+# constraints (57 instruction types). A response's reward is the fraction of the prompt's
+# instructions it follows, checked strictly by AllenAI's IFBench rules; there is no judge
+# model. Reported: mean reward.
 #
 #   nemotron_recipes/super-3.5/run.sh ifbench
 #
-# Set in .env: nothing beyond the shared keys (see .env.example).
+# Set in .env: POLICY_API_KEY
 #
 # The dataset is not pinned to a revision: Gym downloads IFBench_test.jsonl from the main
 # branch of github.com/allenai/IFBench, which had 300 prompts when the published number was
