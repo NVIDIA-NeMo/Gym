@@ -197,7 +197,6 @@ class SavTracksResourcesServerConfig(BaseResourcesServerConfig):
     # invisibility claim on a visible object always scores 0, so claiming
     # invisibility is never a cheap escape from localization.
     absence_score: float = Field(default=1.0, ge=0.0, le=1.0)
-    iou_threshold: float = 0.5
 
 
 class SavTracksRunRequest(BaseRunRequest):
@@ -213,7 +212,6 @@ class SavTracksRunRequest(BaseRunRequest):
     require_answer_tags: bool = True
     penalize_extra_predictions: bool = True
     absence_score: float = Field(default=1.0, ge=0.0, le=1.0)
-    iou_threshold: float = 0.5
 
 
 class SavTracksVerifyRequest(SavTracksRunRequest, BaseVerifyRequest):
@@ -499,7 +497,7 @@ def _assign_ref_ids(
 ) -> dict[int, Optional[int]]:
     """One-to-one assignment of predicted ids to GT objects maximizing total score.
 
-    Exhaustive over permutations when small (ref records have few objects); greedy
+    Exhaustive over pairings when small (ref records have few objects); greedy
     fallback beyond that.
     """
     pred_ids = sorted(grouped)
@@ -518,7 +516,7 @@ def _assign_ref_ids(
     if len(gt_objects) <= 6 and len(pred_ids) <= 6:
         best_total = -1.0
         slots = min(len(gt_objects), len(pred_ids))
-        for gt_subset in itertools.permutations([gt.id for gt in gt_objects], slots):
+        for gt_subset in itertools.combinations([gt.id for gt in gt_objects], slots):
             for pred_subset in itertools.permutations(pred_ids, slots):
                 total = sum(pair_scores[(g, p)] for g, p in zip(gt_subset, pred_subset))
                 if total > best_total:

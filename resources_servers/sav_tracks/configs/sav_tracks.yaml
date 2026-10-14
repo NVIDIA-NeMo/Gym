@@ -3,11 +3,15 @@ sav_tracks:
     sav_tracks:
       entrypoint: app.py
       absence_score: 1.0
-      iou_threshold: 0.5
       domain: other
       verified: false
       description: SA-V tracks-schema verifier for point / box / text-referred tracking
       value: Verify flat {"tracks":[...]} predictions inside <answer> tags — box tracking by IoU, point and text-referred tracking by segmentation-mask membership (binary point-in-mask), with absence credit for correct invisibility claims
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/sav_tracks/data/example.jsonl
+        num_repeats: 1
 sav_pt_tracks_agent:
   responses_api_agents:
     simple_agent:
