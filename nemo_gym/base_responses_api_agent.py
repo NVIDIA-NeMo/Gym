@@ -158,11 +158,15 @@ class AgentSeedSessionRequest(BaseModel):
 
 
 class AgentSeedSessionResponse(BaseModel):
-    """Confirm the caller-assigned agent session identifier."""
+    """Confirm the caller-assigned agent session identifier and declare what the harness can use."""
 
     model_config = ConfigDict(extra="forbid")
 
     agent_session_id: str
+    # Whether the harness drives the task's own tool declarations (Harbor's ``[[environment.mcp_servers]]``
+    # and ``skills_dir``). An environment server refuses such a task to a harness that does not, instead of
+    # running it without its tools.
+    supports_task_tool_context: bool = False
     capabilities: AgentContinuationCapabilities | None = Field(
         default=None,
         description=(
@@ -215,7 +219,10 @@ class AgentCloseSessionResponse(BaseModel):
     trajectory: TrajectoryRecord | None = Field(
         default=None,
         description=(
-            "Cumulative trajectory across this continuation session's activations. Omitted when not reported."
+            "The harness's own account of the run's decisions: the turns it took and the model calls behind "
+            "each. Without it rollout collection rebuilds turns from every captured model call, so helper calls "
+            "(context recovery, summarization) count as decisions and the step counts are lost. Cumulative "
+            "across a continuation session's activations. Omitted when not reported."
         ),
     )
 
@@ -600,7 +607,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             elif record.state.request != body:
                 raise HTTPException(409, "agent_session_id is already bound to another seed request")
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
-            return AgentSeedSessionResponse(agent_session_id=body.agent_session_id, capabilities=capabilities)
+            return AgentSeedSessionResponse(
+                agent_session_id=body.agent_session_id,
+                capabilities=capabilities,
+                supports_task_tool_context=self.supports_task_tool_context(),
+            )
 
     async def close_agent_session(
         self,
@@ -774,6 +785,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         # The adapter may release a borrowed connection after a final negative
         # termination receipt. Preserve that receipt; release errors still raise.
         return await self._close_agent_session_state(record.state)
+
+    def supports_task_tool_context(self) -> bool:
+        """Whether this harness uses the task's own tool declarations.
+
+        Harbor tasks declare ``[[environment.mcp_servers]]`` and ``skills_dir``. A harness that drives them
+        from inside the sandbox answers True, and the seed response carries the answer to the environment
+        server, which refuses such a task to a harness that would run it without its tools.
+        """
+        return False
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
         """Validate grants and initialize harness state.

@@ -687,7 +687,7 @@ def test_ordinary_seed_does_not_add_continuation_capabilities(setup):
         response = client.post("/v1/agent_sessions", json=request.model_dump(mode="json"))
         assert response.status_code == 200, response.text
         assert not agent._require_agent_session(request.agent_session_id).is_continuation
-        assert response.json() == {"agent_session_id": request.agent_session_id}
+        assert response.json() == {"agent_session_id": request.agent_session_id, "supports_task_tool_context": False}
         receipt = close(client, request)
         assert "cleanup_confirmed" not in receipt and "trajectory" not in receipt
 

@@ -388,7 +388,63 @@ class TestSeedWorkdirAndResources:
         assert "OMP_NUM_THREADS" not in server._sandbox_spec(task, "/app").env
 
 
+TASK_TOOL_CONTEXT_DECLARATIONS = {
+    "mcp_servers": '[[environment.mcp_servers]]\nname = "playwright"\ntransport = "sse"\nurl = "http://api:3080/sse"\n',
+    "skills_dir": 'skills_dir = "/app/.skills"\n',
+}
+
+
+def task_tool_context_toml(declaration: str) -> str:
+    """TASK_TOML whose ``[environment]`` table also carries the given tool declaration."""
+    return TASK_TOML + TASK_TOOL_CONTEXT_DECLARATIONS[declaration]
+
+
 class TestAgentStage:
+    @pytest.mark.parametrize("declaration", sorted(TASK_TOOL_CONTEXT_DECLARATIONS))
+    async def test_task_tool_context_is_refused_to_a_harness_that_did_not_declare_support(
+        self, tmp_path, monkeypatch, declaration
+    ):
+        """Terminus 2 never sees the task's MCP servers or skills: the run would score a silent zero."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=task_tool_context_toml(declaration))
+        server.server_client.supports_task_tool_context = False
+
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert response.result is None and failure.stage == "agent" and failure.terminal
+        assert "declares MCP servers or a skills directory" in failure.failure_reason
+        assert "'agent' does not support" in failure.failure_reason
+        assert "supports_task_tool_context" in failure.failure_reason
+        # The harness was seeded and is closed again, but never took its turn, and nothing was verified.
+        assert server.server_client.paths() == ["/v1/agent_sessions", "/v1/agent_sessions/close"]
+        assert not any("test.sh" in call["command"] for call in sandbox.execs)
+        assert sandbox.stopped and not server._sandboxes
+
+    @pytest.mark.parametrize("declaration", sorted(TASK_TOOL_CONTEXT_DECLARATIONS))
+    async def test_task_tool_context_runs_on_a_harness_that_declared_support(self, tmp_path, monkeypatch, declaration):
+        """mini-SWE reads the task's MCP servers and skills from the sandbox, so the task is run and verified."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=task_tool_context_toml(declaration))
+        assert server.server_client.supports_task_tool_context is True
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0
+        assert server.server_client.paths() == [
+            "/v1/agent_sessions",
+            "/ng-rollout/r1/v1/responses",
+            "/v1/agent_sessions/close",
+        ]
+
+    async def test_a_task_without_tool_declarations_runs_on_any_harness(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.supports_task_tool_context = False
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0
+
     async def test_lost_agent_seed_is_a_retryable_agent_failure_and_stops_the_sandbox(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
         server.server_client.fail_path = "/v1/agent_sessions"
@@ -451,6 +507,45 @@ class TestAgentStage:
         response = await run_episode(server, task)
         assert response.result.ng_agent_observations is not None
         assert response.result.model_dump()["ng_agent_observations"]["source"] == "harness"
+        # A harness that returns no trajectory leaves the key out of the result, as before.
+        assert "ng_trajectory" not in response.result.model_dump(mode="json")
+
+    async def test_the_harness_trajectory_travels_with_the_result(self, tmp_path, monkeypatch):
+        """The harness's own decisions ride on its close and reach the result in the slot rollout collection reads.
+
+        Rebuilding turns from the captured model calls would count helper calls (context recovery, summarization)
+        as decisions and lose the command-batch count behind each one.
+        """
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.observations = {"source": "harness", "records": [], "gaps": []}
+        server.server_client.trajectory = {
+            "task_id": "hello",
+            "rollout_id": "r1",
+            "turns": [
+                {
+                    "invocation_id": "harness_1",
+                    "task_id": "hello",
+                    "rollout_id": "r1",
+                    "turn_no": 1,
+                    "timestamp": 1.0,
+                    "question": "do it",
+                    "answer": [],
+                    "step_count": 3,
+                    "model_calls": [
+                        {"model_ref": {"type": "responses_api_models", "name": "policy"}, "response_id": "resp_0"}
+                    ],
+                }
+            ],
+        }
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        [turn] = response.result.ng_trajectory.turns
+        assert (turn.turn_no, turn.step_count, turn.model_calls[0].response_id) == (1, 3, "resp_0")
+        dumped = response.result.model_dump(mode="json")
+        assert dumped["ng_trajectory"]["turns"][0]["step_count"] == 3
+        assert dumped["ng_agent_observations"]["source"] == "harness"
 
     async def test_episode_deadline_stops_the_sandbox(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch, default_episode_timeout_seconds=0.1)

@@ -3019,6 +3019,27 @@ class TestComposeUnboundAgent:
     def _parse_config_paths(self, *paths: str) -> DictConfig:
         return self._parse(DictConfig({"config_paths": list(paths)}))
 
+    def test_shipped_terminus_template_replaces_a_benchmarks_agent(self) -> None:
+        """`--benchmark terminal_bench_2_1/opencode --agent-type terminus_2_sandboxed_agent` swaps the harness."""
+        config = self._parse_config_paths(
+            "benchmarks/terminal_bench_2_1/opencode.yaml",
+            "responses_api_agents/terminus_2_sandboxed_agent/configs/terminus_2_sandboxed_agent.yaml",
+        )
+        agents = {
+            name: list(block["responses_api_agents"])
+            for name, block in config.items()
+            if isinstance(block, DictConfig) and "responses_api_agents" in block
+        }
+        assert "terminus_2_sandboxed_agent" not in config, "the swap source is dropped once composed"
+        assert not any("opencode_sandboxed_agent" in impls for impls in agents.values()), agents
+        composed = config["terminal_bench_2_1_terminus_2_sandboxed_agent"]["responses_api_agents"][
+            "terminus_2_sandboxed_agent"
+        ]
+        assert composed.resources_server.name == "terminal_bench_2_1_opencode_resources_server"
+        assert composed.datasets[0].name == "terminal_bench_2_1"
+        environment = config["terminal_bench_2_1_environment_server"]["environment_servers"]["legacy_agent"]
+        assert environment.agent_server.name == "terminal_bench_2_1_terminus_2_sandboxed_agent"
+
     def test_noop_when_no_instance_is_unbound(self) -> None:
         config = self._config()
         config.pop(self.HARNESS_INSTANCE)
