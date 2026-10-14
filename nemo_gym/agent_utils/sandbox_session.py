@@ -117,6 +117,7 @@ class SandboxSession[Artifacts]:
         collect: Callable[[], Awaitable[Artifacts]],
         timeout: float,
         close_timeout: float,
+        timeout_resolver: Callable[[], float] | None = None,
     ) -> Artifacts:
         """Run once, preserving captured artifacts even when execution raises.
 
@@ -133,6 +134,10 @@ class SandboxSession[Artifacts]:
             command = await asyncio.shield(self._stage_task)
             if self.closing or self._finalize_task is not None:
                 raise RuntimeError(f"{self.harness} sandbox session closed before launch")
+            if timeout_resolver is not None:
+                timeout = min(timeout, timeout_resolver())
+            if timeout <= 0:
+                raise TimeoutError(f"{self.harness} activation deadline expired before launch")
             cleanup_timeout, provider_timeout = supervision_timeouts(timeout=timeout, close_timeout=close_timeout)
             launch = supervised_launch_command(
                 session_dir=self.session_dir,

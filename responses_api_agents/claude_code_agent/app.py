@@ -105,6 +105,8 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
                 num_turns = int(event["num_turns"])
             if isinstance(event.get("subtype"), str):
                 result_metadata["subtype"] = event["subtype"]
+            if isinstance(event.get("stop_reason"), str):
+                result_metadata["stop_reason"] = event["stop_reason"]
             if isinstance(event.get("is_error"), bool):
                 result_metadata["is_error"] = event["is_error"]
             duration_ms = event.get("duration_ms")
@@ -211,10 +213,15 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
 
 def _invocation_outcome(metadata: dict[str, Any], returncode: int | None) -> tuple[str, str | None]:
     subtype = metadata.get("subtype")
+    if metadata.get("stop_reason") == "refusal":
+        return "failed", "refusal"
     if subtype == "error_max_turns":
         return "incomplete", subtype
     if metadata.get("is_error") is True or (isinstance(subtype, str) and subtype.startswith("error_")):
-        return "failed", subtype if isinstance(subtype, str) else "agent_error"
+        reason = metadata.get("stop_reason")
+        if isinstance(reason, str) and reason:
+            return "failed", reason
+        return "failed", subtype if isinstance(subtype, str) and subtype != "success" else "agent_error"
     if returncode not in (0, None):
         return "failed", f"process_exit_{returncode}"
     if subtype == "success":
