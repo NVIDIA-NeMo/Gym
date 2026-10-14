@@ -77,6 +77,7 @@ class Sandbox:
             "error": None,
         }
         self.runtime_info = {"hostname": "task-container", "pid": 123}
+        self.task_environment_receipt = "ready\n"
         self.events = events()
         self.blocked = False
         self.started = asyncio.Event()
@@ -130,6 +131,8 @@ class Sandbox:
         await self.exited.wait()
         self.files[f"{self.directory}/cleanup.json"] = json.dumps(self.result)
         self.files[f"{self.directory}/runtime.json"] = json.dumps(self.runtime_info)
+        if self.task_environment_receipt is not None:
+            self.files[f"{self.directory}/task-environment.ready"] = self.task_environment_receipt
         self.files[f"{self.directory}/export.json"] = self.events
         return 0
 
@@ -268,7 +271,7 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
         payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
         assert payload["prompt"] == "Fix the code"
         assert payload["command"][0].endswith("nemo-gym-opencode-runtime-1.17.11/opencode")
-        assert payload["env"]["HOME"].startswith("/tmp/")
+        assert payload["env"]["HOME"] == f"{sandbox.directory}/home"
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"] == {
             "context": 32000,
@@ -396,17 +399,17 @@ async def test_close_cancels_active_opencode_before_detaching(setup, tmp_path):
     assert invocation.conversation[-1].content[0].text == "Fixed"
 
 
-async def test_failed_cleanup_keeps_handles_and_prevents_close(setup):
+async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
         await task
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
-        await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert session_id in active_sessions(agent)
-    sandbox.disconnect.assert_not_awaited()
-    assert not any("rm -rf" in call.args[0] for call in sandbox.exec.await_args_list)
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert session_id not in active_sessions(agent)
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+    assert any("rm -rf" in call.args[0] for call in sandbox.exec.await_args_list)
 
 
 async def test_disconnect_failure_retains_session_for_retry(setup):
@@ -1334,3 +1337,18 @@ async def test_disconnected_waiter_and_identical_retry_share_one_activation(setu
     assert await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")) == original
     sandbox.launch.assert_awaited_once()
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+@pytest.mark.parametrize("receipt", [None, "", "partial", "ready"])
+async def test_missing_task_environment_hook_rejects_otherwise_valid_result(setup, receipt):
+    agent, sandbox = setup
+    sandbox.task_environment_receipt = receipt
+    request, session_id, task = await activate(agent, sandbox)
+    state = active_sessions(agent)[session_id]
+    with pytest.raises(RuntimeError, match="task environment initialization was not confirmed"):
+        await task
+    assert state.session.cleanup["cleanup_confirmed"] is True
+    assert state.session.artifacts is None
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()

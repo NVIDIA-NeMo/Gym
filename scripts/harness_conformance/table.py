@@ -10,38 +10,34 @@ From a checkout matching a full commit SHA, with Gym/dev and harness dependencie
 
 Runner, selected adapter, and checker tests must pass before any probes run.
 The source tree must still match the commit after testing and probing. Evidence
-failures are reportable; execution/checker errors prevent publication. Commit the
-generated page and JSON separately from the source revision they describe.
+failures are reportable; execution/checker errors prevent publication. The local
+JSON is diagnostic output; CI renders the same table without persisting a report.
 """
 
 import argparse
-import hashlib
 import json
 import math
 import os
 import re
 import subprocess
 import sys
-import tempfile
 import xml.etree.ElementTree as ET
+from datetime import UTC, datetime
 from pathlib import Path
 
 import nemo_gym
 from nemo_gym.harness_capabilities import checker
 from nemo_gym.harness_capabilities.cli import digest_file
-from nemo_gym.harness_capabilities.results import render_matrices
 
 from . import episode, runner
+from .documentation import BEGIN, END, PAGE, atomic_write, replace_block
 from .episode import HARNESSES
+from .rendering import render_table
 from .runner import run_suite
 from .scenarios import SCENARIOS, SUITE
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PAGE = Path("fern/versions/latest/pages/reference/trajectory-capabilities.mdx")
-ASSETS = Path("fern/assets/trajectory-capabilities")
-BEGIN = "{/* BEGIN GENERATED TE TABLE */}"
-END = "{/* END GENERATED TE TABLE */}"
 
 
 def verify_revision(root: Path, commit: str) -> None:
@@ -95,44 +91,6 @@ def run_tests(root: Path, output: Path, *, name: str, path: str) -> dict:
     }
 
 
-def render_table(report: dict, *, asset: str) -> str:
-    """Render counts and provenance without deriving capabilities from unit tests."""
-    commit = report["gym_commit"]
-    lines = [
-        BEGIN,
-        "",
-        f"Gym commit: [`{commit}`](https://github.com/NVIDIA-NeMo/Gym/commit/{commit}).",
-        f"Suite: `{report['suite']}`. [Generation report](../../../../assets/trajectory-capabilities/{asset}).",
-        "",
-    ]
-    displayed = {
-        name: report["harnesses"].get(name, {"scenarios": [{"scenario": s.name, "checks": []} for s in SCENARIOS]})
-        for name in HARNESSES
-    }
-    lines.append(render_matrices(displayed).replace("# Harness checks by scenario\n", "", 1))
-    lines += ["", "### Tested dependencies", ""]
-    for harness, runtime in report["runtimes"].items():
-        identity = runtime.get("version") or ("source SHA-256 " + runtime["sha256"])
-        lines.append(f"- `{harness}`: `{identity.replace('`', '').replace(chr(10), ' ')}`")
-    lines += ["", "### Unit-test gates", "", "| Suite | Passed | Skipped |", "| --- | ---: | ---: |"]
-    for name, result in report["tests"].items():
-        lines.append(f"| `{name}` | {result['passed']} | {result['skipped']} |")
-    lines += ["", END]
-    return "\n".join(lines)
-
-
-def _atomic_write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as handle:
-        temporary = Path(handle.name)
-        try:
-            handle.write(content)
-            handle.close()
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
-
-
 def regenerate(*, root: Path, commit: str, output: Path, harnesses: list[str], timeout: float) -> None:
     """Gate fresh full-suite results and atomically replace only the generated page block."""
     if not harnesses or len(set(harnesses)) != len(harnesses) or set(harnesses) - HARNESSES.keys():
@@ -142,8 +100,7 @@ def regenerate(*, root: Path, commit: str, output: Path, harnesses: list[str], t
     verify_revision(root, commit)
     page = root / PAGE
     original = page.read_text()
-    if original.count(BEGIN) != 1 or original.count(END) != 1 or original.index(BEGIN) >= original.index(END):
-        raise ValueError("reference page needs exactly one ordered pair of generated-table markers")
+    replace_block(original, BEGIN + "\n" + END)
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     test_paths = {"runner": "scripts/harness_conformance/tests"}
@@ -168,6 +125,7 @@ def regenerate(*, root: Path, commit: str, output: Path, harnesses: list[str], t
     report = {
         "schema_version": "trajectory-capabilities-table/v1",
         "gym_commit": commit,
+        "generated_at": datetime.now(UTC).isoformat(),
         "suite": SUITE,
         "tests": tests,
         "runtimes": runtimes,
@@ -178,16 +136,14 @@ def regenerate(*, root: Path, commit: str, output: Path, harnesses: list[str], t
         "summary_sha256": digest_file(probes / "conformance_summary.json"),
     }
     serialized = json.dumps(report, sort_keys=True, indent=2, allow_nan=False) + "\n"
-    asset = hashlib.sha256(serialized.encode()).hexdigest() + ".json"
-    block = render_table(report, asset=asset)
-    updated = original[: original.index(BEGIN)] + block + original[original.index(END) + len(END) :]
+    block = render_table(report)
+    updated = replace_block(original, block)
     verify_revision(root, commit)
     if page.read_text() != original:
         raise ValueError("reference page changed during regeneration")
-    # Content-addressed reports preserve the previous page's provenance even if
-    # publication is interrupted between these two atomic writes.
-    _atomic_write(root / ASSETS / asset, serialized)
-    _atomic_write(page, updated)
+    # Retain the local diagnostic report separately from the preview table.
+    atomic_write(output / "generation_report.json", serialized)
+    atomic_write(page, updated)
     print(f"Updated {page} for {commit}")
 
 
@@ -197,7 +153,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--output", required=True, type=Path, help="new directory for test logs and full probe artifacts"
     )
-    parser.add_argument("--harness", action="append", choices=HARNESSES, help="defaults to all; others show Not run")
+    parser.add_argument(
+        "--harness", action="append", choices=HARNESSES, help="defaults to all; others show Not measured"
+    )
     parser.add_argument("--timeout", type=float, default=120, help="timeout in seconds per probe")
     args = parser.parse_args(argv)
     try:

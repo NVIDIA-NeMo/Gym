@@ -681,6 +681,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+            await sandbox.upload(Path(__file__).with_name("task_environment.mjs"), f"{directory}/task_environment.mjs")
             if self._model_call_capture_enabled():
                 await sandbox.upload(OBSERVABILITY_PATCH, f"{directory}/{OBSERVABILITY_PATCH.name}")
         except BaseException as error:
@@ -865,6 +866,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
         if self._model_call_capture_enabled():
             apply_observability_patch(config, plugin_path=Path(state.session.session_dir) / OBSERVABILITY_PATCH.name)
+        config.setdefault("plugin", []).append((Path(state.session.session_dir) / "task_environment.mjs").as_uri())
         command = [f"{state.runtime}/opencode", "run", "--format", "json", "--title", "NeMo Gym"]
         if self.config.thinking:
             command.append("--thinking")
@@ -875,6 +877,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             "command": command,
             "prompt": prompt,
             "env": {
+                # OpenCode also scans HOME/.opencode independently of XDG config.
                 "HOME": f"{state.session.session_dir}/home",
                 "XDG_DATA_HOME": f"{state.session.session_dir}/data",
                 "XDG_CONFIG_HOME": f"{state.session.session_dir}/config",
