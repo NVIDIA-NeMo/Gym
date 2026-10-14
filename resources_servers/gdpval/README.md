@@ -57,6 +57,26 @@ architecture your sandboxes run on; an arm64 build leaves out the pins in
 `sandbox_config.provider_options.image_auth: {username: ..., password: ...}`, and select the architecture with
 `sandbox_config.provider_options.platform: {os: linux, arch: arm64}` when it is not the provider's default.
 
+## Office to PDF conversion
+
+The judge reads Office deliverables as PDFs that LibreOffice renders. Comparison mode preconverts them beside the
+source files (`preconvert_office_to_pdf`), and rubric mode renders the ones without a PDF into a temp directory. By
+default the server runs `libreoffice` from `PATH`, and with `preconvert_office_to_pdf: true` startup installs it and a
+Java runtime with `apt-get` on Linux when they are missing or broken.
+
+To run LibreOffice from a container or a wrapper script instead, set `libreoffice_command` to the command that replaces
+`libreoffice`:
+
+```yaml
+libreoffice_command: [apptainer, exec, --bind, /path/to/data, --bind, /tmp, /path/to/gdpval.sif, libreoffice]
+```
+
+The command must see `persist_deliverables_dir`, the reference deliverables and the temp directory at the same absolute
+paths. Startup runs it with `--version` and converts a small workbook in a temp directory and under
+`persist_deliverables_dir`, and fails if any of these checks fails. The reference deliverables are not checked. The
+`apt-get` install is skipped when the command is set. A Docker command also needs `--user` with the server's uid and
+gid; otherwise LibreOffice runs as root and leaves files in the temp directory that the server cannot delete.
+
 ## Judge failure telemetry
 
 Comparison judging can optionally write structured request and failure metadata:
