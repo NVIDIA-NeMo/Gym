@@ -141,10 +141,13 @@ def test_runner_removes_stale_task_environment_receipt_before_launch(tmp_path: P
 
 @pytest.mark.parametrize("task_environment", ["valid", "missing", "malformed", "plugin_error"])
 def test_pinned_cli_reports_whether_required_plugin_initialized(tmp_path: Path, task_environment: str) -> None:
-    binary = os.environ.get("GYM_TEST_OPENCODE_BINARY") or shutil.which("opencode")
+    configured_binary = os.environ.get("GYM_TEST_OPENCODE_BINARY")
+    binary = configured_binary or shutil.which("opencode")
     if binary is None:
         pytest.skip("Set GYM_TEST_OPENCODE_BINARY to the pinned OpenCode 1.17.11 executable")
     version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
+    if configured_binary is None and (version.returncode != 0 or version.stdout.strip() != "1.17.11"):
+        pytest.skip("PATH OpenCode is not 1.17.11; set GYM_TEST_OPENCODE_BINARY to the pinned executable")
     assert version.returncode == 0 and version.stdout.strip() == "1.17.11"
     plugin = tmp_path / "task_environment.mjs"
     shutil.copyfile(Path(sandbox_runner.__file__).with_name(plugin.name), plugin)

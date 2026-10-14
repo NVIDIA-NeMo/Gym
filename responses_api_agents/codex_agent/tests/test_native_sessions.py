@@ -1570,10 +1570,18 @@ async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_ses
 async def test_close_confirms_cleanup_before_provider_cancellation(local_session):
     state, _ = local_session
     processes_path = Path(state.session.session_dir).parent / "children.json"
+    # A completed tool leaves a service adopted before close. A direct child of
+    # the still-running CLI would instead be an in-flight tool and must be stopped.
+    service_tool = (
+        "import subprocess,sys; "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'], "
+        "start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        "print(child.pid)"
+    )
     code = (
         "import json,os,subprocess,sys,time; from pathlib import Path; "
-        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
-        f"Path({str(processes_path)!r}).write_text(json.dumps([os.getpid(),child.pid])); time.sleep(60)"
+        f"service_pid=int(subprocess.check_output([sys.executable,'-c',{service_tool!r}],text=True)); "
+        f"Path({str(processes_path)!r}).write_text(json.dumps([os.getpid(),service_pid])); time.sleep(60)"
     )
     payload = {
         "directory": state.session.session_dir,
