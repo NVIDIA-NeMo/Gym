@@ -118,6 +118,12 @@ unreachable objects are pruned. If pruning takes longer than
 single commit of the current tree. The option is off by default. Grading runs in
 a fresh sandbox and is unaffected.
 
+Sanitization requires a standalone repository with its own Git directory and
+object store. Linked worktrees, repositories with sibling worktrees, external or
+symlinked Git directories, and alternate object stores are rejected before
+cleanup. Git access failures, unsuccessful fallback initialization, or objects
+retained after pruning stop setup as a sandbox error; the agent does not run.
+
 ## Reward
 
 SWE-bench and SWE-bench Multilingual use the official `make_test_spec` and

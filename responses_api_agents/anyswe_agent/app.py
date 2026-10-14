@@ -496,27 +496,46 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         ``git fsck --unreachable`` can reach a future commit. If gc exceeds the budget, the history is replaced by
         one commit of the current tree instead. The working tree is untouched either way.
         """
-        return (
-            "set -u\n"
-            f"cd {shlex.quote(repo_path)} || exit 0\n"
-            "[ -d .git ] || exit 0\n"
-            "before=$(git rev-list --count --all 2>/dev/null || echo 0)\n"
-            "cur=$(git symbolic-ref -q --short HEAD || true)\n"
-            'if [ -z "$cur" ]; then git checkout -q -B anyswe_base >/dev/null 2>&1; cur=anyswe_base; fi\n'
-            "git remote 2>/dev/null | xargs -r -n1 git remote remove 2>/dev/null\n"
-            'git for-each-ref --format="%(refname)" | grep -v -x "refs/heads/$cur" '
-            "| xargs -r -n1 git update-ref -d 2>/dev/null\n"
-            "rm -rf .git/logs .git/refs/remotes .git/refs/tags 2>/dev/null\n"
-            "git reflog expire --expire=now --all 2>/dev/null\n"
-            "rm -f .git/FETCH_HEAD .git/ORIG_HEAD 2>/dev/null\n"
-            f'gc="git gc --prune=now --quiet"; command -v timeout >/dev/null 2>&1 && gc="timeout {int(timeout_s)} $gc"\n'
-            "if ! $gc 2>/dev/null; then\n"
-            '  echo ">>>>> git gc failed or exceeded the budget; replacing history with a single commit"\n'
-            "  rm -rf .git && git init -q && git add -A >/dev/null 2>&1 && "
-            "git -c user.email=anyswe@localhost -c user.name=anyswe commit -q -m base --allow-empty >/dev/null 2>&1\n"
-            "fi\n"
-            'echo ">>>>> git history sanitized: $before -> $(git rev-list --count --all 2>/dev/null) commits reachable"\n'
-        )
+        return f"""set -eu
+g() {{ git "$@"; }}
+cd {shlex.quote(repo_path)} || exit 0
+[ -e .git ] || [ -L .git ] || exit 0
+# A task must own its Git metadata and object store; never modify a sibling worktree.
+if [ ! -d .git ] || [ -L .git ] || [ -e .git/commondir ] || [ -d .git/worktrees ] ||
+   [ -L .git/objects ] || [ -s .git/objects/info/alternates ] || [ -s .git/objects/info/http-alternates ] ||
+   [ -n "${{GIT_ALTERNATE_OBJECT_DIRECTORIES:-}}" ] || [ -n "${{GIT_OBJECT_DIRECTORY:-}}" ]; then
+  echo 'unsupported shared Git repository; refusing to sanitize' >&2; exit 1
+fi
+repo=$(pwd -P)
+[ "$(g rev-parse --absolute-git-dir)" = "$repo/.git" ] || {{ echo 'external Git directory' >&2; exit 1; }}
+[ "$(cd "$(g rev-parse --git-common-dir)" && pwd -P)" = "$repo/.git" ] || {{ echo 'shared Git directory' >&2; exit 1; }}
+g rev-parse --verify HEAD >/dev/null
+before=$(g rev-list --count --all)
+cur=$(g symbolic-ref -q HEAD || true)
+if [ -z "$cur" ]; then g checkout -q -B anyswe_base; cur=refs/heads/anyswe_base; fi
+remotes=$(g remote)
+for remote in $remotes; do g remote remove "$remote"; done
+refs=$(g for-each-ref --format='%(refname)')
+printf '%s\n' "$refs" | while IFS= read -r ref; do
+  if [ -n "$ref" ] && [ "$ref" != "$cur" ]; then g update-ref --no-deref -d "$ref"; fi
+done
+g reflog expire --expire=now --all
+rm -f .git/FETCH_HEAD .git/ORIG_HEAD
+gc='git gc --prune=now --quiet'
+command -v timeout >/dev/null 2>&1 && gc="timeout {int(timeout_s)} $gc"
+if ! $gc; then
+  echo '>>>>> git gc failed or exceeded the budget; replacing history with a single commit'
+  rm -rf .git
+  g init -q
+  g add -A
+  g -c user.email=anyswe@localhost -c user.name=anyswe -c commit.gpgsign=false commit -q -m base --allow-empty
+fi
+g rev-parse --verify HEAD >/dev/null
+# Successful gc can still retain unreachable objects (for example in a kept/promisor pack).
+remaining=$(g fsck --full --no-reflogs --unreachable)
+if [ -n "$remaining" ]; then echo "$remaining" >&2; exit 1; fi
+echo ">>>>> git history sanitized: $before -> $(g rev-list --count --all) commits reachable"
+"""
 
     @staticmethod
     def _instance_dict(params: AnySweInstanceConfig) -> Dict[str, Any]:
