@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -488,6 +489,54 @@ def test_startup_failure_reports_the_codex_stderr_tail(setup, started):
     else:
         assert detail.endswith("required MCP servers failed to initialize: gdpval_resources_server")
         assert len(detail) < 2200, "the stderr tail is bounded"
+
+
+def test_startup_failure_stderr_hides_the_grant_tokens(setup):
+    agent, sandbox = setup
+    sandbox.result["return_code"] = 1
+    sandbox.events = json.dumps([0.0, {"type": "thread.started", "thread_id": "t"}])
+    publish = sandbox.publish
+
+    def publish_with_stderr():
+        publish()
+        sandbox.files[f"{sandbox.directory}/stderr.log"] = (
+            "MCP error body: X-NeMo-Gym-Session-Token: token-gdpval_resources_server\n"
+            "Error: required MCP servers failed to initialize: gdpval_resources_server"
+        )
+
+    sandbox.publish = publish_with_stderr
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [mcp_grant()]
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=body).status_code == 200
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+    assert result.status_code == 502
+    detail = result.json()["detail"]
+    assert "token-gdpval_resources_server" not in detail
+    assert "X-NeMo-Gym-Session-Token: [redacted]" in detail
+
+
+def test_unreadable_startup_stderr_does_not_hold_the_activation(setup):
+    agent, sandbox = setup
+    sandbox.result["return_code"] = 1
+    sandbox.events = json.dumps([0.0, {"type": "thread.started", "thread_id": "t"}])
+    download = sandbox.download
+
+    async def hanging_stderr_download(source, destination):
+        if source.endswith("/stderr.log"):
+            await asyncio.sleep(10)  # Longer than the 1 s bound, but finite so a regression fails instead of hanging.
+        await download(source, destination)
+
+    sandbox.download = hanging_stderr_download
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        started = time.monotonic()
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        elapsed = time.monotonic() - started
+    assert result.status_code == 502
+    assert result.json()["detail"] == "Codex execution failed: Codex exited with code 1"
+    # The read is bounded by session_close_timeout_seconds (1 s in this fixture).
+    assert elapsed < 5
 
 
 def test_startup_failure_without_stderr_keeps_the_exit_error(setup):
