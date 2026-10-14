@@ -271,13 +271,11 @@ failure reason); `capture_failed` (`write` or `build` on the model server; `buil
 `retire_skipped` (`stale_snapshot`); and `lock_acquired` (`shared` or `exclusive`). Reasons come
 from a fixed set, and a reason a custom implementation invents is counted as `other`. An operation slower than 5 seconds also logs one warning per operation per minute.
 
-A process records these metrics only after Gym's telemetry is set up in it, with
-`nemo_gym.telemetry.setup.init_telemetry`, and only while it has a metrics exporter; a traces-only
-process records nothing. Gym's servers do this at startup. An inference worker that a training
-framework starts must do it too: with Gym telemetry enabled in the worker's environment, call
-`init_telemetry` once. When the framework has already set up nemo-lens in that process, Gym reuses
-its providers, so the worker's capture metrics go wherever the framework exports. Without that call
-the worker records no token-capture metrics.
+A process records these metrics whenever it has an OpenTelemetry metrics provider, whoever set it
+up. Gym's servers set one up at startup. A training framework's inference worker, which runs Gym's
+staging capture code, records through the provider the framework set up there, such as the one
+NeMo RL's worker telemetry installs with nemo-lens, without calling anything in Gym. A process
+without a metrics provider, including one that exports traces only, records nothing.
 
 ### What `gym.verify.success_rate` Measures
 
