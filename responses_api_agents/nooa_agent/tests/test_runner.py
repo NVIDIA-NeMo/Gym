@@ -30,6 +30,7 @@ from responses_api_agents.nooa_agent.runner import (
     NOOARunFailure,
     NOOARunRequest,
 )
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
 
 
@@ -279,7 +280,7 @@ async def test_real_strategy_budget_failure_keeps_completed_calls() -> None:
             model_url_path="/v1/responses",
         )
     )
-    assert result.termination_reason == "policy_budget_exceeded"
+    assert result.termination_reason is NOOATerminationReason.POLICY_BUDGET_EXCEEDED
     assert len(calls) == len(result.trajectory.turns) == 2
     assert any(invocation.status == "failed" for invocation in result.trajectory.invocations)
 

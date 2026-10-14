@@ -23,7 +23,6 @@ from uuid import uuid4
 
 import aiohttp
 from fastapi import Body, Request, Response
-from openai.types.responses.response_error import ResponseError
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -36,16 +35,18 @@ from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
-from responses_api_agents.nooa_agent.observability import ensure_verifier_final_message, finalize_observation_gaps
+from responses_api_agents.nooa_agent.observability import finalize_observation_gaps
+from responses_api_agents.nooa_agent.result import finalize_run_result, set_response_lifecycle
 from responses_api_agents.nooa_agent.runner import (
     EmbeddedNOOARunner,
     NOOARunFailure,
     NOOARunRequest,
     NOOARunResult,
 )
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 
 
 NOOA_TERMINATION_REASON_KEY = "nooa_termination_reason"
@@ -172,38 +173,10 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         )
         super().model_post_init(context)
 
-    @staticmethod
-    def _set_response_lifecycle(response: NeMoGymResponse, reason: str | None, error: str | None) -> NeMoGymResponse:
-        if reason is None:
-            return response.model_copy(update={"status": "completed", "error": None})
-        status = (
-            "incomplete" if reason in {"timeout", "cancelled", "agent_run_timeout", "timeout_exceeded"} else "failed"
-        )
-        return response.model_copy(
-            update={
-                "status": status,
-                "error": ResponseError(
-                    # Responses error codes are a closed OpenAI enum. Keep the
-                    # NOOA-specific reason in the message and rollout metadata.
-                    code="server_error",
-                    message=error or f"NOOA execution terminated with {reason}.",
-                ),
-            }
-        )
+    _set_response_lifecycle = staticmethod(set_response_lifecycle)
 
     def _finalize_run_result(self, run_result: NOOARunResult) -> tuple[NeMoGymResponse, AgentObservationBundle]:
-        verify_response, verify_gaps = ensure_verifier_final_message(
-            run_result.episode.response, run_result.return_value
-        )
-        observations = finalize_observation_gaps(
-            run_result.episode.observations,
-            extra_gaps=verify_gaps,
-            termination_reason=run_result.termination_reason,
-            termination_error=run_result.termination_error,
-        )
-        return self._set_response_lifecycle(
-            verify_response, run_result.termination_reason, run_result.termination_error
-        ), observations
+        return finalize_run_result(run_result)
 
     async def responses(
         self,
@@ -244,7 +217,9 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 run_result.model_cookies, run_result.resource_cookies
             ).items():
                 response.set_cookie(name, value)
-        return run_result.episode.response
+        return self._set_response_lifecycle(
+            run_result.episode.response, run_result.termination_reason, run_result.termination_error
+        )
 
     async def run(
         self,
@@ -264,6 +239,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 record,
                 f"NOOA episode exceeded run_timeout_secs={self.config.run_timeout_secs}s",
                 failure_class="timeout_exceeded",
+                termination_reason=NOOATerminationReason.TIMEOUT_EXCEEDED,
                 terminal=True,
                 partial=error.result,
             )
@@ -355,6 +331,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         error: str,
         *,
         failure_class: str,
+        termination_reason: NOOATerminationReason = NOOATerminationReason.INFRASTRUCTURE_ERROR,
         terminal: bool = False,
         partial: NOOARunResult | None = None,
     ) -> NOOAAgentVerifyResponse:
@@ -383,14 +360,14 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         if terminal:
             routing[NG_TERMINAL_KEY] = True
         if partial is not None:
-            response = self._set_response_lifecycle(partial.episode.response, failure_class, error)
+            response = self._set_response_lifecycle(partial.episode.response, termination_reason, error)
             observations = finalize_observation_gaps(
-                partial.episode.observations, termination_reason=failure_class, termination_error=error
+                partial.episode.observations, extra_gaps=[ObservationGap(code=failure_class, detail=error)]
             )
             routing.update(_evidence(partial, observations))
             routing["_response_cookies"] = _merge_downstream_cookies(partial.model_cookies, partial.resource_cookies)
         else:
-            response = self._set_response_lifecycle(response, failure_class, error)
+            response = self._set_response_lifecycle(response, termination_reason, error)
         return NOOAAgentVerifyResponse.model_validate(
             record | {"response": response.model_dump(mode="json"), "reward": 0.0} | routing
         )
