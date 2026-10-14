@@ -3648,6 +3648,7 @@ class TestCachedDeliverableReuse:
         *,
         cached: bool,
         first_failure_stage: Optional[str] = None,
+        failed_cached_verifies: int = 0,
     ):
         self.inputs_at_dispatch: List[List[int]] = []
         dispatched: List[Dict[str, Any]] = []
@@ -3701,6 +3702,13 @@ class TestCachedDeliverableReuse:
         async def raise_for_status(response):
             if not cached:
                 raise ClientResponseError(request_info=None, history=(), status=404, message="Not Found")
+            if len(verified) <= failed_cached_verifies:
+                raise ClientResponseError(
+                    request_info=SimpleNamespace(real_url="http://gdpval_resources_server/verify"),
+                    history=(),
+                    status=500,
+                    message="judge timed out",
+                )
 
         async def get_response_json(body):
             return test._per_reference(body)
@@ -3720,7 +3728,7 @@ class TestCachedDeliverableReuse:
             drain_margin_s=None,
             dispatch_longest_first=False,
             resume_from_cache=False,
-            route_failures_to_sidecar=True,
+            route_failures_to_sidecar=False,
             check_completion=lambda **kwargs: None,
         )
         global_config = {
@@ -3776,6 +3784,24 @@ class TestCachedDeliverableReuse:
 
         assert [row["stage_index"] for row in dispatched] == dispatched_stages
         assert [call["json"]["stage_index"] for call in verified] == verified_stages
+
+    async def test_a_failed_cached_verification_is_retried_instead_of_ending_the_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dispatched, verified, persisted = await self._run_two_stages(
+            tmp_path, monkeypatch, cached=True, failed_cached_verifies=1
+        )
+
+        assert [row["stage_index"] for row in dispatched] == [0]
+        assert [call["json"]["stage_index"] for call in verified] == [1, 1]
+        assert sorted(row["stage_index"] for row in persisted) == [0, 1]
+        (failure,) = [
+            json.loads(line) for line in failures_path_for(tmp_path / "rollouts.jsonl").read_text().splitlines()
+        ]
+        assert (failure[NG_FAILURE_CLASS_KEY], failure["_ng_failure_stage"]) == (
+            ENVIRONMENT_SERVER_FAILURE_CLASS,
+            "verification",
+        )
 
     async def test_without_a_cached_deliverable_the_policy_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -98,7 +98,6 @@ from nemo_gym.rollout_collection import (
     NG_TRAJECTORY_KEY,
     DispatchLatencyTracker,
     RolloutCollectionHelper,
-    _agent_request_failure_row,
     _attach_trajectory_record,
     _environment_server_for_agent,
     _environment_servers_by_agent,
@@ -2531,10 +2530,14 @@ async def run_e2e_multistage(
             except _RUN_FAILURE_ERRORS as error:
                 if getattr(error, "status", None) == 404:
                     return row, None
-                if not route_failures_to_sidecar:
-                    raise
-                result = _agent_request_failure_row(error, getattr(error, "status", None))
-                result["reuse_cached_deliverable"] = True
+                # A failed judgement of a persisted deliverable is retryable, like a failed session /verify.
+                result = {
+                    NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
+                    NG_TERMINAL_KEY: False,
+                    "_ng_failure_stage": "verification",
+                    "_ng_failure_message": str(error) or repr(error),
+                    "reuse_cached_deliverable": True,
+                }
         environment_server = environment_server_for_row(row, server_client.global_config_dict)
         result[NG_ENVIRONMENT_SERVER_KEY] = environment_server
         result[NG_RESULT_TYPE_KEY] = next(
