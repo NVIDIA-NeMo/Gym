@@ -583,10 +583,17 @@ class TestCli:
         assert len(prepared.rows_path.read_text().splitlines()) == 1
 
     def test_resolve_agent_accepts_short_name(self):
-        selection = resolve_agent("hermes_agent")
-        assert selection.instance_name == "hermes_agent"
-        assert selection.impl_name == "hermes_agent"
-        assert selection.config_path.name == "hermes_agent.yaml"
+        selection = resolve_agent("simple")
+        assert selection.instance_name == "simple_agent"
+        assert selection.impl_name == "simple_agent"
+        assert selection.config_path.name == "simple_agent.yaml"
+        # `hermes` and `terminus_2` each match two harnesses; the caller has to pick.
+        for ambiguous in ("hermes", "terminus_2"):
+            with pytest.raises(ValueError, match="ambiguous"):
+                resolve_agent(ambiguous)
+        terminus = resolve_agent("terminus_2_sandboxed_agent")
+        assert terminus.instance_name == "terminus_2_sandboxed_agent"
+        assert terminus.impl_name == "terminus_2_sandboxed_agent"
         with pytest.raises(ValueError, match="No agent config"):
             resolve_agent("no_such_agent_xyz")
 
@@ -604,6 +611,14 @@ class TestCli:
         written = yaml.safe_load(config_path.read_text())
         assert written["environment_server_routes"] == {"ds": "harbor_ds_environment"}
         assert written["harbor_ds_agent"]["responses_api_agents"]["hermes_agent"]["enabled_toolsets"] == ["terminal"]
+        terminus = AgentSelection(tmp_path / "t.yaml", "terminus_2_sandboxed_agent", "terminus_2_sandboxed_agent")
+        _, _ = build_run(prepared, terminus, sandbox=None, overrides=[])
+        written = yaml.safe_load(config_path.read_text())
+        generated = written["harbor_ds_agent"]["responses_api_agents"]["terminus_2_sandboxed_agent"]
+        assert generated["num_workers"] == 1
+        # The shipped template leaves `resources_server.name` unset for benchmark composition; the Harbor
+        # instance declares none, so it is neither a swap source nor bound to a resources server.
+        assert "resources_server" in generated and generated["resources_server"] is None
         assert "+split=train" in tokens
         assert not any(token.startswith("+agent_name") for token in tokens)
         config_paths = next(token for token in tokens if token.startswith("+config_paths="))
@@ -635,7 +650,7 @@ class TestCli:
         return prepared
 
     def test_build_run_advertises_node_ip_for_in_sandbox_agent(self, tmp_path):
-        agent = resolve_agent("hermes")
+        agent = resolve_agent("hermes_agent")
         path, _ = build_run(self._prepared(tmp_path), agent, sandbox="opensandbox", overrides=[])
         assert yaml.safe_load(path.read_text())["use_absolute_ip"] is True
 
@@ -883,7 +898,7 @@ def test_registry_versions_keep_distinct_rows_routes_and_outputs(tmp_path, monke
     second = prepare_target("harbor:ds@2.0", output_root=tmp_path / "out")
     assert first.rows_path != second.rows_path and first.taskset != second.taskset
     assert first.rows_path.read_bytes() == first_rows
-    agent = resolve_agent("hermes")
+    agent = resolve_agent("hermes_agent")
     configs = [build_run(prepared, agent, sandbox=None, overrides=[]) for prepared in (first, second)]
     assert configs[0][0] != configs[1][0]
     for prepared, (path, tokens) in zip((first, second), configs):
@@ -905,7 +920,9 @@ def test_config_overlays_win_after_real_loading_and_inheritance(tmp_path):
     overlay.write_text(
         "hermes_agent:\n  responses_api_agents:\n    hermes_agent:\n      max_turns: 71\nharbor_environment_server:\n  environment_servers:\n    harbor:\n      default_episode_timeout_seconds: 1234\n"
     )
-    _, tokens = build_run(prepared, resolve_agent("hermes"), sandbox=None, overrides=[f"+config_paths=[{overlay}]"])
+    _, tokens = build_run(
+        prepared, resolve_agent("hermes_agent"), sandbox=None, overrides=[f"+config_paths=[{overlay}]"]
+    )
     paths_token = next(t for t in _merge_config_paths(tokens) if t.startswith("+config_paths="))
     paths = OverridesParser.create().parse_override(paths_token).value()
     parser = GlobalConfigDictParser()
@@ -933,7 +950,15 @@ def test_partial_eval_requires_explicit_opt_in_and_records_reasons(tmp_path, mon
     monkeypatch.setattr(
         sys,
         "argv",
-        ["gym", "eval", "run", str(tmp_path / "ds"), "--agent", "hermes", *(["--skip-unloadable"] if skip else [])],
+        [
+            "gym",
+            "eval",
+            "run",
+            str(tmp_path / "ds"),
+            "--agent",
+            "hermes_agent",
+            *(["--skip-unloadable"] if skip else []),
+        ],
     )
     if skip:
         main_module.main()
@@ -1079,8 +1104,19 @@ def test_harbor_task_data_schema_names_the_digest_key(tmp_path):
     assert TaskData.model_validate(row["task_input"]["task_data"]).ng_digest == task.digest
 
 
-@pytest.mark.parametrize("taskset", ["ds", "terminal-bench-2.0", "trial=1", "中文=1"])
-def test_generated_run_passes_full_config_validation(tmp_path, monkeypatch, taskset):
+@pytest.mark.parametrize(
+    ("taskset", "agent_name"),
+    [
+        ("ds", "hermes_agent"),
+        ("terminal-bench-2.0", "hermes_agent"),
+        ("trial=1", "hermes_agent"),
+        ("中文=1", "hermes_agent"),
+        # Its template leaves `resources_server.name` unset; the generated instance must still parse as
+        # bound to nothing (not as a composition source, which the full parse would reject).
+        ("ds", "terminus_2_sandboxed_agent"),
+    ],
+)
+def test_generated_run_passes_full_config_validation(tmp_path, monkeypatch, taskset, agent_name):
     import sys
 
     import nemo_gym.global_config as global_config
@@ -1094,7 +1130,7 @@ def test_generated_run_passes_full_config_validation(tmp_path, monkeypatch, task
     prepared = prepare_target(str(tmp_path / taskset), output_root=tmp_path / "out")
     _, tokens = build_run(
         prepared,
-        resolve_agent("hermes"),
+        resolve_agent(agent_name),
         sandbox="opensandbox",
         overrides=[
             f"+config_paths=[{PARENT_DIR / 'responses_api_models/openai_model/configs/openai_model.yaml'}]",
@@ -1112,6 +1148,8 @@ def test_generated_run_passes_full_config_validation(tmp_path, monkeypatch, task
     assert environment.get_inner_run_server_config().agent_server["name"] == agent_instance(taskset)
     agent = next(server for server in servers if server.name == agent_instance(taskset))
     assert agent.datasets[0].name == taskset
+    assert agent.get_inner_run_server_config().resources_server is None
+    assert agent_instance(taskset) in config and agent_name not in config
     run = E2ERolloutCollectionConfig.model_validate(config)
     assert run.environment_routing_mode == "taskset"
     assert taskset in run.environment_server_routes
@@ -1213,7 +1251,7 @@ def test_generated_agent_can_be_overridden_for_versioned_taskset(tmp_path, monke
     name = agent_instance(prepared.taskset)
     _, tokens = build_run(
         prepared,
-        resolve_agent("hermes"),
+        resolve_agent("hermes_agent"),
         sandbox=None,
         overrides=[
             f"+config_paths=[{PARENT_DIR / 'responses_api_models/openai_model/configs/openai_model.yaml'}]",
@@ -1233,10 +1271,10 @@ def test_generated_agent_can_be_overridden_for_versioned_taskset(tmp_path, monke
 @pytest.mark.parametrize(
     ("target", "flags", "message"),
     [
-        ("missing-folder", ["--agent", "hermes"], "is not a directory"),
-        ("harbor:not-present", ["--agent", "hermes"], "not in the Harbor registry"),
+        ("missing-folder", ["--agent", "hermes_agent"], "is not a directory"),
+        ("harbor:not-present", ["--agent", "hermes_agent"], "not in the Harbor registry"),
         ("harbor:hello-world", [], "needs `--agent"),
-        ("harbor:hello-world", ["--no-serve", "--agent", "hermes"], "drop --no-serve"),
+        ("harbor:hello-world", ["--no-serve", "--agent", "hermes_agent"], "drop --no-serve"),
     ],
 )
 def test_expected_harbor_cli_errors_are_concise(tmp_path, monkeypatch, capsys, target, flags, message):
@@ -1254,7 +1292,9 @@ def test_expected_harbor_cli_errors_are_concise(tmp_path, monkeypatch, capsys, t
     assert message in error and "Traceback" not in error
 
 
-@pytest.mark.parametrize("flags", [["--agent", "not-an-agent"], ["--agent", "hermes", "--sandbox", "not-a-sandbox"]])
+@pytest.mark.parametrize(
+    "flags", [["--agent", "not-an-agent"], ["--agent", "hermes_agent", "--sandbox", "not-a-sandbox"]]
+)
 def test_harbor_selectors_fail_before_any_preparation(monkeypatch, capsys, flags):
     import sys
 
@@ -1282,7 +1322,7 @@ def test_unexpected_harbor_programming_errors_remain_visible(monkeypatch):
         raise TypeError("unexpected implementation bug")
 
     monkeypatch.setattr(harbor_cli, "prepare_target", bug)
-    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "harbor:hello-world", "--agent", "hermes"])
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "harbor:hello-world", "--agent", "hermes_agent"])
     with pytest.raises(TypeError, match="unexpected implementation bug"):
         main()
 
@@ -1312,7 +1352,7 @@ def test_damaged_registry_cache_reports_recovery_at_cli(tmp_path, monkeypatch, c
     cache.parent.mkdir(parents=True)
     cache.write_bytes(payload)
     monkeypatch.setenv("NEMO_GYM_DATASETS_DIR", str(root))
-    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "harbor:ds", "--agent", "hermes"])
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "harbor:ds", "--agent", "hermes_agent"])
     with pytest.raises(SystemExit) as exc:
         main()
     assert exc.value.code == 2

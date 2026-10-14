@@ -5,9 +5,11 @@ import asyncio
 import json
 from copy import deepcopy
 from types import SimpleNamespace
+from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import TypeAdapter
 
 import nemo_gym.openai_utils as openai_utils
 from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
@@ -82,7 +84,7 @@ def execution(monkeypatch):
                 "analysis": "inspect",
                 "plan": "run commands",
                 "commands": [{"keystrokes": "pwd\n", "duration": 0.1}, {"keystrokes": "ls\n", "duration": 0.1}],
-                "task_complete": True,
+                "task_complete": mode.value != "never_complete",
             }
         )
         if mode.value == "parse_error" and index == 0:
@@ -201,7 +203,13 @@ def execution(monkeypatch):
             return SimpleNamespace(status=200, ok=True, read=AsyncMock(return_value=json.dumps(result).encode()))
 
         client.post = post
-        return json.loads((await server.run(request, body)).model_dump_json(by_alias=True))
+        try:
+            return json.loads((await server.run(request, body)).model_dump_json(by_alias=True))
+        except app_module.Terminus2InfrastructureError as error:
+            # An infrastructure failure is refused with a 5xx; its observations still ride on the exception.
+            metrics = TypeAdapter(Dict[str, Any]).dump_python(error.metrics, mode="json")
+            row = body.model_dump(by_alias=True) | {"_ng_rollout_id": rollout_id}
+            return row | metrics | {"_ng_http_status": error.status_code, "_ng_http_detail": error.detail}
 
     return SimpleNamespace(run=run, calls=calls, mode=mode, client=client, agents=agents, commands=commands)
 
@@ -230,6 +238,19 @@ def save_and_check(execution, result, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("mode", "outcome"), [("success", "completed"), ("never_complete", "step_limit")])
+async def test_last_turn_completion_is_told_apart_from_step_exhaustion(execution, mode, outcome):
+    """With max_turns=2, Harbor's confirmed completion and step exhaustion both end on the second turn."""
+    execution.mode.value = mode
+    result = await execution.run()
+    assert len(execution.calls) == 2
+    assert result["response"]["metadata"]["terminus2_outcome"] == outcome
+    assert result["terminus2_completed"] is True
+    [agent] = execution.agents
+    assert agent._completed_by_agent is (outcome == "completed")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "mode,call_count,turn_count,status",
     [
@@ -237,7 +258,7 @@ def save_and_check(execution, result, tmp_path):
         ("retry", 3, 2, "completed"),
         ("http_retry", 3, 2, "completed"),
         ("rate_limit", 3, 2, "completed"),
-        ("all_fail", 30, 0, "incomplete"),
+        ("all_fail", 30, 0, "failed"),
         ("compaction", 6, 2, "completed"),
         ("compaction_missing_id", 6, 2, "completed"),
         ("cancel_summary", 3, 1, "incomplete"),
@@ -256,6 +277,9 @@ async def test_real_harbor_decisions_survive_saved_projection(
 ):
     execution.mode.value = mode
     result = await execution.run(task_id="task-identity")
+    # Infrastructure outcomes are refused, not verified: the model never answered (502) or the run was cancelled (503).
+    expected_http_status = {"all_fail": 502, "cancel_summary": 503, "cancel_tool": 503, "cancel_model": 503}.get(mode)
+    assert result.get("_ng_http_status") == expected_http_status
     trajectory, health = save_and_check(execution, result, tmp_path)
     [invocation] = trajectory["invocations"]
     turns = trajectory["turns"]
@@ -385,6 +409,7 @@ async def test_proactive_summarization_flag_resets_on_cancellation(execution, mo
         app_module.Terminus2, "_check_proactive_summarization", AsyncMock(side_effect=asyncio.CancelledError)
     )
     result = await execution.run()
+    assert result["_ng_http_status"] == 503
     assert result["ng_agent_observations"]["records"][0]["status"] == "incomplete"
     assert not result["ng_trajectory"]["turns"]
     assert not execution.agents[0]._is_check_proactive_summarization

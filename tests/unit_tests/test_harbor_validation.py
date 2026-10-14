@@ -90,7 +90,7 @@ def test_validate_reads_effective_output_and_preserves_evaluation_artifacts(
 ):
     write_task(tmp_path / "ds" / "a")
     evaluated = prepare_target(str(tmp_path / "ds"))
-    config_path, _ = build_run(evaluated, resolve_agent("hermes"), sandbox="docker", overrides=[])
+    config_path, _ = build_run(evaluated, resolve_agent("hermes_agent"), sandbox="docker", overrides=[])
     original_config = config_path.read_bytes()
     stale = evaluated.output_dir / "rollouts.jsonl"
     write_jsonl(stale, [result()])
@@ -207,7 +207,7 @@ def test_network_default_is_below_explicit_config_and_cli(tmp_path, monkeypatch,
 
     _, tokens = build_run(
         prepared,
-        resolve_agent("hermes"),
+        resolve_agent("hermes_agent"),
         sandbox="docker",
         overrides=[
             f"+config_paths=[{PARENT_DIR / 'responses_api_models/openai_model/configs/openai_model.yaml'},{overlay}]",

@@ -5,6 +5,7 @@ import asyncio
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from nemo_gym.base_responses_api_agent import (
@@ -68,6 +69,15 @@ def test_episode_tool_access_overrides_configured_access_by_name() -> None:
     )
 
     assert agent.effective_tool_accesses(_seed_request(tool_accesses=[episode])) == [episode]
+
+
+def test_seed_with_several_workers_is_a_client_fault_not_a_server_error() -> None:
+    # Session state is process-local. A 422 makes the environment server record the seed as a terminal
+    # failure; a 500 would be retried on every episode of the run.
+    agent = _Agent.model_construct(config=MagicMock(num_workers=4), server_client=MagicMock())
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(agent.seed_agent_session(MagicMock(), _seed_request()))
+    assert excinfo.value.status_code == 422 and "num_workers=1" in excinfo.value.detail
 
 
 def test_base_agent_exposes_unimplemented_session_routes() -> None:

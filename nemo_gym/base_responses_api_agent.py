@@ -277,7 +277,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     ) -> AgentSeedSessionResponse:
         """Seed once per caller ID; identical retries reuse the same harness state."""
         if self.config.num_workers not in (None, 1):
-            raise ValueError("Agent sessions require num_workers=1")
+            # A 422: the environment server records the seed as a terminal failure instead of retrying a
+            # misconfiguration on every episode. Harnesses that serve sessions also refuse it at startup.
+            raise HTTPException(422, "Agent sessions require num_workers=1")
         current = self._agent_session_id_from_request(request)
         if current is not None and current != body.agent_session_id:
             raise HTTPException(409, "agent_session_id does not match the session cookie")
