@@ -16,6 +16,8 @@
 import asyncio
 import json
 from http.cookies import SimpleCookie
+from json import dumps as json_dumps
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -23,14 +25,16 @@ from unittest.mock import AsyncMock, MagicMock
 import aiohttp
 import pytest
 from fastapi import Response
-from nooa import Agent, PredictStrategy, strategy
-from nooa.config import PredictConfig
+from nooa import Agent, CodeActStrategy, PredictStrategy, strategy
+from nooa.config import CodeActConfig, PredictConfig
+from nooa.errors import GenerationError
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
@@ -47,12 +51,14 @@ from responses_api_agents.nooa_agent.app import (
     _merge_downstream_cookies,
 )
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig, NOOAInvocationConfig
+from responses_api_agents.nooa_agent.gym_llm import OutputTokenLimitExceeded
 from responses_api_agents.nooa_agent.runner import (
     EmbeddedNOOARunner,
     NOOARunFailure,
     NOOARunResult,
 )
-from responses_api_agents.nooa_agent.tests.test_gym_llm import model_response
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+from responses_api_agents.nooa_agent.tests.test_gym_llm import model_response, output_limit_response
 from responses_api_agents.nooa_agent.tests.test_runner import FailingAgent, WaitingAgent, policy_runner
 
 
@@ -323,6 +329,10 @@ async def test_real_structured_output_retries_are_counted_with_partial_evidence(
     assert result.reward == 0.75
     assert NG_FAILURE_CLASS_KEY not in result.model_extra
     assert result.model_extra.get(NOOA_TERMINATION_REASON_KEY) == termination_reason
+    if termination_reason == "policy_budget_exceeded":
+        assert result.response.status == "incomplete"
+        assert result.response.error is None
+        assert result.response.incomplete_details is None
     assert len(model_calls) == expected_calls
     trajectory = result.model_extra["ng_trajectory"]
     assert len(trajectory["turns"]) == expected_calls
@@ -570,7 +580,7 @@ async def test_policy_budget_exhaustion_is_verified_and_counted() -> None:
     def budget_exhausted(run_request: object) -> NOOARunResult:
         result = runner_result(run_request)
         result.return_value = None
-        result.termination_reason = "policy_budget_exceeded"
+        result.termination_reason = NOOATerminationReason.POLICY_BUDGET_EXCEEDED
         result.termination_error = "NOOA policy call budget exhausted after 1 calls"
         return result
 
@@ -583,6 +593,10 @@ async def test_policy_budget_exhaustion_is_verified_and_counted() -> None:
     assert result.model_extra[NOOA_TERMINATION_REASON_KEY] == "policy_budget_exceeded"
     assert "exhausted after 1 calls" in result.model_extra[NOOA_TERMINATION_ERROR_KEY]
     assert result.ng_agent_observations.gaps[0].code == "policy_budget_exceeded"
+    verified_response = client.post.await_args.kwargs["json"]["response"]
+    assert verified_response["status"] == "incomplete"
+    assert verified_response["error"] is None
+    assert verified_response["incomplete_details"] is None
     assert [call.kwargs["url_path"] for call in client.post.await_args_list] == ["/seed_session", "/verify"]
 
 
@@ -593,7 +607,7 @@ async def test_invalid_policy_output_is_verified_and_counted() -> None:
     def invalid_output(run_request: object) -> NOOARunResult:
         result = runner_result(run_request)
         result.return_value = None
-        result.termination_reason = "invalid_policy_output"
+        result.termination_reason = NOOATerminationReason.INVALID_POLICY_OUTPUT
         result.termination_error = "Gym model returned invalid Answer JSON"
         return result
 
@@ -729,7 +743,11 @@ async def test_verifier_failure_preserves_completed_episode(failure: object) -> 
     )
     assert len(result.model_extra["ng_trajectory"]["turns"]) == 1
     assert result.response.output
+    assert result.response.status == "failed"
     assert result.ng_agent_observations.records
+    assert result.ng_agent_observations.gaps[-1].code == result.model_extra[NG_FAILURE_CLASS_KEY]
+    assert result.ng_agent_observations.gaps[-1].detail == result.model_extra["error"]
+    assert NOOA_TERMINATION_REASON_KEY not in result.model_extra
 
 
 @pytest.mark.asyncio
@@ -762,6 +780,10 @@ async def test_episode_timeout_preserves_completed_call() -> None:
 
     assert result.model_extra[NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
     assert result.model_extra[NG_TERMINAL_KEY] is True
+    assert result.response.status == "incomplete"
+    assert result.ng_agent_observations.gaps[-1].code == "timeout_exceeded"
+    assert result.ng_agent_observations.gaps[-1].detail == result.model_extra["error"]
+    assert NOOA_TERMINATION_REASON_KEY not in result.model_extra
     assert len(result.model_extra["ng_trajectory"]["turns"]) == 1
     assert result.response.output
     assert client.post.await_count == 1
@@ -772,3 +794,329 @@ async def test_verifier_reply_does_not_drop_input_row_fields() -> None:
     agent, _ = make_agent()
     result = await agent.run(request(), Response(), body(agent_inputs={"customer": "alice"}))
     assert result.agent_inputs == {"customer": "alice"}
+
+
+class IterationLimitedAgent(Agent):
+    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=1, max_retries=1)))
+    async def analyze(self, text: str) -> str:
+        """Work on the task using execute_python."""
+        ...
+
+    @strategy(CodeActStrategy(config=CodeActConfig(max_retries=1)))
+    async def followup(self) -> str:
+        """Ask the model for more information."""
+        ...
+
+
+class TextOnlyLimitedAgent(Agent):
+    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=1, max_consecutive_text_only=1)))
+    async def analyze(self, text: str) -> str:
+        """Work on the task using execute_python."""
+        ...
+
+
+def make_iteration_limited_agent(
+    *, scenario: str = "iterations", max_policy_calls: int | None = None
+) -> tuple[NOOAAgent, list[dict[str, object]], list[object]]:
+    client = server_client()
+    verified: list[dict[str, object]] = []
+    model_calls: list[object] = []
+
+    async def post(*, server_name: str, url_path: str, json: object, **_: object) -> FakeHTTPResponse:
+        if server_name == "resources":
+            if url_path == "/seed_session":
+                return FakeHTTPResponse({})
+            assert url_path == "/verify"
+            assert isinstance(json, dict)
+            verified.append(json)
+            return FakeHTTPResponse(json | {"reward": 0.75})
+        assert server_name == "policy"
+        model_calls.append(json)
+        if len(model_calls) > 1:
+            raise ConnectionError("unrecovered model outage")
+        code = "print('partial progress')"
+        if scenario == "retries":
+            code = ""
+        elif scenario == "model_outage":
+            code = "try:\n    await self.followup()\nexcept Exception:\n    pass\nprint('partial progress')"
+        output = [
+            {"type": "reasoning", "id": "reasoning-1", "summary": [{"type": "summary_text", "text": "plan so far"}]},
+            NeMoGymResponseOutputMessageForTraining(
+                id="message-1",
+                prompt_token_ids=[1],
+                generation_token_ids=[2],
+                generation_log_probs=[-0.1],
+                content=[NeMoGymResponseOutputText(annotations=[], text="working on the task", logprobs=[])],
+            ),
+        ]
+        if scenario != "text_only":
+            output.append(
+                NeMoGymResponseFunctionToolCall(
+                    id="function-1", call_id="call-1", name="execute_python", arguments=json_dumps({"code": code})
+                )
+            )
+        return FakeHTTPResponse(model_response(*output))
+
+    object.__setattr__(client, "post", AsyncMock(side_effect=post))
+    agent_class = TextOnlyLimitedAgent if scenario == "text_only" else IterationLimitedAgent
+    agent = NOOAAgent(config=config(), server_client=client)
+    agent.runner = EmbeddedNOOARunner(
+        invocation=NOOAInvocationConfig(
+            agent_class=f"{__name__}:{agent_class.__name__}", invocation_adapter=f"{__name__}:invoke_text"
+        ),
+        server_client=client,
+        model_server_name="policy",
+        resources_server_name="resources",
+        max_policy_calls=max_policy_calls,
+    )
+    return agent, verified, model_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["run", "responses"])
+async def test_real_codeact_iteration_limit_preserves_evidence_and_verifier_reward(endpoint: str) -> None:
+    agent, verified, model_calls = make_iteration_limited_agent()
+    if endpoint == "run":
+        result = await agent.run(request(), Response(), body())
+        assert result.reward == 0.75
+        assert NG_FAILURE_CLASS_KEY not in result.model_extra
+        assert result.model_extra[NOOA_TERMINATION_REASON_KEY] is NOOATerminationReason.MAX_ITERATIONS_EXCEEDED
+        assert json.loads(result.model_dump_json())[NOOA_TERMINATION_REASON_KEY] == "max_iterations_exceeded"
+        assert len(verified) == 1
+        assert verified[0]["response"] == result.response.model_dump(mode="json")
+        assert any(gap.code == "max_iterations_exceeded" for gap in result.ng_agent_observations.gaps)
+        trajectory = result.model_extra["ng_trajectory"]
+        assert len(trajectory["turns"]) == 1
+        assert any(tool["tool_call_id"] == "call-1" for tool in trajectory["tool_calls"])
+        response = result.response
+    else:
+        response = await agent.responses(request(), Response(), body().responses_create_params)
+        assert verified == []
+    assert len(model_calls) == 1
+    assert response.status == "incomplete"
+    assert response.error is None
+    assert response.incomplete_details is None
+    assert any(item.type == "reasoning" for item in response.output)
+    assert any(item.type == "message" and item.content[0].text == "working on the task" for item in response.output)
+    assert any(item.type == "function_call" and item.call_id == "call-1" for item in response.output)
+    assert any(
+        item.type == "function_call_output" and item.call_id == "call-1" and "partial progress" in item.output
+        for item in response.output
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["retries", "text_only", "model_outage"])
+async def test_other_failures_at_iteration_limit_do_not_reach_verifier(scenario: str) -> None:
+    agent, verified, model_calls = make_iteration_limited_agent(scenario=scenario)
+
+    result = await agent.run(request(), Response(), body())
+
+    assert verified == []
+    assert result.reward == 0.0
+    assert NG_FAILURE_CLASS_KEY in result.model_extra
+    assert NOOA_TERMINATION_REASON_KEY not in result.model_extra
+    assert len(model_calls) == (2 if scenario == "model_outage" else 1)
+    assert result.response.output
+
+
+@pytest.mark.asyncio
+async def test_matching_generation_error_text_is_not_iteration_exhaustion() -> None:
+    agent, verified, _ = make_iteration_limited_agent()
+
+    async def invoke_error(agent: object, request: object) -> object:
+        raise GenerationError("Generation failed after 1 iterations (max_iterations=1). Unable to complete `analyze`.")
+
+    agent.runner._invocation_adapter = invoke_error
+    result = await agent.run(request(), Response(), body())
+
+    assert verified == []
+    assert NG_FAILURE_CLASS_KEY in result.model_extra
+    assert NOOA_TERMINATION_REASON_KEY not in result.model_extra
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_iteration_exhaustion_is_not_graded() -> None:
+    agent, verified, _ = make_iteration_limited_agent()
+
+    async def cancel_after_limit(agent: Any, request: NeMoGymResponseCreateParamsNonStreaming) -> object:
+        try:
+            await invoke_text(agent, request)
+        except GenerationError:
+            raise asyncio.CancelledError
+
+    agent.runner._invocation_adapter = cancel_after_limit
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await agent.run(request(), Response(), body())
+    assert verified == []
+    assert caught.value.nooa_result.termination_reason is None
+    assert caught.value.nooa_result.episode.response.output
+
+
+class RetryingCodeActAgent(Agent):
+    @strategy(CodeActStrategy(config=CodeActConfig(max_retries=2)))
+    async def analyze(self, text: str) -> str:
+        """Work on the task using execute_python."""
+        ...
+
+
+def make_scripted_codeact_agent(
+    responses: list[dict[str, object] | Exception], *, agent_class: type[Agent] = IterationLimitedAgent
+) -> tuple[NOOAAgent, list[dict[str, object]], list[object]]:
+    client = server_client()
+    verified: list[dict[str, object]] = []
+    model_calls: list[object] = []
+
+    async def post(*, server_name: str, url_path: str, json: object, **_: object) -> FakeHTTPResponse:
+        if server_name == "resources":
+            if url_path == "/seed_session":
+                return FakeHTTPResponse({})
+            assert url_path == "/verify"
+            assert isinstance(json, dict)
+            verified.append(json)
+            return FakeHTTPResponse(json | {"reward": 0.75})
+        assert server_name == "policy"
+        model_calls.append(json)
+        payload = responses[len(model_calls) - 1]
+        if isinstance(payload, Exception):
+            raise payload
+        return FakeHTTPResponse(payload)
+
+    object.__setattr__(client, "post", AsyncMock(side_effect=post))
+    agent = NOOAAgent(config=config(), server_client=client)
+    agent.runner = EmbeddedNOOARunner(
+        invocation=NOOAInvocationConfig(
+            agent_class=f"{__name__}:{agent_class.__name__}", invocation_adapter=f"{__name__}:invoke_text"
+        ),
+        server_client=client,
+        model_server_name="policy",
+        resources_server_name="resources",
+        max_policy_calls=None,
+    )
+    return agent, verified, model_calls
+
+
+def partial_codeact_response(sentinel: Path, tool_form: str) -> dict:
+    outputs = [
+        {
+            "type": "reasoning",
+            "id": "partial-reasoning",
+            "summary": [{"type": "summary_text", "text": "partial plan"}],
+        },
+        NeMoGymResponseOutputMessageForTraining(
+            id="partial-message",
+            content=[NeMoGymResponseOutputText(annotations=[], text="partial text", logprobs=[])],
+            prompt_token_ids=[1, 2],
+            generation_token_ids=[3],
+            generation_log_probs=[-0.2],
+        ),
+    ]
+    if tool_form != "text":
+        arguments = json.dumps({"code": f"from pathlib import Path; Path({str(sentinel)!r}).touch()"})
+        if tool_form == "partial_tool":
+            arguments = arguments[:-2]
+        outputs.append(
+            NeMoGymResponseFunctionToolCall(
+                id="partial-function", call_id="partial-call", name="execute_python", arguments=arguments
+            )
+        )
+    return output_limit_response(*outputs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["run", "responses"])
+@pytest.mark.parametrize("tool_form", ["text", "valid_tool", "partial_tool"])
+async def test_real_codeact_output_limit_preserves_partial_evidence_without_execution(
+    tmp_path: Path, endpoint: str, tool_form: str
+) -> None:
+    sentinel = tmp_path / "must-not-execute"
+    payload = partial_codeact_response(sentinel, tool_form)
+    agent, verified, model_calls = make_scripted_codeact_agent([payload])
+    if endpoint == "run":
+        result = await agent.run(request(), Response(), body())
+        assert result.reward == 0.75
+        assert NG_FAILURE_CLASS_KEY not in result.model_extra
+        assert result.model_extra[NOOA_TERMINATION_REASON_KEY] is NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED
+        assert len(verified) == 1
+        response = result.response
+        assert verified[0]["response"] == response.model_dump(mode="json")
+        trajectory = result.model_extra["ng_trajectory"]
+        assert len(trajectory["turns"]) == 1
+        assert trajectory["turns"][0]["model_calls"][0]["response_id"] == "partial-response"
+        assert not any(tool["tool_call_id"] == "partial-call" for tool in trajectory["tool_calls"])
+    else:
+        response = await agent.responses(request(), Response(), body().responses_create_params)
+        assert verified == []
+    assert len(model_calls) == 1
+    assert response.status == "incomplete"
+    assert response.error is None
+    assert response.incomplete_details.reason == "max_output_tokens"
+    assert response.usage.model_dump(mode="json") == payload["usage"]
+    retained = {getattr(item, "id", None): item.model_dump(mode="json") for item in response.output}
+    for item in payload["output"]:
+        assert retained[item["id"]] == item
+    assert not any(item.type == "function_call_output" and item.call_id == "partial-call" for item in response.output)
+    assert not sentinel.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_outcome", ["success", "outage"])
+async def test_real_codeact_retry_after_output_limit_preserves_recovery_or_infrastructure_failure(
+    tmp_path: Path, final_outcome: str
+) -> None:
+    sentinel = tmp_path / "must-not-execute"
+    partial = partial_codeact_response(sentinel, "valid_tool")
+    final = (
+        model_response(
+            NeMoGymResponseFunctionToolCall(
+                id="final-function", call_id="final-call", name="return_result", arguments='{"result":"done"}'
+            ),
+            response_id="final-response",
+        )
+        if final_outcome == "success"
+        else ConnectionError("unrecovered model outage")
+    )
+    agent, verified, model_calls = make_scripted_codeact_agent([partial, final], agent_class=RetryingCodeActAgent)
+
+    result = await agent.run(request(), Response(), body())
+
+    assert len(model_calls) == 2
+    assert not sentinel.exists()
+    assert any(item.type == "function_call" and item.call_id == "partial-call" for item in result.response.output)
+    assert not any(
+        item.type == "function_call_output" and item.call_id == "partial-call" for item in result.response.output
+    )
+    assert NOOA_TERMINATION_REASON_KEY not in result.model_extra
+    if final_outcome == "success":
+        assert len(verified) == 1
+        assert result.reward == 0.75
+        assert NG_FAILURE_CLASS_KEY not in result.model_extra
+        assert result.response.status == "completed"
+        assert result.response.error is None
+        assert result.response.incomplete_details is None
+        assert result.response.output[-1].content[0].text == "done"
+    else:
+        assert verified == []
+        assert result.model_extra[NG_FAILURE_CLASS_KEY] == "transient"
+        assert result.response.status == "failed"
+        assert result.response.error is not None
+
+
+@pytest.mark.asyncio
+async def test_unrelated_generation_error_after_output_limit_remains_failure(tmp_path: Path) -> None:
+    agent, verified, _ = make_scripted_codeact_agent([partial_codeact_response(tmp_path / "unused", "text")])
+
+    async def invoke_error(agent: Any, request: NeMoGymResponseCreateParamsNonStreaming) -> object:
+        try:
+            await agent.llm.acall([{"role": "user", "content": "task"}])
+        except OutputTokenLimitExceeded:
+            pass
+        raise GenerationError("unrelated generation failure")
+
+    agent.runner._invocation_adapter = invoke_error
+    result = await agent.run(request(), Response(), body())
+
+    assert verified == []
+    assert NG_FAILURE_CLASS_KEY in result.model_extra
+    assert NOOA_TERMINATION_REASON_KEY not in result.model_extra
+    assert result.response.status == "failed"
