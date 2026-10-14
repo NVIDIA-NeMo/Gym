@@ -696,6 +696,21 @@ class TestEvalProfileFlags:
             main()
 
 
+class TestDatasetValidateFlags:
+    @pytest.mark.parametrize("name", ["current(1).jsonl", "current,failed.jsonl", "plain.jsonl"])
+    def test_output_reaches_the_validation_run_quoted(self, monkeypatch: MonkeyPatch, name: str) -> None:
+        # The file name is not a Hydra expression: unquoted, `(` is a parse error and `,` is ambiguous.
+        import json
+
+        from nemo_gym.tasks.harbor import cli as harbor_cli
+
+        captured: list = []
+        monkeypatch.setattr(harbor_cli, "validate_target", lambda args, overrides: captured.append(overrides))
+        monkeypatch.setattr(sys, "argv", ["gym", "dataset", "validate", "tasks", "--output", name])
+        main()
+        assert captured == [[f"+output_jsonl_fpath={json.dumps(name)}"]]
+
+
 class TestEvalReverifyFlags:
     @pytest.mark.parametrize(
         "flag_argv, expected_override",

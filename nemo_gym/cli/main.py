@@ -917,6 +917,8 @@ COMMANDS = {
             SEARCH_DIR,
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent tasks."),
             _value_flag("limit", "limit", "Maximum number of tasks to validate."),
+            # Quoted: a file name with parentheses or commas is not a Hydra expression.
+            _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",), quote=True),
         ),
     ),
     "dataset collate": Command(
