@@ -106,7 +106,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     health_report = directory / "health" / "quality_summary.json"
     records = list(json_rows(bundle)) if bundle.exists() else []
     record = records[0][1] if len(records) == 1 else None
-    scope = EvidenceScope(tools=scenario.tool_steps > 0, verifier=not scenario.terminal_error, steps=scenario.steps)
+    scope = EvidenceScope(tools=scenario.tool_steps > 0, steps=scenario.steps)
     artifact = inspect_record(record, scope=scope)
     checks = artifact["checks"] + inspect_behavior(
         witness,

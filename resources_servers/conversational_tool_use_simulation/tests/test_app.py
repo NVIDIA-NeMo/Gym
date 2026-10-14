@@ -30,6 +30,7 @@ from resources_servers.conversational_tool_use_simulation.app import (
     ConversationalToolUseSimulationServer,
     ConversationalToolUseVerifyRequest,
     ConversationMessage,
+    Evaluation,
     MessageType,
     RecordAgentMessageRequest,
     RecordAgentOutputsRequest,
@@ -37,6 +38,7 @@ from resources_servers.conversational_tool_use_simulation.app import (
     SimulatedToolCallRequest,
     Source,
     TrajectoryEvaluationType,
+    UserAgentEnvironmentEvaluation,
     VerificationFailureLabel,
     VerificationResult,
     VerificationType,
@@ -672,7 +674,7 @@ async def test_agent_step_limit_records_tool_calls_without_tool_simulation(monke
     assert state.failure_labels == [VerificationFailureLabel.TRAJECTORY_FAILURE]
     assert state.terminal_error == "The maximum number of agent steps of 50 has been reached"
     verified = await server.verify(request, make_verify_request())
-    assert verified.instance_config == {"mask_sample": False}
+    assert verified.mask_sample is False
 
 
 async def test_agent_step_limit_after_text_and_user_reply_preserves_messages() -> None:
@@ -742,7 +744,7 @@ async def test_tool_argument_enum_is_validated_by_jsonschema() -> None:
     assert verified.reward == 0.0
     assert verified.trajectory_invalid_reasons == ["invalid_agent_tool_call"]
     assert verified.failure_labels == [VerificationFailureLabel.AGENT_FAILURE]
-    assert verified.instance_config == {"mask_sample": False}
+    assert verified.mask_sample is False
     assert verified.result.trajectory.messages[-1].tool_name == "update_subscription"
 
 
@@ -778,7 +780,7 @@ async def test_user_generation_error_records_invalid_reason(monkeypatch) -> None
     assert verified.reward == 0.0
     assert verified.trajectory_invalid_reasons == ["message_generation_error"]
     assert verified.failure_labels == [VerificationFailureLabel.USER_FAILURE]
-    assert verified.instance_config == {"mask_sample": True}
+    assert verified.mask_sample is True
 
 
 async def test_tool_generation_error_records_invalid_reason(monkeypatch) -> None:
@@ -827,7 +829,7 @@ async def test_tool_generation_error_records_invalid_reason(monkeypatch) -> None
     verified = await server.verify(request, make_verify_request())
     assert verified.trajectory_invalid_reasons == ["message_generation_error"]
     assert verified.failure_labels == [VerificationFailureLabel.TOOL_FAILURE]
-    assert verified.instance_config == {"mask_sample": True}
+    assert verified.mask_sample is True
 
 
 async def test_none_tool_schemas_skip_validation(monkeypatch) -> None:
@@ -1023,7 +1025,7 @@ async def test_transfer_ground_truth_mismatch_zeroes_reward_and_skips_judge(
 
     assert verified.reward == 0.0
     assert verified.failure_labels == [VerificationFailureLabel.AGENT_FAILURE]
-    assert verified.instance_config == {"mask_sample": False}
+    assert verified.mask_sample is False
     assert verified.transfer_ground_truth_enforced is True
     assert verified.transfer_ground_truth_mismatch is True
     assert verified.judge_skipped_for_transfer_mismatch is True
@@ -1127,7 +1129,7 @@ async def test_llm_judge_labels_tool_response_failure_and_short_circuits(monkeyp
     assert verified.trajectory_invalid_reasons == ["no_reward_environment_message"]
     assert verified.failure_labels == [VerificationFailureLabel.TOOL_FAILURE]
     assert verified.num_tool_failures == 1
-    assert verified.instance_config == {"mask_sample": True}
+    assert verified.mask_sample is True
     agent_verification = verified.result.trajectory.agent_verification_result
     assert agent_verification is not None
     assert agent_verification.trajectory_invalid_reasons == ["no_reward_environment_message"]
@@ -1173,7 +1175,7 @@ async def test_combined_verification_type_uses_single_judge_shape(monkeypatch) -
     assert verified.reward == 0.0
     assert verified.trajectory_invalid_reasons == []
     assert verified.failure_labels == [VerificationFailureLabel.AGENT_FAILURE]
-    assert verified.instance_config == {"mask_sample": False}
+    assert verified.mask_sample is False
     assert verified.judge_diagnostics["verification_type"] == "complete_trajectory_combined_evaluation"
     assert verified.judge_diagnostics["conversation_verification_result"]["reward"] == 0
     trajectory_result = verified.result.trajectory
@@ -1252,6 +1254,80 @@ async def test_malformed_judge_output_uses_only_semantic_attempts(monkeypatch) -
     assert result.reward == 1
     assert call_model.await_count == 2
     sleep.assert_not_awaited()
+
+
+COMBINED_EVALUATION = {
+    "customer_success": True,
+    "customer_explanation": "ok",
+    "representative_success": True,
+    "representative_explanation": "ok",
+    "tool_results_success": True,
+    "tool_results_explanation": "ok",
+}
+
+
+async def _run_judge(server, state, combined: bool):
+    if combined:
+        return await server._generate_user_agent_environment_evaluation(state, "Evaluate this trajectory.")
+    return await server._generate_judge_evaluation(Source.USER, "Evaluate this message.", state)
+
+
+@pytest.mark.parametrize(("combined", "output_model"), [(False, Evaluation), (True, UserAgentEnvironmentEvaluation)])
+async def test_judge_requests_structured_output_for_its_evaluation_schema(monkeypatch, combined, output_model) -> None:
+    # A schema only in the prompt lets judges reply `{"properties": {...}}` or with unquoted strings.
+    server = make_server(enable_llm_judge=True)
+    request = RequestStub()
+    await server.seed_session(
+        request,
+        ConversationalToolUseSeedSessionRequest(
+            domain_name="subscription support",
+            profile="general",
+            policy="policy",
+            customer_scenario={"reason_for_contact": "I need help."},
+        ),
+    )
+    state = server.session_id_to_state["session_1"]
+    reply = COMBINED_EVALUATION if combined else {"success": True, "explanation": "ok"}
+    call_model = AsyncMock(return_value=make_judge_response(json.dumps(reply)))
+    monkeypatch.setattr(server, "_call_model", call_model)
+
+    await _run_judge(server, state, combined)
+
+    params = call_model.await_args.kwargs["params"]
+    assert params.model_dump(exclude_unset=True)["text"] == {
+        "format": {
+            "type": "json_schema",
+            "name": output_model.__name__,
+            "schema": output_model.model_json_schema(),
+        }
+    }
+    assert server.config.judge_responses_create_params.text is None
+
+
+@pytest.mark.parametrize("combined", [False, True])
+async def test_judge_keeps_a_configured_text_format(monkeypatch, combined) -> None:
+    server = make_server(enable_llm_judge=True)
+    server.config.judge_responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[], text={"format": {"type": "json_object"}}
+    )
+    request = RequestStub()
+    await server.seed_session(
+        request,
+        ConversationalToolUseSeedSessionRequest(
+            domain_name="subscription support",
+            profile="general",
+            policy="policy",
+            customer_scenario={"reason_for_contact": "I need help."},
+        ),
+    )
+    state = server.session_id_to_state["session_1"]
+    reply = COMBINED_EVALUATION if combined else {"success": True, "explanation": "ok"}
+    call_model = AsyncMock(return_value=make_judge_response(json.dumps(reply)))
+    monkeypatch.setattr(server, "_call_model", call_model)
+
+    await _run_judge(server, state, combined)
+
+    assert call_model.await_args.kwargs["params"].text == {"format": {"type": "json_object"}}
 
 
 async def test_combined_judge_uses_provider_retry_path(monkeypatch) -> None:
@@ -1391,7 +1467,8 @@ async def test_judge_exception_is_synchronized_into_internal_sidecar(monkeypatch
     assert verified.reward == 0.0
     assert verified.trajectory_invalid_reasons == ["verification_generation_error"]
     assert verified.failure_labels == [VerificationFailureLabel.VERIFICATION_GENERATION_ERROR]
-    assert verified.instance_config == {"mask_sample": True}
+    assert verified.mask_sample is True
+    assert "instance_config" not in verified.model_dump()
     assert verified.judge_generation_error == "RuntimeError: judge provider unavailable"
     agent_verification = verified.result.trajectory.agent_verification_result
     assert agent_verification is not None
