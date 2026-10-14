@@ -37,6 +37,12 @@ are an authoring error (a terminal `stage: verification` failure) because Gym re
 
 ## Supported task behavior
 
+Supported today: single-step tasks with a prebuilt `docker_image` or a base-image-only Dockerfile
+(`FROM` plus `WORKDIR`/`ENV`/`USER`/`LABEL`); shared verifier mode, and separate verifier mode when
+`[verifier.environment]` names a prebuilt image (the agent's `/logs/artifacts` and `artifacts` entries are
+copied into the verifier sandbox first). Dockerfile builds, Compose environments, multi-step tasks and
+in-sandbox MCP tools come in later milestones.
+
 | Setting or feature | Behavior in this layer |
 | --- | --- |
 | Image | Prebuilt `environment.docker_image`, or a base-image-only Dockerfile (`FROM`, literal absolute `WORKDIR`, `ENV`, `LABEL`). Dockerfile builds are deferred. |
