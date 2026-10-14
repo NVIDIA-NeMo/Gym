@@ -29,6 +29,7 @@ from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import validate_failure_kind
 from nemo_gym.judge import judge_failsafe
+from nemo_gym.model_endpoint import ModelEndpoint
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -93,6 +94,8 @@ class BaseRunRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    # Agent credentials are not part of verifier requests or persisted results.
+    model_endpoint: Optional[ModelEndpoint] = Field(default=None, exclude=True, repr=False)
     capture_rollout_id: Optional[str] = Field(
         default=None,
         alias="_ng_rollout_id",

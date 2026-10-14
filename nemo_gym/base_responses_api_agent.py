@@ -34,6 +34,11 @@ from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
+from nemo_gym.model_endpoint import (
+    ModelEndpointMiddleware,
+    current_model_endpoint,
+    model_endpoint_context,
+)
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -123,6 +128,11 @@ class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
 class BaseResponsesAPIAgent(BaseServer):
     config: BaseResponsesAPIAgentConfig
 
+    def model_environment(self, body: BaseRunRequest) -> dict[str, str]:
+        """Credentials for one external harness; never mutate process-wide env."""
+        endpoint = body.model_endpoint or current_model_endpoint()
+        return endpoint.environment() if endpoint is not None else {}
+
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
@@ -137,6 +147,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         app = FastAPI()
 
         self.setup_session_middleware(app)
+        app.add_middleware(ModelEndpointMiddleware)
 
         agent_attributes = {"nemo.gym.server.name": self.config.name}
         traced_responses = traced_endpoint(GymSpanGroup.AGENT, "gym.agent.responses", self.responses, agent_attributes)
@@ -159,7 +170,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             body = kwargs.get("body")
             if body is None:
                 body = next((arg for arg in args if isinstance(arg, BaseRunRequest)), None)
-            with rollout_context(self.rollout_id_from_run(body)):
+            endpoint = body.model_endpoint if isinstance(body, BaseRunRequest) else None
+            with (
+                rollout_context(self.rollout_id_from_run(body)),
+                model_endpoint_context(endpoint or current_model_endpoint()),
+            ):
                 return await run(*args, **kwargs)
 
         app.post("/run")(run_with_rollout_context)
