@@ -28,6 +28,7 @@ from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
 from fastapi import Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
+from nemo_gym._checkpoint.model import note_generation_backend, note_generation_request
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     Body,
@@ -255,6 +256,10 @@ def _set_reasoning(message_dict: dict[str, Any], reasoning: str, mode: Reasoning
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
+    # Where each backend takes generation cuts, aligned with `base_url`,
+    # for a backend that serves them on another root than its OpenAI API, such as Megatron inference.
+    # Unset, a backend takes them at its own root.
+    generation_cut_control_url: Optional[Union[str, List[str]]] = None
     api_key: str
     model: str
     return_token_id_information: bool
@@ -277,6 +282,21 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # ``uses_reasoning_parser``.
     preserve_reasoning_in_assistant_content: bool = False
     replace_developer_role_with_system: bool = False
+
+    drop_unrepresentable_request_fields: bool = Field(
+        default=False,
+        description=(
+            "How the Responses-to-Chat-Completions conversion treats a request field that has no "
+            "Chat Completions representation. Off, the conversion refuses the request, so the caller can "
+            "route it to a server that serves Responses natively. On, the reporting-only fields, a "
+            "non-empty `include` (every value), `reasoning.summary` and `reasoning.generate_summary`, and "
+            "a message `phase` are dropped and the request proceeds. An image part in a tool's output is "
+            "replaced with the text placeholder `[image omitted from tool output]`, so the model does not "
+            "see that image. Every other unrepresentable field, `reasoning.context` included, is still "
+            "refused. The setting has no effect when `is_responses_native` is on, because that path skips "
+            "the conversion."
+        ),
+    )
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
     sequential_reasoning_allowed: bool = True
@@ -405,11 +425,20 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
             self.base_url = [self.base_url]
+        if isinstance(self.generation_cut_control_url, str):
+            self.generation_cut_control_url = [self.generation_cut_control_url]
+        if self.generation_cut_control_url is not None and len(self.generation_cut_control_url) != len(self.base_url):
+            raise ValueError(
+                "generation_cut_control_url must list one control URL per base_url: "
+                f"{len(self.generation_cut_control_url)} control URL(s) for {len(self.base_url)} base_url(s)"
+            )
+        if self.generation_cut_control_url is not None and self.endpoint_file:
+            # The endpoint file moves the backends to base URLs no control URL is listed for.
+            raise ValueError("generation_cut_control_url cannot be used with endpoint_file")
         return super().model_post_init(context)
 
 
 class VLLMModel(SimpleResponsesAPIModel):
-    ray_enabled = False
     config: VLLMModelConfig
 
     _TOKENIZE_CHAT_FIELDS: ClassVar[tuple[str, ...]] = (
@@ -422,6 +451,7 @@ class VLLMModel(SimpleResponsesAPIModel):
     )
     _external_capture_handler: ExternalCaptureHandler | None = PrivateAttr(default=None)
     _warned_request_chat_template_kwargs_dropped: bool = PrivateAttr(default=False)
+    _generation_cut_control_urls: Dict[str, str] = PrivateAttr(default_factory=dict)
 
     def setup_exception_middleware(self, app) -> None:
         @app.middleware("http")
@@ -478,6 +508,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
         # Keyed by base_url so the record outlives a client rebind to the same address.
         self._endpoint_health: Dict[str, _EndpointHealth] = dict()
+        self._generation_cut_control_urls = dict(
+            zip(self.config.base_url, self.config.generation_cut_control_url or ())
+        )
         self._endpoint_file_mtime: Optional[float] = None
         self._endpoint_missing_since: Optional[float] = None
         self._endpoint_last_check_at: Optional[float] = None
@@ -556,7 +589,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             return await self._responses_native(request, body)
 
         # Response Create Params -> Chat Completion Create Params
-        chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
+        chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(
+            body, drop_unrepresentable_request_fields=self.config.drop_unrepresentable_request_fields
+        )
         body.model = self.config.model
 
         # Chat Completion Create Params -> Chat Completion
@@ -606,6 +641,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict = self.config.extra_body | body_dict
         self._apply_sampling_overrides(body_dict)
 
+        note_generation_request(body_dict)
         client = self._resolve_client(request)
         execution = start_model_execution(request, upstream_attempted=True)
         try:
@@ -1003,6 +1039,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict = body.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
+        note_generation_request(body_dict)
         client = self._resolve_client(request)
         # Rank-affine routing downstream: expose the Gym session (one per rollout)
         # as the backend's canonical conversation id so a disaggregated server can
@@ -1404,6 +1441,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         completion_body = self._build_completion_body_from_chat_body(body_dict, prompt)
         self._validate_single_choice_token_request(completion_body)
 
+        note_generation_request(body_dict)
         client = self._resolve_client(request)
 
         execution = start_model_execution(request, upstream_attempted=True)
@@ -1771,6 +1809,16 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "against a backend that is no longer published."
             )
 
+    def generation_cut_control_root(self, base_url: str) -> str:
+        """The generation-cut control root of the backend serving `base_url`."""
+        if not self._generation_cut_control_urls:
+            return super().generation_cut_control_root(base_url)
+        control_url = self._generation_cut_control_urls.get(base_url)
+        if control_url is None:
+            # Fails the cut, so its calls regenerate, rather than cutting at a root that may serve another backend.
+            raise ValueError(f"no generation_cut_control_url is configured for backend {base_url}")
+        return control_url.rstrip("/")
+
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
         # Route by rollout when the call carries one: agents that drop cookies get a new
@@ -1792,6 +1840,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if client is None:
             client = self._assign_client(session_id)
         self._session_id_to_client[session_id] = client
+        note_generation_backend(getattr(client, "base_url", None))
 
         return client
 

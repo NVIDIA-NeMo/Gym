@@ -23,7 +23,7 @@ import time
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict, deque
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
@@ -56,9 +56,9 @@ from nemo_gym.config_types import (
     ConfigPathNotFoundError,
     UploadRolloutsConfigMixin,
 )
-from nemo_gym.episode_types import is_materialized_task_row
+from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.failure_kinds import CANCELLED, is_namespaced, is_registered
+from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -85,6 +85,7 @@ from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, m
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
+    NG_AGENT_OBSERVATIONS_KEY,
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
@@ -200,6 +201,7 @@ NG_NO_PERSIST_KEY = "_ng_no_persist"
 # Set only by Gym, on the result it builds for a row the dispatch budget never started.
 NG_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+NG_FAILURE_JUDGE_ERROR_KEY = "_ng_failure_judge_error"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
 ENVIRONMENT_SERVER_FAILURE_CLASS = "environment_server_failed"
@@ -302,18 +304,39 @@ def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
     if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
         raise ValueError(f"Invalid episode attempt: {attempt!r}")
-    base_identity_row = dict(row)
-    base_identity_row[ATTEMPT_INDEX_KEY_NAME] = 0
-    rollout_id = maybe_rollout_id_from_run_body(base_identity_row)
-    if rollout_id is None:
-        rollout_id = f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+    # Decode the identity the way the agent does.
+    # An explicit id may carry the attempt suffix itself, as a restored attempt does.
+    capture_key = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return {
-        "episode_id": {"rollout_id": rollout_id, "attempt": attempt, "repeat": row.get(ROLLOUT_INDEX_KEY_NAME, 0)},
+        "episode_id": EpisodeId.from_capture_key(capture_key)
+        .model_copy(update={"repeat": row.get(ROLLOUT_INDEX_KEY_NAME, 0)})
+        .model_dump(mode="json"),
         "task": {
             "task_id": row["task_id"],
             "task_input": row["task_input"],
         },
     }
+
+
+def _reject_attempt_qualified_rollout_ids(rows: Iterable[Mapping[str, Any]], fpath: Path) -> None:
+    """Refuse dataset rows whose explicit rollout ID names an attempt.
+
+    The suffix ``-a<N>`` is reserved: ``"<id>-a<N>"`` always means attempt N of rollout ``<id>``,
+    which is how a training controller names a restored attempt.
+    A resume retry stamps the next attempt on a row, and an ID that already names one would then fail mid-run,
+    so the row is refused when the input loads.
+    """
+    for line_no, row in enumerate(rows, 1):
+        explicit = row.get(ROLLOUT_ID_KEY_NAME) if isinstance(row, Mapping) else None
+        if not isinstance(explicit, str):
+            continue
+        episode_id = EpisodeId.from_capture_key(explicit)
+        if episode_id.attempt:
+            raise ConfigError(
+                f"Row at line {line_no} of '{fpath}' has {ROLLOUT_ID_KEY_NAME} {explicit!r}, "
+                f"which ends with the reserved suffix '-a<N>': it names attempt {episode_id.attempt} "
+                f"of rollout {episode_id.rollout_id!r}. Give the row a rollout ID without that suffix."
+            )
 
 
 def _is_episode_response(result: Any) -> bool:
@@ -364,16 +387,30 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             record["_ng_failure_stage"] = failure["stage"]
         if failure.get("partial_response") is not None:
             record["_ng_failure_partial_response"] = failure["partial_response"]
+        if failure.get("agent_observations") is not None:
+            record[NG_AGENT_OBSERVATIONS_KEY] = failure["agent_observations"]
         return record
     result = response.get("result")
     if not isinstance(result, Mapping):
         raise ValueError(f"environment server reply for task {task_id!r} carries a non-object result: {result!r}")
+    judge_failure: Dict[str, Any] = {}
+    if result.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED:
+        # judge_failsafe's 200 verify result; stays a result so reverify can re-judge it.
+        judge_failure = {
+            NG_FAILURE_CLASS_KEY: JUDGE_FAILED,
+            NG_FAILURE_JUDGE_ERROR_KEY: result.get(NG_FAILURE_JUDGE_ERROR_KEY),
+        }
+        # drop the judge failure keys from the result so it doesn't raise in _is_collector_key
+        # we don't want to modify the check itself because we want it to raise for other values
+        # of `NG_FAILURE_CLASS_KEY` field
+        result = {key: value for key, value in result.items() if key not in judge_failure}
     reserved = sorted(key for key in result if _is_collector_key(key))
     if reserved:
         raise ValueError(
             f"environment server result for task {task_id!r} uses keys reserved for rollout collection: {reserved}"
         )
-    record = dict(result)
+    # add judge failure info to the record
+    record = dict(result) | judge_failure
     record[NG_TASK_ID_KEY] = task_id
     return record
 
@@ -428,7 +465,7 @@ def _nonnegative_int(value: Any) -> Optional[int]:
 
 
 def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
-    for key in (NG_TRAJECTORY_KEY, "ng_agent_observations"):
+    for key in (NG_TRAJECTORY_KEY, NG_AGENT_OBSERVATIONS_KEY):
         observations = result.get(key)
         gaps = observations.get("gaps") if isinstance(observations, dict) else None
         if isinstance(gaps, list) and any(isinstance(gap, dict) and gap.get("code") == code for gap in gaps):
@@ -572,7 +609,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         except Exception as exc:
             gaps.append(ObservationGap(code="producer_trajectory_invalid", detail=type(exc).__name__))
 
-    raw_observations = result.get("ng_agent_observations")
+    raw_observations = result.get(NG_AGENT_OBSERVATIONS_KEY)
     if raw_observations is not None:
         try:
             observations = AgentObservationBundle.model_validate(raw_observations)
@@ -750,7 +787,7 @@ def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> No
         )
         target = result.get("ng_model_call_capture")
         if not isinstance(target, dict):
-            target = result.get("ng_agent_observations")
+            target = result.get(NG_AGENT_OBSERVATIONS_KEY)
         gap_attached = False
         if isinstance(target, dict):
             gaps = target.setdefault("gaps", [])
@@ -1990,6 +2027,7 @@ class RolloutCollectionHelper(BaseModel):
                 (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
                 for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
             ]
+        _reject_attempt_qualified_rollout_ids([row for _, _, row in raw_rows], _input_path)
 
         # Validate and apply prompt config before per-row processing
         if prompt_cfg is not None:
@@ -2281,6 +2319,7 @@ class RolloutCollectionHelper(BaseModel):
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[bytes]]]:
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
+        _reject_attempt_qualified_rollout_ids(original_input_rows, config.materialized_jsonl_fpath)
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
@@ -2687,7 +2726,8 @@ class RolloutCollectionHelper(BaseModel):
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off). Never alters the harness output/reward already in `result`.
-                if capture_dirs and not no_result:
+                # A failed episode that returned agent evidence made model calls worth joining.
+                if capture_dirs and (not no_result or NG_AGENT_OBSERVATIONS_KEY in result):
                     merge_model_call_capture_into_record(
                         result,
                         capture_dirs,
@@ -2696,7 +2736,7 @@ class RolloutCollectionHelper(BaseModel):
 
                 if (
                     "ng_model_call_capture" in result
-                    or "ng_agent_observations" in result
+                    or NG_AGENT_OBSERVATIONS_KEY in result
                     or NG_TRAJECTORY_KEY in result
                 ):
                     _attach_trajectory_record(row, result)
@@ -3123,7 +3163,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     not in (
                         "response",
                         "responses_create_params",
-                        "ng_agent_observations",
+                        NG_AGENT_OBSERVATIONS_KEY,
                         "ng_model_call_capture",
                         NG_TRAJECTORY_KEY,
                     )
