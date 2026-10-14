@@ -136,7 +136,7 @@ def test_prepare_downloads_data_and_preserves_output_on_validation_failure(recor
         "repo_id": module.SOURCE_ID,
         "filename": "test.parquet",
         "repo_type": "dataset",
-        "revision": "29557d8eaa22621b82f3af5557ab60babcf3feb5",
+        "revision": "29557d8eaa22621b82f3af5557ab60babcf3feb5",  # pragma: allowlist secret
         "token": "test-token",
     }
     original = output.read_bytes()

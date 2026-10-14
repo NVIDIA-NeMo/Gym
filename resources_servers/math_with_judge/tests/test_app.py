@@ -89,7 +89,7 @@ def _sleeping_library_verifier_process(result_connection: Any) -> None:
         result_connection.close()
 
 
-def _extract_long_whitespace_answers(result_connection: Any) -> None:
+def _extract_adversarial_answers(result_connection: Any) -> None:
     try:
         response = "x" + " " * 64_000 + "y"
         result_connection.send(
@@ -98,6 +98,7 @@ def _extract_long_whitespace_answers(result_connection: Any) -> None:
                 _extract_unboxed_answer_candidate(prefix + " " * 64_000 + "by substitution")
                 for prefix in ("Answer", "**Answer**", "उत्तर")
             ]
+            + [_extract_unboxed_answer_candidate("Answer: not 18\n" * 64_000)]
         )
     finally:
         result_connection.close()
@@ -215,19 +216,19 @@ class TestApp:
         )
         assert _prepare_format_tolerant_response(r"\boxed{\frac{1}{2}}") == r"\boxed{\frac{1}{2}}"
 
-    def test_long_whitespace_answer_extraction_is_bounded(self) -> None:
+    def test_adversarial_answer_extraction_is_bounded(self) -> None:
         if "fork" not in mp.get_all_start_methods():
             skip("This regression test requires fork.")
         ctx = mp.get_context("fork")
         parent, child = ctx.Pipe(duplex=False)
-        process = ctx.Process(target=_extract_long_whitespace_answers, args=(child,))
+        process = ctx.Process(target=_extract_adversarial_answers, args=(child,))
         process.start()
         child.close()
         try:
             # A process deadline catches event-loop-blocking regex regressions
             # without hanging the test worker. The old cleanup takes tens of seconds.
-            assert parent.poll(3.0), "Answer extraction blocked on a long whitespace run"
-            assert parent.recv() == [None] * 6
+            assert parent.poll(3.0), "Answer extraction blocked on whitespace or repeated negated labels"
+            assert parent.recv() == [None] * 7
         finally:
             if process.is_alive():
                 process.terminate()
@@ -336,7 +337,49 @@ class TestApp:
             None,
         )
 
-    @mark.parametrize("suffix", [" cm", " (since each term is half)"])
+    @mark.parametrize(
+        ("generated", "selected", "incidental"),
+        [
+            ("Final answer: 18, since the result is divisible by 3", "18", "3"),
+            ("Answer: 19\nWe verified the answer is not 18.", "19", "18"),
+            ("Answer: 19\nIf the answer is 18, the equation would not hold.", "19", "18"),
+            ("Answer: 19\nSuppose the result is 18 for a contradiction.", "19", "18"),
+            ("Answer: 19\nCorrection: the answer is not 18.", "19", "18"),
+            ("Answer: 19\nAfter recalculating, the final answer is not 18.", "19", "18"),
+            ("Answer: 19\nThe answer is not 18.", "19", "18"),
+            ("Answer: 19\nCorrection: if the answer is 18, a contradiction follows.", "19", "18"),
+            ("Answer: 19\nCorrection: the answer is possibly 18.", "19", "18"),
+        ],
+    )
+    @mark.parametrize("use_incidental_reference", [False, True])
+    async def test_tolerant_verifier_ignores_nonanswer_statements(
+        self, config, generated, selected, incidental, use_incidental_reference
+    ):
+        client = MagicMock(spec=ServerClient)
+        server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False, "format_tolerant_answer_extraction": True}),
+            server_client=client,
+        )
+        expected = incidental if use_incidental_reference else selected
+        reward = 0.0 if use_incidental_reference else 1.0
+        assert await server._verify_answer("question", expected, generated) == (reward, selected, reward, None)
+        client.post.assert_not_called()
+
+    @mark.parametrize("unit", [r"\text{ cm}", r" \text{ cm}", r"\mathrm{cm}", r" \mathrm{cm}"])
+    @mark.parametrize(("expected", "reward"), [(r"\frac{1}{2}", 1.0), ("2", 0.0)])
+    async def test_tolerant_verifier_preserves_latex_command_arguments(self, config, unit, expected, reward):
+        server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False, "format_tolerant_answer_extraction": True}),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        assert await server._verify_answer("question", expected, r"Answer: \frac{1}{2}" + unit) == (
+            reward,
+            "1/2",
+            reward,
+            None,
+        )
+
+    @mark.parametrize("suffix", [" cm", " (since each term is half)", r"\text{ cm}", r" \text{ cm}"])
     def test_tolerant_verifier_repeated_commands_are_bounded(self, config, suffix):
         if "fork" not in mp.get_all_start_methods():
             skip("This regression test requires fork.")

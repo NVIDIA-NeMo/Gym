@@ -21,11 +21,12 @@ using the shared math agent, prompt, and symbolic verifier used by English
   formats beyond `\boxed{}`; this setting is isolated from the English verifier.
   For an unboxed response, only the selected final-answer candidate is graded;
   earlier intermediate answers cannot earn credit. Answer labels must introduce
-  an answer line, heading, or explicit answer assertion (including later
-  corrections), rather than occur incidentally in prose. A spaced unary minus
+  an answer line or heading, optionally introduced by `Correction:` or
+  `After recalculating,`. Explanatory, negated, and hypothetical mentions cannot
+  override an explicit answer. A spaced unary minus
   is preserved; list markers are stripped only before an answer label. Multiline
-  math blocks remain intact, and accompanying prose or units are parsed as text
-  instead of being boxed as part of a mathematical expression. Unboxed candidates
+  math blocks and LaTeX command arguments remain intact, including units such as
+  `\text{ cm}`. Bare prose and units stay outside added math delimiters. Unboxed candidates
   longer than 512 characters after trimming whitespace are rejected before cleanup.
 - Metric: accuracy (pass@1), with one response per problem by default. Report
   results by language; pooled accuracy averages across the selected languages.

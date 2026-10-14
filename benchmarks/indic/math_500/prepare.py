@@ -19,7 +19,7 @@ from nemo_gym.global_config import HF_TOKEN_KEY_NAME, maybe_get_global_config_di
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "math_500_benchmark.jsonl"
 SOURCE_ID = "ai4bharat/indic-math-500"
-SOURCE_REVISION = "29557d8eaa22621b82f3af5557ab60babcf3feb5"
+SOURCE_REVISION = "29557d8eaa22621b82f3af5557ab60babcf3feb5"  # pragma: allowlist secret
 EXPECTED_ROWS = 500
 LANGUAGE_NAMES = {
     "as": "Assamese",
