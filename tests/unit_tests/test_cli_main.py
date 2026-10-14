@@ -1911,3 +1911,17 @@ def test_eval_run_keeps_long_configuration_values(monkeypatch, serve):
     assert target.endswith("e2e_rollout_collection" if serve else "collect_rollouts")
     assert overrides == [override, "+limit=3"]
     assert OverridesParser.create().parse_override(overrides[0]).value() == value
+
+
+@pytest.mark.parametrize("serve", [False, True])
+@pytest.mark.parametrize("flag", ["--only-tasks", "--exclude-tasks"])
+def test_eval_run_task_selection_flags_need_a_target(monkeypatch, capsys, serve, flag):
+    """Register-only flags: without a TARGET nothing consumes them, so they are refused, not dropped."""
+    monkeypatch.setattr(cli_main, "dispatch", lambda *args: pytest.fail("a dropped selection must not dispatch"))
+    monkeypatch.setattr(
+        sys, "argv", ["gym", "eval", "run", *([] if serve else ["--no-serve"]), flag, "alpha", "+limit=3"]
+    )
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
+    assert "--only-tasks and --exclude-tasks apply to a task TARGET" in capsys.readouterr().err

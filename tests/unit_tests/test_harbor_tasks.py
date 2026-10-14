@@ -989,6 +989,63 @@ class TestCli:
         assert any("Skipping task bad" in r.getMessage() for r in caplog.records)
         assert len(prepared.rows_path.read_text().splitlines()) == 1
 
+    def test_prepare_skips_excluded_and_compose_tasks(self, tmp_path, capsys):
+        folder = tmp_path / "ds"
+        for name in ("keep", "gpu-task", "grouped"):
+            write_task(folder / name)
+        (folder / "grouped" / "environment" / "docker-compose.yaml").write_text("services: {}\n")
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", exclude=["gpu-*"])
+        assert [task.task_id for task in prepared.tasks] == ["keep"]
+        out = capsys.readouterr().out
+        assert "Skipping gpu-task: excluded by --exclude-tasks 'gpu-*'" in out
+        assert "Skipping grouped: Compose environments are not supported yet" in out
+        assert len((prepared.rows_path).read_text().splitlines()) == 1
+        with pytest.raises(ValueError, match="No runnable task"):
+            prepare_target(str(folder), output_root=tmp_path / "out2", exclude=["*"])
+        only = prepare_target(str(folder), output_root=tmp_path / "out3", only=["gpu-*"])
+        assert [task.task_id for task in only.tasks] == ["gpu-task"]
+        assert "Skipping keep: not in --only-tasks" in capsys.readouterr().out
+
+    def test_prepare_scopes_rows_to_the_agent(self, tmp_path):
+        """Two agents prepared with different selections on one taskset keep their own rows and configs."""
+        folder = tmp_path / "ds"
+        write_task(folder / "alpha")
+        write_task(folder / "beta")
+        hermes = AgentSelection(tmp_path / "agent.yaml", "hermes_agent", "hermes_agent")
+        terminus = AgentSelection(tmp_path / "t.yaml", "terminus_2_sandboxed_agent", "terminus_2_sandboxed_agent")
+
+        first = prepare_target(
+            str(folder), output_root=tmp_path / "out", only=["alpha"], rows_name="tasks_hermes_agent.jsonl"
+        )
+        hermes_config, _ = build_run(first, hermes, sandbox=None, overrides=[])
+        second = prepare_target(
+            str(folder),
+            output_root=tmp_path / "out",
+            only=["beta"],
+            rows_name="tasks_terminus_2_sandboxed_agent.jsonl",
+        )
+        terminus_config, _ = build_run(second, terminus, sandbox=None, overrides=[])
+
+        def referenced_rows(config_path: Path) -> list[str]:
+            paths: list[str] = []
+
+            def walk(node):
+                if isinstance(node, dict):
+                    for key, value in node.items():
+                        paths.append(value) if key == "jsonl_fpath" else walk(value)
+                elif isinstance(node, list):
+                    for item in node:
+                        walk(item)
+
+            walk(yaml.safe_load(config_path.read_text()))
+            (path,) = paths
+            return [json.loads(line)["task_id"]["task_id"] for line in Path(path).read_text().splitlines()]
+
+        assert first.rows_path != second.rows_path and first.output_dir == second.output_dir
+        # Each config still references the rows of its own selection after the other agent was prepared.
+        assert referenced_rows(hermes_config) == ["alpha"]
+        assert referenced_rows(terminus_config) == ["beta"]
+
     def test_resolve_agent_accepts_short_name(self):
         selection = resolve_agent("simple")
         assert selection.instance_name == "simple_agent"
@@ -1019,13 +1076,16 @@ class TestCli:
         assert written["environment_server_routes"] == {"ds": "harbor_ds_environment"}
         assert written["harbor_ds_agent"]["responses_api_agents"]["hermes_agent"]["enabled_toolsets"] == ["terminal"]
         terminus = AgentSelection(tmp_path / "t.yaml", "terminus_2_sandboxed_agent", "terminus_2_sandboxed_agent")
-        _, _ = build_run(prepared, terminus, sandbox=None, overrides=[])
-        written = yaml.safe_load(config_path.read_text())
+        terminus_path, _ = build_run(prepared, terminus, sandbox=None, overrides=[])
+        # Each agent gets its own file, so the hermes config above is untouched.
+        assert terminus_path != config_path and terminus_path.name == "run_config_terminus_2_sandboxed_agent.yaml"
+        written = yaml.safe_load(terminus_path.read_text())
         generated = written["harbor_ds_agent"]["responses_api_agents"]["terminus_2_sandboxed_agent"]
         assert generated["num_workers"] == 1
         # The shipped template leaves `resources_server.name` unset for benchmark composition; the Harbor
         # instance declares none, so it is neither a swap source nor bound to a resources server.
         assert "resources_server" in generated and generated["resources_server"] is None
+        assert "hermes_agent" in yaml.safe_load(config_path.read_text())["harbor_ds_agent"]["responses_api_agents"]
         assert "+split=train" in tokens
         assert not any(token.startswith("+agent_name") for token in tokens)
         config_paths = next(token for token in tokens if token.startswith("+config_paths="))
@@ -1852,3 +1912,91 @@ def test_interrupted_registry_cache_write_preserves_previous_file(tmp_path, monk
     assert attempted
     assert cache.read_bytes() == previous if existing else not cache.exists()
     assert not list(tmp_path.glob(".registry-*"))
+
+
+def test_eval_run_resume_refuses_a_changed_selection_or_digest(tmp_path, monkeypatch, capsys):
+    """`--resume` resumes the collector's cached inputs, so a narrower selection or an edited task is refused first."""
+    import sys
+
+    import nemo_gym.cli.main as main_module
+    from nemo_gym import global_config
+    from nemo_gym.path_utils import materialized_path_for
+
+    monkeypatch.chdir(tmp_path)
+    folder = tmp_path / "ds"
+    write_task(folder / "alpha")
+    beta = write_task(folder / "beta")
+    dispatched = []
+    monkeypatch.setattr(main_module, "dispatch", lambda target, overrides: dispatched.append(overrides))
+
+    def invoke(*flags):
+        monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+        # What any real run passes: the agent config interpolates the model name and the parser checks it at load.
+        argv = ["gym", "eval", "run", str(folder), "--agent", "hermes_agent", "--sandbox", "docker"]
+        argv += ["--model-type", "vllm_model", "+policy_model_name=test-model", "+policy_base_url=http://localhost:1"]
+        argv += ["+policy_api_key=none", *flags]
+        monkeypatch.setattr(sys, "argv", argv)
+        main_module.main()
+
+    # No cache yet: the run goes ahead. The collector would then save its inputs next to the rollouts.
+    invoke("--resume")
+    assert len(dispatched) == 1 and "+resume_from_cache=true" in dispatched[-1]
+    rows = tmp_path / "results" / "harbor" / "ds" / "tasks_hermes_agent.jsonl"
+    rollouts = tmp_path / "results" / "harbor" / "ds" / "rollouts.jsonl"
+    shutil.copyfile(rows, materialized_path_for(rollouts))
+
+    invoke("--resume")  # the same selection resumes
+    assert len(dispatched) == 2
+    with pytest.raises(SystemExit) as exc:
+        invoke("--resume", "--exclude-tasks", "beta")
+    assert exc.value.code == 2 and len(dispatched) == 2
+    err = capsys.readouterr().err
+    cached = materialized_path_for(Path("results") / "harbor" / "ds" / "rollouts.jsonl")  # as configured: relative
+    assert f"Cannot resume from {cached}" in err and "no longer selected: beta" in err
+    assert "+resume_from_cache=false" in err and "+output_jsonl_fpath" in err
+    # Without --resume the narrower selection is simply a fresh run.
+    invoke("--exclude-tasks", "beta")
+    assert len(dispatched) == 3 and not any("resume_from_cache" in token for token in dispatched[-1])
+    # An edited task has another digest than the cached row.
+    (beta / "instruction.md").write_text("A different task now.\n")
+    with pytest.raises(SystemExit):
+        invoke("--resume")
+    assert "changed digest: beta" in capsys.readouterr().err
+    # Another output file is another cache, found through the same config the collector reads.
+    invoke("--resume", f"+output_jsonl_fpath={tmp_path / 'elsewhere' / 'rollouts.jsonl'}")
+    assert len(dispatched) == 4
+
+
+def test_eval_run_resume_reports_a_config_error_cleanly(tmp_path, monkeypatch, capsys):
+    """The resume check parses the run config before dispatch: a config error is the same one-line message
+    the dispatched collector prints, not a traceback."""
+    import sys
+
+    import nemo_gym.cli.main as main_module
+    from nemo_gym import global_config
+    from nemo_gym.path_utils import materialized_path_for
+
+    monkeypatch.chdir(tmp_path)
+    folder = tmp_path / "ds"
+    write_task(folder / "alpha")
+    dispatched = []
+    monkeypatch.setattr(main_module, "dispatch", lambda target, overrides: dispatched.append(overrides))
+    model = ["+policy_model_name=test-model", "+policy_base_url=http://localhost:1", "+policy_api_key=none"]
+
+    def invoke(*flags):
+        monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+        argv = ["gym", "eval", "run", str(folder), "--agent", "hermes_agent", "--sandbox", "docker"]
+        monkeypatch.setattr(sys, "argv", argv + ["--model-type", "vllm_model", *flags])
+        main_module.main()
+
+    invoke("--resume", *model)
+    assert len(dispatched) == 1
+    rows = tmp_path / "results" / "harbor" / "ds" / "tasks_hermes_agent.jsonl"
+    shutil.copyfile(rows, materialized_path_for(tmp_path / "results" / "harbor" / "ds" / "rollouts.jsonl"))
+
+    # The shell lost its model overrides: the agent config's `policy_model_name` interpolation cannot resolve.
+    with pytest.raises(SystemExit) as exc:
+        invoke("--resume")
+    assert exc.value.code == 1 and len(dispatched) == 1
+    out = capsys.readouterr().out
+    assert "Error:" in out and "policy_model_name" in out and "Provide it via a CLI override" in out
