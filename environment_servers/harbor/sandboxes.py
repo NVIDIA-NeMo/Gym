@@ -33,6 +33,7 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.tasks.harbor import HarborTask
+from nemo_gym.tasks.harbor.image_configs import load_compose_document
 from nemo_gym.tasks.harbor.models import HarborEnvironment
 
 
@@ -221,13 +222,9 @@ class HarborSandboxMixin:
 
     def _compose_document(self, task: HarborTask) -> dict[str, Any]:
         """The published overlay resolved against recorded image metadata, ready for the Compose adapter."""
-        compose_file = next(
-            task.path / "environment" / name
-            for name in ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
-            if (task.path / "environment" / name).is_file()
-        )
         image_configs = self._compose_image_configs(task)
-        document = resolve_compose(yaml.safe_load(compose_file.read_text()), task.image, image_configs)
+        # The same reader prepare used: env_file inlined and ${VAR} resolved from the task, not the process.
+        document = resolve_compose(load_compose_document(task), task.image, image_configs)
         adapt_non_root_sidecars(document, image_configs)
         provider = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         if "opensandbox" in provider:
