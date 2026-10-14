@@ -1637,22 +1637,8 @@ class TestServerUtils:
     async def test_exception_middleware_logs_upstream_error_without_debug(
         self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
     ) -> None:
-        callbacks = []
-        app = MagicMock()
-
-        def register_middleware(middleware_type):
-            assert middleware_type == "http"
-
-            def register(callback):
-                callbacks.append(callback)
-                return callback
-
-            return register
-
-        app.middleware.side_effect = register_middleware
         server = MagicMock()
         server.get_session_middleware_key.return_value = "TestSimpleServer___my_server"
-        SimpleServer.setup_exception_middleware(server, app)
 
         request_info = RequestInfo(
             url=URL("http://policy.test/v1/responses"),
@@ -1663,13 +1649,23 @@ class TestServerUtils:
         error = ClientResponseError(request_info=request_info, history=(), status=500, message="policy failed")
         error.response_content = b"ValueError: actionable inner failure"
 
-        async def fail(_request):
+        async def fail(_scope, _receive, _send):
             raise error
 
-        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
-        response = await callbacks[0](MagicMock(), fail)
+        sent = []
 
-        assert response.status_code == 500
+        async def send(message):
+            sent.append(message)
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+        await nemo_gym.server_utils.ExceptionHandlingMiddleware(fail, server=server)(
+            {"type": "http", "method": "POST", "path": "/v1/responses", "headers": []}, receive, send
+        )
+
+        assert sent[0]["type"] == "http.response.start" and sent[0]["status"] == 500
         captured = capsys.readouterr().out
         assert "[upstream_request_failed]" in captured
         assert "ValueError: actionable inner failure" in captured

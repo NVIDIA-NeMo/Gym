@@ -1251,7 +1251,8 @@ def test_unknown_request_without_response_start_fails_closed(tmp_path):
     app.mount("/silent", silent_app)
     client = TestClient(app)
 
-    with pytest.raises(RuntimeError, match="No response returned"):
+    # The app never starts a response. Uvicorn answers such a request with a 500; the test client reports it this way.
+    with pytest.raises(AssertionError, match="did not receive any response"):
         client.get("/ng-rollout/silent-roll0/training-token-capture/silent/")
 
     assert TokenCaptureStore(tmp_path).freeze_now("silent-roll0").incomplete is True
