@@ -1621,7 +1621,7 @@ contested: second_inner
         hydra_main_mock.return_value = hydra_main_wrapper
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
-        expected_ip = "abcd ip"
+        expected_ip = "192.0.2.20"
         gethostbyname_mock = MagicMock(return_value=expected_ip)
         monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", gethostbyname_mock)
 
@@ -3496,3 +3496,38 @@ class TestRolloutRunLabels:
 
         assert labels == {"judge": "judge", "judge_twin": "judge_twin", "grader": "grader"}
         assert label_runs(dict(reversed(list(agent_by_key.items())))) == labels
+
+
+def _absolute_ip_parse_config(settings: dict) -> GlobalConfigDictParserConfig:
+    return GlobalConfigDictParserConfig(
+        initial_global_config_dict=OmegaConf.create({"use_absolute_ip": True, **settings}),
+        skip_load_from_cli=True,
+        skip_load_from_dotenv=True,
+    )
+
+
+def test_explicit_default_host_skips_hostname_resolution(monkeypatch):
+    from socket import gaierror
+
+    # An explicit address wins even on a machine whose short hostname has no DNS entry.
+    resolver = MagicMock(side_effect=gaierror("hostname does not resolve"))
+    monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", resolver)
+    config = GlobalConfigDictParser().parse(_absolute_ip_parse_config({"default_host": "192.0.2.20"}))
+    assert config.head_server.host == "192.0.2.20"
+    resolver.assert_not_called()
+
+
+@mark.parametrize("resolved", [None, "127.0.1.1", "0.0.0.0"])
+def test_absolute_ip_reports_unusable_hostname(monkeypatch, resolved):
+    from socket import gaierror
+
+    from nemo_gym.config_types import ConfigError
+
+    resolver = (
+        MagicMock(side_effect=gaierror("hostname does not resolve"))
+        if resolved is None
+        else MagicMock(return_value=resolved)
+    )
+    monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", resolver)
+    with raises(ConfigError, match="default_host=.*reachable from the sandbox"):
+        GlobalConfigDictParser().parse(_absolute_ip_parse_config({}))

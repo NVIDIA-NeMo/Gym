@@ -312,7 +312,9 @@ wandb_api_key: your-wandb-key
 
 - **Default:** `false` — servers use `127.0.0.1` (localhost).
 - **When to use:** Set to `true` for multi-node setups (e.g. multi-node Ray clusters) where servers must communicate across machines.
-- **Effect:** Resolves and uses the host's IP address (`gethostbyname(gethostname())`) instead of localhost.
+- **Effect:** When `default_host` is unset, resolves and uses the host's IP address (`gethostbyname(gethostname())`) instead of localhost. If lookup fails or returns a loopback or unspecified address, configuration fails with guidance to set a reachable address.
+- **Explicit address:** `default_host` takes precedence over automatic lookup, whether `use_absolute_ip` is `true` or `false`. For example, `+default_host=192.0.2.20` selects that address without consulting hostname lookup. A server's own `host` setting still takes precedence over this shared default.
+- **Harbor runs:** `gym eval run <target> --agent <agent>` enables `use_absolute_ip` by default for harnesses that call the model from inside the sandbox. An explicit config file or command-line setting can override that default. Oracle validation and host-side harnesses do not enable it.
 
 **`sidecar`** — Optional block that starts a local HTTP/2 PING proxy so requests to NVCF endpoints survive the 340 second idle limit.
 
