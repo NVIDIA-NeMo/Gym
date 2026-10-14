@@ -13,8 +13,10 @@ import pytest
 
 from nemo_gym.tasks.harbor import discover_tasks
 from nemo_gym.tasks.harbor.materialize import write_rows
+from tests.unit_tests.test_harbor_tasks import fake_registry  # noqa: F401 (fixture)
 
 
+@pytest.mark.usefixtures("fake_registry")
 class TestDatasetInit:
     """The scaffold is read back by the loader, so `gym dataset init` cannot drift from what runs."""
 

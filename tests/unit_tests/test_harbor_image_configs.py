@@ -12,7 +12,12 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.tasks.harbor import registry as registry_module
-from nemo_gym.tasks.harbor.image_configs import compose_image_references, record_compose_images
+from nemo_gym.tasks.harbor.image_configs import (
+    compose_image_references,
+    dockerfile_base_images,
+    record_base_images,
+    record_compose_images,
+)
 from nemo_gym.tasks.harbor.registry import ImageConfigError, RegistryClient, parse_image_ref
 from nemo_gym.tasks.harbor.task import discover_tasks
 
@@ -21,15 +26,25 @@ MAIN_IMAGE = "harborframework/terminal-bench:ctr-environment-abc@sha256:" + "a" 
 SIDECAR_IMAGE = "harborframework/terminal-bench:ctr-sidecar-api-def@sha256:" + "b" * 64
 
 
-def write_task(root: Path, name: str, *, image: str = MAIN_IMAGE, compose: str | None = None) -> Path:
+def write_task(
+    root: Path,
+    name: str,
+    *,
+    image: str | None = MAIN_IMAGE,
+    compose: str | None = None,
+    dockerfile: str | None = None,
+) -> Path:
     task = root / name
     (task / "environment").mkdir(parents=True)
     (task / "tests").mkdir()
-    (task / "task.toml").write_text(f'schema_version = "1.4"\n\n[environment]\ndocker_image = "{image}"\n')
+    declared = f'docker_image = "{image}"\n' if image else ""
+    (task / "task.toml").write_text(f'schema_version = "1.4"\n\n[environment]\n{declared}')
     (task / "instruction.md").write_text("Do the thing.\n")
     (task / "tests" / "test.sh").write_text("#!/bin/bash\necho 1 > /logs/verifier/reward.txt\n")
     if compose is not None:
         (task / "environment" / "docker-compose.yaml").write_text(compose)
+    if dockerfile is not None:
+        (task / "environment" / "Dockerfile").write_text(dockerfile)
     return task
 
 
@@ -158,7 +173,10 @@ class FakeRegistry:
             )
             raise urllib.error.HTTPError(url, 401, "Unauthorized", {"WWW-Authenticate": challenge}, io.BytesIO(b""))
         if kind == "manifests":
-            manifest = self.tags.get(ref) or self.manifests.get(ref)
+            # A registry serves an index by its own digest as it serves it by tag: that is the pinned reference.
+            manifest = (
+                self.tags.get(ref) or self.manifests.get(ref) or self.tags.get(ref.removeprefix("sha256:index-of-"))
+            )
             if manifest is None:
                 raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b""))
             digest = ref if ref.startswith("sha256:") else "sha256:index-of-" + ref
@@ -244,20 +262,41 @@ class TestRegistryRedirects:
 
 
 class TestRegistryClient:
-    def test_records_the_linux_amd64_manifest_behind_a_floating_tag(self, registry):
+    def test_records_the_linux_amd64_configuration_pinned_to_the_index_behind_a_floating_tag(self, registry):
         entry = RegistryClient().image_config("redis:7-alpine")
         assert entry == {
             "architecture": "amd64",
-            "config": {"Cmd": ["python", "server.py"], "ExposedPorts": {"5000/tcp": {}}, "WorkingDir": "/app"},
+            "config": {
+                "Cmd": ["python", "server.py"],
+                "Env": ["A=1"],
+                "ExposedPorts": {"5000/tcp": {}},
+                "WorkingDir": "/app",
+            },
             "config_digest": "sha256:cfg-amd64",
-            "image": "library/redis@sha256:m-amd64",
+            # The pin is the index the tag named, not the amd64 manifest the configuration was read from.
+            "image": "library/redis@sha256:index-of-7-alpine",
             "os": "linux",
+            "record_version": 2,
         }
 
     def test_a_digest_reference_is_pinned_to_itself(self, registry):
         entry = RegistryClient().image_config("ghcr.io/org/app@sha256:m-amd64")
         assert entry["image"] == "ghcr.io/org/app@sha256:m-amd64"
         assert registry.requests[-1][0] == "https://ghcr.io/v2/org/app/blobs/sha256:cfg-amd64"
+
+    def test_the_pinned_reference_names_the_whole_index_and_resolves_to_the_same_pin(self, registry):
+        """What a task starts is ``repo@<index digest>``: the registry serves the index for it (every platform's
+        manifest is still selectable from it) and reading it back lands on the same pin and configuration."""
+        pinned = RegistryClient().image_config("redis:7-alpine")["image"]
+        del registry.requests[:]
+        again = RegistryClient().image_config(pinned)
+        assert again["image"] == pinned and again["config_digest"] == "sha256:cfg-amd64"
+        manifests = [url.rpartition("/manifests/")[2] for url, _ in registry.requests if "/manifests/" in url]
+        # (the first request is repeated with the token the registry's challenge asked for)
+        assert list(dict.fromkeys(manifests)) == ["sha256:index-of-7-alpine", "sha256:m-amd64"]
+        assert RegistryClient().image_config("redis@sha256:m-amd64")["image"] == "library/redis@sha256:m-amd64", (
+            "a single-platform reference has no index to pin to: its one manifest is the pin"
+        )
 
     def test_the_token_is_fetched_once_per_repository(self, registry):
         client = RegistryClient()
@@ -333,6 +372,7 @@ class FakeClient:
             "config_digest": "sha256:c",
             "image": reference,
             "os": "linux",
+            "record_version": 2,
         }
 
 
@@ -355,6 +395,7 @@ class TestRecordComposeImages:
                 "config_digest": "sha256:old",
                 "image": "library/redis@sha256:old",
                 "os": "linux",
+                "record_version": 2,
             }
         }
         (tmp_path / "compose-images.json").write_text(json.dumps(pinned))
@@ -375,4 +416,126 @@ class TestRecordComposeImages:
     def test_nothing_is_written_without_compose_tasks(self, tmp_path):
         write_task(tmp_path, "plain")
         assert record_compose_images(discover_tasks(tmp_path), tmp_path, client=FakeClient()) is None
+        assert not (tmp_path / "compose-images.json").exists()
+
+
+class TestDockerfileBaseImages:
+    def test_lists_the_base_image_of_every_dockerfile_the_loader_resolves(self, tmp_path):
+        write_task(tmp_path, "pull", image=None, dockerfile="FROM ubuntu:24.04\nWORKDIR /app\n")
+        write_task(tmp_path, "overlay", image=None, dockerfile="FROM ubuntu:24.04\nRUN true\n")
+        write_task(tmp_path, "settings-next-to-image", dockerfile="FROM python:3.12\nENV A=1\n")
+        # A prebuilt image is the build's result: its overlay Dockerfile is not resolved, so no base image.
+        write_task(tmp_path, "prebuilt", dockerfile="FROM python:3.12-slim\nRUN true\n")
+        # Dockerfiles that need a build and tasks that do not parse are the loader's to report.
+        write_task(tmp_path, "needs-build", image=None, dockerfile="FROM ubuntu\nCOPY . /app\n")
+        write_task(tmp_path, "plain")
+        broken = write_task(tmp_path, "broken", image=None, dockerfile="FROM alpine\n")
+        (broken / "task.toml").write_text("not = [toml")
+        assert dockerfile_base_images(tmp_path) == {
+            "ubuntu:24.04": ["overlay", "pull"],
+            "python:3.12": ["settings-next-to-image"],
+        }
+
+    def test_a_single_task_folder_is_scanned_as_one_task(self, tmp_path):
+        task = write_task(tmp_path, "one", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n")
+        assert dockerfile_base_images(task) == {"redis:7-alpine": ["one"]}
+
+    def test_a_dataset_toml_docker_image_override_makes_the_dockerfile_prebuilt(self, tmp_path):
+        (tmp_path / "dataset.toml").write_text(
+            '[gym.tasks."t".environment]\ndocker_image = "ghcr.io/org/t:prebuilt"\n'
+            '[gym.tasks."pull".environment]\ndocker_image = "ghcr.io/org/pull:img"\n'
+        )
+        # The override declares a prebuilt image, so the Dockerfile's RUN lines are already applied and the
+        # loader never resolves its FROM: no base image to record, whether the scan starts at the dataset
+        # or at the task folder (whose dataset.toml sits beside it).
+        write_task(tmp_path, "t", image=None, dockerfile="FROM localbuild/base:dev\nRUN make\n")
+        # A pull-mode Dockerfile next to an overridden image still contributes its ENV, so its base is recorded.
+        write_task(tmp_path, "pull", image=None, dockerfile="FROM redis:7\nENV A=1\n")
+        assert dockerfile_base_images(tmp_path) == {"redis:7": ["pull"]}
+        assert dockerfile_base_images(tmp_path / "t") == {}
+
+    def test_select_limits_the_scan_to_the_chosen_tasks(self, tmp_path):
+        write_task(tmp_path, "a", image=None, dockerfile="FROM ubuntu:24.04\nRUN true\n")
+        write_task(tmp_path, "z", image=None, dockerfile="FROM internal.registry/base:dev\nRUN true\n")
+        assert dockerfile_base_images(tmp_path, select=lambda task_id: task_id == "a") == {"ubuntu:24.04": ["a"]}
+
+    def test_a_broken_dataset_toml_records_nothing(self, tmp_path):
+        # Every task fails to load with the dataset.toml error, which the loader reports; no image is fetched for it.
+        write_task(tmp_path, "a", image=None, dockerfile="FROM ubuntu:24.04\nRUN true\n")
+        (tmp_path / "dataset.toml").write_text("not = [toml")
+        assert dockerfile_base_images(tmp_path) == {}
+
+
+class TestRecordBaseImages:
+    def test_records_next_to_the_task_folders_with_the_image_environment(self, tmp_path, registry):
+        write_task(tmp_path, "overlay", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n")
+        path = record_base_images(tmp_path)
+        assert path == tmp_path / "compose-images.json"
+        recorded = json.loads(path.read_text())["redis:7-alpine"]
+        assert recorded["config"]["Env"] == ["A=1"] and recorded["config"]["WorkingDir"] == "/app"
+        assert recorded["image"] == "library/redis@sha256:index-of-7-alpine"
+
+    def test_a_record_from_an_older_gym_is_read_again_at_its_pinned_digest(self, tmp_path, registry):
+        write_task(tmp_path, "overlay", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n")
+        # Written before Env (and record_version) were recorded; pinned to the manifest behind the tag then.
+        legacy = {
+            "redis:7-alpine": {
+                "architecture": "amd64",
+                "config": {"WorkingDir": "/app"},
+                "config_digest": "sha256:cfg-amd64",
+                "image": "library/redis@sha256:m-amd64",
+                "os": "linux",
+            }
+        }
+        (tmp_path / "compose-images.json").write_text(json.dumps(legacy))
+        record_base_images(tmp_path)
+        recorded = json.loads((tmp_path / "compose-images.json").read_text())["redis:7-alpine"]
+        # The fields the resolver reads are now there, and the pin did not move: the digest was asked for, not the tag.
+        assert recorded["record_version"] == 2 and recorded["config"]["Env"] == ["A=1"]
+        assert recorded["image"] == "library/redis@sha256:m-amd64"
+        manifests = [url for url, _ in registry.requests if "/manifests/" in url]
+        assert manifests and all(url.endswith("/manifests/sha256:m-amd64") for url in manifests)
+        requests = len(registry.requests)
+        record_base_images(tmp_path)
+        assert len(registry.requests) == requests
+
+    def test_a_single_task_folder_records_into_its_parent(self, tmp_path, registry):
+        task = write_task(tmp_path, "one", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n")
+        assert record_base_images(task) == tmp_path / "compose-images.json"
+
+    def test_a_task_on_a_recorded_base_starts_the_pin_and_a_compose_main_is_resolved_by_it(self, tmp_path, registry):
+        """Prepare's order: base images are recorded, the tasks load pinned to them, then the Compose images
+        (``main`` is the task image) are recorded. The record stays keyed by the reference the Dockerfile
+        wrote, and ``main`` resolves by the pinned reference the task now carries."""
+        from nemo_gym.sandbox.compose_config import resolve_compose
+
+        compose = "services:\n  main:\n  cache:\n    image: redis:7-alpine\n"
+        write_task(tmp_path, "t", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n", compose=compose)
+        record_base_images(tmp_path)
+        (task,) = discover_tasks(tmp_path)
+        assert task.image == "library/redis@sha256:index-of-7-alpine"
+        assert compose_image_references(task) == [task.image, "redis:7-alpine"]
+        record_compose_images([task], tmp_path)
+        recorded = json.loads((tmp_path / "compose-images.json").read_text())
+        assert recorded["redis:7-alpine"]["image"] == task.image, "looked up by the written reference"
+        assert recorded[task.image]["image"] == task.image, "and by the pin, as the server asks for main"
+        document = resolve_compose(
+            {"services": {"main": None, "cache": {"image": "redis:7-alpine"}}}, task.image, recorded
+        )
+        assert document["services"]["main"]["image"] == document["services"]["cache"]["image"] == task.image
+
+    def test_nothing_is_written_without_dockerfiles_to_resolve(self, tmp_path):
+        write_task(tmp_path, "plain")
+        assert record_base_images(tmp_path, client=FakeClient()) is None
+        assert not (tmp_path / "compose-images.json").exists()
+
+    def test_an_unresolvable_base_image_names_the_image_the_tasks_and_the_registry_answer(self, tmp_path, registry):
+        write_task(tmp_path, "a", image=None, dockerfile="FROM redis:missing\nRUN true\n")
+        write_task(tmp_path, "b", image=None, dockerfile="FROM redis:missing\nENV X=$Y\n")
+        with pytest.raises(ImageConfigError) as excinfo:
+            record_base_images(tmp_path)
+        message = str(excinfo.value)
+        assert "base image 'redis:missing'" in message
+        assert "task(s) a, b" in message
+        assert "library/redis: registry returned HTTP 404 for manifests/missing" in message
         assert not (tmp_path / "compose-images.json").exists()

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import logging
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -78,6 +79,11 @@ def test_invalid_or_failing_reward_never_passes(tmp_path, reward):
 def validation_cli(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+    # `gym -v` installs a root logging handler bound to that run's stderr. pytest swaps the stream per
+    # test, so a handler left behind by an earlier test would write a "Logging error" traceback here.
+    root = logging.getLogger()
+    saved = root.handlers[:]
+    root.handlers.clear()
 
     def invoke(*flags):
         monkeypatch.setattr(
@@ -85,7 +91,8 @@ def validation_cli(tmp_path, monkeypatch):
         )
         main_module.main()
 
-    return invoke
+    yield invoke
+    root.handlers[:] = saved
 
 
 @pytest.mark.parametrize("source", ["cli", "file", "flag"])

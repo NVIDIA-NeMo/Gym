@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 
 from fastapi import HTTPException
 
+from environment_servers.harbor.users import _is_root
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
@@ -119,6 +120,19 @@ def resolve_env_templates(env: dict[str, str]) -> dict[str, str]:
     return resolved
 
 
+def _task_sandbox_env(task: HarborTask) -> dict[str, str]:
+    """The agent sandbox's environment: the task's image layer as recorded, under the host-resolved ``[environment.env]``.
+
+    The loader folds the Dockerfile's ``ENV`` (resolved as ``docker build`` resolves it, so a single-quoted
+    ``'${X}'`` is the literal text) and the base image's ``Env`` into ``task.env`` under ``[environment.env]``.
+    Only that task.toml layer is a host template surface: Harbor resolves ``task_env_config.env`` alone
+    (0.22.0 environments/base.py 272-285, docker/docker.py 258) and the image layer is baked into the image.
+    Resolving the merged ``task.env`` would expand a Dockerfile literal against the host, or refuse the task
+    when the host has no variable of that name.
+    """
+    return {**task.env, **resolve_env_templates(task.config.environment.env)}
+
+
 class HarborSessionMixin:
     """The per-episode session and the in-sandbox workspace the agent and the verifier share.
 
@@ -144,7 +158,7 @@ class HarborSessionMixin:
             # Only a directory the task or image named below the root is created and, with a user
             # override, handed over; an image whose WORKDIR is `/` must keep root's ownership of it.
             commands = [f"mkdir -p {shlex.quote(workdir)}"]
-            if task.user:
+            if not _is_root(task.user):
                 commands.append(f"chown {shlex.quote(task.user)} {shlex.quote(workdir)}")
             result = await exec_as_root(sandbox, " && ".join(commands), timeout_s=60)
             if result.return_code != 0:
