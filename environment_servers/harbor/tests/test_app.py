@@ -40,6 +40,7 @@ from environment_servers.harbor.verifier import (
 )
 from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor import load_task
 from nemo_gym.tasks.harbor.models import HarborEnvironment
 
@@ -440,6 +441,28 @@ class TestAgentStage:
             "/ng-rollout/r1/v1/responses",
             "/v1/agent_sessions/close",
         ]
+
+    @pytest.mark.parametrize("declaration", sorted(TASK_TOOL_CONTEXT_DECLARATIONS))
+    async def test_the_oracle_declares_support_so_dataset_validate_runs_the_task(
+        self, tmp_path, monkeypatch, declaration
+    ):
+        """`gym dataset validate` runs the oracle through this server; solve.sh reaches the task's tools by itself."""
+        from unittest.mock import MagicMock
+
+        from responses_api_agents.harbor_oracle_agent.app import OracleAgent, OracleAgentConfig
+
+        oracle = OracleAgent(
+            config=OracleAgentConfig(host="0.0.0.0", port=8081, entrypoint="", name="harbor_oracle_agent"),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=task_tool_context_toml(declaration))
+        server.server_client.supports_task_tool_context = oracle.supports_task_tool_context()
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
 
     async def test_a_task_without_tool_declarations_runs_on_any_harness(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch)
@@ -894,7 +917,13 @@ class TestSeparateVerification:
             == "mkdir -p /logs/artifacts && find /logs/artifacts -mindepth 1 -delete && chmod 777 /logs/artifacts"
             for c in verifier.execs
         )
-        assert any(c["command"] == "mkdir -p /app/output && chmod 777 /app/output" for c in verifier.execs)
+        # A file's parent is created world-writable when missing and widened when it exists; when the chmod is
+        # refused (an image that cannot switch to root) the parent only has to be writable.
+        prepare = (
+            "if [ -d /app/output ]; then chmod a+rwx /app/output 2>/dev/null || test -w /app/output; "
+            "else mkdir -p /app/output && chmod 777 /app/output; fi"
+        )
+        assert any(c["command"] == prepare for c in verifier.execs)
         run = next(c for c in verifier.execs if "test.sh" in c["command"] and "timeout" in c["command"])
         assert run["command"] == f"chmod +x /tests/test.sh; {verifier_command(300)}"
         assert (run["env"], run["user"], run["cwd"]) == ({"CHECK": "strict"}, "root", None)
@@ -979,6 +1008,26 @@ class TestSeparateVerification:
         assert created == ["hello"] and agent.archives["/logs/artifacts"] in verifier.uploaded_archives
         assert any("test.sh" in c["command"] and "timeout" in c["command"] for c in verifier.execs)
         assert agent.stopped and verifier.stopped
+
+    async def test_an_archive_step_the_sandbox_cannot_run_masks(self, tmp_path, monkeypatch):
+        """The probe answered, then the provider lost the container under `tar -czf` (error_type set, exit 125):
+        an outage, not an artifact to skip, so nothing is collected and the sample is masked."""
+
+        class LostUnderTar(AgentSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if "tar -czf" in command:
+                    self.execs.append(
+                        {"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user}
+                    )
+                    return SandboxExecResult(stdout="", stderr="container gone", return_code=125, error_type="sandbox")
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        agent = LostUnderTar()
+        server, task, _, verifier, created = self.prepared(tmp_path, monkeypatch, agent=agent)
+        result = (await run_episode(server, task)).result
+        assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+        assert "SandboxUnavailableError" in result.failure_reason and "container gone" in result.failure_reason
+        assert created == [] and verifier.execs == [] and agent.stopped
 
     @pytest.mark.parametrize("member", ["device_node", "long_name"])
     async def test_an_artifact_tree_this_host_cannot_hold_is_not_collected_and_does_not_mask(

@@ -768,6 +768,7 @@ class TestCli:
             "openclaw_agent",
             "hermes_agent",
             "hermes_sandboxed_agent",
+            "miniswe_sandboxed_agent",
             "opencode_sandboxed_agent",
             "pi_sandboxed_agent",
         ],

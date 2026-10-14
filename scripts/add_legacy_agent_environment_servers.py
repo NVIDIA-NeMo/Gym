@@ -103,6 +103,7 @@ def needs_environment_server(instance: dict) -> bool:
             "claude_code_agent",
             "harbor_oracle_agent",
             "terminus_2_sandboxed_agent",
+            "miniswe_sandboxed_agent",
         }
         and resources_server is None
     ):
