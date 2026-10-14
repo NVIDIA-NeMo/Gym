@@ -271,6 +271,9 @@ def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeou
             assert "--timeout 900" in sandbox.launch.await_args.kwargs["command"]
             assert "timeout" not in payload
             assert "PATH" not in payload["env"]
+            assert payload["env"]["OPENCLAW_NO_RESPAWN"] == "1"
+            assert "HOME" not in payload["env"]
+            assert not any(key.startswith("XDG_") for key in payload["env"])
             models = json.loads(sandbox.files[f"{sandbox.directory}/home/.openclaw/openclaw.json"])
             assert models["agents"]["defaults"]["workspace"] == "/app"
             assert models["models"]["providers"]["nemo"]["timeoutSeconds"] == model_timeout_seconds
@@ -327,6 +330,38 @@ def test_unsupported_seed_rejected_before_connection(setup, option):
                 client.post("/v1/agent_sessions", json=body)
         else:
             assert client.post("/v1/agent_sessions", json=body).status_code == 422
+    sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("context_window", "max_output_tokens"), [(None, 32768), (32768, 32768)])
+def test_configured_max_output_tokens_reaches_sandbox_model_entry(setup, context_window, max_output_tokens):
+    agent, sandbox = setup
+    agent.config.context_window = context_window
+    agent.config.max_output_tokens = max_output_tokens
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        config = json.loads(sandbox.files[f"{sandbox.directory}/home/.openclaw/openclaw.json"])
+        entry = config["models"]["providers"]["nemo"]["models"][0]
+        assert entry["maxTokens"] == max_output_tokens
+        assert entry.get("contextWindow") == context_window
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [{"max_output_tokens": 0}, {"max_output_tokens": -1}, {"context_window": 1000, "max_output_tokens": 1001}],
+)
+def test_invalid_max_output_tokens_rejected_before_connection(setup, limits):
+    agent, sandbox = setup
+    for name, value in limits.items():
+        setattr(agent.config, name, value)
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert response.status_code == 422
+    assert "max_output_tokens" in response.json()["detail"]
     sandbox.exec.assert_not_awaited()
 
 
@@ -604,17 +639,16 @@ async def test_obsolete_sandbox_cookie_never_falls_back_to_host(setup, marker):
     sandbox.exec.assert_not_awaited()
 
 
-async def test_failed_cleanup_keeps_handles_and_prevents_close(setup):
+async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
         await task
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
-        await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert agent._session_records[session_id].state is not None
-    sandbox.disconnect.assert_not_awaited()
-    assert not any("rm -rf" in call.args[0] for call in sandbox.exec.await_args_list)
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert agent._session_records[session_id].state is None
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
 
 
 async def test_disconnect_failure_retains_session_for_retry(setup):
@@ -1520,6 +1554,7 @@ async def test_independent_configs_route_prepared_rows_through_environment_run(s
             self.status = status
             self.ok = status < 400
             self.cookies = SimpleCookie(cookies or {})
+            self.headers = {}
             self.payload = payload
 
         async def read(self):

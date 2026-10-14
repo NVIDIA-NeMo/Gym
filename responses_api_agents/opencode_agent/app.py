@@ -205,8 +205,6 @@ class OpenCodeAgentVerifyResponse(BaseVerifyResponse):
 class OpenCodeAgent(SimpleResponsesAPIAgent):
     """Run OpenCode locally or in a borrowed or agent-owned sandbox session."""
 
-    ray_enabled = False
-
     config: OpenCodeAgentConfig
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
     sem: Semaphore = None
@@ -286,13 +284,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 {"baseURL": self._resolve_model_base_url(rollout_id), "apiKey": "EMPTY"}  # pragma: allowlist secret
             )
             model = nemo.setdefault("models", {}).get(self.config.model, {})
+            model.setdefault("interleaved", {"field": "reasoning_content"})
             self._deep_merge(
                 model,
                 {
                     "name": self.config.model,
-                    # Gym model servers emit and accept `reasoning_content`; OpenCode replays assistant
-                    # history under this field, and Gym rejects an unknown `reasoning` key with a 422.
-                    "interleaved": {"field": "reasoning_content"},
                     "limit": {"context": self.config.context_window, "output": self.config.max_output_tokens},
                 },
             )
@@ -685,6 +681,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+            await sandbox.upload(Path(__file__).with_name("task_environment.mjs"), f"{directory}/task_environment.mjs")
             if self._model_call_capture_enabled():
                 await sandbox.upload(OBSERVABILITY_PATCH, f"{directory}/{OBSERVABILITY_PATCH.name}")
         except BaseException as error:
@@ -869,6 +866,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
         if self._model_call_capture_enabled():
             apply_observability_patch(config, plugin_path=Path(state.session.session_dir) / OBSERVABILITY_PATCH.name)
+        config.setdefault("plugin", []).append((Path(state.session.session_dir) / "task_environment.mjs").as_uri())
         command = [f"{state.runtime}/opencode", "run", "--format", "json", "--title", "NeMo Gym"]
         if self.config.thinking:
             command.append("--thinking")
@@ -879,6 +877,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             "command": command,
             "prompt": prompt,
             "env": {
+                # OpenCode also scans HOME/.opencode independently of XDG config.
                 "HOME": f"{state.session.session_dir}/home",
                 "XDG_DATA_HOME": f"{state.session.session_dir}/data",
                 "XDG_CONFIG_HOME": f"{state.session.session_dir}/config",

@@ -35,6 +35,7 @@ from resources_servers.terminal_bench_4.models import (
     SandboxedVerifyResponse,
     SeedSessionResponse,
     TerminalBench4RunRequest,
+    VerifierTestCounts,
 )
 from resources_servers.terminal_bench_4.task import PackageLoader
 
@@ -61,7 +62,6 @@ def atomic_json(path, value):
 
 
 class TerminalBench4ResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: TerminalBench4Config
 
     def model_post_init(self, context):
@@ -265,7 +265,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
 
     def _verified_response(self, session, extra):
         result = session.result or {}
-        rewards = (result.get("verifier_result") or {}).get("rewards") or {}
+        verifier_result = result.get("verifier_result") or {}
+        rewards = verifier_result.get("rewards") or {}
         completed = "reward" in rewards
         failure = None
         failure_type = None
@@ -281,6 +282,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 )
                 | extra
                 | {"task_id": session.request.task_name}
+                | VerifierTestCounts.model_validate(verifier_result).model_dump()
             ),
             reward=float(rewards.get("reward", 0)),
             evaluation_completed=completed,

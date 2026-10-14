@@ -18,6 +18,7 @@ from resources_servers.terminal_bench_4.verifier import (
     VerifierOutputParseError,
     VerifierTimeoutError,
     parse_reward,
+    parse_test_counts,
     restore,
     run_verifier,
 )
@@ -234,6 +235,85 @@ async def test_verifier_nonzero_exit_with_official_zero_is_completed(tmp_path):
     diagnostics = []
     assert await run_verifier(env, tmp_path / "result", diagnostics) == {"rewards": {"reward": 0}}
     assert diagnostics[0]["return_code"] == 4
+
+
+@pytest.mark.parametrize(
+    "report,expected",
+    [
+        ({"results": {"summary": {"tests": 96, "passed": 95, "failed": 1}}}, (95, 96, 1, 0)),
+        ({"results": {"summary": {"tests": 96, "passed": 3, "failed": 93}}}, (3, 96, 93, 0)),
+        ({"results": {"summary": {"tests": 0, "passed": 0, "failed": 0}}}, (0, 0, 0, 0)),
+        (
+            {"results": {"summary": {"tests": 6, "passed": 1, "failed": 1, "skipped": 2, "pending": 1, "other": 1}}},
+            (1, 6, 1, 2),
+        ),
+    ],
+)
+def test_ctrf_counts_use_canonical_summary_without_adding_repeated_runs(tmp_path, report, expected):
+    (tmp_path / "ctrf.json").write_text(json.dumps(report))
+    (tmp_path / "ctrf_1.json").write_text(json.dumps(report))
+    (tmp_path / "trace_results.json").write_text(json.dumps({"total_cases": 20, "passed_cases": 0}))
+    counts = parse_test_counts(tmp_path, []).model_dump()
+    assert counts == dict(
+        zip(("num_tests_passed", "num_tests_total", "num_tests_failed", "num_tests_skipped"), expected)
+    )
+
+
+@pytest.mark.parametrize("total,passed", [(96, 95), (96, 3), (0, 0)])
+def test_trace_case_counts(tmp_path, total, passed):
+    (tmp_path / "trace_results.json").write_text(json.dumps({"total_cases": total, "passed_cases": passed}))
+    counts = parse_test_counts(tmp_path, [])
+    assert counts.num_tests_total == total
+    assert counts.num_tests_passed == passed
+    assert counts.num_tests_failed == total - passed
+    assert counts.num_tests_skipped == 0
+
+
+@pytest.mark.parametrize(
+    "filename,report",
+    [
+        ("ctrf.json", "{broken"),
+        ("ctrf.json", "[]"),
+        ("ctrf.json", '{"results":{"summary":null}}'),
+        ("ctrf.json", '{"results":{"summary":{"tests":96,"passed":95,"failed":2}}}'),
+        ("ctrf.json", '{"results":{"summary":{"tests":1,"passed":true,"failed":0}}}'),
+        ("ctrf.json", '{"results":{"summary":{"tests":1,"passed":1.0,"failed":0}}}'),
+        ("ctrf.json", '{"results":{"summary":{"tests":1,"passed":1,"failed":-1}}}'),
+        ("trace_results.json", '{"total_cases":1,"passed_cases":2}'),
+        ("trace_results.json", '{"total_cases":"96","passed_cases":95}'),
+        ("trace_results.json", "{}"),
+    ],
+)
+async def test_invalid_test_report_preserves_official_reward(tmp_path, filename, report):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"environment": {"docker_image": "v"}}}
+    )
+    env, main, _ = environment(tmp_path / "verifier", cfg)
+    main.path(f"/logs/verifier/{filename}").write_text(report)
+    main.path("/tests/test.sh").write_text(f"#!/bin/sh\necho 1 > {main.path('/logs/verifier/reward.txt')}\n")
+    diagnostics = []
+    result = await run_verifier(env, tmp_path / "result", diagnostics)
+    assert result == {"rewards": {"reward": 1.0}}
+    assert any(item.get("source") == filename and "error" in item for item in diagnostics)
+
+
+async def test_verifier_downloads_counts_even_when_official_reward_is_zero(tmp_path):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"environment": {"docker_image": "v"}}}
+    )
+    env, main, _ = environment(tmp_path / "verifier", cfg)
+    report = {"results": {"summary": {"tests": 96, "passed": 95, "failed": 1, "skipped": 0}}}
+    main.path("/logs/verifier/ctrf.json").write_text(json.dumps(report))
+    main.path("/tests/test.sh").write_text(f"#!/bin/sh\necho 0 > {main.path('/logs/verifier/reward.txt')}\nexit 1\n")
+    result = await run_verifier(env, tmp_path / "result", [])
+    assert result == {
+        "rewards": {"reward": 0.0},
+        "num_tests_passed": 95,
+        "num_tests_total": 96,
+        "num_tests_failed": 1,
+        "num_tests_skipped": 0,
+    }
+    assert json.loads((tmp_path / "result/verifier/ctrf.json").read_text()) == report
 
 
 async def test_verifier_timeout_does_not_promote_partial_reward(tmp_path, monkeypatch):

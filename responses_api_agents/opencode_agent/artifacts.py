@@ -228,6 +228,20 @@ def _parse_opencode_session(
                 "running": "incomplete",
                 "pending": "incomplete",
             }.get(opencode_status, "unknown")
+            if opencode_status == "completed" and part.get("tool") == "bash":
+                # Completion describes the tool lifecycle, not shell success. Timeout/abort
+                # can complete that lifecycle with a null exit code in the native artifact.
+                metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+                exit_code = metadata.get("exit")
+                if type(exit_code) is int:
+                    status = "completed" if exit_code == 0 else "failed"
+                else:
+                    status = "unknown"
+                    gaps.append(
+                        ObservationGap(
+                            code="tool_outcome_unavailable", invocation_id=session_id, detail=observed_call_id
+                        )
+                    )
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(
@@ -239,7 +253,7 @@ def _parse_opencode_session(
                         duration_ms=duration_ms,
                         timing_source="artifact" if started_at is not None else None,
                         status=status,
-                        error_type="tool_error" if opencode_status == "error" else None,
+                        error_type="tool_error" if status == "failed" else None,
                     )
                 )
             else:

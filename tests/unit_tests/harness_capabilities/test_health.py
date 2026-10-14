@@ -81,14 +81,23 @@ def test_expected_fault_must_actually_occur(tmp_path, record):
     assert checks["rollout_ended_on_failed_model_call"]["reasons"] == ["expected unhealthy; observed healthy"]
 
 
-@pytest.mark.parametrize("name,status", [("retry_429", 429), ("retry_500", 500), ("model_error", 400)])
-def test_owned_http_failures_match_the_declared_scenario(tmp_path, record, name, status):
+@pytest.mark.parametrize(
+    "name,status,aggregate_usage",
+    [
+        ("retry_429", 429, None),
+        ("retry_500", 500, None),
+        ("model_error", 400, 0),
+        ("model_error", 400, None),
+        ("model_error", 400, 1),
+    ],
+)
+def test_owned_http_failures_match_the_declared_scenario(tmp_path, record, name, status, aggregate_usage):
     scenario = next(s for s in SCENARIOS if s.name == name)
     trajectory = record["ng_trajectory"]
     failed = deepcopy(trajectory["model_calls"][0])
     failed.update(model_call_id="failed-attempt", started_at=0.0, completed_at=0.5, token_stats={})
     failed["response_metadata"].update(
-        response_id=None, status_code=status, error_category="http_error", response_status=None
+        response_id=None, status_code=status, error_category="http_error", response_status=None, finish_reason=None
     )
     failed["response"] = {"error": {"message": "injected failure"}}
     ref = {"model_call_id": "failed-attempt", "model_ref": failed["response_metadata"]["model_ref"]}
@@ -97,12 +106,23 @@ def test_owned_http_failures_match_the_declared_scenario(tmp_path, record, name,
         trajectory["turns"] = []
         trajectory["invocations"][0]["model_calls"] = [ref]
         record["response"] = {"output": []}
+        if aggregate_usage is not None:
+            record["response"]["usage"] = {
+                "input_tokens": aggregate_usage,
+                "output_tokens": 0,
+                "total_tokens": aggregate_usage,
+            }
     else:
         trajectory["model_calls"].insert(0, failed)
         trajectory["turns"][0]["model_calls"].insert(0, ref)
         trajectory["invocations"][0]["model_calls"].insert(0, ref)
     checks = inspect(tmp_path, [record], scenario.health_expectations, steps=scenario.steps)
-    assert gate_passes(list(checks.values())), checks
+    if scenario.terminal_error and aggregate_usage != 0:
+        assert [key for key, value in checks.items() if value["status"] == "fail"] == ["rollout_token_count_mismatch"]
+        actual = "unobserved" if aggregate_usage is None else "unhealthy"
+        assert checks["rollout_token_count_mismatch"]["reasons"] == [f"expected healthy; observed {actual}"]
+    else:
+        assert gate_passes(list(checks.values())), checks
 
 
 @pytest.mark.parametrize("delivery", ["missing", "empty", "malformed", "failure_sidecar"])

@@ -82,6 +82,8 @@ Verification is message-level:
 - user failures are labeled `user_failure`
 - tool-result failures are labeled `tool_failure`
 - agent failures are labeled `agent_failure`
+- user failures, tool-result failures, judge generation errors, and policy message-generation errors set
+  `mask_sample: true`, because the reward does not measure the policy; agent failures keep `mask_sample: false`
 
 Final verification state is synchronized before the response is built. The top-level reward, invalid reasons, failure
 labels, judge diagnostics, and judge-generation error therefore agree with the verification objects stored in

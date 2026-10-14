@@ -43,7 +43,7 @@ def _write_skill(skills_dir, name, description="A skill.", version=None, body="#
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CANONICAL_SKILLS_DIR = REPO_ROOT / ".agents/skills"
 AGENT_SKILLS_DOC = REPO_ROOT / "fern/versions/latest/pages/contribute/agent-skills.mdx"
-# This Claude workflow prompt lives beside skills but is deliberately not advertised for interactive use.
+# The formal review rubric lives beside skills but is deliberately not advertised for interactive use.
 WORKFLOW_ONLY_SKILLS = {"pr-review"}
 
 
@@ -161,8 +161,6 @@ class TestRepositorySkills:
     @pytest.mark.parametrize("native_dir", [".claude/skills", ".codex/skills"])
     def test_native_discovery_links_cover_canonical_skills(self, native_dir):
         expected_names = {path.name for path in _canonical_skill_dirs()}
-        if native_dir == ".codex/skills":
-            expected_names -= WORKFLOW_ONLY_SKILLS
         discovered_names = {path.name for path in (REPO_ROOT / native_dir).iterdir() if path.is_symlink()}
         assert discovered_names == expected_names
 
