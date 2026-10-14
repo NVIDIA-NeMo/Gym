@@ -109,7 +109,8 @@ A Gym server answers every request on one asyncio event loop. When synchronous w
 | `process.open_file_descriptor.count` | Gauge | count | Open file descriptors, where the platform reports them. |
 | `gym.server.requests.in_flight` | Up/down counter | count | HTTP requests the server is handling. |
 | `gym.server.requests.cancelled_total` | Counter | count | Requests cancelled because the client disconnected before the response finished. |
-| `gym.server.requests.failed_total` | Counter | count | Requests whose handler raised past every middleware. |
+| `gym.server.requests.unhandled_exceptions_total` | Counter | count | Requests whose handler raised an exception that no middleware turned into a response. A handled error, such as an `HTTPException`, is a response and is counted in `gym.server.responses_total` instead. |
+| `gym.server.responses_total` | Counter | count | Responses the server started sending, by `http.response.status_code`. It does not depend on the FastAPI instrumentor, so it reports 4xx and 5xx responses in any run with metrics on. |
 | `gym.http.client.requests.in_flight` | Up/down counter | count | Outbound calls through `server_utils.request` still waiting for their response headers. |
 
 The rollout driver, which is `gym eval run`, reports how much work it holds and where that work waits:

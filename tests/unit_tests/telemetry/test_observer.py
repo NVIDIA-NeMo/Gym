@@ -229,7 +229,7 @@ class TestRequestCounters:
                 return {
                     "in_flight": counts.in_flight,
                     "cancelled": counts.cancelled,
-                    "failed": counts.failed,
+                    "unhandled_exceptions": counts.unhandled_exceptions,
                 }, exported
 
         return asyncio.run(run())
@@ -259,11 +259,11 @@ class TestRequestCounters:
 
         totals, exported = self._serve(app, self._request_then(disconnect_after_the_response), collected)
 
-        assert totals == {"in_flight": 0, "cancelled": 0, "failed": 0}
+        assert totals == {"in_flight": 0, "cancelled": 0, "unhandled_exceptions": 0}
         (in_flight,) = exported[observer.REQUESTS_IN_FLIGHT_INSTRUMENT]
         assert in_flight.value == 0
 
-    def test_a_raising_handler_counts_as_failed(self, collected):
+    def test_a_raising_handler_counts_as_an_unhandled_exception(self, collected):
         async def app(_scope, receive, _send):
             await receive()
             raise RuntimeError("handler broke")
@@ -273,9 +273,9 @@ class TestRequestCounters:
 
         totals, exported = self._serve(app, self._request_then(wait_forever), collected)
 
-        assert totals == {"in_flight": 0, "cancelled": 0, "failed": 1}
-        (failed,) = exported[observer.REQUESTS_FAILED_INSTRUMENT]
-        assert failed.value == 1
+        assert totals == {"in_flight": 0, "cancelled": 0, "unhandled_exceptions": 1}
+        (unhandled,) = exported[observer.REQUESTS_UNHANDLED_EXCEPTIONS_INSTRUMENT]
+        assert unhandled.value == 1
 
     def test_a_client_disconnect_counts_as_cancelled(self, collected):
         async def app(_scope, receive, _send):
@@ -288,7 +288,7 @@ class TestRequestCounters:
 
         totals, _ = self._serve(app, self._request_then(disconnect))
 
-        assert totals == {"in_flight": 0, "cancelled": 1, "failed": 0}
+        assert totals == {"in_flight": 0, "cancelled": 1, "unhandled_exceptions": 0}
 
     def test_totals_stop_reporting_once_the_observer_stops(self, collected):
         async def app(_scope, receive, send):
@@ -345,6 +345,46 @@ def test_outbound_calls_are_counted_while_they_wait_for_a_response(collected, mo
 
     assert asyncio.run(call()) == 0
     assert seen == [1]
+
+
+def test_responses_are_counted_by_status_code_and_unhandled_errors_separately(collected):
+    """A handled HTTPException is a response with its status; an unhandled exception never becomes one inside."""
+    from fastapi import FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+
+    from nemo_gym.server_utils import ClientDisconnectCancellationMiddleware
+
+    app = FastAPI()
+
+    @app.get("/ok")
+    async def ok() -> dict:
+        return {}
+
+    @app.get("/missing")
+    async def missing() -> dict:
+        raise HTTPException(status_code=404)
+
+    @app.get("/broken")
+    async def broken() -> dict:
+        raise RuntimeError("handler broke")
+
+    app.add_middleware(ClientDisconnectCancellationMiddleware)
+    observer.observe_app_event_loop(app, "server")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        statuses = [client.get(path).status_code for path in ("/ok", "/ok", "/missing", "/broken")]
+        counts = observer.request_counts()
+        responses, unhandled = dict(counts.responses), counts.unhandled_exceptions
+        exported = collected()
+
+    assert statuses == [200, 200, 404, 500]
+    assert responses == {200: 2, 404: 1}, "the 500 for /broken is sent outside the middleware, after the exception"
+    assert unhandled == 1
+    by_status = {
+        point.attributes[observer.HTTP_STATUS_CODE_ATTRIBUTE]: point.value
+        for point in exported[observer.RESPONSES_INSTRUMENT]
+    }
+    assert by_status == {200: 2, 404: 1}
 
 
 class TestDriverMetrics:

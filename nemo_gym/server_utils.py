@@ -1253,9 +1253,9 @@ class ClientDisconnectCancellationMiddleware:
         counts.in_flight += 1
         try:
             await self._handle(scope, receive, send, counts)
-        except BaseException as error:
-            if not isinstance(error, asyncio.CancelledError):
-                counts.failed += 1
+        except Exception:
+            # A handled error, such as an HTTPException, became a response inside and is not counted here.
+            counts.unhandled_exceptions += 1
             raise
         finally:
             counts.in_flight -= 1
@@ -1272,6 +1272,8 @@ class ClientDisconnectCancellationMiddleware:
             if client_disconnected.is_set():
                 return
 
+            if counts is not None and message["type"] == "http.response.start":
+                counts.count_response(message["status"])
             await send(message)
             if message["type"] == "http.response.body" and not message.get("more_body", False):
                 response_complete.set()
