@@ -13,15 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# MMLU-ProX (no tools): MMLU-Pro's 10-option multiple-choice questions in other languages. Like
-# the published run, this recipe prepares 10 languages (en, de, es, fr, it, ja, zh, hi, pt, ko),
-# one sample per question: 117,590 questions. Scored on the answer letter; there is no judge
-# model.
+# MMLU-ProX (no tools): MMLU-Pro's 10-option questions in 10 languages (en, de, es, fr, it, ja,
+# zh, hi, pt, ko), 117,590 questions, one sample each. Scored on the answer letter; there is no
+# judge model.
 #
 #   nemotron_recipes/super-3.5/run.sh mmlu-prox
 #
-# Tech report "MMLU-ProX": pass@1/accuracy
-#   (key_metrics of mmlu_prox_mcqa_simple_agent)
+# Tech report (key_metrics of mmlu_prox_mcqa_simple_agent):
+#   MMLU-ProX: pass@1/accuracy
 #
 # Set in .env: POLICY_API_KEY
 #

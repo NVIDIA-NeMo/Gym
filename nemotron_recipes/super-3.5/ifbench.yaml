@@ -14,13 +14,13 @@
 # limitations under the License.
 #
 # IFBench (no tools): 300 prompts x 8 repeats, each with one or more verifiable output
-# constraints (57 instruction types). A response's reward is the fraction of the prompt's
-# instructions it follows, checked strictly by AllenAI's IFBench rules; there is no judge model.
+# constraints. The reward is the fraction of a prompt's constraints the response follows,
+# checked strictly by AllenAI's IFBench rules; there is no judge model.
 #
 #   nemotron_recipes/super-3.5/run.sh ifbench
 #
-# Tech report "IFBench": mean/reward x100
-#   (key_metrics of ifbench_benchmark_simple_agent)
+# Tech report (key_metrics of ifbench_benchmark_simple_agent):
+#   IFBench: mean/reward x100
 #
 # Set in .env: POLICY_API_KEY
 #

@@ -13,14 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# SWE-bench Multilingual: 300 real GitHub issues in other programming languages x 3 repeats. The
-# OpenCode agent fixes each one inside a container holding the project; the project's tests
-# decide.
+# SWE-bench Multilingual (agentic coding): 300 real GitHub issues in other programming languages
+# x 3 repeats. The OpenCode agent fixes each one inside a container holding the project; the
+# project's tests decide; there is no judge model.
 #
 #   nemotron_recipes/super-3.5/run.sh swebench-multilingual
 #
-# Tech report "SWE-bench Multilingual": mean/reward x100
-#   (key_metrics of swebench_multilingual_opencode_sandboxed_agent)
+# Tech report (key_metrics of swebench_multilingual_opencode_sandboxed_agent):
+#   SWE-bench Multilingual: mean/reward x100
 #
 # Set in .env: POLICY_API_KEY, OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY, OPENCODE_DIR
 #
@@ -39,11 +39,9 @@ benchmark_config:
 policy_model:
   responses_api_models:
     vllm_model:
-      # Gym's model server sets these on every request, whatever the agent sends (the agent asks
-      # for max_tokens 262144): the published run's values, from Gym's
-      # benchmarks/nemotron_3.5_super/policy_model_override.yaml, minus its num_workers and
-      # max_output_tokens, which are not Chat Completions fields (vLLM ignores them; stricter
-      # endpoints reject the request).
+      # The published run's values, set by Gym on every request (the agent asks for max_tokens
+      # 262144). Its num_workers and max_output_tokens are left out: not Chat Completions
+      # fields, and stricter endpoints reject them.
       sampling_overrides:
         temperature: 1.0
         top_p: 0.95

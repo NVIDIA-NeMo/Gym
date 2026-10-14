@@ -13,15 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# GraphWalks (no tools): 950 long-context prompts, one sample each. Every prompt lists the edges
-# of a directed graph and asks for the parents of a node or for the nodes at exactly depth N of
-# a breadth-first search. Each answer is scored by F1 between the returned and the expected node
-# set; there is no judge model.
+# GraphWalks (long context, no tools): 950 prompts, one sample each. Each lists the edges of a
+# directed graph and asks for the parents of a node or the nodes at exactly depth N of a
+# breadth-first search; scored by F1 against the expected node set; there is no judge model.
 #
 #   nemotron_recipes/super-3.5/run.sh graphwalks
 #
-# Tech report "GraphWalks (≤1M)": pass@1/accuracy
-#   (key_metrics of graphwalks_benchmark_simple_agent)
+# Tech report (key_metrics of graphwalks_benchmark_simple_agent):
+#   GraphWalks (≤1M): pass@1/accuracy
 #
 # Set in .env: POLICY_API_KEY
 #

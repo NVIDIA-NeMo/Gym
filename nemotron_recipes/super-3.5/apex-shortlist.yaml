@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# APEX Shortlist (no tools): 47 problems x 16 repeats. The final \boxed{} answer is graded
+# APEX Shortlist (no tools): 47 math problems x 16 repeats. The final \boxed{} answer is checked
 # symbolically against the reference; there is no judge model.
 #
 #   nemotron_recipes/super-3.5/run.sh apex-shortlist
 #
-# Tech report "Apex-Shortlist": mean/reward x100
-#   (agent_metrics of apex_shortlist_math_with_judge_simple_agent)
+# Tech report (agent_metrics of apex_shortlist_math_with_judge_simple_agent):
+#   Apex-Shortlist: mean/reward x100
 #
 # Set in .env: POLICY_API_KEY
 #

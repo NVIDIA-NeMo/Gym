@@ -13,15 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# CritPt (no tools): 70 research-level physics problems x 5 repeats. Each rollout has two turns:
-# a derivation, then the problem's Python template filled in with the answer. The Artificial
+# CritPt (no tools): 70 research-level physics problems x 5 repeats, two turns each: a
+# derivation, then the problem's Python template filled in with the answer. The Artificial
 # Analysis (AA) API grades the templates in batches of all 70 problems against private test
-# cases, and every rollout in a batch gets that batch's accuracy as its reward.
+# cases; every rollout in a batch gets that batch's accuracy.
 #
 #   nemotron_recipes/super-3.5/run.sh critpt
 #
-# Tech report "CritPt": mean/accuracy x100
-#   (key_metrics of critpt_benchmark_agent)
+# Tech report (key_metrics of critpt_benchmark_agent):
+#   CritPt: mean/accuracy x100
 #
 # Set in .env: POLICY_API_KEY, ARTIFICIAL_ANALYSIS_API_KEY
 #
@@ -29,10 +29,8 @@
 # '[key1,key2]' to switch keys when one is rate-limited. A full run makes 5 grading calls.
 # Details: reproducibility.md, "CritPt".
 #
-# Serve the model with --max-model-len 262144, as in the published run. Each turn asks for
-# 245,760 output tokens; vLLM rejects a turn whose prompt plus that does not fit the
-# context, and Gym records the rejected turn as an empty answer, scored 0 without an error.
-# With a shorter context every turn fails this way, so check that output_tokens is above 0.
+# Needs --max-model-len 262144: each turn asks for 245,760 output tokens, and a turn that does
+# not fit comes back empty and scores 0 without an error (check that output_tokens is above 0).
 #
 # Leave PARALLEL unset (or at 350 or more). A rollout holds its slot until its batch is
 # graded, so with fewer slots no batch ever fills, and the run fails once the 6 h verify

@@ -13,14 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# OSWorld-Verified (computer use): 361 desktop tasks x 3 repeats. Each task runs in its own
-# Ubuntu VM; the model sees screenshots and acts with mouse/keyboard commands for up to 100
-# steps, then OSWorld's own checker scores the result from 0 to 1 (partial credit kept).
+# OSWorld-Verified (agentic computer use): 361 desktop tasks x 3 repeats, each in its own Ubuntu
+# VM. The model sees screenshots and acts with mouse and keyboard commands for up to 100 steps;
+# OSWorld's own checker scores the result from 0 to 1 (partial credit kept); there is no judge
+# model.
 #
 #   nemotron_recipes/super-3.5/run.sh osworld
 #
-# Tech report "OSWorld": osworld/raw_reward_rate
-#   (key_metrics of osworld_nano_omni_agent)
+# Tech report (key_metrics of osworld_nano_omni_agent):
+#   OSWorld: osworld/raw_reward_rate
 #
 # Set in .env: POLICY_API_KEY
 #

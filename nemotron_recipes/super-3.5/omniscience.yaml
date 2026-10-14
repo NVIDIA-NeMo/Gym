@@ -13,25 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# AA-Omniscience (no tools): 600 questions x 10 repeats. A judge model (gpt-5.6-luna, reasoning
-# effort medium) grades each answer as correct, incorrect, partially correct or not attempted.
+# AA-Omniscience (no tools): 600 questions x 10 repeats. A judge model (gpt-5.6-luna) grades
+# each answer as correct, incorrect, partially correct or not attempted.
 #
 #   nemotron_recipes/super-3.5/run.sh omniscience
 #
-# Tech report AA-Omniscience (key_metrics of omniscience_omniscience_simple_agent):
-#   Accuracy: pass@1[avg-of-10]/judge_correct
-#   Non-Hallucination: 100 - pass@1[avg-of-10]/judge_omni_hallucination
+# Tech report (key_metrics of omniscience_omniscience_simple_agent):
+#   AA-Omniscience Accuracy: pass@1[avg-of-10]/judge_correct
+#   AA-Omniscience Non-Hallucination: 100 - pass@1[avg-of-10]/judge_omni_hallucination
 #
-# Set in .env: POLICY_API_KEY, OMNISCIENCE_JUDGE_API_KEY
+# Set in .env: POLICY_API_KEY, JUDGE_API_KEY
 #
-# Needs the judge endpoint in env.yaml (omniscience_judge_base_url, omniscience_judge_api_key)
-# serving gpt-5.6-luna on Chat Completions (<omniscience_judge_base_url>/chat/completions).
-# The endpoint must accept Gym's judge request as it is: max_tokens 32768, temperature 0.0
-# and top_p 1.0 next to reasoning_effort medium. Gym always sends these three; config can
-# change their values (and then no longer matches the published run) but cannot drop them.
-# The published run's OpenAI-compatible gateway accepted them; OpenAI's own API is expected to
-# reject max_tokens and temperature for this reasoning model, so use an endpoint that accepts
-# or drops them.
+# Needs a judge endpoint (judge_base_url in env.yaml, or omniscience_judge_base_url for this
+# recipe only) serving gpt-5.6-luna on Chat Completions (<base_url>/chat/completions). The
+# endpoint must accept Gym's judge request as it is: max_tokens 32768, temperature 0.0 and top_p
+# 1.0 next to reasoning_effort medium. Gym always sends these three; config can change their
+# values (and then no longer matches the published run) but cannot drop them. The published
+# run's OpenAI-compatible gateway accepted them; OpenAI's own API is expected to reject
+# max_tokens and temperature for this reasoning model, so use an endpoint that accepts or drops
+# them.
 #
 # An answer whose judge call fails is left out of the score and written to
 # evaluator_rollouts_failures.jsonl; RESUME=1 retries it (the model answers again; 3 attempts
@@ -70,13 +70,12 @@ policy_model:
 # Judge: gpt-5.6-luna at reasoning effort medium. Endpoint and key come from env.yaml; set
 # omniscience_judge_model_name there only if your provider serves this model under a
 # different id.
-# env.yaml overrides this file, so it must not carry a genrm_model block: the one in a
-# Lightning 3.5 env.yaml would silently swap this judge for gemini-3-flash-preview.
+# Keep genrm_model out of env.yaml: it would replace this judge.
 genrm_model:
   responses_api_models:
     openai_model:
-      openai_base_url: ${omniscience_judge_base_url}
-      openai_api_key: ${omniscience_judge_api_key}
+      openai_base_url: ${oc.select:omniscience_judge_base_url,${judge_base_url}}
+      openai_api_key: ${oc.select:omniscience_judge_api_key,${judge_api_key}}
       openai_model: ${oc.select:omniscience_judge_model_name,gpt-5.6-luna}
       extra_body:
         reasoning_effort: medium

@@ -13,16 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# GPQA Diamond (no tools): 198 questions x 8 repeats.
+# GPQA Diamond (no tools): 198 questions x 8 repeats. Four-option multiple choice, scored on the
+# letter after "Answer:"; there is no judge model.
 #
 #   nemotron_recipes/super-3.5/run.sh gpqa
 #
-# Tech report "GPQAD": pass@1[avg-of-8]/accuracy
-#   (key_metrics of gpqa_mcqa_simple_agent)
+# Tech report (key_metrics of gpqa_mcqa_simple_agent):
+#   GPQAD: pass@1[avg-of-8]/accuracy
 #
 # Set in .env: POLICY_API_KEY, HF_TOKEN
 #
-# Needs HF_TOKEN (gated dataset; accept its terms on the Hugging Face Hub first).
+# Needs the gated dataset's terms accepted, with the account HF_TOKEN belongs to:
+# https://huggingface.co/datasets/Idavidrein/gpqa
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d

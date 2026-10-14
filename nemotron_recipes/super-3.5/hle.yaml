@@ -13,20 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# HLE (text-only): Humanity's Last Exam without the image questions (no tools), 2,158 questions,
-# one sample each. A judge model (gpt-5.6-luna, reasoning effort medium) compares each final
-# answer with the reference using the official HLE judge prompt (yes/no).
+# HLE (text-only, no tools): Humanity's Last Exam without the image questions, 2,158 questions,
+# one sample each. A judge model (gpt-5.6-luna) compares each final answer with the reference
+# using the official HLE judge prompt.
 #
 #   nemotron_recipes/super-3.5/run.sh hle
 #
-# Tech report "HLE (no tools, text-only)": mean/reward x100
-#   (agent_metrics of hle_equivalence_llm_judge_simple_agent)
+# Tech report (agent_metrics of hle_equivalence_llm_judge_simple_agent):
+#   HLE (no tools, text-only): mean/reward x100
 #
-# Set in .env: POLICY_API_KEY, HF_TOKEN, HLE_JUDGE_API_KEY
+# Set in .env: POLICY_API_KEY, HF_TOKEN, JUDGE_API_KEY
 #
-# Needs HF_TOKEN (gated dataset; accept its terms on the Hugging Face Hub first) and the judge
-# endpoint in env.yaml (hle_judge_base_url, hle_judge_api_key) serving gpt-5.6-luna on the
-# Responses API (<hle_judge_base_url>/responses).
+# Needs the gated dataset's terms accepted, with the account HF_TOKEN belongs to
+# (https://huggingface.co/datasets/cais/hle), and a judge endpoint (judge_base_url in env.yaml,
+# or hle_judge_base_url for this recipe only) serving gpt-5.6-luna on the Responses API
+# (<base_url>/responses).
 #
 # An answer whose judge call fails is left out of the score and written to
 # evaluator_rollouts_failures.jsonl; RESUME=1 retries it (the model answers again; 3 attempts
@@ -50,8 +51,8 @@ benchmark_config:
 judge_model:
   responses_api_models:
     openai_model:
-      openai_base_url: ${hle_judge_base_url}
-      openai_api_key: ${hle_judge_api_key}
+      openai_base_url: ${oc.select:hle_judge_base_url,${judge_base_url}}
+      openai_api_key: ${oc.select:hle_judge_api_key,${judge_api_key}}
       openai_model: ${oc.select:hle_judge_model_name,gpt-5.6-luna}
       # As the published run sent it.
       extra_body:

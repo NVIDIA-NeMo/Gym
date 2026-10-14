@@ -13,14 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# SciCode (no tools): 65 problems x 8 repeats. Each problem is split into sub-steps; the model
-# writes the code for each sub-step, and the code is run against the problem's test cases.
+# SciCode (no tools): 65 problems x 8 repeats, each split into sub-steps. The model writes the
+# code for each sub-step, which runs against the problem's test cases; there is no judge model.
 #
 #   nemotron_recipes/super-3.5/run.sh scicode
 #
-# Tech report, x100 (key_metrics of scicode_benchmark_agent):
-#   SciCode (subtask): mean/subtask_accuracy
-#   SciCode (problem): mean/problem_accuracy
+# Tech report (key_metrics of scicode_benchmark_agent):
+#   SciCode (subtask): mean/subtask_accuracy x100
+#   SciCode (problem): mean/problem_accuracy x100
 #
 # Set in .env: POLICY_API_KEY, TEST_DATA
 #

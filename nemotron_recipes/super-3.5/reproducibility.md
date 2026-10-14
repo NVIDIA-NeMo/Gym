@@ -150,13 +150,21 @@ shorter context its turns come back empty and score 0 without an error.
 Some recipes are graded by another model or service, or need one to play the user: HLE (text-only
 and full), AA-LCR, AA-Omniscience, BrowseComp and GDPval-AA v2 (judge models), Tau2 and Tau3
 (user simulator) and CritPt (Artificial Analysis API). Each recipe pins the model it uses; you
-provide its endpoint in `env.yaml` and its key in `.env`, separately for each recipe, so the
-judges can come from different providers. Both templates have a block per recipe, and the
-recipe's header says which API your endpoint must serve.
+provide one judge gateway in `env.yaml` (`judge_base_url`) and its key in `.env`
+(`JUDGE_API_KEY`), and it must serve all those models. If one comes from a different provider,
+uncomment that recipe's own lines in `env.yaml` and add its key to `.env`. The recipe's header
+says which API your endpoint must serve.
 
 ## Benchmarks needing extra setup
 
 Most recipes need nothing beyond the prerequisites, `env.yaml` and `.env`. These do:
+
+### GPQA, HLE (text-only and full)
+
+Their datasets are gated: accept the terms of
+[Idavidrein/gpqa](https://huggingface.co/datasets/Idavidrein/gpqa) (GPQA) and
+[cais/hle](https://huggingface.co/datasets/cais/hle) (both HLE recipes) on the Hugging Face Hub,
+with the account whose token is `HF_TOKEN` in `.env`.
 
 ### SciCode
 

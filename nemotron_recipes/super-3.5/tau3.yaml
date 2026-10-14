@@ -13,22 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Tau3-Banking (Artificial Analysis setup): 97 customer-service tasks x 8 repeats. The model is
-# a bank agent with BM25 + grep search over the bank's documents and a set of account tools; a
-# user-simulator model (gpt-5.4-mini-2026-03-17) plays the customer. A task scores 1 if the
-# final account state and the agent's statements match the task's expected outcome.
+# Tau3-Banking (agentic tool use, Artificial Analysis setup): 97 customer-service tasks x 8
+# repeats. The model is a bank agent with BM25 + grep search over the bank's documents and
+# account tools; a user-simulator model (gpt-5.4-mini-2026-03-17) plays the customer. A task
+# scores 1 if the final account state (for 9 tasks, the agent's actions) matches the expected
+# outcome.
 #
 #   nemotron_recipes/super-3.5/run.sh tau3
 #
-# Tech report "Tau3 Banking": macro_average x100
-#   (key_metrics of tau2_banking_knowledge_bm25_grep_artificial_analysis_agent)
+# Tech report (key_metrics of tau2_banking_knowledge_bm25_grep_artificial_analysis_agent):
+#   Tau3 Banking: macro_average x100
 #
-# Set in .env: POLICY_API_KEY, TAU3_USER_SIMULATOR_API_KEY
+# Set in .env: POLICY_API_KEY, JUDGE_API_KEY
 #
-# Needs the simulator endpoint in env.yaml (tau3_user_simulator_base_url,
-# tau3_user_simulator_api_key) serving gpt-5.4-mini-2026-03-17 on Chat Completions
-# (<tau3_user_simulator_base_url>/chat/completions). Gym builds the tau2 agent's venv on the
-# first run.
+# Needs a simulator endpoint (judge_base_url in env.yaml, or tau3_user_simulator_base_url for
+# this recipe only) serving gpt-5.4-mini-2026-03-17 on Chat Completions
+# (<base_url>/chat/completions).
 #
 # run.sh first sources tau3.setup.sh, which pins the tasks
 # (https://github.com/bxyu-nvidia/tau2-bench) to the published run's commit, 7245a8f6. The tau2
@@ -52,8 +52,8 @@ policy_model:
 gpt-5_4-mini-2026-03-17:
   responses_api_models:
     openai_model:
-      openai_base_url: ${tau3_user_simulator_base_url}
-      openai_api_key: ${tau3_user_simulator_api_key}
+      openai_base_url: ${oc.select:tau3_user_simulator_base_url,${judge_base_url}}
+      openai_api_key: ${oc.select:tau3_user_simulator_api_key,${judge_api_key}}
       openai_model: ${oc.select:tau3_user_simulator_model_name,gpt-5.4-mini-2026-03-17}
       # As in the published run: no max_output_tokens in the simulator's requests.
       extra_body:

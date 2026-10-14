@@ -13,22 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Tau2 (retail, airline, telecom): 278 customer-service tasks x 8 repeats. A user-simulator
-# model (Qwen3-235B-A22B-Instruct-2507-FP8) plays the customer; a task scores 1 if the final
-# state matches the expected outcome.
+# Tau2 (agentic tool use; retail, airline, telecom): 278 customer-service tasks x 8 repeats. A
+# user-simulator model (Qwen3-235B-A22B-Instruct-2507-FP8) plays the customer; a task scores 1
+# if its outcome matches the task's expected one.
 #
 #   nemotron_recipes/super-3.5/run.sh tau2
 #
-# Tech report, x100 (key_metrics of tau2_benchmark_agent):
-#   Tau2 Retail: retail/reward
-#   Tau2 Airline: airline/reward
-#   Tau2 Telecom: telecom/reward
+# Tech report (key_metrics of tau2_benchmark_agent):
+#   Tau2 Retail: retail/reward x100
+#   Tau2 Airline: airline/reward x100
+#   Tau2 Telecom: telecom/reward x100
 #
-# Set in .env: POLICY_API_KEY, TAU2_USER_SIMULATOR_API_KEY
+# Set in .env: POLICY_API_KEY, JUDGE_API_KEY
 #
-# Needs the simulator endpoint in env.yaml (tau2_user_simulator_base_url,
-# tau2_user_simulator_api_key) serving Qwen3-235B-A22B-Instruct-2507-FP8 on Chat Completions
-# (<tau2_user_simulator_base_url>/chat/completions).
+# Needs a simulator endpoint (judge_base_url in env.yaml, or tau2_user_simulator_base_url for
+# this recipe only) serving Qwen3-235B-A22B-Instruct-2507-FP8 on Chat Completions
+# (<base_url>/chat/completions).
 #
 # run.sh first sources tau2.setup.sh, which pins the tasks and the data the agent reads
 # (https://github.com/bxyu-nvidia/tau2-bench) to the published run's commits, 7245a8f6 and
@@ -58,8 +58,8 @@ Qwen3-235B-A22B-Instruct-2507-FP8:
   responses_api_models:
     vllm_model:
       entrypoint: app.py
-      base_url: ${tau2_user_simulator_base_url}
-      api_key: ${tau2_user_simulator_api_key}
+      base_url: ${oc.select:tau2_user_simulator_base_url,${judge_base_url}}
+      api_key: ${oc.select:tau2_user_simulator_api_key,${judge_api_key}}
       model: ${oc.select:tau2_user_simulator_model_name,Qwen/Qwen3-235B-A22B-Instruct-2507-FP8}
       replace_developer_role_with_system: true
       return_token_id_information: false
