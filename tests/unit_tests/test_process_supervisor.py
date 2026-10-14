@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -498,6 +499,150 @@ def test_unreadable_group_state_does_not_confirm_termination(monkeypatch: pytest
     monkeypatch.setattr(Path, "read_text", unreadable)
     with pytest.raises(PermissionError, match="Cannot read process state"):
         supervisor["_reap_process_group"](123, 0.1)
+
+
+@pytest.mark.parametrize("state, alive", [("Z", False), ("X", False), ("S", True)])
+def test_group_scan_ignores_vanished_and_unrelated_processes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str, alive: bool
+) -> None:
+    scan = runpy.run_path(str(SUPERVISOR))["_group_has_live_processes"]
+    # A process may disappear between listing /proc and reading its stat file.
+    for name in ("self", "100", "101", "102"):
+        (tmp_path / name).mkdir()
+    (tmp_path / "101/stat").write_text("101 (unrelated) R 1 999 0")
+    (tmp_path / "102/stat").write_text(f"102 (name with ) parentheses) {state} 1 123 0")
+    monkeypatch.setitem(scan.__globals__, "Path", lambda _: tmp_path)
+
+    assert scan(123) is alive
+
+
+def test_forced_cleanup_drains_successive_adoptions_but_preserves_existing_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reap = runpy.run_path(str(SUPERVISOR))["_reap_process_group"]
+    children = {101, 202, 204}
+    killed: list[int] = []
+    reaped: list[int] = []
+
+    def absent_group(*_: object) -> None:
+        raise ProcessLookupError
+
+    def kill(pid: int, sig: int) -> None:
+        assert sig == signal.SIGKILL
+        killed.append(pid)
+        if pid == 204:
+            children.remove(pid)
+            raise ProcessLookupError  # Exited before the signal arrived.
+
+    def waitpid(pid: int, options: int) -> tuple[int, int]:
+        assert options == os.WNOHANG
+        if pid == -123:
+            raise ChildProcessError
+        children.remove(pid)
+        reaped.append(pid)
+        if pid == 202:
+            children.add(303)  # Killing this tool adopts another detached generation.
+        return pid, 0
+
+    monkeypatch.setitem(
+        reap.__globals__, "os", SimpleNamespace(killpg=absent_group, kill=kill, waitpid=waitpid, WNOHANG=os.WNOHANG)
+    )
+    monkeypatch.setitem(reap.__globals__, "_child_pids", lambda: set(children))
+
+    reap(123, 1, preserved_children={101})
+
+    assert set(killed) == {202, 204, 303}
+    assert reaped == [202, 303]
+    assert children == {101}
+
+
+@pytest.mark.parametrize("remaining", ["live_group", "unreaped_group", "adopted_tool"])
+def test_cleanup_deadline_rejects_each_kind_of_unfinished_process(
+    monkeypatch: pytest.MonkeyPatch, remaining: str
+) -> None:
+    reap = runpy.run_path(str(SUPERVISOR))["_reap_process_group"]
+    clock = iter([0.0, 0.5, 1.0])
+    sleeps: list[float] = []
+
+    def killpg(*_: object) -> None:
+        if remaining != "live_group":
+            raise ProcessLookupError
+
+    def waitpid(pid: int, _: int) -> tuple[int, int]:
+        if pid == -123 and remaining != "unreaped_group":
+            raise ChildProcessError
+        return 0, 0  # Still present after a nonblocking reap attempt.
+
+    monkeypatch.setitem(
+        reap.__globals__,
+        "os",
+        SimpleNamespace(killpg=killpg, kill=lambda *_: None, waitpid=waitpid, WNOHANG=os.WNOHANG),
+    )
+    monkeypatch.setitem(reap.__globals__, "time", SimpleNamespace(monotonic=lambda: next(clock), sleep=sleeps.append))
+    monkeypatch.setitem(reap.__globals__, "_group_has_live_processes", lambda _: remaining == "live_group")
+    monkeypatch.setitem(reap.__globals__, "_child_pids", lambda: {101, 202} if remaining == "adopted_tool" else {101})
+
+    with pytest.raises(TimeoutError, match="have not terminated"):
+        reap(123, 1, preserved_children={101})
+    assert sleeps == [0.01]
+
+
+@pytest.mark.parametrize("boundary", ["stop_marker", "unsupported_platform", "subreaper_failure"])
+def test_supervisor_does_not_launch_without_startup_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    supervise = runpy.run_path(str(SUPERVISOR))["_supervise"]
+    launched: list[list[str]] = []
+    stop = tmp_path / "stop"
+    if boundary == "stop_marker":
+        stop.touch()
+    monkeypatch.setitem(
+        supervise.__globals__, "signal", SimpleNamespace(signal=lambda *_: None, SIGTERM=15, SIG_IGN=1)
+    )
+    monkeypatch.setitem(
+        supervise.__globals__,
+        "sys",
+        SimpleNamespace(platform="darwin" if boundary == "unsupported_platform" else "linux"),
+    )
+    monkeypatch.setitem(supervise.__globals__, "os", SimpleNamespace(getpgrp=lambda: 1, getpid=lambda: 1))
+    monkeypatch.setitem(
+        supervise.__globals__,
+        "ctypes",
+        SimpleNamespace(
+            CDLL=lambda *_, **__: SimpleNamespace(prctl=lambda *_: -1 if boundary == "subreaper_failure" else 0),
+            get_errno=lambda: 1,
+        ),
+    )
+    monkeypatch.setitem(
+        supervise.__globals__, "subprocess", SimpleNamespace(Popen=lambda command, **_: launched.append(command))
+    )
+
+    receipt = supervise(["worker"], timeout=1, stop_path=stop)
+
+    assert launched == []
+    assert receipt["cleanup_confirmed"] is True  # No process was started.
+    assert receipt["return_code"] is None
+    assert receipt["timed_out"] is False
+    if boundary == "stop_marker":
+        assert receipt["error"] is None
+    elif boundary == "unsupported_platform":
+        assert receipt["error"] == "Sandbox process supervision requires Linux"
+    else:
+        assert "Cannot supervise harness process group" in receipt["error"]
+
+
+def test_supervisor_requires_a_command_before_writing_a_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    main = runpy.run_path(str(SUPERVISOR))["main"]
+    receipt = tmp_path / "cleanup.json"
+    monkeypatch.setattr(sys, "argv", [str(SUPERVISOR), "--timeout", "1", "--receipt", str(receipt), "--"])
+
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 2
+    assert "a harness command is required" in capsys.readouterr().err
+    assert not receipt.exists()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")

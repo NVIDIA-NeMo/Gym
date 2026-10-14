@@ -219,6 +219,54 @@ async def test_missing_borrowed_receipt_retains_state_and_retries_capture(sessio
     assert session.closed
 
 
+async def test_transport_error_survives_failed_cleanup_until_receipt_arrives(session, receipt_reader):
+    failure = OSError("transport failed")
+    session.sandbox.exec.side_effect = [failure, OK, OK, OK]
+    receipt_reader.side_effect = FileNotFoundError("no receipt yet")
+    collector = AsyncMock(return_value="recovered transcript")
+
+    with pytest.raises(OSError, match="transport failed") as error:
+        await execute(session, collect=collector)
+    assert error.value is failure
+    with pytest.raises(RuntimeError, match="launch outcome is unknown"):
+        await session.close(timeout=1)
+    assert not session.closed
+    assert session.cleanup is None
+    collector.assert_not_awaited()
+    session.sandbox.disconnect.assert_not_awaited()
+    session.sandbox.stop.assert_not_awaited()
+    assert all("rm -rf" not in call.args[0] for call in session.sandbox.exec.await_args_list)
+
+    receipt_reader.side_effect = None
+    await session.close(timeout=1)
+    assert session.closed
+    assert session.cleanup == RECEIPT
+    assert session.artifacts == "recovered transcript"
+    collector.assert_awaited_once()
+    session.sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "result", [SandboxExecResult("", "remove failed", 1), SandboxExecResult("", "timeout", 0, "timeout")]
+)
+async def test_directory_removal_failure_retains_borrowed_connection_for_retry(session, result):
+    collector = AsyncMock(return_value="saved transcript")
+    await execute(session, collect=collector)
+    session.sandbox.exec.side_effect = [result, OK]
+
+    with pytest.raises(RuntimeError, match="Could not remove test session files"):
+        await session.close(timeout=1)
+    assert not session.closed
+    session.sandbox.disconnect.assert_not_awaited()
+    session.sandbox.stop.assert_not_awaited()
+
+    await session.close(timeout=1)
+    assert session.closed
+    assert session.artifacts == "saved transcript"
+    collector.assert_awaited_once()
+    session.sandbox.disconnect.assert_awaited_once()
+
+
 @pytest.mark.parametrize("owned", [False, True])
 async def test_terminal_negative_receipt_skips_capture_but_releases_session(session, receipt_reader, owned):
     session.owns_sandbox = owned
