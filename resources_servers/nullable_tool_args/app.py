@@ -47,7 +47,9 @@ class NullableToolArgsVerifier:
         except json.JSONDecodeError:
             args = {}
         null_args = body.verifier_metadata["null_args"]
-        reward = float(bool(calls) and all(name in args and args[name] is None for name in null_args))
+        reward = float(
+            bool(calls) and isinstance(args, dict) and all(name in args and args[name] is None for name in null_args)
+        )
         return NullableToolArgsVerifyResponse(**body.model_dump(), reward=reward)
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:

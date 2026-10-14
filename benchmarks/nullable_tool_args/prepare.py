@@ -195,7 +195,9 @@ def make_task(rng: random.Random, position: str) -> dict:
     history = []
     if position == "mid":
         earlier = rng.choice(TOOLS)
-        if earlier[0] != spec[0]:
+        if earlier[0] == spec[0]:
+            earlier = spec
+        else:
             tools.append(make_tool(rng, earlier))
         prompt, arguments = make_request(rng, earlier)
         history = [
