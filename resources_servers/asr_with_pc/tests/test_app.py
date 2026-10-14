@@ -12,6 +12,7 @@ WER values against numeric expectations computed offline (jiwer 3.x).
 import base64
 import json
 from pathlib import Path
+from typing import Any, Dict
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,6 +26,8 @@ from resources_servers.asr_with_pc.app import (
     calculate_per,
     evaluate_asr,
     evaluate_asr_pc,
+    evaluate_bleu,
+    evaluate_exact_match,
     evaluate_hallucination,
     extract_punctuation,
     normalize_whitespace,
@@ -664,3 +667,162 @@ class TestMixedTaskTypeAggregation:
         # Reserved suffixes (c, pc) stay under their canonical headline names.
         assert key["wer_c"] == 9.0
         assert key["wer_pc"] == 14.0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AudioBench (BLEU + EXACT_MATCH + audiobench normalization)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestAudiobenchNormalization:
+    """preprocess_asr_text(mode='audiobench') folds digits into words.
+
+    AudioBench's text normalizer is more aggressive than Whisper's: standalone
+    digit tokens get spelled out (so "I bought 3 apples" matches "I bought
+    three apples").
+    """
+
+    def test_digits_get_spelled_out(self) -> None:
+        out = preprocess_asr_text("I bought 3 apples", mode="audiobench")
+        assert "three" in out
+        assert "3" not in out
+
+    def test_standard_mode_keeps_digits(self) -> None:
+        # whisper's EnglishTextNormalizer does some digit handling on its own
+        # (e.g., "twenty three" → "23"); the audiobench mode runs digits→words
+        # AFTER, so the final string has words. Standard mode should NOT.
+        out = preprocess_asr_text("twenty three", mode="standard")
+        assert "twenty" not in out  # whisper folded it to digits
+        assert "23" in out
+
+
+class TestEvaluateBleu:
+    """task_type=BLEU path: sentence-level sacrebleu, 0..1 fraction."""
+
+    def test_perfect_translation_high_bleu(self) -> None:
+        result = evaluate_bleu("the cat sat on the mat", "the cat sat on the mat")
+        assert result["bleu"] >= 0.99
+        assert result["is_correct"] is True
+
+    def test_completely_different_low_bleu(self) -> None:
+        result = evaluate_bleu("the cat sat on the mat", "totally unrelated content")
+        assert result["bleu"] < 0.5
+        assert result["is_correct"] is False
+
+    def test_empty_reference_zero(self) -> None:
+        result = evaluate_bleu("", "anything")
+        assert result["bleu"] == 0.0
+        assert result["is_correct"] is False
+
+
+class TestEvaluateExactMatch:
+    """task_type=EXACT_MATCH path: lowercased, punct-stripped, whitespace-collapsed."""
+
+    def test_exact(self) -> None:
+        assert evaluate_exact_match("42", "42")["is_correct"] is True
+
+    def test_case_insensitive(self) -> None:
+        assert evaluate_exact_match("Yes", "yes")["is_correct"] is True
+
+    def test_punct_stripped(self) -> None:
+        assert evaluate_exact_match("yes.", "Yes!")["is_correct"] is True
+
+    def test_mismatch(self) -> None:
+        assert evaluate_exact_match("42", "43")["is_correct"] is False
+
+    def test_empty_ref_never_correct(self) -> None:
+        # Empty reference should NEVER score as correct, even against an
+        # empty hypothesis — a row with no gold answer can't be validated.
+        assert evaluate_exact_match("", "")["is_correct"] is False
+
+
+class TestBleuExactMatchDispatch:
+    """task_type=BLEU / EXACT_MATCH route through the verify dispatch."""
+
+    async def test_bleu_dispatch_populates_bleu_field(self) -> None:
+        server = _make_server(task_type="BLEU")
+        body = _make_verify_request("the cat sat on the mat", "the cat sat on the mat")
+        result = await server.verify(body)
+        assert result.bleu is not None
+        assert result.bleu >= 0.99
+        assert result.is_correct is True
+        assert result.reward == 1.0
+
+    async def test_exact_match_dispatch(self) -> None:
+        server = _make_server(task_type="EXACT_MATCH")
+        body = _make_verify_request("Yes!", "yes")
+        result = await server.verify(body)
+        assert result.is_correct is True
+        assert result.reward == 1.0
+
+    async def test_exact_match_mismatch_zero_reward(self) -> None:
+        server = _make_server(task_type="EXACT_MATCH")
+        body = _make_verify_request("43", "42")
+        result = await server.verify(body)
+        assert result.is_correct is False
+        assert result.reward == 0.0
+
+    async def test_audiobench_normalization_in_request(self) -> None:
+        """task_type=ASR with normalization_mode='audiobench' folds digits."""
+        server = _make_server(task_type="ASR")
+        body = ASRWithPCVerifyRequest(
+            responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
+            response=_make_response("I bought 3 apples"),
+            expected_answer="I bought three apples",
+            normalization_mode="audiobench",
+        )
+        result = await server.verify(body)
+        # With audiobench normalization, digits→words should make these match.
+        assert result.wer == pytest.approx(0.0)
+        assert result.is_correct is True
+
+
+class TestAudiobenchMetrics:
+    """BLEU / EXACT_MATCH rows stay out of WER aggregates; subset_for_metrics adds per-subset metrics."""
+
+    async def _rollout(self, server: ASRWithPCResourcesServer, hyp: str, ref: str, **fields: Any) -> Dict[str, Any]:
+        body = _make_verify_request(hyp, ref).model_copy(update=fields)
+        return (await server.verify(body)).model_dump()
+
+    async def test_bleu_rows_report_corpus_bleu_not_wer(self) -> None:
+        server = _make_server(task_type="BLEU")
+        tasks = [
+            [await self._rollout(server, "the cat sat on the mat", "the cat sat on the mat")],
+            [await self._rollout(server, "a dog ran", "the bird flew away")],
+        ]
+        metrics = server.compute_metrics(tasks)
+        assert not any(name.startswith(("corpus_wer@", "wer_c@", "per@")) for name in metrics)
+        assert 0.0 < metrics["corpus_bleu@k=1"] < 100.0
+        assert metrics["pass@1[avg-of-1]/bleu"] == pytest.approx(50.0 * (tasks[0][0]["bleu"] + tasks[1][0]["bleu"]))
+        key = server.get_key_metrics(metrics)
+        assert key["bleu"] == metrics["corpus_bleu@k=1"]
+        assert "wer" not in key
+
+    async def test_mixed_rows_keep_wer_over_asr_rows_only(self) -> None:
+        server = _make_server(task_type="ASR")
+        asr_row = await self._rollout(server, "hello world", "hello world")
+        em_row = await self._rollout(server, "43", "42", task_type="EXACT_MATCH")
+        metrics = server.compute_metrics([[asr_row], [em_row]])
+        assert metrics["corpus_wer@k=1"] == pytest.approx(0.0)
+        assert metrics["pass@1[avg-of-1]/accuracy"] == pytest.approx(50.0)
+        assert "corpus_bleu@k=1" not in metrics
+
+    async def test_subset_for_metrics_breakdown(self) -> None:
+        server = _make_server(task_type="EXACT_MATCH")
+        tasks = [
+            [await self._rollout(server, "42", "42", subset_for_metrics="spoken_mqa_long_digit")],
+            [await self._rollout(server, "7", "8", subset_for_metrics="spoken_mqa_multi_step_reasoning")],
+        ]
+        metrics = server.compute_metrics(tasks)
+        assert metrics["spoken_mqa_long_digit/pass@1[avg-of-1]/accuracy"] == pytest.approx(100.0)
+        assert metrics["spoken_mqa_multi_step_reasoning/pass@1[avg-of-1]/accuracy"] == pytest.approx(0.0)
+
+
+async def test_verifier_fixture() -> None:
+    from nemo_gym.verifier_fixture import exercise_verifier_fixture
+    from resources_servers.asr_with_pc.app import VERIFIER_FIXTURE
+
+    results = await exercise_verifier_fixture(
+        VERIFIER_FIXTURE, reward_range=(0.0, 1.0), higher_is_better=True, determinism="stochastic"
+    )
+    assert {result.kind for result in results} == {"full_reward", "zero_reward", "malformed"}

@@ -34,6 +34,7 @@ overridden per row via the verify request body's ``task_type`` field.
 """
 
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 import numpy as np
@@ -45,7 +46,9 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.reward_profile import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
+from nemo_gym.verifier_fixture import VerifierFixture
+from resources_servers.asr_with_pc.verifier_fixture import create_server
 
 
 # Hallucination detection: chars/min above this rate signal repetition/hallucination.
@@ -69,13 +72,38 @@ def extract_punctuation(text: str) -> List[str]:
     return [c for c in text if not c.isalnum() and not c.isspace()]
 
 
-def preprocess_asr_text(text: str) -> str:
-    """Whisper text normalizer + lowercase + whitespace collapse."""
+# "audiobench" adds digits-to-words on top of the Whisper normalization ("standard").
+_NORMALIZATION_MODES = Literal["standard", "audiobench"]
+
+
+def preprocess_asr_text(text: str, *, mode: _NORMALIZATION_MODES = "standard") -> str:
+    """Whisper text normalizer + lowercase + whitespace collapse.
+
+    ``mode``:
+      * ``"standard"`` (default): Whisper EnglishTextNormalizer + lowercase +
+        whitespace collapse — what librispeech-pc / asr-leaderboard use.
+      * ``"audiobench"``: standard normalization plus digits→words on
+        residual numeric tokens. Mirrors AudioBench's normalization
+        (https://github.com/AudioLLMs/AudioBench/blob/main/src/utils/text_norm.py)
+        which is more aggressive on numeric tokens than Whisper's default.
+    """
     from whisper_normalizer.english import EnglishTextNormalizer
 
     text = text.lower()
     text = EnglishTextNormalizer()(text)
+    if mode == "audiobench":
+        text = _digits_to_words(text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _digits_to_words(text: str) -> str:
+    """Convert standalone digit tokens to their spelled-out form.
+
+    ``num2words`` is imported lazily so the standard normalization path doesn't pay the import cost.
+    """
+    from num2words import num2words
+
+    return re.sub(r"\b\d+\b", lambda match: num2words(int(match.group(0))), text)
 
 
 def calculate_per(reference: str, hypothesis: str) -> float:
@@ -156,16 +184,20 @@ def evaluate_asr_pc(reference: str, hypothesis: str) -> Dict[str, Any]:
     }
 
 
-def evaluate_asr(reference: str, hypothesis: str) -> Dict[str, Any]:
+def evaluate_asr(
+    reference: str, hypothesis: str, *, normalization_mode: _NORMALIZATION_MODES = "standard"
+) -> Dict[str, Any]:
     """Standard ASR WER (Whisper-normalized) — no PC scoring.
 
     Used by benchmarks that only score standard WER (e.g. asr-leaderboard).
     Empty references are dropped (HF Open ASR Leaderboard convention).
+    Pass ``normalization_mode="audiobench"`` to enable the more aggressive
+    AudioBench-style normalization (digits→words on top of Whisper).
     """
     import jiwer
 
-    ref = preprocess_asr_text(reference)
-    hyp = preprocess_asr_text(hypothesis)
+    ref = preprocess_asr_text(reference, mode=normalization_mode)
+    hyp = preprocess_asr_text(hypothesis, mode=normalization_mode)
     if not ref:
         return {
             "wer": None,
@@ -219,17 +251,64 @@ def _suffix_for_reference_field(field_name: str) -> str:
     return field_name[len("text_") :] if field_name.startswith("text_") else field_name
 
 
+def evaluate_bleu(reference: str, hypothesis: str) -> Dict[str, Any]:
+    """Sentence-level sacrebleu for translation tasks (CoVoST2 et al).
+
+    Returns the sentence BLEU as a 0-1 fraction (sacrebleu reports 0-100).
+    ``is_correct = bleu >= 0.5`` is a coarse per-row threshold; the headline
+    corpus-level BLEU is aggregated in ``compute_metrics`` over the raw
+    reference/hypothesis pairs.
+    """
+    from sacrebleu.metrics import BLEU
+
+    ref = (reference or "").strip()
+    hyp = (hypothesis or "").strip()
+    if not ref:
+        return {"bleu": 0.0, "is_correct": False, "text": "", "pred_text": hyp}
+    bleu = BLEU(effective_order=True)
+    score = bleu.sentence_score(hyp, [ref]).score / 100.0
+    return {
+        "bleu": score,
+        "is_correct": score >= 0.5,
+        "text": ref,
+        "pred_text": hyp,
+    }
+
+
+def evaluate_exact_match(reference: str, hypothesis: str) -> Dict[str, Any]:
+    """Lowercase + punctuation-strip + whitespace-collapse exact match.
+
+    Used by spoken-mqa benchmarks (arithmetic / multi-step reasoning). A
+    rollout is correct iff its normalized string equals the normalized
+    reference.
+    """
+    ref = re.sub(r"[^\w\s]", " ", (reference or "").lower())
+    hyp = re.sub(r"[^\w\s]", " ", (hypothesis or "").lower())
+    ref = normalize_whitespace(ref)
+    hyp = normalize_whitespace(hyp)
+    return {
+        "is_correct": ref != "" and ref == hyp,
+        "text": ref,
+        "pred_text": hyp,
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Pydantic schemas
 # ──────────────────────────────────────────────────────────────────────────────
 
-_TASK_TYPES = Literal["ASR-PC", "ASR", "Hallucination", "ASR_LEADERBOARD"]
+_TASK_TYPES = Literal["ASR-PC", "ASR", "Hallucination", "ASR_LEADERBOARD", "BLEU", "EXACT_MATCH"]
+# Task types scored without WER; their rollouts are left out of the WER aggregates in compute_metrics().
+_NON_WER_TASK_TYPES = ("BLEU", "EXACT_MATCH")
 
 
 class ASRWithPCConfig(BaseResourcesServerConfig):
     # Default scoring task type; can be overridden per-row via task_type on the
     # request.
     task_type: _TASK_TYPES = "ASR-PC"
+    # Default ASR normalization mode; "audiobench" enables digits-to-words on
+    # top of the Whisper standard. Applies only to ASR / ASR-PC / ASR_LEADERBOARD.
+    normalization_mode: _NORMALIZATION_MODES = "standard"
 
 
 class ASRWithPCVerifyRequest(BaseVerifyRequest):
@@ -241,6 +320,7 @@ class ASRWithPCVerifyRequest(BaseVerifyRequest):
     sample_id: Optional[str] = None
     split: Optional[str] = None
     task_type: Optional[_TASK_TYPES] = None
+    normalization_mode: Optional[_NORMALIZATION_MODES] = None
     audio_duration: Optional[float] = None
     reference_fields: Optional[List[str]] = None
 
@@ -264,6 +344,7 @@ class ASRWithPCVerifyResponse(BaseVerifyResponse):
     hyp_c: str = ""
     hallucination_rate: Optional[float] = None
     char_rate: Optional[float] = None
+    bleu: Optional[float] = None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -330,6 +411,7 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
 
         # Per-row override beats the server-level default.
         task_type = body.task_type or self.config.task_type
+        norm_mode = body.normalization_mode or self.config.normalization_mode
 
         # Extra fields ride alongside the canonical schema via
         # ``ConfigDict(extra="allow")`` and are populated only by the
@@ -339,14 +421,14 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         if task_type == "ASR-PC":
             scores = evaluate_asr_pc(reference, hypothesis)
         elif task_type == "ASR":
-            scores = _asr_to_response_scores(evaluate_asr(reference, hypothesis))
+            scores = _asr_to_response_scores(evaluate_asr(reference, hypothesis, normalization_mode=norm_mode))
         elif task_type == "ASR_LEADERBOARD":
-            scores = _asr_to_response_scores(evaluate_asr(reference, hypothesis))
+            scores = _asr_to_response_scores(evaluate_asr(reference, hypothesis, normalization_mode=norm_mode))
             request_fields = body.model_dump()
             for ref_field in body.reference_fields or []:
                 if ref_field not in request_fields:
                     raise ValueError(f"ASR_LEADERBOARD: reference_fields entry {ref_field!r} not found on request")
-                ref_metrics = evaluate_asr(request_fields[ref_field] or "", hypothesis)
+                ref_metrics = evaluate_asr(request_fields[ref_field] or "", hypothesis, normalization_mode=norm_mode)
                 suffix = _suffix_for_reference_field(ref_field)
                 extra_fields[f"wer_{suffix}"] = ref_metrics["wer"]
                 extra_fields[f"is_correct_{suffix}"] = ref_metrics["is_correct"]
@@ -359,9 +441,25 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
             )
             extra_fields["hallucination_rate"] = hall["hallucination_rate"]
             extra_fields["char_rate"] = hall["char_rate"]
+        elif task_type == "BLEU":
+            bleu = evaluate_bleu(reference, hypothesis)
+            scores = _empty_score_record(
+                is_correct=bool(bleu["is_correct"]),
+                text=bleu["text"],
+                pred_text=bleu["pred_text"],
+            )
+            extra_fields["bleu"] = bleu["bleu"]
+        elif task_type == "EXACT_MATCH":
+            em = evaluate_exact_match(reference, hypothesis)
+            scores = _empty_score_record(
+                is_correct=bool(em["is_correct"]),
+                text=em["text"],
+                pred_text=em["pred_text"],
+            )
         else:
             raise ValueError(
-                f"Unsupported task_type: {task_type!r}. Use one of: ASR-PC, ASR, Hallucination, ASR_LEADERBOARD."
+                f"Unsupported task_type: {task_type!r}. Use one of: ASR-PC, ASR, Hallucination, "
+                f"ASR_LEADERBOARD, BLEU, EXACT_MATCH."
             )
 
         return ASRWithPCVerifyResponse(
@@ -401,6 +499,8 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         }
         if r.get("hallucination_rate") is not None:
             scores["hallucination_rate"] = float(r["hallucination_rate"])
+        if r.get("bleu") is not None:
+            scores["bleu"] = float(r["bleu"])
         return scores
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
@@ -413,6 +513,7 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         the per-row ``text_<suffix>`` references.
         """
         import jiwer
+        from sacrebleu.metrics import BLEU
 
         metrics, _, _, max_k = compute_pass_majority_metrics(
             tasks,
@@ -437,6 +538,8 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         for k in range(1, max_k + 1):
             refs_std: List[str] = []
             hyps_std: List[str] = []
+            bleu_refs: List[str] = []
+            bleu_hyps: List[str] = []
             wer_c_scores: List[float] = []
             wer_pc_scores: List[float] = []
             per_scores: List[float] = []
@@ -445,6 +548,12 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
 
             for rollouts in tasks:
                 for r in rollouts[:k]:
+                    task_type = r.get("task_type") or self.config.task_type
+                    if task_type == "BLEU" and r.get("text"):
+                        bleu_refs.append(r["text"])
+                        bleu_hyps.append(r.get("pred_text") or "")
+                    if task_type in _NON_WER_TASK_TYPES:
+                        continue
                     refs_std.append(r.get("text", ""))
                     hyps_std.append(r.get("pred_text", ""))
                     if r.get("wer_c") is not None:
@@ -464,6 +573,8 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
                         ref_corpus[suffix].append(ref_norm)
                         hyp_corpus[suffix].append(hyp_norm)
 
+            if bleu_refs:
+                metrics[f"corpus_bleu@k={k}"] = BLEU().corpus_score(bleu_hyps, [bleu_refs]).score
             if not refs_std:
                 continue
 
@@ -477,6 +588,15 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
             for suffix in ref_suffixes:
                 if ref_corpus[suffix]:
                     metrics[f"wer_{suffix}@k={k}"] = 100.0 * jiwer.wer(ref_corpus[suffix], hyp_corpus[suffix])
+
+        # Per-sub-dataset breakdown via ``subset_for_metrics`` field. Used by the
+        # audiobench buckets where one rollout collection covers many
+        # sub-datasets (alpaca_audio_test vs gigaspeech_test vs ...) and the
+        # reviewer wants per-sub-dataset accuracy alongside the headline.
+        # Skipped when rows don't carry ``subset_for_metrics`` (e.g. librispeech_pc).
+        if any(t and t[0].get("subset_for_metrics") for t in tasks):
+            subset = compute_subset_metrics(tasks, subset_key="subset_for_metrics", score_fn=self._score_fn)
+            metrics.update(subset)
 
         return metrics
 
@@ -516,7 +636,19 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
                     continue
                 key[f"wer_{suffix}"] = agent_metrics[k_str_key]
 
+        # Corpus BLEU (BLEU task_type) at the highest k, exposed as ``bleu``.
+        bleu_ks = [int(name.split("=")[1]) for name in agent_metrics if name.startswith("corpus_bleu@k=")]
+        if bleu_ks:
+            key["bleu"] = agent_metrics[f"corpus_bleu@k={max(bleu_ks)}"]
+
         return key
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=create_server,
+    request_model=ASRWithPCVerifyRequest,
+    cases_path=Path(__file__).parent / "tests" / "verifier_cases.jsonl",
+)
 
 
 if __name__ == "__main__":
