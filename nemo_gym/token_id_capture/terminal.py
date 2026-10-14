@@ -91,8 +91,8 @@ class TerminalAttribution:
     """The joined terminal call, or the reasons no witness could name one."""
 
     model_call_id: str | None
-    # The strongest agreeing witness: "explicit", "response_id", "item_id",
-    # "content_cumulative", "content_output", or "" when unattributed.
+    # The first agreeing witness naming a uniquely identified serving, or
+    # the first token-equivalent witness if none does; "" when unattributed.
     method: str = ""
     # The abstention/disagreement trail, kept on success and failure alike,
     # plus corroboration notes when several witnesses agreed.
@@ -103,7 +103,8 @@ class TerminalAttribution:
     # at the output budget, a retry under a larger budget complete). When the
     # call was chosen among such twins by call-id order alone and their finish
     # reasons differ, the truncation verdict would depend on that order, so
-    # the consumer withholds it.
+    # the consumer withholds it. Witnesses that identify different servings
+    # must also agree on the finish reason before it can be reported.
     finish_reason_resolved: bool = True
 
     @property
@@ -191,18 +192,22 @@ def resolve_terminal(
         reasons.append(f"witness_disagreement[{detail}]")
         return TerminalAttribution(None, reason=",".join(reasons))
 
-    method, named = witnesses[0]
+    # Token-equivalent witnesses can name different servings. Prefer one a
+    # witness identified uniquely over a twin chosen only by call-id order.
+    # This preserves that serving's finish reason when an earlier witness
+    # matched several identical retries (for example a reused response id).
+    identified_witnesses = [(method, entry) for method, entry in witnesses if entry.model_call_id in identified]
+    method, named = (identified_witnesses or witnesses)[0]
     if len(witnesses) > 1:
-        reasons.append("corroborated_by=" + "+".join(other for other, _ in witnesses[1:]))
+        reasons.append("corroborated_by=" + "+".join(other for other, _ in witnesses if other != method))
     # Identical retries are one delivered chain but not necessarily one finish
-    # reason. The named call's reason settles the rebuilt response's status
-    # only when a witness singled that call out among its token-identical
-    # twins, or when the twins all recorded the same reason.
+    # reason. All uniquely identified servings must agree on the reason; one
+    # identifying witness cannot overrule another. Without such a witness,
+    # every token-identical twin must agree instead.
     identity = _sequence_identity(named)
     twins = [entry for entry in entries if _sequence_identity(entry) == identity]
-    finish_reason_resolved = named.model_call_id in identified or (
-        len({getattr(entry, "finish_reason", None) for entry in twins}) == 1
-    )
+    reason_candidates = [entry for _, entry in identified_witnesses] or twins
+    finish_reason_resolved = len({getattr(entry, "finish_reason", None) for entry in reason_candidates}) == 1
     if not finish_reason_resolved:
         reasons.append(FINISH_REASON_DISAGREEMENT_REASON)
     # The trail is kept even on success: a witness that abstained (e.g. a

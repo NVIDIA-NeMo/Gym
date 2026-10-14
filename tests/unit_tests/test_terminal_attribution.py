@@ -307,6 +307,65 @@ def test_a_witness_that_singles_out_one_twin_settles_its_finish_reason(witness):
     assert att.finish_reason_resolved and "finish_reason_disagreement" not in att.reason
 
 
+@pytest.mark.parametrize("witness", ["explicit", "declared", "response_id"])
+@pytest.mark.parametrize("other_reason", ["stop", "content_filter", None])
+def test_token_identical_witnesses_must_agree_on_the_servings_finish_reason(witness, other_reason):
+    entries = [
+        _entry("call_a", [1, 2], [3, 4], text="same", response_id="resp_a", finish_reason="length"),
+        _entry("call_b", [1, 2], [3, 4], text="same", response_id="resp_b", finish_reason=other_reason),
+    ]
+    entries[1].output_items[0]["id"] = "msg_b"
+    response = _response([_assistant_item("same", item_id="msg_b")], response_id="resp_b")
+    explicit = "call_a" if witness == "explicit" else None
+    declared = "resp_a" if witness == "declared" else None
+    if witness == "response_id":
+        response["id"] = "resp_a"
+
+    att = resolve_terminal(entries, response, explicit, declared_response_id=declared)
+    # The witnesses agree on tokens, but each identifies a different serving. Neither serving's
+    # finish reason is corroborated, even though the token chain is safe to deliver.
+    assert att.attributed and not att.finish_reason_resolved
+    assert "finish_reason_disagreement" in att.reason
+    built = _assemble(
+        "r",
+        entries,
+        "prefix_merging",
+        "m",
+        verified_response=response,
+        explicit_terminal_call_id=explicit,
+        declared_response_id=declared,
+    )
+    assert built[MASK_SAMPLE_KEY] is False
+    assert "status" not in built["rebuilt_response"]
+    assert "incomplete_details" not in built["rebuilt_response"]
+
+
+@pytest.mark.parametrize("witness", ["response_id", "declared"])
+@pytest.mark.parametrize("kept_call", ["call_a", "call_b"])
+def test_unique_item_id_settles_the_serving_when_an_envelope_id_matches_both_twins(witness, kept_call):
+    entries = [
+        _entry(
+            call_id,
+            [1, 2],
+            [3, 4],
+            text="same",
+            response_id="shared",
+            finish_reason="length" if call_id == kept_call else "stop",
+        )
+        for call_id in ("call_a", "call_b")
+    ]
+    for entry in entries:
+        entry.output_items[0]["id"] = "msg_" + entry.model_call_id
+    response = _response([_assistant_item("same", item_id="msg_" + kept_call)])
+    if witness == "response_id":
+        response["id"] = "shared"
+    declared = "shared" if witness == "declared" else None
+    built = _assemble("r", entries, "prefix_merging", "m", verified_response=response, declared_response_id=declared)
+    assert built[MASK_SAMPLE_KEY] is False
+    assert built["rebuilt_response"].get("incomplete_details") == {"reason": "max_output_tokens"}
+    assert built["metrics"]["terminal_attribution"]["call_id"] == kept_call
+
+
 def test_divergent_final_retries_resolve_by_id_and_abstain_on_content():
     # Same prompt, different generations: content cannot say which was kept,
     # but possession of the served id can.
@@ -769,6 +828,29 @@ def test_finalize_keeps_a_harness_verdict_that_is_already_a_failure(tmp_path):
         [3, 4],
         [7, 8],
     ]
+
+
+def test_finalize_withholds_a_cutoff_when_identified_servings_disagree(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    entries = [
+        _entry("call_a", [1, 2], [3, 4], text="same", response_id="resp_a", finish_reason="length"),
+        _entry("call_b", [1, 2], [3, 4], text="same", response_id="resp_b", finish_reason="stop"),
+    ]
+    response = _response([_assistant_item("same")], response_id="resp_b")
+    response["status"] = "completed"
+    result = {"_ng_rollout_id": "r", TERMINAL_CALL_KEY: "call_a", "response": response, "reward": 1.0}
+
+    async def go():
+        for entry in entries:
+            await store.put(entry)
+        return await finalize_rollout_token_capture(result, store)
+
+    built = asyncio.run(go())
+    assert built[MASK_SAMPLE_KEY] is False
+    assert result["response"]["status"] == "completed"
+    assert "incomplete_details" not in result["response"]
+    assert result["response"]["output"][0]["generation_token_ids"] == [3, 4]
+    assert result["reward"] == 1.0
 
 
 def test_finalize_honors_an_explicit_terminal_key(tmp_path):
