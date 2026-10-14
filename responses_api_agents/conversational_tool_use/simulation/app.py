@@ -109,7 +109,6 @@ class ConversationalToolUseResult(BaseModel):
 class ConversationalToolUseAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
-    instance_config: Dict[str, Any] = Field(default_factory=lambda: {"mask_sample": False})
     result: Optional[ConversationalToolUseResult] = None
 
     @model_validator(mode="after")
@@ -792,7 +791,7 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
                 "error_class": TRANSIENT_FAILURE_CLASS,
                 "error_stage": stage,
                 NG_FAILURE_CLASS_KEY: TRANSIENT_FAILURE_CLASS,
-                "instance_config": {"mask_sample": True},
+                "mask_sample": True,
             }
         )
         return ConversationalToolUseAgentVerifyResponse.model_validate(payload)
