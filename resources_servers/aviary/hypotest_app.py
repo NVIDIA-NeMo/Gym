@@ -25,7 +25,6 @@ class HypotestServerConfig(AviaryResourcesServerConfig):
 
 
 class HypotestResourcesServer(AviaryResourcesServer[InterpreterEnv, HypotestDataset]):
-    ray_enabled = False
     config: HypotestServerConfig
     dataset: HypotestDataset
 

@@ -65,7 +65,6 @@ def message_only_payload(prompt: str) -> dict[str, Any]:
 
 
 class PolicyToolGenerationAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: PolicyToolGenerationAgentConfig
 
     async def responses(
