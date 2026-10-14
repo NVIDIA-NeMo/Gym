@@ -18,27 +18,44 @@ import fnmatch
 import json
 import logging
 import math
+import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from nemo_gym import component_search_roots
+from nemo_gym import _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.tasks.harbor.digest import DIGEST_KEY
 from nemo_gym.tasks.harbor.hub import HubError, datasets_dir, fetch_ref, is_hub_ref
+from nemo_gym.tasks.harbor.image_build import (
+    BUILD_TOOLS,
+    REPOSITORY_ENV,
+    BuildError,
+    ImageBuilder,
+    build_images,
+    plan_builds,
+)
 from nemo_gym.tasks.harbor.image_configs import record_base_images, record_compose_images
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
-from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError, discover_tasks, is_task_folder
+from nemo_gym.tasks.harbor.task import (
+    HarborTask,
+    HarborTaskError,
+    discover_tasks,
+    is_task_folder,
+    read_built_images,
+)
 
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_ROOT = Path("results/harbor")
+IMAGES_FILE = "images.json"
 ENVIRONMENT_SERVER_CONFIG = "environment_servers/harbor/configs/harbor.yaml"
 ORACLE_AGENT = "oracle_agent"
 # Harnesses that call the Gym model server from inside the task sandbox, where 127.0.0.1 is the container
@@ -73,6 +90,116 @@ AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
 }
 
 
+# The top-level configuration block that sets Dockerfile builds up, and the settings it takes.
+BUILDS_KEY = "builds"
+BUILD_SETTINGS = ("tool", "repository", "platform", "enabled")
+HYDRA_QUIET_OVERRIDES = (
+    "hydra.run.dir=.",
+    "hydra.output_subdir=null",
+    "hydra/job_logging=none",
+    "hydra/hydra_logging=none",
+)
+
+
+@dataclass(frozen=True)
+class BuildOptions:
+    """How prepare treats Dockerfiles outside pull and overlay mode: the ``builds:`` configuration block.
+
+    ``tool`` builds them (buildah, podman or docker; default: the first one on PATH that fits, see
+    :func:`nemo_gym.tasks.harbor.image_build.detect_tool`). ``repository`` is the registry path built
+    images are pushed under (default: the ``NEMO_GYM_BUILD_REPOSITORY`` variable; unset keeps them local
+    in the Docker daemon). ``platform`` is passed to the tool (default ``linux/amd64``). With ``enabled``
+    false nothing is built, and the tasks that need a build are skipped with the loader's message.
+    """
+
+    enabled: bool = True
+    tool: str | None = None
+    repository: str | None = None
+    platform: str | None = None
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any] | None) -> "BuildOptions":
+        """The ``builds:`` block of a merged configuration dict, applied over the defaults.
+
+        ``config`` is the merged global configuration (``env.yaml``, ``--config`` files and
+        ``++builds.<setting>=<value>`` overrides) or any dict shaped like it; a missing block keeps
+        every default. Unknown settings and values of the wrong type are refused.
+        """
+        block = (config or {}).get(BUILDS_KEY)
+        if block is None:
+            block = {}
+        if not isinstance(block, Mapping):
+            raise ValueError(f"`{BUILDS_KEY}` must be a mapping of {', '.join(BUILD_SETTINGS)}; got {block!r}")
+        unknown = sorted(set(block) - set(BUILD_SETTINGS))
+        if unknown:
+            raise ValueError(
+                f"Unknown `{BUILDS_KEY}` setting(s) {', '.join(unknown)}; expected {', '.join(BUILD_SETTINGS)}"
+            )
+        enabled = block.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError(f"`{BUILDS_KEY}.enabled` must be true or false; got {enabled!r}")
+        tool = _build_setting(block, "tool")
+        if tool is not None and tool not in BUILD_TOOLS:
+            raise ValueError(f"`{BUILDS_KEY}.tool` must be one of {', '.join(BUILD_TOOLS)}; got {tool!r}")
+        return cls(
+            enabled=enabled,
+            tool=tool,
+            repository=_build_setting(block, "repository") or os.environ.get(REPOSITORY_ENV) or None,
+            platform=_build_setting(block, "platform"),
+        )
+
+
+def _build_setting(block: Mapping[str, Any], name: str) -> str | None:
+    value = block.get(name)
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"`{BUILDS_KEY}.{name}` must be a string; got {value!r}")
+    return value
+
+
+def build_options_from_overrides(overrides: list[str]) -> BuildOptions:
+    """Read the ``builds:`` block from the configuration the command line names, before the run config exists.
+
+    Preparation builds images before the run config can be written, so the global configuration is not
+    composed yet. This merges the sources the user controls, in the global config's order (the files
+    the ``+config_paths`` tokens name, from ``--config`` and the asset selectors, then ``env.yaml``, then
+    the ``+``/``++`` overrides), and reads the block from the result. The full global config is still
+    parsed once, at dispatch, with the run config added.
+    """
+    from omegaconf import OmegaConf
+    from omegaconf.errors import InterpolationResolutionError
+
+    from nemo_gym.global_config import (
+        CONFIG_PATHS_KEY_NAME,
+        GlobalConfigDictParser,
+        _load_config_yaml,
+        translate_interpolation_error,
+    )
+
+    parser = GlobalConfigDictParser()
+    saved_argv = sys.argv
+    # A side-effect-free Hydra parse: no outputs/<date>/<time> run folder and no logging reconfiguration,
+    # which the one parse at dispatch keeps as its own.
+    sys.argv = [saved_argv[0], *overrides, *HYDRA_QUIET_OVERRIDES]
+    try:
+        cli = parser.parse_global_config_dict_from_cli()
+    finally:
+        sys.argv = saved_argv
+    OmegaConf.set_struct(cli, False)
+    dotenv_path = _resolve_under_cwd_or_install("env.yaml")
+    dotenv = _load_config_yaml(dotenv_path) if dotenv_path.exists() else OmegaConf.create({})
+    config_paths = OmegaConf.merge(dotenv, cli).get(CONFIG_PATHS_KEY_NAME) or []
+    _, extra_configs = parser.load_extra_config_paths([str(path) for path in config_paths])
+    merged = OmegaConf.merge(*extra_configs, dotenv, cli)
+    block = merged.get(BUILDS_KEY)
+    try:
+        resolved = OmegaConf.to_container(block, resolve=True) if block is not None else None
+    except InterpolationResolutionError as exc:
+        raise translate_interpolation_error(exc) from exc
+    return BuildOptions.from_config({BUILDS_KEY: resolved})
+
+
 @dataclass(frozen=True)
 class PreparedTaskset:
     taskset: str
@@ -81,6 +208,8 @@ class PreparedTaskset:
     rows_path: Path
     output_dir: Path
     skipped: dict[str, str] = field(default_factory=dict)
+    # Every distinct image the prepared tasks start from, for pre-pulling.
+    images: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -105,6 +234,7 @@ def prepare_target(
     refresh_registry: bool = False,
     exclude: list[str] | None = None,
     only: list[str] | None = None,
+    build: BuildOptions | None = None,
 ) -> PreparedTaskset:
     """Fetch (for hub references) and load the tasks, then write the rows file.
 
@@ -112,8 +242,12 @@ def prepare_target(
     ``PreparedTaskset.skipped``) so the rest of the dataset still prepares.
 
     Tasks matching an ``exclude`` glob, or not matching an ``only`` glob, are left out of the
-    rows and listed on stdout.
+    rows and listed on stdout. Dockerfiles outside pull and overlay mode are built once and
+    recorded before the tasks load, as ``build`` (the ``builds:`` configuration block) says; the
+    default builds locally with docker, and pushes with the first tool on PATH when a repository
+    is named.
     """
+    build = build or BuildOptions()
     if is_hub_ref(target):
         folder = fetch_ref(target, refresh_registry=refresh_registry)
         print(f"Fetched {target} into {folder}")
@@ -135,6 +269,8 @@ def prepare_target(
     )
     if images is not None:
         print(f"Base image configurations recorded in {images}")
+    if folder.is_dir():
+        _build_dockerfiles(folder, build, select=None if is_task_folder(folder) else selected)
     output_dir = Path(output_root) / taskset
     output_dir.mkdir(parents=True, exist_ok=True)
     errors: dict[str, HarborTaskError] = {}
@@ -162,6 +298,13 @@ def prepare_target(
     write_rows(tasks, taskset, rows_path)
     skipped_note = f", skipped {len(errors)}" if errors else ""
     print(f"Materialized {len(tasks)} task(s) from {folder} into {rows_path}{skipped_note}")
+    distinct = tuple(sorted({task.image for task in tasks if task.image}))
+    # Every distinct image, for pre-pulling onto the sandbox hosts before a run.
+    (output_dir / IMAGES_FILE).write_text(json.dumps(list(distinct), indent=2) + "\n")
+    if distinct:
+        print(f"Images: {len(distinct)} distinct, listed in {output_dir / IMAGES_FILE}")
+        for image in distinct:
+            print(f"  {image}")
     return PreparedTaskset(
         taskset=taskset,
         folder=folder,
@@ -169,6 +312,40 @@ def prepare_target(
         rows_path=rows_path,
         output_dir=output_dir,
         skipped={task_id: str(error) for task_id, error in errors.items()},
+        images=distinct,
+    )
+
+
+def _build_dockerfiles(folder: Path, build: BuildOptions, *, select) -> None:
+    """Build and record the images of the selected tasks whose Dockerfile needs a build.
+
+    With builds disabled, the tasks that need one are left for the loader to skip with its
+    message. A missing builder or a failed build stops the preparation, naming the tasks.
+    """
+    plan = plan_builds(folder, select=select)
+    if not plan:
+        return
+    names = ", ".join(task for entry in plan for task in entry.tasks[:3])
+    if not build.enabled:
+        parent = folder.parent if is_task_folder(folder) else folder
+        recorded = read_built_images(parent)
+        unbuilt = [task for entry in plan if entry.digest not in recorded for task in entry.tasks[:3]]
+        if unbuilt:
+            print(
+                f"Skipping Dockerfile builds ({BUILDS_KEY}.enabled is false); tasks that need one are left out: "
+                + ", ".join(unbuilt)
+            )
+        return
+    try:
+        builder = ImageBuilder(tool=build.tool, repository=build.repository, platform=build.platform)
+        results = build_images(folder, builder=builder, select=select)
+    except BuildError as exc:
+        raise ValueError(f"Could not build the Dockerfile image(s) for task(s) {names}: {exc}") from exc
+    if not results:
+        return
+    pushed = sum(1 for result in results if result.pushed)
+    print(
+        f"Built {len(results)} image(s) with {results[0].tool}" + (f", pushed {pushed}" if pushed else ", kept local")
     )
 
 
@@ -330,12 +507,15 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
     except (ValueError, OSError, yaml.YAMLError) as exc:
         args._parser.error(str(exc))
     try:
+        # The `builds:` block comes from the configuration the command names; the run config does not exist yet.
+        build = build_options_from_overrides(overrides)
         prepared = prepare_target(
             args.target,
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
+            build=build,
         )
-    except (HarborTaskError, HubError, ValueError, OSError) as exc:
+    except (HarborTaskError, HubError, BuildError, ConfigError, ValueError, OSError) as exc:
         args._parser.error(str(exc))
     if prepared.skipped and not getattr(args, "skip_unloadable", False):
         args._parser.error(
@@ -371,8 +551,9 @@ def validate_target(args: argparse.Namespace, overrides: list[str]) -> None:
             output_root=DEFAULT_OUTPUT_ROOT / "validation",
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
+            build=build_options_from_overrides(overrides),
         )
-    except (HarborTaskError, HubError, ValueError, OSError, yaml.YAMLError) as exc:
+    except (HarborTaskError, HubError, BuildError, ConfigError, ValueError, OSError, yaml.YAMLError) as exc:
         args._parser.error(str(exc))
     unvalidated = [task.task_id for task in prepared.tasks if not task.has_solution]
     prepared = replace(prepared, tasks=[task for task in prepared.tasks if task.has_solution])

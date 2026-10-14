@@ -166,6 +166,9 @@ class SandboxSpec:
     sidecars: tuple[SandboxSidecarSpec, ...] | list[SandboxSidecarSpec | Mapping[str, Any]] = field(
         default_factory=tuple
     )
+    # The user commands run as when an exec names none (a Dockerfile's final ``USER``). Providers that
+    # cannot set a container default apply it per exec through the sandbox facade.
+    user: str | int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.resources, SandboxResources):
