@@ -303,6 +303,11 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(monkeypatc
 
     assert isinstance(control_transport, GymAiohttpTransport)
     assert isinstance(envd_transport, GymAiohttpTransport)
+    # Keywords newer SDKs pass, e.g. the envd health probe's retry_connect=False.
+    newer_sdk_transport = client_async_module.get_transport(
+        config, http_version="1.1", for_streaming=True, retry_connect=False
+    )
+    assert isinstance(newer_sdk_transport, GymAiohttpTransport)
     proxy = httpx.Proxy("http://proxy.example:8080", auth=("user", "password"))
     assert client_async_module.get_transport(types.SimpleNamespace(proxy=proxy)).proxy is proxy
     assert str(client_async_module.get_transport(types.SimpleNamespace(proxy="http://proxy.example")).proxy.url) == (
