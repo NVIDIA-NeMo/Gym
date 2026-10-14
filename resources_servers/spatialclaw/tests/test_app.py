@@ -94,6 +94,7 @@ async def test_verify_uses_native_per_sample_scorer() -> None:
     assert verified.native_score == 1.0
     assert verified.extracted_answer == "A"
     assert verified.scored is True
+    assert verified.evaluation_completed is True
 
 
 def test_compute_metrics_uses_native_subset_and_restores_dataset() -> None:
@@ -108,3 +109,19 @@ def test_compute_metrics_uses_native_subset_and_restores_dataset() -> None:
     assert metrics["spatialclaw/num_evaluated_tasks"] == 1
     assert server._benchmark_instance.data is original_data
     assert server._benchmark_instance.data == [first, second]
+
+
+def test_masked_infrastructure_failure_is_not_a_native_wrong_answer() -> None:
+    server, first, second = _server()
+    metrics = server.compute_metrics(
+        [
+            [{"sample_id": "one", "prediction": "A", "extracted_answer": "A", "native_score": 1.0, "reward": 1.0}],
+            [{"sample_id": "two", "prediction": "", "reward": 0.0, "mask_sample": True}],
+        ]
+    )
+    assert metrics["spatialclaw/overall_accuracy"] == 1.0
+    assert metrics["spatialclaw/num_evaluated_tasks"] == 1
+    assert server._benchmark_instance.data == [first, second]
+    empty = server.compute_metrics([[{"sample_id": "two", "mask_sample": True, "reward": 0.0}]])
+    assert empty["spatialclaw/num_evaluated_tasks"] == 0
+    assert "spatialclaw/overall_accuracy" not in empty

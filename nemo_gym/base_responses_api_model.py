@@ -1816,7 +1816,11 @@ class _CaptureMiddleware:
                     defer_response = terminal is not None
                     if terminal is not None:
                         state["stream_terminal"] = terminal
-                if defer_response or not message.get("more_body", False):
+                # A JSON response may arrive as a body chunk followed by an empty
+                # ASGI terminal chunk (for example through BaseHTTPMiddleware).
+                # Content-Length lets an HTTP client finish after the first chunk;
+                # defer every non-SSE body until its capture is durable.
+                if not state["streaming"] or defer_response or not message.get("more_body", False):
                     deferred_response_messages.append(dict(message))
                     return
             await send(message)  # forward unchanged -> streaming is preserved

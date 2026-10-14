@@ -47,15 +47,14 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
-    NeMoGymResponseOutputTokensDetails,
-    NeMoGymResponseUsage,
 )
+from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from nemo_gym.server_utils import request as http_request
 from responses_api_agents.spatialclaw_agent.kernel_transport import _kernel_transport_loop
+from responses_api_agents.spatialclaw_agent.observability import read_observations, response_usage
 
 
 SPATIALCLAW_URL = "ssh://git@gitlab-master.nvidia.com:12051/ehosseiniasl/spatial_claw.git"
@@ -89,6 +88,8 @@ class SpatialClawAgentRunRequest(BaseRunRequest):
 
 
 class SpatialClawAgentVerifyResponse(BaseVerifyResponse):
+    ng_agent_observations: AgentObservationBundle | None = None
+    evaluation_completed: bool = False
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     termination_reason: str | None = None
@@ -344,9 +345,10 @@ def _extract_video_frames_locked(
 
 
 class _AiohttpChatCompletions:
-    def __init__(self, endpoint: str):
+    def __init__(self, endpoint: str, journal: str | None = None, cookies: dict | None = None):
         self.endpoint = endpoint.rstrip("/")
-        self.cookies = None
+        self.cookies = cookies
+        self.journal = journal
 
     async def create(self, **kwargs: Any) -> NeMoGymChatCompletion:
         payload = dict(kwargs)
@@ -370,18 +372,33 @@ class _AiohttpChatCompletions:
             method="POST",
             url=f"{self.endpoint}/chat/completions",
             json=payload,
-            headers={"Authorization": "Bearer gym"},  # pragma: allowlist secret
+            headers={
+                "Authorization": "Bearer gym",
+                **({"x-session-id": Path(self.journal).parent.name} if self.journal else {}),
+            },  # pragma: allowlist secret
             cookies=self.cookies,
         )
         await raise_for_status(response)
         self.cookies = response.cookies
-        return NeMoGymChatCompletion.model_validate(await get_response_json(response))
+        result = NeMoGymChatCompletion.model_validate(await get_response_json(response))
+        if self.journal:
+            # The client is serialized into Jupyter kernels. A file retains observations
+            # across those processes; no in-memory accumulator can do that reliably.
+            with _checkout_lock(Path(f"{self.journal}.lock")):
+                with Path(self.journal).open("a", encoding="utf-8") as stream:
+                    stream.write(
+                        json.dumps(
+                            {"response_id": result.id, "usage": result.usage.model_dump() if result.usage else None}
+                        )
+                        + "\n"
+                    )
+        return result
 
 
 class _AiohttpOpenAIClient:
-    def __init__(self, endpoint: str):
+    def __init__(self, endpoint: str, journal: str | None = None, cookies: dict | None = None):
         self.chat = type("Chat", (), {})()
-        self.chat.completions = _AiohttpChatCompletions(endpoint)
+        self.chat.completions = _AiohttpChatCompletions(endpoint, journal, cookies)
 
     async def close(self) -> None:
         return None
@@ -390,7 +407,7 @@ class _AiohttpOpenAIClient:
 def _gym_get_client(llm_client: Any, endpoint: str) -> _AiohttpOpenAIClient:
     client = llm_client._client_pool.get(endpoint)
     if client is None:
-        client = _AiohttpOpenAIClient(endpoint)
+        client = _AiohttpOpenAIClient(endpoint, llm_client._gym_journal, llm_client._gym_cookies)
         llm_client._client_pool[endpoint] = client
     return client
 
@@ -399,8 +416,10 @@ async def _gym_noop_rediscover(_llm_client: Any) -> None:
     return None
 
 
-def _install_gym_llm_transport(llm_client: Any) -> None:
+def _install_gym_llm_transport(llm_client: Any, *, journal: Path | None = None, cookies: dict | None = None) -> None:
     """Keep SpatialClaw semantics while replacing its httpx OpenAI transport."""
+    llm_client._gym_journal = str(journal) if journal else None
+    llm_client._gym_cookies = dict(cookies or {})
     llm_client._client_pool.clear()
     llm_client._is_vllm = True
     llm_client._get_client = MethodType(_gym_get_client, llm_client)
@@ -466,18 +485,21 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
         _configure_gpu_registry(root, self.config.gpu_server_registry)
         return root
 
-    def _model_base_url(self) -> str:
+    def _model_base_url(self, request: Request | None = None) -> str:
         model_server_config = get_first_server_config_dict(
             self.server_client.global_config_dict,
             self.config.model_server.name,
         )
-        return f"{self.server_client._build_server_base_url(model_server_config)}/v1"
+        return self.server_client._build_server_base_url(model_server_config) + self.url_path_for_request(
+            "/v1", request
+        )
 
     def _build_spatialclaw_config(
         self,
         root: Path,
         session_dir: Path,
         body: NeMoGymResponseCreateParamsNonStreaming,
+        request: Request | None = None,
     ) -> Any:
         from spatial_agent.config import SpatialAgentConfig
 
@@ -494,7 +516,7 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
                 raise ValueError(f"Unknown SpatialClaw config override: {name}")
             setattr(spatial_config, name, value)
 
-        spatial_config.llm_base_url = self._model_base_url()
+        spatial_config.llm_base_url = self._model_base_url(request)
         spatial_config.llm_model = self.config.model_name or self.config.model_server.name
         spatial_config.llm_api_key = "gym"  # pragma: allowlist secret
         spatial_config.work_dir = str(session_dir)
@@ -668,15 +690,19 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
             session_dir = Path(self.config.workspace_root).expanduser().resolve() / session_id
             session_dir.mkdir(parents=True, exist_ok=False)
             workflow = None
+            result = {}
+            failure = None
+            started_at = time()
+            journal = session_dir / "gym-model-responses.jsonl"
             try:
-                spatial_config = self._build_spatialclaw_config(root, session_dir, body)
+                spatial_config = self._build_spatialclaw_config(root, session_dir, body, request)
                 instruction, images, metadata = await self._materialize_inputs(body, session_dir, spatial_config)
                 from spatial_agent.config import set_config
                 from spatial_agent.workflow import SpatialAgentWorkflow
 
                 set_config(spatial_config)
                 workflow = SpatialAgentWorkflow(spatial_config)
-                _install_gym_llm_transport(workflow.llm_client)
+                _install_gym_llm_transport(workflow.llm_client, journal=journal, cookies=request.cookies)
                 try:
                     result = await asyncio.wait_for(
                         workflow.arun(
@@ -702,35 +728,36 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
                         timeout=self.config.timeout,
                     )
                 except asyncio.TimeoutError:
-                    result = {
-                        "final_answer": {"text": ""},
-                        "termination_reason": "timeout",
-                        "step_count": 0,
-                        "total_tool_calls": 0,
-                        "usage": {},
+                    failure = {
+                        "failure_kind": "agent_timeout",
+                        "failure_reason": f"SpatialClaw exceeded {self.config.timeout}s",
                     }
-            except Exception:
+                    result = {"termination_reason": "timeout"}
+            except Exception as exc:
                 error_traceback = traceback.format_exc()
                 print(
                     f"[spatialclaw_agent] session {session_id} failed:\n{error_traceback}", file=sys.stderr, flush=True
                 )
-                try:
-                    (session_dir / "error.traceback.txt").write_text(error_traceback, encoding="utf-8")
-                except OSError:
-                    pass
-                raise
+                (session_dir / "error.traceback.txt").write_text(error_traceback, encoding="utf-8")
+                failure = {"failure_kind": "agent_run_error", "failure_reason": f"{type(exc).__name__}: {exc}"}
+                result = {"termination_reason": "error"}
             finally:
                 if workflow is not None:
                     await _shutdown_workflow(workflow)
+                observations = read_observations(
+                    session_dir,
+                    session_id,
+                    model_ref=self.config.model_server,
+                    result=result,
+                    failure=failure,
+                    duration_ms=(time() - started_at) * 1000,
+                )
+                usage = response_usage(journal)
                 if not self.config.keep_workspaces:
                     shutil.rmtree(session_dir, ignore_errors=True)
 
             final = result.get("final_answer") or {}
             final_answer = str(final.get("text", "") if isinstance(final, Mapping) else final)
-            usage = result.get("usage") or {}
-            input_tokens = int(usage.get("total_prompt_tokens", 0) or 0)
-            output_tokens = int(usage.get("total_completion_tokens", 0) or 0)
-            reasoning_tokens = int(usage.get("total_reasoning_tokens", 0) or 0)
             response = NeMoGymResponse(
                 id=f"spatialclaw-{session_id}",
                 created_at=int(time()),
@@ -750,14 +777,11 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
                     "spatialclaw_turns": str(result.get("step_count", 0) or 0),
                     "spatialclaw_tool_calls": str(result.get("total_tool_calls", 0) or 0),
                 },
-                usage=NeMoGymResponseUsage(
-                    input_tokens=input_tokens,
-                    input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
-                    output_tokens=output_tokens,
-                    output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
-                    total_tokens=input_tokens + output_tokens,
-                ),
+                usage=usage,
             )
+            response = response.model_copy(update={"_ng_agent_observations": observations.model_dump(mode="json")})
+            if failure:
+                response = response.model_copy(update={"_ng_agent_failure": failure})
             return response
 
     async def run(
@@ -779,25 +803,52 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
         response_params.metadata = dict(response_params.metadata or {}) | {"spatialclaw_session_id": uuid4().hex}
         agent_response = await self.server_client.post(
             server_name=self.config.name,
-            url_path="/v1/responses",
+            url_path=self.url_path_for_run("/v1/responses", body),
             json=response_params,
             cookies=cookies,
         )
         await raise_for_status(agent_response)
         agent_json = await get_response_json(agent_response)
+        observations = agent_json.pop("_ng_agent_observations", None)
+        failure = agent_json.pop("_ng_agent_failure", None)
+        if failure:
+            return SpatialClawAgentVerifyResponse.model_validate(
+                body.model_dump()
+                | {
+                    "response": agent_json,
+                    "reward": 0.0,
+                    "mask_sample": True,
+                    "ng_agent_observations": observations,
+                    **failure,
+                }
+            )
 
-        verify = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=body.model_dump() | {"response": agent_json},
-            cookies=cookies,
-        )
-        await raise_for_status(verify)
-        verify_json = await get_response_json(verify)
+        try:
+            verify = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=body.model_dump() | {"response": agent_json},
+                cookies=cookies,
+            )
+            await raise_for_status(verify)
+            verify_json = await get_response_json(verify)
+        except Exception as exc:
+            return SpatialClawAgentVerifyResponse.model_validate(
+                body.model_dump()
+                | {
+                    "response": agent_json,
+                    "reward": 0.0,
+                    "mask_sample": True,
+                    "failure_kind": "verifier_error",
+                    "failure_reason": f"{type(exc).__name__}: {exc}",
+                    "ng_agent_observations": observations,
+                }
+            )
         metadata = agent_json.get("metadata") or {}
         return SpatialClawAgentVerifyResponse.model_validate(
             verify_json
             | {
+                "ng_agent_observations": observations,
                 "turns_used": int(metadata.get("spatialclaw_turns", 0) or 0),
                 "termination_reason": metadata.get("spatialclaw_termination_reason"),
             }

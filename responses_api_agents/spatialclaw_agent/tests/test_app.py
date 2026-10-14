@@ -293,7 +293,9 @@ async def test_responses_runs_spatialclaw_and_returns_gym_response(monkeypatch, 
     response = await agent.responses(MagicMock(), body)
     assert response.output_text == "B"
     assert response.metadata["spatialclaw_turns"] == "3"
-    assert response.usage.total_tokens == 14
+    # A native accumulator is not authoritative evidence of provider usage.
+    assert response.usage is None
+    assert response.model_dump()["_ng_agent_observations"]["source"] == "spatialclaw"
     close.assert_awaited_once()
     shutdown_all.assert_awaited_once()
     assert not (tmp_path / "workspaces" / "sample-1").exists()

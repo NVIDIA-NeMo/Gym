@@ -2014,3 +2014,45 @@ def test_capture_uses_supplied_assistant_header_or_none(tmp_path, header):
     assert captured.client_assistant_message_id == ("persisted-reply" if header else None)
     [absent] = read_model_call_records(CaptureStore(tmp_path), "no-configured-header")
     assert absent.client_assistant_message_id is None
+
+
+@pytest.mark.parametrize("split_body", [False, True])
+async def test_nonstreaming_body_is_not_delivered_before_capture_is_durable(tmp_path, split_body):
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+
+    store = CaptureStore(tmp_path)
+    payload = json.dumps(
+        {
+            "id": "last-response",
+            "choices": [],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+        }
+    ).encode()
+    delivered = []
+
+    async def app(scope, receive, send):
+        await receive()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(payload)).encode())],
+            }
+        )
+        await send({"type": "http.response.body", "body": payload, "more_body": split_body})
+        if split_body:
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    async def receive():
+        return {"type": "http.request", "body": b'{"messages": []}', "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            delivered.append((message["body"], store.path_for("0-0").exists()))
+
+    middleware = _CaptureMiddleware(app, store=store, model_server_name="policy")
+    await middleware(
+        {"type": "http", "method": "POST", "path": "/ng-rollout/0-0/v1/chat/completions", "headers": []}, receive, send
+    )
+    assert delivered == [(payload, True)]
+    assert json.loads(store.path_for("0-0").read_text())["response"]["id"] == "last-response"
