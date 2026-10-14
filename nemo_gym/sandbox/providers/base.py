@@ -15,6 +15,7 @@
 """Provider-facing sandbox protocol."""
 
 from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -278,6 +279,15 @@ class SandboxProvider(Protocol):
 
     async def aclose(self) -> None:
         """Close provider-scoped resources such as SDK clients."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxCheckpointPolling(Protocol):
+    """Optional scoped acceleration of command completion checks during checkpoint shutdown."""
+
+    def checkpoint_exec_polling(self, handle: SandboxHandle) -> AbstractContextManager[None]:
+        """Wake pending command polls and accelerate them until the scope exits."""
         ...
 
 

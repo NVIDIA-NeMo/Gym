@@ -13,6 +13,8 @@ import re
 import shutil
 import signal
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from shlex import quote
 from typing import Optional
@@ -434,3 +436,45 @@ async def test_cancelling_a_paused_run_kills_the_launch_and_everything_it_starte
 
     assert not alive(int(pids.read_text())), "the paused detached process is gone"
     assert not launch_states(launch_id(shell)), "no process is left"
+
+
+class PollingShell(LocalShell):
+    """A sandbox with a checkpoint polling scope, which counts how often the scope was entered and left."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scopes: list[str] = []
+
+    @contextmanager
+    def checkpoint_exec_polling(self) -> Iterator[None]:
+        self.scopes.append("enter")
+        try:
+            yield
+        finally:
+            self.scopes.append("exit")
+
+
+async def test_a_stop_runs_inside_the_sandboxs_checkpoint_polling_scope() -> None:
+    shell, park = PollingShell(), ParkRequest()
+    run = asyncio.create_task(run_until_park_requested(shell, "sleep 300", park, timeout_s=600))  # type: ignore[arg-type]
+    await asyncio.sleep(0.5)
+
+    park.requested.set()
+    with pytest.raises(HarnessInterrupted):
+        await asyncio.wait_for(run, timeout=30)
+
+    assert shell.scopes == ["enter", "exit"], "the whole stop ran inside one polling scope"
+
+
+async def test_a_pause_does_not_enter_the_polling_scope() -> None:
+    shell, park = PollingShell(), ParkRequest()
+    parker = Parker(park)
+    run = run_pausing(shell, "sleep 1 && echo done", park, parker, timeout_s=60)
+    await asyncio.sleep(0.3)
+    park.requested.set()
+    await asyncio.wait_for(parker.parked.wait(), 10)
+    parker.opened.set()
+
+    result = await asyncio.wait_for(run, 30)
+
+    assert result.stdout == "done\n" and shell.scopes == [], "a paused launch is not ending: no fast polling"
