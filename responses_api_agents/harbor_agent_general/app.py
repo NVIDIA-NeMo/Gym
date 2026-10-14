@@ -161,8 +161,13 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     job_name=f"t{body.task_index}-r{body.rollout_index}",
                 )
 
+                job_config.agents = [
+                    agent.model_copy(update={"env": {**agent.env, **self.model_environment(body)}})
+                    for agent in job_config.agents
+                ]
+
                 job_ref = harbor_job_worker.options(num_cpus=self.config.harbor_ray_task_num_cpus).remote(
-                    job_config.model_dump(mode="json"), body.task_name
+                    job_config.model_dump(mode="json", context={"redact_sensitive_env": False}), body.task_name
                 )
                 try:
                     trial_dir = Path(await job_ref)

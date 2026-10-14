@@ -125,8 +125,13 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             workers = 1
             cache_dir_template = self.config.cache_dir_template
             run_golden = self.config.run_golden
-            base_url = body.policy_base_url or f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
-            api_key = body.policy_api_key or "dummy_key"
+            model_env = self.model_environment(body)
+            base_url = (
+                model_env.get("OPENAI_BASE_URL")
+                or body.policy_base_url
+                or f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+            )
+            api_key = model_env.get("OPENAI_API_KEY") or body.policy_api_key or "dummy_key"
             model_name = f"hosted_vllm/{policy_model_name}"
             step_timeout = self.config.step_timeout
             eval_timeout = self.config.eval_timeout

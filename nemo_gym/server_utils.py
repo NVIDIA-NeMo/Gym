@@ -85,6 +85,7 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.model_endpoint import current_model_endpoint, endpoint_headers
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
@@ -899,6 +900,31 @@ class ServerClient(BaseModel):
         **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         """Call another server. ``_control`` sends the call over the reserved control pool."""
+        endpoint = current_model_endpoint()
+        server_entry = self.global_config_dict.get(server_name)
+        if endpoint is not None:
+            if server_name == endpoint.server_name:
+                # A model endpoint includes /v1. Resource and verifier calls do
+                # not receive model credentials or endpoint overrides.
+                path = "/" + url_path.split("/v1/", 1)[1]
+                headers = dict(kwargs.pop("headers", {}) or {})
+                headers["Authorization"] = f"Bearer {endpoint.api_key}"
+                body = kwargs.get("json")
+                if isinstance(body, BaseModel):
+                    kwargs["json"] = body.model_dump(exclude_unset=True)
+                return await request(
+                    method=method,
+                    url=f"{endpoint.base_url.rstrip('/')}{path}",
+                    headers=headers,
+                    _internal=True,
+                    _server_name=server_name,
+                    _control=_control,
+                    **kwargs,
+                )
+            if server_entry is not None and "responses_api_agents" in server_entry:
+                headers = dict(kwargs.pop("headers", {}) or {})
+                headers.update(endpoint_headers(endpoint))
+                kwargs["headers"] = headers
         model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
         model_server_base_url = getenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME)
         if model_server_base_url and server_name == model_server_name:
