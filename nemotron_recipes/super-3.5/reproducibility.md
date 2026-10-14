@@ -42,8 +42,8 @@ Results land in `./results/<recipe>`; the scores are in `evaluator_rollouts_aggr
 `run.sh` first switches the repo's files to the Gym commit the recipe's published number was
 produced with, leaving the recipes alone, and syncs your venv to that commit's lockfile. It
 overwrites and deletes files and changes your venv, so run the recipes from a separate copy of
-Gym (a fresh clone, or `git worktree add`), not the checkout you work in, and one recipe at a
-time per copy. Set `PIN_GYM=0` to run against your current checkout instead.
+Gym (a fresh clone, or `git worktree add`), not the checkout you work in, one after another
+rather than in parallel. Set `PIN_GYM=0` to run against your current checkout instead.
 
 ## What you can reproduce
 

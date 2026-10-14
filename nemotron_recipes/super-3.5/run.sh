@@ -29,8 +29,8 @@
 # Results land in ./results/<recipe>. Run without arguments to list the recipes.
 #
 # The pin overwrites and deletes files (never the recipes) and changes your venv, so run the
-# recipes from a separate copy of Gym (a fresh clone, or `git worktree add`), one recipe at a
-# time per copy. Set PIN_GYM=0 to run against your current checkout instead, or
+# recipes from a separate copy of Gym (a fresh clone, or `git worktree add`), one after
+# another, not in parallel. Set PIN_GYM=0 to run against your current checkout instead, or
 # GYM_PIN=<sha> to use a different commit.
 
 set -euo pipefail
@@ -54,8 +54,8 @@ case "$BENCH" in common|*/*) CONFIG="" ;; esac
 [ -f "$CONFIG" ] || { echo "no recipe named '$BENCH' (run without arguments to list them)" >&2; exit 1; }
 
 # Configs load in this order, each overriding the ones before it: the recipe's Gym benchmark
-# config(s), the model config, common.yaml, the recipe. All are passed at the top level
-# because Gym versions before 2026-08-16 merge included files after the file including them.
+# config(s), the model config, common.yaml, the recipe. All are passed here explicitly:
+# older Gym merges configs that include each other in a different order.
 CONFIGS=()
 while IFS= read -r bench_config; do
   if [ -n "$bench_config" ]; then CONFIGS+=(--config "$bench_config"); fi
