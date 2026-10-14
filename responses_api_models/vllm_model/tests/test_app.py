@@ -5565,6 +5565,7 @@ def _make_top_logprobs_model(
     *,
     extra_body: dict[str, Any] | None = None,
     request_prompt_and_generation_token_ids: bool = False,
+    derive_prefix_token_ids_from_messages: bool = False,
 ) -> VLLMModel:
     """A VLLMModel with the minimum config needed to exercise top_logprobs handling."""
     config = VLLMModelConfig(
@@ -5577,6 +5578,7 @@ def _make_top_logprobs_model(
         model="dummy_model",
         return_token_id_information=return_token_id_information,
         request_prompt_and_generation_token_ids=request_prompt_and_generation_token_ids,
+        derive_prefix_token_ids_from_messages=derive_prefix_token_ids_from_messages,
         uses_reasoning_parser=False,
         uses_interleaved_reasoning=False,
         extra_body=extra_body,
@@ -5626,6 +5628,233 @@ class TestTopLogprobsHandling:
 
         assert result["return_token_ids"] is True
 
+    def test_capture_path_derives_required_prefix_from_latest_assistant(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True, derive_prefix_token_ids_from_messages=True)
+        messages = [
+            {"role": "user", "content": "first"},
+            {
+                "role": "assistant",
+                "content": "old",
+                "prompt_token_ids": [1],
+                "generation_token_ids": [2],
+                "generation_log_probs": [-0.1],
+            },
+            {"role": "user", "content": "second"},
+            {
+                "role": "assistant",
+                "content": "new",
+                "prompt_token_ids": [3, 4],
+                "generation_token_ids": [5, 6],
+                "generation_log_probs": [-0.2, -0.3],
+            },
+            {"role": "user", "content": "third"},
+        ]
+
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(), {"model": "dummy_model", "messages": messages}
+        )
+
+        assert result["required_prefix_token_ids"] == [3, 4, 5, 6]
+
+    def test_capture_path_preserves_explicit_prefix_and_first_turn_omits_it(
+        self,
+    ) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True, derive_prefix_token_ids_from_messages=True)
+        prior_assistant = {
+            "role": "assistant",
+            "content": "answer",
+            "prompt_token_ids": [1],
+            "generation_token_ids": [2],
+            "generation_log_probs": [-0.1],
+        }
+
+        explicit = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {
+                "model": "dummy_model",
+                "messages": [prior_assistant],
+                "required_prefix_token_ids": [9, 8],
+            },
+        )
+        first_turn = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {
+                "model": "dummy_model",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+
+        assert explicit["required_prefix_token_ids"] == [9, 8]
+        assert "required_prefix_token_ids" not in first_turn
+
+    def test_capture_path_rejects_partial_assistant_token_bundle(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True, derive_prefix_token_ids_from_messages=True)
+
+        with raises(RuntimeError, match="partial token metadata"):
+            model._preprocess_chat_completion_create_params(
+                MagicMock(),
+                {
+                    "model": "dummy_model",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": "answer",
+                            "prompt_token_ids": [1],
+                        }
+                    ],
+                },
+            )
+
+    def test_capture_path_does_not_derive_prefix_unless_enabled(self) -> None:
+        """Stock vLLM ignores the field and strict frontends such as Dynamo reject it."""
+        model = _make_top_logprobs_model(return_token_id_information=True)
+
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {
+                "model": "dummy_model",
+                "messages": [
+                    {"role": "user", "content": "first"},
+                    {
+                        "role": "assistant",
+                        "content": "answer",
+                        "prompt_token_ids": [1, 2],
+                        "generation_token_ids": [3],
+                        "generation_log_probs": [-0.1],
+                    },
+                    {"role": "user", "content": "next"},
+                ],
+            },
+        )
+
+        assert "required_prefix_token_ids" not in result
+
+    def test_capture_path_does_not_fall_back_to_an_older_assistant_prefix(self) -> None:
+        """A newest assistant turn without tokens means the older tokens may no longer be a prefix."""
+        model = _make_top_logprobs_model(return_token_id_information=True, derive_prefix_token_ids_from_messages=True)
+
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {
+                "model": "dummy_model",
+                "messages": [
+                    {"role": "user", "content": "first"},
+                    {
+                        "role": "assistant",
+                        "content": "old",
+                        "prompt_token_ids": [1],
+                        "generation_token_ids": [2],
+                        "generation_log_probs": [-0.1],
+                    },
+                    {"role": "user", "content": "second"},
+                    {"role": "assistant", "content": "injected by the harness"},
+                    {"role": "user", "content": "third"},
+                ],
+            },
+        )
+
+        assert "required_prefix_token_ids" not in result
+
+    def test_derived_prefix_reaches_the_engine_and_tokenize_through_http(self) -> None:
+        """Token metadata on an inbound assistant message must survive request validation."""
+        model = _make_top_logprobs_model(return_token_id_information=True, derive_prefix_token_ids_from_messages=True)
+        app = model.setup_webserver()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(
+            return_value=self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {"token": "token_id:7", "logprob": -0.4, "bytes": None, "top_logprobs": []},
+                    ]
+                }
+            )
+        )
+        mock_client.create_tokenize = AsyncMock(return_value={"tokens": [1, 2, 3, 4, 5, 6]})
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "user", "content": "first"},
+                    {
+                        "role": "assistant",
+                        "content": "answer",
+                        "prompt_token_ids": [1, 2],
+                        "generation_token_ids": [3, 4],
+                        "generation_log_probs": [-0.2, -0.3],
+                    },
+                    {"role": "user", "content": "next"},
+                ]
+            },
+        )
+
+        assert response.status_code == 200
+        assert mock_client.create_chat_completion.await_args.kwargs["required_prefix_token_ids"] == [1, 2, 3, 4]
+        assert mock_client.create_tokenize.await_args.kwargs["required_prefix_token_ids"] == [1, 2, 3, 4]
+
+    def test_derived_prefix_is_never_put_in_an_external_staging_body(self) -> None:
+        """External staging keeps the token array out of the request; the worker fetches it."""
+        model = _make_top_logprobs_model(return_token_id_information=True, derive_prefix_token_ids_from_messages=True)
+        context = CaptureContext(
+            rollout_id="derive-ext",
+            model_call_id="call-a",
+            token_sink=None,
+            lineage_store=_TEST_LINEAGE,
+            external_staging=True,
+        )
+
+        token = set_token_sink(context)
+        try:
+            result = model._preprocess_chat_completion_create_params(
+                MagicMock(),
+                {
+                    "model": "dummy_model",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": "answer",
+                            "prompt_token_ids": [1],
+                            "generation_token_ids": [2],
+                            "generation_log_probs": [-0.1],
+                        },
+                        {"role": "user", "content": "next"},
+                    ],
+                },
+            )
+        finally:
+            reset_token_sink(token)
+
+        assert "required_prefix_token_ids" not in result
+        assert context.prefix_requested is False
+
+    @mark.parametrize(
+        ("overrides", "error"),
+        [
+            ({"return_token_id_information": False}, "requires return_token_id_information=true"),
+            ({"supply_prefix_token_ids": True}, "mutually exclusive"),
+            ({"use_completions_api": True}, "not supported with use_completions_api=true"),
+        ],
+    )
+    def test_derive_prefix_config_rejects_incompatible_settings(self, overrides: dict[str, Any], error: str) -> None:
+        with raises(ValueError, match=error):
+            VLLMModelConfig(
+                **{
+                    "host": "0.0.0.0",
+                    "port": 8080,
+                    "entrypoint": "",
+                    "name": "vllm_model",
+                    "base_url": "http://localhost:9999/v1",
+                    "api_key": "dummy_key",  # pragma: allowlist secret
+                    "model": "dummy_model",
+                    "return_token_id_information": True,
+                    "uses_reasoning_parser": False,
+                    "derive_prefix_token_ids_from_messages": True,
+                    **overrides,
+                }
+            )
+
     def test_capture_path_rejects_multiple_choices(self) -> None:
         model = _make_top_logprobs_model(return_token_id_information=True)
 
@@ -5638,6 +5867,56 @@ class TestTopLogprobsHandling:
                     "n": 2,
                 },
             )
+
+    def test_dynamo_request_gets_the_derived_prefix_through_http(self) -> None:
+        model = _make_top_logprobs_model(
+            return_token_id_information=True,
+            derive_prefix_token_ids_from_messages=True,
+            extra_body={"nvext": {"extra_fields": ["engine_data"]}},
+        )
+        app = model.setup_webserver()
+        captured_kwargs: dict[str, Any] = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                response_extra={
+                    "nvext": {
+                        "engine_data": {
+                            "prompt_token_ids": [1, 2, 3, 4, 5],
+                            "completion_token_ids": [6],
+                            "completion_logprobs": [-0.1],
+                        }
+                    }
+                },
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock()
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "user", "content": "first"},
+                    {
+                        "role": "assistant",
+                        "content": "answer",
+                        "prompt_token_ids": [1, 2],
+                        "generation_token_ids": [3, 4],
+                        "generation_log_probs": [-0.2, -0.3],
+                    },
+                    {"role": "user", "content": "next"},
+                ]
+            },
+        )
+
+        assert response.status_code == 200
+        assert captured_kwargs["required_prefix_token_ids"] == [1, 2, 3, 4]
+        assert captured_kwargs["nvext"] == {"extra_fields": ["engine_data"]}
 
     def test_noncapture_path_strips_null_top_logprobs(self) -> None:
         """On the non-capture path a null top_logprobs is dropped (letting vLLM apply its
@@ -5801,7 +6080,16 @@ class TestTopLogprobsHandling:
                 logprobs=None,
                 message_extra=token_bundle,
                 choice_extra={"token_ids": [123]},
-                response_extra={"prompt_token_ids": [10, 20]},
+                response_extra={
+                    "prompt_token_ids": [10, 20],
+                    "nvext": {
+                        "engine_data": {
+                            "prompt_token_ids": [10, 20],
+                            "completion_token_ids": [123],
+                            "completion_logprobs": [-0.1],
+                        }
+                    },
+                },
             )
 
         mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
@@ -5820,6 +6108,401 @@ class TestTopLogprobsHandling:
         message = response.json()["choices"][0]["message"]
         for field, value in token_bundle.items():
             assert message[field] == value
+        mock_client.create_tokenize.assert_not_awaited()
+
+    def test_capture_path_accepts_dynamo_engine_data_without_logprobs(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                response_extra={
+                    "nvext": {
+                        "engine_data": {
+                            "prompt_token_ids": [10, 20],
+                            "completion_token_ids": [123, 456],
+                            "completion_logprobs": [-0.1, -0.2],
+                        },
+                        "timing": {"request_duration_ms": 12},
+                    }
+                },
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(
+            side_effect=AssertionError("create_tokenize must not be called for Dynamo engine data")
+        )
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        message = data["choices"][0]["message"]
+        assert message["prompt_token_ids"] == [10, 20]
+        assert message["generation_token_ids"] == [123, 456]
+        assert message["generation_log_probs"] == [-0.1, -0.2]
+        assert data["nvext"] == {"timing": {"request_duration_ms": 12}}
+        mock_client.create_tokenize.assert_not_awaited()
+
+    def test_capture_path_uses_dynamo_logprobs_and_strips_transport_data(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+        choice_logprobs = {
+            "content": [
+                {"token": "token_id:123", "logprob": -9.1, "bytes": None, "top_logprobs": []},
+            ]
+        }
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=choice_logprobs,
+                response_extra={
+                    "nvext": {
+                        "engine_data": {
+                            "prompt_token_ids": [10, 20],
+                            "completion_token_ids": [123],
+                            "completion_logprobs": [-0.1],
+                        }
+                    }
+                },
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock()
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["choices"][0]["message"]["generation_log_probs"] == [-0.1]
+        assert data["choices"][0]["logprobs"] is None
+        assert "nvext" not in data
+        mock_client.create_tokenize.assert_not_awaited()
+
+    @mark.parametrize(
+        ("engine_data", "error"),
+        [
+            (
+                {"prompt_token_ids": [10], "completion_logprobs": [-0.1]},
+                "missing: completion_token_ids",
+            ),
+            ([], "must be an object"),
+            (
+                {
+                    "prompt_token_ids": [10, 20],
+                    "completion_token_ids": [123, 456],
+                    "completion_logprobs": [-0.1],
+                },
+                "mismatched completion_token_ids and completion_logprobs",
+            ),
+            (
+                {
+                    "prompt_token_ids": [10, 20],
+                    "completion_token_ids": [123],
+                    "completion_logprobs": [{"logprob": -0.1}],
+                },
+                r"completion_logprobs\[0\].*numeric",
+            ),
+            (
+                {
+                    "prompt_token_ids": [10, True],
+                    "completion_token_ids": [123],
+                    "completion_logprobs": [-0.1],
+                },
+                r"nvext\.engine_data\.prompt_token_ids\[1\].*integer",
+            ),
+            (
+                {
+                    "prompt_token_ids": [10, 20],
+                    "completion_token_ids": ["123"],
+                    "completion_logprobs": [-0.1],
+                },
+                r"nvext\.engine_data\.completion_token_ids\[0\].*integer",
+            ),
+            (
+                {
+                    "prompt_token_ids": {"ids": [10]},
+                    "completion_token_ids": [123],
+                    "completion_logprobs": [-0.1],
+                },
+                r"nvext\.engine_data\.prompt_token_ids.*must be a list",
+            ),
+        ],
+    )
+    def test_capture_path_rejects_malformed_dynamo_engine_data(self, engine_data: Any, error: str) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                response_extra={"nvext": {"engine_data": engine_data}},
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=AssertionError("malformed native data must not fall back"))
+        model._clients = [mock_client]
+
+        with raises(RuntimeError, match=error):
+            TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+        mock_client.create_tokenize.assert_not_awaited()
+
+    def test_capture_path_rejects_non_object_nvext(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                response_extra={"nvext": []},
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        model._clients = [mock_client]
+
+        with raises(RuntimeError, match="nvext.*must be an object"):
+            TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+
+    def test_capture_path_nvext_without_engine_data_uses_tokenize_fallback(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                    ]
+                },
+                response_extra={"nvext": {"timing": {"request_duration_ms": 12}}},
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(return_value={"tokens": [10, 20]})
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["nvext"] == {"timing": {"request_duration_ms": 12}}
+        mock_client.create_tokenize.assert_awaited_once()
+
+    def test_capture_path_requires_requested_dynamo_engine_data(self) -> None:
+        model = _make_top_logprobs_model(
+            return_token_id_information=True,
+            extra_body={"nvext": {"extra_fields": ["engine_data"]}},
+        )
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                    ]
+                },
+                response_extra={"nvext": {"timing": {"request_duration_ms": 12}}},
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(
+            side_effect=AssertionError("missing requested engine data must not fall back")
+        )
+        model._clients = [mock_client]
+
+        with raises(RuntimeError, match="asked for `nvext.engine_data` but the response did not include it"):
+            TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+        mock_client.create_tokenize.assert_not_awaited()
+
+    def test_complete_dynamo_bundle_ignores_partial_vllm_token_ids(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                response_extra={
+                    "prompt_token_ids": [10, 20],
+                    "nvext": {
+                        "engine_data": {
+                            "prompt_token_ids": [10, 20],
+                            "completion_token_ids": [123],
+                            "completion_logprobs": [-0.1],
+                        }
+                    },
+                },
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock()
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["choices"][0]["message"]["generation_token_ids"] == [123]
+        mock_client.create_tokenize.assert_not_awaited()
+
+    def test_capture_path_rejects_disagreeing_dynamo_and_message_ids(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                message_extra={
+                    "prompt_token_ids": [10, 20],
+                    "generation_token_ids": [123],
+                    "generation_log_probs": [-0.1],
+                },
+                response_extra={
+                    "nvext": {
+                        "engine_data": {
+                            "prompt_token_ids": [10, 20],
+                            "completion_token_ids": [999],
+                            "completion_logprobs": [-0.1],
+                        }
+                    }
+                },
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        model._clients = [mock_client]
+
+        with raises(RuntimeError, match="disagrees with Dynamo engine data"):
+            TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+
+    def test_capture_path_rejects_disagreeing_dynamo_and_message_logprobs(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                message_extra={
+                    "prompt_token_ids": [10, 20],
+                    "generation_token_ids": [123],
+                    "generation_log_probs": [-9.1],
+                },
+                response_extra={
+                    "nvext": {
+                        "engine_data": {
+                            "prompt_token_ids": [10, 20],
+                            "completion_token_ids": [123],
+                            "completion_logprobs": [-0.1],
+                        }
+                    }
+                },
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        model._clients = [mock_client]
+
+        with raises(RuntimeError, match="disagrees with Dynamo engine data"):
+            TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+
+    def test_capture_path_rejects_dynamo_bundle_disagreeing_with_vllm_token_ids(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                choice_extra={"token_ids": [999]},
+                response_extra={
+                    "prompt_token_ids": [10, 20],
+                    "nvext": {
+                        "engine_data": {
+                            "prompt_token_ids": [10, 20],
+                            "completion_token_ids": [123],
+                            "completion_logprobs": [-0.1],
+                        }
+                    },
+                },
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        model._clients = [mock_client]
+
+        with raises(RuntimeError, match="Native token metadata disagrees with vLLM response token IDs"):
+            TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+
+    def test_capture_path_strips_pseudo_token_logprobs_with_message_bundle(self) -> None:
+        """`token_id:<int>` entries exist only because capture forces them; callers never see them."""
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                    ]
+                },
+                message_extra={
+                    "prompt_token_ids": [10, 20],
+                    "generation_token_ids": [123],
+                    "generation_log_probs": [-0.1],
+                },
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock()
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        choice = response.json()["choices"][0]
+        assert choice["logprobs"] is None
+        assert choice["message"]["generation_token_ids"] == [123]
         mock_client.create_tokenize.assert_not_awaited()
 
     def test_capture_path_rejects_disagreeing_duplicate_ids(self) -> None:
