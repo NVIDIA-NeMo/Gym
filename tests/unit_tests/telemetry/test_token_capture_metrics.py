@@ -90,6 +90,52 @@ def collected(monkeypatch):
     capture_metrics._reset_for_testing()
 
 
+@pytest.fixture
+def no_meter_provider(monkeypatch):
+    """Pin the process's meter provider to the API's no-op one.
+
+    An earlier test in the same worker may have installed a real SDK provider globally.
+    Capture metrics record through any such provider, so tests of the off path must rule it out.
+    """
+    from opentelemetry import metrics
+
+    monkeypatch.setattr(metrics, "get_meter_provider", metrics.NoOpMeterProvider)
+
+
+@pytest.fixture
+def framework_meter_provider(monkeypatch):
+    """Stand in for a training framework that set OpenTelemetry up itself, without Gym's ``init_telemetry``.
+
+    NeMo RL's inference workers do this with nemo-lens before running Gym's staging capture code.
+    """
+    from opentelemetry import metrics
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", None)
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", False)
+    monkeypatch.setattr(metrics, "get_meter_provider", lambda: provider)
+    monkeypatch.setattr(metrics, "get_meter", lambda name, *args, **kwargs: provider.get_meter(name))
+    recorders._reset_for_testing()
+    capture_metrics._reset_for_testing()
+
+    def collect() -> dict:
+        data = reader.get_metrics_data()
+        out: dict = {}
+        for resource_metric in data.resource_metrics if data is not None else ():
+            for scope_metric in resource_metric.scope_metrics:
+                for metric in scope_metric.metrics:
+                    out[metric.name] = list(metric.data.data_points)
+        return out
+
+    yield collect
+    provider.shutdown()
+    recorders._reset_for_testing()
+    capture_metrics._reset_for_testing()
+
+
 def _durations(collected) -> dict[tuple[str, str, str, str], int]:
     """Sample count per (operation, implementation, size class, error)."""
     points = collected().get(recorders.OPERATION_DURATION_INSTRUMENT, [])
@@ -400,8 +446,63 @@ def test_a_slow_operation_logs_once_per_interval(collected, monkeypatch, caplog)
     assert sum("Slow token-capture operation sink.put" in r.getMessage() for r in caplog.records) == 1
 
 
+def test_staging_records_through_a_framework_meter_provider(framework_meter_provider):
+    """External staging in a framework's inference worker is the primary training path.
+
+    The worker set up OpenTelemetry itself and never called Gym's ``init_telemetry``, and its staging metrics still record.
+    """
+    _complete(_RecordingSink())
+    exported = framework_meter_provider()
+
+    operations = {p.attributes[OPERATION] for p in exported[recorders.OPERATION_DURATION_INSTRUMENT]}
+    assert {"staging.build_record", "staging_sink.stage"} <= operations
+    digests = {p.attributes[recorders.DIGEST_ATTRIBUTE]: p.value for p in exported[recorders.DIGEST_CALLS_INSTRUMENT]}
+    assert digests["staging"] == 1
+
+
+def test_a_provider_installed_after_gym_is_imported_is_picked_up(monkeypatch, no_meter_provider):
+    """A worker imports Gym, which counts a digest at import time, before it sets telemetry up.
+
+    Until the OpenTelemetry metrics SDK is loaded, no provider can exist, so the off answer is not cached.
+    """
+    from opentelemetry import metrics
+    from opentelemetry.sdk.metrics import MeterProvider
+
+    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", None)
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", False)
+    capture_metrics._reset_for_testing()
+    sdk_metrics = sys.modules.pop("opentelemetry.sdk.metrics")
+    try:
+        assert capture_metrics.active() is False
+        assert capture_metrics._PROVIDER_CHECKED_AT == float("-inf"), "nothing to recheck before the SDK loads"
+    finally:
+        sys.modules["opentelemetry.sdk.metrics"] = sdk_metrics
+
+    provider = MeterProvider()
+    monkeypatch.setattr(metrics, "get_meter_provider", lambda: provider)
+    assert capture_metrics.active() is True
+    provider.shutdown()
+
+
+def test_with_the_sdk_loaded_an_off_answer_is_rechecked_after_an_interval(monkeypatch, no_meter_provider):
+    from opentelemetry import metrics
+    from opentelemetry.sdk.metrics import MeterProvider
+
+    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", None)
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", False)
+    capture_metrics._reset_for_testing()
+    assert capture_metrics.active() is False
+
+    provider = MeterProvider()
+    monkeypatch.setattr(metrics, "get_meter_provider", lambda: provider)
+    assert capture_metrics.active() is False, "the off answer is kept for up to the recheck interval"
+    monkeypatch.setattr(capture_metrics, "_PROVIDER_CHECKED_AT", float("-inf"))
+    assert capture_metrics.active() is True
+    provider.shutdown()
+
+
 @pytest.mark.parametrize("traces_only", [False, True])
-def test_nothing_is_recorded_without_a_metrics_exporter(monkeypatch, traces_only):
+def test_nothing_is_recorded_without_a_metrics_exporter(monkeypatch, no_meter_provider, traces_only):
     """A traces-only process exports spans but has no metrics exporter, so capture sites must stay idle."""
 
     class _TracesOnly:
@@ -434,7 +535,7 @@ def test_importing_capture_does_not_import_the_telemetry_stack():
 MAX_RATIO_VS_NULLCONTEXT = 4.0
 
 
-def test_disabled_site_costs_about_an_empty_with_block(monkeypatch):
+def test_disabled_site_costs_about_an_empty_with_block(monkeypatch, no_meter_provider):
     """Ratio between two timings in the same process, never an absolute time."""
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", None)
     monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", False)

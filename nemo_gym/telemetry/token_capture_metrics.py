@@ -184,7 +184,9 @@ class TokenCaptureInstruments:
 
 
 _LOCK = threading.Lock()
-_STATE: dict[str, Any] = {"meter": None, "instruments": None, "totals": None}
+_STATE: dict[str, Any] = {"meter": None, "instruments": None, "totals": None, "global_meter": None}
+#: Meter name used when recording through a meter provider another library installed.
+GLOBAL_METER_NAME = "nemo_gym.token_capture"
 
 
 def set_totals_source(source: Any) -> None:
@@ -193,9 +195,32 @@ def set_totals_source(source: Any) -> None:
     _STATE["totals"] = source
 
 
+def _capture_meter() -> Optional[Any]:
+    """Gym's meter when Gym set telemetry up with metrics, otherwise the process's global meter.
+
+    A training framework that set OpenTelemetry up itself, as NeMo RL does in its inference workers, installs the global provider.
+    The global meter is created once, so the instruments built on it are created once too.
+    """
+    from nemo_gym.telemetry.setup import is_metrics_exporter_active
+
+    if is_metrics_exporter_active():
+        return _meter()
+    meter = _STATE["global_meter"]
+    if meter is None:
+        try:
+            from opentelemetry import metrics
+
+            meter = metrics.get_meter(GLOBAL_METER_NAME)
+        except Exception:
+            logger.debug("nemo-lens: failed to get the global meter for token capture", exc_info=True)
+            return None
+        _STATE["global_meter"] = meter
+    return meter
+
+
 def instruments() -> Optional[TokenCaptureInstruments]:
     """Return this process's instruments, or ``None`` when nothing is exporting. Never raises."""
-    meter = _meter()
+    meter = _capture_meter()
     if meter is None:
         return None
     current = _STATE["instruments"]
@@ -271,4 +296,4 @@ def _register_observables(meter: Any) -> None:
 
 def _reset_for_testing() -> None:
     with _LOCK:
-        _STATE.update(meter=None, instruments=None)
+        _STATE.update(meter=None, instruments=None, global_meter=None)

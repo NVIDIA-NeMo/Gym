@@ -3,22 +3,24 @@
 
 """Low-overhead token-capture metrics for call sites inside this package.
 
-Capture runs on every captured model call. With no metrics exporter active, a call site pays one
-attribute check and gets back a shared no-op timer. With one active:
+Capture runs on every captured model call.
+With metrics off, a call site pays a few cheap checks and gets back a shared no-op timer.
+With metrics on:
 
-- an operation costs two clock reads and one histogram record, made in ``__exit__`` so failed and
-  cancelled operations are recorded too, labelled ``error`` or ``cancelled``;
-- outcome and digest counts are integer increments in process memory, read by observable
-  instruments at each export, because they fire far more often than operations do;
-- an operation slower than :data:`SLOW_OPERATION_MS` also logs one warning (at most one per
-  operation per minute), which survives a crash that loses the last metric export.
+- An operation costs two clock reads and one histogram record.
+  The record is made in ``__exit__``, so failed and cancelled operations are recorded too, labelled ``error`` or ``cancelled``.
+- Outcome and digest counts are integer increments in process memory, read by observable instruments at each export.
+  They fire far more often than operations do.
+- An operation slower than :data:`SLOW_OPERATION_MS` also logs one warning, at most one per operation per minute.
+  The log line survives a crash that loses the last metric export.
 
-Operations are timed where Gym calls a capture protocol (``TokenSink``, ``TokenSource``,
-``LineageResolver``, ``CaptureLedger``, ``StagingSink``), labelled with the implementing class, so
-framework-provided implementations are measured without changes to them.
+Operations are timed where Gym calls a capture protocol (``TokenSink``, ``TokenSource``, ``LineageResolver``, ``CaptureLedger``, ``StagingSink``).
+Each is labelled with the implementing class, so framework-provided implementations are measured without changes to them.
 
-This package stays a leaf: nothing from ``nemo_gym.telemetry`` is imported until that package has
-already been loaded, which every process that exports metrics does when it sets telemetry up.
+Metrics are on when Gym's own telemetry has a metrics exporter, or when any other library installed an OpenTelemetry meter provider in the process.
+The second case is a training framework's inference worker, which runs Gym's staging capture code under the framework's own telemetry setup.
+
+This package stays a leaf: nothing from ``nemo_gym.telemetry`` is imported until metrics are on.
 
 Usage::
 
@@ -50,8 +52,13 @@ _SLOW_LOG_INTERVAL_S = 60.0
 MAX_OUTCOME_KEYS = 256
 OTHER_REASON = "other"
 
-_setup: Any = None
 _recorders: Any = None
+#: True once importing the recorders failed; token-capture metrics then stay off for the process.
+_UNAVAILABLE = False
+#: A meter provider, once installed, stays for the life of the process, so a positive check is kept.
+_PROVIDER_FOUND = False
+_PROVIDER_CHECKED_AT = float("-inf")
+_PROVIDER_RECHECK_S = 1.0
 _CACHE_OWNERS: "weakref.WeakSet[Any]" = weakref.WeakSet()
 _SLOW_LOGGED_AT: dict[str, float] = {}
 
@@ -63,34 +70,66 @@ _OUTCOMES: dict[tuple[str, str], int] = {}
 _DIGESTS: dict[str, list[int]] = {}
 
 
-def _load() -> bool:
-    """Bind the telemetry modules once telemetry has been set up in this process."""
-    global _setup, _recorders
-    setup_module = sys.modules.get("nemo_gym.telemetry.setup")
-    if setup_module is None:
+def _process_meter_provider_installed() -> bool:
+    """Whether any library installed an OpenTelemetry SDK meter provider in this process.
+
+    A training framework such as NeMo RL sets up telemetry in its own inference workers without Gym's ``init_telemetry``.
+    Gym's capture code running there records through that provider.
+    The check never imports OpenTelemetry.
+    An SDK provider can exist only after ``opentelemetry.sdk.metrics`` is loaded, which setup does while it builds providers.
+    Until then the answer is no, at the cost of one dictionary lookup, so a worker that imports Gym before setting up telemetry loses nothing.
+    Once the SDK is loaded, a negative answer is checked again at most once per second.
+    """
+    global _PROVIDER_FOUND, _PROVIDER_CHECKED_AT
+    if _PROVIDER_FOUND:
+        return True
+    if "opentelemetry.sdk.metrics" not in sys.modules:
         return False
+    now = time.monotonic()
+    if now - _PROVIDER_CHECKED_AT < _PROVIDER_RECHECK_S:
+        return False
+    _PROVIDER_CHECKED_AT = now
+    otel_metrics = sys.modules.get("opentelemetry.metrics")
+    if otel_metrics is None:
+        return False
+    try:
+        provider = otel_metrics.get_meter_provider()
+    except Exception:
+        logger.debug("Could not read the OpenTelemetry meter provider", exc_info=True)
+        return False
+    # The API's default and proxy providers record nothing; only an SDK provider exports.
+    _PROVIDER_FOUND = type(provider).__module__.startswith("opentelemetry.sdk.")
+    return _PROVIDER_FOUND
+
+
+def _bind_recorders() -> bool:
+    """Import the instruments the first time metrics are on in this process."""
+    global _recorders, _UNAVAILABLE
     try:
         from nemo_gym.telemetry import token_capture_metrics as recorders_module
     except Exception:
         # Permanent for this process: token-capture metrics stay off rather than retry the import per call.
         logger.debug("Token-capture metrics are unavailable in this process", exc_info=True)
-        _setup = False
+        _UNAVAILABLE = True
         return False
-    _setup, _recorders = setup_module, recorders_module
-    _recorders.set_totals_source(_Totals())
+    recorders_module.set_totals_source(_Totals())
+    _recorders = recorders_module
     return True
 
 
 def active() -> bool:
-    """Whether this process exports metrics. Cheap enough for every captured call.
+    """Whether this process records token-capture metrics. Cheap enough for every captured call.
 
-    A traces-only process exports but has no metrics exporter, so it records nothing here.
+    Metrics are on when Gym's own telemetry has a metrics exporter, or when another library installed a meter provider.
+    A traces-only process has neither, so it records nothing here.
     """
-    if _setup is None and not _load():
+    if _UNAVAILABLE:
         return False
-    if _setup is False:
+    gym_setup = sys.modules.get("nemo_gym.telemetry.setup")
+    gym_exporting = gym_setup is not None and gym_setup.is_metrics_exporter_active()
+    if not gym_exporting and not _process_meter_provider_installed():
         return False
-    return _setup.is_metrics_exporter_active()
+    return _recorders is not None or _bind_recorders()
 
 
 def implementation(component: Any) -> str:
@@ -257,6 +296,9 @@ class _Totals:
 
 
 def _reset_for_testing() -> None:
+    global _PROVIDER_FOUND, _PROVIDER_CHECKED_AT
+    _PROVIDER_FOUND = False
+    _PROVIDER_CHECKED_AT = float("-inf")
     with _TOTALS_LOCK:
         _OUTCOMES.clear()
         _DIGESTS.clear()
