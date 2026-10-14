@@ -12,6 +12,7 @@ import pytest
 from environment_servers.harbor.sandbox_io import (
     SandboxProbeError,
     SandboxTransferError,
+    SandboxUnavailableError,
     _exec_as_root,
     _unpack,
     download_path,
@@ -242,8 +243,16 @@ async def test_remote_kind_answers_or_raises(tmp_path):
         async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
             return SandboxExecResult(stdout="", stderr="container gone", return_code=125, error_type="sandbox")
 
-    with pytest.raises(SandboxProbeError, match="Could not probe .*absent: sandbox: container gone") as info:
+    class NoShell:
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+            return SandboxExecResult(stdout="", stderr="sh: not found", return_code=127)
+
+    # A provider outage and a probe that could not run are both raised, and neither is a transfer failure.
+    with pytest.raises(SandboxUnavailableError, match="sandbox: container gone") as info:
         await remote_kind(Outage(), str(tmp_path / "absent"))
+    assert not isinstance(info.value, SandboxTransferError)
+    with pytest.raises(SandboxProbeError, match="Could not probe .*absent: 127: sh: not found") as info:
+        await remote_kind(NoShell(), str(tmp_path / "absent"))
     assert not isinstance(info.value, SandboxTransferError)
 
 
@@ -264,3 +273,88 @@ async def test_a_link_at_the_artifact_root_is_never_followed_on_restore(tmp_path
         await upload_path(Untouched(), link, "/app/output")
     with pytest.raises(SandboxTransferError, match="symbolic link"):
         await upload_dir(Untouched(), link, "/app/output")
+
+
+async def test_provider_failures_are_not_transfer_failures(tmp_path):
+    """A command the provider could not run (error_type set) is an outage; a non-zero exit is a transfer failure."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "solve.sh").write_text("#!/bin/sh\n")
+
+    class Fake:
+        def __init__(self, result):
+            self.result, self.commands = result, []
+
+        async def upload(self, local, remote):
+            pass
+
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+            self.commands.append(command)
+            return self.result
+
+    lost = Fake(SandboxExecResult(stdout="", stderr="", return_code=125, error_type="timeout"))
+    with pytest.raises(SandboxUnavailableError, match="could not run .*: timeout") as info:
+        await upload_dir(lost, source, "/solution")
+    assert not isinstance(info.value, SandboxTransferError)
+
+    refused = Fake(SandboxExecResult(stdout="", stderr="tar: /solution: Permission denied", return_code=2))
+    with pytest.raises(SandboxTransferError, match="Permission denied") as info:
+        await upload_dir(refused, source, "/solution")
+    assert not isinstance(info.value, SandboxUnavailableError)
+    with pytest.raises(SandboxUnavailableError):
+        await _exec_as_root(lost, "true", timeout_s=5)
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+async def test_a_file_restore_accepts_a_writable_parent_as_it_is(tmp_path):
+    """An existing parent is widened with `a+rwx`: /tmp keeps its sticky bit, a 0755 parent ends up 0777."""
+    host = tmp_path / "host"
+    host.mkdir()
+    (host / "out.json").write_text("{}")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o1777)
+
+    await upload_path(LocalSandbox(), host / "out.json", str(shared / "out.json"))
+
+    assert (shared / "out.json").read_text() == "{}" and stat.S_IMODE(shared.stat().st_mode) == 0o1777
+    # A parent the image ships as 0755 is widened, as Harbor does, so a verifier that drops privileges can
+    # write next to the restored file.
+    narrow = tmp_path / "app" / "output"
+    narrow.mkdir(parents=True)
+    narrow.chmod(0o755)
+    await upload_path(LocalSandbox(), host / "out.json", str(narrow / "out.json"))
+    assert (narrow / "out.json").read_text() == "{}" and stat.S_IMODE(narrow.stat().st_mode) == 0o777
+    # A parent that does not exist yet is created world-writable, as before.
+    await upload_path(LocalSandbox(), host / "out.json", str(tmp_path / "fresh" / "out.json"))
+    assert stat.S_IMODE((tmp_path / "fresh").stat().st_mode) == 0o777
+
+
+async def test_a_file_restore_into_a_parent_the_user_cannot_chmod_succeeds(tmp_path):
+    """The before/after case: a non-root image where `chmod 777 /tmp` fails but /tmp is writable."""
+    host = tmp_path / "host"
+    host.mkdir()
+    (host / "out.json").write_text("{}")
+
+    class NonRootImage:
+        def __init__(self):
+            self.commands, self.uploads = [], []
+
+        async def upload(self, local, remote):
+            self.uploads.append(remote)
+
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+            self.commands.append(command)
+            if user == "root":
+                return SandboxExecResult(stdout="", stderr="exec: operation not permitted", return_code=1)
+            if "chmod" in command and "/tmp" in command and "if [ -d" not in command:
+                return SandboxExecResult(stdout="", stderr="chmod: /tmp: Operation not permitted", return_code=1)
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    sandbox = NonRootImage()
+    await upload_path(sandbox, host / "out.json", "/tmp/out.json")
+    prepare = next(c for c in sandbox.commands if c.startswith("if [ -d /tmp ]"))
+    assert prepare == (
+        "if [ -d /tmp ]; then chmod a+rwx /tmp 2>/dev/null || test -w /tmp; else mkdir -p /tmp && chmod 777 /tmp; fi"
+    )
+    assert sandbox.uploads and any("tar -xzf" in c and "-C /tmp;" in c for c in sandbox.commands)

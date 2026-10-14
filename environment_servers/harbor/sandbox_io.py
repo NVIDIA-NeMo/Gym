@@ -4,6 +4,7 @@
 """Directory transfers through sandbox exec, upload and download."""
 
 import asyncio
+import contextlib
 import logging
 import shlex
 import shutil
@@ -21,6 +22,16 @@ LOGGER = logging.getLogger(__name__)
 
 class SandboxTransferError(RuntimeError):
     """A transfer command failed inside the sandbox."""
+
+
+class SandboxUnavailableError(RuntimeError):
+    """The provider could not run a transfer command at all (its result carries an ``error_type``).
+
+    A timeout, a lost container or an exec the provider refused is Gym's outage, not a property of
+    the task or the sandbox's files, so it is not a :class:`SandboxTransferError`: a caller that
+    scores a deterministic transfer failure (permission denied, cannot mkdir) lets this one propagate
+    and the episode is retried.
+    """
 
 
 class SandboxProbeError(RuntimeError):
@@ -100,7 +111,11 @@ async def _exec_as_root(sandbox: AsyncSandbox, command: str, *, timeout_s: float
         return await sandbox.exec(command, cwd="/", timeout_s=timeout_s)
     text = f"{result.stderr or ''} {result.stdout or ''}"
     if result.return_code and any(marker in text for marker in _NO_ROOT_MARKERS):
-        return await sandbox.exec(command, cwd="/", timeout_s=timeout_s)
+        result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s)
+    if result.error_type:
+        raise SandboxUnavailableError(
+            f"The sandbox could not run {command[:80]!r}: {result.error_type}: {result.stderr or result.stdout or ''}"
+        )
     return result
 
 
@@ -170,7 +185,9 @@ async def download_dir(
             await sandbox.download(remote, archive)
             await asyncio.to_thread(_unpack, archive, target, names=names, skip_unsafe=skip_unsafe, links=links)
     finally:
-        await _exec_as_root(sandbox, f"rm -f {remote}", timeout_s=60)
+        # Best effort: a sandbox that is gone cannot clean up, and must not hide why the download failed.
+        with contextlib.suppress(SandboxUnavailableError):
+            await _exec_as_root(sandbox, f"rm -f {remote}", timeout_s=60)
 
 
 async def remote_kind(sandbox: AsyncSandbox, path: str) -> str | None:
@@ -227,7 +244,10 @@ async def upload_path(sandbox: AsyncSandbox, source: Path, target: str, *, timeo
     A directory replaces whatever the image ships at ``target`` (a file the agent deleted stays
     deleted) and is made world-writable, as Harbor does when it restores artifacts: verifiers drop
     privileges before running agent output and need to write next to it. A file lands in its
-    parent, created world-writable the same way. Modes travel in both cases.
+    parent, which is created world-writable when missing; an existing parent is made world-writable
+    when the sandbox can (``a+rwx`` keeps a sticky bit) and otherwise only has to be writable, so a
+    root-owned ``/tmp`` keeps its mode and an image that cannot switch to root can still receive the
+    file. Modes travel in both cases.
     """
     if source.is_symlink():
         raise SandboxTransferError(f"Refusing to restore {source} to {target}: it is a symbolic link")
@@ -236,7 +256,10 @@ async def upload_path(sandbox: AsyncSandbox, source: Path, target: str, *, timeo
         prepare = f"mkdir -p {directory} && find {directory} -mindepth 1 -delete && chmod 777 {directory}"
     else:
         directory = shlex.quote(str(PurePosixPath(target).parent))
-        prepare = f"mkdir -p {directory} && chmod 777 {directory}"
+        prepare = (
+            f"if [ -d {directory} ]; then chmod a+rwx {directory} 2>/dev/null || test -w {directory}; "
+            f"else mkdir -p {directory} && chmod 777 {directory}; fi"
+        )
     result = await _exec_as_root(sandbox, prepare, timeout_s=60)
     if result.return_code:
         raise SandboxTransferError(f"Could not prepare {directory} for {target}: {result.stderr or result.stdout}")

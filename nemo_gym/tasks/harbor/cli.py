@@ -69,6 +69,7 @@ AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
     # leaves `resources_server.name` unset for benchmark composition; here the environment server
     # drives it, so the generated instance declares none (and is not a composition source).
     "terminus_2_sandboxed_agent": {"num_workers": 1, "resources_server": None},
+    "miniswe_sandboxed_agent": {"num_workers": 1},
 }
 
 
