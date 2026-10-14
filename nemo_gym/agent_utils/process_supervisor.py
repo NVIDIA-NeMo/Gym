@@ -130,12 +130,11 @@ def _supervise(
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
             if process is not None:
-                # Natural wrapper exit can also leave foreground tool children
-                # running. Stop the whole group before capture or verification.
-                # Compatibility: `server &` or `nohup` may leave task services
-                # in this group, so they can be killed before verification.
-                # Audit real service-launching tasks before assuming compatibility;
-                # controls with explicitly detached services do not cover this case.
+                # Stop remaining group members before capture or verification.
+                # Harness shell tools can start their own sessions, so this does
+                # not confirm termination of all in-flight tools. Services from
+                # completed tool calls may also live outside this group; group
+                # membership alone cannot distinguish them from unfinished tools.
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:

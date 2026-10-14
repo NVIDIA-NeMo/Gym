@@ -156,9 +156,11 @@ a successful smoke, and one task does not establish a benchmark baseline.
 
 ## Tasks that start services
 
-The supervisor stops the harness process group before capture or verification, including
-foreground tools left behind after CLI exit or timeout. Explicitly detached task services
-remain available to the verifier. Resources stops them by closing the sandbox after
+The supervisor stops and reaps the harness process group before capture or verification.
+Shell-tool commands can run in separate sessions, so a confirmed receipt does not prove
+that all foreground tools have stopped after CLI exit or timeout. Those commands may
+still change task files during verification. Processes outside the group, including
+services from completed tool calls, remain until Resources closes the sandbox after
 verification or episode failure. Unconfirmed harness termination blocks verification;
 a final failure receipt still lets agent close release its connection for owner teardown.
 

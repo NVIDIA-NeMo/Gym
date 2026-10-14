@@ -139,9 +139,11 @@ Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
 required; the adapter validates the captured terminal events without inventing an exit code.
 
 One shared Linux supervisor per activation fences delayed launches and bounds harness
-termination and reaps its process group, including foreground tool children. Explicitly
-detached task services remain for the sandbox owner to stop: Resources after
-verification or episode failure, or the agent when closing its own sandbox. Ownership
+termination and reaps its process group. Shell-tool commands can run in separate sessions
+and survive CLI exit or timeout; a confirmed receipt does not prove that those commands
+have stopped changing task files. Processes outside the group, including services from
+completed tool calls, remain for the sandbox owner to stop: Resources after verification
+or episode failure, or the agent when closing its own sandbox. Ownership
 does not change process supervision. Services must not depend on the agent's temporary
 session files. Close confirms the receipt before cancelling provider execution,
 then removes adapter-owned files and disconnects. Missing/negative termination evidence
