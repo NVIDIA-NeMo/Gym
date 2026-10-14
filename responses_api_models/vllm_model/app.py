@@ -2198,10 +2198,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         except OSError:
             # Transient filesystem trouble is not a backend exit; retry the current clients.
             return
-        if mtime == self._endpoint_file_mtime:
-            if self._endpoint_missing_since is not None:
-                self._note_endpoint_unpublished()
-            return
+        # Rewrites can retain the same mtime on a coarse or weakly coherent shared
+        # filesystem. The check interval already bounds filesystem traffic, so
+        # read the endpoint instead of treating mtime equality as authoritative.
         try:
             with open(self.config.endpoint_file) as endpoint_stream:
                 url = endpoint_stream.read().strip()
