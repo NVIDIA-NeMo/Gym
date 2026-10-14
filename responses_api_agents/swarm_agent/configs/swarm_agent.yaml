@@ -1,0 +1,29 @@
+# Flat swarm of up to 16 workers, the default flavor. Other topologies are the sibling flavors
+# (--agent-type swarm_agent/swarm_board256 and so on). Load one flavor next to a benchmark and Gym rehosts
+# the benchmark's agent on it.
+swarm_flat16:
+  responses_api_agents:
+    swarm_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Spawned agents use the root's model server unless worker_model_server is set.
+      topology: flat
+      max_agents: 16
+      # Unset: the row's verifier_metadata.budget_s, else 3600.
+      deadline_s: null
+      # Unset: the row's verifier_metadata.grace_s, else 1800.
+      final_grace_s: null
+      # Unset: deadline / 12, so children still get time under short row budgets.
+      child_margin_s: null
+      root_turns: 400
+      worker_turns: 30
+      root_ctx: 262144
+      worker_ctx: 262144
+      max_tokens: 16384
+      final_max_tokens: 65536
+      call_timeout_s: 1800
