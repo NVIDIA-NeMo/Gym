@@ -3,6 +3,7 @@
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 import tomllib
@@ -22,7 +23,20 @@ from nemo_gym.tasks.harbor.cli import (
     resolve_agent,
     runs_in_sandbox,
 )
-from nemo_gym.tasks.harbor.dockerfile import base_image_only
+from nemo_gym.tasks.harbor.dockerfile import (
+    DEFAULT_PATH,
+    RECORD_VERSION,
+    BaseImageConfig,
+    DockerfileNeedsBuild,
+    ImageConfigRequired,
+    OverlayImage,
+    base_image_only,
+    has_heredoc,
+    overlay_image,
+    parse_dockerfile,
+    resolve_dockerfile,
+    split_words,
+)
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.hub import (
     HubError,
@@ -37,6 +51,7 @@ from nemo_gym.tasks.harbor.hub import (
 )
 from nemo_gym.tasks.harbor.materialize import materialize_task, run_config, write_rows
 from nemo_gym.tasks.harbor.package_store import PackageStoreError
+from nemo_gym.tasks.harbor.records import IMAGE_CONFIGS_FILE
 from nemo_gym.tasks.harbor.task import task_digest
 
 
@@ -72,6 +87,29 @@ def write_task(root: Path, *, dockerfile: str = "FROM ubuntu:24.04\n\nWORKDIR /a
     (root / "solution").mkdir(exist_ok=True)
     (root / "solution" / "solve.sh").write_text("#!/bin/bash\necho hi > hello.txt\n")
     return root
+
+
+IMAGE_PATH = "/usr/local/bin:/usr/bin:/bin"
+
+
+def write_image_config(parent: Path, image: str, **config) -> None:
+    """Record ``image``'s OCI configuration next to the task folders, as prepare does."""
+    path = parent / IMAGE_CONFIGS_FILE
+    recorded = json.loads(path.read_text()) if path.is_file() else {}
+    recorded[image] = {
+        "os": "linux",
+        "architecture": "amd64",
+        "image": image,
+        "config": config,
+        "record_version": RECORD_VERSION,
+    }
+    path.write_text(json.dumps(recorded))
+
+
+def dockerfile(text: str, **config) -> OverlayImage:
+    """Parse and resolve ``text`` against a base image whose configuration is ``config`` (``Env`` etc.)."""
+    record = {"record_version": RECORD_VERSION, "config": config}
+    return resolve_dockerfile(parse_dockerfile(text), BaseImageConfig.from_record(record))
 
 
 class TestTaskConfig:
@@ -180,6 +218,138 @@ class TestDockerfileDetection:
         base = base_image_only("FROM ubuntu:24.04 \\\n   # inside\n\n AS base\n\nWORKDIR \\\n /app\n")
         assert base is not None and base.image == "ubuntu:24.04" and base.workdir == "/app"
 
+    def test_a_continuation_joins_the_next_line_verbatim(self):
+        # Docker removes only the backslash and the newline: no separator is inserted, blanks are kept.
+        parsed = parse_dockerfile("FROM img\nRUN echo ab\\\ncd \\   \n    && echo e\\\n\tf\n")
+        assert parsed.instructions == (("RUN", "echo abcd     && echo e\tf"),)
+
+    def test_env_values_resolve_as_docker_does(self):
+        image = dockerfile(
+            "FROM img\n"
+            "ENV PATH=/opt/a/bin:$PATH\n"
+            'ENV PATH="/opt/b/bin:${PATH}" LIT=\'$PATH\' ESC="\\$HOME/x" UNQ=\\$NOPE\n'
+            'ENV MIX="a\\"b" EMPTY= TAIL=${MISSING:-dflt} OPT=${PATH:+set}\n'
+            "ENV LEGACY two words $LIT\n",
+            Env=[f"PATH={IMAGE_PATH}", "HOME=/root"],
+        )
+        assert image.env == {
+            "PATH": f"/opt/b/bin:/opt/a/bin:{IMAGE_PATH}",
+            "LIT": "$PATH",
+            "ESC": "$HOME/x",
+            "UNQ": "$NOPE",
+            "MIX": 'a"b',
+            "EMPTY": "",
+            "TAIL": "dflt",
+            "OPT": "set",
+            "LEGACY": "two words $PATH",
+        }
+        # Only the single-quoted and escaped values keep a `$`, and theirs is a literal character, not a reference.
+        assert [key for key, value in image.env.items() if "$" in value] == ["LIT", "ESC", "UNQ", "LEGACY"]
+
+    def test_pairs_of_one_env_line_see_the_environment_before_the_line(self):
+        # Docker's reference example: `ENV abc=bye def=$abc` gives def the previous abc; the next line sees the new one.
+        image = dockerfile("FROM img\nENV abc=bye def=$abc\nENV ghi=$abc\nRUN env\n", Env=["abc=hello"])
+        assert image.env == {"abc": "bye", "def": "hello", "ghi": "bye"}
+        assert image.runs[0].env["def"] == "hello"
+
+    def test_legacy_env_splits_on_any_run_of_blanks(self):
+        # A tab (or several blanks) between the key and the value is what docker build accepts; the value keeps
+        # its interior blanks.
+        image = dockerfile("FROM img\nENV APP_HOME\t/srv/app\nWORKDIR $APP_HOME\n", Env=[f"PATH={IMAGE_PATH}"])
+        assert image.env == {"APP_HOME": "/srv/app"} and image.workdir == "/srv/app"
+        assert dockerfile("FROM img\nENV K  \t  v1  v2\n").env == {"K": "v1  v2"}
+        with pytest.raises(DockerfileNeedsBuild, match="ENV ONLYKEY must have two arguments"):
+            parse_dockerfile("FROM img\nENV ONLYKEY\n")
+
+    def test_env_modifier_defaults_expand(self):
+        image = dockerfile(
+            "FROM img\nENV A=${B:-${PATH}} C=${B:-$PATH} D=${PATH:+${PATH}:/x} E=${B-${PATH}} F=${B:-${C:-${PATH}}}\n",
+            Env=["PATH=/bin"],
+        )
+        assert image.env == {"A": "/bin", "C": "/bin", "D": "/bin:/x", "E": "/bin", "F": "/bin"}
+        assert not [key for key, value in image.env.items() if "$" in value]
+
+    def test_unterminated_modifier_needs_build(self):
+        with pytest.raises(DockerfileNeedsBuild, match="unsupported variable expansion"):
+            dockerfile("FROM img\nENV A=${B:-${PATH}\n", Env=["PATH=/bin"])
+
+    def test_from_platform_flag_needs_build(self):
+        # Dropping the flag would run the registry's linux/amd64 pick for an image the file asked for on arm64.
+        text = "FROM --platform=linux/arm64 ubuntu\nRUN echo hi\n"
+        with pytest.raises(DockerfileNeedsBuild, match=r"FROM --platform \(BuildKit flag\)"):
+            parse_dockerfile(text)
+        assert overlay_image(text) is None and base_image_only(text) is None
+        with pytest.raises(DockerfileNeedsBuild, match="FROM --platform"):
+            parse_dockerfile("FROM --platform=$BUILDPLATFORM --no-cache ubuntu\n")
+        # The stage name after the image still parses.
+        assert parse_dockerfile("FROM ubuntu AS base\n").image == "ubuntu"
+
+    def test_escape_directive_needs_build(self):
+        # With a backtick escape, the backslash is not a continuation: dropping the directive would read the
+        # two RUN lines as the single command `echo foo RUN echo bar`.
+        directive = "# escape=`\nFROM ubuntu\nRUN echo foo \\\nRUN echo bar\n"
+        with pytest.raises(DockerfileNeedsBuild, match="escape"):
+            parse_dockerfile(directive)
+        assert overlay_image(directive) is None
+        for leading in ("# syntax=docker/dockerfile:1\n\n  #  Escape = `\n", "\n# ESCAPE=`\n# a comment\n"):
+            with pytest.raises(DockerfileNeedsBuild, match="escape"):
+                parse_dockerfile(leading + "FROM ubuntu\n")
+        # After the first instruction it is an ordinary comment (Docker reads directives only at the top), so the
+        # backslash still joins the lines as it does for any comment inside a continuation.
+        parsed = parse_dockerfile("FROM ubuntu\n# escape=`\nRUN echo foo \\\nRUN echo bar\n")
+        assert parsed.instructions == (("RUN", "echo foo RUN echo bar"),)
+        assert parse_dockerfile("# syntax=docker/dockerfile:1\n# a comment\nFROM ubuntu\n").image == "ubuntu"
+
+    def test_image_without_path_gets_dockers_default(self):
+        assert dockerfile("FROM scratch\nENV PATH=/x:$PATH\n").env == {"PATH": f"/x:{DEFAULT_PATH}"}
+
+    def test_workdir_and_user_expand_variables_and_start_from_the_image(self):
+        image = dockerfile(
+            "FROM img\nENV APP=/srv/app USR=svc\nWORKDIR $APP\nWORKDIR src/\nUSER ${USR}:$USR\n",
+            WorkingDir="/home/svc",
+            User="svc",
+        )
+        assert image.workdir == "/srv/app/src" and image.user == "svc:svc"
+        assert dockerfile("FROM img\nWORKDIR rel\n", WorkingDir="/home/svc").workdir == "/home/svc/rel"
+        inherited = dockerfile("FROM img\n", WorkingDir="/home/svc", User="svc")
+        assert inherited.workdir == "/home/svc" and inherited.user == "svc"
+        bare = dockerfile("FROM img\n")
+        assert bare.workdir == "/" and bare.user is None
+
+    def test_without_the_image_configuration_only_self_contained_files_resolve(self):
+        # Nothing refers to the base image: the result does not depend on it.
+        base = base_image_only("FROM img\nENV A=1\nENV B=$A\nWORKDIR /app\nUSER me\n")
+        assert base is not None and base.env == {"A": "1", "B": "1"} and base.workdir == "/app"
+        for text, fragment in [
+            ("FROM img\nENV PATH=/x:$PATH\n", "`$PATH` refers to the base image"),
+            # `$A` on the same line as `A=1` is the base image's A, not the new one.
+            ("FROM img\nENV A=1 B=$A\n", "`$A` refers to the base image"),
+            ("FROM img\nWORKDIR src\n", "WORKDIR src is relative to the base image"),
+            ("FROM img\nRUN true\n", "RUN lines run with the base image"),
+        ]:
+            with pytest.raises(ImageConfigRequired, match=re.escape(fragment)):
+                resolve_dockerfile(parse_dockerfile(text))
+
+    def test_split_words_keeps_quotes_and_escapes(self):
+        assert split_words("A=1  B=\"two words\" C='x y' D=a\\ b") == ["A=1", 'B="two words"', "C='x y'", "D=a\\ b"]
+
+    @pytest.mark.parametrize(
+        ("command", "heredoc"),
+        [
+            ("cat <<EOF", True),
+            ("python3 <<-'PY'", True),
+            ('cat <<"EOF" > /x', True),
+            ("echo $((1<<2))", False),
+            ("cat <<< hello", False),
+            ("echo '<<EOF'", False),
+            ('echo "a <<EOF b"', False),
+            ("bash -lc 'cat <<EOF'", False),
+            ("echo it's <<EOF", True),
+        ],
+    )
+    def test_heredoc_detection(self, command, heredoc):
+        assert has_heredoc(command) is heredoc
+
     @pytest.mark.parametrize(
         "text",
         [
@@ -193,6 +363,29 @@ class TestDockerfileDetection:
     )
     def test_anything_else_needs_a_build(self, text):
         assert base_image_only(text) is None
+
+    def test_emptied_entrypoint_is_ignored_in_pull_mode(self):
+        base = base_image_only("FROM ubuntu:24.04\nENTRYPOINT []\nCMD [ ]\nWORKDIR /app\n")
+        assert base is not None and base.image == "ubuntu:24.04" and base.workdir == "/app"
+        assert base_image_only('FROM ubuntu\nENTRYPOINT ["sleep", "infinity"]') is None
+        assert base_image_only('FROM ubuntu\nCMD ["bash"]') is None
+
+
+TB21_DEBIAN_DOCKERFILE = """\
+FROM debian:bookworm-slim
+
+# Terminal-Bench style: apt setup, then the task's own files
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    curl \\
+    tmux \\
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+ENV PATH="/opt/tools/bin:$PATH" \\
+    DEBIAN_FRONTEND=noninteractive
+RUN mkdir -p /opt/tools/bin && echo ready > /app/ready.txt
+ENTRYPOINT []
+"""
 
 
 class TestDigest:
@@ -253,6 +446,7 @@ class TestLoadTask:
         assert task.image == "ubuntu:24.04"
         assert task.workdir == "/app"
         assert task.user is None
+        assert task.overlay == ()
         assert task.needs_sandbox and task.has_solution
         assert task.instruction == "Create a file called hello.txt.\n"
         assert task.digest == content_hash(task.path)
@@ -274,13 +468,135 @@ class TestLoadTask:
         assert task.user == "agent"
 
     def test_dockerfile_needing_a_build_without_image_is_rejected(self, tmp_path):
-        with pytest.raises(HarborTaskError, match="needs a build"):
-            load_task(write_task(tmp_path / "t", dockerfile="FROM ubuntu\nRUN true"))
+        with pytest.raises(HarborTaskError, match=r"needs a build \(COPY\)"):
+            load_task(write_task(tmp_path / "t", dockerfile="FROM ubuntu\nRUN true\nCOPY . /app"))
+        with pytest.raises(HarborTaskError, match=r"needs a build \(RUN with a heredoc"):
+            load_task(write_task(tmp_path / "t", dockerfile="FROM ubuntu\nRUN <<EOF\ntrue\nEOF"))
+
+    def test_overlay_dockerfile_records_the_run_lines(self, tmp_path):
+        toml = HELLO_TOML + '\n[environment.env]\nDEBIAN_FRONTEND = "teletype"\n'
+        folder = write_task(tmp_path / "t", dockerfile=TB21_DEBIAN_DOCKERFILE, toml=toml)
+        write_image_config(tmp_path, "debian:bookworm-slim", Env=[f"PATH={IMAGE_PATH}"])
+        task = load_task(folder)
+        assert task.image == "debian:bookworm-slim" and task.workdir == "/app" and task.user is None
+        # task.toml wins for the sandbox env; the Dockerfile's `$PATH` is the image's, resolved, not a live `$`.
+        assert task.env == {"PATH": f"/opt/tools/bin:{IMAGE_PATH}", "DEBIAN_FRONTEND": "teletype"}
+        assert [run.command[:10] for run in task.overlay] == ["apt-get up", "mkdir -p /"]
+        assert task.overlay[1].env["DEBIAN_FRONTEND"] == "noninteractive"
+        assert task.needs_sandbox
+
+    def test_a_resolved_dockerfile_starts_the_pinned_base_image_under_the_written_key(self, tmp_path):
+        """The sandbox starts the immutable reference the base configuration was recorded at (the index digest
+        behind the tag), not the tag the Dockerfile wrote; the record stays keyed by that tag."""
+        pinned = "library/debian@sha256:" + "d" * 64
+        overlay = write_task(tmp_path / "overlay", dockerfile=TB21_DEBIAN_DOCKERFILE)
+        pull = write_task(tmp_path / "pull", dockerfile="FROM debian:bookworm-slim\nENV A=$PATH\nWORKDIR /w")
+        write_image_config(tmp_path, "debian:bookworm-slim", Env=[f"PATH={IMAGE_PATH}"])
+        path = tmp_path / IMAGE_CONFIGS_FILE
+        recorded = json.loads(path.read_text())
+        recorded["debian:bookworm-slim"]["image"] = pinned
+        path.write_text(json.dumps(recorded))
+        task = load_task(overlay)
+        assert task.image == pinned and task.needs_sandbox and len(task.overlay) == 2
+        task = load_task(pull)
+        assert task.image == pinned and task.env == {"A": IMAGE_PATH} and task.workdir == "/w"
+        assert list(json.loads(path.read_text())) == ["debian:bookworm-slim"]
+        # A declared image starts as written, as Harbor starts it; the pull-mode Dockerfile beside it lends its settings.
+        toml = HELLO_TOML.replace("gpus = 0", 'gpus = 0\ndocker_image = "org/app:1"')
+        declared = write_task(tmp_path / "declared", dockerfile="FROM debian:bookworm-slim\nWORKDIR /w", toml=toml)
+        task = load_task(declared)
+        assert task.image == "org/app:1" and task.workdir == "/w"
+
+    def test_overlay_dockerfile_without_the_recorded_base_image_is_rejected(self, tmp_path):
+        folder = write_task(tmp_path / "t", dockerfile=TB21_DEBIAN_DOCKERFILE)
+        with pytest.raises(HarborTaskError) as excinfo:
+            load_task(folder)
+        message = str(excinfo.value)
+        assert "RUN lines run with the base image" in message
+        assert "'debian:bookworm-slim' is not recorded" in message and IMAGE_CONFIGS_FILE in message
+        assert "Prepare the dataset again" in message
+        # A pull-mode Dockerfile that refers to the image environment needs it too; one that does not, does not.
+        (folder / "environment" / "Dockerfile").write_text("FROM img\nENV PATH=/x:$PATH\n")
+        with pytest.raises(HarborTaskError, match=r"`\$PATH` refers to the base image"):
+            load_task(folder)
+        (folder / "environment" / "Dockerfile").write_text("FROM img\nENV A=1\nWORKDIR /app\n")
+        assert load_task(folder).env == {"A": "1"}
+
+    def test_recorded_base_image_fills_in_workdir_and_user(self, tmp_path):
+        folder = write_task(tmp_path / "t", dockerfile="FROM img\nENV PATH=/x:$PATH\n")
+        write_image_config(tmp_path, "img", Env=["PATH=/bin"], WorkingDir="/srv", User="svc")
+        task = load_task(folder)
+        assert (task.workdir, task.user, task.env) == ("/srv", "svc", {"PATH": "/x:/bin"})
+
+    def test_sandbox_user_is_the_recorded_base_image_user(self, tmp_path):
+        # The sandbox starts from the base image, so its default user is the image's, whatever the Dockerfile
+        # or [agent].user make the task's user.
+        folder = write_task(tmp_path / "t", dockerfile="FROM img\nUSER root\nRUN true\n")
+        write_image_config(tmp_path, "img", Env=["PATH=/bin"], User="jovyan")
+        task = load_task(folder)
+        assert task.user == "root" and task.sandbox_user == "jovyan"
+        toml = HELLO_TOML.replace(
+            "timeout_sec = 120.0\n\n[environment]", 'timeout_sec = 120.0\nuser = "agent"\n\n[environment]'
+        )
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM img\nRUN true\n", toml=toml))
+        assert task.user == "agent" and task.sandbox_user == "jovyan"
+        # An image that records no User runs as root.
+        write_image_config(tmp_path, "rootimg", Env=["PATH=/bin"])
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM rootimg\nUSER agent\nRUN true\n"))
+        assert task.user == "agent" and task.sandbox_user is None
+        # Without a recorded base image (a self-contained pull-mode Dockerfile, a prebuilt image), the task's
+        # user stands in.
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM unknown\nUSER me\n"))
+        assert task.user == "me" and task.sandbox_user == "me"
+        toml = HELLO_TOML.replace("cpus = 1", 'docker_image = "org/task:1"\ncpus = 1')
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM unknown\nRUN true\nUSER built\n", toml=toml))
+        assert task.user is None and task.sandbox_user is None
+        toml = toml.replace(
+            "timeout_sec = 120.0\n\n[environment]", 'timeout_sec = 120.0\nuser = "agent"\n\n[environment]'
+        )
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM unknown\nRUN true\n", toml=toml))
+        assert task.user == "agent" and task.sandbox_user == "agent"
+
+    def test_a_declared_image_takes_its_default_user_from_the_dockerfiles_final_user(self, tmp_path):
+        toml = HELLO_TOML.replace("cpus = 1", 'docker_image = "org/app:1"\ncpus = 1')
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM python:3.12\nUSER app\n", toml=toml))
+        # The declared image is the one that runs; its default user is the Dockerfile's final USER.
+        assert task.image == "org/app:1" and task.user == "app" and task.sandbox_user == "app"
+        # The FROM image's record expands ENV and WORKDIR but does not name the started image's user.
+        write_image_config(tmp_path, "python:3.12", Env=["PATH=/bin"], WorkingDir="/srv", User="root")
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM python:3.12\nENV P=$PATH\nUSER app\n", toml=toml))
+        assert (task.workdir, task.env, task.sandbox_user) == ("/srv", {"P": "/bin"}, "app")
+        # Without a USER line the declared image runs as the FROM image's user.
+        write_image_config(tmp_path, "python:3.12", Env=["PATH=/bin"], User="svc")
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM python:3.12\nENV P=$PATH\n", toml=toml))
+        assert task.sandbox_user == "svc"
+
+    def test_a_declared_image_runs_as_is_when_its_dockerfile_needs_a_build_at_resolution_time(self, tmp_path):
+        toml = HELLO_TOML.replace("cpus = 1", 'docker_image = "org/app:1"\ncpus = 1')
+        write_image_config(tmp_path, "python:3.12", Env=["PATH=/bin"], WorkingDir="/srv")
+        dockerfile_text = "FROM python:3.12\nENV X=${PATH%:/bin}\n"
+        task = load_task(write_task(tmp_path / "t", dockerfile=dockerfile_text, toml=toml))
+        # The same fallback as a parse-time build requirement: the prebuilt image with task.toml's settings.
+        assert task.image == "org/app:1" and task.env == {} and task.workdir is None and task.overlay == ()
+        assert task.sandbox_user is None
+        with pytest.raises(HarborTaskError, match=r"needs a build \(unsupported variable expansion"):
+            load_task(write_task(tmp_path / "t2", dockerfile=dockerfile_text))
+
+    def test_a_recorded_base_image_from_an_older_gym_is_refused_with_a_prepare_hint(self, tmp_path):
+        folder = write_task(tmp_path / "t", dockerfile="FROM img\nRUN true\n")
+        legacy = {"img": {"os": "linux", "architecture": "amd64", "image": "img", "config": {"User": "svc"}}}
+        (tmp_path / IMAGE_CONFIGS_FILE).write_text(json.dumps(legacy))
+        with pytest.raises(HarborTaskError, match="prepare the dataset again") as excinfo:
+            load_task(folder)
+        assert IMAGE_CONFIGS_FILE in str(excinfo.value) and "'img'" in str(excinfo.value)
 
     def test_prebuilt_image_allows_a_real_dockerfile(self, tmp_path):
         toml = HELLO_TOML.replace("cpus = 1", 'docker_image = "org/task:1"\ncpus = 1')
-        task = load_task(write_task(tmp_path / "t", dockerfile="FROM ubuntu\nRUN true", toml=toml))
-        assert task.image == "org/task:1"
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM ubuntu\nRUN true\nWORKDIR /built", toml=toml))
+        # The prebuilt image is the build's result: nothing from the Dockerfile is re-applied.
+        assert task.image == "org/task:1" and task.overlay == () and task.workdir is None
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM ubuntu\nCOPY . /app", toml=toml))
+        assert task.image == "org/task:1" and task.overlay == ()
 
     def test_missing_pieces_are_reported(self, tmp_path):
         with pytest.raises(HarborTaskError, match="no task.toml"):
@@ -356,6 +672,26 @@ class TestDiscovery:
         write_task(tmp_path / "ds" / "x", toml="not toml =")
         with pytest.raises(HarborTaskError, match="No task under"):
             discover_tasks(tmp_path / "ds", skipped={})
+
+    def test_discovery_reads_the_shared_image_configurations_once(self, tmp_path, monkeypatch):
+        import nemo_gym.tasks.harbor.task as task_module
+
+        for name in ("a", "b", "c"):
+            write_task(tmp_path / name, dockerfile="FROM img\nRUN true\n")
+        write_image_config(tmp_path, "img", Env=["PATH=/bin"])
+        reads: list[Path] = []
+        original = task_module.read_image_configs
+
+        def counting(folder):
+            reads.append(Path(folder))
+            return original(folder)
+
+        monkeypatch.setattr(task_module, "read_image_configs", counting)
+        tasks = discover_tasks(tmp_path)
+        assert [task.task_id for task in tasks] == ["a", "b", "c"] and all(task.overlay for task in tasks)
+        assert reads == [tmp_path.resolve()]
+        # A single task loads its parent's file itself.
+        assert load_task(tmp_path / "a").overlay and reads == [tmp_path.resolve(), tmp_path.resolve()]
 
 
 class TestMaterialize:
@@ -724,6 +1060,44 @@ class TestInstruction:
         assert read_instruction(path) == "\nStarts after a blank line.\n"
 
 
+class FakeRegistryClient:
+    """Stands in for ``RegistryClient`` at prepare: records every image, except the ones told to fail."""
+
+    missing: set[str] = set()
+    resolved: list[str] = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def image_config(self, reference: str) -> dict:
+        from nemo_gym.tasks.harbor.registry import ImageConfigError
+
+        FakeRegistryClient.resolved.append(reference)
+        if reference in FakeRegistryClient.missing:
+            raise ImageConfigError(
+                f"library/{reference.partition(':')[0]}: registry returned HTTP 404 for manifests/x"
+            )
+        return {
+            "architecture": "amd64",
+            "config": {"Env": [f"PATH={IMAGE_PATH}"], "WorkingDir": "/"},
+            "config_digest": "sha256:c",
+            "image": reference,
+            "os": "linux",
+            "record_version": RECORD_VERSION,
+        }
+
+
+@pytest.fixture
+def fake_registry(monkeypatch):
+    from nemo_gym.tasks.harbor import image_configs as image_configs_module
+
+    monkeypatch.setattr(image_configs_module, "RegistryClient", FakeRegistryClient)
+    monkeypatch.setattr(FakeRegistryClient, "missing", set())
+    monkeypatch.setattr(FakeRegistryClient, "resolved", [])
+    return FakeRegistryClient
+
+
+@pytest.mark.usefixtures("fake_registry")
 class TestCli:
     def test_prepare_local_folder(self, tmp_path):
         folder = tmp_path / "ds"
@@ -733,6 +1107,74 @@ class TestCli:
         assert prepared.rows_path == tmp_path / "out" / "ds" / "tasks.jsonl"
         assert [t.task_id for t in prepared.tasks] == ["a"]
         assert prepared.skipped == {}
+
+    def test_prepare_records_base_images_before_loading_and_resolves_the_dockerfiles(self, tmp_path, capsys):
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        write_task(folder / "b", dockerfile=TB21_DEBIAN_DOCKERFILE)
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+        # Images are resolved in task order, once each, before any task loads.
+        assert FakeRegistryClient.resolved == ["ubuntu:24.04", "debian:bookworm-slim"]
+        recorded = json.loads((folder / IMAGE_CONFIGS_FILE).read_text())
+        assert set(recorded) == {"debian:bookworm-slim", "ubuntu:24.04"}
+        assert recorded["debian:bookworm-slim"]["config"]["Env"] == [f"PATH={IMAGE_PATH}"]
+        overlay = next(task for task in prepared.tasks if task.task_id == "b")
+        assert overlay.env == {"PATH": f"/opt/tools/bin:{IMAGE_PATH}", "DEBIAN_FRONTEND": "noninteractive"}
+        assert overlay.overlay[0].env == {"PATH": IMAGE_PATH} and overlay.overlay[0].workdir == "/"
+        assert f"Base image configurations recorded in {folder / IMAGE_CONFIGS_FILE}" in capsys.readouterr().out
+        # A second prepare finds everything recorded and asks the registry for nothing.
+        prepare_target(str(folder), output_root=tmp_path / "out")
+        assert FakeRegistryClient.resolved == ["ubuntu:24.04", "debian:bookworm-slim"]
+
+    def test_prepare_fails_clearly_when_a_base_image_cannot_be_fetched(self, tmp_path):
+        from nemo_gym.tasks.harbor.registry import ImageConfigError
+
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        write_task(folder / "b", dockerfile=TB21_DEBIAN_DOCKERFILE)
+        FakeRegistryClient.missing.add("debian:bookworm-slim")
+        with pytest.raises(ImageConfigError) as excinfo:
+            prepare_target(str(folder), output_root=tmp_path / "out")
+        message = str(excinfo.value)
+        assert "base image 'debian:bookworm-slim'" in message and "task(s) b" in message
+        assert "registry returned HTTP 404" in message
+        assert not (tmp_path / "out").exists()
+
+    @pytest.mark.parametrize(
+        "kw,reason",
+        [({"only": ["a"]}, "not in --only-tasks"), ({"exclude": ["z"]}, "excluded by --exclude-tasks 'z'")],
+    )
+    def test_prepare_does_not_fetch_the_base_image_of_a_left_out_task(self, tmp_path, capsys, kw, reason):
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        write_task(folder / "z", dockerfile="FROM internal.registry/base:dev\nRUN true\n")
+        FakeRegistryClient.missing.add("internal.registry/base:dev")
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", **kw)
+        assert [t.task_id for t in prepared.tasks] == ["a"]
+        # The left-out task did not load (its base image is not recorded) but is left out, not reported broken.
+        assert prepared.skipped == {}
+        assert FakeRegistryClient.resolved == ["ubuntu:24.04"]
+        assert f"Skipping z: {reason}" in capsys.readouterr().out
+
+    def test_prepare_single_task_folder_left_out_by_only_still_says_no_runnable_task(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "z", dockerfile="FROM ubuntu:24.04\nRUN true\n")
+        with pytest.raises(ValueError, match="No runnable task"):
+            prepare_target(str(folder / "z"), output_root=tmp_path / "out", only=["a"])
+        assert FakeRegistryClient.resolved == ["ubuntu:24.04"]
+
+    def test_prepare_does_not_fetch_the_base_image_a_dataset_override_replaces(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        write_task(folder / "t", dockerfile="FROM internal.registry/base:dev\nRUN make\n")
+        (folder / "dataset.toml").write_text('[gym.tasks."t".environment]\ndocker_image = "ghcr.io/org/t:prebuilt"\n')
+        FakeRegistryClient.missing.add("internal.registry/base:dev")
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+        assert [(t.task_id, t.image, t.overlay) for t in prepared.tasks] == [
+            ("a", "ubuntu:24.04", ()),
+            ("t", "ghcr.io/org/t:prebuilt", ()),
+        ]
+        assert FakeRegistryClient.resolved == ["ubuntu:24.04"]
 
     def test_prepare_skips_tasks_that_do_not_load(self, tmp_path, caplog):
         folder = tmp_path / "ds"
@@ -772,6 +1214,8 @@ class TestCli:
         # Compose tasks run like any other since Compose groups landed.
         assert [task.task_id for task in prepared.tasks] == ["grouped", "keep"]
         assert prepared.tasks[0].needs_compose
+        # The Compose task's images were recorded through the (faked) registry, never Docker Hub.
+        assert "ubuntu:24.04" in FakeRegistryClient.resolved
         out = capsys.readouterr().out
         assert "Skipping gpu-task: excluded by --exclude-tasks 'gpu-*'" in out
         assert len((prepared.rows_path).read_text().splitlines()) == 2
@@ -978,37 +1422,11 @@ class TestCli:
 
         merged = [token for token in _merge_config_paths(tokens) if token.startswith("+config_paths=[")]
         assert len(merged) == 1
+        # Entries are JSON-quoted when written; the merge may re-emit them bare.
         paths = [json.loads(p) if p.startswith('"') else p for p in merged[0][len("+config_paths=[") : -1].split(",")]
         assert paths[-1] == str(overlay)
         assert any(path.endswith("opensandbox.yaml") for path in paths[:-1])
         assert any(path.endswith("harbor.yaml") for path in paths[:-1])
-
-
-@pytest.mark.parametrize(
-    "suffix",
-    [
-        "ENV PATH=/opt/bin:$PATH",
-        "ENV ROOT=/app\nWORKDIR $ROOT",
-        "USER $RUNNER",
-        "WORKDIR /app\nWORKDIR child",
-        'ENV A "x y"',
-        "ENV A=ok broken",
-        'ENV A="unterminated',
-        'WORKDIR "/quoted"',
-        "USER",
-        "ENV",
-        "ENV A=foo\\ bar",
-        "ENV A=<<EOF\nx\nEOF",
-    ],
-)
-def test_dockerfile_shortcut_refuses_uninterpreted_syntax(suffix):
-    assert base_image_only(f"FROM ubuntu\n{suffix}\n") is None
-
-
-def test_prebuilt_image_ignores_all_dockerfile_settings(tmp_path):
-    toml = HELLO_TOML.replace("cpus = 1", 'docker_image = "prebuilt:1"\ncpus = 1')
-    task = load_task(write_task(tmp_path / "t", toml=toml, dockerfile="FROM other\nENV A=1\nWORKDIR /x\nUSER ghost"))
-    assert (task.image, task.workdir, task.env, task.user) == ("prebuilt:1", None, {}, None)
 
 
 @pytest.mark.parametrize("failure", ["encoding", "escape", "io"])
@@ -1205,6 +1623,7 @@ def test_existing_unpinned_task_is_never_relabeled(tmp_path, registry_repo):
     assert not (existing.parent / "manifest.toml").exists()
 
 
+@pytest.mark.usefixtures("fake_registry")  # prepare records base images; never reach Docker Hub
 def test_registry_versions_keep_distinct_rows_routes_and_outputs(tmp_path, monkeypatch):
     import nemo_gym.tasks.harbor.cli as harbor_cli
 
@@ -1225,6 +1644,7 @@ def test_registry_versions_keep_distinct_rows_routes_and_outputs(tmp_path, monke
         assert yaml.safe_load(path.read_text())["output_jsonl_fpath"] == str(prepared.output_dir / "rollouts.jsonl")
 
 
+@pytest.mark.usefixtures("fake_registry")  # prepare records base images; never reach Docker Hub
 def test_config_overlays_win_after_real_loading_and_inheritance(tmp_path):
     from hydra.core.override_parser.overrides_parser import OverridesParser
     from omegaconf import OmegaConf
@@ -1457,6 +1877,7 @@ def test_harbor_task_data_schema_names_the_digest_key(tmp_path):
     assert TaskData.model_validate(row["task_input"]["task_data"]).ng_digest == task.digest
 
 
+@pytest.mark.usefixtures("fake_registry")  # prepare records base images; never reach Docker Hub
 @pytest.mark.parametrize(
     ("taskset", "agent_name"),
     [
@@ -1543,6 +1964,7 @@ def test_interrupted_cache_repair_preserves_pending_pins(tmp_path, registry_repo
     assert (folder / "c" / "instruction.md").read_text().startswith("Create a file")
 
 
+@pytest.mark.usefixtures("fake_registry")  # prepare records base images; never reach Docker Hub
 @pytest.mark.parametrize("external", [False, True])
 def test_symlinked_child_tasks_are_reported_without_duplicate_rows(tmp_path, external):
     folder = tmp_path / "ds"
@@ -1588,6 +2010,7 @@ def test_generated_instance_names_are_override_safe_and_collision_free():
             assert override.key_or_group == f"{name}.setting"
 
 
+@pytest.mark.usefixtures("fake_registry")  # prepare records base images; never reach Docker Hub
 def test_generated_agent_can_be_overridden_for_versioned_taskset(tmp_path, monkeypatch):
     import sys
 

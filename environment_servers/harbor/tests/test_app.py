@@ -26,6 +26,8 @@ from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S
 from environment_servers.harbor.tests.conftest import (
     COMPOSE_YAML,
     IMAGE_CONFIGS,
+    IMAGE_PATH,
+    OK,
     SEPARATE_TOML,
     TASK_TOML,
     AgentSandbox,
@@ -51,6 +53,7 @@ from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor import load_task
 from nemo_gym.tasks.harbor.models import HarborEnvironment
+from nemo_gym.tasks.harbor.records import IMAGE_CONFIGS_FILE
 
 
 class TestRewardFile:
@@ -276,6 +279,26 @@ class TestEpisode:
         assert response.failure.stage == "seed" and not response.failure.terminal
         assert "shutting down" in response.failure.failure_reason and created == []
 
+    def test_sandbox_spec_starts_the_pinned_base_image(self, tmp_path, monkeypatch):
+        """An overlay-mode task starts the immutable reference its base configuration was recorded at (the index
+        digest behind the tag the Dockerfile wrote), with the recorded settings resolved from it."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch, dockerfile="FROM debian:bookworm-slim\nRUN true")
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict",
+            lambda: {"sandbox": {"opensandbox": {}, "default_metadata": {"sandbox-api": "osb"}}},
+        )
+        pinned = "library/debian@sha256:" + "d" * 64
+        path = task.path.parent / IMAGE_CONFIGS_FILE
+        recorded = json.loads(path.read_text())
+        recorded["debian:bookworm-slim"]["image"] = pinned
+        path.write_text(json.dumps(recorded))
+        task = load_task(task.path)
+        assert task.image == pinned and [run.command for run in task.overlay] == ["true"]
+
+        spec = server._sandbox_spec(task, "/app")
+
+        assert spec.image == pinned and spec.workdir == "/app"
+
     def test_sandbox_spec_from_task(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         monkeypatch.setattr(
@@ -350,7 +373,7 @@ class TestSeedWorkdirAndResources:
     async def test_root_workdir_is_neither_created_nor_handed_over(self, tmp_path, monkeypatch):
         """An image whose WORKDIR is `/` with a user override: `/` keeps root's ownership."""
         server, task, _, _ = make_server(tmp_path, monkeypatch, dockerfile="FROM ubuntu:24.04\nUSER runner\n")
-        assert task.user == "runner" and task.workdir is None
+        assert task.user == "runner" and task.workdir in (None, "/")
 
         class RootPwdSandbox(FakeSandbox):
             async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
@@ -638,13 +661,15 @@ class TestVerify:
                     return SandboxExecResult(stdout="", stderr="chmod: Permission denied", return_code=1)
                 return result
 
+        # The recorded base image runs as `app`, as the NonRootSandbox models.
         server, task, sandbox, response = await self.verified(
             tmp_path,
             monkeypatch,
             NonRootSandbox(),
-            toml=TASK_TOML.replace("[environment]", '[environment]\ndocker_image = "nonroot:latest"'),
+            dockerfile="FROM ubuntu:24.04\nWORKDIR /app\nUSER app",
+            image_config={"Env": [f"PATH={IMAGE_PATH}"], "User": "app"},
         )
-        assert task.user is None
+        assert task.user == "app" and task.sandbox_user == "app"
         assert response.result.reward == 1.0 and response.result.failure_kind is None
         # Harbor's `chmod +x` on test.sh is root's as well; set it aside so the lines below read the run itself.
         chmod = next(call for call in sandbox.execs if call["command"] == "chmod +x /tests/test.sh")
@@ -1256,7 +1281,7 @@ class TestComposeAndRouting:
                     # The attempt begins inside the start period and ends after it, failing.
                     await asyncio.sleep(0.1)
                     return SandboxExecResult(stdout="", stderr="", return_code=1)
-                return SandboxExecResult(stdout="", stderr="", return_code=0)
+                return OK
 
         sandbox = SlowFirstProbe()
         # With retries = 1 a counted failure would raise here; Harbor decides the start period before the attempt.

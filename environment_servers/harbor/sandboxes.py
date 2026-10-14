@@ -24,7 +24,7 @@ from typing import Any, Awaitable
 
 import yaml
 
-from environment_servers.harbor.session import resolve_env_templates
+from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
 from environment_servers.harbor.verifier import _verifier_image, _verifier_key
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxSpec, clamp_resource_requests
@@ -98,10 +98,11 @@ class HarborSandboxMixin:
         """The agent's sandbox by default; pass the verifier's environment for a separate verifier."""
         global_config_dict = get_global_config_dict()
         if environment is None:
-            # The agent's sandbox: Dockerfile ENV recorded by the loader, overridden by `[environment.env]`.
-            environment, task_env = task.config.environment, task.env
+            # The agent's sandbox: Dockerfile ENV recorded by the loader, under the host-resolved `[environment.env]`.
+            environment, task_env = task.config.environment, _task_sandbox_env(task)
         else:
-            task_env = environment.env
+            # A separate verifier in its own image: only its `[verifier.environment].env`, host-resolved.
+            task_env = resolve_env_templates(environment.env)
         metadata = (
             resolve_provider_metadata(self._provider_ref(task), global_config_dict)
             | self.config.sandbox_metadata
@@ -122,7 +123,7 @@ class HarborSandboxMixin:
             ttl_s=ttl,
             ready_timeout_s=self.config.sandbox_ready_timeout_s,
             workdir=workdir,
-            env=resolve_env_templates(task_env),
+            env=task_env,
             metadata=metadata,
             resources=resources,
             provider_options=self._provider_options_within(resources, task, role),
@@ -168,8 +169,16 @@ class HarborSandboxMixin:
         return sandbox
 
     async def _create_sandbox_within_deadline(self, task: HarborTask, episode_key: str) -> AsyncSandbox:
-        """The agent's ``_create_sandbox`` under the ready deadline; the timeout is a seed failure, retried."""
-        return await self._within_ready_deadline(self._create_sandbox(task, task.workdir, episode_key=episode_key))
+        """The agent's ``_create_sandbox`` under the ready deadline; the timeout is a seed failure, retried.
+
+        An overlay task starts in the base image's own working directory: a provider creates the spec's
+        directory as root before anything runs, and the overlay's ``WORKDIR`` steps (then ``_prepare_workdir``)
+        would find it existing and leave it root-owned. Created by the overlay instead, it belongs to the
+        user in effect at that ``WORKDIR``, as in the build. The ``main`` service of a Compose group starts
+        the same way (:meth:`_create_compose`).
+        """
+        workdir = None if task.overlay else task.workdir
+        return await self._within_ready_deadline(self._create_sandbox(task, workdir, episode_key=episode_key))
 
     async def _within_ready_deadline[T](self, create: Awaitable[T]) -> T:
         """A sandbox create bounded by the configured ready timeout, whatever the provider's retry budget.
@@ -256,7 +265,9 @@ class HarborSandboxMixin:
     async def _create_compose(self, task: HarborTask, episode_key: str) -> AsyncSandboxCompose:
         """Start the task's Compose group; the ``main`` service is the agent's sandbox."""
         document, path = await self._compose_document_for(task)
-        main_spec = self._sandbox_spec(task, task.workdir)
+        # An overlay task's main service starts without the task workdir, as its single sandbox would (see
+        # `_create_sandbox_within_deadline`); the sidecars derive from it and start in their images' own.
+        main_spec = self._sandbox_spec(task, None if task.overlay else task.workdir)
         sidecar_spec = replace(
             main_spec, resources={}, env={}, provider_options=dict(self.config.sandbox_provider_options)
         )
@@ -274,12 +285,25 @@ class HarborSandboxMixin:
     async def _create_verifier_sandbox(self, task: HarborTask, *, episode_key: str | None = None) -> AsyncSandbox:
         """A separate verifier runs in its own sandbox, sized by ``[verifier.environment]``.
 
+        Without a ``[verifier.environment]`` the verifier runs in the task's own image, so it is
+        created like the agent's sandbox: the Dockerfile's resolved ``ENV`` under ``task.toml``'s.
+
         Its lifetime is the episode-sized default the agent's sandbox gets, not ``timeout_sec`` plus
-        slack: the sandbox also has to come up, receive ``/tests`` and the artifacts, run ``test.sh``
-        with its grace and hand back the reward, and a provider's renew interval must fit under it.
+        slack: the sandbox also has to come up, run the overlay when it gets one, receive ``/tests``
+        and the artifacts, run ``test.sh`` with its grace and hand back the reward, and a provider's
+        renew interval must fit under it. The default covers the overlay for the agent, so it does
+        for the verifier too.
         """
-        environment = task.config.verifier.environment or task.config.environment
-        spec = self._sandbox_spec(task, None, environment=environment, image=_verifier_image(task), role="verifier")
+        environment = task.config.verifier.environment
+        spec = self._sandbox_spec(
+            task,
+            # The task image keeps the task's working directory, as the agent had it; an explicit
+            # verifier image starts in its `[verifier.environment].workdir`, else its own WORKDIR.
+            task.workdir if environment is None else environment.workdir,
+            environment=environment,
+            image=_verifier_image(task),
+            role="verifier",
+        )
         provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         sandbox = AsyncSandbox(provider_config)
         if episode_key is not None:

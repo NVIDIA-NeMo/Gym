@@ -10,7 +10,11 @@ rows were materialized (see ``nemo_gym.tasks.harbor``).
 ``/run`` owns one whole episode, in this order:
 
 - seed: check the row's digest against the mapping and the folder, start the task's
-  image as a sandbox through the configured provider, create the working directory;
+  image as a sandbox through the configured provider, run the ``RUN`` lines of an
+  overlay-mode Dockerfile with the ``ENV``, ``WORKDIR`` and ``USER`` the loader resolved for
+  each (see ``nemo_gym.tasks.harbor.dockerfile``), create the working directory. A ``RUN``
+  line that fails is a terminal seed failure (the task's Dockerfile does not apply); a
+  provider that cannot run one is retryable;
 - agent: open an agent session on the configured agent server, handing it a
   ``SandboxAccess`` for that sandbox, post the task's ``responses_create_params`` to it,
   then close the session and keep what the agent observed;
@@ -39,6 +43,7 @@ from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, PositiveFloat
 
 from environment_servers.harbor.entrypoint import HarborEntrypointMixin
+from environment_servers.harbor.overlay import HarborOverlayError, HarborOverlayMixin
 from environment_servers.harbor.sandboxes import COMPOSE_IMAGES_FILE, HarborSandboxMixin
 from environment_servers.harbor.session import HarborSession, HarborSessionMixin, resolve_env_templates
 from environment_servers.harbor.verifier import HarborVerificationMixin, _verifier_image, _verifier_key
@@ -139,6 +144,7 @@ class HarborEnvironmentServer(
     HarborSessionMixin,
     HarborVerificationMixin,
     HarborEntrypointMixin,
+    HarborOverlayMixin,
 ):
     config: HarborEnvironmentServerConfig
     request_model = SingleAgentTurnRequest
@@ -461,8 +467,6 @@ class HarborEnvironmentServer(
                 f"Task {task.task_id!r} needs a separate verifier built from tests/Dockerfile; "
                 "only prebuilt verifier images are supported yet",
             )
-        if task.user is not None:
-            raise HTTPException(422, "Agent user overrides ([agent].user or Dockerfile USER) are not supported yet")
         # Fail before provisioning; retain templates in the snapshot and resolve at use time.
         resolve_env_templates(task.env)
         resolve_env_templates(task.config.verifier.env)
@@ -502,9 +506,18 @@ class HarborEnvironmentServer(
                 provider_ref=self._provider_ref(task),
                 compose=compose,
             )
+            await self._apply_overlay(sandbox, task)
             session.workdir = await self._prepare_workdir(sandbox, task, task.workdir)
             await self._wait_healthy(sandbox, task)
             await self._write_task_context(sandbox, task)
+        except HarborOverlayError as exc:
+            # The task's own Dockerfile failed to apply: a task error, not a sandbox one.
+            try:
+                await self._stop_sandbox(episode_key)
+            except Exception:
+                LOGGER.exception("Failed to stop Harbor sandbox after a failed overlay")
+            LOGGER.error("Dockerfile overlay failed for %s: %s", task.task_id, exc)
+            raise HTTPException(422, f"Dockerfile overlay failed for {task.task_id!r}: {exc}") from exc
         except BaseException as exc:
             if not isinstance(exc, Exception):
                 # Cancellation (the episode deadline fired): the registered `close_sandbox` cleanup stops

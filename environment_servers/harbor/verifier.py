@@ -26,6 +26,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
+from environment_servers.harbor.overlay import OVERLAY_FAILED_KIND, HarborOverlayError
 from environment_servers.harbor.session import (
     AGENT_LOGS_DIR,
     ARTIFACTS_DIR,
@@ -200,6 +201,11 @@ def _stdout_tail(logs_dir: Path, limit: int = 600) -> str:
     return path.read_text(errors="replace")[-limit:]
 
 
+def _verifier_gets_overlay(task: HarborTask) -> bool:
+    """A separate verifier that runs in the task's own image needs the same Dockerfile overlay as the agent."""
+    return bool(task.overlay) and not task.config.is_shared_verifier and task.config.verifier.environment is None
+
+
 class HarborVerificationMixin:
     """Grade an episode: the test.sh wrapper protocol, the reward files and the verifier sandbox.
 
@@ -300,6 +306,9 @@ class HarborVerificationMixin:
             await session.stop_agent_side()
 
             verifier = await self._create_verifier_sandbox(task, episode_key=session.session_id)
+            if _verifier_gets_overlay(task):
+                # The verifier runs in the task's own image, so it needs the same overlay as the agent did.
+                await self._apply_overlay(verifier, task)
             prepare = await exec_as_root(
                 verifier,
                 f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR} && chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR}",
@@ -337,6 +346,10 @@ class HarborVerificationMixin:
             timed_out = verifier_timed_out(result, exit_record, budget)
         except HTTPException:
             raise
+        except HarborOverlayError as exc:
+            # The rollout is complete; losing the verifier's sandbox to its overlay must not discard it.
+            LOGGER.error(f"Dockerfile overlay failed in the verifier sandbox for {task.task_id}: {exc}")
+            return self._masked(OVERLAY_FAILED_KIND, f"Dockerfile overlay failed in the verifier sandbox: {exc}")
         except Exception as exc:
             LOGGER.exception(f"Separate verification infrastructure failed for {task.task_id}")
             return self._masked(failure_kinds.PROVIDER_UNAVAILABLE, f"{type(exc).__name__}: {exc}")

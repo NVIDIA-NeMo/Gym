@@ -22,9 +22,13 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
 
-# The startup fields Compose would read from the image; the rest of the config is not recorded.
-RECORDED_CONFIG_KEYS = ("Cmd", "Entrypoint", "ExposedPorts", "Healthcheck", "User", "WorkingDir")
+
+# The fields Compose would read from the image to start it, plus the build-time state (environment,
+# user, working directory, the shell that runs RUN lines) a Dockerfile's instructions resolve from; the
+# rest of the config is not recorded. Growing this tuple means bumping ``dockerfile.RECORD_VERSION``.
+RECORDED_CONFIG_KEYS = ("Cmd", "Entrypoint", "Env", "ExposedPorts", "Healthcheck", "Shell", "User", "WorkingDir")
 MANIFEST_ACCEPT = ", ".join(
     [
         "application/vnd.oci.image.index.v1+json",
@@ -122,6 +126,11 @@ class RegistryClient:
         """One ``compose-images.json`` entry for ``reference``."""
         ref = parse_image_ref(reference)
         manifest, manifest_digest = self._manifest(ref, ref.manifest_ref)
+        # The pin is the digest of the manifest the reference named. Behind a tag that is the multi-arch
+        # index itself, so a sandbox of any platform selects its own manifest from one immutable
+        # reference; the configuration below is read from the manifest the index names for the recorded
+        # platform. A single-platform reference pins to its one manifest.
+        pinned_digest = manifest_digest
         if manifest.get("mediaType") in INDEX_MEDIA_TYPES or "manifests" in manifest:
             manifest_digest = self._select_platform(ref, manifest)
             manifest, _ = self._manifest(ref, manifest_digest)
@@ -136,8 +145,9 @@ class RegistryClient:
             "architecture": blob["architecture"],
             "config": {key: config[key] for key in RECORDED_CONFIG_KEYS if config.get(key)},
             "config_digest": config_digest,
-            "image": f"{ref.pinned_repository}@{manifest_digest}",
+            "image": f"{ref.pinned_repository}@{pinned_digest}",
             "os": blob["os"],
+            "record_version": RECORD_VERSION,
         }
 
     def _select_platform(self, ref: ImageRef, index: dict[str, Any]) -> str:

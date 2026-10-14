@@ -12,10 +12,11 @@ import pytest
 from pydantic import ValidationError
 
 from environment_servers.harbor.app import HarborEnvironmentServer
-from environment_servers.harbor.session import resolve_env_templates
+from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
 from environment_servers.harbor.task_data import TaskData
 from environment_servers.harbor.tests import conftest
 from environment_servers.harbor.tests.conftest import (
+    SEPARATE_IN_TASK_IMAGE_TOML,
     SEPARATE_TOML,
     TASK_TOML,
     AgentSandbox,
@@ -90,40 +91,38 @@ async def test_templates_resolve_at_use_without_changing_materialized_task(tmp_p
     assert "verifier-secret" not in (snapshots[0] / "task.toml").read_text()
 
 
-@pytest.mark.parametrize("variant", ["agent_user", "dockerfile_user"])
-async def test_unsupported_semantics_fail_before_provisioning(tmp_path, monkeypatch, variant):
-    # Separate verification is supported since M10; agent user overrides arrive with overlay images.
-    toml = TASK_TOML
-    dockerfile = "FROM ubuntu:24.04\nWORKDIR /app"
-    if variant == "agent_user":
-        toml = toml.replace("[agent]", '[agent]\nuser = "nobody"')
-    else:
-        dockerfile += "\nUSER nobody"
-    server, task, _, created = make_server(tmp_path, monkeypatch, toml=toml, dockerfile=dockerfile)
-    response = await run_episode(server, task)
-    assert response.failure.stage == "seed" and response.failure.terminal
-    assert "not supported" in response.failure.failure_reason
-    assert created == []
+async def test_dockerfile_env_literal_is_not_a_host_template(tmp_path, monkeypatch):
+    """A Dockerfile ``ENV`` value is baked, as ``docker build`` leaves it; only ``[environment.env]`` is a host template."""
+    monkeypatch.setenv("HARBOR_TEST_TOKEN", "agent-secret")
+    monkeypatch.setenv("GYM4256_LITERAL_PROBE", "host-value")
+    dockerfile = "FROM debian:bookworm-slim\nENV LITERAL='${GYM4256_LITERAL_PROBE}'\nRUN echo probe\n"
+    toml = TASK_TOML + '\n[environment.env]\nTOKEN = "${HARBOR_TEST_TOKEN}"\n'
+    server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml, dockerfile=dockerfile)
+    # The loader keeps the single-quoted value literal and stores the task.toml template unresolved.
+    assert task.overlay and task.env["LITERAL"] == "${GYM4256_LITERAL_PROBE}"
+    assert task.env["TOKEN"] == "${HARBOR_TEST_TOKEN}"
+    monkeypatch.setattr(
+        "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+    )
+    specs = []
 
+    async def create(task, workdir, *, episode_key=None):
+        # The sandbox starts with the spec's environment, as the provider's container would.
+        specs.append(server._sandbox_spec(task, workdir))
+        sandbox.spec_env = dict(specs[-1].env)
+        sandbox.created_in(workdir)
+        return sandbox
 
-# A Compose file makes the task a Compose group (M13), covered by TestComposeAndRouting.
-@pytest.mark.parametrize("build_file", [None, "Dockerfile"])
-async def test_prebuilt_environment_files_only_uploaded_without_build_definition(tmp_path, monkeypatch, build_file):
-    toml = TASK_TOML.replace("[environment]", '[environment]\ndocker_image = "ubuntu:24.04"')
-    server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml)
-    env = task.path / "environment"
-    (env / "Dockerfile").unlink()
-    if build_file:
-        (env / build_file).write_text("FROM ubuntu:24.04" if build_file == "Dockerfile" else "services: {}")
-    (env / "input.txt").write_text("task input")
-    task = refresh_task(server, task)
+    monkeypatch.setattr(server, "_create_sandbox", create)
     response = await run_episode(server, task)
-    assert response.failure is None, response.failure
-    # The verifier's tests/ archive is always the last upload; the task inputs come first when they are uploaded.
-    assert len(sandbox.uploaded_archives) == (1 if build_file else 2)
-    if not build_file:
-        with tarfile.open(fileobj=io.BytesIO(sandbox.uploaded_archives[0])) as archive:
-            assert archive.extractfile("input.txt").read() == b"task input"
+    assert response.failure is None and response.result.reward == 1
+    (spec,) = specs
+    # The agent's sandbox gets the Dockerfile value as written and the task.toml template resolved on the host.
+    assert spec.env["LITERAL"] == "${GYM4256_LITERAL_PROBE}" and spec.env["TOKEN"] == "agent-secret"
+    assert spec.env == _task_sandbox_env(task) == {**task.env, "TOKEN": "agent-secret"}
+    # The overlay RUN line sees the same literal, as a build step would.
+    assert sandbox.run("echo probe")["seen"]["env"]["LITERAL"] == "${GYM4256_LITERAL_PROBE}"
+    assert "host-value" not in response.model_dump_json()
 
 
 async def test_live_folder_edits_do_not_change_seeded_verifier(tmp_path, monkeypatch):
@@ -475,6 +474,52 @@ async def test_interrupted_verifier_start_is_stopped_by_the_episode(tmp_path, mo
     assert response.failure is not None
     # The episode's own cleanup stops the half-started verifier; it does not wait for shutdown.
     assert verifier.stopped and agent.stopped and not server._sandboxes
+
+
+@pytest.mark.parametrize("mode", ["task_image", "explicit", "explicit_workdir"])
+async def test_separate_verifier_spec_follows_the_task_image_or_the_explicit_environment(tmp_path, monkeypatch, mode):
+    """Built through ``_create_verifier_sandbox`` itself, not a test double of it."""
+    monkeypatch.setenv("HARBOR_TEST_TOKEN", "secret")
+    explicit = mode != "task_image"
+    toml = (
+        SEPARATE_TOML
+        if explicit
+        else SEPARATE_IN_TASK_IMAGE_TOML + '\n[environment.env]\nAPP_MODE = "${HARBOR_TEST_TOKEN}"\n'
+    )
+    if mode == "explicit_workdir":
+        toml = toml.replace(
+            'docker_image = "org/verifier:1"\n', 'docker_image = "org/verifier:1"\nworkdir = "/work"\n'
+        )
+    server, task, _, _ = make_server(tmp_path, monkeypatch, toml=toml)
+    verifier = FakeSandbox()
+    specs = []
+
+    async def start(spec):
+        specs.append(spec)
+
+    monkeypatch.setattr(verifier, "start", start, raising=False)
+    monkeypatch.setattr("environment_servers.harbor.sandboxes.resolve_provider_config", lambda *args: {})
+    monkeypatch.setattr(
+        "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+    )
+    monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandbox", lambda config: verifier)
+    assert await server._create_verifier_sandbox(task) is verifier
+    (spec,) = specs
+    assert spec.metadata["harbor_role"] == "verifier"
+    # The verifier lives as long as the agent's sandbox: readiness, transfers, test.sh with its grace and reward
+    # collection all fit, and so does the TB4 provider's 1800 s renew interval, which the old `timeout_sec + slack`
+    # (300 + 900) did not clear.
+    assert spec.ttl_s == server._sandbox_spec(task, task.workdir).ttl_s >= 1800 + task.config.verifier.timeout_sec
+    if explicit:
+        # An explicit verifier image starts in its own WORKDIR, or the one `[verifier.environment]` names,
+        # with its own variables.
+        assert spec.image == "org/verifier:1" and spec.env == {}
+        assert spec.workdir == ("/work" if mode == "explicit_workdir" else None)
+    else:
+        # The task image: the agent's working directory and resolved environment, Dockerfile ENV included.
+        assert task.workdir == "/app"
+        assert spec.image == task.image and spec.workdir == "/app"
+        assert spec.env == _task_sandbox_env(task) and spec.env["APP_MODE"] == "secret"
 
 
 def test_task_data_requires_digest_and_accepts_materialized_row(tmp_path, monkeypatch):

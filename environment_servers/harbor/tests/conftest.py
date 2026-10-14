@@ -12,6 +12,10 @@ fixtures, so the test modules import them by name from this file.
 import asyncio
 import inspect
 import io
+import json
+import posixpath
+import re
+import shlex
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,10 +33,12 @@ from environment_servers.harbor.app import (
 from environment_servers.harbor.verifier import EXIT_RECORD_NAME
 from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 from nemo_gym.tasks.harbor import DIGEST_KEY, load_task
+from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
+from nemo_gym.tasks.harbor.records import IMAGE_CONFIGS_FILE
 
 
 TASK_TOML = """
@@ -51,7 +57,31 @@ storage_mb = 10240
 """
 
 
-def write_task(root: Path, *, toml: str = TASK_TOML, dockerfile: str = "FROM ubuntu:24.04\nWORKDIR /app") -> Path:
+# The PATH the test base images record, as Docker's default for an image whose Dockerfile set none.
+IMAGE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def write_image_config(parent: Path, image: str, **config) -> None:
+    """Record ``image``'s OCI configuration next to the task folders, as preparing the dataset does."""
+    path = parent / IMAGE_CONFIGS_FILE
+    recorded = json.loads(path.read_text()) if path.is_file() else {}
+    recorded[image] = {
+        "os": "linux",
+        "architecture": "amd64",
+        "image": image,
+        "config": config,
+        "record_version": RECORD_VERSION,
+    }
+    path.write_text(json.dumps(recorded))
+
+
+def write_task(
+    root: Path,
+    *,
+    toml: str = TASK_TOML,
+    dockerfile: str = "FROM ubuntu:24.04\nWORKDIR /app",
+    image_config: dict | None = None,
+) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "task.toml").write_text(toml)
     (root / "instruction.md").write_text("Create hello.txt\n")
@@ -59,6 +89,8 @@ def write_task(root: Path, *, toml: str = TASK_TOML, dockerfile: str = "FROM ubu
     (root / "environment" / "Dockerfile").write_text(dockerfile)
     (root / "tests").mkdir(exist_ok=True)
     (root / "tests" / "test.sh").write_text("#!/bin/bash\necho 1 > /logs/verifier/reward.txt\n")
+    # The loader resolves the Dockerfile against its base image's configuration, recorded at prepare.
+    write_image_config(root.parent, dockerfile.split()[1], **(image_config or {"Env": [f"PATH={IMAGE_PATH}"]}))
     return root
 
 
@@ -73,26 +105,68 @@ def archive_of(files: dict[str, str]) -> bytes:
     return buffer.getvalue()
 
 
+OK = SandboxExecResult(stdout="", stderr="", return_code=0)
+
+
+def _fails(message: str) -> SandboxExecResult:
+    return SandboxExecResult(stdout="", stderr=message, return_code=1)
+
+
 @dataclass
 class FakeSandbox:
-    """Records sandbox calls; ``verifier_files`` is what ``/logs/verifier`` holds after test.sh.
+    """Records sandbox calls and behaves like the container they would reach.
 
-    The verifier wrapper's exit record is added when the wrapper ran to its end: ``test_elapsed`` is how
-    long the run took inside the container. A provider timeout, or ``wrapper_ran=False`` (no ``timeout``
-    or ``bash`` in the image), leaves no record.
+    ``verifier_files`` is what ``/logs/verifier`` holds after test.sh. The verifier wrapper's exit
+    record is added when the wrapper ran to its end: ``test_elapsed`` is how long the run took inside
+    the container. A provider timeout, or ``wrapper_ran=False`` (no ``timeout`` or ``bash`` in the
+    image), leaves no record. The container side: a command runs as the exec's ``user``, else as the
+    image's default user; ``spec_env`` is the environment the sandbox was created with, and the
+    ``unset``/``export``/``cd`` prefix the server puts before a Dockerfile ``RUN`` line is applied to
+    it, so each exec's record carries under ``seen`` the command, environment, user and directory the
+    container would run. Directories exist only once something made them (``dirs`` maps each to its
+    owner; a non-root user can only create under its own directories, and ``cd`` into a missing one
+    fails), and ``passwd`` is the image's uid-to-name table.
     """
 
     verifier_files: dict[str, str] = field(default_factory=lambda: {"reward.txt": "1\n"})
-    test_result: SandboxExecResult = SandboxExecResult(stdout="", stderr="", return_code=0)
+    test_result: SandboxExecResult = OK
     test_elapsed: int = 1
     wrapper_ran: bool = True
     execs: list[dict] = field(default_factory=list)
     uploads: list[tuple[Path, str]] = field(default_factory=list)
     uploaded_archives: list[bytes] = field(default_factory=list)
     stopped: bool = False
+    spec_env: dict[str, str] = field(default_factory=dict)
+    image_user: str = "root"
+    dirs: dict[str, str] = field(default_factory=lambda: {"/": "root", "/tmp": "root", "/home": "root"})
+    passwd: dict[str, str] = field(default_factory=lambda: {"0": "root", "1000": "agent"})
+
+    def run(self, fragment: str) -> dict:
+        """The record of the one exec whose command, prefix aside, holds ``fragment``."""
+        (record,) = [c for c in self.execs if c.get("seen") and fragment in c["seen"]["command"]]
+        return record
+
+    def created_in(self, workdir: str | None) -> None:
+        """What a provider does with the spec's workdir: the directory exists, root-owned, before anything runs."""
+        if workdir is not None:
+            self._mkdir(workdir, "root")
+
+    def _mkdir(self, path: str, user: str) -> SandboxExecResult:
+        if path in self.dirs:
+            return OK
+        parent = posixpath.dirname(path)
+        while parent not in self.dirs:
+            parent = posixpath.dirname(parent)
+        if user.split(":")[0] not in ("root", "0") and self.dirs[parent] != user:
+            return _fails(f"mkdir: cannot create directory '{path}': Permission denied")
+        while path not in self.dirs:
+            self.dirs[path] = user
+            path = posixpath.dirname(path)
+        return OK
 
     async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
-        self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user})
+        record = {"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user, "seen": None}
+        self.execs.append(record)
         if "test.sh" in command:
             if "timeout" not in command:
                 # Harbor's `chmod +x` on test.sh before the run, or a separate verifier's probe for the file.
@@ -106,7 +180,43 @@ class FakeSandbox:
         if command == "pwd":
             # The image's own WORKDIR, asked for when a task declares none.
             return SandboxExecResult(stdout="/app\n", stderr="", return_code=0)
-        return SandboxExecResult(stdout="", stderr="", return_code=0)
+        who = str(user) if user is not None else self.image_user
+        if match := re.fullmatch(r"getent passwd (\S+) \| cut -d: -f1", command):
+            name = self.passwd.get(shlex.split(match.group(1))[0], "")
+            return SandboxExecResult(stdout=f"{name}\n" if name else "", stderr="", return_code=0)
+        if match := re.fullmatch(r"test -d (\S+) \|\| \(mkdir -p \1 && chown (\S+) \1\)", command):
+            path, owner = shlex.split(match.group(1))[0], shlex.split(match.group(2))[0]
+            if path in self.dirs:
+                return OK
+            result = self._mkdir(path, who)
+            if result.return_code == 0:
+                self.dirs[path] = owner
+            return result
+        if match := re.fullmatch(r"mkdir -p (\S+)(?: && chown (\S+) \1)?", command):
+            path = shlex.split(match.group(1))[0]
+            result = self._mkdir(path, who)
+            if result.return_code == 0 and match.group(2):
+                self.dirs[path] = shlex.split(match.group(2))[0]
+            return result
+        # Anything else runs as a shell line: the server's `unset`/`export`/`cd` prefix shapes what the
+        # command itself sees.
+        statements = command.split("; ")
+        seen_env, seen_cwd = dict(self.spec_env), cwd
+        while statements and statements[0].startswith(("unset ", "export ")):
+            words = shlex.split(statements.pop(0))
+            if words[0] == "unset":
+                seen_env.pop(words[1], None)
+            else:
+                key, _, value = words[1].partition("=")
+                seen_env[key] = value
+        if statements and statements[0].startswith("cd ") and statements[0].endswith(" || exit 1"):
+            seen_cwd = shlex.split(statements.pop(0))[1]
+            if seen_cwd not in self.dirs:
+                return _fails(f"cd: {seen_cwd}: No such file or directory")
+        record["seen"] = {"command": "; ".join(statements), "env": seen_env, "user": who, "cwd": seen_cwd}
+        # Who owned the directory the command ran in at that moment (a build step fails there otherwise).
+        record["cwd_owner"] = self.dirs.get(seen_cwd)
+        return OK
 
     async def upload(self, local_path, remote_path):
         self.uploads.append((Path(local_path), remote_path))
@@ -242,10 +352,11 @@ def make_server(
     *,
     toml: str = TASK_TOML,
     dockerfile: str = "FROM ubuntu:24.04\nWORKDIR /app",
+    image_config: dict | None = None,
     **config_overrides,
 ):
     folder = tmp_path / "datasets" / "ds"
-    task = load_task(write_task(folder / "hello", toml=toml, dockerfile=dockerfile))
+    task = load_task(write_task(folder / "hello", toml=toml, dockerfile=dockerfile, image_config=image_config))
     config = HarborEnvironmentServerConfig(
         host="0.0.0.0",
         port=8080,
@@ -263,6 +374,7 @@ def make_server(
 
     async def create(task, workdir, *, episode_key=None):
         created.append((task.task_id, workdir))
+        sandbox.created_in(workdir)
         return sandbox
 
     monkeypatch.setattr(server, "_create_sandbox", create)
@@ -287,6 +399,50 @@ def episode(task, *, rollout="r1", attempt=0, digest=None, task_id="hello", task
 async def run_episode(server: HarborEnvironmentServer, task, **kwargs) -> HarborEpisodeResponse:
     return await server.run_request(episode(task, **kwargs))
 
+
+OVERLAY_DOCKERFILE = """\
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y curl
+WORKDIR /app
+ENV PATH="/opt/tools/bin:$PATH" MSG="hi there"
+RUN mkdir -p /opt/tools/bin && echo ok > ready.txt
+USER agent
+RUN echo "as agent" > /tmp/who
+ENTRYPOINT []
+"""
+
+HEALTHCHECK_TOML = (
+    TASK_TOML
+    + """
+[environment.healthcheck]
+command = "test -f /app/ready.txt"
+interval_sec = 0.01
+start_interval_sec = 0.01
+timeout_sec = 5.0
+retries = 3
+"""
+)
+
+
+@dataclass
+class OverlaySandbox(FakeSandbox):
+    """Fails the RUN line whose command holds ``failing`` with the given result."""
+
+    failing: str | None = None
+    failure: SandboxExecResult = SandboxExecResult(
+        stdout="line 1\nline 2\n", stderr="E: no package\n", return_code=100
+    )
+    spec: SandboxSpec | None = None
+
+    async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        result = await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+        seen = self.execs[-1]["seen"]
+        if self.failing and seen and self.failing in seen["command"]:
+            return self.failure
+        return result
+
+
+SEPARATE_IN_TASK_IMAGE_TOML = TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
 
 SEPARATE_TOML = """
 schema_version = "1.4"
@@ -441,6 +597,7 @@ IMAGE_CONFIGS = {
         "architecture": "amd64",
         "image": "org/agent@sha256:" + "a" * 64,
         "config": {},
+        "record_version": RECORD_VERSION,
     },
     "org/api:1": {
         "os": "linux",
