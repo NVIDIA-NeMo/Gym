@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from omegaconf import OmegaConf
 
 from benchmarks.claweval.prepare import prepare_split
 from responses_api_agents.claweval_agent.trajectory import trace_to_response
@@ -39,6 +40,16 @@ def test_native_export_all_tasks(native_root, split, count, tmp_path):
         assert set(row["verifier_metadata"]) == {"task_id", "task_sha256", "split"}
         path = native_root / "tasks" / row["verifier_metadata"]["task_id"] / "task.yaml"
         assert row["verifier_metadata"]["task_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_native_export_selected_multimodal_tasks(native_root, tmp_path, configured):
+    selected = ["M001_clock", "M027_video_food_memo", "M099_su7_price_from_image_zh"]
+    task_ids = OmegaConf.create(selected) if configured else selected
+    output = prepare_split("multimodal", output=tmp_path / "selected.jsonl", task_ids=task_ids)
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len(rows) == len(selected)
+    assert {row["verifier_metadata"]["task_id"] for row in rows} == set(selected)
 
 
 def test_native_loop_and_grader_preserve_score_and_grader_isolation(native_root, tmp_path, monkeypatch):

@@ -29,7 +29,7 @@ def prepare_split(
         "claweval_root": str(root),
         "split": split,
         "output": str(output),
-        "task_ids": task_ids or [],
+        "task_ids": list(task_ids or []),
         "agent_name": agent_name or f"claweval_{split}_agent",
     }
     worker = Path(__file__).resolve().parents[2] / "responses_api_agents/claweval_agent/worker.py"
