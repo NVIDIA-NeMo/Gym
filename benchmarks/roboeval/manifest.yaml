@@ -1,0 +1,32 @@
+name: roboeval
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: coding
+description: RoboEval from CodeBotler. 16 service-mobile-robot tasks with 5 prompt paraphrases each; the model writes
+  task_program() against a robot API, and the program passes only if RoboEval's symbolic simulator and temporal checks
+  accept it in every world state. Evaluation only (license forbids training use).
+modality: text
+licensing: LicenseRef-BSD-3-Clause-ML-Restriction
+authors:
+- lgulich
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: roboeval
+agent_server: simple_agent
+datasets:
+- name: roboeval
+  type: benchmark
+  jsonl_fpath: benchmarks/roboeval/data/roboeval_benchmark.jsonl
+  prepare_script: benchmarks/roboeval/prepare.py
+  # RoboEval reports pass@1 over 20 samples per prompt.
+  num_repeats: 20
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active
