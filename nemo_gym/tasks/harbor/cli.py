@@ -16,23 +16,37 @@ selected agent, environment server and model configs.
 import argparse
 import json
 import logging
-from dataclasses import dataclass, field
+import sys
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from nemo_gym import component_search_roots
+from nemo_gym.cli.utils import exit_cleanly_on_config_error
+from nemo_gym.config_types import ConfigError
+from nemo_gym.tasks.harbor.digest import DIGEST_KEY
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.hub import HubError, datasets_dir, fetch_ref, is_hub_ref
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
 from nemo_gym.tasks.harbor.task import HarborTask, discover_tasks
+from nemo_gym.tasks.harbor.validation_report import _dig, _validation_key, _validation_rows, summarize_validation
 
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_ROOT = Path("results/harbor")
 ENVIRONMENT_SERVER_CONFIG = "environment_servers/harbor/configs/harbor.yaml"
+ORACLE_AGENT = "harbor_oracle_agent"
+# A harness that calls the Gym model server from inside the task sandbox, where 127.0.0.1 is the container
+# itself, needs the model server to advertise the node's IP (`use_absolute_ip`). The harness declares that on
+# the agent class its entrypoint runs (`calls_model_from_sandbox: ClassVar[bool] = True`), read from source
+# like `ray_enabled`; an agent whose config declares `SANDBOX_MODEL_BASE_URL_KEY` routes its model calls
+# through the sandbox too.
+SANDBOX_MODEL_BASE_URL_KEY = "sandbox_model_base_url"
+CALLS_MODEL_FROM_SANDBOX_KEY = "calls_model_from_sandbox"
+USE_ABSOLUTE_IP_KEY = "use_absolute_ip"
 SANDBOX_PROVIDER_CONFIG = "nemo_gym/sandbox/providers/{provider}/configs/{provider}.yaml"
 # Harness-specific settings a Harbor run needs; keyed by the agent implementation folder.
 AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
@@ -62,6 +76,8 @@ class AgentSelection:
     config_path: Path
     instance_name: str
     impl_name: str
+    # The harness calls the model server from inside the task sandbox (see ``runs_in_sandbox``).
+    runs_in_sandbox: bool = False
 
 
 def prepare_target(
@@ -107,6 +123,25 @@ def prepare_target(
     )
 
 
+def runs_in_sandbox(impl_name: str, impl_config: Any) -> bool:
+    """Whether the harness behind ``impl_name`` calls the model server from inside the task sandbox.
+
+    The harness says so itself: ``calls_model_from_sandbox = True`` on the agent class its entrypoint runs, read
+    from the entrypoint source (no agent module is imported here), or ``sandbox_model_base_url`` in its config.
+    """
+    from nemo_gym.server_utils import entrypoint_class_flag
+
+    config = impl_config if isinstance(impl_config, dict) else {}
+    if SANDBOX_MODEL_BASE_URL_KEY in config:
+        return True
+    entrypoint = config.get("entrypoint") or "app.py"
+    for root in component_search_roots():
+        path = root / "responses_api_agents" / impl_name / entrypoint
+        if path.is_file():
+            return entrypoint_class_flag(path, CALLS_MODEL_FROM_SANDBOX_KEY) is True
+    return False
+
+
 def resolve_agent(agent: str) -> AgentSelection:
     """Map ``--agent NAME[/FLAVOR]`` to ``responses_api_agents/<NAME>/configs/<FLAVOR>.yaml``.
 
@@ -122,10 +157,16 @@ def resolve_agent(agent: str) -> AgentSelection:
                 instances = [key for key, value in config.items() if isinstance(value, dict)]
                 if len(instances) != 1 or "responses_api_agents" not in config[instances[0]]:
                     raise ValueError(f"{path} must define exactly one responses_api_agents instance")
-                impls = list(config[instances[0]]["responses_api_agents"])
+                impls = config[instances[0]]["responses_api_agents"]
                 if len(impls) != 1:
                     raise ValueError(f"{path} must define exactly one agent implementation")
-                return AgentSelection(config_path=path.resolve(), instance_name=instances[0], impl_name=impls[0])
+                (impl_name,) = impls
+                return AgentSelection(
+                    config_path=path.resolve(),
+                    instance_name=instances[0],
+                    impl_name=impl_name,
+                    runs_in_sandbox=runs_in_sandbox(impl_name, impls[impl_name]),
+                )
     raise ValueError(f"No agent config found for `--agent {agent}` (looked for {' or '.join(candidates)})")
 
 
@@ -167,6 +208,10 @@ def build_run(
         agent_impl=agent.impl_name,
         agent_overrides=AGENT_OVERRIDES.get(agent.impl_name),
     )
+    # Defaults belong below explicit config files and command-line overrides.
+    config["output_jsonl_fpath"] = str(prepared.output_dir / "rollouts.jsonl")
+    if agent.runs_in_sandbox:
+        config[USE_ABSOLUTE_IP_KEY] = True
     config_path = prepared.output_dir / "run_config.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
 
@@ -178,10 +223,6 @@ def build_run(
     tokens += [token for token in overrides if not token.startswith("+agent_name=")]
     if not _has_override(tokens, "split"):
         tokens.append("+split=validation")
-    if not _has_override(tokens, "output_jsonl_fpath"):
-        tokens.append(
-            f"+output_jsonl_fpath={json.dumps(str(prepared.output_dir / 'rollouts.jsonl'), ensure_ascii=False)}"
-        )
     return config_path, tokens
 
 
@@ -202,6 +243,11 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
             resolve_sandbox_config(sandbox)
     except (ValueError, OSError, yaml.YAMLError) as exc:
         args._parser.error(str(exc))
+    if agent.impl_name == ORACLE_AGENT:
+        # The oracle runs the reference solution, not a model: its run is `gym dataset validate`, whose results
+        # live under results/harbor/validation/ where no model run, resumed or not, can pick them up as its own.
+        validate_target(args, overrides, agent=agent)
+        return
     try:
         prepared = prepare_target(args.target)
     except (HarborTaskError, HubError, OSError) as exc:
@@ -217,3 +263,81 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error(str(exc))
     print(f"Run config written to {config_path} (datasets folder: {datasets_dir()})")
     dispatch("nemo_gym.cli.eval:e2e_rollout_collection", _merge_config_paths(tokens))
+
+
+@exit_cleanly_on_config_error
+def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: AgentSelection | None = None) -> None:
+    """Entry point for ``gym dataset validate <target>``: run every task's reference solution and score it.
+
+    ``gym eval run <target> --agent harbor_oracle`` lands here too, with its ``agent`` selection, so the oracle's
+    results never share a folder with a model's.
+    """
+    from omegaconf import OmegaConf
+    from omegaconf.errors import InterpolationResolutionError
+
+    from nemo_gym.cli.main import _merge_config_paths, dispatch
+    from nemo_gym.global_config import get_global_config_dict, translate_interpolation_error
+    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+
+    # Evaluation and reference validation must never share inputs, configs, or cached results.
+    try:
+        agent = agent or resolve_agent(ORACLE_AGENT)
+        sandbox = getattr(args, "sandbox", None)
+        if sandbox is not None:
+            resolve_sandbox_config(sandbox)
+        prepared = prepare_target(args.target, output_root=DEFAULT_OUTPUT_ROOT / "validation")
+    except (HarborTaskError, HubError, ValueError, OSError, yaml.YAMLError) as exc:
+        args._parser.error(str(exc))
+    unvalidated = [task.task_id for task in prepared.tasks if not task.has_solution]
+    prepared = replace(prepared, tasks=[task for task in prepared.tasks if task.has_solution])
+    write_rows(prepared.tasks, prepared.taskset, prepared.rows_path)
+    rollouts = prepared.output_dir / "rollouts.jsonl"
+    expected = []
+    if prepared.tasks:
+        # Oracle runs reference scripts directly; it needs no placeholder model server.
+        config_path, tokens = build_run(prepared, agent, sandbox=sandbox, overrides=list(overrides))
+        tokens = _merge_config_paths(tokens)
+        # Resolve through the same parser and cache used by dispatch, including file overlays.
+        sys.argv = [sys.argv[0], *tokens]
+        config = get_global_config_dict()
+        try:
+            resolved = OmegaConf.to_container(config, resolve=True)
+        except InterpolationResolutionError as exc:
+            raise translate_interpolation_error(exc) from exc
+        collection = RolloutCollectionConfig.model_validate({**resolved, "input_jsonl_fpath": str(prepared.rows_path)})
+        expected = RolloutCollectionHelper()._preprocess_rows_from_config(collection)
+        rollouts = Path(collection.output_jsonl_fpath)
+        if collection.resume_from_cache and rollouts.is_file() and collection.materialized_jsonl_fpath.is_file():
+            # The collector resumes its saved inputs, not the just-prepared task rows. Reject a stale
+            # selection or digest before startup so an old reward cannot validate a changed solution.
+            cached = _validation_rows(collection.materialized_jsonl_fpath)
+            current_digests = {
+                _validation_key(row): _dig(row, "task_input", "task_data", DIGEST_KEY) for row in expected
+            }
+            cached_digests = {_validation_key(row): _dig(row, "task_input", "task_data", DIGEST_KEY) for row in cached}
+            if cached_digests != current_digests:
+                raise ConfigError(
+                    f"Cannot resume Harbor validation from {collection.materialized_jsonl_fpath}: "
+                    "the selected tasks or task digests have changed. Use +resume_from_cache=false "
+                    "to validate the current tasks, or choose a new +output_jsonl_fpath to keep the old results."
+                )
+            # Only the oracle agent stamps `response.metadata.oracle`. Cached results without it were written by
+            # another run (a model evaluation on the same file); resumed, they would stand in for the oracle's.
+            foreign = sorted(
+                _validation_key(row)[1]
+                for row in _validation_rows(rollouts)
+                if ((row.get("response") or {}).get("metadata") or {}).get("oracle") is None
+            )
+            if foreign:
+                raise ConfigError(
+                    f"Cannot resume Harbor validation from {rollouts}: {len(foreign)} cached result(s) were not "
+                    f"produced by the oracle agent (no oracle metadata): {', '.join(foreign[:5])}"
+                    f"{', ...' if len(foreign) > 5 else ''}. Use +resume_from_cache=false to validate the current "
+                    "tasks, or choose a new +output_jsonl_fpath to keep the old results."
+                )
+        print(f"Run config written to {config_path}; validating {len(expected)} oracle rollout(s)")
+        dispatch("nemo_gym.cli.eval:e2e_rollout_collection", tokens)
+    report = summarize_validation(rollouts, unvalidated, expected=expected, skipped=prepared.skipped)
+    print(report.text)
+    if not report.ok:
+        sys.exit(1)

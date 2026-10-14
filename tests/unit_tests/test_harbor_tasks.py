@@ -13,7 +13,14 @@ import yaml
 
 import nemo_gym.tasks.harbor.hub as hub_module
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTaskConfig, content_hash, discover_tasks, load_task
-from nemo_gym.tasks.harbor.cli import AgentSelection, PreparedTaskset, build_run, prepare_target, resolve_agent
+from nemo_gym.tasks.harbor.cli import (
+    AgentSelection,
+    PreparedTaskset,
+    build_run,
+    prepare_target,
+    resolve_agent,
+    runs_in_sandbox,
+)
 from nemo_gym.tasks.harbor.dockerfile import base_image_only
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.hub import (
@@ -576,7 +583,7 @@ class TestCli:
         assert len(prepared.rows_path.read_text().splitlines()) == 1
 
     def test_resolve_agent_accepts_short_name(self):
-        selection = resolve_agent("hermes")
+        selection = resolve_agent("hermes_agent")
         assert selection.instance_name == "hermes_agent"
         assert selection.impl_name == "hermes_agent"
         assert selection.config_path.name == "hermes_agent.yaml"
@@ -584,8 +591,6 @@ class TestCli:
             resolve_agent("no_such_agent_xyz")
 
     def test_build_run_writes_config_and_overrides(self, tmp_path):
-        from hydra.core.override_parser.overrides_parser import OverridesParser
-
         folder = tmp_path / "ds"
         tasks = [load_task(write_task(folder / "a"))]
         prepared = PreparedTaskset("ds", folder, tasks, tmp_path / "out" / "tasks.jsonl", tmp_path / "out")
@@ -606,9 +611,96 @@ class TestCli:
         assert "environment_servers/harbor/configs/harbor.yaml" in config_paths
         assert "resources_servers" not in config_paths
         assert "opensandbox/configs/opensandbox.yaml" in config_paths
-        parsed = OverridesParser.create().parse_overrides(tokens)
-        output = next(token.value() for token in parsed if token.key_or_group == "output_jsonl_fpath")
-        assert output == str(tmp_path / "out" / "rollouts.jsonl")
+        assert yaml.safe_load(config_path.read_text())["output_jsonl_fpath"] == str(
+            tmp_path / "out" / "rollouts.jsonl"
+        )
+        assert not any(token.lstrip("+").startswith("use_absolute_ip=") for token in tokens)
+
+    def test_resolve_agent_marks_in_sandbox_harnesses(self):
+        assert resolve_agent("terminus_2_sandboxed").runs_in_sandbox is False
+        assert resolve_agent("hermes_agent").runs_in_sandbox is True
+        assert resolve_agent("codex").runs_in_sandbox is True
+        assert resolve_agent("harbor_oracle").runs_in_sandbox is False
+
+    @pytest.mark.parametrize(
+        "impl_name",
+        [
+            "codex_agent",
+            "opencode_agent",
+            "pi_agent",
+            "openclaw_agent",
+            "hermes_agent",
+            "hermes_sandboxed_agent",
+            "opencode_sandboxed_agent",
+            "pi_sandboxed_agent",
+        ],
+    )
+    def test_shipped_sandboxed_harnesses_declare_model_calls_from_sandbox(self, impl_name):
+        """Each harness that calls the model from the task sandbox declares it on its class; the CLI keeps no
+        list of names, so a run with it advertises a reachable model server without ++use_absolute_ip=true."""
+        assert runs_in_sandbox(impl_name, {"entrypoint": "app.py"}) is True
+
+    @pytest.mark.parametrize("impl_name", ["terminus_2_sandboxed_agent", "terminus_2_agent", "harbor_oracle_agent"])
+    def test_host_side_harnesses_declare_nothing(self, impl_name):
+        # Terminus 2 drives a tmux session in the sandbox but calls the model from the agent server.
+        assert runs_in_sandbox(impl_name, {"entrypoint": "app.py"}) is False
+
+    def test_runs_in_sandbox_from_declaration_or_config_key(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("nemo_gym.tasks.harbor.cli.component_search_roots", lambda: [tmp_path])
+
+        def write_agent(name, source, entrypoint="app.py"):
+            folder = tmp_path / "responses_api_agents" / name
+            folder.mkdir(parents=True)
+            (folder / entrypoint).write_text(source)
+
+        declared = (
+            "class Agent(SimpleResponsesAPIAgent):\n    calls_model_from_sandbox = True\n\nAgent.run_webserver()\n"
+        )
+        write_agent("declared_agent", declared)
+        write_agent("custom_agent", declared, entrypoint="serve.py")
+        write_agent("silent_agent", "class Agent(SimpleResponsesAPIAgent):\n    pass\n\nAgent.run_webserver()\n")
+        write_agent(
+            "heir_agent",
+            "class Base:\n    calls_model_from_sandbox = True\n\nclass Agent(Base):\n    pass\n\nAgent.run_webserver()\n",
+        )
+
+        assert runs_in_sandbox("declared_agent", {"entrypoint": "app.py"}) is True
+        assert runs_in_sandbox("declared_agent", {}) is True  # the entrypoint defaults to app.py
+        assert runs_in_sandbox("custom_agent", {"entrypoint": "serve.py"}) is True
+        assert runs_in_sandbox("custom_agent", {}) is False
+        # Not declared.
+        assert runs_in_sandbox("silent_agent", {"model_server": {"name": "policy_model"}}) is False
+        # An inherited declaration is not read from source: each class declares it itself.
+        assert runs_in_sandbox("heir_agent", {}) is False
+        # The config key alone is enough, whatever the class says.
+        assert runs_in_sandbox("silent_agent", {"sandbox_model_base_url": None}) is True
+        assert runs_in_sandbox("anyswe_agent", {"sandbox_model_base_url": None}) is True
+        # Neither, including an agent folder that does not exist.
+        assert runs_in_sandbox("anyswe_agent", {"model_server": {"name": "policy_model"}}) is False
+        assert runs_in_sandbox("missing_agent", None) is False
+
+    def _prepared(self, tmp_path):
+        folder = tmp_path / "ds"
+        tasks = [load_task(write_task(folder / "a"))]
+        prepared = PreparedTaskset("ds", folder, tasks, tmp_path / "out" / "tasks.jsonl", tmp_path / "out")
+        prepared.output_dir.mkdir(parents=True)
+        return prepared
+
+    def test_build_run_advertises_node_ip_for_in_sandbox_agent(self, tmp_path):
+        agent = resolve_agent("hermes")
+        path, _ = build_run(self._prepared(tmp_path), agent, sandbox="opensandbox", overrides=[])
+        assert yaml.safe_load(path.read_text())["use_absolute_ip"] is True
+
+    def test_build_run_leaves_host_side_agent_on_loopback(self, tmp_path):
+        agent = AgentSelection(tmp_path / "agent.yaml", "harbor_oracle_agent", "harbor_oracle_agent")
+        path, _ = build_run(self._prepared(tmp_path), agent, sandbox="docker", overrides=[])
+        assert yaml.safe_load(path.read_text()).get("use_absolute_ip", False) is False
+
+    @pytest.mark.parametrize("override", ["+use_absolute_ip=false", "++use_absolute_ip=false"])
+    def test_build_run_respects_caller_use_absolute_ip(self, tmp_path, override):
+        agent = AgentSelection(tmp_path / "agent.yaml", "hermes_agent", "hermes_agent", runs_in_sandbox=True)
+        _, tokens = build_run(self._prepared(tmp_path), agent, sandbox=None, overrides=[override])
+        assert [token for token in tokens if "use_absolute_ip" in token] == [override]
 
 
 @pytest.mark.parametrize(
@@ -833,8 +925,6 @@ def test_existing_unpinned_task_is_never_relabeled(tmp_path, registry_repo):
 
 
 def test_registry_versions_keep_distinct_rows_routes_and_outputs(tmp_path, monkeypatch):
-    from hydra.core.override_parser.overrides_parser import OverridesParser
-
     import nemo_gym.tasks.harbor.cli as harbor_cli
 
     for version in ("1.0", "2.0"):
@@ -851,9 +941,7 @@ def test_registry_versions_keep_distinct_rows_routes_and_outputs(tmp_path, monke
     for prepared, (path, tokens) in zip((first, second), configs):
         assert json.loads(prepared.rows_path.read_text())["task_id"]["taskset"] == prepared.taskset
         assert list(yaml.safe_load(path.read_text())["environment_server_routes"]) == [prepared.taskset]
-        parsed = OverridesParser.create().parse_overrides(tokens)
-        output = next(token.value() for token in parsed if token.key_or_group == "output_jsonl_fpath")
-        assert output == str(prepared.output_dir / "rollouts.jsonl")
+        assert yaml.safe_load(path.read_text())["output_jsonl_fpath"] == str(prepared.output_dir / "rollouts.jsonl")
 
 
 def test_config_overlays_win_after_real_loading_and_inheritance(tmp_path):
@@ -995,6 +1083,7 @@ def test_generated_run_passes_full_config_validation(tmp_path, monkeypatch, task
     )
     monkeypatch.setattr(sys, "argv", ["e2e", *_merge_config_paths(tokens)])
     monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+    monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
     config = get_global_config_dict()
     servers = GlobalConfigDictParser().filter_for_server_instance_configs(config)
     environment = next(server for server in servers if server.name == environment_server_instance(taskset))
@@ -1095,6 +1184,7 @@ def test_generated_agent_can_be_overridden_for_versioned_taskset(tmp_path, monke
     from nemo_gym.global_config import get_global_config_dict
     from nemo_gym.tasks.harbor.materialize import agent_instance
 
+    monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
     folder = tmp_path / "ds-2.0"
     write_task(folder / "a")
     prepared = prepare_target(str(folder), output_root=tmp_path / "out")

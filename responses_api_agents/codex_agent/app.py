@@ -27,7 +27,7 @@ from contextlib import AsyncExitStack
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from time import time
-from typing import Any, Literal, Optional
+from typing import Any, ClassVar, Literal, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -455,6 +455,8 @@ class CodexAgentVerifyResponse(BaseVerifyResponse):
 
 class CodexAgent(SimpleResponsesAPIAgent):
     config: CodexAgentConfig
+    # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
