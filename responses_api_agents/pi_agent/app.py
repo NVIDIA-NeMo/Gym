@@ -70,12 +70,15 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
+from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.pi_agent.sandbox import PiSandboxSession
 from responses_api_agents.pi_agent.setup_pi import ensure_pi
 
 
 LOG = logging.getLogger(__name__)
 MCP_SETUP_ERROR_EXIT_CODE = 78  # Must match gym_mcp.mjs (EX_CONFIG).
+# gym_mcp.mjs prefixes each tool name with its server name and accepts only these characters.
+_MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]+")
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
@@ -487,6 +490,9 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     sandbox_bash_timeout_seconds: int = Field(default=900, gt=0)
+    sandbox_mcp_timeout_seconds: float = Field(
+        default=300, gt=0, allow_inf_nan=False, description="Timeout of each call to a granted MCP tool."
+    )
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
     @property
@@ -532,8 +538,23 @@ class PiAgent(SimpleResponsesAPIAgent):
             provider_ref = body.sandbox_access.connection.provider_config_ref
         if not isinstance(workdir, str) or not workdir.startswith("/"):
             raise HTTPException(422, "Pi sandbox workdir must be absolute")
-        if any(access.required for access in self.effective_tool_accesses(body)):
-            raise HTTPException(422, "Pi supports its own sandbox tools, not required HTTP/MCP tools")
+        tool_accesses = self.effective_tool_accesses(body)
+        unsupported = sorted(
+            access.name for access in tool_accesses if access.required and not isinstance(access, MCPToolAccess)
+        )
+        if unsupported:
+            raise HTTPException(
+                422, "Pi supports only MCP tool grants; required grants it cannot use: " + ", ".join(unsupported)
+            )
+        invalid = sorted(
+            access.name
+            for access in tool_accesses
+            if isinstance(access, MCPToolAccess) and not _MCP_SERVER_NAME.fullmatch(access.name)
+        )
+        if invalid:
+            raise HTTPException(
+                422, "Pi MCP grant names may contain only letters, digits, '_' and '-': " + ", ".join(invalid)
+            )
         if self.config.model_server is None:
             raise HTTPException(422, "Pi requires a sandbox-reachable Gym model_server")
         if not self.config.pi_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.pi_version):
@@ -658,6 +679,19 @@ class PiAgent(SimpleResponsesAPIAgent):
         system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, input_system) if part)
         return prompt, system
 
+    def _session_mcp_servers(self, request: AgentSeedSessionRequest) -> dict[str, dict[str, Any]]:
+        """gym_mcp.mjs configuration for the episode's MCP tool grants."""
+        return {
+            access.name: {
+                "url": str(access.connection.url),
+                "headers": access.connection.headers,
+                "timeout": round(self.config.sandbox_mcp_timeout_seconds * 1000),
+                "required": access.required,
+            }
+            for access in self.effective_tool_accesses(request)
+            if isinstance(access, MCPToolAccess)
+        }
+
     async def _sandbox_response(
         self,
         state: PiSandboxSession,
@@ -685,6 +719,17 @@ class PiAgent(SimpleResponsesAPIAgent):
         await state.session.sandbox.upload(
             Path(__file__).with_name("outcome.mjs"), f"{state.session.session_dir}/outcome.mjs"
         )
+        mcp_servers = self._session_mcp_servers(state.request)
+        mcp_extension = []
+        mcp_env = {}
+        if mcp_servers:
+            await state.session.sandbox.upload(
+                Path(__file__).with_name("gym_mcp.mjs"), f"{state.session.session_dir}/gym_mcp.mjs"
+            )
+            # The headers carry this episode's tool session token.
+            await state.upload_json("mcp-servers.json", mcp_servers)
+            mcp_extension = ["--extension", f"{state.session.session_dir}/gym_mcp.mjs"]
+            mcp_env["NEMO_GYM_PI_MCP_CONFIG"] = f"{state.session.session_dir}/mcp-servers.json"
         command = [
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
@@ -703,6 +748,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             f"{state.session.session_dir}/{runtime_guards_extension}",
             "--extension",
             f"{state.session.session_dir}/outcome.mjs",
+            *mcp_extension,
             "--no-skills",
             "--no-prompt-templates",
             "--no-themes",
@@ -721,6 +767,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 "PI_SKIP_VERSION_CHECK": "1",
                 "PI_TELEMETRY": "0",
                 "NEMO_GYM_PI_BASH_TIMEOUT": str(self.config.sandbox_bash_timeout_seconds),
+                **mcp_env,
             },
         }
         try:
@@ -815,6 +862,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             # They must not erase an independently confirmed worker or cleanup failure.
             terminal_error = None
         error = cleanup["error"] or terminal_error
+        if mcp_servers and cleanup["return_code"] == MCP_SETUP_ERROR_EXIT_CODE:
+            error = error or "Required Gym MCP tools could not be initialized"
         if cleanup["return_code"] not in (None, 0) and not cleanup["timed_out"] and not model_limit:
             error = error or f"Pi exited with code {cleanup['return_code']}"
         if not stop_reasons:

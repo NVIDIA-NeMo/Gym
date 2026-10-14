@@ -5,95 +5,113 @@ import { readFileSync } from "node:fs";
 
 // Gym's MCP server uses stateless Streamable HTTP with JSON responses. This
 // adapter deliberately does not implement arbitrary MCP transports or SSE.
+// A server marked `required: false` is skipped when its discovery fails; any other
+// failure registers no tools.
 export async function registerGymTools(pi, servers) {
   const names = new Set(pi.getAllTools().map((tool) => tool.name));
   const pending = [];
   for (const [serverName, server] of Object.entries(servers)) {
     if (server.enabled === false) continue;
-    if (!/^[A-Za-z0-9_-]+$/.test(serverName)) {
-      throw new Error("Invalid Gym MCP server name");
+    let tools;
+    try {
+      tools = await discoverTools(serverName, server, names);
+    } catch (error) {
+      if (server.required !== false) throw error;
+      process.stderr.write(`Optional Gym MCP server ${serverName} is unavailable\n`);
+      continue;
     }
-    let requestId = 0;
-    let protocolVersion = "2025-03-26";
-    async function rpc(method, params, signal, notification = false) {
-      const id = ++requestId;
-      const timeout = method === "tools/call" ? server.timeout : Math.min(server.timeout, 30000);
-      const deadline = AbortSignal.timeout(timeout);
-      const response = await fetch(server.url, {
-        method: "POST",
-        redirect: "error",
-        headers: {
-          ...server.headers,
-          "Content-Type": "application/json",
-          Accept: "application/json, text/event-stream",
-          "MCP-Protocol-Version": protocolVersion,
-        },
-        body: JSON.stringify({ jsonrpc: "2.0", ...(notification ? {} : { id }), method, params }),
-        signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
-      });
-      if (!response.ok) {
-        await response.body?.cancel();
-        throw new Error(`Gym MCP ${method}: HTTP ${response.status}`);
-      }
-      if (notification) {
-        await response.body?.cancel();
-        return;
-      }
-      if (!response.headers.get("content-type")?.includes("application/json")) {
-        await response.body?.cancel();
-        throw new Error("Gym MCP requires stateless JSON responses");
-      }
-      const message = await response.json();
-      if (message.jsonrpc !== "2.0" || message.id !== id || message.error || !message.result) {
-        // Do not include response bodies or authentication headers in diagnostics.
-        throw new Error(`Gym MCP ${method}: invalid or unsuccessful response`);
-      }
-      return message.result;
-    }
-    const initialized = await rpc("initialize", {
-      protocolVersion,
-      capabilities: {},
-      clientInfo: { name: "nemo-gym-pi", version: "1" },
-    });
-    if (typeof initialized.protocolVersion !== "string") throw new Error("Missing MCP protocol version");
-    protocolVersion = initialized.protocolVersion;
-    await rpc("notifications/initialized", {}, undefined, true);
-    let cursor;
-    const cursors = new Set();
-    do {
-      const result = await rpc("tools/list", cursor ? { cursor } : {});
-      for (const tool of result.tools) {
-        const name = `${serverName}_${tool.name}`;
-        if (!/^[A-Za-z0-9_-]{1,64}$/.test(name) || names.has(name)) {
-          throw new Error("Invalid or duplicate Gym MCP tool name");
-        }
-        names.add(name);
-        pending.push({
-          name,
-          label: name,
-          description: tool.description || tool.name,
-          parameters: tool.inputSchema,
-          async execute(_callId, params, signal) {
-            const result = await rpc("tools/call", { name: tool.name, arguments: params }, signal);
-            const content = result.content.map((item) =>
-              item.type === "text" || item.type === "image"
-                ? item
-                : { type: "text", text: JSON.stringify(item) },
-            );
-            if (result.isError) {
-              throw new Error(content.filter((item) => item.type === "text").map((item) => item.text).join("\n"));
-            }
-            return { content, details: {} };
-          },
-        });
-      }
-      cursor = result.nextCursor;
-      if (cursor && cursors.has(cursor)) throw new Error("Repeated Gym MCP tools/list cursor");
-      cursors.add(cursor);
-    } while (cursor);
+    for (const tool of tools) names.add(tool.name);
+    pending.push(...tools);
   }
   // A failed discovery must not leave a partially registered tool set.
   for (const tool of pending) pi.registerTool(tool);
+}
+
+async function discoverTools(serverName, server, registered) {
+  if (!/^[A-Za-z0-9_-]+$/.test(serverName)) {
+    throw new Error("Invalid Gym MCP server name");
+  }
+  const names = new Set(registered);
+  const pending = [];
+  let requestId = 0;
+  let protocolVersion = "2025-03-26";
+  async function rpc(method, params, signal, notification = false) {
+    const id = ++requestId;
+    const timeout = method === "tools/call" ? server.timeout : Math.min(server.timeout, 30000);
+    const deadline = AbortSignal.timeout(timeout);
+    const response = await fetch(server.url, {
+      method: "POST",
+      redirect: "error",
+      headers: {
+        ...server.headers,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        "MCP-Protocol-Version": protocolVersion,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", ...(notification ? {} : { id }), method, params }),
+      signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`Gym MCP ${method}: HTTP ${response.status}`);
+    }
+    if (notification) {
+      await response.body?.cancel();
+      return;
+    }
+    if (!response.headers.get("content-type")?.includes("application/json")) {
+      await response.body?.cancel();
+      throw new Error("Gym MCP requires stateless JSON responses");
+    }
+    const message = await response.json();
+    if (message.jsonrpc !== "2.0" || message.id !== id || message.error || !message.result) {
+      // Do not include response bodies or authentication headers in diagnostics.
+      throw new Error(`Gym MCP ${method}: invalid or unsuccessful response`);
+    }
+    return message.result;
+  }
+  const initialized = await rpc("initialize", {
+    protocolVersion,
+    capabilities: {},
+    clientInfo: { name: "nemo-gym-pi", version: "1" },
+  });
+  if (typeof initialized.protocolVersion !== "string") throw new Error("Missing MCP protocol version");
+  protocolVersion = initialized.protocolVersion;
+  await rpc("notifications/initialized", {}, undefined, true);
+  let cursor;
+  const cursors = new Set();
+  do {
+    const result = await rpc("tools/list", cursor ? { cursor } : {});
+    for (const tool of result.tools) {
+      const name = `${serverName}_${tool.name}`;
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(name) || names.has(name)) {
+        throw new Error("Invalid or duplicate Gym MCP tool name");
+      }
+      names.add(name);
+      pending.push({
+        name,
+        label: name,
+        description: tool.description || tool.name,
+        parameters: tool.inputSchema,
+        async execute(_callId, params, signal) {
+          const result = await rpc("tools/call", { name: tool.name, arguments: params }, signal);
+          const content = result.content.map((item) =>
+            item.type === "text" || item.type === "image"
+              ? item
+              : { type: "text", text: JSON.stringify(item) },
+          );
+          if (result.isError) {
+            throw new Error(content.filter((item) => item.type === "text").map((item) => item.text).join("\n"));
+          }
+          return { content, details: {} };
+        },
+      });
+    }
+    cursor = result.nextCursor;
+    if (cursor && cursors.has(cursor)) throw new Error("Repeated Gym MCP tools/list cursor");
+    cursors.add(cursor);
+  } while (cursor);
+  return pending;
 }
 
 export default function (pi) {
