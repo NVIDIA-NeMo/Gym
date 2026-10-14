@@ -127,6 +127,6 @@ def test_program_exiting_at_the_timeout_is_not_a_verifier_error(monkeypatch) -> 
         raise ProcessLookupError(3, "No such process")
 
     monkeypatch.setattr(os, "killpg", _exits_just_before_the_kill)
-    program = 'def task_program():\n    while True:\n        time.sleep(1)'
+    program = "def task_program():\n    while True:\n        time.sleep(1)"
     _, status, _ = asyncio.run(verifier._simulate("ElevatorTour", program, 1))
     assert status == "timeout"
