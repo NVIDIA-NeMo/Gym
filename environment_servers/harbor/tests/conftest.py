@@ -26,6 +26,7 @@ from environment_servers.harbor.app import (
     HarborEnvironmentServerConfig,
     HarborEpisodeResponse,
 )
+from environment_servers.harbor.verifier import EXIT_RECORD_NAME
 from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.sandbox.providers.base import SandboxExecResult
@@ -74,10 +75,17 @@ def archive_of(files: dict[str, str]) -> bytes:
 
 @dataclass
 class FakeSandbox:
-    """Records sandbox calls; ``verifier_files`` is what ``/logs/verifier`` holds after test.sh."""
+    """Records sandbox calls; ``verifier_files`` is what ``/logs/verifier`` holds after test.sh.
+
+    The verifier wrapper's exit record is added when the wrapper ran to its end: ``test_elapsed`` is how
+    long the run took inside the container. A provider timeout, or ``wrapper_ran=False`` (no ``timeout``
+    or ``bash`` in the image), leaves no record.
+    """
 
     verifier_files: dict[str, str] = field(default_factory=lambda: {"reward.txt": "1\n"})
     test_result: SandboxExecResult = SandboxExecResult(stdout="", stderr="", return_code=0)
+    test_elapsed: int = 1
+    wrapper_ran: bool = True
     execs: list[dict] = field(default_factory=list)
     uploads: list[tuple[Path, str]] = field(default_factory=list)
     uploaded_archives: list[bytes] = field(default_factory=list)
@@ -86,7 +94,15 @@ class FakeSandbox:
     async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
         self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user})
         if "test.sh" in command:
+            if self.wrapper_ran and self.test_result.error_type != "timeout":
+                start = 1_700_000_000
+                self.verifier_files.setdefault(
+                    EXIT_RECORD_NAME, f"{self.test_result.return_code} {start} {start + self.test_elapsed}\n"
+                )
             return self.test_result
+        if command == "pwd":
+            # The image's own WORKDIR, asked for when a task declares none.
+            return SandboxExecResult(stdout="/app\n", stderr="", return_code=0)
         return SandboxExecResult(stdout="", stderr="", return_code=0)
 
     async def upload(self, local_path, remote_path):

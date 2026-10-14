@@ -49,6 +49,12 @@ are an authoring error (a terminal `stage: verification` failure) because Gym re
 | Image ENTRYPOINT | No Harbor-compatible entrypoint lifecycle is guaranteed; startup follows the selected Gym sandbox provider. Tasks must not rely on an entrypoint running. |
 | Other features | Multi-step tasks, in-sandbox MCP tools, Windows and TPU environments are unsupported. |
 
+Shared-mode verification does not stop or quiesce what the agent left running: `test.sh` runs in the same
+sandbox beside those processes, as Harbor's shared mode runs it, so a test that talks to a service the agent
+started keeps working, and a process the agent left behind can still interfere. Separate verifier mode is the
+tamper-proof path: the verifier gets its own sandbox and its own image, and nothing the agent started is there
+(see the Verification row for what this layer supports).
+
 Clearing `/tests` and `/logs/verifier` before verification is a deliberate difference from Harbor's
 single-step shared mode, which merges tests. It prevents agent-planted reward files or test helpers
 from being used. Linked verification roots (including `/logs`) are unlinked before preparation,
