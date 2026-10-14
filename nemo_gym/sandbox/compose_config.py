@@ -13,8 +13,363 @@ Adapted from Gym's Terminal Bench 4 server (``resources_servers/terminal_bench_4
 
 import re
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+from nemo_gym.tasks.harbor.digest import is_ignored
+
+
+class ComposeSubstitutionError(ValueError):
+    """A Compose file names a variable or an ``env_file`` that prepare cannot resolve."""
+
+    def __init__(self, name: str, message: str | None = None) -> None:
+        self.name = name
+        super().__init__(message or f"unresolved Compose variable ${{{name}}}")
+
+
+_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _closing_brace(text: str, start: int) -> int:
+    """Index of the ``}`` that closes the ``${`` opening at ``start``, nested ``${...}`` included."""
+    depth = 0
+    index = start
+    while index < len(text):
+        if text.startswith("${", index):
+            depth += 1
+            index += 2
+            continue
+        if text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    raise ComposeSubstitutionError(text[start:], f"unterminated interpolation {text[start : start + 40]!r}")
+
+
+def _substitute_text(text: str, variables: dict[str, str]) -> str:
+    """Compose interpolation: ``$$`` (a literal dollar, kept doubled for ``_compose_literals``), ``${NAME}``,
+    ``${NAME:-default}``, ``${NAME-default}``, ``${NAME:?error}``, ``${NAME?error}``, ``${NAME:+alternative}``,
+    ``${NAME+alternative}`` and bare ``$NAME``. Defaults, alternatives and error texts are interpolated too, so
+    ``${A:-${B:-x}}`` nests the way Compose documents."""
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        dollar = text.find("$", index)
+        if dollar < 0:
+            out.append(text[index:])
+            break
+        out.append(text[index:dollar])
+        if text.startswith("$$", dollar):
+            out.append("$$")
+            index = dollar + 2
+            continue
+        if text.startswith("${", dollar):
+            close = _closing_brace(text, dollar)
+            body = text[dollar + 2 : close]
+            match = _NAME.match(body)
+            if match is None:
+                raise ComposeSubstitutionError(body, f"invalid interpolation ${{{body}}}")
+            name = match.group(0)
+            rest = body[match.end() :]
+            operator = ""
+            argument = ""
+            if rest:
+                operator = rest[:2] if rest[:2] in (":-", ":?", ":+") else rest[:1]
+                if operator not in ("-", "?", "+", ":-", ":?", ":+"):
+                    raise ComposeSubstitutionError(name, f"invalid interpolation ${{{body}}}")
+                argument = rest[len(operator) :]
+            out.append(_resolve(name, operator, argument, variables))
+            index = close + 1
+            continue
+        match = _NAME.match(text, dollar + 1)
+        if match is None:
+            # A lone ``$`` with no name after it is literal, as in Compose.
+            out.append("$")
+            index = dollar + 1
+            continue
+        out.append(_resolve(match.group(0), "", "", variables))
+        index = match.end()
+    return "".join(out)
+
+
+def _resolve(name: str, operator: str, argument: str, variables: dict[str, str]) -> str:
+    value = variables.get(name)
+    unset = value is None
+    empty = unset or (operator.startswith(":") and value == "")
+    if operator in ("-", ":-"):
+        return _substitute_text(argument, variables) if empty else value
+    if operator in ("?", ":?"):
+        if empty:
+            message = _substitute_text(argument, variables) if argument else "no value"
+            raise ComposeSubstitutionError(name, f"${{{name}}} is required: {message}")
+        return value
+    if operator in ("+", ":+"):
+        return "" if empty else _substitute_text(argument, variables)
+    if unset:
+        raise ComposeSubstitutionError(name)
+    return value
+
+
+def substitute_compose(value: Any, variables: dict[str, str]) -> Any:
+    """Interpolate ``${VAR}`` references in every string of a Compose document from ``variables`` alone.
+
+    The process environment is never consulted, so a dataset resolves the same way on every
+    deployment. A variable that is neither defined nor given a default raises
+    :class:`ComposeSubstitutionError` naming it.
+    """
+    if isinstance(value, str):
+        return _substitute_text(value, variables)
+    if isinstance(value, list):
+        return [substitute_compose(item, variables) for item in value]
+    if isinstance(value, dict):
+        return {key: substitute_compose(item, variables) for key, item in value.items()}
+    return value
+
+
+# Escapes a double-quoted env_file value honours; ``\$`` is mapped by the caller's ``escaped_dollar``.
+_DOUBLE_QUOTE_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", '"': '"'}
+
+
+def _quoted_env_value(text: str, line: int, escaped_dollar: str) -> tuple[str, str, int]:
+    """The quoted env_file value opening at ``text[0]``: ``(value, quote, characters consumed)``. The value runs
+    to its closing quote, across newlines if need be. Double quotes decode ``\\n``, ``\\r``, ``\\t``, ``\\\\``,
+    ``\\"`` and ``\\$`` (the last becoming ``escaped_dollar``) and keep any other ``\\X`` as written; single
+    quotes are literal except for ``\\'``, which is an escaped quote in either style."""
+    quote = text[0]
+    index = 1
+    chars: list[str] = []
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            escaped = text[index + 1]
+            if escaped == quote:
+                chars.append(quote)
+                index += 2
+                continue
+            if quote == '"' and (escaped == "$" or escaped in _DOUBLE_QUOTE_ESCAPES):
+                chars.append(escaped_dollar if escaped == "$" else _DOUBLE_QUOTE_ESCAPES[escaped])
+                index += 2
+                continue
+        if char == quote:
+            return "".join(chars), quote, index + 1
+        chars.append(char)
+        index += 1
+    raise ComposeSubstitutionError(f"line {line}", f"env_file line {line} has no closing quote")
+
+
+def env_file_entries(text: str, escaped_dollar: str = "$") -> list[tuple[str, str, str]]:
+    """The ``KEY=value`` lines of a Compose env file in file order, as ``(key, value, quote)``. ``quote`` is
+    ``'``, ``"`` or ``""`` for an unquoted value, which is how Compose's dotenv reader decides what to do with
+    it: a single-quoted value is literal, the other two it interpolates. Blank lines and ``#`` comments are
+    skipped and an optional ``export`` prefix dropped. A quoted value ends at its closing quote, which may be on
+    a later line, and the rest of that line is a comment; its escapes are decoded as :func:`_quoted_env_value`
+    says, a double-quoted ``\\$`` becoming ``escaped_dollar``. An unquoted value ends at the first ``#`` that
+    follows whitespace and is returned as written, ``$`` included. A line that is not ``KEY=value`` or a quote
+    that never closes raises :class:`ComposeSubstitutionError` naming the line number only, as env files hold
+    secrets."""
+    entries: list[tuple[str, str, str]] = []
+    text = text.lstrip("\ufeff").replace("\r\n", "\n")
+    position = 0
+    number = 0
+    while position < len(text):
+        newline = text.find("\n", position)
+        end = len(text) if newline < 0 else newline
+        raw = text[position:end]
+        number += 1
+        position = end + 1
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or not _NAME.fullmatch(key):
+            # The line itself is not echoed: env files hold secrets.
+            raise ComposeSubstitutionError(f"line {number}", f"env_file line {number} is not KEY=value")
+        if value.lstrip()[:1] not in ("'", '"'):
+            entries.append((key, re.split(r"\s+#", value.lstrip(), maxsplit=1)[0].rstrip(), ""))
+            continue
+        # The quote's offset in the whole text: the first ``=`` of the raw line is the separator (neither the
+        # leading whitespace nor ``export`` holds one), and the value may run on past this line.
+        after_equals = raw[raw.index("=") + 1 :]
+        start = end - len(after_equals) + (len(after_equals) - len(after_equals.lstrip()))
+        unquoted, quote, consumed = _quoted_env_value(text[start:], number, escaped_dollar)
+        entries.append((key, unquoted, quote))
+        closing = start + consumed
+        number += text.count("\n", start, closing)
+        newline = text.find("\n", closing)
+        position = len(text) if newline < 0 else newline + 1
+    return entries
+
+
+def parse_env_file(text: str) -> dict[str, str]:
+    """``KEY=value`` lines of a Compose ``env_file``, taken literally.
+
+    Lines are read as :func:`env_file_entries` reads them. Values are not interpolated: a ``$`` in a value
+    is escaped as ``$$`` so the document's later interpolation and literal checks leave it as one ``$``.
+    """
+    return {key: value.replace("$", "$$") for key, value, _ in env_file_entries(text)}
+
+
+def _env_file_path(base_dir: Path, path: str, service: str) -> Path:
+    """``path`` resolved under ``base_dir`` (Harbor's ``${CONTEXT_DIR}/x.env`` is absolute and lands there too).
+    A path that resolves outside, or a symlink, is refused: task folders are third-party content and the
+    file must be part of what prepare digested. So is a file the task digest skips (``*~``, ``*.swp``,
+    ``__pycache__`` and the like, see :func:`nemo_gym.tasks.harbor.digest.is_ignored`): it would change the
+    document without changing the identity the server checks at seed."""
+    base = Path(base_dir).resolve()
+    file = Path(path) if Path(path).is_absolute() else base / path
+    escapes = file.is_symlink() or not file.resolve().is_relative_to(base)
+    if escapes:
+        raise ComposeSubstitutionError(
+            path, f"service {service!r} env_file {path!r} must stay under the task's environment folder"
+        )
+    if is_ignored(file.resolve().relative_to(base.parent).as_posix()):
+        raise ComposeSubstitutionError(
+            path, f"service {service!r} env_file {path!r} is excluded from the task digest; rename it"
+        )
+    return file
+
+
+def _compose_scalar(value: Any) -> str:
+    """An environment value as Compose would emit it: booleans lower-case, ``None`` empty."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _environment_mapping(service_name: str, environment: Any, variables: dict[str, str]) -> dict[str, str | None]:
+    """A service's ``environment`` as a mapping. A bare ``NAME`` in the list form, or a null value in the mapping
+    form, stands for the task variable of that name and is ``None`` when there is none: Compose then leaves the
+    variable unset in the container, even where an ``env_file`` sets it. ``NAME=`` and ``NAME: ''`` are empty."""
+    if environment is None:
+        return {}
+    if isinstance(environment, list):
+        pairs: dict[str, str | None] = {}
+        for item in environment:
+            key, separator, value = str(item).partition("=")
+            pairs[key] = value if separator else variables.get(key)
+        return pairs
+    if isinstance(environment, dict):
+        return {
+            str(key): variables.get(str(key)) if value is None else _compose_scalar(value)
+            for key, value in environment.items()
+        }
+    raise ComposeSubstitutionError("environment", f"service {service_name!r} environment must be a list or a mapping")
+
+
+def inline_env_files(document: dict, base_dir: Path, variables: dict[str, str] | None = None) -> dict:
+    """Read each service's ``env_file`` entries (relative to ``base_dir``) into its ``environment`` mapping.
+
+    Every service's ``environment`` becomes a mapping of strings. A service's own entries win over its
+    files, as in Compose. A bare ``NAME`` entry in a list-form ``environment`` (or ``NAME:`` with no value in
+    the mapping form) takes the task variable of that name; when there is none the variable is left unset,
+    as Compose leaves it, so it also removes the ``env_file`` value of that name. A missing required file
+    raises :class:`ComposeSubstitutionError` naming it; an entry with ``required: false`` is skipped when
+    absent; an entry with a ``format`` is refused, as only the default dotenv format is read. A file that
+    does not parse raises with the service, the file and the line number, never the line.
+    """
+    variables = variables or {}
+    services = document.get("services") if isinstance(document, dict) else None
+    if not isinstance(services, dict):
+        return document
+    for name, service in services.items():
+        if not isinstance(service, dict):
+            continue
+        merged: dict[str, str | None] = {}
+        if "env_file" in service:
+            entries = service.pop("env_file")
+            if isinstance(entries, (str, dict)):
+                entries = [entries]
+            if not isinstance(entries, list):
+                raise ComposeSubstitutionError(
+                    "env_file", f"service {name!r} env_file must be a path or a list of paths"
+                )
+            for entry in entries:
+                required = True
+                path = entry
+                if isinstance(entry, dict):
+                    path = entry.get("path")
+                    required = bool(entry.get("required", True))
+                if not isinstance(path, str) or not path:
+                    raise ComposeSubstitutionError("env_file", f"service {name!r} has an env_file entry with no path")
+                if isinstance(entry, dict) and entry.get("format") is not None:
+                    raise ComposeSubstitutionError(
+                        path,
+                        f"service {name!r} env_file {path!r}: format {entry['format']!r} is not supported "
+                        "(only the default dotenv format is)",
+                    )
+                file = _env_file_path(base_dir, path, name)
+                if not file.is_file():
+                    if required:
+                        raise ComposeSubstitutionError(
+                            path, f"service {name!r} env_file {path!r} not found under the task's environment folder"
+                        )
+                    continue
+                try:
+                    merged.update(parse_env_file(file.read_text()))
+                except ComposeSubstitutionError as exc:
+                    raise ComposeSubstitutionError(path, f"service {name!r} env_file {path!r}: {exc}") from exc
+        if merged or "environment" in service:
+            merged.update(_environment_mapping(name, service.get("environment"), variables))
+            service["environment"] = {key: value for key, value in merged.items() if value is not None}
+    return document
+
+
+# Compose healthcheck fields the sandbox adapter reads by type, which interpolation hands back as strings.
+_HEALTHCHECK_BOOLEANS = {"true": True, "false": False}
+
+
+def restore_compose_types(document: dict) -> dict:
+    """Give the typed healthcheck fields their types back after interpolation, which turns every scalar it
+    touches into a string: ``disable`` becomes a boolean (``${DISABLE:-false}`` must not disable the check by
+    being a non-empty string) and ``retries`` an integer. Any other string value raises
+    :class:`ComposeSubstitutionError` naming the field. Mutates and returns ``document``."""
+    services = document.get("services") if isinstance(document, dict) else None
+    if not isinstance(services, dict):
+        return document
+    for name, service in services.items():
+        health = service.get("healthcheck") if isinstance(service, dict) else None
+        if not isinstance(health, dict):
+            continue
+        disable = health.get("disable")
+        if isinstance(disable, str):
+            if disable.strip().lower() not in _HEALTHCHECK_BOOLEANS:
+                raise ComposeSubstitutionError(
+                    f"services.{name}.healthcheck.disable",
+                    f"service {name!r} healthcheck disable must be true or false, not {disable!r}",
+                )
+            health["disable"] = _HEALTHCHECK_BOOLEANS[disable.strip().lower()]
+        retries = health.get("retries")
+        if isinstance(retries, str):
+            if not retries.strip().isdigit():
+                raise ComposeSubstitutionError(
+                    f"services.{name}.healthcheck.retries",
+                    f"service {name!r} healthcheck retries must be an integer, not {retries!r}",
+                )
+            health["retries"] = int(retries.strip())
+    return document
+
+
+def residual_interpolation(value: Any, path: str = "") -> str | None:
+    """The key path (``services.api.environment.DB_PASS``, ``services.a.command[1]``) of the first string still
+    carrying a ``$NAME`` or ``${...}`` after substitution, or ``None``. The path, not the value: the value next to
+    a residual may be a secret the host supplied, and the caller reports this in an error message."""
+    if isinstance(value, str):
+        match = re.search(r"\$(?:\{|[A-Za-z_])", value.replace("$$", ""))
+        return (path or "the document") if match else None
+    if isinstance(value, list):
+        found = (residual_interpolation(v, f"{path}[{i}]") for i, v in enumerate(value))
+        return next((r for r in found if r), None)
+    if isinstance(value, dict):
+        found = (residual_interpolation(v, f"{path}.{k}" if path else str(k)) for k, v in value.items())
+        return next((r for r in found if r), None)
+    return None
 
 
 def _compose_literals(value: Any) -> Any:

@@ -2162,6 +2162,37 @@ class TestComposeAndRouting:
         monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
         return server, task, compose, documents, verifier
 
+    async def test_compose_document_resolves_variables_and_env_file_from_the_task_then_the_process_environment(
+        self, tmp_path, monkeypatch
+    ):
+        # M19: the server reads the Compose file through the same resolver prepare used, so ${MAIN_IMAGE_NAME},
+        # ${CONTEXT_DIR} and an env_file resolve from the task. G3: a variable the task does not set is read from
+        # the server's process environment, as Harbor's docker compose reads it, so prepare and the server must
+        # run with the same variables.
+        server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
+        monkeypatch.setenv("KAFKA_TOPIC", "from-the-shell")
+        (task.path / "environment" / "docker-compose.yaml").write_text(
+            "services:\n"
+            "  main:\n    image: ${MAIN_IMAGE_NAME}\n    volumes: ['${CONTEXT_DIR}/seed.json:/app/seed.json:ro']\n"
+            "  api:\n    image: org/api:1\n    expose: ['3080']\n    env_file: api.env\n"
+            "  kafka:\n    image: org/kafka:1\n    environment: ['KAFKA_TOPIC=${KAFKA_TOPIC:-events}']\n"
+        )
+        (task.path / "environment" / "api.env").write_text("API_MODE=replay\n")
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        services = documents[0]["services"]
+        assert services["main"]["image"] == IMAGE_CONFIGS["org/agent:1"]["image"]
+        # The server resolves the task from its snapshot, so the bind mount points into that copy.
+        (volume,) = services["main"]["volumes"]
+        assert volume.endswith("/hello/environment/seed.json:/app/seed.json:ro")
+        assert volume.startswith(server._snapshots.name) and not volume.startswith(str(task.path))
+        assert services["api"]["environment"] == {"API_MODE": "replay"} and "env_file" not in services["api"]
+        assert services["kafka"]["environment"] == {"KAFKA_TOPIC": "from-the-shell"}
+
     async def test_compose_task_seeds_a_group_and_leaves_task_context(self, tmp_path, monkeypatch):
         server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
 

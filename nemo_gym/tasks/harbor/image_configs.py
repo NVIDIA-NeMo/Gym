@@ -20,19 +20,31 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import ChainMap
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 import yaml
 
+from nemo_gym.sandbox.compose_config import (
+    ComposeSubstitutionError,
+    env_file_entries,
+    inline_env_files,
+    residual_interpolation,
+    restore_compose_types,
+    substitute_compose,
+)
 from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
+from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
 from nemo_gym.tasks.harbor.models import HarborTaskConfig
 from nemo_gym.tasks.harbor.task import IMAGE_CONFIGS_FILE, TASK_FILE, HarborTask, dockerfile_base_image, is_task_folder
@@ -246,12 +258,209 @@ def compose_file(task: HarborTask) -> Path | None:
     return None
 
 
-def compose_image_references(task: HarborTask) -> list[str]:
-    """Every image a Compose task starts: the task image for ``main`` and each sidecar's image."""
+# In-sandbox paths Harbor's legacy ``${HOST_*_PATH}`` and ``${ENV_*_PATH}`` log-mount variables stand for.
+LOG_MOUNT_PATHS = {"VERIFIER_LOGS": "/logs/verifier", "AGENT_LOGS": "/logs/agent", "ARTIFACTS": "/logs/artifacts"}
+# Where a task's ``tests/`` folder lands in the sandbox, the value of ``TEST_DIR``. Harbor's terminal-bench mapper
+# writes ``TEST_DIR=${TEST_DIR}`` into its Compose files and Harbor never sets the variable, so it is empty under
+# Harbor; Gym defines it, a deliberate improvement.
+TEST_DIR = "/tests"
+# Harbor's ``[environment].env`` template (``_TEMPLATE_PATTERN`` in ``harbor/utils/env.py`` at v0.22.0): a whole
+# value ``${VAR}`` or ``${VAR:-default}``, read from the host environment.
+HARBOR_ENV_TEMPLATE = re.compile(r"\$\{([^}:]+)(?::-(.*))?\}")
+# The project directory's env file Compose interpolates with, below everything the command's environment sets.
+COMPOSE_DOTENV = ".env"
+# ``(task id, variable)`` pairs already warned about: the server loads a task's document once per episode.
+_WARNED_UNSET: set[tuple[str, str]] = set()
+
+
+def compose_variables(task: HarborTask, *, unset: set[str] | None = None) -> dict[str, str]:
+    """The variables a task's Compose file may interpolate, resolved in the order Harbor's ``docker compose`` sees.
+
+    Harbor runs ``docker compose`` with the process environment, the task's ``[environment].env`` over it and
+    its own infrastructure variables over both (``merge_compose_env`` in
+    ``harbor/environments/docker/compose_env.py`` and ``_compose_env_vars`` in ``docker.py`` at v0.22.0, called
+    with ``include_os_env=True``), and Compose reads the project directory's ``.env`` below everything the
+    command's environment sets. Highest first:
+
+    1. Gym's infrastructure set: ``MAIN_IMAGE_NAME`` (the resolved task image), ``CONTEXT_DIR`` (the task's
+       ``environment/`` folder), ``TEST_DIR`` (:data:`TEST_DIR`), ``COMPOSE_PROJECT_NAME`` (``hb__<hash>``,
+       Harbor's environment id of the context and the ``main`` image name, a stable placeholder: compose-go
+       injects the real value from ``--project-name``, the trial session id under Harbor and ``compose-<uuid>``
+       per episode in Gym's adapter, which has no Compose-generated names for it to match), ``PREBUILT_IMAGE_NAME``
+       when ``docker_image`` is declared, ``CPUS`` and ``MEMORY`` (as ``<n>M``, Harbor's spelling) from the
+       task's resources, and the ``HOST_*_PATH`` / ``ENV_*_PATH`` log mounts as the ``/logs`` tree;
+    2. the task's ``[environment].env``, each value read as Harbor's ``resolve_env_vars`` reads it
+       (``harbor/utils/env.py``): a whole value ``${VAR}`` or ``${VAR:-default}`` comes from the process
+       environment, the default standing in when the variable is unset, and one with neither raises
+       :class:`ImageConfigError` naming the task and the variable, as Harbor fails the trial; any other value
+       is literal;
+    3. the process environment;
+    4. ``environment/.env``, its unquoted and double-quoted values interpolated against the levels above and
+       the lines before them, as Compose's dotenv reader does; single-quoted values are literal.
+
+    A reference none of them sets takes its default (``${VAR:-x}``, ``${VAR-x}``), else it is an empty string,
+    as docker compose makes it, with one warning naming the task and the variable (added to ``unset`` when
+    given, so the caller warns once for the whole document, else logged here). ``${VAR:?msg}`` and
+    ``${VAR?msg}`` raise :class:`ImageConfigError` with the message. The process environment is not part of
+    the task's digest: prepare and the environment server must run with the same variables, as Harbor's one
+    process does.
+
+    Every value is literal to the document, as it is to Compose (which splices a variable's value in verbatim and
+    never re-scans it): a ``$`` in a host, task or infrastructure value is doubled here, the convention
+    :func:`parse_env_file` and :func:`_dotenv_variables` keep for a literal dollar, so a password such as
+    ``$2b$12$...`` neither trips the document's residual check nor loses a ``$$`` when the sandbox starts.
+    """
+    environment = task.config.environment
+    context = task.path / "environment"
+    infra: dict[str, str] = {"MAIN_IMAGE_NAME": task.image or "", "CONTEXT_DIR": str(context), "TEST_DIR": TEST_DIR}
+    if context.is_dir():
+        # Not the runtime project name (Harbor: the trial session id; Gym: the adapter's compose-<uuid>). A stable
+        # per-task value, so files like o11y-bench's `o11y-stack-${COMPOSE_PROJECT_NAME}` alias and URL agree.
+        infra["COMPOSE_PROJECT_NAME"] = f"hb__{context_digest(context)}"
+    if environment.docker_image:
+        infra["PREBUILT_IMAGE_NAME"] = environment.docker_image
+    if environment.cpus:
+        infra["CPUS"] = str(environment.cpus)
+    if environment.memory_mb:
+        infra["MEMORY"] = f"{environment.memory_mb}M"
+    for suffix, path in LOG_MOUNT_PATHS.items():
+        infra[f"HOST_{suffix}_PATH"] = path
+        infra[f"ENV_{suffix}_PATH"] = path
+    host = {key: _literal(value) for key, value in os.environ.items()}
+    above = {
+        **host,
+        **_task_env(task, environment.env or {}),
+        **{key: _literal(value) for key, value in infra.items()},
+    }
+    collected: set[str] = set() if unset is None else unset
+    variables = {**_dotenv_variables(task, context, above, collected), **above}
+    if unset is None:
+        _warn_unset(task, collected)
+    return variables
+
+
+def _literal(value: str) -> str:
+    """``value`` as the document's interpolation and literal checks read a literal: every ``$`` doubled."""
+    return value.replace("$", "$$")
+
+
+def _task_env(task: HarborTask, env: Mapping[str, Any]) -> dict[str, str]:
+    """``[environment].env`` as Harbor's ``resolve_env_vars`` hands it to ``docker compose`` (see
+    :func:`compose_variables`), each value literal to the document (:func:`_literal`)."""
+    resolved: dict[str, str] = {}
+    for key, value in env.items():
+        match = HARBOR_ENV_TEMPLATE.fullmatch(str(value))
+        if match is None:
+            resolved[str(key)] = _literal(str(value))
+            continue
+        name, default = match.group(1), match.group(2)
+        if name in os.environ:
+            resolved[str(key)] = _literal(os.environ[name])
+        elif default is not None:
+            resolved[str(key)] = _literal(default)
+        else:
+            raise ImageConfigError(
+                f"{task.task_id}: [environment].env {key} reads ${{{name}}}, which is not set in the process "
+                "environment and has no default"
+            )
+    return resolved
+
+
+def _dotenv_variables(task: HarborTask, context: Path, above: Mapping[str, str], unset: set[str]) -> dict[str, str]:
+    """``environment/.env`` read as Compose's dotenv reader reads it (``compose-go/dotenv``): an unquoted or
+    double-quoted value is interpolated against ``above`` and then the lines before it, a single-quoted value is
+    literal. A dollar that stays literal is kept doubled, as :func:`parse_env_file` keeps it, so the document's
+    literal check leaves it alone."""
+    dotenv = context / COMPOSE_DOTENV
+    if not dotenv.is_file():
+        return {}
+    variables: dict[str, str] = {}
+    try:
+        for key, value, quote in env_file_entries(dotenv.read_text(), escaped_dollar="$$"):
+            if quote == "'":
+                variables[key] = value.replace("$", "$$")
+            else:
+                variables[key] = substitute_with_empty(value, ChainMap(above, variables), unset)
+    except ComposeSubstitutionError as exc:
+        raise ImageConfigError(f"{task.task_id}: environment/{COMPOSE_DOTENV}: {exc}") from exc
+    return variables
+
+
+def substitute_with_empty(value: Any, variables: Mapping[str, str], unset: set[str]) -> Any:
+    """:func:`substitute_compose` with Compose's rule for a bare ``${VAR}`` or ``$VAR`` nobody sets: an empty
+    string, the name added to ``unset`` for the caller to warn about once. Only the bare form raises the resolver's
+    default message; ``${VAR:-x}`` keeps its default, ``${VAR:?msg}`` its refusal, and every other failure passes
+    through unchanged. The loader and the Dockerfile build (``nemo_gym.tasks.harbor.image_build``) interpolate a
+    task's Compose file through this one rule, so the two never disagree on the same file."""
+    if isinstance(value, list):
+        return [substitute_with_empty(item, variables, unset) for item in value]
+    if isinstance(value, dict):
+        return {key: substitute_with_empty(item, variables, unset) for key, item in value.items()}
+    if not isinstance(value, str):
+        return value
+    empty: dict[str, str] = {}
+    while True:
+        try:
+            return substitute_compose(value, ChainMap(variables, empty))
+        except ComposeSubstitutionError as exc:
+            if str(exc) != str(ComposeSubstitutionError(exc.name)) or exc.name in empty:
+                raise
+            empty[exc.name] = ""
+            unset.add(exc.name)
+
+
+def _warn_unset(task: HarborTask, unset: set[str]) -> None:
+    for name in sorted(unset):
+        if (task.task_id, name) in _WARNED_UNSET:
+            continue
+        _WARNED_UNSET.add((task.task_id, name))
+        LOGGER.warning(
+            "%s: Compose variable ${%s} has no value from the task, the process environment or environment/.env; "
+            "it is an empty string, as docker compose makes it",
+            task.task_id,
+            name,
+        )
+
+
+def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
+    """The task's Compose overlay with ``env_file`` entries inlined and ``${VAR}`` references resolved.
+
+    Returns ``None`` for a task without a Compose file. Prepare and the resources server both read the
+    file through this function, so the document the sandbox starts is the one prepare validated, provided
+    both run with the same process environment (see :func:`compose_variables`). A required variable
+    (``${VAR:?msg}``) without a value, a task variable the host does not set or a missing ``env_file``
+    raises :class:`ImageConfigError` naming it; a variable nobody sets is an empty string, with a warning.
+    """
     path = compose_file(task)
     if path is None:
-        return []
+        return None
     document = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(document, dict):
+        raise ImageConfigError(f"{task.task_id}: {path.name} is not a mapping")
+    unset: set[str] = set()
+    try:
+        # Interpolate first, as Compose does, so an env_file path may use ${CONTEXT_DIR}; env_file values are then
+        # literal. Anything still carrying a ``$NAME`` afterwards fails here, at prepare, not at seed.
+        variables = compose_variables(task, unset=unset)
+        document = substitute_with_empty(document, variables, unset)
+        document = inline_env_files(document, path.parent, variables)
+        # Interpolation hands back strings; the adapter reads healthcheck ``disable`` and ``retries`` by type.
+        document = restore_compose_types(document)
+    except ComposeSubstitutionError as exc:
+        raise ImageConfigError(f"{task.task_id}: {path.name}: {exc}") from exc
+    _warn_unset(task, unset)
+    residual = residual_interpolation(document)
+    if residual is not None:
+        # The key path only: the value next to it may be a host secret.
+        raise ImageConfigError(f"{task.task_id}: {path.name}: unresolved interpolation left at {residual}")
+    return document
+
+
+def compose_image_references(task: HarborTask) -> list[str]:
+    """Every image a Compose task starts: the task image for ``main`` and each sidecar's image."""
+    document = load_compose_document(task)
+    if document is None:
+        return []
     services = document.get("services") or {}
     references: list[str] = []
     main_image = (services.get("main") or {}).get("image") or task.image
@@ -341,16 +550,34 @@ def record_image_configs(
 
 
 def record_compose_images(
-    tasks: list[HarborTask], folder: Path, *, client: RegistryClient | None = None
+    tasks: list[HarborTask],
+    folder: Path,
+    *,
+    client: RegistryClient | None = None,
+    skipped: dict[str, str] | None = None,
 ) -> Path | None:
     """Write ``compose-images.json`` in ``folder`` for the Compose tasks among ``tasks``.
 
-    Returns the file's path, or ``None`` when no task uses Compose.
+    Returns the file's path, or ``None`` when no task uses Compose. A task whose Compose file does not
+    resolve (an :class:`ImageConfigError` from :func:`load_compose_document`) does not stop the others:
+    with ``skipped`` given it is recorded there by task id with the reason and left out, otherwise one
+    :class:`ImageConfigError` at the end names every such task. An image the registry cannot resolve
+    still raises for the whole set, as :func:`record_image_configs` says.
     """
     references: dict[str, list[str]] = {}
+    failures: dict[str, str] = {}
     for task in tasks:
-        for reference in compose_image_references(task):
+        try:
+            task_references = compose_image_references(task)
+        except ImageConfigError as exc:
+            failures[task.task_id] = str(exc)
+            continue
+        for reference in task_references:
             references.setdefault(reference, []).append(task.task_id)
+    if failures and skipped is None:
+        raise ImageConfigError(f"{len(failures)} Compose task(s) do not resolve: " + "; ".join(failures.values()))
+    if failures:
+        skipped.update(failures)
     return record_image_configs(references, folder, client=client, what="Compose image")
 
 
