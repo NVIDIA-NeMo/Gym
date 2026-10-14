@@ -64,7 +64,6 @@ policy_model:
 # Judge: gpt-5.6-luna at reasoning effort medium. Endpoint and key come from env.yaml; set
 # omniscience_judge_model_name there only if your provider serves this model under a
 # different id.
-# Keep genrm_model out of env.yaml: it would replace this judge.
 genrm_model:
   responses_api_models:
     openai_model:

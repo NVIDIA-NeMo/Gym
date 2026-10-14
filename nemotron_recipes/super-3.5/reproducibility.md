@@ -27,10 +27,10 @@ explains each of them.
 
 Every recipe accepts `LIMIT` for a quick smoke (except CritPt, see its header), `OUT` for
 the output directory, `PARALLEL` for concurrency (16 by default for SWE-bench and
-Terminal-Bench, 4 VMs for OSWorld, unlimited for the rest) and `RESUME` to continue an
-interrupted run. `LIMIT` keeps the first N rows of the prepared data, where a question's
-repeats come one after another, so `LIMIT=3` is usually 3 samples of the first question
-(APEX: 3 problems x 16):
+Terminal-Bench, 4 VMs for OSWorld, unlimited for the rest; set it for rate-limited endpoints)
+and `RESUME` to continue an interrupted run. `LIMIT` keeps the first N rows of the prepared
+data, where a question's repeats come one after another, so `LIMIT=3` is usually 3 samples
+of the first question (APEX: 3 problems x 16):
 
 ```bash
 LIMIT=3 nemotron_recipes/super-3.5/run.sh gpqa     # quick smoke; not a score

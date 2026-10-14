@@ -24,7 +24,7 @@
 #
 # Set in .env: POLICY_API_KEY, TEST_DATA
 #
-# Needs SciCode's ~1 GB test_data.h5; set TEST_DATA to its absolute path (reproducibility.md,
+# Needs SciCode's ~1 GB test_data.h5; set TEST_DATA to its path (reproducibility.md,
 # "SciCode" has the download).
 #
 # run.sh first sources scicode.setup.sh, which checks that the file is readable: otherwise
