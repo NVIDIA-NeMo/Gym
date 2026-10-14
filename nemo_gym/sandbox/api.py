@@ -497,8 +497,8 @@ class AsyncSandbox:
 
         ``preserve_background_services`` selects a provider's service-preserving
         execution when available; other providers use ordinary exec. Services
-        must redirect stdout and stderr. This mode does not accept per-command
-        ``env`` or ``user`` overrides on providers with a service-preserving path.
+        must redirect stdout and stderr. Per-command ``env`` and ``user``
+        overrides apply to the service-preserving execution too.
         """
         if not is_span_group_enabled(GymSpanGroup.SANDBOX):
             return await self._exec_uninstrumented(
@@ -553,13 +553,14 @@ class AsyncSandbox:
         preserve_background_services: bool = False,
     ) -> SandboxExecResult:
         if preserve_background_services and isinstance(self._provider, SupportsSandboxBackgroundServices):
-            if env is not None or user is not None:
-                raise ValueError("Service-preserving execution does not support per-command env or user overrides")
             return await self._provider.exec_with_background_services(
                 self._require_handle(),
                 command,
                 cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
                 timeout_s=timeout_s,
+                # Older custom providers implement only cwd and timeout_s.
+                **({"env": env} if env is not None else {}),
+                **({"user": user} if user is not None else {}),
             )
         return await self._provider.exec(
             self._require_handle(),
