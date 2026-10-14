@@ -717,7 +717,6 @@ class PiAgent(SimpleResponsesAPIAgent):
             "prompt": prompt,
             "cwd": state.session.workdir,
             "env": {
-                "HOME": f"{state.session.session_dir}/home",
                 "PI_CODING_AGENT_DIR": f"{state.session.session_dir}/home/.pi/agent",
                 "PI_SKIP_VERSION_CHECK": "1",
                 "PI_TELEMETRY": "0",

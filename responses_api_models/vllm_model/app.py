@@ -62,6 +62,7 @@ from nemo_gym.token_id_capture.external_capture import (
     ExternalCaptureHandler,
     make_external_capture_handler,
 )
+from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
@@ -382,11 +383,15 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     endpoint_retry_after_s: float = Field(default=60.0, gt=0)
 
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
-    # entries in ``metadata.audio_paths``) against. Absolute paths are used
-    # as-is. When unset, relative paths raise. Audio is always inlined as a
+    # entries in ``metadata.audio_paths``), and ``metadata.audio_ref.archive``.
+    # audio_path/audio_paths permit absolute paths; audio_ref archives must
+    # remain under audio_root. When unset, relative paths raise. Audio is inlined as a
     # ``data:audio/<fmt>;base64,...`` URI at request time — keeps the JSONL
     # small without depending on vLLM's ``--allowed-local-media-path``.
     audio_root: Optional[str] = None
+    # Preserve the existing audio-first order by default. VoiceBench's legacy
+    # client uses text first, which some audio model chat templates distinguish.
+    audio_content_order: Literal["before_text", "after_text"] = "before_text"
 
     @model_validator(mode="after")
     def _validate_prefix_supply(self) -> "VLLMModelConfig":
@@ -451,6 +456,7 @@ class VLLMModel(SimpleResponsesAPIModel):
     )
     _external_capture_handler: ExternalCaptureHandler | None = PrivateAttr(default=None)
     _warned_request_chat_template_kwargs_dropped: bool = PrivateAttr(default=False)
+    _tar_audio_reader: TarAudioReader = PrivateAttr(default_factory=TarAudioReader)
     _generation_cut_control_urls: Dict[str, str] = PrivateAttr(default_factory=dict)
 
     def setup_exception_middleware(self, app) -> None:
@@ -632,6 +638,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise NotImplementedError
         if not self.config.sequential_reasoning_allowed:
             raise NotImplementedError
+        if "audio_ref" in (body.metadata or {}):
+            raise ValueError("metadata.audio_ref requires is_responses_native=false and the chat-completions backend.")
 
         body_dict = body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.model
@@ -714,6 +722,32 @@ class VLLMModel(SimpleResponsesAPIModel):
             self.config.name,
             reason,
         )
+
+    def _resolve_audio_ref_to_url(self, audio_ref: str) -> str:
+        """Inline a JSON-encoded archive/member reference at the vLLM boundary."""
+        if not isinstance(audio_ref, str):
+            raise ValueError("metadata.audio_ref must be a JSON string containing archive and member.")
+        try:
+            reference = json.loads(audio_ref)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                "metadata.audio_ref must be a valid JSON string containing archive and member."
+            ) from error
+        if not isinstance(reference, dict) or set(reference) != {"archive", "member"}:
+            raise ValueError("metadata.audio_ref must contain exactly the archive and member fields.")
+        member = reference["member"]
+        validate_relative_path(member, field="metadata.audio_ref.member")
+        archive_path = resolve_archive_path(reference["archive"], audio_root=self.config.audio_root)
+        extension = os.path.splitext(member)[1].lower()
+        mime = self._AUDIO_EXT_TO_MIME.get(extension)
+        if mime is None:
+            raise ValueError(
+                f"Unsupported audio extension {extension!r} for tar member {member!r}. "
+                f"Supported: {sorted(self._AUDIO_EXT_TO_MIME)}."
+            )
+        audio = self._tar_audio_reader.read_member(archive_path, member=member)
+        encoded = base64.b64encode(audio).decode("ascii")
+        return f"data:audio/{mime};base64,{encoded}"
 
     @staticmethod
     def _strip_hosted_only_tool_fields(body_dict: Dict[str, Any]) -> None:
@@ -851,8 +885,21 @@ class VLLMModel(SimpleResponsesAPIModel):
         if extra_body:
             body_dict = extra_body | body_dict
 
+        self._splice_audio_from_metadata(body_dict, metadata)
+
+        self._apply_sampling_overrides(body_dict)
+        self._validate_single_choice_token_request(body_dict)
+        if self._external_capture_handler is not None:
+            body_dict = self._external_capture_handler.prepare_request(body_dict)
+        else:
+            body_dict = self._apply_prefix_supply(body_dict)
+
+        return body_dict
+
+    def _splice_audio_from_metadata(self, body_dict: Dict[str, Any], metadata: Dict[str, Any]) -> None:
+        """Move audio metadata into content blocks on the most recent user message."""
         # Audio sidechannel: rows can carry audio on
-        # ``responses_create_params.metadata`` via three mutually exclusive
+        # ``responses_create_params.metadata`` via four mutually exclusive
         # keys, all spliced as ``audio_url`` content blocks into the most
         # recent user message before forwarding to vLLM Chat Completions:
         #
@@ -865,6 +912,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         #   * ``audio_paths`` — list of file paths; each encoded and spliced
         #                       in order. Mirrors NeMo Skills' ``audios``
         #                       multi-clip schema.
+        #   * ``audio_ref``   — JSON string containing a relative .tar archive
+        #                       and member path; read via cached offsets.
         #
         # OpenAI's Responses API content union has no audio variant (audio
         # types exist as orphans in the SDK but aren't members of
@@ -872,14 +921,17 @@ class VLLMModel(SimpleResponsesAPIModel):
         # ``input.content`` directly — the metadata-sidechannel hop lets
         # audio benchmarks carry audio without a Gym schema change.
         #
-        # Audio is placed BEFORE text in the content list (some audio
-        # models care). No-op when none of the three keys are present, so
-        # non-audio benchmarks are unaffected.
-        audio_keys_present = [k for k in ("audio_data", "audio_path", "audio_paths") if metadata.get(k)]
+        # Audio placement is configured with audio_content_order. No-op when
+        # none of the keys are present, so non-audio benchmarks are unaffected.
+        audio_keys_present = [
+            k
+            for k in ("audio_data", "audio_path", "audio_paths", "audio_ref")
+            if metadata.get(k) or k == "audio_ref" and k in metadata
+        ]
         if len(audio_keys_present) > 1:
             raise ValueError(
                 f"metadata audio keys are mutually exclusive — got {audio_keys_present}. "
-                "Set exactly one of audio_data / audio_path / audio_paths per row."
+                "Set exactly one of audio_data / audio_path / audio_paths / audio_ref per row."
             )
 
         audio_urls: List[str] = []
@@ -895,6 +947,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 raise ValueError(f"metadata.audio_paths must be a list, got {type(paths).__name__}.")
             audio_urls.extend(self._resolve_audio_path_to_url(p) for p in paths)
             metadata.pop("audio_paths", None)
+        elif "audio_ref" in metadata:
+            audio_urls.append(self._resolve_audio_ref_to_url(metadata["audio_ref"]))
+            metadata.pop("audio_ref", None)
 
         if audio_urls:
             if not metadata and "metadata" in body_dict:
@@ -907,25 +962,20 @@ class VLLMModel(SimpleResponsesAPIModel):
                     continue
                 content = msg.get("content")
                 if isinstance(content, str):
-                    msg["content"] = audio_blocks + [{"type": "text", "text": content}]
+                    content_blocks = [{"type": "text", "text": content}]
                 elif isinstance(content, list):
-                    msg["content"] = audio_blocks + list(content)
+                    content_blocks = list(content)
                 else:
                     # ``None`` / unexpected shape — replace with a fresh content list
-                    msg["content"] = list(audio_blocks)
+                    content_blocks = []
+                if self.config.audio_content_order == "after_text":
+                    msg["content"] = content_blocks + audio_blocks
+                else:
+                    msg["content"] = audio_blocks + content_blocks
                 break
             else:
                 # No user message found — create one with just the audio blocks.
                 body_dict.setdefault("messages", []).append({"role": "user", "content": list(audio_blocks)})
-
-        self._apply_sampling_overrides(body_dict)
-        self._validate_single_choice_token_request(body_dict)
-        if self._external_capture_handler is not None:
-            body_dict = self._external_capture_handler.prepare_request(body_dict)
-        else:
-            body_dict = self._apply_prefix_supply(body_dict)
-
-        return body_dict
 
     def _preserve_envelope_id(self) -> bool:
         """Keep the backend envelope id only for requests with an active external-capture context."""
@@ -1037,7 +1087,14 @@ class VLLMModel(SimpleResponsesAPIModel):
             return await self._chat_completions_via_completions_api(request, body)
 
         body_dict = body.model_dump(exclude_unset=True)
-        body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
+        metadata = body_dict.get("metadata") or {}
+        if any(metadata.get(key) for key in ("audio_path", "audio_paths", "audio_ref")):
+            # Archive indexing, disk reads, and base64 encoding must not block
+            # concurrent requests on the event loop. to_thread also preserves
+            # the request's token-capture context for preprocessing hooks.
+            body_dict = await asyncio.to_thread(self._preprocess_chat_completion_create_params, request, body_dict)
+        else:
+            body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
         note_generation_request(body_dict)
         client = self._resolve_client(request)
@@ -1425,8 +1482,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "for the standard chat-completions tool-call path."
             )
 
-        for audio_key in ("audio_data", "audio_path", "audio_paths"):
-            if metadata.get(audio_key):
+        for audio_key in ("audio_data", "audio_path", "audio_paths", "audio_ref"):
+            if metadata.get(audio_key) or audio_key == "audio_ref" and audio_key in metadata:
                 raise ValueError(
                     f"NeMo Gym server `{self.config.name}`: audio metadata "
                     f"({audio_key!r}) is not supported with use_completions_api=true. "

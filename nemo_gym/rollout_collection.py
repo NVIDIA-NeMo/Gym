@@ -140,6 +140,7 @@ from nemo_gym.telemetry.gym_metrics import (
     record_rollout_completed,
     record_rollout_health,
 )
+from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
@@ -1081,7 +1082,11 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
     )
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
+        description=(
+            "Overrides for responses_create_params, e.g. temperature or max_output_tokens. "
+            "Metadata mappings merge by key with overrides winning; metadata=null clears row metadata. "
+            "Other fields and individual metadata values are replaced."
+        ),
     )
     disable_aggregation: bool = Field(
         default=False,
@@ -1367,6 +1372,34 @@ class DispatchLatencyTracker:
                 "These wrote no row and will be re-dispatched on resume."
             )
         return "\n".join(lines)
+
+
+def _record_rollout_shape(row: Mapping[str, Any], result: Mapping[str, Any]) -> None:
+    """Record the size of one completed rollout, while metrics are exporting.
+
+    Turns and tool calls come from the rollout's ``ng_perf`` when rollout observability produced it.
+    Without it, tool calls are counted from the final response's ``function_call`` items, and turns are not recorded.
+    """
+    observer = driver_metrics()
+    if observer is None:
+        return
+    try:
+        input_items = (row.get("responses_create_params") or {}).get("input")
+        if isinstance(input_items, list):
+            observer.input_items.record(len(input_items))
+        output_items = ((result.get("response") or {}).get("output")) or []
+        observer.output_items.record(len(output_items))
+        ng_perf = result.get(NG_PERF_KEY) or {}
+        if "num_turns" in ng_perf:
+            observer.turns.record(ng_perf["num_turns"])
+        tool_calls = ng_perf.get("num_tool_calls")
+        if tool_calls is None:
+            tool_calls = sum(
+                1 for item in output_items if isinstance(item, dict) and item.get("type") == "function_call"
+            )
+        observer.tool_calls.record(tool_calls)
+    except Exception:
+        logger.debug("Could not record rollout shape metrics", exc_info=True)
 
 
 def _dispatch_drained_result(remaining_s: float, margin_s: Optional[float]) -> Dict[str, Any]:
@@ -2508,9 +2541,16 @@ class RolloutCollectionHelper(BaseModel):
                 if skills_ref_dict is not None:
                     raise ValueError("run-level skills are not supported for materialized task rows")
             else:
-                row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
-                    row[RESPONSES_CREATE_PARAMS_KEY_NAME] | responses_create_params_overrides
-                )
+                # Preserve row-specific media references and template controls when run-level
+                # sampling settings supply metadata. Values (including JSON strings) still replace
+                # by key, and an explicit metadata=null still clears the row's metadata.
+                row_params = row[RESPONSES_CREATE_PARAMS_KEY_NAME]
+                merged_params = row_params | responses_create_params_overrides
+                row_metadata = row_params.get("metadata")
+                override_metadata = responses_create_params_overrides.get("metadata")
+                if isinstance(row_metadata, Mapping) and isinstance(override_metadata, Mapping):
+                    merged_params["metadata"] = {**row_metadata, **override_metadata}
+                row[RESPONSES_CREATE_PARAMS_KEY_NAME] = merged_params
 
             # Stamp the run-level skills_ref onto the row so it is sent to the agent in the
             # /run request body and propagated to results. The source dataset stays untouched.
@@ -2778,10 +2818,11 @@ class RolloutCollectionHelper(BaseModel):
         preset but deliberately not in `per_rollout`, where each rollout is meant to be
         its own bounded root trace.
         """
-        if not is_span_group_enabled(GymSpanGroup.JOB):
-            return await self._run_from_config(config)
-        with managed_span(GymSpanGroup.JOB, "gym.job"):
-            return await self._run_from_config(config)
+        async with observe_event_loop("driver"):
+            if not is_span_group_enabled(GymSpanGroup.JOB):
+                return await self._run_from_config(config)
+            with managed_span(GymSpanGroup.JOB, "gym.job"):
+                return await self._run_from_config(config)
 
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         # Choose the target before locking, including fresh runs. Replacing an
@@ -3233,6 +3274,7 @@ class RolloutCollectionHelper(BaseModel):
                     store.record_outcome(result, sync=capture_build_can_retire(token_capture_build))
                     _record_rollout_outcome(metric_result, "scored", dispatch_name)
                     health_outcome = "scored"
+                    _record_rollout_shape(row, result)
                     if batch_tracker is not None:
                         batch_completed_rows.append(_batch_status_row(result, batch_agent_refs))
                     try:
@@ -3993,6 +4035,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             if isinstance(block, DictConfig) and isinstance(block.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME), DictConfig)
         }
         semaphore = semaphore or nullcontext()
+        observer = driver_metrics()
+        if observer is not None:
+            semaphore = MeteredAdmission(semaphore, observer)
+            observer.driver.offered += len(examples)
         tracker = latency_tracker if latency_tracker is not None else DispatchLatencyTracker()
         # `is not None`, not truthiness: 0.0 is a real budget that is already
         # spent, and must drain rather than disable the check.
@@ -4140,10 +4186,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     else:
                         tracker.record_failure(elapsed)
 
+        async def observed_post(row: Dict) -> _CompletedRollout:
+            # Create the inner coroutine only after the task starts: cancellation
+            # before admission must not leave an unawaited request coroutine.
+            return await count_resident(_post_subroutine(row), observer)
+
+        awaitables = map(observed_post if observer is not None else _post_subroutine, examples)
         if max_resident_tasks is not None:
-            return _BoundedCompletionIterator(
-                map(_post_subroutine, examples), max_resident_tasks=max_resident_tasks, total=len(examples)
-            )
+            return _BoundedCompletionIterator(awaitables, max_resident_tasks=max_resident_tasks, total=len(examples))
 
         class Dispatches:
             def __init__(self):
@@ -4155,7 +4205,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
             def __next__(self):
                 if self.futures is None:
-                    self.tasks = [asyncio.create_task(_post_subroutine(row)) for row in examples]
+                    self.tasks = [asyncio.create_task(awaitable) for awaitable in awaitables]
                     for task in self.tasks:
                         # A direct caller may consume only one future. Retrieve
                         # other errors without changing what awaiting them raises.

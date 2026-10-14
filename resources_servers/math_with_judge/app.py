@@ -43,6 +43,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.telemetry.resources_operations import resources_operation
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
@@ -267,7 +268,9 @@ Example output: "My final verdict is different [[A!=B]]"."""
     async def _verify_answer_with_library_async(
         self, expected_answer: str, generated_answer: str
     ) -> tuple[float, Optional[str]]:
-        async with self._library_verifier_semaphore:
+        async with resources_operation(
+            self._library_verifier_semaphore, operation="verify", executor="subprocess"
+        ) as operation:
             # The production rollout workers run on Linux. Pin fork so the
             # verifier child is cheap to start and can be killed independently
             # if SymPy wedges.
@@ -283,11 +286,12 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 process,
                 result_connection,
                 self.config.library_verifier_timeout_seconds,
+                operation=operation,
             )
 
     @staticmethod
     async def _wait_for_library_verifier_process(
-        process: Any, result_connection: Any, timeout_seconds: float
+        process: Any, result_connection: Any, timeout_seconds: float, *, operation: Optional[Any] = None
     ) -> tuple[float, Optional[str]]:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_seconds
@@ -304,11 +308,15 @@ Example output: "My final verdict is different [[A!=B]]"."""
                     while process.is_alive():
                         await asyncio.sleep(0.05)
                     process.join(timeout=0)
+                    if operation is not None:
+                        operation.outcome = "timeout"
                     return 0.0, None
                 await asyncio.sleep(min(0.05, remaining))
 
             process.join(timeout=0)
             if process.exitcode != 0 or not result_connection.poll():
+                if operation is not None:
+                    operation.outcome = "crashed"
                 return 0.0, None
             try:
                 return result_connection.recv()

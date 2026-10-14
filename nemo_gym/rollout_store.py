@@ -24,6 +24,7 @@ import os
 from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
+from time import perf_counter
 
 import orjson
 from pydantic import ValidationError
@@ -46,9 +47,18 @@ from nemo_gym.rollout_records import (
     resolve_rollout_path,
 )
 from nemo_gym.rollout_recovery import RunManifest, atomic_write_json, manifest_path_for, validate_resume
+from nemo_gym.telemetry.observer import driver_metrics
 
 
 logger = logging.getLogger(__name__)
+
+
+def _record_output_write(started: float, raw: bytes) -> None:
+    """Measure the persisted outcome bytes, including their JSONL newline."""
+    observer = driver_metrics()
+    if observer is not None:
+        observer.write_duration.record((perf_counter() - started) * 1000.0)
+        observer.write_bytes.record(len(raw))
 
 
 def raw_outcomes_are_selected(path: Path) -> bool:
@@ -187,11 +197,15 @@ class RolloutStore:
                 manifest.write(manifest_path)
             return cls(output, state)
 
+        materialize_started = perf_counter()
         rows, manifest = prepare_inputs()
         state = RolloutRecords(manifest, rows)
         with materialized.open("wb") as file:
             for row in rows:
                 file.write(orjson.dumps(row) + b"\n")
+        observer = driver_metrics()
+        if observer is not None:
+            observer.materialize.record((perf_counter() - materialize_started) * 1000.0)
         for path in (
             output,
             failures_path_for(output),
@@ -320,12 +334,14 @@ class RolloutStore:
         raw = orjson.dumps(result) + b"\n"
         stat = os.fstat(file.fileno())
         record = RolloutRecord(Path(file.name), file.tell(), len(raw), file_identity=(stat.st_dev, stat.st_ino))
+        write_started = perf_counter()
         file.write(raw)
         file.flush()
         if sync:
             os.fsync(file.fileno())
         self._state.outcome(result, record=record)
         self.outcomes_recorded += 1
+        _record_output_write(write_started, raw)
 
     def record_omission(self, row: dict, reason: str) -> None:
         """Save intentional omissions separately from scored results and failures."""

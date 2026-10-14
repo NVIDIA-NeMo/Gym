@@ -49,7 +49,7 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.path_utils import materialized_path_for
+from nemo_gym.path_utils import failures_path_for, materialized_path_for
 from nemo_gym.reward_profile import compute_aggregate_metrics, compute_subset_metrics
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
@@ -246,6 +246,126 @@ def failing_row(task_index: int = 7) -> dict:
         ROLLOUT_INDEX_KEY_NAME: 0,
         "responses_create_params": {"input": []},
     }
+
+
+@pytest.fixture
+def driver_metric_reader(monkeypatch: pytest.MonkeyPatch):
+    pytest.importorskip("opentelemetry.sdk.metrics")
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from nemo_gym.telemetry import setup
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    monkeypatch.setattr(
+        setup, "_TELEMETRY_HANDLE", SimpleNamespace(is_exporting=True, meter=provider.get_meter("recovery"))
+    )
+    monkeypatch.setattr(setup, "_METRICS_EXPORTING", True)
+    monkeypatch.setattr(nemo_gym.rollout_collection, "_record_rollout_health", lambda *args: None)
+
+    def collected():
+        data = reader.get_metrics_data()
+        return {
+            metric.name: list(metric.data.data_points)
+            for resource in (data.resource_metrics if data is not None else ())
+            for scope in resource.scope_metrics
+            for metric in scope.metrics
+        }
+
+    yield collected
+    provider.shutdown()
+
+
+class TestRecoveryDriverMetrics:
+    @pytest.mark.parametrize("max_resident_tasks", [None, 2])
+    async def test_only_new_persisted_outcomes_are_measured_on_resume(
+        self, tmp_path, monkeypatch, empty_global_config, driver_metric_reader, max_resident_tasks
+    ):
+        from nemo_gym.telemetry import observer
+
+        source = tmp_path / "input.jsonl"
+        source.write_text("".join(json.dumps(failing_row(i)) + "\n" for i in range(4)))
+        output = tmp_path / "output.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(source),
+            output_jsonl_fpath=str(output),
+            route_failures_to_sidecar=True,
+            upload_rollouts=False,
+            disable_aggregation=True,
+            disable_health_check=True,
+            num_samples_in_parallel=1,
+            max_resident_rollout_tasks=max_resident_tasks,
+        )
+        calls = Counter()
+
+        async def post(server_name, url_path, json):
+            index = json[TASK_INDEX_KEY_NAME]
+            calls[index] += 1
+            if index == 1 and calls[index] == 1:
+                return FakeResponse(
+                    200,
+                    {
+                        "_ng_failure_class": "judge_failed",
+                        "failure_kind": "judge_failed",
+                        "failure_reason": "judge unavailable",
+                        "response": {"output": []},
+                    },
+                )
+            if index == 2:
+                return FakeResponse(200, {"_ng_no_persist": True, "_ng_no_result": True})
+            return FakeResponse(200, {"response": {"output": []}, "reward": 1.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        async with observer.observe_event_loop("driver"):
+            helper = RolloutCollectionHelper()
+            await helper.run_from_config(config)
+            first = driver_metric_reader()
+            assert first[observer.DRIVER_WRITE_BYTES_INSTRUMENT][0].count == 4
+            assert first[observer.ROLLOUT_OUTPUT_ITEMS_INSTRUMENT][0].count == 2
+            saved = output.read_bytes()
+            await helper.run_from_config(config.model_copy(update={"resume_from_cache": True}))
+            exported = driver_metric_reader()
+            assert output.read_bytes().startswith(saved)
+            assert calls == {0: 1, 1: 2, 2: 1, 3: 1}
+            sizes = exported[observer.DRIVER_WRITE_BYTES_INSTRUMENT][0]
+            assert sizes.count == 5
+            assert sizes.sum == output.stat().st_size + failures_path_for(output).stat().st_size
+            assert exported[observer.DRIVER_WRITE_DURATION_INSTRUMENT][0].count == 5
+            assert exported[observer.DRIVER_MATERIALIZE_INSTRUMENT][0].count == 1
+            assert exported[observer.ROLLOUT_OUTPUT_ITEMS_INSTRUMENT][0].count == 3
+            assert exported[observer.DRIVER_OFFERED_INSTRUMENT][0].value == 5
+            assert exported[observer.DRIVER_ACTIVE_INSTRUMENT][0].value == 0
+            assert exported[observer.DRIVER_RESIDENT_INSTRUMENT][0].value == 0
+
+    @pytest.mark.parametrize("max_resident_tasks", [None, 2])
+    async def test_closing_dispatch_clears_live_counts(self, monkeypatch, driver_metric_reader, max_resident_tasks):
+        from nemo_gym.telemetry import observer
+
+        started = asyncio.Event()
+
+        async def post(**kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        async with observer.observe_event_loop("driver"):
+            iterator = RolloutCollectionHelper()._run_examples_with_metadata(
+                [failing_row(i) for i in range(3)],
+                semaphore=asyncio.Semaphore(1),
+                max_resident_tasks=max_resident_tasks,
+            )
+            consumer = asyncio.create_task(next(iterator))
+            await asyncio.wait_for(started.wait(), timeout=2)
+            during = driver_metric_reader()
+            assert during[observer.DRIVER_ACTIVE_INSTRUMENT][0].value == 1
+            assert during[observer.DRIVER_RESIDENT_INSTRUMENT][0].value == (max_resident_tasks or 3)
+            await iterator.aclose()
+            with pytest.raises(asyncio.CancelledError):
+                await consumer
+            after = driver_metric_reader()
+            assert after[observer.DRIVER_ACTIVE_INSTRUMENT][0].value == 0
+            assert after[observer.DRIVER_RESIDENT_INSTRUMENT][0].value == 0
 
 
 class TestLoadsJsonlLine:
@@ -804,6 +924,97 @@ class TestRolloutCollection:
         finally:
             release.set()
             await collection
+
+    async def test_run_from_config_preserves_audio_metadata_with_sampling_overrides(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Sampling overrides must retain archive references through materialization and dispatch."""
+        audio_ref = json.dumps({"archive": "alpaca.tar", "member": "alpacaeval_full/test_0.wav"})
+        chat_template_kwargs = json.dumps({"enable_thinking": True})
+        source_row = {
+            "agent_ref": {"name": "my_agent"},
+            "responses_create_params": {
+                "input": [{"role": "user", "content": "Please provide a response to the audio prompt."}],
+                "temperature": 0.1,
+                "metadata": {
+                    "audio_ref": audio_ref,
+                    "chat_template_kwargs": chat_template_kwargs,
+                    "extra_body": json.dumps({"top_k": 10, "min_p": 0.1}),
+                },
+            },
+        }
+        original_row = deepcopy(source_row)
+        source_bytes = orjson.dumps(source_row) + b"\n"
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(source_bytes)
+        sampling_extra_body = json.dumps({"top_k": 20})
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            responses_create_params={"temperature": 0.6, "metadata": {"extra_body": sampling_extra_body}},
+            disable_aggregation=True,
+        )
+        post = AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "response": {}}))
+        install_fake_server_client(monkeypatch, post)
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        [materialized] = [orjson.loads(line) for line in config.materialized_jsonl_fpath.read_bytes().splitlines()]
+        expected_params = {
+            "input": original_row["responses_create_params"]["input"],
+            "temperature": 0.6,
+            "metadata": {
+                "audio_ref": audio_ref,
+                "chat_template_kwargs": chat_template_kwargs,
+                "extra_body": sampling_extra_body,
+            },
+        }
+        assert materialized["responses_create_params"] == expected_params
+        post.assert_awaited_once()
+        assert post.call_args.kwargs["url_path"] == "/run"
+        assert post.call_args.kwargs["json"]["responses_create_params"] == expected_params
+        assert input_fpath.read_bytes() == source_bytes
+        assert source_row == original_row
+
+    @pytest.mark.parametrize(
+        "row_metadata, override_metadata, expected_metadata",
+        [
+            ({"audio_ref": "audio", "shared": "row"}, {"shared": "run"}, {"audio_ref": "audio", "shared": "run"}),
+            ({"audio_ref": "audio"}, None, None),
+            (None, {"extra_body": '{"top_k":20}'}, {"extra_body": '{"top_k":20}'}),
+            ({"audio_ref": "audio"}, {}, {"audio_ref": "audio"}),
+        ],
+    )
+    def test_responses_overrides_merge_metadata_without_merging_other_fields(
+        self, tmp_path: Path, row_metadata: dict | None, override_metadata: dict | None, expected_metadata: dict | None
+    ) -> None:
+        source_row = {
+            "agent_ref": {"name": "my_agent"},
+            "responses_create_params": {
+                "input": [{"role": "user", "content": "row input"}],
+                "metadata": row_metadata,
+                "temperature": 0.1,
+            },
+        }
+        original_row = deepcopy(source_row)
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="<in-memory>",
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            responses_create_params={
+                "input": [{"role": "user", "content": "run input"}],
+                "metadata": override_metadata,
+                "temperature": 0.6,
+            },
+        )
+
+        [row] = RolloutCollectionHelper._preprocess_raw_rows([(0, json.dumps(source_row), source_row.copy())], config)
+
+        assert row["responses_create_params"] == {
+            "input": [{"role": "user", "content": "run input"}],
+            "metadata": expected_metadata,
+            "temperature": 0.6,
+        }
+        assert source_row == original_row
 
     def test_rollout_request_debug_summary_compact(self) -> None:
         row = {

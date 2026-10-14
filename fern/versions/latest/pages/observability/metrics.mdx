@@ -32,6 +32,7 @@ would disagree the first time one dropped a sample.
 | `gym.http.connection_pool.queue_duration_ms` | Histogram | ms | Time one queued connection acquisition waited for an aiohttp pool slot. |
 | `gym.http.connection_pool.connect_total` | Observable counter | count | All outbound aiohttp connection attempts (`connect()` calls), including attempts that later fail or are abandoned. |
 | `gym.rollout.completed_total` | Counter | count | Rollout attempts the collection driver finished handling, by outcome. See below. |
+| `gym.http.connection_pool.connect_duration_ms` | Histogram | ms | Time to open one new pooled connection, including DNS, TCP, and TLS setup. Reused connections record nothing. |
 | `gym.server.memory.usage` | Gauge | bytes | Current RSS or PSS for one managed server and its descendants. |
 | `gym.server.memory.sampled_peak` | Gauge | bytes | Largest value observed by the sampler for one managed server and its descendants. |
 | `gym.server.processes` | Gauge | count | Processes currently attributed to one managed server. |
@@ -100,6 +101,75 @@ A server with `num_workers` above 1 runs `run_webserver` again in every Uvicorn 
 
 There is no supervisor-side total. The supervisor learns that a server is ready from a health poll every few seconds, so its total would be the stages above plus polling delay. The total for each server is the `gym.startup.server` span in the startup trace.
 
+### Event Loop and Process Metrics
+
+These metrics are reported whenever metrics are exported. Every server process reports them, and the `process.pid` resource attribute tells apart the Uvicorn workers of one server.
+
+A Gym server answers every request on one asyncio event loop. When synchronous work holds that loop, every other request waits, even though no single request looks slow. Requests that arrive in bursts make this worse, because each one waits for the synchronous work of the requests ahead of it.
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.event_loop.lag_ms` | Histogram | ms | How late a sleeping coroutine wakes up, sampled once per interval. This is the signal that the event loop is busy. |
+| `gym.event_loop.tasks` | Gauge | count | Asyncio tasks that exist on the loop, reported only when `telemetry.event_loop_task_count` is true. This counts resident work, not a queue: a task waiting on the network counts as much as a runnable one. |
+| `gym.gc.pause_duration_ms` | Histogram | ms | Duration of one garbage collection, by `nemo.gym.gc.generation`. |
+| `gym.gc.collections_total` | Counter | count | Garbage collections, by `nemo.gym.gc.generation`. |
+| `gym.gc.collected_total` | Counter | count | Objects freed, by `nemo.gym.gc.generation`. |
+| `gym.gc.uncollectable_total` | Counter | count | Objects found but not freed, by `nemo.gym.gc.generation`. |
+| `gym.gc.count` | Gauge | count | Allocations counted toward the next collection, by `nemo.gym.gc.generation`. |
+| `process.cpu.time` | Counter | s | Process CPU time, by `cpu.mode` (`user` or `system`). |
+| `process.memory.usage` | Gauge | bytes | Resident memory of the process. |
+| `process.thread.count` | Gauge | count | Threads in the process. |
+| `process.open_file_descriptor.count` | Gauge | count | Open file descriptors, where the platform reports them. |
+| `gym.server.requests.in_flight` | Up/down counter | count | HTTP requests the server is handling. |
+| `gym.server.requests.cancelled_total` | Counter | count | Requests cancelled because the client disconnected before the response finished. |
+| `gym.server.requests.unhandled_exceptions_total` | Counter | count | Requests whose handler raised an exception that no middleware turned into a response. A handled error, such as an `HTTPException`, is a response and is counted in `gym.server.responses_total` instead. |
+| `gym.server.responses_total` | Counter | count | Responses the server started sending, by `http.response.status_code`. It does not depend on the FastAPI instrumentor, so it reports 4xx and 5xx responses in any run with metrics on. |
+| `gym.http.client.requests.in_flight` | Up/down counter | count | Outbound calls through `server_utils.request` still waiting for their response headers. |
+
+The rollout driver, which is `gym eval run`, reports how much work it holds and where that work waits:
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.driver.rollouts.offered_total` | Counter | count | Rollouts handed to dispatch. |
+| `gym.driver.rollouts.resident` | Up/down counter | count | Rollout tasks that exist and have not finished, whether waiting for admission or running. |
+| `gym.driver.rollouts.active` | Up/down counter | count | Rollouts admitted past the concurrency limit and running. |
+| `gym.driver.admission_duration_ms` | Histogram | ms | Time one rollout waited for the concurrency limit before it started. |
+| `gym.driver.output_write_duration_ms` | Histogram | ms | Time to write and flush one rollout's output row. |
+| `gym.driver.output_write_bytes` | Histogram | bytes | Size of one rollout's output row. |
+| `gym.driver.materialize_duration_ms` | Histogram | ms | Time to read, repeat, and write a run's input rows before dispatch. |
+| `gym.driver.rollout.input_items` | Histogram | count | Input items one completed rollout started with. |
+| `gym.driver.rollout.output_items` | Histogram | count | Output items in one completed rollout's final response. |
+| `gym.driver.rollout.turns` | Histogram | count | Agent turns in one completed rollout. Recorded only when rollout observability produced the rollout's `ng_perf`. |
+| `gym.driver.rollout.tool_calls` | Histogram | count | Tool calls in one completed rollout, from `ng_perf`, or counted from the final response's `function_call` items without it. |
+
+Resident minus active is the number of rollouts waiting for admission. A standalone `gym eval run --no-serve` driver sets up its own telemetry from the `telemetry:` block, so it reports these metrics and the `gym.job` span too.
+
+`gym.event_loop.lag_ms` and `gym.event_loop.tasks` carry `nemo.gym.event_loop`, which is `server` for a server's own loop, `head_server` for the head server's loop inside the supervisor, and `driver` for the rollout driver's loop.
+
+The `process.*` metrics keep the OpenTelemetry process semantic-convention names, units, and `cpu.mode` attribute, so standard dashboards recognize them. The Gym metrics follow Gym's own conventions: durations in milliseconds with a `_ms` suffix, counters with a `_total` suffix, and attributes under `nemo.gym.`.
+
+The work stays off the request path. The event loop runs one sampling coroutine per interval. Process, garbage-collection, and request totals are plain counters that the exporter's background thread reads when it exports, so a request costs a few integer updates and no OpenTelemetry call.
+
+### Resources Operation Metrics
+
+Many resources servers limit expensive work, such as a verifier subprocess or a judge call, with a semaphore. When the limit is too small, verification waits in a queue that no request metric shows. A resources server reports that queue by wrapping its limited work in `nemo_gym.telemetry.resources_operations.resources_operation`:
+
+```python
+async with resources_operation(self._semaphore, operation="verify", executor="subprocess") as op:
+    result = await run_the_verifier()
+    if it_timed_out:
+        op.outcome = "timeout"
+```
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.resources.operation.queue_duration_ms` | Histogram | ms | Time one operation waited for its limit. |
+| `gym.resources.operation.duration_ms` | Histogram | ms | Time one operation ran inside its limit, by `nemo.gym.resources.operation.outcome`: `ok`, `error`, `timeout`, `cancelled`, or `crashed`. |
+| `gym.resources.operation.queued` | Up/down counter | count | Operations waiting for their limit. |
+| `gym.resources.operation.active` | Up/down counter | count | Operations running inside their limit. |
+
+Every metric carries `nemo.gym.resources.operation` (`verify`, `tool`, `judge`, or `other`) and `nemo.gym.resources.executor` (`inline`, `thread`, `process`, `subprocess`, or `other`). They are recorded only while metrics are exported. `math_with_judge` uses this contract for its SymPy verifier subprocesses.
+
 ### Memory Metrics
 
 Memory metrics are emitted only when `telemetry.memory_profiling.enabled` is true. Server points carry `nemo.gym.server.name`, `nemo.gym.server.type`, and the root `process.pid`; server memory gauges also carry `memory.type`, which is `rss` or `pss`. Host points rely on the existing `host.name` resource attribute and carry no per-sample attributes.
@@ -110,7 +180,7 @@ Host usage is `total - available`, matching the memory the operating system cann
 
 Descendants remain attributed while they stay in the server's Linux process tree. Detached or reparented processes and remote Ray actors are not included.
 
-Compare these series with `http.server.active_requests` while increasing workload concurrency. Separate server processes export their HTTP metrics independently, so sum active requests by Gym server name when a server uses several Uvicorn workers.
+Compare these series with `http.server.active_requests`, which requires traces, while increasing workload concurrency. Separate server processes export their HTTP metrics independently, so sum active requests by Gym server name when a server uses several Uvicorn workers.
 
 ### What `gym.verify.success_rate` Measures
 
@@ -135,12 +205,21 @@ so it is the only writer. It sets the count after startup and zero on shutdown.
 ## HTTP Metrics
 
 FastAPI auto-instrumentation emits the standard HTTP server metrics on every NeMo Gym
-server:
+server while traces are exported. The pinned instrumentation package uses the older
+OpenTelemetry HTTP semantic conventions:
 
-| Metric | Dimensions |
-| --- | --- |
-| `http.server.active_requests` | `http.server_name`, `http.method` |
-| `http.server.request.duration` | `http.route`, `http.request.method`, `http.response.status_code` |
+| Metric | Unit | Dimensions |
+| --- | --- | --- |
+| `http.server.active_requests` | requests | `http.server_name`, `http.method` |
+| `http.server.duration` | ms | `http.target`, `http.method`, `http.status_code` |
+| `http.server.request.size` | bytes | `http.target`, `http.method`, `http.status_code` |
+| `http.server.response.size` | bytes | `http.target`, `http.method`, `http.status_code` |
+
+`http.target` carries the route template, such as `/verify`, not the raw path.
+
+With `traces_enabled: false`, NeMo Gym does not install the instrumentor, because it costs
+every request tens of microseconds even when no span is exported. A metrics-only run
+therefore has no `http.server.*` metrics. Turn traces on to get them.
 
 Use these for request latency. They are dimensioned, so you can compare `/verify` against
 `/v1/responses`, or isolate 500s, which is what latency questions usually require.
@@ -175,7 +254,7 @@ it.
 At the pinned `nemo-lens` version, that instrument records without attributes. Every
 endpoint of every server type would land in one undimensioned histogram: a verification,
 an inference call, and a liveness probe sharing one set of buckets. The result answers no
-question anyone has. The dimensioned `http.server.request.duration` above supersedes it.
+question anyone has. The dimensioned `http.server.duration` above supersedes it.
 
 ## Enabling and Disabling
 

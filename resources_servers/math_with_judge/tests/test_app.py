@@ -35,6 +35,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.telemetry.resources_operations import ResourcesOperation
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
@@ -436,13 +437,16 @@ class TestApp:
         process.start()
         child_connection.close()
 
+        operation = ResourcesOperation()
         try:
             assert await LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(
                 process,
                 result_connection,
                 0.01,
+                operation=operation,
             ) == (approx(0.0), None)
             assert not process.is_alive()
+            assert operation.outcome == "timeout"
         finally:
             if process.is_alive():
                 process.kill()
