@@ -118,7 +118,9 @@ def mlflow_config() -> DictConfig:
 def _register_recording(monkeypatch: MonkeyPatch) -> MagicMock:
     """Point the registry at RecordingExporter and hand back the (spied) lazy loader."""
     loader = MagicMock(return_value=RecordingExporter)
-    monkeypatch.setattr(exporters_module, "EXPORTER_REGISTRY", {"recording": (RecordingConfig, "recording")})
+    monkeypatch.setattr(
+        exporters_module, "EXPORTER_REGISTRY", {"recording": (RecordingConfig, "recording", "recording")}
+    )
     monkeypatch.setattr(exporters_module, "_load_exporter_class", loader)
     return loader
 
@@ -176,6 +178,24 @@ class TestRegistry:
 
         assert setup_exporters(wandb_config) == []
         assert get_exporters() == []
+
+    def test_missing_sdk_is_skipped_with_an_actionable_install_hint(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setattr(
+            exporters_module, "EXPORTER_REGISTRY", {"recording": (RecordingConfig, "recording", "recording")}
+        )
+        monkeypatch.setattr(
+            exporters_module,
+            "_load_exporter_class",
+            MagicMock(side_effect=ImportError("No module named 'recording_sdk'")),
+        )
+
+        with caplog.at_level("WARNING"):
+            assert setup_exporters(wandb_config) == []
+
+        assert get_exporters() == []
+        assert "pip install nemo-gym[recording]" in caplog.text
 
     def test_setup_replaces_previously_opened_exporters(
         self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
@@ -434,7 +454,7 @@ class TestMLflowExporter:
 
         mlflow_module.MlflowClient.assert_called_once_with(tracking_uri="https://tracking.example")
         client.create_experiment.assert_not_called()
-        client.create_run.assert_called_once_with("exp-1", run_name="run")
+        client.create_run.assert_called_once_with("exp-1", run_name="run", tags=None)
         assert exporter.run_id == "run-1"
         assert mlflow_module.environ["MLFLOW_TRACKING_TOKEN"] == "secret-token"  # pragma: allowlist secret
 
@@ -460,7 +480,20 @@ class TestMLflowExporter:
         MLflowExporter(mlflow_config).setup()
 
         client.create_experiment.assert_called_once_with("gym")
-        client.create_run.assert_called_once_with("exp-new", run_name="run")
+        client.create_run.assert_called_once_with("exp-new", run_name="run", tags=None)
+
+    def test_setup_passes_run_tags_and_description_as_one_tag_dict(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig
+    ) -> None:
+        mlflow_config["mlflow_run_tags"] = {"model": "m", "benchmark": "b"}
+        mlflow_config["mlflow_run_description"] = "m on b"
+
+        _, client = _open_mlflow_exporter(monkeypatch, mlflow_config)
+
+        # create_run only accepts a dict; the description is MLflow's mlflow.note.content tag.
+        client.create_run.assert_called_once_with(
+            "exp-1", run_name="run", tags={"model": "m", "benchmark": "b", "mlflow.note.content": "m on b"}
+        )
 
     def test_logging_before_setup_raises(self, mlflow_config: DictConfig) -> None:
         with pytest.raises(RuntimeError, match="not open"):

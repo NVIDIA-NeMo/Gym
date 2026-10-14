@@ -9,7 +9,12 @@ from collections import defaultdict
 from sqlite3 import Row
 from typing import Any
 
-from nemo_gym.rollout_observability import ObservationGap, TrajectoryRecord, TrajectoryTurn
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.rollout_observability import (
+    ObservationGap,
+    TrajectoryRecord,
+    TrajectoryTurn,
+)
 
 
 def _object(value: Any) -> dict[str, Any]:
@@ -27,7 +32,12 @@ def _timestamp(value: Any) -> float | None:
 
 
 def append_opencode_turns(
-    trajectory: TrajectoryRecord, session_ids: set[str], message_rows: list[Row], part_rows: list[Row]
+    trajectory: TrajectoryRecord,
+    session_ids: set[str],
+    message_rows: list[Row],
+    part_rows: list[Row],
+    *,
+    model_ref: ModelServerRef | None = None,
 ) -> None:
     """Membership comes only from persisted IDs; row order numbers turns within a session.
 
@@ -127,6 +137,8 @@ def append_opencode_turns(
         trajectory.turns.append(
             TrajectoryTurn(
                 invocation_id=session_id,
+                source_message_id=message_id,
+                source_model_ref=model_ref,
                 task_id=trajectory.task_id,
                 rollout_id=trajectory.rollout_id,
                 turn_no=turn_counts[session_id],

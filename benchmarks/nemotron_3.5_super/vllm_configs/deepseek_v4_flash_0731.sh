@@ -43,6 +43,7 @@ VLLM_PREFILL_ARGS=(
 VLLM_DECODE_ARGS=(
     --kv-transfer-config "$DECODE_KV_TRANSFER_CONFIG"
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    --max-cudagraph-capture-size 2048
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
 )

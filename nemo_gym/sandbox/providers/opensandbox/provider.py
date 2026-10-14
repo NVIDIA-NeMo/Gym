@@ -293,6 +293,24 @@ def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
     return "sandbox_not_found" in message or ("sandbox" in message and "not found" in message)
 
 
+def _execution_outcome(execution: Any) -> tuple[int, str | None, str | None]:
+    """Map a streamed SDK execution to ``(return_code, error_type, stderr_note)``.
+
+    The SDK fills in ``exit_code=0`` itself once execd sends its completion
+    event. With no exit code, error or completion event, the stream ended
+    without reporting the command's outcome. The command may have completed
+    or still be running; neither success nor failure is confirmed. Return a
+    sandbox error rather than assuming success.
+    """
+    if execution.exit_code is not None:
+        return execution.exit_code, None, None
+    if execution.error is not None:
+        return 125, "sandbox", None
+    if execution.complete is not None:
+        return 0, None, None
+    return 125, "sandbox", "Command ended without a final status: no exit code, error or completion event"
+
+
 def _log_create_retry(retry_state: Any) -> None:
     exception = retry_state.outcome.exception() if retry_state.outcome else None
     sleep_s = retry_state.next_action.sleep if retry_state.next_action else None
@@ -1700,15 +1718,10 @@ class OpenSandboxProvider:
             stderr_parts = [msg.text for msg in execution.logs.stderr]
             if execution.error is not None:
                 stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
+            return_code, error_type, note = _execution_outcome(execution)
+            if note is not None:
+                stderr_parts.append(note)
             stderr = "\n".join(stderr_parts) or None
-            error_type = None
-            if execution.exit_code is not None:
-                return_code = execution.exit_code
-            elif execution.error is not None:
-                return_code = 125
-                error_type = "sandbox"
-            else:
-                return_code = 0
 
             return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
 
@@ -1823,11 +1836,10 @@ class OpenSandboxProvider:
         if status_timeout_s is None:
             status_timeout_s = poll_timeout_s
 
-        def _status_poll_is_retryable(exception: BaseException) -> bool:
-            # The short budget makes poll timeouts routine rather than fatal:
-            # re-polling a status is an idempotent GET, so unlike a submit
-            # (where a timeout stays terminal to avoid a double-run) a timed-out
-            # poll retries within the normal budget instead of killing the command.
+        def _command_read_is_retryable(exception: BaseException) -> bool:
+            # Status and log reads are idempotent GETs for the same execution.
+            # Retry timed-out reads within the normal budget; submit timeouts
+            # stay terminal because retrying could run the command twice.
             if isinstance(exception, TimeoutError):
                 return True
             return _is_retryable_sdk_operation_error(exception)
@@ -1842,7 +1854,7 @@ class OpenSandboxProvider:
                 sandbox_id=handle.sandbox_id,
                 timeout_s=status_timeout_s,
                 retries=self._operations.retries,
-                is_retryable=_status_poll_is_retryable,
+                is_retryable=_command_read_is_retryable,
             )
             # A renamed SDK field must not degrade silently: a missing `running`
             # would end the poll at once, a missing `exit_code` would score a
@@ -1869,6 +1881,7 @@ class OpenSandboxProvider:
             sandbox_id=handle.sandbox_id,
             timeout_s=poll_timeout_s,
             retries=self._operations.retries,
+            is_retryable=_command_read_is_retryable,
         )
         stdout = getattr(logs, "content", None) or None
         status_error = getattr(status, "error", None)
@@ -1971,11 +1984,9 @@ class OpenSandboxProvider:
             return SandboxExecResult(stdout, "\n".join(stderr_parts), 124, error_type="timeout")
         if execution.error is not None:
             stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
-        return_code = execution.exit_code
-        error_type = None
-        if return_code is None:
-            return_code = 125 if execution.error is not None else 0
-            error_type = "sandbox" if execution.error is not None else None
+        return_code, error_type, note = _execution_outcome(execution)
+        if note is not None:
+            stderr_parts.append(note)
         return SandboxExecResult(stdout, "\n".join(stderr_parts) or None, return_code, error_type)
 
     def _pty_http_client(self) -> Any:

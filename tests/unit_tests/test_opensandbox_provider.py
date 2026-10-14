@@ -965,6 +965,51 @@ def test_connection_config_disable_pooling_sets_fresh_transport(fake_opensandbox
     assert transport._pool._max_keepalive_connections == 0
 
 
+@pytest.mark.parametrize(
+    ("execution", "expected"),
+    [
+        (SimpleNamespace(exit_code=3, error=None, complete=None), (3, None, None)),
+        (SimpleNamespace(exit_code=None, error=SimpleNamespace(), complete=None), (125, "sandbox", None)),
+        (SimpleNamespace(exit_code=None, error=None, complete=SimpleNamespace()), (0, None, None)),
+    ],
+    ids=["exit-code", "error-without-code", "completed"],
+)
+def test_execution_outcome_maps_sdk_results(execution: Any, expected: tuple[int, str | None, str | None]) -> None:
+    assert opensandbox_provider._execution_outcome(execution) == expected
+
+
+async def test_exec_without_final_status_is_not_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stream cut short (no exit code, error or completion event) must not read as exit 0."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    async def run(_command: str, *, opts: FakeRunCommandOpts) -> Any:
+        return SimpleNamespace(
+            logs=SimpleNamespace(stdout=[SimpleNamespace(text="partial")], stderr=[]),
+            error=None,
+            exit_code=None,
+            complete=None,
+        )
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 5}, probe={"command": None})
+    raw = SimpleNamespace(commands=SimpleNamespace(run=run))
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-1", provider_name="opensandbox", raw=raw)
+
+    result = await provider.exec(handle, "pytest", timeout_s=30)
+
+    assert result.return_code == 125
+    assert result.error_type == "sandbox"
+    assert result.stdout == "partial"
+    assert result.stderr == "Command ended without a final status: no exit code, error or completion event"
+
+
 async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class FakeRunCommandOpts:
         def __init__(self, **kwargs: Any) -> None:
@@ -990,6 +1035,7 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
                 logs=SimpleNamespace(stdout=[FakeLog("stdout")], stderr=[]),
                 error=None,
                 exit_code=None,
+                complete=SimpleNamespace(execution_time_in_millis=1),
             )
 
     class FakeFiles:
@@ -2325,14 +2371,12 @@ async def test_exec_background_status_polls_use_dedicated_timeout(
 
 
 @pytest.mark.asyncio
-async def test_exec_background_retries_timed_out_status_poll(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A timed-out status poll retries instead of killing the running command.
-
-    Per-call timeouts are deliberately terminal for submits (a retry could
-    double-run the command), so with the short poll budget a single slow poll
-    would otherwise fail the whole command; re-polling a status is an
-    idempotent GET and must retry within the normal budget.
-    """
+@pytest.mark.parametrize("read_operation", ["status", "logs"])
+@pytest.mark.parametrize("failures", [1, 3])
+async def test_exec_background_retries_timed_out_reads(
+    monkeypatch: pytest.MonkeyPatch, read_operation: str, failures: int
+) -> None:
+    """Read retries are bounded and never resubmit an already-running command."""
 
     class FakeRunCommandOpts:
         def __init__(self, **kwargs: Any) -> None:
@@ -2340,20 +2384,26 @@ async def test_exec_background_retries_timed_out_status_poll(monkeypatch: pytest
 
     class FakeCommands:
         def __init__(self) -> None:
+            self.submissions = 0
             self.status_calls: list[str] = []
+            self.log_calls: list[str] = []
 
         async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            self.submissions += 1
             return SimpleNamespace(id="exec-slowpoll")
 
         async def get_command_status(self, execution_id: str) -> Any:
             self.status_calls.append(execution_id)
-            if len(self.status_calls) == 1:
+            if read_operation == "status" and len(self.status_calls) <= failures:
                 # Surfaces through _await_sdk_call the same way an expired
                 # per-call budget does (asyncio.TimeoutError is TimeoutError).
                 raise TimeoutError("simulated status poll budget expiry")
             return SimpleNamespace(running=False, exit_code=0, error=None)
 
         async def get_background_command_logs(self, execution_id: str) -> Any:
+            self.log_calls.append(execution_id)
+            if read_operation == "logs" and len(self.log_calls) <= failures:
+                raise TimeoutError("simulated log fetch budget expiry")
             return SimpleNamespace(content="ok", cursor=None)
 
     monkeypatch.setattr(
@@ -2378,10 +2428,22 @@ async def test_exec_background_retries_timed_out_status_poll(monkeypatch: pytest
         sandbox_id="sandbox-slowpoll", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
     )
 
-    result = await provider.exec(handle, "echo ok", timeout_s=30)
+    if failures == 3:
+        with pytest.raises(TimeoutError, match=f"command {read_operation}"):
+            await provider.exec(handle, "echo ok", timeout_s=30)
+    else:
+        result = await provider.exec(handle, "echo ok", timeout_s=30)
+        assert result.return_code == 0
+        assert result.stdout == "ok"
 
-    assert commands.status_calls == ["exec-slowpoll", "exec-slowpoll"]
-    assert result.return_code == 0
+    assert commands.submissions == 1
+    expected_attempts = min(failures + 1, 3)
+    if read_operation == "status":
+        assert commands.status_calls == ["exec-slowpoll"] * expected_attempts
+        assert commands.log_calls == (["exec-slowpoll"] if failures == 1 else [])
+    else:
+        assert commands.status_calls == ["exec-slowpoll"]
+        assert commands.log_calls == ["exec-slowpoll"] * expected_attempts
 
 
 def test_tls_verify_reaches_transports(fake_opensandbox_sdk: None) -> None:

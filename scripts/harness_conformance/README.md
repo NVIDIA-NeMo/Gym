@@ -1,5 +1,42 @@
 # Live harness conformance probes
 
+## Pull-request feedback
+
+Gym CI runs a harness probe matrix on approved PR mirrors and merge-queue
+revisions. Changes to a registered adapter select that harness; shared code,
+dependency files, CI configuration, and other server code conservatively select
+all registered harnesses. Changes limited to `fern/`, `docs/`, or root Markdown
+files are skipped. Scheduled and manual CI runs exercise all harnesses.
+
+Each job installs the adapter's pinned runtime, validates the runner, checker,
+and adapter tests, then runs every scenario. Execution errors fail the probe job;
+completed measurements can succeed as jobs even when they find conformance failures.
+Warnings and a detailed table remain available in the Actions summary.
+
+After the probes finish, a separate reporting job publishes **Harness conformance P0**
+in the PR checks list. It succeeds only if every selected harness passes the current
+P0 suite, or no harnesses are affected. Conformance failures and unavailable
+measurements both produce a failed check, with the first failure and number of
+failed scenario checks per harness, local rerun commands, and direct artifact links.
+Counts include execution errors and count each scenario once, rather than counting
+cascading evidence failures separately. Only the
+reporting job receives `checks: write`; probe jobs keep read-only permissions.
+Download the `harness-conformance-*` artifacts for test/setup logs and probe evidence.
+The reporter only uses artifacts from the current run attempt; rerun all jobs to
+refresh results for all selected harnesses.
+
+After publishing the result, **Publish P0 check** also fails if P0 fails or any
+probe job fails or is cancelled, making the result visible in the workflow job list.
+
+To enforce P0 before merging, add the fixed **Harness conformance P0** check name to
+the repository's required checks. Until configured, it remains optional. It is
+independent of the existing `Nemo_CICD_Test` gate. This workflow does not regenerate
+documentation.
+
+Use the diagnostic command below to reproduce a warning at the reported commit.
+When registering another harness in `registry.HARNESSES`, provide its pinned runtime
+installation in `ci.install_runtime` as well as its episode configuration.
+
 ## Regenerate the documentation table
 
 From a checkout matching a full Gym commit SHA, rebuild the TE table in
@@ -91,7 +128,8 @@ reported as exercise failures.
 The runner observes actual retry behavior. A runtime that does not retry the
 injected error leaves that scenario incomplete. A terminal error must still
 produce a collected rollout to satisfy its evidence checks; a failure sidecar
-alone cannot qualify it. TE-8 and TE-9 remain alternatives per scenario.
+alone cannot qualify it. Every applicable individual P0 check must pass;
+TE labels group results and do not determine priority or grant exemptions.
 
 ## Results
 
@@ -109,8 +147,9 @@ rejected, so previous rollouts cannot accidentally qualify a new run.
   execution markers, returned tool results, and verifier outcomes.
 - `<harness>/<scenario>/scenario_result.json` and `evidence/`: execution gaps,
   input hashes, and the existing artifact checker reports.
-- `conformance_summary.json` and `conformance_report.md`: harness × evidence
-  matrix with passing / exercised / required scenario counts.
+- `conformance_summary.json` and `conformance_report.md`: individual results and
+  one table per harness, with check rows and scenario columns. Artifact and
+  behavioral results stay independent; execution status is recorded separately.
 
 A scenario counts as passing only when its independent observations agree with
 the retained rollout and the relevant evidence checks pass. Attempt comparison
@@ -130,8 +169,8 @@ tree, including harnesses that start new process groups.
 Exit codes: **0** when all selected gates pass, **1** for evidence or scenario
 failures, and **2** for execution, dependency, input, or checker errors. Existing
 harness evidence gaps are expected to remain visible as failures. This suite
-covers the current P0 checks; multimodal content, compaction, parallelism,
-transport disconnects, TE-10 and P1 remain outside its qualification scope.
+covers P0 checks, including ownership and call-to-step checks. Multimodal content,
+compaction, parallelism and transport disconnects remain outside its qualification scope.
 
 Run regression checks with:
 
@@ -139,7 +178,7 @@ Run regression checks with:
 python -m pytest scripts/harness_conformance/tests tests/unit_tests/harness_capabilities -q
 ```
 
-To add another local harness, add its adapter class to `episode.HARNESSES`, supply
+To add another local harness, add its adapter class to `registry.HARNESSES`, supply
 its launch settings in `episode._config`, and make its advertised shell-tool
 schema consumable by `provider.Probe._tool`. Keep expectations and witnesses out
 of the task input and preserve the normal Gym collection path.

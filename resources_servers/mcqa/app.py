@@ -87,6 +87,16 @@ BOXED_LETTER_LABEL_PATTERN = re.compile(r"^\s*([A-Z])\s*[:).\-]")
 ANSWER_COLON_PATTERN = re.compile(r"(?i)answer\s*:\s*(.+)")
 # Markdown-aware variant: captures the final-answer payload after Answer:.
 ANSWER_COLON_PAYLOAD_PATTERN = re.compile(r"(?im)[*_]{0,2}Answer[*_]{0,2}\s*:[*_\s]{0,2}(.+)")
+# Recognized Indic answer labels only; arbitrary labels such as "Eliminated
+# option" must never supply an answer. This fallback also requires a row opt-in.
+LOCALIZED_ANSWER_LABELS = frozenset(
+    {"উত্তৰ", "উত্তর", "જવાબ", "उत्तर", "ಉತ್ತರ", "ഉത്തരം", "ଉତ୍ତର", "ਉੱਤਰ", "उत्तरम्", "उत्तरं", "பதில்", "விடை", "సమాధానం", "جواب"}
+)
+TERMINAL_LABELED_CHOICE_PATTERN = re.compile(
+    r"^[\s*_`#~-]*(?P<label>[^:：\n]{2,80})[:：]"
+    r"[\s*_`#~\[({-]*(?P<choice>[A-Za-z])"
+    r"[\s*_`#~\])}.।。!?,;:：-]*$"
+)
 
 
 def _parse_answer_letter_strict_boxed(text: str, allowed_letters: set[str]) -> tuple[Optional[str], str, bool]:
@@ -262,6 +272,19 @@ def _extract_from_answer_payloads(
     return pred
 
 
+def _extract_terminal_labeled_choice(text: str, allowed_letters: set[str]) -> Optional[str]:
+    """Accept a recognized Indic label and one choice on the final nonempty line."""
+    line = next((line.strip() for line in reversed(text.splitlines()) if line.strip()), "")
+    match = TERMINAL_LABELED_CHOICE_PATTERN.fullmatch(unicodedata.normalize("NFKC", line))
+    if not match:
+        return None
+    label = match.group("label").strip("*_`#~ ")
+    if label not in LOCALIZED_ANSWER_LABELS:
+        return None
+    choice = match.group("choice").upper()
+    return choice if choice in allowed_letters else None
+
+
 def _normalize_extracted_answer(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     return (
@@ -343,7 +366,6 @@ def _parse_answer_with_custom_regexes(
 
 
 class MCQAResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: MCQAResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -435,6 +457,10 @@ class MCQAResourcesServer(SimpleResourcesServer):
                 )
                 if pred is None and answer_prefix:
                     pred, _, _ = _parse_answer_letter_strict_boxed(text, allowed_letters)
+                # Preserve all existing consumers and fallback precedence. Only
+                # explicitly opted-in rows gain localized-label normalization.
+                if pred is None and (body.template_metadata or {}).get("allow_localized_answer_labels") is True:
+                    pred = _extract_terminal_labeled_choice(text, allowed_letters)
 
         is_correct = (pred == gold) if (pred is not None and gold) else False
         reward = 1.0 if is_correct else 0.0

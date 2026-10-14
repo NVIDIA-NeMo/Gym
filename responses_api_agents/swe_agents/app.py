@@ -316,6 +316,7 @@ class SWEBenchMetrics(BaseModel):
     agent_error_kind: Optional[str] = None
     agent_timed_out: Optional[bool] = None
     eval_timed_out: Optional[bool] = None
+    eval_launch_failed: bool = False
 
     # Memory watchdog signals
     oom_killed: Optional[bool] = None
@@ -393,6 +394,22 @@ def _resolve_remote_commit(repo: Optional[str], ref: str) -> str:
         f"could not resolve agent_framework_commit={ref!r} against {repo}; "
         "pin a full 40-hex SHA or use a branch/tag that exists on the remote."
     )
+
+
+def _real_path_bind_mounts(path: Union[str, Path], ro: bool = False) -> List[str]:
+    """Bind ``path`` at its symlink-resolved location too, when it is reached through a symlink.
+
+    The setup trees are also bound at their own absolute host path because the interpreters and venvs inside them
+    record absolute paths at install time. Those recorded paths are the REAL paths: ``uv`` venvs point
+    ``bin/python`` and ``pyvenv.cfg`` at the resolved interpreter, and miniforge's console-script shebangs use the
+    resolved prefix. When the configured path goes through a symlink (a symlinked ``cache_dir`` or home directory,
+    or a setup tree linked to a shared copy), only the link path existed inside the container and every interpreter
+    lookup failed. Returns no mounts when ``path`` is not reached through a symlink.
+    """
+    real = os.path.realpath(path)
+    if real == os.path.abspath(path):
+        return []
+    return [f"--mount type=bind,src={real},dst={real}{',ro' if ro else ''}"]
 
 
 @contextmanager
@@ -1796,9 +1813,12 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
         llm_model_config = {
             "model": self.config.body.model or "",
             "base_url": f"{model_server_base_url}/v1",
-            "temperature": self.config.inference_params["temperature"],
-            "top_p": self.config.inference_params["top_p"],
         }
+        # temperature/top_p are only in inference_params when the request set them;
+        # tomlkit cannot serialize None, so only write the keys that are present.
+        for key in ("temperature", "top_p"):
+            if self.config.inference_params.get(key) is not None:
+                llm_model_config[key] = self.config.inference_params[key]
         max_output_tokens = self.config.inference_params.get("tokens_to_generate")
         if max_output_tokens is not None:
             llm_model_config["max_output_tokens"] = max_output_tokens
@@ -2907,6 +2927,10 @@ class RunOpenHandsAgent(BaseModel):
             self._apply_watchdog_stats(metrics, eval_active_command, mode="eval")
             metrics.final_eval_time += time.time()
             metrics.patch_exists = True
+            # Every evaluator writes this fresh per-episode marker before
+            # running setup or model-dependent tests. If it never appeared,
+            # the evaluator failed to start and produced no valid reward.
+            metrics.eval_launch_failed = not self.config.final_eval_apptainer_spinup_timestamp_fpath.exists()
             # Detect wall-clock eval timeout: final_eval_time (elapsed since eval start)
             # reached or exceeded the configured swebench_tests_timeout.
             metrics.eval_timed_out = (
@@ -3090,7 +3114,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             if key in provider_specific_fields:
                 final_assistant_message[key] = provider_specific_fields[key]
 
-        if final_assistant_message.get("content") or final_assistant_message.get("tool_calls"):
+        # Empty decoded output can still contain sampled tokens (for example, EOS).
+        if (
+            final_assistant_message.get("content")
+            or final_assistant_message.get("tool_calls")
+            or final_assistant_message.get("generation_token_ids")
+        ):
             messages.append(final_assistant_message)
 
         return messages, tools
@@ -3444,6 +3473,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
                 ]
             )
+            # The same tree at its symlink-resolved path: read-only parent first, then the writable subdirectories.
+            real_openhands_mounts = _real_path_bind_mounts(openhands_dir, ro=True)
+            if real_openhands_mounts:
+                real_openhands_dir = os.path.realpath(openhands_dir)
+                real_openhands_mounts += [
+                    f"--mount type=bind,src={real_openhands_dir}/{subdir},dst={real_openhands_dir}/{subdir}"
+                    for subdir in (".eval_sessions", "logs", "evaluation/oh")
+                ]
+            mount_args.extend(real_openhands_mounts)
             if params.install_openhands_capture_overlay and command.mode == "agent":
                 # Mount ``sitecustomize.py`` into capture-enabled agent containers.
                 # The module patches the OpenHands ``nemo-gym`` client at startup.
@@ -3466,6 +3504,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             miniforge3_path = Path(params.openhands_setup_dir) / "miniforge3"
             mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
             mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
+            mount_args.extend(_real_path_bind_mounts(miniforge3_path, ro=True))
 
         # Add SWE-bench setup directory mount if available (for evaluation)
         # swe-bench-ext, nv-internal-1, and deepswe don't use the swebench harness
@@ -3474,6 +3513,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # This is needed because uv venv has hardcoded absolute paths
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst=/swebench_setup")
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst={params.swebench_setup_dir}")
+            mount_args.extend(_real_path_bind_mounts(params.swebench_setup_dir))
 
         if command.mode == "eval" and "SWE-bench_Multilingual" in data_point["dataset_name"]:
             mount_args.append(
@@ -3482,6 +3522,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             mount_args.append(
                 f"--mount type=bind,src={params.swebench_multilingual_setup_dir},dst={params.swebench_multilingual_setup_dir}"
             )
+            mount_args.extend(_real_path_bind_mounts(params.swebench_multilingual_setup_dir))
 
         if command.mode == "eval" and data_point["dataset_name"] == "nv-internal-1":
             run_script_path = params.persistent_dir / "run_script.sh"
@@ -3500,6 +3541,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # print(f"Mounting R2E-Gym setup directory from: {self.r2e_gym_setup_dir}", flush=True)
             mount_args.append(f"--mount type=bind,src={params.r2e_gym_setup_dir},dst=/r2egym_setup")
             mount_args.append(f"--mount type=bind,src={params.r2e_gym_setup_dir},dst={params.r2e_gym_setup_dir}")
+            mount_args.extend(_real_path_bind_mounts(params.r2e_gym_setup_dir))
 
         if command.mode == "eval" and "SWE-rebench" in data_point["dataset_name"]:
             rebench_setup_dir = params.swe_rebench_setup_dir
@@ -3899,6 +3941,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # 3) Agent itself timed out (wall-clock) — mask regardless of resolved.
         # 4) Memory watchdog killed the agent container (OOM).
         # 5) Memory watchdog killed the eval container.
+        # 6) Evaluator failed before its startup marker; no reward was measured.
         persisted_metrics = SWEBenchMetrics.model_validate(update_and_read_metrics(params.metrics_fpath))
         agent_error_kind = persisted_metrics.agent_error_kind
         eval_timed_out = bool(persisted_metrics.eval_timed_out)
@@ -3908,6 +3951,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         if (
             agent_error_kind in ("max_iteration", "context_window")
             or eval_timed_out
+            or persisted_metrics.eval_launch_failed
             or agent_timed_out
             or oom_killed
             or eval_oom_killed

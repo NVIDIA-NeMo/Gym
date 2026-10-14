@@ -10,6 +10,43 @@ A benchmark contribution should let any user prepare the same tasks, run them un
 
 When onboarding a benchmark, it is important to keep the task contract independent of the harness wherever possible. The task defines the inputs, tools, state, required artifacts, and scoring rules; the harness chooses how to solve it. If the harness itself is part of the subject being measured, this must be stated explicitly. See [Component Ownership](/main/contribute/environments/new-environment#component-ownership) for the agent/environment separation design and the current implementation boundaries.
 
+## Overview
+
+Onboarding can be done in the following order:
+
+1. **Reuse and scaffold:** choose an existing harness and scorer, or scaffold a verifier for your task.
+2. **Prepare and declare:** convert source data reproducibly, define prompts, and complete the manifest and measurement contract.
+3. **Validate and test:** check the declaration, prepared inputs, and scoring behavior.
+4. **Evaluate:** run a small sample with a configured model and inspect the trajectories and scores.
+5. **Check local publication:** for workloads with verifier fixtures, finish metadata and run `gym env publish` to confirm validation, verifier tests, and catalog discovery.
+
+## Onboarding Example: Hello World
+
+Use a [development checkout](/main/contribute/development-setup), activate its environment, and run commands from the repository root. This example uses the scaffold's built-in sample task unchanged:
+
+```bash
+gym env init --benchmark hello_world --profile custom-gym-verifier
+gym eval prepare --benchmark hello_world
+gym env validate hello_world
+gym env test hello_world
+```
+
+The scaffold creates `benchmarks/hello_world/` and `resources_servers/hello_world/`. Its source data is one row:
+
+```json
+{"question": "What is 6 x 7?", "expected_answer": "42"}
+```
+
+To try a model, [configure its endpoint](/main/model-server), then run:
+
+```bash
+gym eval run --benchmark hello_world --model-type openai_model \
+    --split benchmark --limit 1 --num-repeats 1 \
+    --output results/hello_world_smoke.jsonl
+```
+
+The scaffold is the starting point: the sample data and scoring should be replaced as needed, the measurement contract documented, and the manifest's placeholder metadata completed before running local publication checks.
+
 ## Before implementation
 
 The measurement contract should be recorded in the benchmark's README:
@@ -17,6 +54,8 @@ The measurement contract should be recorded in the benchmark's README:
 - **Provenance:** upstream repository or dataset, pinned revision, data and software licenses, split, filtering, task count, and any synthetic data generation.
 - **Task contract:** model-visible inputs, prompt construction, tools, sandbox requirements, and how the harness produces every artifact the verifier reads. Keep reference answers out of model-visible prompts.
 - **Scoring and run conditions:** reward range and direction, aggregate metric, judge settings, harness and model, sampling settings, token or step budgets, timeouts, repeats, and seeds where supported.
+
+When the task definition changes, update this contract together with preparation, prompts, verifier logic, and representative fixtures. Regenerate the data and rerun validation, scoring tests, and a representative evaluation. If component wiring changes, review the composition mirror with `gym env validate --sync` as described below.
 
 ## Onboarding workflow
 
@@ -91,5 +130,7 @@ gym eval run --benchmark my_benchmark --model-type openai_model \
     --split benchmark --limit 5 --num-repeats 1 \
     --output results/my_benchmark_smoke.jsonl
 ```
+
+### 5. Check local publication
 
 For workloads with a verifier fixture, finish the local onboarding checks with `gym env publish my_benchmark`. This reruns validation and the fixture, rejects unfinished metadata, and confirms catalog discovery. It does not upload data, register a hosted workload, or push changes.

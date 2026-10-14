@@ -35,6 +35,18 @@ aws s3 cp opencode /path/to/folder/opencode/$APP-$target
 aws s3 ls /path/to/folder/opencode/
 ```
 
+## Optional offline ripgrep
+
+OpenCode's `glob` and `grep` tools also need ripgrep (`rg`). Without it, OpenCode
+tries downloading from GitHub, which fails in network-restricted sandboxes.
+Optionally set `local_ripgrep_binary_path` to a predownloaded, version-pinned
+executable on each Gym agent-server host, for example
+`/opt/gym-assets/ripgrep/15.1.0/rg`. Match the sandbox architecture/libc
+(for Linux x86_64, the official musl build is portable) and verify its release
+checksum before use. Gym uploads it through the sandbox file API and installs it
+alongside OpenCode before execution; no sandbox internet access or root package
+installation is needed. The default is `null`, preserving existing behavior.
+
 ## Offline scientific evaluation with OpenCode or Pi
 
 The dedicated `opencode_sandboxed_agent` and `pi_sandboxed_agent` run their native
