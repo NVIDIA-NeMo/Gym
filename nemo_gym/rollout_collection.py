@@ -2703,9 +2703,9 @@ class RolloutCollectionHelper(BaseModel):
         )
         capture_dirs = model_call_capture_dirs_from_config(global_config)
         observability_enabled = observability_enabled_from_config(global_config)
-        # Live health metrics follow telemetry alone; `disable_health_check` only gates the post-run report.
-        # Without an active metrics exporter the evaluation would feed nothing, so it is skipped.
-        health_metrics_enabled = is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_metrics_exporter_active()
+        # Live health metrics follow the metrics exporter alone: `disable_health_check` only gates the post-run
+        # report, and span groups only select traces. Without an exporter the evaluation would feed nothing.
+        health_metrics_enabled = is_metrics_exporter_active()
         health_ignored_checks = frozenset(config.health_check_ignored_checks)
         # How a finalized rollout with an incomplete capture is treated
         # (token_id_capture.mask_incomplete_when_attributed): read once, applied to every rebuild below.
@@ -2970,7 +2970,11 @@ class RolloutCollectionHelper(BaseModel):
                     failures_file.write(serialized + b"\n")
                     failures_file.flush()
                     _record_rollout_outcome(result, "failed", dispatch_name)
-                    if not no_result:
+                    # An environment failure that returned agent evidence ran an agent worth checking.
+                    if not no_result or (
+                        failure_class == ENVIRONMENT_SERVER_FAILURE_CLASS
+                        and (NG_AGENT_OBSERVATIONS_KEY in result or NG_TRAJECTORY_KEY in result)
+                    ):
                         health_outcome = "failed"
                     if batch_tracker is not None:
                         batch_failure_rows.append(_batch_status_row(result, batch_agent_refs))

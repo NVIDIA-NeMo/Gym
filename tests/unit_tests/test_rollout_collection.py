@@ -57,6 +57,7 @@ from nemo_gym.rollout_collection import (
     AGENT_RUN_ERROR_FAILURE_CLASS,
     AGGREGATION_ERROR_KEY,
     ENVIRONMENT_SERVER_FAILURE_CLASS,
+    NG_AGENT_OBSERVATIONS_KEY,
     NG_DISPATCH_DRAINED_KEY,
     NG_ENVIRONMENT_SERVER_KEY,
     NG_FAILURE_CLASS_KEY,
@@ -9571,7 +9572,9 @@ class TestLiveHealthEvaluation:
         )
 
     @staticmethod
-    def _install(monkeypatch: pytest.MonkeyPatch, *, bodies: dict[int, dict]) -> list[tuple[str, dict]]:
+    def _install(
+        monkeypatch: pytest.MonkeyPatch, *, bodies: dict[int, dict], stub_health: bool = True
+    ) -> list[tuple[str, dict]]:
         """Fake the servers (``bodies`` maps the row's ``x`` to its ``/run`` payload) and record health calls."""
         evaluated: list[tuple[str, dict]] = []
 
@@ -9581,11 +9584,12 @@ class TestLiveHealthEvaluation:
             return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
-        monkeypatch.setattr(
-            nemo_gym.rollout_collection,
-            "_record_rollout_health",
-            lambda result, outcome, ignored: evaluated.append((outcome, result)),
-        )
+        if stub_health:
+            monkeypatch.setattr(
+                nemo_gym.rollout_collection,
+                "_record_rollout_health",
+                lambda result, outcome, ignored: evaluated.append((outcome, result)),
+            )
         return evaluated
 
     async def test_every_finished_rollout_is_evaluated_with_its_outcome(
@@ -9599,7 +9603,6 @@ class TestLiveHealthEvaluation:
                 1: {"reward": 0.0, NG_FAILURE_CLASS_KEY: "judge_invalid"},
             },
         )
-        monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: True)
         monkeypatch.setattr(nemo_gym.rollout_collection, "is_metrics_exporter_active", lambda: True)
 
         await RolloutCollectionHelper().run_from_config(self._config(tmp_path))
@@ -9607,17 +9610,18 @@ class TestLiveHealthEvaluation:
         assert sorted(outcome for outcome, _ in evaluated) == ["failed", "scored"]
 
     @pytest.mark.parametrize(
-        ("span_group", "exporter"),
-        [(True, False), (False, True), (False, False)],
-        ids=["tracing on, metrics export off", "tracing off, metrics export on", "both off"],
+        ("span_group", "exporter", "expected"),
+        [(True, True, 2), (False, True, 2), (True, False, 0), (False, False, 0)],
+        ids=["tracing and export on", "tracing off, export on", "tracing on, export off", "both off"],
     )
-    async def test_nothing_is_evaluated_without_tracing_and_an_active_metrics_exporter(
+    async def test_evaluation_follows_the_metrics_exporter_and_not_the_span_groups(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         empty_global_config: MagicMock,
         span_group: bool,
         exporter: bool,
+        expected: int,
     ) -> None:
         evaluated = self._install(monkeypatch, bodies={0: {"reward": 1.0}, 1: {"reward": 1.0}})
         monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: span_group)
@@ -9625,7 +9629,86 @@ class TestLiveHealthEvaluation:
 
         await RolloutCollectionHelper().run_from_config(self._config(tmp_path))
 
-        assert evaluated == []
+        assert len(evaluated) == expected
+
+    @pytest.mark.parametrize(
+        ("failed_body", "expected"),
+        [
+            pytest.param(
+                {
+                    NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
+                    NG_AGENT_OBSERVATIONS_KEY: {
+                        "source": "fake",
+                        "records": [{"kind": "agent_invocation", "invocation_id": "root", "status": "failed"}],
+                    },
+                },
+                ["failed", "scored"],
+                id="environment failure with agent evidence",
+            ),
+            pytest.param(
+                {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS},
+                ["scored"],
+                id="environment failure without evidence",
+            ),
+            pytest.param(
+                {NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS},
+                ["scored"],
+                id="agent run error",
+            ),
+            pytest.param(
+                {NG_FAILURE_CLASS_KEY: AGENT_REQUEST_FAILED_FAILURE_CLASS},
+                ["scored"],
+                id="agent request failed",
+            ),
+        ],
+    )
+    async def test_only_failures_that_kept_agent_evidence_are_evaluated(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        failed_body: dict,
+        expected: list[str],
+    ) -> None:
+        evaluated = self._install(monkeypatch, bodies={0: {"reward": 1.0}, 1: failed_body})
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_metrics_exporter_active", lambda: True)
+
+        await RolloutCollectionHelper().run_from_config(self._config(tmp_path))
+
+        assert sorted(outcome for outcome, _ in evaluated) == expected
+        # The failure stays in the sidecar either way; evaluating it does not score it.
+        persisted = Path(tmp_path / "output.jsonl").read_bytes().splitlines()
+        assert [orjson.loads(line)["reward"] for line in persisted] == [1.0]
+
+    async def test_a_failed_episode_with_agent_evidence_gets_a_health_verdict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Through the real evaluation: the failed outcome and a verdict reach the recorder."""
+        recorded: list[tuple[str, str]] = []
+        self._install(
+            monkeypatch,
+            stub_health=False,
+            bodies={
+                0: {"reward": 1.0},
+                1: {
+                    NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
+                    NG_AGENT_OBSERVATIONS_KEY: {
+                        "source": "fake",
+                        "records": [{"kind": "agent_invocation", "invocation_id": "root", "status": "failed"}],
+                    },
+                },
+            },
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_metrics_exporter_active", lambda: True)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "record_rollout_health",
+            lambda verdict, *, outcome, flagged_checks: recorded.append((outcome, verdict)),
+        )
+
+        await RolloutCollectionHelper().run_from_config(self._config(tmp_path))
+
+        assert sorted(recorded) == [("failed", "unobserved"), ("scored", "unobserved")]
 
     async def test_a_cancellation_at_the_health_await_finds_the_bookkeeping_done(
         self,

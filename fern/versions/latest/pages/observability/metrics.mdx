@@ -182,7 +182,8 @@ that lives for less than one interval may exit before exporting anything.
 
 The trajectory-level checks of the [rollout health report](/main/evaluation/rollout-health) also run as
 each rollout finishes, so problems show up while a run is still in progress. Both counters use the
-same check logic as the report. They depend only on telemetry being initialized with a metrics exporter:
+same check logic as the report. They depend only on telemetry being initialized with a metrics exporter, not on which span groups are
+enabled:
 `disable_health_check` turns off the post-run report, not these counters, and `health_check_ignored_checks`
 applies to both.
 
@@ -194,7 +195,8 @@ applies to both.
 `gym.rollout.health_verdict_total` counts each evaluated rollout once. The verdict is `healthy`,
 `unhealthy` or `unobserved`, with the meaning it has in the report. A rollout is `unobserved` when no
 check flagged it but at least one could not run, for example because `observability_enabled` is off
-and no trajectory was captured. Rollouts that never ran are not evaluated.
+and no trajectory was captured. Rollouts that never ran are not evaluated. A rollout that failed in its
+environment after the agent ran is evaluated when it returned agent evidence.
 
 Both counters carry the outcome, `scored` or `failed`. The post-run report reads scored rollouts only,
 so filter on `scored` to compare the two.
