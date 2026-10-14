@@ -38,6 +38,7 @@ from nemo_gym.sandbox import (
     SandboxStatus,
     SupportsSandboxEndpoint,
     SupportsSandboxPauseResume,
+    clamp_resource_requests,
     create_provider,
     get_provider_class,
     list_providers,
@@ -2072,3 +2073,21 @@ async def test_pty_exec_detach_requires_a_capable_session() -> None:
     with pytest.raises(NotImplementedError, match="detached execution"):
         await sandbox.pty.exec("make", session=_LiveShellSession(), detach=True)
     await sandbox.stop()
+
+
+def test_clamp_resource_requests_caps_each_request_at_the_declared_limit() -> None:
+    requests = {"cpu": 0.5, "memory_mib": 512, "disk_gib": 10, "gpu": 2}
+    limits = SandboxResources(cpu=1, memory_mib=2048, disk_gib=4, gpu=1)
+    clamped, changed = clamp_resource_requests(requests, limits)
+    assert clamped == {"cpu": 0.5, "memory_mib": 512, "disk_gib": 4, "gpu": 1}
+    assert changed == {"disk_gib": (10, 4), "gpu": (2, 1)}
+    assert requests["disk_gib"] == 10  # the caller's mapping is not mutated
+
+    # A key the limits do not declare passes through; equal values are not a change.
+    assert clamp_resource_requests({"disk_gib": 10, "cpu": 1}, {"cpu": 1}) == ({"disk_gib": 10, "cpu": 1}, {})
+    assert clamp_resource_requests(SandboxResources(memory_mib=3), {"memory_mib": 2}) == (
+        {"cpu": None, "memory_mib": 2, "disk_gib": None, "gpu": None, "gpu_type": None},
+        {"memory_mib": (3, 2)},
+    )
+    with pytest.raises(ValueError, match="Unknown sandbox resource keys"):
+        clamp_resource_requests({"memory_gib": 2}, limits)

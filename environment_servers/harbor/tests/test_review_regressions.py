@@ -70,7 +70,6 @@ async def test_templates_resolve_at_use_without_changing_materialized_task(tmp_p
         + '\n[environment.env]\nTOKEN = "${HARBOR_TEST_TOKEN}"\n[verifier.env]\nTOKEN = "${HARBOR_TEST_TOKEN}"\n'
     )
     server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml)
-    server.config.derive_cpu_env = False  # keep the spec env to the task's own entries
     monkeypatch.setattr(
         "environment_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
     )
