@@ -366,7 +366,6 @@ def _parse_answer_with_custom_regexes(
 
 
 class MCQAResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: MCQAResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

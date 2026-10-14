@@ -147,7 +147,7 @@ For example, a harness that calls a chat-completions endpoint for rollout `3-0` 
 
 The built-in external agents, such as Claude Code, add this prefix when `token_id_capture` is enabled for them and they call a Gym model server. A custom harness must add it to every model call. Without the `training-token-capture` segment, the call is not recorded for training, and Gym masks the rollout because it finds no captured calls.
 
-Agents based on `SimpleResponsesAPIAgent` can build the prefixed URL with `base_url_for_run(base_url, body)` or `url_path_for_run(url_path, body)`. Both helpers read the rollout id from the run request and add the training segment when the agent has opted into capture. [Model-call capture](/main/model-server/model-call-capture#if-you-build-a-custom-agent) describes the same URL prefix for evaluation capture, along with the other routing helpers.
+Agents based on `SimpleResponsesAPIAgent` can build the prefixed URL with `base_url_for_run(base_url, body)` or `url_path_for_run(url_path, body)`. Both helpers read the rollout id from the run request and add the training segment when the agent has opted into capture. [Model-Call Capture](/main/model-server/model-call-capture#if-you-build-a-custom-agent) describes the same URL prefix for evaluation capture, along with the other routing helpers.
 
 ## Run a first rollout with Claude Code
 
@@ -394,3 +394,4 @@ row["_ng_rollout_id"] = f"step{step}.{task_index}-{rollout_index}"
 ```
 
 The id may contain letters, digits, dots, dashes, and underscores, and it must begin with a letter or digit.
+It must not end with `-a` followed by a positive number, such as `-a2`: that suffix names an attempt of a rollout, and rollout collection rejects dataset rows that use it.

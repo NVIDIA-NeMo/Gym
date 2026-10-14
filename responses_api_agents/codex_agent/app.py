@@ -33,6 +33,7 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
+from nemo_gym.agent_utils.process_supervisor import CLEANUP_PHASE_COUNT
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -453,7 +454,6 @@ class CodexAgentVerifyResponse(BaseVerifyResponse):
 
 
 class CodexAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: CodexAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -687,14 +687,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "prompt": prompt,
             "cwd": state.session.workdir,
             "env": {
-                "HOME": f"{state.session.session_dir}/home",
                 "CODEX_HOME": f"{state.session.session_dir}/home/.codex",
-                "XDG_CACHE_HOME": f"{state.session.session_dir}/home/.cache",
                 # Gym receives the calls; never copy the direct OpenAI credential into this path.
                 "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
             },
             "timeout": self.config.timeout,
-            "cleanup_timeout": self.config.session_close_timeout_seconds / 3,
+            "cleanup_timeout": self.config.session_close_timeout_seconds / CLEANUP_PHASE_COUNT,
         }
         raw = ""
         failure = None
