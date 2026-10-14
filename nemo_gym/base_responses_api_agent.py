@@ -59,6 +59,10 @@ from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.tool_access import ToolAccess
 
 
+# Session cookie key that binds later activation and close requests to their agent session.
+AGENT_SESSION_COOKIE_KEY = "agent_session_id"
+
+
 class AgentSeedSessionRequest(BaseModel):
     """Idempotently initialize agent-server state under a caller-assigned identifier.
 
@@ -110,7 +114,13 @@ class AgentCloseSessionResponse(BaseModel):
 
     agent_session_id: str
     agent_observations: AgentObservationBundle | None = None
-    resources_cookies: dict[str, str] | None = None
+    resources_cookies: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "The Resources Server cookie jar after the agent's tool calls. "
+            "None or an empty jar leaves the Environment Server's jar from the Resources seed unchanged."
+        ),
+    )
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
@@ -205,9 +215,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             session = request.session
         except (AssertionError, AttributeError):
             return None
-        if not isinstance(session, Mapping) or "agent_session_id" not in session:
+        if not isinstance(session, Mapping) or AGENT_SESSION_COOKIE_KEY not in session:
             return None
-        marker = session["agent_session_id"]
+        marker = session[AGENT_SESSION_COOKIE_KEY]
         if not isinstance(marker, str) or not marker:
             raise HTTPException(409, "Invalid agent session marker")
         return marker
@@ -288,7 +298,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     raise error.error from None
             elif record.state.request != body:
                 raise HTTPException(409, "agent_session_id is already bound to another seed request")
-            request.session["agent_session_id"] = body.agent_session_id
+            request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
             return AgentSeedSessionResponse(agent_session_id=body.agent_session_id)
 
     async def close_agent_session(
@@ -325,7 +335,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             record.expires_at = monotonic() + self.config.session_close_retry_window_seconds
             self._closed_session_records[body.agent_session_id] = record
             # Keep the marker so a stale /responses request cannot fall back to the non-session path.
-            request.session["agent_session_id"] = body.agent_session_id
+            request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
             return result
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:

@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import signal
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -586,6 +587,7 @@ def install_sbatch_stub(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         "SBATCH_PARTITION": "batch",
         "SBATCH_QOS": "interactive",
     }
+    env.pop("SBATCH_TIMELIMIT", None)  # Test the default independently of the caller's allocation settings.
     return calls, env
 
 
@@ -667,6 +669,89 @@ def test_slurm_launcher_submits_one_dependent_cpu_cleanup_job(tmp_path: Path) ->
     assert "attacker" not in batch_command
 
 
+@pytest.mark.parametrize("walltime", [None, "20:00:00"])
+def test_slurm_launcher_configures_walltime(tmp_path: Path, walltime: str | None) -> None:
+    """Only the main job's walltime changes; cleanup keeps its own limit."""
+    calls_path, env = install_sbatch_stub(tmp_path)
+    if walltime is not None:
+        env["SBATCH_TIMELIMIT"] = walltime
+    result = subprocess.run(
+        ["bash", str(SBATCH_SCRIPT), "--config", "benchmark.yaml"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    main_call, cleanup_call = read_sbatch_calls(calls_path)
+    assert f"--time={walltime or '04:00:00'}" in main_call
+    assert "--time=00:30:00" in cleanup_call
+    assert not any(argument.startswith("--signal=") for argument in main_call)
+
+
+@pytest.mark.parametrize(
+    ("restart_count", "output_path", "resume"),
+    [
+        pytest.param("0", None, None, id="timestamped-default"),
+        pytest.param("1", None, None, id="requeue-without-resume"),
+        pytest.param("0", "results/custom.jsonl", None, id="output-override-only"),
+        pytest.param("0", "results/custom.jsonl", "true", id="explicit-resume"),
+        pytest.param("1", "results/custom.jsonl", "true", id="requeue-with-resume"),
+        pytest.param("0", "results/custom.jsonl", "false", id="explicit-no-resume"),
+    ],
+)
+def test_slurm_eval_preserves_output_paths_and_explicit_resume(
+    tmp_path: Path,
+    restart_count: str,
+    output_path: str | None,
+    resume: str | None,
+) -> None:
+    """Output paths and requeues never enable resume without the Hydra override."""
+    _calls_path, env = install_sbatch_stub(tmp_path)
+    env.update(
+        EXPORT_TO_CSV="0",
+        SLURM_JOB_ID="7001",
+        SLURM_RESTART_COUNT=restart_count,
+        SLURM_JOB_USER="test-user",
+        ROUTER_NODE="node-a",
+        ALL_NODES="node-a node-b",
+        ROLLOUTS_FPATH=output_path or "",
+        GYM_CAPTURE_DIR=str(tmp_path),
+    )
+    overrides = [] if resume is None else [f"++resume_from_cache={resume}"]
+    subprocess.run(
+        ["bash", str(SBATCH_SCRIPT), "--config", "benchmark.yaml", *overrides],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    # Stub container setup and Gym itself; inspect the actual argv each command receives.
+    shell_stubs = (
+        "source() { GYM_MODEL_PARAMS=(); }\n"
+        "cd() { :; }\n"
+        "getent() { printf '127.0.0.1 node-a\\n'; }\n"
+        "date() { printf '20260915_010000\\n'; }\n"
+        'gym() { printf "%s\\0" "$@" > "$GYM_CAPTURE_DIR/$2-args"; }\n'
+    )
+    subprocess.run(
+        ["bash", "-c", shell_stubs + (tmp_path / "eval-command").read_text()],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    for command in ("prepare", "run"):
+        args = (tmp_path / f"{command}-args").read_bytes().decode().split("\0")[:-1]
+        assert args[:4] == ["eval", command, "--config", "benchmark.yaml"]
+        assert [arg for arg in args if arg.startswith("++resume_from_cache=")] == overrides
+        if command == "run":
+            run_name = "experiment/slurm_job_id_7001/date_20260915_010000"
+            expected_path = output_path or f"results/{run_name}.jsonl"
+            assert f"++output_jsonl_fpath={expected_path}" in args
+            assert f"+wandb_name={run_name}" in args
+            assert f"+nemo_gym_log_dir=results/{run_name}/logs" in args
+
+
 def test_slurm_launcher_skips_cleanup_job_without_eval_args(tmp_path: Path) -> None:
     calls_path, env = install_sbatch_stub(tmp_path)
     result = subprocess.run(
@@ -702,7 +787,7 @@ def test_slurm_launcher_reports_cleanup_submission_failure(tmp_path: Path) -> No
 
 @pytest.mark.parametrize(
     ("first_step", "eval_status", "expected_status"),
-    [("eval", 37, 37), ("eval", 143, 143), ("server", 0, 41)],
+    [("eval", 0, 0), ("eval", 37, 37), ("eval", 143, 143), ("server", 0, 41)],
 )
 def test_slurm_batch_command_preserves_status_and_stops_server(
     tmp_path: Path, first_step: str, eval_status: int, expected_status: int
@@ -733,23 +818,28 @@ def test_slurm_batch_command_preserves_status_and_stops_server(
     stubs = {
         "scontrol": "#!/bin/bash\nprintf 'node-a\\nnode-b\\n'\n",
         "python3": '#!/bin/bash\necho unexpected-parent-python >> "$EVENTS"\nexit 10\n',
+        # Each step signals readiness only after installing its TERM trap, and the step that ends first waits for it.
+        # The launcher then never signals a step before its trap exists, or while it is still being forked.
+        # A TERM in either window would end the step without recording the stop, or be lost.
         "srun": (
             "#!/bin/bash\n"
             'if [[ " $* " == *eval-container-on-node* ]]; then\n'
-            '    while [[ ! -f "$SERVER_READY" ]]; do sleep 0.01; done\n'
             '    if [[ "$FIRST_STEP" == eval ]]; then\n'
+            '        while [[ ! -f "$SERVER_READY" ]]; do sleep 0.01; done\n'
             '        if [[ "$EVAL_STATUS" == 143 ]]; then kill -TERM "$PPID"; fi\n'
             '        exit "$EVAL_STATUS"\n'
             "    fi\n"
             "    trap 'exit 0' TERM\n"
+            '    touch "$EVAL_READY"\n'
             "    while :; do sleep 0.1; done\n"
             "fi\n"
-            'touch "$SERVER_READY"\n'
             'if [[ "$FIRST_STEP" == server ]]; then\n'
+            '    while [[ ! -f "$EVAL_READY" ]]; do sleep 0.01; done\n'
             '    echo server-exit >> "$EVENTS"\n'
             '    exit "$SERVER_STATUS"\n'
             "fi\n"
             "trap 'echo server-stop >> \"$EVENTS\"; exit 0' TERM\n"
+            'touch "$SERVER_READY"\n'
             "while :; do sleep 0.1; done\n"
         ),
     }
@@ -758,13 +848,16 @@ def test_slurm_batch_command_preserves_status_and_stops_server(
         stub.write_text(contents)
         stub.chmod(0o755)
 
-    result = subprocess.run(
+    # The batch command gets its own process group so teardown can stop stub steps it leaves behind on failure.
+    batch = subprocess.Popen(
         ["bash", "-c", batch_command],
-        check=False,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
         env={
             **env,
             "EVENTS": str(events),
+            "EVAL_READY": str(tmp_path / "eval-ready"),
             "EVAL_STATUS": str(eval_status),
             "FIRST_STEP": first_step,
             "SERVER_STATUS": "41",
@@ -778,9 +871,16 @@ def test_slurm_batch_command_preserves_status_and_stops_server(
             "vllm_command": "server-command",
         },
         text=True,
-        timeout=10,
     )
-    assert result.returncode == expected_status
+    try:
+        batch.communicate(timeout=10)
+    finally:
+        try:
+            os.killpg(batch.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        batch.wait()
+    assert batch.returncode == expected_status
     assert events.read_text().splitlines() == (["server-stop"] if first_step == "eval" else ["server-exit"])
 
 

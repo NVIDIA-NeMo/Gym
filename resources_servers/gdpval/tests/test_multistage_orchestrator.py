@@ -20,8 +20,11 @@ from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
+from omegaconf import OmegaConf
 
 import nemo_gym.rollout_collection as rollout_collection_module
 import resources_servers.gdpval.multistage_orchestrator as multistage_module
@@ -137,6 +140,15 @@ class TestParseConfig:
     def test_reuse_cached_deliverables_can_be_disabled(self) -> None:
         cfg = parse_multistage_config({"enabled": True, "stages": ["5"], "reuse_cached_deliverables": False})
         assert cfg.reuse_cached_deliverables is False
+
+    def test_transport_replacement_is_opt_in(self) -> None:
+        default = parse_multistage_config({"enabled": True, "stages": ["5"]})
+        enabled = parse_multistage_config(
+            {"enabled": True, "stages": ["5"], "replace_transport_ineligible_tasks": True}
+        )
+
+        assert default.replace_transport_ineligible_tasks is False
+        assert enabled.replace_transport_ineligible_tasks is True
 
     def test_parses_string_stages(self) -> None:
         cfg = parse_multistage_config({"enabled": True, "stages": ["5", "88:4", "100:2:9"]})
@@ -659,6 +671,79 @@ class TestAssignmentRepairSeam:
                 _fake_run_rollouts_factory(),
                 assignment_repair=lambda stage_index, reference_ids, original: (mutate(dict(original)), {}),
             )
+
+
+class TestTransportIneligibleTaskReplacement:
+    @staticmethod
+    def _cfg(*, enabled: bool) -> MultiStageRunConfig:
+        return parse_multistage_config(
+            {
+                "enabled": True,
+                "stages": [{"num_tasks": 3}, {"num_tasks": 6, "num_models": 1}],
+                "seed": 7,
+                "replace_transport_ineligible_tasks": enabled,
+            }
+        )
+
+    async def test_replaces_strict_calibration_task_and_preserves_reference_slot(self) -> None:
+        task_ids = [f"t{i}" for i in range(6)]
+        successful_run = _fake_run_rollouts_factory()
+        stage_zero_calls: List[List[str]] = []
+        blocked_task_id: Optional[str] = None
+
+        async def run(rows: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+            nonlocal blocked_task_id
+            pairs = await successful_run(rows)
+            if rows and rows[0]["stage_index"] == 0:
+                stage_zero_calls.append([row["task_id"] for row in rows])
+                if blocked_task_id is None:
+                    blocked_task_id = rows[0]["task_id"]
+                return [
+                    (
+                        row,
+                        {
+                            NG_FAILURE_CLASS_KEY: "transport_ineligible",
+                            NG_TERMINAL_KEY: True,
+                            "task_id": row["task_id"],
+                        },
+                    )
+                    if row["task_id"] == blocked_task_id
+                    else (row, result)
+                    for row, result in pairs
+                ]
+            return pairs
+
+        resume = RecordingResume()
+        results, summaries = await run_multistage_stages(
+            self._cfg(enabled=True),
+            REF_ELOS,
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            run,
+            resume=resume,
+        )
+
+        assert blocked_task_id is not None
+        stage_zero_results = [row for row in results if row["stage_index"] == 0]
+        assert len(stage_zero_results) == 3
+        assert blocked_task_id not in {row["task_id"] for row in stage_zero_results}
+        assert [len(call) for call in stage_zero_calls] == [3, 1]
+        replacement = summaries[0]["transport_replacements"][0]
+        assert replacement["before"] == blocked_task_id
+        latest_plan = [plan for index, plan in resume.planned if index == 0][-1]
+        assert replacement["after"] in latest_plan["task_ids"]
+        assert blocked_task_id not in latest_plan["task_ids"]
+        assert latest_plan["task_reference_ids"][replacement["after"]] == replacement["reference_id"]
+        assert len([row for row in results if row["stage_index"] == 1]) == 6
+
+    async def test_opt_in_is_a_noop_without_transport_failures(self) -> None:
+        task_ids = [f"t{i}" for i in range(6)]
+        args = (REF_ELOS, _distribution(task_ids), _materialized_rows(task_ids), _fake_run_rollouts_factory())
+
+        baseline = await run_multistage_stages(self._cfg(enabled=False), *args)
+        enabled = await run_multistage_stages(self._cfg(enabled=True), *args)
+
+        assert enabled == baseline
 
 
 class TestWriteRollouts:
@@ -2512,6 +2597,15 @@ class TestFingerprint:
         }
         assert compute_fingerprint(cfg, REF_ELOS, dist_a) != compute_fingerprint(cfg, REF_ELOS, dist_b)
 
+    def test_transport_replacement_policy_invalidates(self) -> None:
+        dist = _distribution(["t0", "t1"])
+        strict = parse_multistage_config({"enabled": True, "stages": ["1", "2"]})
+        replacement = parse_multistage_config(
+            {"enabled": True, "stages": ["1", "2"], "replace_transport_ineligible_tasks": True}
+        )
+
+        assert compute_fingerprint(strict, REF_ELOS, dist) != compute_fingerprint(replacement, REF_ELOS, dist)
+
     def test_partial_completion_policy_preserves_rollout_cache_fingerprint(self) -> None:
         dist = _distribution(["t0", "t1"])
         strict = parse_multistage_config(
@@ -3455,6 +3549,86 @@ class TestIntegrationWiring:
         assert {row["expected_stage_row_count"] for row in persisted} == {1}
         assert len(set(cache_namespaces)) == 1
         assert len(cache_namespaces[0]) == 64
+
+    async def test_multistage_fails_when_aggregate_metrics_service_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A completed run must not report success when /aggregate_metrics returns HTTP 500."""
+        original_error = ClientResponseError(
+            request_info=SimpleNamespace(method="POST", url="http://env/aggregate_metrics", real_url="http://env"),
+            history=(),
+            status=500,
+            message="boom",
+        )
+
+        class AggregationFailsHelper(rollout_collection_module.RolloutCollectionHelper):
+            """Real _call_aggregate_metrics, with rollout collection stubbed out."""
+
+            def _preprocess_rows_from_config(self, config):
+                return _materialized_rows(["t0"])
+
+            def _run_examples_with_metadata(self, rows, **kwargs):
+                async def done(row):
+                    reference_id = row["reference_ids"][0]
+                    result = {
+                        "task_id": row["task_id"],
+                        "per_reference": {
+                            reference_id: {
+                                "wins": 1,
+                                "losses": 0,
+                                "ties": 0,
+                                "reference_elo": REF_ELOS[reference_id],
+                            }
+                        },
+                    }
+                    return rollout_collection_module._CompletedRollout(row=row, result=result, rollout_latency_ms=None)
+
+                return [done(row) for row in rows]
+
+        server_client = MagicMock()
+        server_client.post = AsyncMock(side_effect=original_error)
+        server_client.global_config_dict = OmegaConf.create(
+            {
+                "gdpval_stirrup_agent": {"responses_api_agents": {"impl": {}}},
+                "gdpval_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "gdpval_stirrup_agent"}}}
+                },
+            }
+        )
+        monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", AggregationFailsHelper)
+        monkeypatch.setattr(
+            rollout_collection_module, "setup_server_client_utils", lambda *args, **kwargs: server_client
+        )
+        monkeypatch.setattr(
+            "resources_servers.gdpval.multistage_orchestrator.ensure_distribution",
+            lambda *args, **kwargs: (_distribution(["t0"]), None),
+        )
+        config = SimpleNamespace(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            num_samples_in_parallel=2,
+            dispatch_budget_s=120.0,
+            drain_margin_s=15.0,
+            dispatch_longest_first=True,
+            resume_from_cache=False,
+            route_failures_to_sidecar=True,
+            check_completion=lambda **kwargs: None,
+        )
+        global_config = {
+            "multistage": {"enabled": True, "stages": ["1", "1"], "seed": 0},
+            "gdpval": {
+                "resources_servers": {
+                    "gdpval": {"reference_models": {key: {"elo": elo} for key, elo in REF_ELOS.items()}}
+                }
+            },
+        }
+
+        with pytest.raises(ClientResponseError) as exc_info:
+            await run_e2e_multistage(config, global_config)
+
+        assert exc_info.value is original_error
+        written = json.loads((tmp_path / "rollouts_aggregate_metrics.json").read_text())
+        assert written[0]["aggregation_error"]["http_status"] == 500
 
 
 class TestFailureContractOptIn:
