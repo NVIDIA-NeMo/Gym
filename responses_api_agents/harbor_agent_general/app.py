@@ -32,7 +32,7 @@ from harbor.models.trajectories import ContentPart, Step, Trajectory
 from harbor.models.trial.config import AgentConfig, EnvironmentConfig, VerifierConfig
 from harbor.models.trial.paths import TrialPaths
 from harbor.models.trial.result import TrialResult
-from pydantic import ConfigDict, Field, PrivateAttr, ValidationError, field_validator
+from pydantic import ConfigDict, Field, PrivateAttr, ValidationError, ValidationInfo, field_validator
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -64,8 +64,9 @@ GYM_ROOT = Path(__file__).resolve().parents[2]
 _RAY_WORKER_EVENT_LOOP: asyncio.AbstractEventLoop | None = None
 
 
-def resolve_from_gym_root(path: Path) -> Path:
-    return path.resolve() if path.is_absolute() else (GYM_ROOT / path).resolve()
+def resolve_harbor_path(path: Path, *, from_gym_root: bool) -> Path:
+    """Resolve paths from cwd by default, with an opt-in root for built-in datasets."""
+    return (GYM_ROOT / path).resolve() if from_gym_root else path.resolve()
 
 
 @contextmanager
@@ -95,6 +96,9 @@ def harbor_job_worker(job_config_dict: dict, task_name: str, worker_env: dict[st
 
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     harbor_ray_task_num_cpus: float = Field(default=0.25, ge=0)
+    # Preserve cwd-based paths and stable resumable jobs for existing callers.
+    harbor_resolve_paths_from_gym_root: bool = False
+    harbor_unique_job_names: bool = False
     # Passed as a task argument and installed inside the worker process. Do not
     # use Ray runtime_env for secrets: Ray persists runtime_env values in logs.
     harbor_worker_env: dict[str, str] = Field(default_factory=dict)
@@ -109,20 +113,25 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
 
     @field_validator("harbor_jobs_dir", mode="after")
     @classmethod
-    def normalize_jobs_dir(cls, harbor_jobs_dir: Path) -> Path:
-        harbor_jobs_dir = resolve_from_gym_root(harbor_jobs_dir)
+    def normalize_jobs_dir(cls, harbor_jobs_dir: Path, info: ValidationInfo) -> Path:
+        harbor_jobs_dir = resolve_harbor_path(
+            harbor_jobs_dir, from_gym_root=info.data.get("harbor_resolve_paths_from_gym_root", False)
+        )
         if harbor_jobs_dir.suffix.lower() == ".jsonl":
             return harbor_jobs_dir.parent / "harbor"
         return harbor_jobs_dir
 
     @field_validator("harbor_dataset", mode="after")
     @classmethod
-    def normalize_dataset_path(cls, harbor_dataset: DatasetConfig) -> DatasetConfig:
-        if harbor_dataset.path is None or harbor_dataset.path.is_absolute():
+    def normalize_dataset_path(cls, harbor_dataset: DatasetConfig, info: ValidationInfo) -> DatasetConfig:
+        if not info.data.get("harbor_resolve_paths_from_gym_root") or harbor_dataset.path is None:
             return harbor_dataset
-        return harbor_dataset.model_copy(update={"path": resolve_from_gym_root(harbor_dataset.path)})
+        return harbor_dataset.model_copy(update={"path": resolve_harbor_path(harbor_dataset.path, from_gym_root=True)})
 
     def build_job_config(self, task_name: str, job_name: str) -> JobConfig:
+        if self.harbor_unique_job_names:
+            # Isolate repeated requests, including retries, without deleting prior evidence.
+            job_name = f"{job_name}-{uuid4().hex}"
         return JobConfig(
             job_name=job_name,
             jobs_dir=self.harbor_jobs_dir,
@@ -190,7 +199,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
             try:
                 job_config = self.config.build_job_config(
                     task_name=body.task_name,
-                    ## Use a stable job name to allow resume.
+                    ## Stable names allow resume unless fresh jobs are configured.
                     job_name=f"t{body.task_index}-r{body.rollout_index}",
                 )
 
@@ -439,7 +448,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
     def success_response(self, body: HarborRunRequest, trial_dir: Path) -> HarborVerifyResponse:
         trial_paths = TrialPaths(trial_dir)
         trial = TrialResult.model_validate_json(trial_paths.result_path.read_text())
-        task_paths = TaskPaths(resolve_from_gym_root(trial.config.task.get_local_path()))
+        task_paths = TaskPaths(
+            resolve_harbor_path(
+                trial.config.task.get_local_path(), from_gym_root=self.config.harbor_resolve_paths_from_gym_root
+            )
+        )
         if trial.step_results:
             path_entries = [
                 (

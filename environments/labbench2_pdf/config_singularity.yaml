@@ -9,6 +9,8 @@ harbor_agent_general:
       description: OpenCode through Harbor over benchmark-relevant LabBench2 PDFs (Singularity profile).
       concurrency: 4
       harbor_ray_task_num_cpus: 0.25
+      harbor_resolve_paths_from_gym_root: true
+      harbor_unique_job_names: true
       harbor_jobs_dir: "results/labbench2_pdf/harbor_jobs"
 
       harbor_dataset:
@@ -36,3 +38,11 @@ harbor_agent_general:
 
       harbor_verifier:
         disable: false
+
+harbor_agent_general_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: harbor_agent_general

@@ -28,6 +28,28 @@ judge_model_name: your-judge-model
 
 Harbor owns inference for this benchmark, so no Gym `--model-type` is needed.
 
+## Hugging Face dataset access
+
+The question dataset is gated. Sign in to
+[EdisonScientific/labbench2](https://huggingface.co/datasets/EdisonScientific/labbench2)
+and accept its access conditions (including sharing contact information).
+Then authenticate as that same account before running preparation:
+
+```bash
+hf auth login
+```
+
+Alternatively, export `HF_TOKEN` in the shell running `gym eval prepare` with
+a read token for the authorized account. Fine-grained tokens must include
+access to the gated dataset. A Gym `env.yaml` entry alone does not export
+`HF_TOKEN` to the preparation process. Do not commit the token.
+
+Access failures can appear as `DatasetNotFoundError` even though the dataset
+exists. Preparation raises an actionable error describing the access terms,
+authentication, and local-snapshot alternative. Supplying `questions_dir`
+bypasses HF downloads; a matching cached question snapshot also needs no
+fresh authentication.
+
 ## Prepare the full benchmark
 
 From the repository root:
@@ -104,7 +126,7 @@ gym eval run --no-serve \
 
 The Gym rollout is written to the requested JSONL. Harbor's original ATIF
 trajectory remains under
-`results/labbench2_pdf/harbor_jobs/<job>/<trial>/agent/trajectory.json`; inspect
+`results/labbench2_pdf/harbor_jobs/t<task>-r<rollout>-<uuid>/<trial>/agent/trajectory.json`; inspect
 its tool calls to see whether the agent rendered, cropped, or otherwise read an
 image. Image inspection is available but is not required by the task prompt.
 
@@ -135,7 +157,8 @@ changed to the committed ATIF file; endpoint credentials, PDFs, rendered
 images, agent databases, and bulk logs are not included in this evidence set.
 
 To reproduce the run against an already prepared registry, start Gym with a
-fresh Harbor jobs directory in one terminal:
+Harbor server in one terminal (the directory override is optional and groups
+the artifacts for this example):
 
 ```bash
 gym env start --benchmark labbench2_pdf \
@@ -156,10 +179,31 @@ gym eval run --no-serve \
   --concurrency 1
 ```
 
-Use a new directory name in both commands for each independent run to avoid
-resuming an earlier Harbor trial. Stop the server after collection. The raw
+Every rollout request gets a unique Harbor job name, so repeated collections
+can reuse the jobs directory without deleting or resuming earlier trials.
+Use a new Gym output filename for an independent collection, since Gym may
+resume an existing rollout file. Stop the server after collection. The raw
 job directory remains gitignored; only the small evidence exports above are
 intended for review.
+
+### Repeat-run validation (2026-10-13)
+
+After the review fixes, the same FigQA2 item was collected twice through one
+running Gym server with OpenCode 1.19.0 and GPT-5-mini, using the same Harbor
+jobs directory and separate Gym output files. Both completed with reward 1.0
+and answer `PBMC (12k)` by exact match, without a judge request. The first
+trajectory was read alongside the verifier details; it records native PDF
+reading and writing the answer file. The second trajectory and verifier were
+also inspected. These runs verify independent execution and job isolation,
+not image-cropping behavior or a full benchmark baseline.
+
+The jobs had distinct UUID-suffixed names, and the first trajectory remained
+byte-for-byte unchanged after the second collection. The server started with
+`+error_on_agent_without_environment_server=true`, confirming explicit routing
+without the deprecated automatic fallback. Local raw evidence is retained
+under `environments/labbench2_pdf/data/harbor_jobs/review-20261013/` as
+`first.jsonl`, `second.jsonl`, and the original trajectories under `jobs/`;
+these additional local artifacts remain gitignored.
 
 ## Compatibility and benchmark impact
 
@@ -178,12 +222,15 @@ Compatibility limits:
 
 - There is no catalog `manifest.yaml`; Gym lists this benchmark with status
   `no-manifest`. This does not prevent discovery or execution.
-- Upstream Gym inspected on 2026-10-09 routes agents through Environment
-  Servers. These configs rely on its supported but deprecated automatic
-  `legacy_agent` relay. An explicit Environment Server is needed when
-  `error_on_agent_without_environment_server` is enabled, and before that
-  compatibility fallback is removed. Latest upstream behavior was inspected,
-  not freshly validated end-to-end after rebasing this integration.
+- Both environment profiles and the benchmark declare an explicit Environment
+  Server using Gym's `legacy_agent` adapter. They do not require the deprecated
+  automatic relay, including when `error_on_agent_without_environment_server`
+  is enabled.
+- LabBench2 opts into repository-root path resolution and fresh UUID-suffixed
+  Harbor jobs per rollout request. Other `harbor_agent_general` configs retain
+  cwd-based job paths, unchanged dataset paths, and stable resumable job names
+  unless they explicitly opt in. Existing trial artifacts are never cleared
+  to start a new LabBench2 collection.
 - Harbor owns inference, so this profile does not use Gym's model server or
   model-call capture. The representative rollout is therefore **unobserved**
   by Gym's model-call health checks; inspect its original Harbor trajectory.
@@ -194,5 +241,9 @@ Compatibility limits:
 ## Test
 
 ```bash
-pytest -q benchmarks/labbench2_pdf/tests environments/labbench2_pdf/tests
+.venv/bin/pytest -q benchmarks/labbench2_pdf/tests environments/labbench2_pdf/tests
+
+# After Gym has installed the Harbor agent's isolated environment:
+responses_api_agents/harbor_agent_general/.venv/bin/python -m pytest -q \
+  responses_api_agents/harbor_agent_general/tests
 ```

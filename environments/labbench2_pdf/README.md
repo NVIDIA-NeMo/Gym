@@ -28,6 +28,12 @@ remain useful when developing or debugging the environment directly.
 
 Run the preparation command from the Gym repository root:
 
+For question downloads, first accept the gated
+[HF dataset access conditions](https://huggingface.co/datasets/EdisonScientific/labbench2)
+and authenticate with `hf auth login` or export an authorized `HF_TOKEN`.
+See [dataset access](../../benchmarks/labbench2_pdf/README.md#hugging-face-dataset-access).
+Local question snapshots bypass that download.
+
 ```bash
 python environments/labbench2_pdf/prepare_data.py \
   --environment-type docker \
@@ -272,7 +278,7 @@ gym eval run --no-serve \
 
 Gym writes the converted rollout to the requested output. Harbor's lossless
 ATIF trajectory remains under the configured
-`results/labbench2_pdf/harbor_jobs/<job>/<trial>/agent/trajectory.json`. Inspect
+`results/labbench2_pdf/harbor_jobs/t<task>-r<rollout>-<uuid>/<trial>/agent/trajectory.json`. Inspect
 that file to understand how the agent used the supplied PDFs. The agent may use
 text extraction, page rendering, image crops, OCR, or any combination it chooses.
 

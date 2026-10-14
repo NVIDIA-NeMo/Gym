@@ -126,6 +126,17 @@ gym eval run --no-serve \
 
 ## Implementation Notes
 
+Relative job paths resolve from the agent process's working directory, and
+dataset paths are passed to Harbor unchanged. Built-in profiles can opt into
+repository-root resolution with `harbor_resolve_paths_from_gym_root: true`;
+absolute paths remain unchanged.
+
+Job names default to `t<task>-r<rollout>` for resuming trials. Set
+`harbor_unique_job_names: true` to append a fresh UUID for every rollout
+request, including retries, and prevent independent collections from colliding
+or reusing an old result. Prior job directories are preserved. LabBench2 enables
+both options; the generic Docker and Singularity configs retain their defaults.
+
 A few notable details make it more general than the [older implementation](../harbor_agent/README.md):
 - The Gym configurations now support the full Harbor spec same as the original Pydantic models (see `HarborAgentConfig` in [app.py](./app.py)), allowing a direct translation from a `harbor run` CLI/config to Gym config, without guesswork.
   - New Harbor datasets can be directly used by using appropriate keys in `harbor_dataset` config key, which maps directly to the `harbor.models.job.config:DatasetConfig` specification.

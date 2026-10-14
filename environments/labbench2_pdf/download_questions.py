@@ -66,9 +66,27 @@ def _can_reuse(options: QuestionDownloadOptions, output_dir: Path) -> bool:
 def _load_hf_rows(repo_id: str, benchmark: str, revision: str | None) -> Any:
     try:
         from datasets import load_dataset
+        from datasets.exceptions import DatasetNotFoundError
+        from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
     except ImportError as exc:  # pragma: no cover - root Gym environment includes datasets
         raise RuntimeError("question download requires the Gym `datasets` dependency") from exc
-    return load_dataset(repo_id, benchmark, split="train", revision=revision)
+    access_help = (
+        f"Unable to download {repo_id}/{benchmark} (revision {revision!r}). "
+        "Verify the repository and revision exist. For this gated dataset, sign in at "
+        f"https://huggingface.co/datasets/{repo_id} and accept its access terms, then "
+        "export HF_TOKEN with a read token from that account (including gated-repository "
+        "access if using a fine-grained token), or authenticate with `hf auth login`. "
+        "Alternatively, provide a local question snapshot to prepare_data.py with --questions-dir "
+        "(Gym: +prepare_script_args.questions_dir=/absolute/path/to/questions)."
+    )
+    try:
+        return load_dataset(repo_id, benchmark, split="train", revision=revision, token=os.environ.get("HF_TOKEN"))
+    except (DatasetNotFoundError, GatedRepoError) as exc:
+        raise RuntimeError(access_help) from exc
+    except HfHubHTTPError as exc:
+        if exc.response is not None and exc.response.status_code in {401, 403}:
+            raise RuntimeError(access_help) from exc
+        raise
 
 
 def _write_snapshot(path: Path, rows: Any) -> int:

@@ -79,11 +79,29 @@ def test_benchmark_config_is_discoverable_and_uses_generated_tasks() -> None:
     initial_config = OmegaConf.merge(
         OmegaConf.load(CONFIG_FPATH),
         GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        {"error_on_agent_without_environment_server": True},
     )
     resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial_config)
     assert "harbor_agent_general" not in resolved
 
     agent = resolved.labbench2_pdf_benchmark_harbor_agent.responses_api_agents.harbor_agent_general
+    environment = resolved.labbench2_pdf_benchmark_environment_server.environment_servers.legacy_agent
+    assert environment.agent_server.name == benchmark_prepare.BENCHMARK_AGENT_NAME
+    assert "harbor_agent_general_environment_server" not in resolved
+    assert agent.harbor_resolve_paths_from_gym_root is True
+    assert agent.harbor_unique_job_names is True
     assert agent.harbor_dataset.path == "environments/labbench2_pdf/data/tasks_docker"
     assert len(agent.datasets) == 1
     assert agent.datasets[0].type == "benchmark"
+
+
+@pytest.mark.parametrize("profile", ["config.yaml", "config_singularity.yaml"])
+def test_environment_profiles_declare_server_without_legacy_fallback(profile: str) -> None:
+    initial_config = OmegaConf.merge(
+        OmegaConf.load(BENCHMARK_DIR.parents[1] / "environments/labbench2_pdf" / profile),
+        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        {"error_on_agent_without_environment_server": True},
+    )
+    resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial_config)
+    environment = resolved.harbor_agent_general_environment_server.environment_servers.legacy_agent
+    assert environment.agent_server.name == "harbor_agent_general"

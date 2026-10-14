@@ -5,6 +5,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import Mock
+
+import datasets
+import httpx
+import pytest
+from datasets.exceptions import DatasetNotFoundError
+from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
 
 from environments.labbench2_pdf import download_questions as download_questions_module
 from environments.labbench2_pdf.data_utils import QUESTION_FIELDS
@@ -21,6 +28,61 @@ def _row(item_id: str, benchmark: str) -> dict:
         "sources": ["https://doi.org/10.1000/example"],
         "unneeded_upstream_field": "not exported",
     }
+
+
+def test_hf_download_uses_token_without_recording_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HF_TOKEN", "test-hf-token")
+    loader = Mock(return_value=[_row("figqa2-id", "figqa2")])
+    monkeypatch.setattr(datasets, "load_dataset", loader)
+    manifest = download_questions(QuestionDownloadOptions(output_dir=tmp_path, benchmarks=("figqa2",)))
+
+    loader.assert_called_once_with(
+        "EdisonScientific/labbench2", "figqa2", split="train", revision="main", token="test-hf-token"
+    )
+    assert "test-hf-token" not in json.dumps(manifest)
+    assert "test-hf-token" not in (tmp_path / "source_manifest.json").read_text()
+
+
+@pytest.mark.parametrize("error_type", ["dataset_not_found", "gated", "unauthorized", "forbidden"])
+def test_hf_access_failure_explains_auth_and_preserves_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, error_type: str
+) -> None:
+    original = json.dumps(_row("original", "figqa2")) + "\n"
+    snapshot = tmp_path / "figqa2.jsonl"
+    snapshot.write_text(original)
+    if error_type == "dataset_not_found":
+        error = DatasetNotFoundError("not accessible")
+    elif error_type == "gated":
+        error = GatedRepoError(
+            "accept terms", response=httpx.Response(403, request=httpx.Request("GET", "https://huggingface.co"))
+        )
+    else:
+        status = 401 if error_type == "unauthorized" else 403
+        error = HfHubHTTPError(
+            "access denied", response=httpx.Response(status, request=httpx.Request("GET", "https://huggingface.co"))
+        )
+    monkeypatch.setattr(datasets, "load_dataset", Mock(side_effect=error))
+
+    with pytest.raises(RuntimeError) as caught:
+        download_questions(QuestionDownloadOptions(output_dir=tmp_path, benchmarks=("figqa2",), overwrite=True))
+
+    assert caught.value.__cause__ is error
+    assert "https://huggingface.co/datasets/EdisonScientific/labbench2" in str(caught.value)
+    assert "accept its access terms" in str(caught.value)
+    assert "HF_TOKEN" in str(caught.value)
+    assert "hf auth login" in str(caught.value)
+    assert "questions_dir" in str(caught.value)
+    assert snapshot.read_text() == original
+
+
+def test_hf_server_failure_is_not_misreported_as_access_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    error = HfHubHTTPError(
+        "unavailable", response=httpx.Response(503, request=httpx.Request("GET", "https://huggingface.co"))
+    )
+    monkeypatch.setattr(datasets, "load_dataset", Mock(side_effect=error))
+    with pytest.raises(HfHubHTTPError) as caught:
+        download_questions_module._load_hf_rows("EdisonScientific/labbench2", "figqa2", "main")
+    assert caught.value is error
 
 
 def test_download_questions_writes_valid_minimal_pinned_snapshot(monkeypatch, tmp_path: Path) -> None:
