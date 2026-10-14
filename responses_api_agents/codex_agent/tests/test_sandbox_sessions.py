@@ -448,10 +448,9 @@ def test_session_without_grants_writes_no_mcp_servers(setup):
             "supports only MCP tool grants; required grants it cannot use: resources.direct_http",
         ),
         (mcp_grant("resources.mcp"), "letters, digits, '-' and '_': resources.mcp"),
-        (mcp_grant("resources.mcp", required=False), "letters, digits, '-' and '_': resources.mcp"),
     ],
 )
-def test_unusable_tool_grants_are_rejected_before_connection(setup, grant, message):
+def test_unusable_required_tool_grants_are_rejected_before_connection(setup, grant, message):
     agent, sandbox = setup
     body = seed().model_dump(mode="json")
     body["tool_accesses"] = [grant]
@@ -462,11 +461,62 @@ def test_unusable_tool_grants_are_rejected_before_connection(setup, grant, messa
     sandbox.exec.assert_not_awaited()
 
 
-def test_mcp_tool_timeout_must_be_positive_and_finite(setup):
+def test_optional_mcp_grant_with_an_unusable_name_is_left_out(setup):
+    agent, sandbox = setup
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [mcp_grant(), mcp_grant("search.mcp", required=False)]
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=body).status_code == 200
+        assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code == 200
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+    assert list(config["mcp_servers"]) == ["gdpval_resources_server"]
+
+
+@pytest.mark.parametrize("value", [0, -1, float("inf"), 601])
+def test_mcp_tool_timeout_must_be_positive_and_within_the_run_timeout(setup, value):
     agent, _ = setup
-    for value in (0, -1, float("inf")):
-        with pytest.raises(ValidationError):
-            CodexAgentConfig(**(agent.config.model_dump() | {"mcp_tool_timeout_seconds": value}))
+    with pytest.raises(ValidationError):
+        CodexAgentConfig(**(agent.config.model_dump() | {"timeout": 600, "mcp_tool_timeout_seconds": value}))
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_startup_failure_reports_the_codex_stderr_tail(setup, started):
+    agent, sandbox = setup
+    stderr = "x" * 5000 + "Error: required MCP servers failed to initialize: gdpval_resources_server"
+    sandbox.result["return_code"] = 1
+    thread = [{"type": "thread.started", "thread_id": "t"}]
+    if started:
+        thread.append({"type": "turn.started"})
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(thread))
+    publish = sandbox.publish
+
+    def publish_with_stderr():
+        publish()
+        sandbox.files[f"{sandbox.directory}/stderr.log"] = stderr
+
+    sandbox.publish = publish_with_stderr
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+    assert result.status_code == 502
+    detail = result.json()["detail"]
+    if started:
+        # A turn started, so the event stream explains the failure; stderr is not appended.
+        assert "stderr:" not in detail
+    else:
+        assert detail.endswith("required MCP servers failed to initialize: gdpval_resources_server")
+        assert len(detail) < 2200, "the stderr tail is bounded"
+
+
+def test_startup_failure_without_stderr_keeps_the_exit_error(setup):
+    agent, sandbox = setup
+    sandbox.result["return_code"] = 1
+    sandbox.events = json.dumps([0.0, {"type": "thread.started", "thread_id": "t"}])
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+    assert result.status_code == 502
+    assert result.json()["detail"] == "Codex execution failed: Codex exited with code 1"
 
 
 def test_several_workers_seed_sessions(setup):

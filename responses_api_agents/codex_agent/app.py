@@ -86,6 +86,8 @@ _SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
 _MODEL_CALL_JOIN_GAP = "model_call_join_key_unavailable"
 _PROVIDER_ERROR = "provider_error"
 _OUTPUT_LIMIT_ERROR = "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
+# Characters of Codex stderr kept in the error of an activation that never started a turn.
+_STDERR_TAIL_CHARS = 2000
 _COMPACTION_ADVISORY = (
     "Heads up: Long threads and multiple compactions can cause the model to be less accurate. "
     "Start a new thread when possible to keep threads small and targeted."
@@ -161,6 +163,11 @@ fi
         bootstrap + f"python3 -I -c {shlex.quote(validate)} {shlex.quote(workdir)} "
         f"{shlex.quote(directory)} {shlex.quote(runtime)} && mkdir -p {shlex.quote(directory + '/home/.codex')}"
     )
+
+
+def _codex_mcp_server_name(name: str) -> bool:
+    """Whether Codex accepts ``name`` as an MCP server name."""
+    return re.fullmatch(r"[A-Za-z0-9_-]+", name) is not None
 
 
 def _toml_key(key: str) -> str:
@@ -488,6 +495,13 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
             raise ValueError("model_auto_compact_token_limit must not exceed 90% of model_context_window")
         return self
 
+    @model_validator(mode="after")
+    def validate_mcp_tool_timeout(self) -> "CodexAgentConfig":
+        """A tool call cannot outlast the Codex run that makes it."""
+        if self.mcp_tool_timeout_seconds is not None and self.mcp_tool_timeout_seconds > self.timeout:
+            raise ValueError("mcp_tool_timeout_seconds must not exceed timeout, which bounds the whole Codex run")
+        return self
+
 
 class CodexAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
@@ -590,11 +604,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 "Codex in the task sandbox supports only MCP tool grants; required grants it cannot use: "
                 + ", ".join(sorted(unsupported)),
             )
-        # Codex refuses to load a config whose MCP server name has other characters.
+        # Codex cannot start an MCP server whose name has other characters; _granted_mcp_servers skips optional ones.
         invalid = [
             access.name
             for access in tool_accesses
-            if isinstance(access, MCPToolAccess) and not re.fullmatch(r"[A-Za-z0-9_-]+", access.name)
+            if isinstance(access, MCPToolAccess) and access.required and not _codex_mcp_server_name(access.name)
         ]
         if invalid:
             raise HTTPException(
@@ -1032,6 +1046,14 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if failure is not None:
             raise failure
         if error and not reported_model_error:
+            if not started:
+                # Startup failures, such as a required MCP server that did not connect, are reported only on stderr.
+                try:
+                    stderr = (await state.read_text("stderr.log")).strip()
+                except Exception:
+                    stderr = ""
+                if stderr:
+                    error = f"{error}; stderr: {stderr[-_STDERR_TAIL_CHARS:]}"
             raise HTTPException(502, f"Codex execution failed: {error}")
         terminal = next((event for _, event in reversed(events) if event.get("type") == "turn.failed"), {})
         if state.model_attempts:
@@ -1316,14 +1338,20 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
         Codex connects when the activation starts. A required server that does not connect fails the
         activation before the first model call; an optional one is left out of the tool list.
+        Codex runs one tool call at a time per server, and a call that times out keeps running on the server,
+        so ``mcp_tool_timeout_seconds`` should exceed the slowest call the server can make.
         """
-        servers = {
-            access.name: self._mcp_server_entry(
+        servers = {}
+        for access in self.effective_tool_accesses(request):
+            if not isinstance(access, MCPToolAccess):
+                continue
+            if not _codex_mcp_server_name(access.name):
+                # Seeding rejects such a name when the grant is required.
+                LOG.warning("Skipping optional MCP grant %r: Codex cannot start a server with that name", access.name)
+                continue
+            servers[access.name] = self._mcp_server_entry(
                 str(access.connection.url), access.connection.headers, required=access.required
             )
-            for access in self.effective_tool_accesses(request)
-            if isinstance(access, MCPToolAccess)
-        }
         return servers or None
 
     def _mcp_server_entry(
