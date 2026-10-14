@@ -442,7 +442,7 @@ def _content_witness(entries: list[TokenEntry], response: dict, reasons: list[st
         if target_turn:
             id_matches: dict[str, TokenEntry] = {}
             for entry in entries:
-                if not entry.output_items:
+                if _is_custody_row(entry) or not entry.output_items:
                     continue
                 try:
                     own_turn = tool_call_turn_fingerprint(list(entry.output_items))

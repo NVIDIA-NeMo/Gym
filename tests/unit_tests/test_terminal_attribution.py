@@ -42,7 +42,9 @@ from nemo_gym.token_id_capture.delivery import (
     capture_build_can_retire,
     finalize_rollout_token_capture,
 )
-from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
+from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
+from nemo_gym.token_id_capture.staging.digest import EMPTY_EXTRAS_DIGEST
+from nemo_gym.token_id_capture.staging.records import CallRecord
 from nemo_gym.token_id_capture.terminal import resolve_terminal
 
 
@@ -756,3 +758,29 @@ def test_content_attribution_refuses_ambiguous_tool_call_ids():
     attribution = resolve_terminal([a, b], transcript)
     assert attribution.model_call_id is None
     assert "tool_ids_ambiguous" in attribution.reason
+
+
+@pytest.mark.parametrize("matching_id", [False, True])
+def test_staged_terminal_rewritten_tools_abstains_without_crashing(matching_id):
+    row = CallRecord(
+        model_call_id="c1",
+        prev_len=0,
+        delta_len=3,
+        cum_len=3,
+        weight_version=1,
+        digest="b" * 64,
+        extras_digest=EMPTY_EXTRAS_DIGEST,
+        staging_key="r/c1",
+        mode="text",
+        chain_hash="b" * 64,
+        cumulative_hash="b" * 64,
+        response_id="resp_c1",
+        output_fingerprint=assistant_fingerprint([_rewritten_tool_call_item("t1", '{"command":"cd /testbed && ls"}')]),
+        fingerprint_version=FINGERPRINT_VERSION,
+    )
+    response = {
+        "id": "resp_c1" if matching_id else "harness",
+        "output": [_rewritten_tool_call_item("t1", '{"command":"ls"}')],
+    }
+    result = resolve_terminal([row], response)
+    assert result.model_call_id == ("c1" if matching_id else None)

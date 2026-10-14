@@ -306,7 +306,11 @@ class RolloutLineage:
         return [
             node
             for call_id in self.by_tool_call_turn.get(key) or []
-            if (node := self.by_call_id.get(call_id)) is not None and self._continues(node, messages)
+            if (node := self.by_call_id.get(call_id)) is not None
+            and self._continues(node, messages)
+            # The context check covers the prefix, while the lookup covers only
+            # the trailing turn. Account for every model item between them too.
+            and tool_call_turn_fingerprint(messages[node.context_len :]) == key
         ]
 
     def _index_tool_call_turn(self, call_id: str, response_items: list[dict]) -> None:

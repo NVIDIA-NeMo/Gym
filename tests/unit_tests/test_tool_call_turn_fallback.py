@@ -167,3 +167,23 @@ def test_tool_fallback_keeps_text_and_complete_identity_across_dialects(dialect:
         result = lineage.resolve(ctx + echoed)
         assert result.status == ParentResolutionStatus.RESOLVED
         assert result.match.model_call_id == "served"
+
+
+@pytest.mark.parametrize("index_path", ["record", "add_entry"])
+@pytest.mark.parametrize(
+    "inserted", [[_message("Uncaptured work.")], [_tool("unrecorded", "Bash", "{}")], [_message("")]]
+)
+def test_tool_fallback_rejects_model_turns_between_context_and_echo(index_path: str, inserted: list[dict]) -> None:
+    ctx = [{"role": "user", "content": "fix it"}]
+    lineage = RolloutLineage()
+    if index_path == "record":
+        lineage.record("served", ctx + _served(), [1, 2, 3], "digest", context_len=len(ctx))
+    else:
+        lineage.add_entry(_entry(_served()))
+
+    # The recorded prefix and the trailing complete tool turn both match. The
+    # intervening assistant/user exchange must still prevent prefix reuse.
+    request = ctx + inserted + [{"role": "user", "content": "Continue."}] + _rewritten()
+    result = lineage.resolve(request)
+
+    assert result.status == ParentResolutionStatus.UNRESOLVED
