@@ -89,9 +89,9 @@ from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgent
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
 from nemo_gym.tasks.harbor.dockerfile import OverlayRun
-from nemo_gym.tasks.harbor.image_configs import load_compose_document
+from nemo_gym.tasks.harbor.image_configs import load_compose_document, without_main_build
 from nemo_gym.tasks.harbor.models import HarborArtifact, HarborEnvironment
-from nemo_gym.tasks.harbor.task import HarborTaskError
+from nemo_gym.tasks.harbor.task import BUILT_IMAGES_FILE, HarborTaskError
 
 
 LOGGER = logging.getLogger(__name__)
@@ -297,16 +297,23 @@ def _is_root(user: str | None) -> bool:
 
 
 async def _exec_as_root_user(
-    sandbox: AsyncSandbox, command: str, *, configured_user: str | None, cwd: str = "/", timeout_s: float = 60
+    sandbox: AsyncSandbox,
+    command: str,
+    *,
+    configured_user: str | None,
+    spec_user: str | None = None,
+    cwd: str = "/",
+    timeout_s: float = 60,
 ):
     """Run ``command`` as root.
 
-    ``configured_user`` is the user the sandbox runs commands as by default: the OCI ``User``
-    of the image the sandbox started from (``HarborTask.sandbox_user``), which is not the
-    Dockerfile's final ``USER`` or ``[agent].user``. Only a non-root default needs the
-    ``user="root"`` override; root images keep the plain exec path every provider supports.
+    ``configured_user`` is the OCI ``User`` of the image the sandbox started from
+    (``HarborTask.sandbox_user``); ``spec_user`` is the default the sandbox was created with
+    (``SandboxSpec.user``, the Dockerfile's final ``USER`` or ``[agent].user``), which the sandbox
+    facade applies to every exec that names no user. Only when both are root does the plain exec
+    path, which every provider supports, already run as root; otherwise ``user="root"`` is asked for.
     """
-    user = None if _is_root(configured_user) else "root"
+    user = None if _is_root(configured_user) and _is_root(spec_user) else "root"
     return await sandbox.exec(command, cwd=cwd, timeout_s=timeout_s, user=user)
 
 
@@ -480,8 +487,8 @@ class HarborEnvironmentServer(
             shutil.copytree(folder, snapshot, symlinks=True)
             # Dataset-level files live beside the task folders and the loader reads them from the
             # task's parent, so the snapshot gets copies at the same relative place: the dataset's
-            # own settings (dataset.toml) and the recorded image configurations.
-            for name in (DATASET_FILE, COMPOSE_IMAGES_FILE):
+            # own settings (dataset.toml), the recorded image configurations and the built images.
+            for name in (DATASET_FILE, COMPOSE_IMAGES_FILE, BUILT_IMAGES_FILE):
                 sidecar = folder.parent / name
                 if sidecar.is_file():
                     shutil.copy2(sidecar, snapshot_root / name)
@@ -562,6 +569,11 @@ class HarborEnvironmentServer(
         resources = _sandbox_resources(environment, request_gpu_type=self.config.request_gpu_type) | (
             self.config.sandbox_resources_override or {}
         )
+        # The Dockerfile's final USER (or [agent].user) is the default for every exec in the task's own
+        # image. A separate verifier in another image keeps that image's own default. An overlay task
+        # starts without it, because its RUN lines may be what creates the user; `_set_default_user`
+        # switches the sandbox over once the overlay has run.
+        user = task.user if (image is None or image == task.image) and not task.overlay else None
         return SandboxSpec(
             image=image or task.image,
             ttl_s=ttl,
@@ -571,6 +583,7 @@ class HarborEnvironmentServer(
             metadata=metadata,
             resources=resources,
             provider_options=self._provider_options_within(resources, task, role),
+            user=user,
         )
 
     def _provider_options_within(self, resources: Mapping[str, Any], task: HarborTask, role: str) -> dict[str, Any]:
@@ -651,7 +664,11 @@ class HarborEnvironmentServer(
         """The published overlay resolved against recorded image metadata, ready for the Compose adapter."""
         image_configs = self._compose_image_configs(task)
         # The same reader prepare used: env_file inlined and ${VAR} resolved from the task, not the process.
-        document = resolve_compose(load_compose_document(task), task.image, image_configs)
+        document = load_compose_document(task)
+        if task.built_image is not None:
+            # Prepare built main from this file; the recorded image stands in for its build: and pull_policy.
+            document = without_main_build(document)
+        document = resolve_compose(document, task.image, image_configs)
         adapt_non_root_sidecars(document, image_configs)
         provider = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         if "opensandbox" in provider:
@@ -672,8 +689,9 @@ class HarborEnvironmentServer(
         path = Path(tempfile.mkdtemp(prefix="compose-", dir=self._artifacts_dir)) / "compose.yaml"
         path.write_text(yaml.safe_dump(document, sort_keys=False))
         main_spec = self._sandbox_spec(task, task.workdir)
+        # Sidecars keep their own image's default user; the task's USER belongs to the main image only.
         sidecar_spec = replace(
-            main_spec, resources={}, env={}, provider_options=dict(self.config.sandbox_provider_options)
+            main_spec, resources={}, env={}, user=None, provider_options=dict(self.config.sandbox_provider_options)
         )
         compose = AsyncSandboxCompose(
             resolve_provider_config(self._provider_ref(task), get_global_config_dict()),
@@ -686,7 +704,35 @@ class HarborEnvironmentServer(
         await compose.start()
         return compose
 
-    async def _apply_overlay(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
+    async def _set_default_user(self, sandbox: AsyncSandbox, task: HarborTask, names: dict[str, str]) -> None:
+        """Make the task's user the sandbox's default for every exec, once it exists in the sandbox.
+
+        A digit-only ``USER`` is resolved to its name with ``getent`` (``names`` is what the overlay
+        already looked up), because OpenSandbox and PTY sessions switch user by name. When the uid
+        names no user the numeric value stays, with a warning: Docker accepts it as it is.
+        """
+        user = task.user
+        if user is None:
+            return
+        if _is_numeric_user(user):
+            uid, _, group = str(user).partition(":")
+            name = names.get(uid)
+            if name is None:
+                lookup = await _exec_as_root_user(
+                    sandbox, f"getent passwd {shlex.quote(uid)} | cut -d: -f1", configured_user=task.sandbox_user
+                )
+                lines = (lookup.stdout or "").strip().splitlines()
+                name = lines[-1] if lookup.return_code == 0 and lines and lines[-1] else None
+            if name is None:
+                LOGGER.warning(
+                    f"{task.task_id}: USER {uid} names no user in {task.image}; providers that switch user by name "
+                    "cannot run commands as it"
+                )
+            else:
+                user = name + (f":{group}" if group else "")
+        sandbox.set_default_user(user)
+
+    async def _apply_overlay(self, sandbox: AsyncSandbox, task: HarborTask) -> dict[str, str]:
         """Run the Dockerfile ``RUN`` lines the loader recorded, in order, before anything else uses the sandbox.
 
         Each line runs with the ``ENV``, ``WORKDIR`` and ``USER`` the loader resolved for it, the
@@ -698,20 +744,22 @@ class HarborEnvironmentServer(
         task's Dockerfile does not apply, so retrying would not help. A provider that cannot run a
         step at all raises :class:`HarborOverlayUnavailable` instead, so the seed is retried.
         """
+        user_names: dict[str, str] = {}
         if not task.overlay:
-            return
+            return user_names
         budget = task.config.environment.build_timeout_sec
         loop = asyncio.get_running_loop()
         deadline = loop.time() + budget
         total = len(task.overlay)
         prepared_workdirs: set[str] = {"/"}  # the root always exists; every other WORKDIR is made on first use
-        user_names: dict[str, str] = {}
 
         async def as_root(command: str, label: str, what: str) -> SandboxExecResult:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise HarborOverlayError(f"{label} not run: [environment].build_timeout_sec={budget} is used up")
-            result = await _exec_as_root_user(sandbox, command, configured_user=task.sandbox_user, timeout_s=remaining)
+            result = await _exec_as_root_user(
+                sandbox, command, configured_user=task.sandbox_user, spec_user=task.user, timeout_s=remaining
+            )
             _check_overlay_result(result, label, what, budget)
             return result
 
@@ -738,11 +786,12 @@ class HarborEnvironmentServer(
             command = overlay_shell_command(step, task.env)
             if _is_root(user):
                 result = await _exec_as_root_user(
-                    sandbox, command, configured_user=task.sandbox_user, timeout_s=remaining
+                    sandbox, command, configured_user=task.sandbox_user, spec_user=task.user, timeout_s=remaining
                 )
             else:
                 result = await sandbox.exec(command, cwd="/", timeout_s=remaining, user=user)
             _check_overlay_result(result, label, None, budget)
+        return user_names
 
     async def _wait_healthy(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
         """Poll the task's ``[environment.healthcheck]`` until it passes or its retries run out."""
@@ -1068,7 +1117,8 @@ class HarborEnvironmentServer(
                 provider_ref=self._provider_ref(task),
                 compose=compose,
             )
-            await self._apply_overlay(sandbox, task)
+            names = await self._apply_overlay(sandbox, task)
+            await self._set_default_user(sandbox, task, names)
             session.workdir = await self._prepare_workdir(sandbox, task, task.workdir)
             await self._wait_healthy(sandbox, task)
             await self._write_task_context(sandbox, task)
@@ -1237,7 +1287,8 @@ class HarborEnvironmentServer(
             verifier = await self._create_verifier_sandbox(task, episode_key=session.session_id)
             if _verifier_gets_overlay(task):
                 # The verifier runs in the task's own image, so it needs the same overlay as the agent did.
-                await self._apply_overlay(verifier, task)
+                names = await self._apply_overlay(verifier, task)
+                await self._set_default_user(verifier, task, names)
             prepare = await _exec_as_root(
                 verifier,
                 f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR} && chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR}",

@@ -8,12 +8,15 @@ SHA256 over sorted ``relative_path NUL file_sha256 LF`` records covering
 ``task.toml``, ``instruction.md``, ``README.md``, ``trajectory.json`` and everything
 under ``environment/``, ``tests/``, ``solution/`` and ``steps/``. The digest travels in
 ``task_data`` under :data:`DIGEST_KEY` so the resources server can refuse a row whose
-folder changed after materialization.
+folder changed after materialization. :func:`context_digest` is the other digest here: Harbor's environment
+id of a Dockerfile build context, which keys and names the images prepare builds.
 """
 
 import fnmatch
 import hashlib
 from pathlib import Path
+
+from nemo_gym.tasks.harbor.harbor_compat import environment_content_hash
 
 
 DIGEST_KEY = "_ng_digest"
@@ -45,3 +48,21 @@ def content_hash(path: Path) -> str:
             file_hash = hashlib.file_digest(stream, "sha256").hexdigest()
         digest.update(f"{relative}\0{file_hash}\n".encode())
     return digest.hexdigest()
+
+
+def context_digest(path: Path) -> str:
+    """Harbor's environment id of a Dockerfile build context (a task's ``environment/`` folder).
+
+    :func:`~nemo_gym.tasks.harbor.harbor_compat.environment_content_hash` over the folder: 32 hex
+    characters of SHA-256 over the sorted (relative path, bytes) of its regular files. Symbolic links and
+    anything under a :data:`~nemo_gym.tasks.harbor.harbor_compat._CONTENT_HASH_IGNORE_NAMES` member
+    (``__pycache__``, ``.git``, ``.DS_Store``) are skipped, and file modes are not part of it: parity with
+    Harbor's image name is the contract, not a complete cache identity. An empty folder hashes to its
+    name, as Harbor hashes it when the task declares no ``docker_image`` (one that does never reaches a
+    build). Two contexts with the same files get the same id, so it keys the build record (see
+    ``nemo_gym.tasks.harbor.image_build``).
+    """
+    path = Path(path)
+    if not path.is_dir():
+        raise ValueError(f"Not a build context folder: {path}")
+    return environment_content_hash(path)

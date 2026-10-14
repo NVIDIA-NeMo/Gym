@@ -291,6 +291,30 @@ def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
     return document
 
 
+# The keys of ``main`` that describe how Harbor builds its image, meaningless once the image is built and recorded.
+MAIN_BUILD_KEYS = ("build", "pull_policy")
+
+
+def without_main_build(document: dict[str, Any]) -> dict[str, Any]:
+    """``document`` with ``main``'s ``build`` and ``pull_policy`` removed, for a task that runs from the image
+    prepare built and recorded.
+
+    Harbor builds ``main`` from the task's Compose file at every start, so the file may give ``main`` a
+    ``build:`` (args, a target, a ``dockerfile_inline``) and Harbor's own template sets ``pull_policy: build``.
+    Gym builds that image once at prepare, with the same file, and the loader then substitutes the recorded
+    ``hb__<hash>`` image for ``main`` (``MAIN_IMAGE_NAME`` resolves to it). The two keys describe a build that
+    already happened; the sandbox Compose adapter starts images only and refuses them as unsupported fields,
+    so they are dropped here rather than failing every episode of a task prepare accepted. Nothing else is
+    touched: a sidecar's ``build:`` is refused at prepare, and a task in pull or overlay mode keeps whatever
+    its file says, so an unsupported field there is still reported.
+    """
+    services = document.get("services") if isinstance(document, dict) else None
+    main = services.get("main") if isinstance(services, dict) else None
+    if isinstance(main, dict) and any(key in main for key in MAIN_BUILD_KEYS):
+        services["main"] = {key: value for key, value in main.items() if key not in MAIN_BUILD_KEYS}
+    return document
+
+
 def compose_image_references(task: HarborTask) -> list[str]:
     """Every image a Compose task starts: the task image for ``main`` and each sidecar's image."""
     document = load_compose_document(task)
@@ -326,7 +350,7 @@ def dockerfile_base_images(folder: Path, *, select: Callable[[str], bool] | None
     to report.
     """
     # Resolved like load_task does: overrides are keyed by the task folder's name and dataset.toml
-    # sits beside the task folders.
+    # sits beside the task folders, or one level up for datasets/<name>/tasks/.
     folder = Path(folder).resolve()
     single = is_task_folder(folder)
     children = [folder] if single else sorted(child for child in folder.iterdir() if child.is_dir())

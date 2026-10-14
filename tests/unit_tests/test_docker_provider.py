@@ -488,6 +488,28 @@ async def test_create_ttl_s_ignored_with_entrypoint(
 # --------------------------------------------------------------------------- #
 # exec
 # --------------------------------------------------------------------------- #
+async def test_create_does_not_pass_the_spec_user_to_docker_run(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # In overlay mode the Dockerfile's final USER may not exist in the base image yet, so `docker run --user`
+    # would fail the create. The sandbox facade applies the default to every exec instead.
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "run" in argv:
+            return (0, "cid", "")
+        if "exec" in argv:
+            return (0, docker_provider.READY_PROBE_EXPECTED, "")
+        return (0, "", "")
+
+    provider, rec = _make_provider(monkeypatch, responder)
+    handle = await provider.create(SandboxSpec(image="ubuntu:22.04", user="agent"))
+    assert "--user" not in rec.calls[0]["argv"]
+    # The provider still honours an explicit exec user, which is how the facade's default reaches it.
+    await provider.exec(handle, "id", user="agent")
+    assert _contains_seq(rec.calls[-1]["argv"], ["--user", "agent"])
+    await provider.exec(handle, "id", user="root")
+    assert _contains_seq(rec.calls[-1]["argv"], ["--user", "0"])
+
+
 async def test_exec_normal_with_cwd_and_env(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
     provider, rec = _make_provider(monkeypatch, lambda argv: (0, "hello", ""))
     result = await provider.exec(_make_handle(), "echo hi", cwd="/work", env={"A": "b"})
