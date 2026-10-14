@@ -42,8 +42,8 @@ policy_model:
   responses_api_models:
     vllm_model:
       # Gym's model server sets these on every request, whatever the agent sends (the agent asks
-      # for its own max_tokens): the published run's values, from the policy-model override
-      # in the Gym it ran with, minus its num_workers and
+      # for max_tokens 262144): the published run's values, from Gym's
+      # benchmarks/nemotron_3.5_super/policy_model_override.yaml, minus its num_workers and
       # max_output_tokens, which are not Chat Completions fields (vLLM ignores them; stricter
       # endpoints reject the request).
       sampling_overrides:

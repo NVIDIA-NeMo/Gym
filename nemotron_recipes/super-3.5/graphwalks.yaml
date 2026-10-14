@@ -29,8 +29,8 @@
 # run.sh first sources graphwalks.setup.sh, which installs the tokenizer packages prepare
 # needs.
 #
-# Prompts are up to ~361,000 tokens. Serve the model with a context length (--max-model-len)
-# that fits the longest prompt plus the 100,000-token output cap.
+# Prompts are up to ~361,000 tokens. Serve the model with --max-model-len 1048576, as in the
+# published run; it needs at least the longest prompt plus the 100,000-token output cap.
 #
 # Like the published run, prepare counts tokens with the Nemotron 3 Super tokenizer
 # (downloaded from the Hugging Face Hub) and drops the 200 of openai/graphwalks' 1,150 prompts

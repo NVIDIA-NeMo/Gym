@@ -30,8 +30,8 @@
 # '[key1,key2]' to switch keys when one is rate-limited. A full run makes 5 grading calls.
 # Details: reproducibility.md, "CritPt".
 #
-# Serve the model with a context length (--max-model-len) that fits the prompt plus 245,760
-# output tokens: each turn asks for that many. vLLM rejects a turn that does not fit the
+# Serve the model with --max-model-len 262144, as in the published run. Each turn asks for
+# 245,760 output tokens; vLLM rejects a turn whose prompt plus that does not fit the
 # context, and Gym records the rejected turn as an empty answer, scored 0 without an error.
 # With a shorter context every turn fails this way, so check that output_tokens is above 0.
 #

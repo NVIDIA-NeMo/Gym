@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Runs one recipe from this folder: pins Gym to the commit the published number
+# Runs one Nemotron 3.5 Super VL recipe: pins Gym to the commit the published number
 # was produced with, prepares the benchmark data and collects rollouts.
 #
 # Needs an active Gym venv, ./env.yaml (copy env.yaml.example) and .env loaded into your

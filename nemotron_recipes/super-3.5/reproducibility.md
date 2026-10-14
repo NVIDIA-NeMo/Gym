@@ -1,7 +1,8 @@
 # Reproducing the published evaluation results
 
-This tutorial demonstrates how to reproduce the published evaluation results with the recipes
-in this folder, using NeMo Gym.
+This tutorial demonstrates how to reproduce the evaluation results for the NVIDIA
+Nemotron 3.5 Super VL model (`nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`) using
+NeMo Gym.
 
 Every benchmark is one Gym config here, `<benchmark>.yaml`, holding the settings the
 published run used; one shared script, `run.sh`, runs any of them.
@@ -103,15 +104,46 @@ benchmark setting there would silently replace the published one.
 
 ## Serving the model
 
-Reproducing these numbers depends on the model being served the right way. Check the model
-card for the authoritative serving guidance; the serve command the published runs used will be
-added here. Serve with `--reasoning-parser nemotron_v3`, and with `--enable-auto-tool-choice
---tool-call-parser qwen3_coder` for the agentic recipes.
+Reproducing these numbers depends on the model being served the right way. Check the
+[model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16)
+for the authoritative serving guidance.
 
-Some recipes need a longer context than others: CritPt asks for 245,760 output tokens per turn
-and GraphWalks sends prompts of up to about 361,000 tokens, so serve with a context length
-(`--max-model-len`) that fits them (see their headers). With a shorter context CritPt's turns
-come back empty and score 0 without an error.
+The published runs served the model with vLLM 0.30.0, on one node of 4 GPUs per server:
+
+```bash
+# TODO: confirm public vLLM version and flags before release.
+vllm serve nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 \
+  --served-model-name nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 --port 8000 \
+  --tensor-parallel-size 4 --enable-expert-parallel \
+  --trust-remote-code --gpu-memory-utilization 0.8 \
+  --enable-prefix-caching --enable-chunked-prefill --async-scheduling --api-server-count 1 \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+  --reasoning-parser nemotron_v3 \
+  --kv-cache-dtype fp8 --mamba-cache-dtype auto --mamba-ssm-cache-dtype float32 \
+  --no-enable-mamba-cache-stochastic-rounding \
+  --max-model-len 262144 --max-num-seqs 1024 --max-num-batched-tokens 135680 \
+  --limit-mm-per-prompt '{"image":128,"video":1}' --video-pruning-rate 0.5 \
+  --media-io-kwargs '{"video":{"fps":2,"num_frames":256}}' \
+  --skip-mm-profiling --mm-encoder-attn-backend TORCH_SDPA \
+  --hf-overrides '{"architectures":["NemotronH_Super_Omni_Reasoning_V3"],"use_thumbnail":false,"vision_config":{"args":{"model":"vit_huge_patch16_224","min_num_patches":1024,"max_num_patches":13312,"num_cls_tokens":3,"num_registers":7,"summary_idxs":[0,1]}},"norm_mean":[0.48145466,0.4578275,0.40821073],"norm_std":[0.26862954,0.26130258,0.27577711]}'
+```
+
+Every recipe except SWE-bench and Terminal-Bench 2.1 (below) was run against this. MMLU-ProX and
+WMT24++ were served with `--max-model-len 32768`, which also capped each answer; their recipes
+set `max_output_tokens: 32768` instead, so they need no change. Two recipes changed it:
+
+| Recipe | Change | Why it matters |
+|---|---|---|
+| GraphWalks | `--max-model-len 1048576 --max-num-batched-tokens 8192` | Needed: prompts are up to ~361,000 tokens |
+| OSWorld | `--max-num-batched-tokens 32768` | Optional: with the default above, the published setup repeatedly ran out of GPU memory on OSWorld; lower it if yours does. Does not change answers |
+
+The vision flags (`--limit-mm-per-prompt` and the rest) matter for HLE (full) and OSWorld,
+which send images; text-only recipes ignore them. SWE-bench and Terminal-Bench 2.1 were served
+with the same parsers, context and cache dtypes but without the vision flags, split across
+separate prefill and decode servers (2 to 8 nodes each) for throughput.
+
+CritPt asks for 245,760 output tokens per turn and needs `--max-model-len 262144`. With a
+shorter context its turns come back empty and score 0 without an error.
 
 ## Judges and graders
 
@@ -363,8 +395,8 @@ in rubric mode only: comparison mode samples each stage's tasks from the whole b
 
 ## What to expect from your numbers
 
-**Where the published numbers are.** Table 10 of the tech report. Each recipe's header names the
-metric to compare (`Score:`): the key in
+**Where the published numbers are.** Table 10 of the Nemotron 3.5 Super tech report. Each
+recipe's header names the metric to compare (`Score:`): the key in
 `evaluator_rollouts_aggregate_metrics.json` behind each of its rows in that table. A published
 number is the mean of two runs, except CritPt, BrowseComp and AA-Omniscience (one run each).
 

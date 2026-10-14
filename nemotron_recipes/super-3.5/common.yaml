@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Settings shared by every recipe in this folder.
+# Settings shared by every Nemotron 3.5 Super VL recipe.
 #
 # run.sh loads, in this order: the recipe's benchmark config, the model config, this file,
 # the recipe. Later files override earlier ones, so these values replace the benchmark's
