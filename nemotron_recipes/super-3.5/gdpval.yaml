@@ -43,9 +43,9 @@
 #
 # run.sh first sources gdpval.setup.sh, which checks the image path and Tavily key and picks
 # the scoring mode:
-#   * rubric (default): judges score each deliverable against the task's rubric. Needs no
+#   * rubric (default): the judge scores each deliverable against the task's rubric. Needs no
 #     reference deliverables, but it is not the published metric.
-#   * comparison (the published metric): judges compare each deliverable with a reference
+#   * comparison (the published metric): the judge compares each deliverable with a reference
 #     model's deliverable for the same task, and an ELO is fitted against references of known
 #     rating, in two stages (45 tasks, each against one reference drawn from all of them; then all
 #     220, each against one of the 4 nearest).
@@ -57,8 +57,6 @@
 # PARALLEL sets both Gym's and the agent's concurrency (the published run's agent used 220; the
 # agent's default is 32). A full comparison run takes hours and makes about a thousand judge
 # calls. LIMIT works in rubric mode; a comparison run needs every stage's tasks.
-#
-# Dataset: latest openai/gdpval, not pinned; 220 tasks at the published run.
 
 # Gym commit the published number was produced with; run.sh pins to it. It is on the branch of
 # Gym pull request #3333, not on main: run.sh fetches it by its id.

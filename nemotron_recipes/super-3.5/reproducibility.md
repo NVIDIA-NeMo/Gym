@@ -427,6 +427,9 @@ you cannot tell whether it came from their serving stack or from the model. That
 way to measure a deployment you already have — it is not a basis for confirming published
 numbers.
 
+**Most datasets are not pinned**: a question count different from the recipe header's means
+the dataset has changed since the published run.
+
 **Check for failed answers.** An answer that fails, e.g. on a judge call, is left out of the
 score and written to `evaluator_rollouts_failures.jsonl` in the output directory. Compare
 with the published number only if that file is empty; otherwise rerun with `RESUME=1`.

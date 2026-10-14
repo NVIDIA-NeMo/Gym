@@ -22,8 +22,6 @@
 #   Apex-Shortlist: mean/reward x100
 #
 # Set in .env: POLICY_API_KEY
-#
-# Dataset: latest MathArena/apex-shortlist, not pinned; 47 problems at the published run.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d

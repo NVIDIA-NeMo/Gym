@@ -32,9 +32,6 @@
 # An answer whose judge call fails is left out of the score and written to
 # evaluator_rollouts_failures.jsonl; RESUME=1 retries it (the model answers again; 3 attempts
 # in all by default).
-#
-# Dataset: latest cais/hle test split, not pinned; 2,158 text-only questions at the published
-# run.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d

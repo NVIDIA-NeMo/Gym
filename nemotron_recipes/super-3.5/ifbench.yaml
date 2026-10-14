@@ -23,9 +23,6 @@
 #   IFBench: mean/reward x100
 #
 # Set in .env: POLICY_API_KEY
-#
-# Dataset: latest IFBench_test.jsonl from the main branch of github.com/allenai/IFBench, not
-# pinned; 300 prompts at the published run.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d

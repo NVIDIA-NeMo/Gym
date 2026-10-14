@@ -31,8 +31,7 @@
 # published run; it needs at least the longest prompt plus the 100,000-token output cap.
 #
 # Like the published run, prepare counts tokens with the Nemotron 3 Super tokenizer and drops
-# the 200 of openai/graphwalks' 1,150 prompts above 1,048,576 tokens. Dataset and tokenizer:
-# latest, not pinned; 1,150 prompts at the published run.
+# the 200 of openai/graphwalks' 1,150 prompts above 1,048,576 tokens.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
