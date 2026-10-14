@@ -168,7 +168,7 @@ def test_install_transport_forces_vllm_kwargs_without_discovery() -> None:
     assert first is client._get_client("http://model/v1")
 
 
-async def test_aiohttp_adapter_encodes_openai_extra_body(monkeypatch) -> None:
+async def test_aiohttp_adapter_encodes_openai_extra_body(monkeypatch, tmp_path) -> None:
     captured = {}
     response = MagicMock()
 
@@ -196,7 +196,8 @@ async def test_aiohttp_adapter_encodes_openai_extra_body(monkeypatch) -> None:
             }
         ),
     )
-    adapter = _AiohttpChatCompletions("http://model/v1")
+    journal = tmp_path / "session" / "responses.jsonl"
+    adapter = _AiohttpChatCompletions("http://model/v1", str(journal))
     result = await adapter.create(
         model="model",
         messages=[{"role": "user", "content": "hello"}],
@@ -209,9 +210,12 @@ async def test_aiohttp_adapter_encodes_openai_extra_body(monkeypatch) -> None:
     assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": True}
     assert captured["cookies"] is None
     assert adapter.cookies is response.cookies
+    assert captured["headers"]["x-session-id"] == "session"
+    assert json.loads(journal.read_text()) == {"response_id": "chat-1", "usage": None}
 
 
-async def test_responses_runs_spatialclaw_and_returns_gym_response(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("model_status", [None, 400, 503, "timeout"])
+async def test_responses_runs_spatialclaw_and_returns_gym_response(monkeypatch, tmp_path, model_status) -> None:
     close = AsyncMock()
     shutdown_all = AsyncMock()
 
@@ -225,6 +229,17 @@ async def test_responses_runs_spatialclaw_and_returns_gym_response(monkeypatch, 
             self._kernel_pool = SimpleNamespace(shutdown_all=shutdown_all)
 
         async def arun(self, **kwargs):
+            if model_status == "timeout":
+                raise TimeoutError("deadline")
+            if model_status is not None:
+                from aiohttp import ClientResponseError
+
+                raise ClientResponseError(
+                    SimpleNamespace(real_url="http://model/v1/chat/completions"),
+                    (),
+                    status=model_status,
+                    message="injected model failure",
+                )
             assert kwargs["instruction"] == "Which option is correct?"
             assert kwargs["video_source"] == "/videos/clip.mp4"
             return {
@@ -291,8 +306,19 @@ async def test_responses_runs_spatialclaw_and_returns_gym_response(monkeypatch, 
         metadata={"video_path": "clip.mp4", "spatialclaw_session_id": "sample-1"},
     )
     response = await agent.responses(MagicMock(), body)
-    assert response.output_text == "B"
-    assert response.metadata["spatialclaw_turns"] == "3"
+    if model_status is None:
+        assert response.output_text == "B"
+        assert response.metadata["spatialclaw_turns"] == "3"
+    else:
+        failure = response.model_dump()["_ng_agent_failure"]
+        assert failure.get("mask_sample", True) == (model_status != 400)
+        assert failure["failure_kind"] == (
+            "spatialclaw:model_request_rejected"
+            if model_status == 400
+            else "agent_timeout"
+            if model_status == "timeout"
+            else "agent_run_error"
+        )
     # A native accumulator is not authoritative evidence of provider usage.
     assert response.usage is None
     assert response.model_dump()["_ng_agent_observations"]["source"] == "spatialclaw"

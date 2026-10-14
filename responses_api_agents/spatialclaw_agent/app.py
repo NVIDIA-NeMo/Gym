@@ -26,6 +26,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
+from aiohttp import ClientResponseError
 from fastapi import Request
 from pydantic import ConfigDict, Field
 
@@ -739,7 +740,12 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
                     f"[spatialclaw_agent] session {session_id} failed:\n{error_traceback}", file=sys.stderr, flush=True
                 )
                 (session_dir / "error.traceback.txt").write_text(error_traceback, encoding="utf-8")
-                failure = {"failure_kind": "agent_run_error", "failure_reason": f"{type(exc).__name__}: {exc}"}
+                model_rejected = isinstance(exc, ClientResponseError) and exc.status in {400, 422}
+                failure = {
+                    "failure_kind": "spatialclaw:model_request_rejected" if model_rejected else "agent_run_error",
+                    "failure_reason": f"{type(exc).__name__}: {exc}",
+                    "mask_sample": not model_rejected,
+                }
                 result = {"termination_reason": "error"}
             finally:
                 if workflow is not None:
@@ -811,7 +817,7 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
         agent_json = await get_response_json(agent_response)
         observations = agent_json.pop("_ng_agent_observations", None)
         failure = agent_json.pop("_ng_agent_failure", None)
-        if failure:
+        if failure and failure.get("mask_sample", True):
             return SpatialClawAgentVerifyResponse.model_validate(
                 body.model_dump()
                 | {
@@ -847,6 +853,7 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
         metadata = agent_json.get("metadata") or {}
         return SpatialClawAgentVerifyResponse.model_validate(
             verify_json
+            | (failure or {})
             | {
                 "ng_agent_observations": observations,
                 "turns_used": int(metadata.get("spatialclaw_turns", 0) or 0),

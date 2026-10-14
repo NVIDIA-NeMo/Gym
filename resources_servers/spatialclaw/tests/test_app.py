@@ -125,3 +125,102 @@ def test_masked_infrastructure_failure_is_not_a_native_wrong_answer() -> None:
     empty = server.compute_metrics([[{"sample_id": "two", "mask_sample": True, "reward": 0.0}]])
     assert empty["spatialclaw/num_evaluated_tasks"] == 0
     assert "spatialclaw/overall_accuracy" not in empty
+
+
+@pytest.mark.parametrize("prediction,reward", [("B", 0.0), ("", 0.0), (" a ", 1.0)])
+async def test_native_wrong_and_empty_answers_remain_scored(prediction, reward):
+    server, _, _ = _server()
+    result = await server.verify(
+        SpatialClawVerifyRequest(
+            responses_create_params={"input": "question"}, response=_response(prediction), sample_id="one"
+        )
+    )
+    assert result.reward == reward and result.evaluation_completed
+    assert not result.mask_sample
+    with pytest.raises(ValueError, match="Unknown SpatialClaw sample"):
+        await server.verify(
+            SpatialClawVerifyRequest(
+                responses_create_params={"input": "question"}, response=_response(prediction), sample_id="missing"
+            )
+        )
+
+
+async def test_native_unscored_result_is_distinguished_from_incorrect_answer():
+    server, _, _ = _server()
+    server._benchmark_instance.evaluate_single = lambda *args: None
+    result = await server.verify(
+        SpatialClawVerifyRequest(
+            responses_create_params={"input": "question"}, response=_response("A"), sample_id="one"
+        )
+    )
+    assert result.native_score is None and not result.scored
+    assert result.reward == 0.0 and result.evaluation_completed
+
+
+async def test_load_benchmark_once_and_reject_partial_invalid_loads(tmp_path, monkeypatch):
+    import asyncio
+    import sys
+    from types import ModuleType
+
+    from resources_servers.spatialclaw import app
+
+    factory_module = ModuleType("spatial_agent.evals.factory")
+    config_module = ModuleType("spatial_agent.config")
+
+    class Config:
+        benchmark = "native-name"
+        question_type = None
+
+        def _load_from_envs(self):
+            pass
+
+        def update_from_dataset_json(self, path):
+            assert path == "dataset.json"
+
+    config_module.SpatialAgentConfig = Config
+    config_module.set_config = MagicMock()
+    native = SimpleNamespace(data=[SimpleNamespace(sample_id=1)])
+    factory = MagicMock(return_value=native)
+    factory_module.BenchmarkFactory = SimpleNamespace(create_benchmark=factory)
+    monkeypatch.setitem(sys.modules, "spatial_agent.config", config_module)
+    monkeypatch.setitem(sys.modules, "spatial_agent.evals.factory", factory_module)
+    monkeypatch.setattr(app, "_config_path", lambda *args: "dataset.json")
+    monkeypatch.setattr(app, "_install_source_path", lambda *args: None)
+    monkeypatch.setattr(app, "_validate_spatialclaw_checkout", lambda root, commit: root)
+    monkeypatch.setattr(app, "ensure_spatialclaw_checkout", lambda url, commit, cache: tmp_path)
+    server, _, _ = _server()
+    server._benchmark_instance = None
+    server._load_lock = None
+    server.config.spatialclaw_root = str(tmp_path)
+    results = await asyncio.gather(server._load_benchmark(), server._load_benchmark())
+    assert results == [native, native]
+    factory.assert_called_once_with("native-name", data_root=str(tmp_path / "data"), question_type=None)
+    assert server._sample_by_id == {"1": native.data[0]}
+    server._benchmark_instance = None
+    server.config.spatialclaw_root = None
+    server.config.source_cache_root = str(tmp_path / "cache")
+    server.config.data_root = str(tmp_path / "dataset")
+    native.data.append(SimpleNamespace(sample_id=1))
+    with pytest.raises(RuntimeError, match="Duplicate"):
+        await server._load_benchmark()
+    assert server._benchmark_instance is None
+    factory.return_value = None
+    with pytest.raises(RuntimeError, match="selected no benchmark"):
+        await server._load_benchmark()
+    native.data.pop()
+    factory.return_value = native
+    assert await server._load_benchmark() is native
+    assert factory.call_args.kwargs["data_root"] == str(tmp_path / "dataset")
+
+
+def test_dataset_metrics_handle_empty_unknown_rows_and_select_native_headlines():
+    server, _, _ = _server()
+    assert (
+        server.compute_metrics([[], [{"sample_id": "unknown", "reward": 0}]])["spatialclaw/num_evaluated_tasks"] == 0
+    )
+    metrics = {"spatialclaw/overall_accuracy": 0.5, "internal_count": 3, "pass@1[avg-of-1]/native_score": 50}
+    assert server.get_key_metrics(metrics) == {
+        "spatialclaw/overall_accuracy": 0.5,
+        "pass@1[avg-of-1]/native_score": 50,
+    }
+    assert _flatten_numeric({"evaluated": True, "label": "ignored"}) == {"evaluated": 1}
