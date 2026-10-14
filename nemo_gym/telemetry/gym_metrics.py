@@ -37,6 +37,17 @@ Retrying is provider-internal, so each provider that retries records it from its
 
 All four carry ``nemo.gym.sandbox.provider``.
 
+Server startup
+--------------
+``gym.server.startup_stage_duration_ms`` (histogram): one stage of one server's own startup, recorded by the process that ran it.
+``nemo.gym.startup.stage`` names the stage, and ``nemo.gym.server.worker`` marks a Uvicorn worker of a multi-worker server.
+Each point also carries ``nemo.gym.server.name`` and ``nemo.gym.server.type``.
+Stages are contiguous, so one process's stages add up to the time from its start until it accepts connections.
+A server process starts when the supervisor spawns it, and a worker starts when its main process hands off to Uvicorn.
+The same stages are spans under the ``startup`` span group.
+There is no supervisor-side total, because the supervisor only learns that a server is ready from a periodic health poll.
+That total would be these stages plus polling delay.
+
 HTTP connection pool
 --------------------
 ``gym.http.connection_pool.queue_duration_ms`` (histogram): connection-acquisition wait
@@ -48,11 +59,43 @@ Bounded attributes identify the binding connector limit, queue outcome, and dest
 ``gym.http.connection_pool.connect_total`` (observable counter): all connection attempts
 (``connect()`` calls), including attempts that later fail or are abandoned.
 Compare its value with the queue-duration histogram count to calculate the queued fraction.
+
+Rollout outcomes
+----------------
+``gym.rollout.completed_total`` (counter): one per rollout attempt the collection driver finished
+handling, recorded after it wrote the attempt or decided to omit it. An attempt is one dispatch of
+one row in one collection run; a retry on a later resume run is another attempt, and an HTTP-level
+re-send of ``/run`` inside one dispatch is not. Only ``run_from_config`` (``gym eval run`` with
+serving) records it: ``--no-serve`` initialises no telemetry, and ``run_examples`` callers,
+reverification and the GDPVal multistage driver do not call the recorder.
+
+``nemo.gym.rollout.outcome`` is ``scored`` (main output, masked and forced-zero results included),
+``failed`` (failures sidecar) or ``omitted`` (no-persist, e.g. kill-shaped). Rows drained by the
+dispatch budget never ran and are not counted, unlike the progress metrics, whose ``dropped``
+groups ``failed`` with an ``omitted`` that includes drained rows. A failed ``/run`` is a ``failed``
+attempt with class ``agent_request_failed`` only with ``route_failures_to_sidecar`` on; otherwise
+it aborts the run and is not counted. Coverage comes from the output files, not this counter.
+
+Attributes are bounded: ``nemo.gym.rollout.dispatch.name`` (the environment server, or the agent
+when rows name no environment server) and, on attempts that carry a failure class,
+``nemo.gym.failure_class``, ``nemo.gym.failure_kind`` (registered or ``<server>:<kind>``
+namespaced, any other value recorded as ``unregistered``) and ``nemo.gym.failure_type`` (exception
+class name). Free-text reasons are never attributes.
+
+Rollout health
+--------------
+The trajectory-level checks of the rollout health report, evaluated as each rollout finishes.
+``gym.rollout.health_verdict_total`` (counter): one per evaluated rollout, by ``nemo.gym.health.verdict``
+(``healthy``, ``unhealthy`` or ``unobserved``, as in the report) and ``nemo.gym.rollout.outcome``
+(``scored`` or ``failed``; the post-run report reads scored rollouts only).
+``gym.rollout.health_flagged_total`` (counter): one per rollout *and* check with at least one finding,
+by ``nemo.gym.health.check`` (a check id from the health-check registry) and ``nemo.gym.rollout.outcome``, so a
+check's count is the number of rollouts it flagged, not the number of findings. Checks in ``health_check_ignored_checks`` are not evaluated.
 """
 
 import logging
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, Optional
 
 
@@ -63,11 +106,23 @@ SANDBOX_ACTIVE_INSTRUMENT = "gym.sandbox.active"
 SANDBOX_STARTUP_INSTRUMENT = "gym.sandbox.startup_duration_ms"
 SANDBOX_EXEC_INSTRUMENT = "gym.sandbox.exec_duration_ms"
 SANDBOX_CREATE_RETRY_INSTRUMENT = "gym.sandbox.create_retry_total"
+SERVER_STARTUP_STAGE_INSTRUMENT = "gym.server.startup_stage_duration_ms"
+SERVER_NAME_ATTRIBUTE = "nemo.gym.server.name"
+SERVER_TYPE_ATTRIBUTE = "nemo.gym.server.type"
+STARTUP_STAGE_ATTRIBUTE = "nemo.gym.startup.stage"
+WORKER_ATTRIBUTE = "nemo.gym.server.worker"
 HTTP_CONNECTION_POOL_QUEUE_DURATION_INSTRUMENT = "gym.http.connection_pool.queue_duration_ms"
 HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT = "gym.http.connection_pool.connect_total"
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
 HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_outcome"
 HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
+ROLLOUT_COMPLETED_INSTRUMENT = "gym.rollout.completed_total"
+ROLLOUT_OUTCOME_ATTRIBUTE = "nemo.gym.rollout.outcome"
+FAILURE_CLASS_ATTRIBUTE = "nemo.gym.failure_class"
+FAILURE_KIND_ATTRIBUTE = "nemo.gym.failure_kind"
+FAILURE_TYPE_ATTRIBUTE = "nemo.gym.failure_type"
+DISPATCH_NAME_ATTRIBUTE = "nemo.gym.rollout.dispatch.name"
+UNREGISTERED_FAILURE_KIND = "unregistered"
 
 #: Milliseconds. Provisioning a remote sandbox takes tens of seconds and a long command can run
 #: for minutes; the SDK's default boundaries end at 10 s and would put most of both in +Inf.
@@ -84,6 +139,26 @@ SANDBOX_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
     300_000,
     600_000,
     1_800_000,
+)
+
+#: Milliseconds.
+#: A cold venv install can run for minutes and a local model load for longer, so the boundaries run to an hour.
+#: Init stages of a warm server fall in the lowest buckets.
+SERVER_STARTUP_BOUNDARIES_MS: tuple[float, ...] = (
+    100,
+    250,
+    500,
+    1_000,
+    2_500,
+    5_000,
+    10_000,
+    30_000,
+    60_000,
+    120_000,
+    300_000,
+    600_000,
+    1_800_000,
+    3_600_000,
 )
 
 HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
@@ -224,6 +299,31 @@ def record_sandbox_create_retry(*, provider: str) -> None:
     )
 
 
+def _server_attributes(server_name: str, server_type: Optional[str]) -> dict[str, Any]:
+    attributes: dict[str, Any] = {SERVER_NAME_ATTRIBUTE: server_name}
+    if server_type:
+        attributes[SERVER_TYPE_ATTRIBUTE] = server_type
+    return attributes
+
+
+def record_server_startup_stage(
+    duration_ms: float, *, stage: str, server_name: str, server_type: Optional[str], worker: bool = False
+) -> None:
+    """Record one stage of one server's own startup, from the process that ran it.
+
+    ``worker`` is true for a Uvicorn worker of a multi-worker server.
+    A worker's stages are timed separately from its main process's.
+    """
+    _record_histogram(
+        SERVER_STARTUP_STAGE_INSTRUMENT,
+        "ms",
+        "Wall-clock time of one stage of a server process's startup.",
+        duration_ms,
+        _server_attributes(server_name, server_type) | {STARTUP_STAGE_ATTRIBUTE: stage, WORKER_ATTRIBUTE: worker},
+        boundaries=SERVER_STARTUP_BOUNDARIES_MS,
+    )
+
+
 def record_http_connection_pool_queue_duration(
     duration_ms: float,
     *,
@@ -278,7 +378,49 @@ def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[st
         logger.debug("nemo-lens: failed to register %s", HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT, exc_info=True)
 
 
+def record_rollout_completed(
+    outcome: str,
+    *,
+    dispatch_name: str,
+    failure_class: str | None = None,
+    failure_kind: str | None = None,
+    failure_type: str | None = None,
+) -> None:
+    """Count one finished rollout attempt in ``gym.rollout.completed_total``."""
+    attributes: dict[str, Any] = {ROLLOUT_OUTCOME_ATTRIBUTE: outcome, DISPATCH_NAME_ATTRIBUTE: dispatch_name}
+    if failure_class:
+        attributes[FAILURE_CLASS_ATTRIBUTE] = failure_class
+    if failure_kind:
+        attributes[FAILURE_KIND_ATTRIBUTE] = failure_kind
+    if failure_type:
+        attributes[FAILURE_TYPE_ATTRIBUTE] = failure_type
+    _record_counter(
+        ROLLOUT_COMPLETED_INSTRUMENT, "Rollout attempts the driver finished handling, by outcome.", attributes
+    )
+
+
 def _reset_for_testing() -> None:
     """Drop cached instruments. Test-only."""
     with _INSTRUMENT_LOCK:
         _INSTRUMENTS.clear()
+
+
+ROLLOUT_HEALTH_VERDICT_INSTRUMENT = "gym.rollout.health_verdict_total"
+ROLLOUT_HEALTH_FLAGGED_INSTRUMENT = "gym.rollout.health_flagged_total"
+HEALTH_VERDICT_ATTRIBUTE = "nemo.gym.health.verdict"
+HEALTH_CHECK_ATTRIBUTE = "nemo.gym.health.check"
+
+
+def record_rollout_health(verdict: str, *, outcome: str, flagged_checks: Iterable[str]) -> None:
+    """Count one health-evaluated rollout and each distinct check that flagged it."""
+    _record_counter(
+        ROLLOUT_HEALTH_VERDICT_INSTRUMENT,
+        "Rollouts evaluated by the trajectory health checks, by verdict.",
+        {HEALTH_VERDICT_ATTRIBUTE: verdict, ROLLOUT_OUTCOME_ATTRIBUTE: outcome},
+    )
+    for check in sorted(set(flagged_checks)):
+        _record_counter(
+            ROLLOUT_HEALTH_FLAGGED_INSTRUMENT,
+            "Rollouts flagged by a trajectory health check.",
+            {HEALTH_CHECK_ATTRIBUTE: check, ROLLOUT_OUTCOME_ATTRIBUTE: outcome},
+        )

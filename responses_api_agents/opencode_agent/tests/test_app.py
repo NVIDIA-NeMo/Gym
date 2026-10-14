@@ -20,10 +20,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-import yaml
+from omegaconf import OmegaConf
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import GlobalConfigDictParser
 from nemo_gym.openai_utils import (
+    NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -46,6 +48,7 @@ from responses_api_agents.opencode_agent.app import (
     _parse_opencode_session,
     parse_opencode_session,
 )
+from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 
 
 def _config(**kwargs) -> OpenCodeAgentConfig:
@@ -72,9 +75,8 @@ def _compactions(bundle: AgentObservationBundle) -> list[ContextCompactionObserv
 
 
 def _make_agent(**kwargs) -> OpenCodeAgent:
-    with patch("responses_api_agents.opencode_agent.app.OpenCodeAgent.model_post_init"):
-        agent = OpenCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
+    agent = OpenCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+    agent._ensure_local_runtime = AsyncMock()
     return agent
 
 
@@ -249,14 +251,18 @@ class TestParseOpencodeSession:
         assert isinstance(call, NeMoGymResponseFunctionToolCall)
         assert call.status == "incomplete"
 
-    def test_step_finish_usage(self, tmp_path) -> None:
+    @pytest.mark.parametrize(
+        "cache,expected_input",
+        [({}, 122), ({"read": 5760}, 5882), ({"write": 5760}, 5882), ({"read": 5000, "write": 760}, 5882)],
+    )
+    def test_step_finish_usage(self, tmp_path: Path, cache: dict[str, int], expected_input: int) -> None:
         db = _session_db(
             tmp_path,
-            [("assistant", [{"type": "step-finish", "tokens": {"input": 100, "output": 20, "cache": {"read": 5}}}])],
+            [("assistant", [{"type": "step-finish", "tokens": {"input": 122, "output": 22, "cache": cache}}])],
         )
         _, usage = parse_opencode_session(db)
-        assert usage["input_tokens"] == 105
-        assert usage["output_tokens"] == 20
+        assert usage["input_tokens"] == expected_input
+        assert usage["output_tokens"] == 22
 
     def test_reasoning_usage_reaches_response(self, tmp_path: Path) -> None:
         db = _session_db(
@@ -478,6 +484,17 @@ class TestDeepMerge:
 
 
 class TestEnv:
+    @pytest.mark.parametrize("capture_enabled", [False, True])
+    def test_capture_plugin_preserves_user_config(self, capture_enabled: bool, tmp_path: Path) -> None:
+        agent = _make_agent(opencode_config={"plugin": ["user-plugin"]})
+        agent.server_client.global_config_dict = {"observability_enabled": capture_enabled}
+        agent._write_opencode_config(tmp_path)
+        config = json.loads((tmp_path / "opencode.json").read_text())
+        assert OBSERVABILITY_PATCH.is_file()
+        assert config["plugin"] == ["user-plugin"] + ([OBSERVABILITY_PATCH.as_uri()] if capture_enabled else [])
+        assert agent.config.opencode_config == {"plugin": ["user-plugin"]}
+        assert agent._build_opencode_config() == config
+
     def test_env_passthrough(self) -> None:
         agent = _make_agent(openai_api_key="k", openai_base_url="https://x/v1", env={"FOO": "bar", "EMPTY": ""})
         env = agent._env("/tmp/data")
@@ -501,6 +518,30 @@ class TestEnv:
         assert env["OPENAI_BASE_URL"] == "http://model/v1"
         assert provider["options"]["baseURL"] == "http://model/v1"
         assert provider["models"]["Qwen3.6-35B-A3B"]["limit"]["output"] == 131072
+
+    def test_model_server_replayed_reasoning_is_accepted_by_gym_chat_completions(self) -> None:
+        agent = _make_agent(model="m", model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            field = agent._build_opencode_config()["provider"]["nemo"]["models"]["m"]["interleaved"]["field"]
+
+        # OpenCode replays an assistant turn after a tool call with the interleaved field set.
+        replayed = {
+            "role": "assistant",
+            "content": "",
+            field: "thinking",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "task", "arguments": "{}"}}],
+        }
+        body = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+            {
+                "model": "m",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    replayed,
+                    {"role": "tool", "tool_call_id": "c1", "content": "done"},
+                ],
+            }
+        )
+        assert body.messages[1]["reasoning_content"] == "thinking"
 
 
 class TestWorkspaceRoot:
@@ -678,11 +719,87 @@ class TestConfigYaml:
         app_path = Path(__file__).resolve().parent.parent / "app.py"
         compile(app_path.read_text(), str(app_path), "exec")
 
-    def test_config_yaml_parses(self) -> None:
+    @pytest.mark.parametrize("training_capture", [None, False, True])
+    def test_config_yaml_parses(self, monkeypatch: pytest.MonkeyPatch, training_capture: bool | None) -> None:
+        monkeypatch.chdir(Path(__file__).resolve().parents[3])
         cfg_path = Path(__file__).resolve().parent.parent / "configs" / "opencode_agent.yaml"
-        data = yaml.safe_load(cfg_path.read_text())
+        _, configs = GlobalConfigDictParser().load_extra_config_paths([str(cfg_path)])
+        data = OmegaConf.to_container(OmegaConf.merge(*configs, {"policy_model_name": "test-model"}), resolve=True)
         assert "opencode_agent" in data
         inner = data["opencode_agent"]["responses_api_agents"]["opencode_agent"]
-        assert inner["entrypoint"] == "app.py"
-        assert inner["concurrency"] == 8
-        assert inner["command"] == "opencode"
+        if training_capture is not None:
+            inner["token_id_capture"] = training_capture
+        config = OpenCodeAgentConfig.model_validate(inner | {"host": "localhost", "port": 8000, "name": "opencode"})
+        assert config.entrypoint == "app.py"
+        assert "execution_mode" not in type(config).model_fields
+        assert config.thinking is True
+        assert config.timeout == 10800
+        assert config.model == "test-model"
+        assert config.sandbox_provider is None
+        assert config.sandbox_install_timeout_seconds == 600
+        assert config.session_close_timeout_seconds == 60
+        assert config.resources_server is None
+        assert config.model_server.name == "policy_model"
+        assert config.opencode_config["permission"]["bash"]["*"] == "allow"
+        assert config.opencode_config["permission"]["bash"]["*git submodule update*"] == "deny"
+        assert config.opencode_config["tools"]["webfetch"] is False
+
+        assert config.token_id_capture is (training_capture is True)
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": True, "token_id_capture": {"enabled": True}}
+        agent = OpenCodeAgent(config=config, server_client=client)
+        capture_path = "/training-token-capture" if training_capture else ""
+        assert (
+            agent.base_url_for_run("http://model", {"_ng_task_index": 0, "_ng_rollout_index": 0})
+            == f"http://model/ng-rollout/0-0{capture_path}"
+        )
+
+
+@pytest.mark.parametrize(
+    "exit_code,status", [(0, "completed"), (7, "failed"), (-15, "failed"), (None, "unknown"), (True, "unknown")]
+)
+@pytest.mark.parametrize("sandboxed", [False, True])
+def test_bash_exit_code_is_execution_outcome(
+    tmp_path: Path, exit_code: int | None, status: str, sandboxed: bool
+) -> None:
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    db = _session_db(
+        tmp_path,
+        [
+            (
+                "assistant",
+                [
+                    {
+                        "type": "tool",
+                        "callID": "shell",
+                        "tool": "bash",
+                        "state": {
+                            "status": "completed",
+                            "input": {"command": "exit 7"},
+                            "output": "stdout",
+                            "metadata": {"exit": exit_code},
+                        },
+                    }
+                ],
+            )
+        ],
+    )
+    parser = parse_opencode_observations if sandboxed else _parse_opencode_session
+    bundle = parser(db, "fallback")
+    tool = _tool_calls(bundle)[0]
+    assert tool.status == status
+    assert tool.error_type == ("tool_error" if status == "failed" else None)
+    assert any(gap.code == "tool_outcome_unavailable" for gap in bundle.gaps) == (status == "unknown")
+
+
+@pytest.mark.parametrize("override,expected", [({}, {"field": "reasoning_content"}), ({"interleaved": True}, True)])
+def test_gym_provider_preserves_interleaved_override(override: dict, expected: dict | bool) -> None:
+    agent = _make_agent(
+        model="policy",
+        model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        opencode_config={"provider": {"nemo": {"models": {"policy": override}}}},
+    )
+    with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+        config = agent._build_opencode_config("1-2")
+    assert config["provider"]["nemo"]["models"]["policy"]["interleaved"] == expected

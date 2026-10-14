@@ -21,6 +21,7 @@ from typing import Any, Optional
 from pydantic import BaseModel
 
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -44,6 +45,9 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -
     An explicit ``_ng_rollout_id`` takes precedence.
     Otherwise derive ``"{task}-{rollout}"`` from the task and rollout indices.
     Re-dispatch attempts append ``-a{n}``.
+    The suffix is reserved: an explicit id ending in ``-a<N>`` names attempt N of the rollout before it,
+    as a training controller names a restored attempt,
+    and rollout collection refuses dataset rows that use it as a plain id.
     Writers and consumers must use this same identity.
     Reused task and rollout indices produce a repeated capture key.
     Use an explicit id when numbering restarts across dispatches.
@@ -78,11 +82,26 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -
     attempt = field(ATTEMPT_INDEX_KEY_NAME)
     if attempt is not None and int(attempt) > 0:
         rollout_id = f"{rollout_id}-a{int(attempt)}"
+        # An explicit id may carry its own attempt suffix, but not as well as an attempt index:
+        # the key would not decode to one rollout and attempt.
+        try:
+            EpisodeId.from_capture_key(rollout_id)
+        except ValueError as error:
+            raise ValueError(
+                f"{ROLLOUT_ID_KEY_NAME} {explicit!r} already ends with the attempt suffix '-a<N>'; "
+                f"do not also set {ATTEMPT_INDEX_KEY_NAME}"
+            ) from error
     return rollout_id
 
 
 def current_rollout_id() -> Optional[str]:
     return _ROLLOUT_ID.get()
+
+
+def current_episode_id() -> Optional[EpisodeId]:
+    """Return the logical rollout and attempt carried by the current capture key."""
+    capture_key = _ROLLOUT_ID.get()
+    return EpisodeId.from_capture_key(capture_key) if capture_key is not None else None
 
 
 @contextmanager
