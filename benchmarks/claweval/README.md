@@ -27,7 +27,8 @@ inspected at revision `0e272107a96c2af54b6191c6b09cd534d7368d0d` with local
 modifications. It requires that fork's `evaluation/task_catalog.py` and
 `evaluation/run_multimodal.py`. It reads public prompts through the native
 `TaskDefinition` loader; no separate Gym exporter or changes to the native agent
-and grading code are required. The adapter does not install or patch Claw-Eval.
+and grading code are required. The adapter does not install or edit Claw-Eval. Its worker observes the native
+sandbox context manager to report outcomes while retaining its lifecycle.
 
 ## Setup
 
@@ -49,6 +50,10 @@ export CLAW_EVAL_FIXTURE_ROOT=/path/to/claw_eval_multimodal_fixtures
 export CLAW_EVAL_GENERAL_CONFIG=evaluation/configs/nano_omni_general.yaml
 export CLAW_EVAL_MULTIMODAL_CONFIG=evaluation/configs/nano_omni.yaml
 export CLAW_EVAL_MULTI_TURN_CONFIG=evaluation/configs/nano_omni_multi_turn.yaml
+
+# Policy endpoint consumed by Gym's capture proxy (must match the native profile).
+export POLICY_URL=http://127.0.0.1:12500/v1
+export POLICY_MODEL=Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16
 ```
 
 Use the existing fork's `evaluation/CLUSTER_SETUP.md` to prepare its image,
@@ -91,7 +96,9 @@ python -m benchmarks.claweval.prepare --split multimodal \
 
 # Run this server in one terminal inside the allocation.
 export CLAW_EVAL_CONFIG="$CLAW_EVAL_MULTIMODAL_CONFIG"
-gym env start --config responses_api_agents/claweval_agent/configs/claweval_agent.yaml
+gym env start --config responses_api_agents/claweval_agent/configs/claweval_agent.yaml \
+  --model-url "$POLICY_URL" --model "$POLICY_MODEL" --model-api-key unused \
+  +observability_enabled=true
 
 # In a second terminal with the same Gym environment:
 gym eval run --no-serve --agent claweval_agent \
@@ -103,22 +110,31 @@ After stopping the smoke server, run any full split:
 
 ```bash
 gym eval run --benchmark claweval/multimodal --split benchmark \
-  --output outputs/claweval_multimodal/rollouts.jsonl
+  --output outputs/claweval_multimodal/rollouts.jsonl \
+  --model-url "$POLICY_URL" --model "$POLICY_MODEL" --model-api-key unused
 
 # All three splits, 900 trials total with the default configs:
 gym eval run --config benchmarks/claweval/config.yaml --split benchmark \
-  --output outputs/claweval_all/rollouts.jsonl
+  --output outputs/claweval_all/rollouts.jsonl \
+  --model-url "$POLICY_URL" --model "$POLICY_MODEL" --model-api-key unused
 ```
 
 Gym's `--temperature`, `--top-p`, and `--max-output-tokens` overrides are forwarded
 to the native provider. Otherwise its configured generation parameters are retained.
-Gym's `--model-url`, `--model`, and `--model-api-key` select the native provider's
-endpoint, model ID, and credential when supplied. Otherwise the native profile
-is retained. These also accept the `policy_base_url`, `policy_model_name`, and
-`policy_api_key` keys injected by `gym eval submit`. Leave `driver.policy_model_type`
-empty to avoid starting an unused Gym policy server. For other provider settings,
-use `model_overrides`; `judge_overrides` and `user_agent_model_overrides` select
-the judge and simulated-user settings separately. Nested overrides merge recursively.
+Gym's `--model-url`, `--model`, and `--model-api-key` configure the Gym
+policy server. Set these to the endpoint and model from the native profile.
+The original native provider calls that server through a rollout-correlated URL;
+its request options, media, reasoning, and native retry policy are preserved.
+The proxy forwards one upstream attempt per request and synthesizes the native
+client's streaming response from the upstream completion. Factory injects these
+settings and uses `driver.policy_model_type: openai_model`.
+
+`model_overrides` retains additional native provider settings; `judge_overrides`
+and `user_agent_model_overrides` configure the judge and simulated user separately.
+Nested overrides merge recursively. Keep `observability_enabled: true` for evaluation.
+Each dataset is prepared once; `--num-repeats` controls trial expansion (default 3).
+For separate server-seed jobs, set `--num-repeats 1` and the agent's `seed_base`
+to 1001, 1002, or 1003, then compare the union by task ID and seed.
 
 For Slurm submissions, use `driver.container: null` and `driver.mounts: []`.
 The Gym driver runs on the allocated host so the original runner can launch its
@@ -134,7 +150,9 @@ Gym reward is the native task score:
 A trial passes at `reward >= 0.75`. Gym rollout indices 0, 1, and 2 select seeds
 1001, 1002, and 1003. Each rollout has its own output directory and worker process.
 Timeout and cancellation request native cleanup before killing remaining children.
-Execution/worker failures raise errors instead of fabricating scored results.
+Execution/worker failures return `mask_sample: true` and a structured failure
+kind and reason. Masked trials are excluded from native score metrics and prevent
+three-trial metrics from being reported as complete. Cancellation still propagates.
 
 The aggregate metrics include `claweval/mean_task_score`, `claweval/pass_at_1`,
 `claweval/pass_at_3` (any of three passes), and `claweval/strict_pass_3` (all three
@@ -149,9 +167,11 @@ runtime source hash, and native config hash. Output directories persist under
 `outputs/claweval_agent` (override with `CLAW_EVAL_GYM_OUTPUT`). `worker.log` is
 kept there for diagnosis.
 
-Gym's trajectory projection includes assistant text/reasoning, tool calls and
-results, and simulated-user text turns. Native media payloads remain in the
-original trace; the projection is not a lossless training transcript. Token IDs
+Gym's canonical trajectory uses captured model requests and responses, including
+inline media, reasoning, token usage, and explicit invocation joins. Native tool
+timings and model-visible results are joined by tool call ID; native sandbox
+outcomes are retained separately. The Responses API output is a text projection;
+full media remain in native traces and model-call captures. Token IDs
 and logprobs are not provided. This is an evaluation adapter for the fork's
 native harness and Pyxis runtime; it does not add a Docker launcher or replace
 the native agent with OpenCode. `no_judge: true` is available for debugging, but
@@ -182,22 +202,23 @@ recipe with a CPU allocation and external GPT-4o mini endpoint, limited to
 `T001zh_email_triage`. Seeds 1001/1002/1003 scored 0.935/0.870/0.935; all three
 trials completed, with native mean score 0.913333 and Pass@1, Pass@3 and strict
 Pass³ of 1.0 for this single task. The pinned Gym commit was
-`e2a4a6b15a9b4be119e24275e537b8fce0c4bd5c`. Native calls are not instrumented
-by Gym's model telemetry, so rollout health reports these trials as unobserved.
+`e2a4a6b15a9b4be119e24275e537b8fce0c4bd5c`. Those earlier trials bypassed Gym capture and their health was unobserved;
+they do not satisfy onboarding evidence requirements.
 
 The 303 saved native Nano 3 Omni multimodal traces (101 tasks, three trials)
 also pass Gym's trace conversion and native-score checks, including 1,334 tool
 calls. This checks historical trace compatibility; it is not a new model run.
 
-A fresh Nano 3 Omni multimodal comparison was submitted through Factory's
-`gym_native` backend on 2026-10-05 UTC: Slurm jobs `7184062`, `7184058`, and
-`7184071`, with seeds 1001, 1002, and 1003 respectively. The run uses the native
-checkpoint, serving arguments and model/judge profile, preserves each task's
-turn limit, and explicitly selects the native harness. All 101 task definitions
-match the reference snapshot; media validation and a real Serper preflight
-passed. Each job runs one trial of all 101 tasks; the three outputs must be
-combined by task ID and trial seed before reporting Pass@3 or strict Pass³.
-At submission the jobs were queued for GPU resources, so no new scores or
-parity result are claimed. Historical runtime versions and live search/judge
-responses may differ. Multi-turn rollout validation, the Super 3.5 serving run,
-and benchmark certification remain pending.
+The October 5 Nano comparison is invalid as a full-run parity result: dataset
+repetition expanded each intended single-seed job three times. The retained
+outputs contain overlapping task/seed pairs and incomplete coverage. They must
+not be used for certification. The corrected implementation removes dataset-level
+repetition and preserves provider extensions through Gym's capture proxy.
+
+For every corrected run retain `resolved-config.yaml`, native profiles and
+fingerprints, `rollouts.jsonl`, aggregate metrics, and `quality_summary.json`.
+Run `python scripts/inspect_harness_conformance.py --bundle <rollouts.jsonl>
+--output <evidence-dir>` and require `gym-p0/v1` on every rollout. Native parity,
+current harness capability evidence, Frontier Eval review, SWQA full-run score
+bands, and Evergreen certification are separate onboarding requirements. This
+branch does not claim those outstanding review or certification steps are complete.

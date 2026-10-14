@@ -364,7 +364,7 @@ def test_benchmark_config_resolves(split, monkeypatch):
         monkeypatch.setenv(key, "/tmp/test")
     config = BenchmarkConfig.from_config_path(Path(f"benchmarks/claweval/{split}.yaml"))
     assert config.agent_name == f"claweval_{split}_agent"
-    assert config.num_repeats == 3
+    assert config.num_repeats == 1
     assert config.dataset.prepare_script.is_file()
 
 

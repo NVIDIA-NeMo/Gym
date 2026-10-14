@@ -132,6 +132,8 @@ class TestSanitizeStreamingChatBody:
             "chat_template_kwargs": {"enable_thinking": True},
             "thinking": True,
             "output_config": {"effort": "high"},
+            "thinking_token_budget": 17408,
+            "mm_processor_kwargs": {"use_audio_in_video": True},
         }
         assert set(extensions) == CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
         cleaned, _ = sanitize_streaming_chat_body({"messages": [], "stream": True, **extensions})

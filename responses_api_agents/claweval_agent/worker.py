@@ -11,6 +11,8 @@ import re
 import signal
 import subprocess
 import sys
+import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -137,6 +139,8 @@ def run_trial(payload: dict[str, Any], root: Path) -> dict[str, Any]:
         raise FileNotFoundError("Missing Claw-Eval assets: " + "; ".join(missing))
     judge = build_judge(cfg, no_judge=payload["no_judge"])
     provider = build_provider(cfg)
+    if payload.get("invocation_id"):
+        provider.client = provider.client.with_options(default_headers={"x-session-id": payload["invocation_id"]})
     try:
         result = run_one(
             task_yaml=path,
@@ -162,6 +166,46 @@ def run_trial(payload: dict[str, Any], root: Path) -> dict[str, Any]:
     return result
 
 
+def observe_sandboxes(output_dir: Path) -> None:
+    """Observe the native context manager without replacing its lifecycle or commands."""
+    import evaluation.run_multimodal as native
+
+    original = native.RemoteSandbox
+    records: list[dict[str, Any]] = []
+
+    class ObservedSandbox(original):
+        def __enter__(self):
+            self.observed_start = time.monotonic()
+            try:
+                return super().__enter__()
+            except Exception as exc:
+                self.record("sandbox_error", type(exc).__name__)
+                raise
+
+        def __exit__(self, exc_type, exc, tb):
+            try:
+                return super().__exit__(exc_type, exc, tb)
+            finally:
+                self.record("completed" if exc_type is None else "failed", exc_type.__name__ if exc_type else None)
+
+        def record(self, outcome: str, error_type: str | None) -> None:
+            records.append(
+                {
+                    "kind": "sandbox",
+                    "role": "environment",
+                    "provider": "slurm_pyxis",
+                    "sandbox_id": self.instance_id,
+                    "outcome": outcome,
+                    "exit_code": self.process.returncode if self.process else None,
+                    "wall_time_s": time.monotonic() - self.observed_start,
+                    "error_type": error_type,
+                }
+            )
+            (output_dir / "sandboxes.json").write_text(json.dumps(records), encoding="utf-8")
+
+    native.RemoteSandbox = ObservedSandbox
+
+
 def main() -> None:
     # Allow the native context managers to stop services and the Pyxis step on timeout.
     def terminate(signum, frame):
@@ -175,7 +219,20 @@ def main() -> None:
     if payload["operation"] == "prepare":
         prepare(payload, root)
     elif payload["operation"] == "run":
-        result = run_trial(payload, root)
+        observe_sandboxes(Path(payload["output_dir"]))
+        try:
+            result = run_trial(payload, root)
+        except Exception as exc:
+            # The process boundary must persist failed trials, not turn infrastructure
+            # errors into ordinary zero scores or lose the entire collection batch.
+            traceback.print_exc()
+            result = {
+                "task_id": payload["verifier_metadata"]["task_id"],
+                "status": "failed",
+                "failure_kind": "claweval:execution_error",
+                "failure_reason": f"{type(exc).__name__}; inspect this rollout's worker.log",
+                "seed": payload["seed"],
+            }
         Path(payload["output_dir"], "result.json").write_text(json.dumps(result), encoding="utf-8")
     else:
         raise ValueError(f"Unknown operation: {payload['operation']}")

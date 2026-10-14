@@ -1,3 +1,5 @@
+num_repeats: 3
+
 config_paths:
   - responses_api_agents/claweval_agent/configs/claweval_agent.yaml
 
@@ -12,7 +14,7 @@ claweval_general_agent:
           jsonl_fpath: benchmarks/claweval/data/general.jsonl
           prepare_script: benchmarks/claweval/prepare_general.py
           prompt_config: null
-          num_repeats: 3
+          num_repeats: 1
           license: MIT
 
 claweval_general_environment_server:

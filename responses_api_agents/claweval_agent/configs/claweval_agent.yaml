@@ -1,3 +1,5 @@
+observability_enabled: true
+
 claweval_agent:
   responses_api_agents:
     claweval_agent:
@@ -15,6 +17,9 @@ claweval_agent:
       concurrency: 1
       timeout: 3600
       no_judge: false
+      model_server:
+        type: responses_api_models
+        name: policy_model
       policy_base_url: ${oc.select:policy_base_url,''}
       policy_model_name: ${oc.select:policy_model_name,''}
       policy_api_key: ${oc.select:policy_api_key,''}
@@ -30,3 +35,16 @@ claweval_environment_server:
       agent_server:
         type: responses_api_agents
         name: claweval_agent
+
+# Native SDK owns retry policy. Preserve its multimodal and reasoning parameters.
+policy_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:policy_base_url,'http://localhost:8000/v1'}
+      openai_api_key: ${oc.select:policy_api_key,''}
+      openai_model: ${oc.select:policy_model_name,''}
+      forward_streaming_chat_provider_extensions: true
+      upstream_max_num_tries: 1
+      max_http_attempts: 1
+      propagate_upstream_http_status_codes: [400, 401, 403, 404, 408, 422, 429, 500, 502, 503, 504, 529]

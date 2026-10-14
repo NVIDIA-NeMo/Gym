@@ -3,11 +3,82 @@
 """Convert native trace messages, retaining tool pairs and simulated-user turns."""
 
 import json
+from datetime import datetime
 from pathlib import Path
 from time import time
 from typing import Any
 
 from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ObservationGap,
+    SandboxObservation,
+    ToolCallObservation,
+)
+
+
+def trace_observations(
+    path: Path | None,
+    *,
+    invocation_id: str,
+    response: NeMoGymResponse,
+    prompt: str,
+    output_dir: Path,
+    duration_ms: float,
+    failed: bool = False,
+) -> AgentObservationBundle:
+    """Join native tool timing and sandbox outcomes to the captured policy invocation."""
+    bundle = AgentObservationBundle(
+        source="claweval_native",
+        records=[
+            AgentInvocation(
+                invocation_id=invocation_id,
+                status="failed" if failed else "completed",
+                duration_ms=duration_ms,
+                conversation=[{"role": "user", "content": prompt}, *response.output],
+            )
+        ],
+    )
+    sandbox_path = output_dir / "sandboxes.json"
+    sandboxes = (
+        [SandboxObservation.model_validate(row) for row in json.loads(sandbox_path.read_text())]
+        if sandbox_path.exists()
+        else []
+    )
+    bundle.records.extend(sandboxes)
+    sandbox_id = sandboxes[0].sandbox_id if len(sandboxes) == 1 else None
+    if not sandboxes:
+        bundle.gaps.append(ObservationGap(code="sandbox_outcome_unavailable", invocation_id=invocation_id))
+    events = [json.loads(line) for line in path.read_text().splitlines() if line.strip()] if path else []
+    error_calls = {
+        block["tool_use_id"]
+        for event in events
+        if event["type"] == "message"
+        for block in event["message"]["content"]
+        if isinstance(block, dict)
+        if block.get("type") == "tool_result" and block.get("is_error")
+    }
+    for event in events:
+        if event["type"] == "tool_dispatch":
+            completed = datetime.fromisoformat(event["timestamp"]).timestamp()
+            duration = event["latency_ms"]
+            failed_tool = event["response_status"] >= 400 or event["tool_use_id"] in error_calls
+            bundle.records.append(
+                ToolCallObservation(
+                    invocation_id=invocation_id,
+                    tool_call_id=event["tool_use_id"],
+                    sandbox_id=sandbox_id,
+                    tool_name=event["tool_name"],
+                    started_at=completed - duration / 1000,
+                    completed_at=completed,
+                    duration_ms=duration,
+                    timing_source="artifact",
+                    status="failed" if failed_tool else "completed",
+                    error_type="native_tool_error" if failed_tool else None,
+                )
+            )
+    return bundle
 
 
 def trace_to_response(path: Path, task_id: str, model: str, expected_score: float | None = None) -> NeMoGymResponse:

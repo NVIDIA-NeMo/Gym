@@ -106,7 +106,10 @@ digraph ClawEvalIntegration {
   factory -> prepare [style=invis];
   adapter -> runner [color="#16a34a", lhead=cluster_native, label="worker invokes original runner"];
   runner -> sandbox [color="#ea580c", dir=both, label="tools / results"];
-  runner -> policy [color="#ea580c", dir=both, label="policy calls", constraint=false];
+  capture [fillcolor="#eff6ff", color="#2563eb", label="Gym policy model server\nCorrelated requests, responses and token usage"];
+  runner -> capture [color="#2563eb", dir=both, label="native policy calls", constraint=false];
+  capture -> policy [color="#ea580c", dir=both, label="forward preserved options", constraint=false];
+  capture -> output [color="#2563eb", label="canonical trajectory + health", constraint=false];
   runner -> judge [color="#ea580c", dir=both, label="simulated-user calls", constraint=false];
   grade -> judge [color="#ea580c", dir=both, label="judge calls", constraint=false];
   grade -> projection [color="#16a34a", label="native score + trace", constraint=false];

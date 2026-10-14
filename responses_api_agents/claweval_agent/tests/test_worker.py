@@ -52,6 +52,7 @@ def boundary(tmp_path, monkeypatch):
     config_path.write_text("model: {}\n")
     provider = SimpleNamespace(client=Mock())
     native = ModuleType("evaluation.run_multimodal")
+    native.RemoteSandbox = type("RemoteSandbox", (), {})
     native.build_judge = Mock(return_value=object())
     native.build_provider = Mock(return_value=provider)
     native.run_one = Mock(return_value={"task_id": "T001_test", "task_score": 0.9, "status": "completed"})

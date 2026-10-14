@@ -12,6 +12,7 @@ import signal
 import sys
 from collections import defaultdict
 from pathlib import Path
+from time import monotonic, time
 from typing import Any
 from uuid import uuid4
 
@@ -20,9 +21,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from responses_api_agents.claweval_agent.trajectory import trace_to_response
+from responses_api_agents.claweval_agent.trajectory import trace_observations, trace_to_response
 from responses_api_agents.claweval_agent.worker import source_root, task_path
 
 
@@ -41,6 +43,7 @@ class ClawEvalAgentConfig(BaseResponsesAPIAgentConfig):
     shutdown_grace: float = Field(default=45, gt=0)
     seed_base: int = 1001
     no_judge: bool = False
+    model_server: ModelServerRef | None = None
     policy_base_url: str = ""
     policy_model_name: str = ""
     policy_api_key: str = ""
@@ -71,6 +74,8 @@ class ClawEvalVerifyResponse(BaseVerifyResponse):
 
 def benchmark_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    masked = sum(bool(row.get("mask_sample")) for row in rows)
+    rows = [row for row in rows if not row.get("mask_sample")]
     for row in rows:
         groups[row["task_id"]].append(row)
     complete: list[list[dict[str, Any]]] = []
@@ -83,6 +88,7 @@ def benchmark_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     metrics = {
         "claweval/tasks": len(groups),
         "claweval/trials": len(rows),
+        "claweval/masked_trials": masked,
         "claweval/complete_three_trial_tasks": len(complete),
         "claweval/incomplete_three_trial_tasks": len(groups) - len(complete),
     }
@@ -90,7 +96,7 @@ def benchmark_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         metrics["claweval/mean_task_score"] = sum(row["reward"] for row in rows) / len(rows)
         metrics["claweval/pass_at_1"] = sum(row["passed"] for row in rows) / len(rows)
     # Never present a subset of complete tasks as the full selected run's Pass³.
-    if complete and len(complete) == len(groups):
+    if complete and len(complete) == len(groups) and not masked:
         metrics["claweval/pass_at_3"] = sum(any(row["passed"] for row in group) for group in complete) / len(complete)
         metrics["claweval/strict_pass_3"] = sum(all(row["passed"] for row in group) for group in complete) / len(
             complete
@@ -130,6 +136,7 @@ class ClawEvalAgent(SimpleResponsesAPIAgent):
 
     async def run(self, body: ClawEvalRunRequest = Body()) -> ClawEvalVerifyResponse:
         async with self._sem:
+            started = monotonic()
             root = source_root(self.config.claweval_root)
             meta = body.verifier_metadata
             task_path(root, meta.task_id, meta.task_sha256)
@@ -144,10 +151,12 @@ class ClawEvalAgent(SimpleResponsesAPIAgent):
                 prompt = items[0]["content"]
             output_dir = Path(self.config.workspace_root).expanduser().resolve() / f"{meta.task_id}-{uuid4().hex}"
             output_dir.mkdir(parents=True)
+            invocation_id = f"claweval-{uuid4().hex}"
             payload = self.config.model_dump()
             payload.update(
                 {
                     "operation": "run",
+                    "invocation_id": invocation_id,
                     "claweval_root": str(root),
                     "output_dir": str(output_dir),
                     "verifier_metadata": meta.model_dump(),
@@ -165,6 +174,16 @@ class ClawEvalAgent(SimpleResponsesAPIAgent):
             ):
                 if value:
                     model_overrides[key] = value
+            if self.config.model_server is not None:
+                model_overrides["base_url"] = self.resolve_model_base_url(
+                    self.config.model_server.name,
+                    self.rollout_id_from_run(
+                        {**body.model_dump(by_alias=True), "_ng_rollout_id": body.capture_rollout_id}
+                    ),
+                )
+                model_overrides["api_key"] = "gym-local"
+            elif self._model_call_capture_enabled():
+                raise ValueError("ClawEval observability requires model_server pointing to a Gym policy model server")
             for key in ("temperature", "top_p", "max_output_tokens"):
                 value = getattr(params, key, None)
                 if value is None:
@@ -176,8 +195,24 @@ class ClawEvalAgent(SimpleResponsesAPIAgent):
                     extra["max_tokens" if key == "max_output_tokens" else key] = value
                     model_overrides["extra_body"] = extra
             payload["model_overrides"] = model_overrides
-            await self._launch_worker(payload, output_dir)
+            try:
+                await self._launch_worker(payload, output_dir)
+            except (TimeoutError, RuntimeError) as exc:
+                return self._failed_response(
+                    body,
+                    output_dir,
+                    invocation_id,
+                    prompt,
+                    started,
+                    {
+                        "status": "failed",
+                        "failure_kind": "agent_timeout" if isinstance(exc, TimeoutError) else "agent_run_error",
+                        "failure_reason": f"{type(exc).__name__}; inspect {output_dir / 'worker.log'}",
+                    },
+                )
             result = json.loads((output_dir / "result.json").read_text(encoding="utf-8"))
+            if result.get("status") == "failed" and result.get("failure_kind"):
+                return self._failed_response(body, output_dir, invocation_id, prompt, started, result)
             score = float(result["task_score"])
             if result["task_id"] != meta.task_id or result["status"] != "completed":
                 raise ValueError("Claw-Eval worker returned an incomplete or mismatched task")
@@ -195,8 +230,63 @@ class ClawEvalAgent(SimpleResponsesAPIAgent):
                     "task_id": meta.task_id,
                     "passed": result["passed"],
                     "native_result": result,
+                    "evaluation_completed": True,
+                    "ng_agent_observations": trace_observations(
+                        trace,
+                        invocation_id=invocation_id,
+                        response=response,
+                        prompt=prompt,
+                        output_dir=output_dir,
+                        duration_ms=(monotonic() - started) * 1000,
+                    ),
                 }
             )
+
+    def _failed_response(
+        self,
+        body: ClawEvalRunRequest,
+        output_dir: Path,
+        invocation_id: str,
+        prompt: str,
+        started: float,
+        result: dict[str, Any],
+    ) -> ClawEvalVerifyResponse:
+        response = NeMoGymResponse.model_validate(
+            {
+                "id": invocation_id,
+                "created_at": int(time()),
+                "object": "response",
+                "model": "unknown",
+                "output": [],
+                "parallel_tool_calls": False,
+                "tools": [],
+                "tool_choice": "auto",
+            }
+        )
+        return ClawEvalVerifyResponse.model_validate(
+            {
+                **body.model_dump(by_alias=True),
+                "response": response,
+                "reward": 0,
+                "task_id": body.verifier_metadata.task_id,
+                "passed": False,
+                "status": "failed",
+                "evaluation_completed": False,
+                "mask_sample": True,
+                "failure_kind": result["failure_kind"],
+                "failure_reason": result["failure_reason"],
+                "native_result": result,
+                "ng_agent_observations": trace_observations(
+                    None,
+                    invocation_id=invocation_id,
+                    response=response,
+                    prompt=prompt,
+                    output_dir=output_dir,
+                    duration_ms=(monotonic() - started) * 1000,
+                    failed=True,
+                ),
+            }
+        )
 
     async def _launch_worker(self, payload: dict[str, Any], output_dir: Path) -> None:
         worker = Path(__file__).with_name("worker.py")
@@ -207,7 +297,7 @@ class ClawEvalAgent(SimpleResponsesAPIAgent):
                 self.config.python_executable,
                 str(worker),
                 cwd=payload["claweval_root"],
-                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "CLAW_AGENT_HARNESS": "native"},
                 stdin=asyncio.subprocess.PIPE,
                 stdout=log,
                 stderr=asyncio.subprocess.STDOUT,

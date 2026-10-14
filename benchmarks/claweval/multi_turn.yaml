@@ -1,3 +1,5 @@
+num_repeats: 3
+
 config_paths:
   - responses_api_agents/claweval_agent/configs/claweval_agent.yaml
 
@@ -12,7 +14,7 @@ claweval_multi_turn_agent:
           jsonl_fpath: benchmarks/claweval/data/multi_turn.jsonl
           prepare_script: benchmarks/claweval/prepare_multi_turn.py
           prompt_config: null
-          num_repeats: 3
+          num_repeats: 1
           license: MIT
 
 claweval_multi_turn_environment_server:
