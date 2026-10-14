@@ -186,6 +186,33 @@ def test_oracle_runs_solution_in_borrowed_sandbox(tmp_path, monkeypatch):
     assert close.status_code == 200 and sandbox.disconnected
 
 
+MCP_TASK_TOML = (
+    TASK_TOML
+    + """
+[[environment.mcp_servers]]
+name = "playwright"
+transport = "sse"
+url = "http://api:3080/sse"
+"""
+)
+
+
+def test_oracle_declares_task_tool_context_support_and_runs_the_solution_of_an_mcp_task(tmp_path, monkeypatch):
+    """`gym dataset validate` must not refuse tasks with MCP servers or skills: solve.sh reaches them by itself."""
+    agent, _, sandbox, _ = make_agent(tmp_path, monkeypatch, toml=MCP_TASK_TOML)
+    client = TestClient(agent.setup_webserver())
+
+    seed = client.post("/v1/agent_sessions", json=seed_body())
+    assert seed.status_code == 200, seed.text
+    # The harbor environment server reads this declaration and lets the task through to the oracle.
+    assert seed.json() == {"agent_session_id": "ag-1", "supports_task_tool_context": True}
+
+    response = client.post("/v1/responses", json=RESPONSES_BODY)
+    assert response.status_code == 200, response.text
+    assert response.json()["metadata"]["oracle"] == "solved"
+    assert any("solve.sh" in call["command"] for call in sandbox.execs)
+
+
 def test_task_without_solution_is_unvalidated_not_failed(tmp_path, monkeypatch):
     agent, _, sandbox, _ = make_agent(tmp_path, monkeypatch, solution=False)
     client = TestClient(agent.setup_webserver())
@@ -361,3 +388,62 @@ def test_transient_disconnect_is_retried_by_base_session_lifecycle(tmp_path, mon
     assert client.post("/v1/agent_sessions/close", json=body).status_code == 500
     assert client.post("/v1/agent_sessions/close", json=body).status_code == 200
     assert len(attempts) == 2 and sandbox.disconnected
+
+
+def test_transfer_failure_is_an_oracle_failure_not_a_500(tmp_path, monkeypatch):
+    from nemo_gym.sandbox.transfer import SandboxTransferError
+
+    agent, _, sandbox, _ = make_agent(tmp_path, monkeypatch)
+
+    async def refuse(sandbox, source, target, **kwargs):
+        raise SandboxTransferError("Failed to unpack solution into /solution: operation not permitted")
+
+    monkeypatch.setattr(module, "upload_dir", refuse)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    response = client.post("/v1/responses", json=RESPONSES_BODY)
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["metadata"] == {"oracle": "failed", "oracle_error_type": "transfer"}
+    assert "operation not permitted" in payload["output"][0]["content"][0]["text"]
+    assert not any("solve.sh" in call["command"] for call in sandbox.execs)
+
+
+def test_provider_failure_during_transfer_is_not_scored_as_an_oracle_failure(tmp_path, monkeypatch):
+    """A lost sandbox or provider timeout propagates (a retryable failed episode) instead of `oracle=failed`."""
+    from nemo_gym.sandbox.transfer import SandboxUnavailableError
+
+    agent, _, sandbox, _ = make_agent(tmp_path, monkeypatch)
+
+    async def lost(sandbox, source, target, **kwargs):
+        raise SandboxUnavailableError("The sandbox could not run 'mkdir -p /solution': timeout: ")
+
+    monkeypatch.setattr(module, "upload_dir", lost)
+    client = TestClient(agent.setup_webserver(), raise_server_exceptions=False)
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    response = client.post("/v1/responses", json=RESPONSES_BODY)
+
+    assert response.status_code == 500, response.text
+    assert not any("solve.sh" in call["command"] for call in sandbox.execs)
+
+
+def test_provider_error_in_the_log_dir_setup_is_not_scored_either(tmp_path, monkeypatch):
+    """`exec_as_root` turns a provider `error_type` into the same propagating failure."""
+
+    class Lost(FakeSandbox):
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None, **kwargs):
+            await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user, **kwargs)
+            if command.startswith("mkdir -p"):
+                return SandboxExecResult(stdout="", stderr="container gone", return_code=125, error_type="sandbox")
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    sandbox = Lost()
+    agent, _, _, _ = make_agent(tmp_path, monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver(), raise_server_exceptions=False)
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+    response = client.post("/v1/responses", json=RESPONSES_BODY)
+    assert response.status_code == 500, response.text
+    assert not any("solve.sh" in call["command"] for call in sandbox.execs)

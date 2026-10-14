@@ -50,7 +50,7 @@ from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
-from nemo_gym.sandbox.transfer import upload_dir
+from nemo_gym.sandbox.transfer import SandboxTransferError, exec_as_root, upload_dir
 from nemo_gym.tasks.harbor import HarborTask, load_task
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 
@@ -90,6 +90,15 @@ class OracleSession(AgentSessionState):
 class OracleAgent(SimpleResponsesAPIAgent):
     config: OracleAgentConfig
     ray_enabled = False
+
+    def supports_task_tool_context(self) -> bool:
+        """The reference solution runs inside the task's own environment, where its MCP servers and skills live.
+
+        ``solve.sh`` is the task author's script, so it reaches the task's sidecars and skills directory by
+        itself, as it does under Harbor's oracle. Declaring support keeps ``gym dataset validate`` running
+        such tasks instead of refusing them before the solution starts.
+        """
+        return True
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -183,8 +192,20 @@ class OracleAgent(SimpleResponsesAPIAgent):
         if self.config.max_solve_timeout_s is not None:
             timeout = min(timeout, self.config.max_solve_timeout_s)
         env = {"DEBIAN_FRONTEND": "noninteractive", **resolve_env_templates(settings.solution.env)}
-        await upload_dir(session.sandbox, task.path / "solution", SOLUTION_DIR)
-        await session.sandbox.exec(f"mkdir -p {SOLVE_LOG_DIR} && chmod 777 {SOLVE_LOG_DIR}", cwd="/", timeout_s=60)
+        try:
+            await upload_dir(session.sandbox, task.path / "solution", SOLUTION_DIR)
+            prepared = await exec_as_root(
+                session.sandbox, f"mkdir -p {SOLVE_LOG_DIR} && chmod 777 {SOLVE_LOG_DIR}", timeout_s=60
+            )
+            if prepared.return_code:
+                raise SandboxTransferError(f"Could not create {SOLVE_LOG_DIR}: {prepared.stderr or prepared.stdout}")
+        except SandboxTransferError as exc:
+            # The sandbox user cannot place the solution where solve.sh expects it (for example an image
+            # that runs as a non-root user without the capability to switch to root). Report it as an
+            # oracle failure so the row stays scored and the reason is visible. A provider failure
+            # (`SandboxUnavailableError`: timeout, lost container) is not caught: it propagates and the
+            # episode fails as retryable instead of being scored as a failed reference solution.
+            return self._response(body, ORACLE_STATUS_FAILED, str(exc), {"oracle_error_type": "transfer"})
         # One bounded exec: the provider keeps the command alive for `timeout_s`, and `timeout`
         # inside the container stops the solution itself (a sub-second budget still gets a whole
         # second: `timeout 0` means no limit). Output goes to a file we tail.

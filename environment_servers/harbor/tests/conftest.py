@@ -364,7 +364,7 @@ class AgentSandbox(FakeSandbox):
         result = (await run_episode(server, task)).result
         # The outage is Gym's, not an empty artifact: masked, and no verifier was started for it.
         assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
-        assert "Could not probe /logs/artifacts: sandbox" in result.failure_reason
+        assert "SandboxUnavailableError" in result.failure_reason and "container gone" in result.failure_reason
         assert created == [] and verifier.execs == [] and agent.stopped
 
         server, task, agent, verifier, _ = self.prepared(tmp_path, monkeypatch)
