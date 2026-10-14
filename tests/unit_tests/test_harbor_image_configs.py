@@ -14,7 +14,9 @@ from nemo_gym.tasks.harbor.image_configs import (
     ImageConfigError,
     RegistryClient,
     compose_image_references,
+    compose_variables,
     dockerfile_base_images,
+    load_compose_document,
     parse_image_ref,
     record_base_images,
     record_compose_images,
@@ -286,6 +288,120 @@ class FakeClient:
             "image": reference,
             "os": "linux",
         }
+
+
+class TestComposeVariablesAndEnvFile:
+    """M19: Harbor's Compose interpolation variables and env_file, resolved at prepare from the task alone."""
+
+    HIL_BENCH_STYLE = """services:
+  main:
+    image: ${MAIN_IMAGE_NAME}
+    volumes:
+      - ${CONTEXT_DIR}/seed.json:/app/seed.json:ro
+      - ${HOST_VERIFIER_LOGS_PATH}:/logs/verifier
+    environment:
+      - CPU_BUDGET=${CPUS:-1}
+      - MODE=${MODE}
+  api:
+    image: ${SIDECAR:-redis:7-alpine}
+    env_file: api.env
+    environment:
+      PRICE: "$$5"
+"""
+
+    def test_variables_come_from_the_task_and_harbor_infra_wins(self, tmp_path):
+        task_dir = write_task(tmp_path, "ctr", compose=self.HIL_BENCH_STYLE)
+        (task_dir / "task.toml").write_text(
+            'schema_version = "1.4"\n\n[environment]\n'
+            f'docker_image = "{MAIN_IMAGE}"\ncpus = 4\nmemory_mb = 2048\n'
+            'env = { MODE = "strict", MAIN_IMAGE_NAME = "task-tries-to-override" }\n'
+        )
+        (task,) = discover_tasks(tmp_path)
+        variables = compose_variables(task)
+        assert variables["MAIN_IMAGE_NAME"] == MAIN_IMAGE  # infra wins over [environment].env
+        assert variables["PREBUILT_IMAGE_NAME"] == MAIN_IMAGE
+        assert variables["CONTEXT_DIR"] == str(task.path / "environment")
+        assert (variables["CPUS"], variables["MEMORY"], variables["MODE"]) == ("4", "2048m", "strict")
+        assert variables["HOST_VERIFIER_LOGS_PATH"] == variables["ENV_VERIFIER_LOGS_PATH"] == "/logs/verifier"
+        assert (
+            variables["HOST_AGENT_LOGS_PATH"] == "/logs/agent"
+            and variables["HOST_ARTIFACTS_PATH"] == "/logs/artifacts"
+        )
+
+    def test_task_env_values_are_interpolated_before_they_serve_as_variables(self, tmp_path, monkeypatch):
+        # hil-bench-swe-ask-human on the hub: [environment.env] holds `${ASK_HUMAN_BACKEND:-litellm_proxy}` and the
+        # Compose file references the same name again. Both layers resolve to the default, never to the shell.
+        monkeypatch.setenv("ASK_HUMAN_BACKEND", "from-the-shell")
+        task_dir = write_task(
+            tmp_path,
+            "ctr",
+            compose="services:\n  ask-human:\n    image: redis:7\n    environment:\n"
+            "      - ASK_HUMAN_BACKEND=${ASK_HUMAN_BACKEND:-litellm_proxy}\n      - API_KEY=${LITELLM_API_KEY:-}\n",
+        )
+        (task_dir / "task.toml").write_text(
+            f'schema_version = "1.4"\n\n[environment]\ndocker_image = "{MAIN_IMAGE}"\n\n[environment.env]\n'
+            'ASK_HUMAN_BACKEND = "${ASK_HUMAN_BACKEND:-litellm_proxy}"\nLITELLM_API_KEY = "${LITELLM_API_KEY:-}"\n'
+        )
+        (task,) = discover_tasks(tmp_path)
+        variables = compose_variables(task)
+        assert (variables["ASK_HUMAN_BACKEND"], variables["LITELLM_API_KEY"]) == ("litellm_proxy", "")
+        environment = load_compose_document(task)["services"]["ask-human"]["environment"]
+        assert environment == {"ASK_HUMAN_BACKEND": "litellm_proxy", "API_KEY": ""}
+
+    def test_document_is_resolved_and_env_file_inlined(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MODE", "from-the-shell")
+        task_dir = write_task(tmp_path, "ctr", compose=self.HIL_BENCH_STYLE)
+        (task_dir / "task.toml").write_text(
+            f'schema_version = "1.4"\n\n[environment]\ndocker_image = "{MAIN_IMAGE}"\nenv = {{ MODE = "strict" }}\n'
+        )
+        (task_dir / "environment" / "api.env").write_text("API_KEY_NAME=demo\nPRICE=overridden-by-environment\n")
+        (task,) = discover_tasks(tmp_path)
+        document = load_compose_document(task)
+        main, api = document["services"]["main"], document["services"]["api"]
+        assert main["image"] == MAIN_IMAGE
+        assert main["volumes"] == [
+            f"{task.path / 'environment'}/seed.json:/app/seed.json:ro",
+            "/logs/verifier:/logs/verifier",
+        ]
+        assert main["environment"] == {"CPU_BUDGET": "1", "MODE": "strict"}  # no cpus declared: the default applies
+        assert api["image"] == "redis:7-alpine"
+        assert "env_file" not in api
+        assert api["environment"] == {"API_KEY_NAME": "demo", "PRICE": "$$5"}
+        # Prepare's image list sees the substituted names.
+        assert compose_image_references(task) == [MAIN_IMAGE, "redis:7-alpine"]
+
+    def test_an_unresolved_variable_fails_prepare_naming_it(self, tmp_path):
+        write_task(tmp_path, "ctr", compose="services:\n  api:\n    image: ${SIDECAR_IMAGE}\n")
+        (task,) = discover_tasks(tmp_path)
+        with pytest.raises(
+            ImageConfigError, match=r"ctr: docker-compose.yaml: unresolved Compose variable \$\{SIDECAR_IMAGE\}"
+        ):
+            compose_image_references(task)
+        with pytest.raises(ImageConfigError, match=r"\$\{SIDECAR_IMAGE\}"):
+            record_compose_images([task], tmp_path, client=FakeClient())
+
+    def test_env_file_path_may_use_context_dir_and_values_stay_literal(self, tmp_path):
+        task_dir = write_task(
+            tmp_path,
+            "ctr",
+            compose="services:\n  api:\n    image: redis:7\n    env_file: ${CONTEXT_DIR}/api.env\n",
+        )
+        (task_dir / "environment" / "api.env").write_text("PW='ab$cd'\nREF=${MAIN_IMAGE_NAME}\n")
+        (task,) = discover_tasks(tmp_path)
+        environment = load_compose_document(task)["services"]["api"]["environment"]
+        # env_file values are literal: a dollar is kept (doubled for the start-time literal check), never resolved.
+        assert environment == {"PW": "ab$$cd", "REF": "$${MAIN_IMAGE_NAME}"}
+
+    def test_a_missing_env_file_fails_prepare_naming_it(self, tmp_path):
+        write_task(tmp_path, "ctr", compose="services:\n  api:\n    image: redis:7\n    env_file: secrets.env\n")
+        (task,) = discover_tasks(tmp_path)
+        with pytest.raises(ImageConfigError, match="env_file 'secrets.env' not found"):
+            load_compose_document(task)
+
+    def test_a_task_without_compose_has_no_document(self, tmp_path):
+        write_task(tmp_path, "plain")
+        (task,) = discover_tasks(tmp_path)
+        assert load_compose_document(task) is None
 
 
 class TestRecordComposeImages:
