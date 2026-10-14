@@ -391,3 +391,38 @@ class TestApp:
         result = await _server(record_step_outputs=True).verify(_request(solutions=None))
         assert result.step_outputs == []
         assert result.num_steps_total == 0
+
+    def test_config_step_code_default(self):
+        assert _server().config.record_step_code is False
+
+    @pytest.mark.asyncio
+    async def test_verify_with_step_code_records_the_program_each_sub_step_ran_against(self):
+        results = {"a": _details(True), "b": _details(False)}
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep_details(results):
+            server = _server(h5.name, record_step_outputs=True, record_step_code=True)
+            result = await server.verify(_request(solutions={"1.1": "a", "1.2": "b"}))
+        assert [o["code"] for o in result.step_outputs] == ["a", "b"]
+        assert [o["passed"] for o in result.step_outputs] == [True, False]
+
+    @pytest.mark.asyncio
+    async def test_verify_with_step_code_leaves_sentinel_steps_without_code(self):
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep_details({"a": _details(True)}):
+            server = _server(h5.name, record_step_outputs=True, record_step_code=True)
+            result = await server.verify(_request(solutions={"1.1": "a", "1.2": "_ran_out_of_context_"}))
+        assert result.step_outputs[0]["code"] == "a"
+        assert result.step_outputs[1]["status"] == "out_of_context"
+        assert result.step_outputs[1]["code"] is None
+
+    @pytest.mark.asyncio
+    async def test_verify_without_step_code_records_carry_no_code_key(self):
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep_details({"a": _details(True)}):
+            server = _server(h5.name, record_step_outputs=True)
+            result = await server.verify(_request(solutions={"1.1": "a"}, n_steps=1))
+        assert "code" not in result.step_outputs[0]
+
+    @pytest.mark.asyncio
+    async def test_step_code_alone_does_not_turn_on_step_outputs(self):
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep(passed=True):
+            server = _server(h5.name, record_step_code=True)
+            result = await server.verify(_request(solutions={"1.1": "a"}, n_steps=1))
+        assert result.step_outputs is None

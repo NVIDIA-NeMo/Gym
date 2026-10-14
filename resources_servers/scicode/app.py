@@ -57,6 +57,10 @@ class ScicodeResourcesServerConfig(BaseResourcesServerConfig):
     record_step_outputs: bool = False
     # Last N characters of stdout and of stderr kept per sub-step when record_step_outputs is on.
     output_tail_chars: int = 2000
+    # Opt-in on top of record_step_outputs: each record also carries `code`, the accumulated solution the
+    # sub-step's tests ran against (the agent's solutions[step_id]); None for a sentinel step that never ran.
+    # Off by default: the code is model-generated and grows a row by the size of every scored program.
+    record_step_code: bool = False
 
 
 class ScicodeRunRequest(BaseRunRequest):
@@ -82,7 +86,7 @@ class ScicodeVerifyResponse(BaseVerifyResponse):
     step_results: List[bool] = []
     # Per scored sub-step, aligned with step_results, only when record_step_outputs is on (None otherwise):
     # {step_id, step_number, status (executed | out_of_context | empty), passed, returncode, timed_out,
-    #  duration_s, exception_class, stdout_tail, stderr_tail}.
+    #  duration_s, exception_class, stdout_tail, stderr_tail} plus `code` when record_step_code is on too.
     step_outputs: Optional[List[dict]] = None
     num_steps_passed: int = 0
     num_steps_total: int = 0
@@ -120,6 +124,7 @@ class ScicodeResourcesServer(SimpleResourcesServer):
     async def verify(self, body: ScicodeVerifyRequest) -> ScicodeVerifyResponse:
         solutions = body.solutions or {}
         record = self.config.record_step_outputs
+        record_code = record and self.config.record_step_code
         # Score only sub-steps the agent produced a solution for. Sub-steps absent from solutions
         # (prefilled steps) are excluded from the denominator entirely; out-of-context sentinels
         # are present and counted as failures.
@@ -138,9 +143,11 @@ class ScicodeResourcesServer(SimpleResourcesServer):
         h5_path = self._resolve_test_data()
         loop = asyncio.get_running_loop()
 
-        def _step_output(i: int, status: str, passed: bool, result: Optional[dict] = None) -> dict:
+        def _step_output(
+            i: int, status: str, passed: bool, result: Optional[dict] = None, code: Optional[str] = None
+        ) -> dict:
             result = result or {}
-            return {
+            output = {
                 "step_id": f"{body.problem_id}.{i + 1}",
                 "step_number": body.sub_steps[i]["step_number"],
                 "status": status,
@@ -152,6 +159,9 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                 "stdout_tail": result.get("stdout_tail", ""),
                 "stderr_tail": result.get("stderr_tail", ""),
             }
+            if record_code:
+                output["code"] = code
+            return output
 
         async def _run_substep(i: int) -> tuple:
             sub_step = body.sub_steps[i]
@@ -170,7 +180,7 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             async with self._semaphore:
                 result = await loop.run_in_executor(None, call)
             passed = bool(result["passed"])
-            return passed, _step_output(i, "executed", passed, result)
+            return passed, _step_output(i, "executed", passed, result, code=code)
 
         outcomes = await asyncio.gather(*[_run_substep(i) for i in scored])
         step_results = [passed for passed, _ in outcomes]

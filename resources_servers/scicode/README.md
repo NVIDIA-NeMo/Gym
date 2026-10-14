@@ -52,8 +52,13 @@ every rollout row): one record per scored sub-step, aligned with `step_results`,
 named on the last traceback line, e.g. `AssertionError`, `ImportError`, `numpy.linalg.LinAlgError`;
 `null` when there is none) and the last `output_tail_chars` characters (default 2000) of `stdout_tail`
 and `stderr_tail`. The tails contain model-generated output and tracebacks, so the flag is off by
-default and the rows grow by up to `2 * output_tail_chars` per sub-step when it is on. The agent's
-per-step generations are a separate concern: enable model-call observability to keep them.
+default and the rows grow by up to `2 * output_tail_chars` per sub-step when it is on. With
+`record_step_code: true` as well, each record also carries `code`: the accumulated program the
+sub-step's tests ran against (the agent's `solutions[step_id]`: the problem's dependency header and any
+prefilled reference steps from the dataset, then the model's code for the previous sub-steps and this
+one; `null` for a sentinel step that never ran). That mixes dataset text with model-generated code and
+grows a row by the size of every scored program, so it is a second opt-in. The agent's raw per-step
+generations are a separate concern: enable model-call observability to keep them.
 
 ```yaml
 scicode:
@@ -61,6 +66,7 @@ scicode:
     scicode:
       record_step_outputs: true
       output_tail_chars: 2000
+      record_step_code: true
 ```
 
 ## Test data (required, staged manually)
@@ -112,7 +118,7 @@ gym env test +entrypoint=resources_servers/scicode
 Covers test sanitization, the program builder, subprocess pass/fail/timeout and the execution
 details it reports (exit code, timeout, duration, bounded output tails, exception class), and the
 `verify()` paths (no solutions, missing/unconfigured test data, all-pass, all-fail, prefilled-excluded,
-out-of-context, `step_outputs` on and off).
+out-of-context, `step_outputs` on and off, `code` on and off).
 
 ## Licensing
 
