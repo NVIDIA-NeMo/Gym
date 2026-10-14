@@ -197,10 +197,19 @@ async def _before_deadline(deadline: Optional[float], awaitable):
     # Bounds a single in-flight call: the per-step check alone cannot stop a call that hangs.
     if deadline is None:
         return await awaitable
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        awaitable.close()
+        raise _RolloutDeadline()
+    limit = asyncio.timeout(remaining)
     try:
-        return await asyncio.wait_for(awaitable, max(0.0, deadline - time.monotonic()))
-    except asyncio.TimeoutError as e:
-        raise _RolloutDeadline() from e
+        async with limit:
+            return await awaitable
+    except TimeoutError as e:
+        # A TimeoutError raised by the call itself is not the rollout deadline.
+        if limit.expired():
+            raise _RolloutDeadline() from e
+        raise
 
 
 def _is_infrastructure_failure(exc: BaseException) -> bool:
@@ -811,6 +820,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         model_response.num_tool_calls = num_tool_calls
         model_response.pre_reset_warning_steps = pre_reset_warning_steps
         model_response.timed_out = timed_out
+        if timed_out:
+            model_response.status = "incomplete"
         return model_response
 
     async def run(self, request: Request, body: BrowsecompAgentRunRequest) -> BrowsecompAgentVerifyResponse:

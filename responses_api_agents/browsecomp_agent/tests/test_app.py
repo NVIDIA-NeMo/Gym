@@ -15,8 +15,10 @@
 import asyncio
 import json
 import re
+import time
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from pytest import fixture
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -36,6 +38,8 @@ from responses_api_agents.browsecomp_agent.app import (
     BrowsecompAgent,
     BrowsecompAgentConfig,
     BrowsecompAgentRunRequest,
+    _before_deadline,
+    _RolloutDeadline,
 )
 
 
@@ -525,6 +529,7 @@ class TestRolloutTimeout:
         result = await agent.responses(request_mock, response_mock, body)
 
         assert result.timed_out is True
+        assert result.status == "incomplete"
         # A zero budget expires before the first model call is sent.
         assert agent.server_client.post.call_count == 0
 
@@ -533,7 +538,9 @@ class TestRolloutTimeout:
         http = MagicMock()
         http.ok = True
         http.status = 200
-        http.read = AsyncMock(return_value=json.dumps(_make_model_response([fn_call])).encode())
+        model_turn = _make_model_response([fn_call])
+        model_turn["status"] = "completed"
+        http.read = AsyncMock(return_value=json.dumps(model_turn).encode())
         http.content.read = AsyncMock(return_value=b'{"results_string": "r"}')
         http.cookies = {}
         calls = 0
@@ -555,13 +562,37 @@ class TestRolloutTimeout:
         agent = BrowsecompAgent(config=_make_config(rollout_timeout_s=0.2), server_client=MagicMock(spec=ServerClient))
         result = await self._hanging_call(agent, hang_on_call=1)
         assert result.timed_out is True
+        assert result.status == "incomplete"
         assert result.output == []
 
     async def test_hanging_tool_call_is_cut_at_the_limit(self) -> None:
         agent = BrowsecompAgent(config=_make_config(rollout_timeout_s=0.2), server_client=MagicMock(spec=ServerClient))
         result = await self._hanging_call(agent, hang_on_call=2)
         assert result.timed_out is True
+        # The last model reply said "completed"; the cut rollout must not.
+        assert result.status == "incomplete"
         assert result.num_tool_calls == 1
+
+    async def test_finished_rollout_within_the_limit_keeps_its_status(self) -> None:
+        agent = BrowsecompAgent(
+            config=_make_config(rollout_timeout_s=3600), server_client=MagicMock(spec=ServerClient)
+        )
+        final_turn = _make_model_response([_make_msg("Exact Answer: 42")])
+        final_turn["status"] = "completed"
+        http = MagicMock()
+        http.ok = True
+        http.status = 200
+        http.read = AsyncMock(return_value=json.dumps(final_turn).encode())
+        http.cookies = {}
+        agent.server_client.post = AsyncMock(return_value=http)
+        request_mock = MagicMock()
+        request_mock.cookies = {}
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q?"}])
+
+        result = await agent.responses(request_mock, MagicMock(), body)
+
+        assert result.timed_out is False
+        assert result.status == "completed"
 
     async def test_run_scores_a_timed_out_rollout_without_the_judge(self) -> None:
         agent = BrowsecompAgent(config=_make_config(), server_client=MagicMock(spec=ServerClient))
@@ -635,3 +666,31 @@ class TestDeadlineCoversBodyAndTokenize:
 
         assert result.timed_out is True
         assert agent.server_client.post.call_count == 0
+
+
+class TestDeadlineOnlyOwnsItsOwnExpiry:
+    """A TimeoutError raised inside a call is that call's error, not the rollout deadline."""
+
+    async def test_inner_timeout_with_budget_left_is_reraised(self) -> None:
+        async def _inner_timeout():
+            raise TimeoutError("downstream read timeout")
+
+        with pytest.raises(TimeoutError, match="downstream read timeout") as exc_info:
+            await _before_deadline(time.monotonic() + 3600, _inner_timeout())
+        assert not isinstance(exc_info.value, _RolloutDeadline)
+
+    async def test_expired_deadline_raises_rollout_deadline(self) -> None:
+        with pytest.raises(_RolloutDeadline):
+            await _before_deadline(time.monotonic() + 0.05, asyncio.Event().wait())
+
+    async def test_inner_model_timeout_does_not_flag_the_rollout(self) -> None:
+        agent = BrowsecompAgent(
+            config=_make_config(rollout_timeout_s=3600), server_client=MagicMock(spec=ServerClient)
+        )
+        agent.server_client.post = AsyncMock(side_effect=TimeoutError("model server timeout"))
+        request_mock = MagicMock()
+        request_mock.cookies = {}
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q?"}])
+
+        with pytest.raises(TimeoutError, match="model server timeout"):
+            await agent.responses(request_mock, MagicMock(), body)
