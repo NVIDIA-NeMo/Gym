@@ -100,3 +100,22 @@ test("does not connect disabled entries", async () => {
   await registerGymTools(a, { unused: { enabled: false } });
   assert.deepEqual(a.tools, []);
 });
+
+test("skips an unavailable optional server but not a required one", async (t) => {
+  const f = await fixture(t);
+  const down = await fixture(t, (_body, _req, res) => { res.writeHead(503).end(); return true; });
+  const a = agent();
+  await registerGymTools(a, { tavily: f.config, extra: { ...down.config, required: false } });
+  assert.deepEqual(a.tools.map((x) => x.name), ["tavily_web_search"]);
+  const b = agent();
+  await assert.rejects(registerGymTools(b, { tavily: f.config, extra: down.config }), /HTTP 503/);
+  assert.deepEqual(b.tools, []);
+});
+
+test("an optional server whose tools collide registers none of them", async (t) => {
+  const f = await fixture(t);
+  const a = agent();
+  a.getAllTools = () => [{ name: "tavily_web_search" }];
+  await registerGymTools(a, { tavily: { ...f.config, required: false } });
+  assert.deepEqual(a.tools, []);
+});
