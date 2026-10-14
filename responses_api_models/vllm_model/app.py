@@ -25,7 +25,7 @@ from time import monotonic, time, time_ns
 from typing import Any, Awaitable, ClassVar, Dict, List, Literal, Optional, Union, get_args
 
 from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
-from fastapi import HTTPException, Request, Response
+from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field, PrivateAttr, model_validator
 
