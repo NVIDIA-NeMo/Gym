@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 # WMT24++ (no tools): 960 English sentences translated into 9 languages, 8,640 translations, one
-# sample each. Scored by the xCOMET-XXL model, plus spBLEU and chrF.
+# sample each. Scored by the xCOMET-XXL model.
 #
 #   nemotron_recipes/super-3.5/run.sh wmt24pp
 #
@@ -25,13 +25,11 @@
 #
 # Needs the gated scorer model's terms accepted, with the account HF_TOKEN belongs to
 # (https://huggingface.co/Unbabel/XCOMET-XXL), and GPUs for scoring: xCOMET-XXL runs on this
-# machine, one copy per GPU, 43 GB of weights plus room for the batch (comet_batch_size below).
-# By default it uses every GPU with 75 GB free; to include GPUs with less, list the GPUs to use
-# in CUDA_VISIBLE_DEVICES. On Slurm it is set to all your job's GPUs, so point it at the GPUs
-# vLLM does not use. Details: reproducibility.md, "WMT24++".
+# machine, one copy per GPU, 43 GB of weights plus the batch (comet_batch_size below). Choosing
+# GPUs: reproducibility.md, "WMT24++".
 #
-# run.sh first sources wmt24pp.setup.sh, which sets this up and downloads the scorer model
-# once.
+# run.sh first sources wmt24pp.setup.sh, which picks the GPUs for scoring and downloads the
+# scorer model once.
 #
 # The published run's served context (32,768 tokens) capped each translation, thinking included.
 # max_output_tokens below sets the same cap, slightly looser as the prompt no longer counts

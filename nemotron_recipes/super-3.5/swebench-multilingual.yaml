@@ -53,8 +53,7 @@ policy_model:
 # the sandboxes, not from your network. Change it if your Docker network differs.
 default_host: 172.17.0.1
 
-# Tasks at once; PARALLEL overrides it. Each task is a container on your machine, so this stays
-# low. The published run used 1024 on NVIDIA's cluster.
+# Tasks at once; PARALLEL overrides it. Each task is a container on your machine, so keep it low.
 num_samples_in_parallel: 16
 
 # OpenCode from your own copy, as in the published run, not downloaded per task: many task

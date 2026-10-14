@@ -24,9 +24,9 @@
 #
 # Set in .env: POLICY_API_KEY
 #
-# The published run's served context (32,768 tokens) capped each answer, thinking included (1.2%
-# of answers reached it). max_output_tokens below sets the same cap, slightly looser as the
-# prompt no longer counts against it, so serve the model as for the other recipes.
+# The published run's served context (32,768 tokens) capped each answer, thinking included.
+# max_output_tokens below sets the same cap, slightly looser as the prompt no longer counts
+# against it, so serve the model as for the other recipes.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d

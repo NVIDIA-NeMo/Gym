@@ -29,8 +29,6 @@
 #
 # run.sh first sources browsecomp.setup.sh, which selects all 1,266 questions (Gym's default
 # is a 400-question subset) and points the search at the domain exclude list.
-#
-# The published run made about 33 tool calls (searches and page reads) per question.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: 0a287243543020c1cc23f76f6004fcf3c83fc4a9
