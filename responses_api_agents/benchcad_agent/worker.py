@@ -18,7 +18,12 @@ from pathlib import Path
 from types import ModuleType
 
 
-DATASET_REVISION = "5919f578ab09ec283603a082fab07c7639ab56eb"
+DATASET_REVISION = "5919f578ab09ec283603a082fab07c7639ab56eb"  # pragma: allowlist secret
+OPENCODE_INSTRUCTIONS = (
+    "\n\nYou may use the terminal and Python to work on this task. "
+    "Your final response must contain the complete answer in the format above, "
+    "even if you also save files. CadQuery is available through `python`."
+)
 
 
 def download(root: Path, output: Path, task: str, limit: int | None) -> None:
@@ -126,11 +131,7 @@ def export_records(root: Path, *, source: Path, output: Path, task: str, limit: 
         (directory / "task.json").write_text(json.dumps(metadata, allow_nan=False))
         image_instruction = "".join(f"\nUse the read tool to inspect /workspace/{name}." for name in image_names)
         prompt = system + "\n\n" + user + image_instruction
-        prompt += (
-            "\n\nYou may use the terminal and Python to work on this task. "
-            "Your final response must contain the complete answer in the format above, "
-            "even if you also save files. CadQuery is available through `python`."
-        )
+        prompt += OPENCODE_INSTRUCTIONS
         rows.append(
             {
                 "task": task,

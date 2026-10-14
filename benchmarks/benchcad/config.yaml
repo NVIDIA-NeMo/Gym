@@ -9,6 +9,7 @@ benchcad_agent:
       entrypoint: app.py
       domain: agent
       description: CAD generation, editing, and numeric QA with OpenCode and native BenchCAD scoring
+      inference_mode: opencode
       model_server:
         type: responses_api_models
         name: policy_model

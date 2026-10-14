@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 UPSTREAM_URL = "https://github.com/BenchCAD/BenchCAD-main.git"
-UPSTREAM_REVISION = "77fd16a80a4e5fc39964ee23b6cc3225beefac8f"
+UPSTREAM_REVISION = "77fd16a80a4e5fc39964ee23b6cc3225beefac8f"  # pragma: allowlist secret
 TASKS = ("vision2code", "codeedit", "vision_qa", "code_qa")
 WORKER = Path(__file__).with_name("worker.py")
 CAD_REQUIREMENTS = Path(__file__).with_name("cad-requirements.txt")

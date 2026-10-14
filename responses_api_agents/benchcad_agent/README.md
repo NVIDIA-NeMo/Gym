@@ -1,12 +1,14 @@
 # BenchCAD agent
 
-Evaluates BenchCAD with Gym's sandboxed OpenCode harness and pinned upstream
-prompts and scorers. Agent execution and prediction execution use separate
-sandboxes; reference geometry and answers stay in the trusted scorer.
+Evaluates BenchCAD with one direct model response or Gym's sandboxed OpenCode
+harness, using pinned upstream prompts and scorers. Generated CAD executes in
+an isolated prediction sandbox; reference geometry and answers stay in the
+trusted scorer. OpenCode remains the default.
 
 See the [BenchCAD evaluation guide](../../fern/versions/latest/pages/evaluation-tutorials/benchcad.mdx)
 for data preparation, Docker setup, model configuration, and scoring.
-The benchmark configuration is [benchmarks/benchcad/config.yaml](../../benchmarks/benchcad/config.yaml).
+Use [config.yaml](../../benchmarks/benchcad/config.yaml) for OpenCode or
+[single_turn.yaml](../../benchmarks/benchcad/single_turn.yaml) for direct inference.
 
 Run component tests with:
 
