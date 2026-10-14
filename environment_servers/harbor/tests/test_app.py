@@ -6,7 +6,11 @@ import errno
 import inspect
 import io
 import json
+import posixpath
+import re
+import shlex
 import shutil
+import subprocess
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,12 +29,16 @@ from yarl import URL
 import nemo_gym.sandbox.providers.base as sandbox_base
 from environment_servers.harbor.app import (
     EXIT_RECORD_NAME,
+    OVERLAY_FAILED_KIND,
     SEED_CREATE_GRACE_S,
     TIMEOUT_WRAPPER_GUARD,
     HarborEnvironmentServer,
     HarborEnvironmentServerConfig,
     HarborEpisodeResponse,
+    _exec_as_root_user,
     _verifier_image,
+    overlay_shell_command,
+    overlay_workdir_command,
     parse_exit_record,
     parse_reward_file,
     select_reward,
@@ -40,11 +48,13 @@ from nemo_gym.base_environment_server import BaseEnvironmentServerConfig
 from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 from nemo_gym.tasks.harbor import DIGEST_KEY, load_task
+from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION, OverlayRun
 from nemo_gym.tasks.harbor.models import HarborEnvironment
+from nemo_gym.tasks.harbor.task import IMAGE_CONFIGS_FILE
 
 
 TASK_TOML = """
@@ -63,7 +73,31 @@ storage_mb = 10240
 """
 
 
-def write_task(root: Path, *, toml: str = TASK_TOML, dockerfile: str = "FROM ubuntu:24.04\nWORKDIR /app") -> Path:
+# The PATH the test base images record, as Docker's default for an image whose Dockerfile set none.
+IMAGE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def write_image_config(parent: Path, image: str, **config) -> None:
+    """Record ``image``'s OCI configuration next to the task folders, as preparing the dataset does."""
+    path = parent / IMAGE_CONFIGS_FILE
+    recorded = json.loads(path.read_text()) if path.is_file() else {}
+    recorded[image] = {
+        "os": "linux",
+        "architecture": "amd64",
+        "image": image,
+        "config": config,
+        "record_version": RECORD_VERSION,
+    }
+    path.write_text(json.dumps(recorded))
+
+
+def write_task(
+    root: Path,
+    *,
+    toml: str = TASK_TOML,
+    dockerfile: str = "FROM ubuntu:24.04\nWORKDIR /app",
+    image_config: dict | None = None,
+) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "task.toml").write_text(toml)
     (root / "instruction.md").write_text("Create hello.txt\n")
@@ -71,6 +105,8 @@ def write_task(root: Path, *, toml: str = TASK_TOML, dockerfile: str = "FROM ubu
     (root / "environment" / "Dockerfile").write_text(dockerfile)
     (root / "tests").mkdir(exist_ok=True)
     (root / "tests" / "test.sh").write_text("#!/bin/bash\necho 1 > /logs/verifier/reward.txt\n")
+    # The loader resolves the Dockerfile against its base image's configuration, recorded at prepare.
+    write_image_config(root.parent, dockerfile.split()[1], **(image_config or {"Env": [f"PATH={IMAGE_PATH}"]}))
     return root
 
 
@@ -85,26 +121,68 @@ def archive_of(files: dict[str, str]) -> bytes:
     return buffer.getvalue()
 
 
+OK = SandboxExecResult(stdout="", stderr="", return_code=0)
+
+
+def _fails(message: str) -> SandboxExecResult:
+    return SandboxExecResult(stdout="", stderr=message, return_code=1)
+
+
 @dataclass
 class FakeSandbox:
-    """Records sandbox calls; ``verifier_files`` is what ``/logs/verifier`` holds after test.sh.
+    """Records sandbox calls and behaves like the container they would reach.
 
-    The verifier wrapper's exit record is added when the wrapper ran to its end: ``test_elapsed`` is how
-    long the run took inside the container. A provider timeout, or ``wrapper_ran=False`` (no ``timeout``
-    or ``bash`` in the image), leaves no record.
+    ``verifier_files`` is what ``/logs/verifier`` holds after test.sh. The verifier wrapper's exit
+    record is added when the wrapper ran to its end: ``test_elapsed`` is how long the run took inside
+    the container. A provider timeout, or ``wrapper_ran=False`` (no ``timeout`` or ``bash`` in the
+    image), leaves no record. The container side: a command runs as the exec's ``user``, else as the
+    image's default user; ``spec_env`` is the environment the sandbox was created with, and the
+    ``unset``/``export``/``cd`` prefix the server puts before a Dockerfile ``RUN`` line is applied to
+    it, so each exec's record carries under ``seen`` the command, environment, user and directory the
+    container would run. Directories exist only once something made them (``dirs`` maps each to its
+    owner; a non-root user can only create under its own directories, and ``cd`` into a missing one
+    fails), and ``passwd`` is the image's uid-to-name table.
     """
 
     verifier_files: dict[str, str] = field(default_factory=lambda: {"reward.txt": "1\n"})
-    test_result: SandboxExecResult = SandboxExecResult(stdout="", stderr="", return_code=0)
+    test_result: SandboxExecResult = OK
     test_elapsed: int = 1
     wrapper_ran: bool = True
     execs: list[dict] = field(default_factory=list)
     uploads: list[tuple[Path, str]] = field(default_factory=list)
     uploaded_archives: list[bytes] = field(default_factory=list)
     stopped: bool = False
+    spec_env: dict[str, str] = field(default_factory=dict)
+    image_user: str = "root"
+    dirs: dict[str, str] = field(default_factory=lambda: {"/": "root", "/tmp": "root", "/home": "root"})
+    passwd: dict[str, str] = field(default_factory=lambda: {"0": "root", "1000": "agent"})
+
+    def run(self, fragment: str) -> dict:
+        """The record of the one exec whose command, prefix aside, holds ``fragment``."""
+        (record,) = [c for c in self.execs if c.get("seen") and fragment in c["seen"]["command"]]
+        return record
+
+    def created_in(self, workdir: str | None) -> None:
+        """What a provider does with the spec's workdir: the directory exists, root-owned, before anything runs."""
+        if workdir is not None:
+            self._mkdir(workdir, "root")
+
+    def _mkdir(self, path: str, user: str) -> SandboxExecResult:
+        if path in self.dirs:
+            return OK
+        parent = posixpath.dirname(path)
+        while parent not in self.dirs:
+            parent = posixpath.dirname(parent)
+        if user.split(":")[0] not in ("root", "0") and self.dirs[parent] != user:
+            return _fails(f"mkdir: cannot create directory '{path}': Permission denied")
+        while path not in self.dirs:
+            self.dirs[path] = user
+            path = posixpath.dirname(path)
+        return OK
 
     async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
-        self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user})
+        record = {"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user, "seen": None}
+        self.execs.append(record)
         if "test.sh" in command:
             if self.wrapper_ran and self.test_result.error_type != "timeout":
                 start = 1_700_000_000
@@ -115,7 +193,43 @@ class FakeSandbox:
         if command == "pwd":
             # The image's own WORKDIR, asked for when a task declares none.
             return SandboxExecResult(stdout="/app\n", stderr="", return_code=0)
-        return SandboxExecResult(stdout="", stderr="", return_code=0)
+        who = str(user) if user is not None else self.image_user
+        if match := re.fullmatch(r"getent passwd (\S+) \| cut -d: -f1", command):
+            name = self.passwd.get(shlex.split(match.group(1))[0], "")
+            return SandboxExecResult(stdout=f"{name}\n" if name else "", stderr="", return_code=0)
+        if match := re.fullmatch(r"test -d (\S+) \|\| \(mkdir -p \1 && chown (\S+) \1\)", command):
+            path, owner = shlex.split(match.group(1))[0], shlex.split(match.group(2))[0]
+            if path in self.dirs:
+                return OK
+            result = self._mkdir(path, who)
+            if result.return_code == 0:
+                self.dirs[path] = owner
+            return result
+        if match := re.fullmatch(r"mkdir -p (\S+)(?: && chown (\S+) \1)?", command):
+            path = shlex.split(match.group(1))[0]
+            result = self._mkdir(path, who)
+            if result.return_code == 0 and match.group(2):
+                self.dirs[path] = shlex.split(match.group(2))[0]
+            return result
+        # Anything else runs as a shell line: the server's `unset`/`export`/`cd` prefix shapes what the
+        # command itself sees.
+        statements = command.split("; ")
+        seen_env, seen_cwd = dict(self.spec_env), cwd
+        while statements and statements[0].startswith(("unset ", "export ")):
+            words = shlex.split(statements.pop(0))
+            if words[0] == "unset":
+                seen_env.pop(words[1], None)
+            else:
+                key, _, value = words[1].partition("=")
+                seen_env[key] = value
+        if statements and statements[0].startswith("cd ") and statements[0].endswith(" || exit 1"):
+            seen_cwd = shlex.split(statements.pop(0))[1]
+            if seen_cwd not in self.dirs:
+                return _fails(f"cd: {seen_cwd}: No such file or directory")
+        record["seen"] = {"command": "; ".join(statements), "env": seen_env, "user": who, "cwd": seen_cwd}
+        # Who owned the directory the command ran in at that moment (a build step fails there otherwise).
+        record["cwd_owner"] = self.dirs.get(seen_cwd)
+        return OK
 
     async def upload(self, local_path, remote_path):
         self.uploads.append((Path(local_path), remote_path))
@@ -237,10 +351,11 @@ def make_server(
     *,
     toml: str = TASK_TOML,
     dockerfile: str = "FROM ubuntu:24.04\nWORKDIR /app",
+    image_config: dict | None = None,
     **config_overrides,
 ):
     folder = tmp_path / "datasets" / "ds"
-    task = load_task(write_task(folder / "hello", toml=toml, dockerfile=dockerfile))
+    task = load_task(write_task(folder / "hello", toml=toml, dockerfile=dockerfile, image_config=image_config))
     config = HarborEnvironmentServerConfig(
         host="0.0.0.0",
         port=8080,
@@ -258,6 +373,7 @@ def make_server(
 
     async def create(task, workdir, *, episode_key=None):
         created.append((task.task_id, workdir))
+        sandbox.created_in(workdir)
         return sandbox
 
     monkeypatch.setattr(server, "_create_sandbox", create)
@@ -580,7 +696,7 @@ class TestSeedWorkdirAndResources:
     async def test_root_workdir_is_neither_created_nor_handed_over(self, tmp_path, monkeypatch):
         """An image whose WORKDIR is `/` with a user override: `/` keeps root's ownership."""
         server, task, _, _ = make_server(tmp_path, monkeypatch, dockerfile="FROM ubuntu:24.04\nUSER runner\n")
-        assert task.user == "runner" and task.workdir is None
+        assert task.user == "runner" and task.workdir in (None, "/")
 
         class RootPwdSandbox(FakeSandbox):
             async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
@@ -701,6 +817,613 @@ class TestAgentStage:
         assert sandbox.stopped and not server._sandboxes
 
 
+OVERLAY_DOCKERFILE = """\
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y curl
+WORKDIR /app
+ENV PATH="/opt/tools/bin:$PATH" MSG="hi there"
+RUN mkdir -p /opt/tools/bin && echo ok > ready.txt
+USER agent
+RUN echo "as agent" > /tmp/who
+ENTRYPOINT []
+"""
+
+HEALTHCHECK_TOML = (
+    TASK_TOML
+    + """
+[environment.healthcheck]
+command = "test -f /app/ready.txt"
+interval_sec = 0.01
+start_interval_sec = 0.01
+timeout_sec = 5.0
+retries = 3
+"""
+)
+
+
+@dataclass
+class OverlaySandbox(FakeSandbox):
+    """Fails the RUN line whose command holds ``failing`` with the given result."""
+
+    failing: str | None = None
+    failure: SandboxExecResult = SandboxExecResult(
+        stdout="line 1\nline 2\n", stderr="E: no package\n", return_code=100
+    )
+    spec: SandboxSpec | None = None
+
+    async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        result = await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+        seen = self.execs[-1]["seen"]
+        if self.failing and seen and self.failing in seen["command"]:
+            return self.failure
+        return result
+
+
+SEPARATE_IN_TASK_IMAGE_TOML = TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+
+
+class TestOverlay:
+    def overlay_server(
+        self, tmp_path, monkeypatch, *, dockerfile=OVERLAY_DOCKERFILE, toml=TASK_TOML, sandbox=None, image_config=None
+    ):
+        sandbox = sandbox or OverlaySandbox()
+        server, task, _, created = make_server(
+            tmp_path, monkeypatch, sandbox, dockerfile=dockerfile, image_config=image_config
+        )
+        (task.path / "task.toml").write_text(toml)
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        monkeypatch.setattr(
+            "environment_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+
+        async def create(task, workdir, *, episode_key=None):
+            # The sandbox starts with the spec's environment, as the provider's container would.
+            sandbox.spec = server._sandbox_spec(task, workdir)
+            sandbox.spec_env = dict(sandbox.spec.env)
+            sandbox.created_in(workdir)
+            created.append((task.task_id, workdir))
+            return sandbox
+
+        monkeypatch.setattr(server, "_create_sandbox", create)
+        return server, task, sandbox, created
+
+    def test_shell_command_exports_literal_values_and_only_enters_the_workdir(self):
+        step = OverlayRun(
+            command="make all", workdir="/app src", env={"PATH": "/opt/bin:/usr/bin", "Q": 'say "hi" `x` $NOT'}
+        )
+        # Values are already resolved: they are quoted so nothing expands again, `$NOT` included.
+        assert overlay_shell_command(step) == (
+            "export PATH=/opt/bin:/usr/bin; export Q='say \"hi\" `x` $NOT'; cd '/app src' || exit 1; make all"
+        )
+        # Keys the sandbox was created with that this step does not have yet are unset first.
+        assert overlay_shell_command(step, {"PATH": "/x", "LATE": "1", "ZED": "2"}) == (
+            "unset LATE; unset ZED; export PATH=/opt/bin:/usr/bin; export Q='say \"hi\" `x` $NOT'; "
+            "cd '/app src' || exit 1; make all"
+        )
+        assert overlay_shell_command(OverlayRun(command="true")) == "cd / || exit 1; true"
+
+    def test_workdir_command_creates_as_root_and_hands_the_directory_to_the_user(self):
+        assert overlay_workdir_command("/app", None) == "mkdir -p /app"
+        assert overlay_workdir_command("/app", "root") == overlay_workdir_command("/app", "0") == "mkdir -p /app"
+        # root with a group of its own is not plain root: the directory gets that group, as in a build.
+        assert overlay_workdir_command("/app", "0:0") == "test -d /app || (mkdir -p /app && chown 0:0 /app)"
+        assert overlay_workdir_command("/home/agent/w", "agent") == (
+            "test -d /home/agent/w || (mkdir -p /home/agent/w && chown agent /home/agent/w)"
+        )
+        assert overlay_workdir_command("/a b", "agent:staff") == (
+            "test -d '/a b' || (mkdir -p '/a b' && chown agent:staff '/a b')"
+        )
+
+    async def test_run_lines_see_the_environment_directory_and_user_of_their_point_in_the_dockerfile(
+        self, tmp_path, monkeypatch
+    ):
+        server, task, sandbox, created = self.overlay_server(tmp_path, monkeypatch, toml=HEALTHCHECK_TOML)
+        assert len(task.overlay) == 3 and task.user == "agent"
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        # An overlay task's sandbox starts without the task workdir: the overlay's WORKDIR step makes it.
+        assert created == [("hello", None)]
+        # The sandbox is created with the Dockerfile's final environment, resolved: no live `$` reaches the provider.
+        assert sandbox.spec.env == {"PATH": f"/opt/tools/bin:{IMAGE_PATH}", "MSG": "hi there"}
+        assert not any("$" in value for value in sandbox.spec.env.values())
+        first = sandbox.run("apt-get update")
+        second = sandbox.run("echo ok > ready.txt")
+        third = sandbox.run("as agent")
+        # The line before `ENV PATH=...` sees the image's PATH and no MSG; the lines after see the extended PATH.
+        extended = {"PATH": f"/opt/tools/bin:{IMAGE_PATH}", "MSG": "hi there"}
+        assert first["seen"] == {
+            "command": "apt-get update && apt-get install -y curl",
+            "env": {"PATH": IMAGE_PATH},
+            "user": "root",
+            "cwd": "/",
+        }
+        assert second["seen"] == {
+            "command": "mkdir -p /opt/tools/bin && echo ok > ready.txt",
+            "env": extended,
+            "user": "root",
+            "cwd": "/app",
+        }
+        assert third["seen"] == {
+            "command": 'echo "as agent" > /tmp/who',
+            "env": extended,
+            "user": "agent",
+            "cwd": "/app",
+        }
+        # Lines before `USER agent` run as root, which is the image's own default user, so without an override
+        # (every provider supports the plain exec path); after it, as agent.
+        assert task.sandbox_user is None
+        assert [c["user"] for c in (first, second, third)] == [None, None, "agent"]
+        assert all(c["cwd"] == "/" and c["env"] is None for c in (first, second, third))
+        commands = [c["command"] for c in sandbox.execs]
+        # /app is made as root when the first RUN after `WORKDIR /app` comes up, once, then only entered.
+        assert commands[:4] == [first["command"], "mkdir -p /app", second["command"], third["command"]]
+        assert first["command"] == f"unset MSG; export PATH={IMAGE_PATH}; cd / || exit 1; {first['seen']['command']}"
+        assert sandbox.execs[1]["user"] is None and commands.count("mkdir -p /app") == 1
+        # The overlay shares the task's build budget: the first line sees all of it, later ones what is left.
+        assert first["timeout_s"] == pytest.approx(task.config.environment.build_timeout_sec, abs=1)
+        assert second["timeout_s"] <= first["timeout_s"] and third["timeout_s"] <= second["timeout_s"]
+        # Only then does Gym prepare the agent's workdir, poll the healthcheck and hand the sandbox over.
+        assert commands[4] == "mkdir -p /app && chown agent /app" and sandbox.dirs["/app"] == "agent"
+        assert commands.index("test -f /app/ready.txt") > commands.index(third["command"])
+        # The harness got its session only after all of it.
+        assert server.server_client.seed_bodies()
+
+    async def test_root_image_without_user_keeps_the_plain_exec_path(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile="FROM img\nWORKDIR /app\nRUN true\nRUN false\n"
+        )
+        assert (await run_episode(server, task)).failure is None
+        prepare, *runs = sandbox.execs[:3]
+        assert prepare["command"] == "mkdir -p /app"
+        # The image's own PATH is exported again, harmlessly: a step exports its whole resolved environment.
+        assert [c["command"] for c in runs] == [
+            f"export PATH={IMAGE_PATH}; cd /app || exit 1; true",
+            f"export PATH={IMAGE_PATH}; cd /app || exit 1; false",
+        ]
+        assert [c["seen"]["cwd"] for c in runs] == ["/app", "/app"]
+        # No USER anywhere: root is the image's default user, so no override is needed (every provider supports this).
+        assert [c["user"] for c in (prepare, *runs)] == [None, None, None]
+
+    async def test_workdir_after_user_is_made_as_root_and_owned_by_the_user(self, tmp_path, monkeypatch):
+        # The fake enforces what a container would: a non-root user cannot create under a root-owned directory.
+        assert OverlaySandbox()._mkdir("/home/agent/work", "agent").return_code == 1
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile="FROM img\nUSER agent\nWORKDIR /home/agent/work\nRUN touch made\n"
+        )
+        assert task.user == "agent" and task.workdir == "/home/agent/work"
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        prepare, run = sandbox.execs[:2]
+        assert prepare["command"] == (
+            "test -d /home/agent/work || (mkdir -p /home/agent/work && chown agent /home/agent/work)"
+        )
+        assert prepare["user"] is None  # the image's default user is root already
+        assert sandbox.dirs["/home/agent/work"] == "agent" and sandbox.dirs["/home/agent"] == "root"
+        assert run["seen"] == {
+            "command": "touch made",
+            "env": {"PATH": IMAGE_PATH},
+            "user": "agent",
+            "cwd": "/home/agent/work",
+        }
+
+    async def test_numeric_user_is_resolved_to_its_name_in_the_image(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile="FROM img\nUSER 1000\nWORKDIR /home/agent/work\nRUN id\nRUN id -g\n"
+        )
+        assert task.user == "1000"
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        lookup, prepare, first, second = sandbox.execs[:4]
+        assert lookup["command"] == "getent passwd 1000 | cut -d: -f1" and lookup["user"] is None
+        # The name serves the directory's owner and both lines; the lookup happens once.
+        assert prepare["command"].endswith("chown agent /home/agent/work)") and prepare["user"] is None
+        assert [c["seen"]["user"] for c in (first, second)] == ["agent", "agent"]
+        assert sum("getent" in c["command"] for c in sandbox.execs) == 1
+
+    async def test_root_steps_on_a_non_root_image_override_the_image_user(self, tmp_path, monkeypatch):
+        # jupyter/base-notebook style: the image runs as jovyan, the Dockerfile switches to root and stays there.
+        # The sandbox's default exec user is the image's, so every root step needs the override, including the
+        # WORKDIR directory and the agent's workdir, both made by root.
+        sandbox = OverlaySandbox(image_user="jovyan")
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path,
+            monkeypatch,
+            dockerfile="FROM img\nUSER root\nWORKDIR /opt/tools\nRUN apt-get install -y gcc\n",
+            sandbox=sandbox,
+            image_config={"Env": [f"PATH={IMAGE_PATH}"], "User": "jovyan"},
+        )
+        assert task.user == "root" and task.sandbox_user == "jovyan"
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        # The overlay's WORKDIR step and the agent workdir preparation both create it, as root.
+        assert [c["user"] for c in sandbox.execs if "mkdir -p /opt/tools" in c["command"]] == ["root", "root"]
+        run = sandbox.run("apt-get install")
+        assert run["user"] == "root" and run["seen"]["user"] == "root" and run["seen"]["cwd"] == "/opt/tools"
+        assert sandbox.dirs["/opt/tools"] == "root"
+
+    async def test_steps_on_a_non_root_image_without_a_user_line_run_as_the_image_user(self, tmp_path, monkeypatch):
+        sandbox = OverlaySandbox(image_user="jovyan")
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path,
+            monkeypatch,
+            dockerfile="FROM img\nWORKDIR /home/jovyan/work\nRUN touch made\n",
+            sandbox=sandbox,
+            image_config={"Env": [f"PATH={IMAGE_PATH}"], "User": "jovyan"},
+        )
+        assert task.user == "jovyan" and task.sandbox_user == "jovyan"
+        sandbox.dirs["/home/jovyan"] = "jovyan"
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        prepare, run = sandbox.execs[:2]
+        # The directory is still made as root (with the override) and handed to the image user; the line runs
+        # as that user with no override, as it would in a build.
+        assert prepare["user"] == "root" and prepare["command"].endswith("chown jovyan /home/jovyan/work)")
+        assert run["user"] == "jovyan" and run["seen"]["user"] == "jovyan"
+        assert sandbox.dirs["/home/jovyan/work"] == "jovyan"
+
+    async def test_a_numeric_user_without_a_passwd_entry_is_passed_through_as_a_uid(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile="FROM img\nUSER 4242\nRUN id\n"
+        )
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        lookup, run = sandbox.execs[:2]
+        # The uid goes to the exec as a number: Docker's --user and OpenSandbox's uid take it, where the string
+        # "4242" would be looked up as an account name by the su-backed providers and fail.
+        assert lookup["command"] == "getent passwd 4242 | cut -d: -f1"
+        assert run["user"] == 4242 and isinstance(run["user"], int) and run["seen"]["user"] == "4242"
+        # A uid:gid pair stays as written: only Docker's --user takes the pair.
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile="FROM img\nUSER 4242:4242\nRUN id\n"
+        )
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        assert sandbox.execs[1]["user"] == "4242:4242"
+        # A provider that refuses the uid fails the line itself, with its message: the Dockerfile does not apply.
+        sandbox = OverlaySandbox(
+            failing="id", failure=SandboxExecResult(stdout="", stderr="unable to find user 4242\n", return_code=125)
+        )
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile="FROM img\nUSER 4242\nRUN id\n", sandbox=sandbox
+        )
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and response.failure.terminal
+        assert "RUN line 1/1 'id' exited 125" in response.failure.failure_reason
+        assert "unable to find user 4242" in response.failure.failure_reason and sandbox.stopped
+
+    @pytest.mark.parametrize("user", ["root:1234", "0:0"])
+    async def test_root_with_a_group_keeps_the_group_on_its_workdir_and_runs_the_line_as_root(
+        self, tmp_path, monkeypatch, user
+    ):
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile=f"FROM img\nUSER {user}\nWORKDIR /srv/data\nRUN id -g\n"
+        )
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        prepare, run = sandbox.execs[:2]
+        # The directory gets the group a build would give it; the line itself runs as plain root, since the
+        # su-backed providers (OpenSandbox, enroot, apptainer) reject "root:1234" or "0:0" as an account name.
+        assert prepare["command"] == f"test -d /srv/data || (mkdir -p /srv/data && chown {user} /srv/data)"
+        assert prepare["user"] is None and sandbox.dirs["/srv/data"] == user
+        assert run["user"] is None and run["seen"]["user"] == "root"
+        # On a non-root image the same line takes the root override, as every other root step does.
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path,
+            monkeypatch,
+            dockerfile=f"FROM img\nUSER {user}\nRUN id -g\n",
+            sandbox=OverlaySandbox(image_user="jovyan"),
+            image_config={"Env": [f"PATH={IMAGE_PATH}"], "User": "jovyan"},
+        )
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        assert sandbox.execs[0]["user"] == "root" and sandbox.execs[0]["seen"]["user"] == "root"
+
+    async def test_the_final_workdir_belongs_to_the_user_of_its_instruction(self, tmp_path, monkeypatch):
+        # node:20 style: USER node, then WORKDIR, then a RUN that writes there as node. A sandbox created with the
+        # task workdir already has it, root-owned, and the RUN line fails; the overlay must make it instead.
+        sandbox = OverlaySandbox(passwd={"0": "root", "1000": "node"})
+        sandbox.dirs["/home/node"] = "node"
+        server, task, sandbox, created = self.overlay_server(
+            tmp_path,
+            monkeypatch,
+            dockerfile="FROM node:20\nUSER node\nWORKDIR /home/node/app\nRUN npm init -y\n",
+            sandbox=sandbox,
+        )
+        assert task.user == "node" and task.workdir == "/home/node/app"
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        assert created == [("hello", None)]
+        run = sandbox.run("npm init")
+        assert run["seen"]["user"] == "node" and run["seen"]["cwd"] == "/home/node/app"
+        assert run["cwd_owner"] == "node", "the directory was root-owned when the RUN line ran"
+        prepare = next(c for c in sandbox.execs if c["command"].endswith("chown node /home/node/app)"))
+        assert sandbox.execs.index(prepare) < sandbox.execs.index(run)
+        assert server.server_client.seed_bodies()[0]["sandbox_access"]["workdir"] == "/home/node/app"
+
+    async def test_the_compose_main_service_of_an_overlay_task_starts_without_the_task_workdir_too(
+        self, tmp_path, monkeypatch
+    ):
+        # The same node:20 shape as a Compose task: the main service's spec must not name the task workdir
+        # either, or the provider creates it root-owned before the overlay's WORKDIR step can.
+        sandbox = OverlaySandbox(passwd={"0": "root", "1000": "node"})
+        sandbox.dirs["/home/node"] = "node"
+        server, task, _, _ = make_server(
+            tmp_path,
+            monkeypatch,
+            sandbox,
+            dockerfile="FROM node:20\nUSER node\nWORKDIR /home/node/app\nRUN npm init -y\n",
+        )
+        (task.path / "environment" / "docker-compose.yaml").write_text(COMPOSE_YAML)
+        (task.path.parent / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
+        write_image_config(task.path.parent, "node:20", Env=[f"PATH={IMAGE_PATH}"])
+        task = load_task(task.path)
+        assert task.needs_compose and task.overlay and task.workdir == "/home/node/app" and task.user == "node"
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        monkeypatch.setattr(
+            "environment_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        specs: dict[str, SandboxSpec] = {}
+
+        class CapturingCompose(FakeCompose):
+            def __init__(self, provider_config, path, *, service_specs, timeout_s):
+                super().__init__({"main": sandbox, "api": FakeSandbox(), "kafka": FakeSandbox()})
+                specs.update(service_specs)
+                # What a provider does with the spec's workdir: it exists, root-owned, before anything runs.
+                sandbox.created_in(service_specs["main"].workdir)
+
+            async def start(self):
+                pass
+
+        monkeypatch.setattr("environment_servers.harbor.app.AsyncSandboxCompose", CapturingCompose)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        # Neither main nor the sidecars derived from it start in the task workdir.
+        assert specs["main"].workdir is None and specs["api"].workdir is None
+        run = sandbox.run("npm init")
+        assert run["seen"]["user"] == "node" and run["seen"]["cwd"] == "/home/node/app"
+        assert run["cwd_owner"] == "node", "the directory was root-owned when the RUN line ran"
+        assert server.server_client.seed_bodies()[0]["sandbox_access"]["workdir"] == "/home/node/app"
+
+    async def test_every_workdir_instruction_is_created_in_order_even_without_a_run_after_it(
+        self, tmp_path, monkeypatch
+    ):
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path,
+            monkeypatch,
+            dockerfile="FROM img\nWORKDIR /tmp/a\nWORKDIR /\nRUN test -d /tmp/a\nUSER agent\nWORKDIR /home/agent/last\n",
+        )
+        assert [(w.path, w.user, w.before) for w in task.overlay_workdirs] == [
+            ("/tmp/a", None, 0),
+            ("/", None, 0),
+            ("/home/agent/last", "agent", 1),
+        ]
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        commands = [c["command"] for c in sandbox.execs]
+        run = sandbox.run("test -d /tmp/a")
+        # /tmp/a was made (as root, the user of its instruction) before the RUN line that checks it...
+        assert commands.index("mkdir -p /tmp/a") < sandbox.execs.index(run) and sandbox.dirs["/tmp/a"] == "root"
+        # ...and the WORKDIR after the last RUN line exists too, owned by agent, before the workdir preparation.
+        trailing = next(c for c in sandbox.execs if c["command"].endswith("chown agent /home/agent/last)"))
+        assert sandbox.execs.index(run) < sandbox.execs.index(trailing) and sandbox.dirs["/home/agent/last"] == "agent"
+        assert commands.index("mkdir -p /home/agent/last && chown agent /home/agent/last") > sandbox.execs.index(
+            trailing
+        )
+
+    @pytest.mark.skipif(shutil.which("bash") is None or shutil.which("sh") is None, reason="sh and bash are required")
+    def test_an_inherited_shell_runs_the_line_and_exec_form_bypasses_it(self):
+        pipefail = OverlayRun(command="false | true", shell=("/bin/bash", "-o", "pipefail", "-c"))
+        line = overlay_shell_command(pipefail)
+        assert line == "cd / || exit 1; exec /bin/bash -o pipefail -c 'false | true'"
+        # The build failed this line under bash -o pipefail; the provider's sh would have passed it.
+        assert subprocess.run(["sh", "-c", line]).returncode != 0
+        assert subprocess.run(["sh", "-c", overlay_shell_command(OverlayRun(command="false | true"))]).returncode == 0
+        exec_form = OverlayRun(command=shlex.join(["bash", "-lc", "echo hi"]), shell=None)
+        assert overlay_shell_command(exec_form) == "cd / || exit 1; exec bash -lc 'echo hi'"
+        assert subprocess.run(["sh", "-c", overlay_shell_command(exec_form)], capture_output=True).stdout == b"hi\n"
+
+    async def test_a_declared_image_built_from_a_user_line_gets_the_root_override(self, tmp_path, monkeypatch):
+        toml = TASK_TOML.replace("[environment]\n", '[environment]\ndocker_image = "org/app:1"\n')
+        server, task, sandbox, _ = make_server(
+            tmp_path, monkeypatch, FakeSandbox(image_user="app"), toml=toml, dockerfile="FROM python:3.12\nUSER app\n"
+        )
+        # The declared image runs as the Dockerfile's final USER, so root work needs the override.
+        assert task.image == "org/app:1" and task.sandbox_user == "app"
+        await _exec_as_root_user(sandbox, "true", configured_user=task.sandbox_user)
+        assert sandbox.execs[-1]["user"] == "root"
+
+    async def test_failing_run_is_a_terminal_task_error_with_the_end_of_its_output(self, tmp_path, monkeypatch):
+        stdout = "\n".join(f"line {number}" for number in range(1, 401)) + "\n"
+        sandbox = OverlaySandbox(
+            failing="apt-get install",
+            failure=SandboxExecResult(stdout=stdout, stderr="E: no package\n", return_code=100),
+        )
+        server, task, sandbox, _ = self.overlay_server(tmp_path, monkeypatch, sandbox=sandbox)
+
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert failure.stage == "seed" and failure.terminal
+        assert "Dockerfile overlay failed for 'hello'" in failure.failure_reason
+        assert "RUN line 1/3 'apt-get update && apt-get install -y curl' exited 100" in failure.failure_reason
+        # The tail keeps the end of a long log, where the error is, and drops the start.
+        assert "line 400\nE: no package" in failure.failure_reason and "line 1\nline 2\n" not in failure.failure_reason
+        # Nothing after the failing line ran, the sandbox is gone and the harness was never engaged.
+        assert len(sandbox.execs) == 1 and sandbox.stopped and not server._sandboxes
+        assert server.server_client.calls == []
+
+    async def test_provider_failure_during_a_run_is_retriable(self, tmp_path, monkeypatch):
+        sandbox = OverlaySandbox(
+            failing="apt-get install",
+            failure=SandboxExecResult(stdout=None, stderr="connection reset", return_code=-1, error_type="sandbox"),
+        )
+        server, task, sandbox, _ = self.overlay_server(tmp_path, monkeypatch, sandbox=sandbox)
+
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert failure.stage == "seed" and not failure.terminal
+        assert "Could not set up sandbox for 'hello'" in failure.failure_reason
+        assert (
+            "RUN line 1/3 'apt-get update && apt-get install -y curl' could not run in the sandbox: sandbox"
+            in failure.failure_reason
+        )
+        assert len(sandbox.execs) == 1 and sandbox.stopped
+        assert server.server_client.calls == []
+
+    async def test_timed_out_run_names_the_budget(self, tmp_path, monkeypatch):
+        sandbox = OverlaySandbox(
+            failing="echo ok", failure=SandboxExecResult(stdout="", stderr="", return_code=-1, error_type="timeout")
+        )
+        server, task, sandbox, _ = self.overlay_server(tmp_path, monkeypatch, sandbox=sandbox)
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and response.failure.terminal
+        assert "RUN line 2/3" in response.failure.failure_reason
+        assert "exceeded [environment].build_timeout_sec=600" in response.failure.failure_reason
+        assert sandbox.stopped
+
+    async def test_exhausted_budget_skips_the_remaining_lines(self, tmp_path, monkeypatch):
+        class SlowSandbox(OverlaySandbox):
+            async def exec(self, command, **kwargs):
+                await asyncio.sleep(0.05)  # longer than the whole build budget below
+                return await super().exec(command, **kwargs)
+
+        toml = TASK_TOML.replace("cpus = 1", "build_timeout_sec = 0.01\ncpus = 1")
+        server, task, sandbox, _ = self.overlay_server(tmp_path, monkeypatch, toml=toml, sandbox=SlowSandbox())
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and response.failure.terminal
+        assert "RUN line 2/3" in response.failure.failure_reason
+        assert "build_timeout_sec=0.01 is used up" in response.failure.failure_reason
+        assert len(sandbox.execs) == 1 and sandbox.stopped
+
+    def test_sandbox_ttls_stay_episode_sized_when_there_is_an_overlay(self, tmp_path, monkeypatch):
+        server, task, _, _ = self.overlay_server(tmp_path, monkeypatch, toml=SEPARATE_IN_TASK_IMAGE_TOML)
+        config, slack = task.config, server.config.sandbox_ttl_slack_s
+        assert config.environment.build_timeout_sec == 600 and task.overlay
+        agent_spec = server._sandbox_spec(task, "/app")
+        episode = server.config.default_episode_timeout_seconds + server.config.cleanup_timeout_seconds
+        # The agent sandbox lives for the environment's whole episode, which already covers the overlay.
+        assert agent_spec.ttl_s == episode + slack
+
+        specs = []
+
+        class RecordingSandbox:
+            def __init__(self, provider_config):
+                pass
+
+            async def start(self, spec):
+                specs.append(spec)
+
+        monkeypatch.setattr("environment_servers.harbor.app.AsyncSandbox", RecordingSandbox)
+        asyncio.run(server._create_verifier_sandbox(task))
+        (verifier_spec,) = specs
+        # The verifier gets the same episode-sized lifetime, overlay included: `timeout_sec + slack (+ build)`
+        # would not clear a provider's renew interval (TB4's 1800 s), which masks every separate-mode episode.
+        assert verifier_spec.ttl_s == agent_spec.ttl_s == episode + slack >= 1800 + config.verifier.timeout_sec
+        # The verifier runs in the task's own image: it gets the same resolved Dockerfile environment as the agent.
+        assert verifier_spec.image == task.image == "debian:bookworm-slim"
+        assert verifier_spec.env == agent_spec.env == {"PATH": f"/opt/tools/bin:{IMAGE_PATH}", "MSG": "hi there"}
+
+        # A pull-mode task has no overlay and the same lifetimes.
+        server, task, _, _ = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile="FROM img\nWORKDIR /app\n", toml=SEPARATE_IN_TASK_IMAGE_TOML
+        )
+        assert not task.overlay
+        assert server._sandbox_spec(task, "/app").ttl_s == episode + slack
+        specs.clear()
+        asyncio.run(server._create_verifier_sandbox(task))
+        assert specs[0].ttl_s == episode + slack
+
+    def separate_verifier(self, tmp_path, monkeypatch, *, toml=SEPARATE_IN_TASK_IMAGE_TOML, verifier=None):
+        server, task, agent, _ = self.overlay_server(tmp_path, monkeypatch, toml=toml)
+        verifier = verifier or OverlaySandbox()
+
+        async def create_verifier(task, *, episode_key=None):
+            verifier.spec_env = dict(
+                server._sandbox_spec(task, None, environment=task.config.verifier.environment).env
+            )
+            server._sandboxes[f"{episode_key}/verifier"] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        return server, task, agent, verifier
+
+    async def test_separate_verifier_in_the_task_image_gets_the_overlay(self, tmp_path, monkeypatch):
+        server, task, agent, verifier = self.separate_verifier(tmp_path, monkeypatch)
+        assert not task.config.is_shared_verifier and _verifier_image(task) == "debian:bookworm-slim"
+
+        result = (await run_episode(server, task)).result
+
+        assert result.reward == 1.0 and result.verifier_mode == "separate", result
+        assert result.mask_sample is False and result.failure_kind is None
+        verifier_commands = [c["command"] for c in verifier.execs]
+        # The same three lines, in the same state, before anything else touches the verifier's sandbox.
+        assert verifier.execs[0]["seen"]["command"] == "apt-get update && apt-get install -y curl"
+        assert verifier.run("apt-get update")["seen"]["env"] == {"PATH": IMAGE_PATH}
+        assert verifier.run("as agent")["seen"] == {
+            "command": 'echo "as agent" > /tmp/who',
+            "env": {"PATH": f"/opt/tools/bin:{IMAGE_PATH}", "MSG": "hi there"},
+            "user": "agent",
+            "cwd": "/app",
+        }
+        assert verifier_commands.index(verifier.run("as agent")["command"]) < next(
+            i for i, c in enumerate(verifier_commands) if "test.sh" in c
+        )
+        assert agent.stopped and verifier.stopped
+
+    async def test_separate_verifier_overlay_failure_masks_the_sample(self, tmp_path, monkeypatch):
+        verifier = OverlaySandbox(failing="apt-get install")
+        server, task, agent, verifier = self.separate_verifier(tmp_path, monkeypatch, verifier=verifier)
+
+        response = await run_episode(server, task)
+
+        # The rollout is complete; a verifier sandbox that cannot take the overlay must not discard it.
+        assert response.failure is None, response.failure
+        result = response.result
+        assert result.reward == 0.0 and result.mask_sample is True
+        assert result.failure_kind == OVERLAY_FAILED_KIND == "harbor:overlay_failed"
+        assert "Dockerfile overlay failed in the verifier sandbox" in result.failure_reason
+        assert "RUN line 1/3 'apt-get update && apt-get install -y curl' exited 100" in result.failure_reason
+        assert "E: no package" in result.failure_reason
+        assert not any("test.sh" in c["command"] for c in verifier.execs)
+        assert agent.stopped and verifier.stopped
+
+    async def test_separate_verifier_provider_failure_during_the_overlay_masks_the_sample(self, tmp_path, monkeypatch):
+        verifier = OverlaySandbox(
+            failing="apt-get install",
+            failure=SandboxExecResult(stdout=None, stderr="gone", return_code=-1, error_type="sandbox"),
+        )
+        server, task, _, verifier = self.separate_verifier(tmp_path, monkeypatch, verifier=verifier)
+        result = (await run_episode(server, task)).result
+        assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+        assert "could not run in the sandbox: sandbox" in result.failure_reason and verifier.stopped
+
+    async def test_prebuilt_verifier_image_gets_no_overlay(self, tmp_path, monkeypatch):
+        toml = TASK_TOML.replace(
+            "[verifier]\n",
+            '[verifier]\nenvironment_mode = "separate"\n\n[verifier.environment]\ndocker_image = "org/verifier:1"\n',
+        )
+        server, task, _, verifier = self.separate_verifier(tmp_path, monkeypatch, toml=toml)
+        assert _verifier_image(task) == "org/verifier:1"
+        assert (await run_episode(server, task)).result.reward == 1.0
+        assert not any("apt-get" in c["command"] for c in verifier.execs)
+        # Nor the agent image's Dockerfile environment.
+        assert verifier.spec_env == {}
+
+
 class TestVerify:
     async def verified(self, tmp_path, monkeypatch, sandbox=None, **kwargs):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch, sandbox, **kwargs)
@@ -751,13 +1474,15 @@ class TestVerify:
                     return SandboxExecResult(stdout="", stderr="chmod: Permission denied", return_code=1)
                 return result
 
+        # The recorded base image runs as `app`, as the NonRootSandbox models.
         server, task, sandbox, response = await self.verified(
             tmp_path,
             monkeypatch,
             NonRootSandbox(),
-            toml=TASK_TOML.replace("[environment]", '[environment]\ndocker_image = "nonroot:latest"'),
+            dockerfile="FROM ubuntu:24.04\nWORKDIR /app\nUSER app",
+            image_config={"Env": [f"PATH={IMAGE_PATH}"], "User": "app"},
         )
-        assert task.user is None
+        assert task.user == "app" and task.sandbox_user == "app"
         assert response.result.reward == 1.0 and response.result.failure_kind is None
         prepare = next(
             call for call in sandbox.execs if "chmod 777" in call["command"] and "/tests" in call["command"]
