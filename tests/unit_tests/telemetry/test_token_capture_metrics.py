@@ -70,6 +70,7 @@ def collected(monkeypatch):
         meter = provider.get_meter("test")
 
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", True)
     recorders._reset_for_testing()
     capture_metrics._reset_for_testing()
 
@@ -189,6 +190,30 @@ async def test_model_server_writes_are_timed_by_implementation(collected, tmp_pa
     assert outcomes[("lock_acquired", "exclusive")] >= 1
 
 
+def test_manifest_retire_and_delete_are_timed_at_the_route_and_in_the_thread(collected, tmp_path):
+    """The manifest fetch a training framework waits on: route time minus in-thread time is thread-pool queueing."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from nemo_gym.token_id_capture.control_routes import CONTROL_ROUTE_PREFIX, install_rollout_control_routes
+
+    app = FastAPI()
+    install_rollout_control_routes(app, FileLineageStore(tmp_path), auth_token="t")
+    headers = {"Authorization": "Bearer t"}
+    with TestClient(app) as client:
+        assert client.get(f"{CONTROL_ROUTE_PREFIX}/rollouts/r1/manifest", headers=headers).status_code == 200
+        for action in ("retire", "delete"):
+            response = client.post(
+                f"{CONTROL_ROUTE_PREFIX}/rollouts/{action}", json={"rollout_ids": ["r1"]}, headers=headers
+            )
+            assert response.status_code == 200
+
+    durations = _durations(collected)
+    for operation in ("ledger.manifest", "ledger.retire", "ledger.delete"):
+        assert durations[(operation, "FileLineageStore", "", "")] == 1
+        assert durations[(f"{operation}.in_thread", "FileLineageStore", "", "")] == 1
+
+
 @pytest.mark.asyncio
 async def test_a_failing_put_is_timed_as_an_error(collected):
     class _FailingSink:
@@ -224,6 +249,34 @@ async def test_a_cancelled_operation_is_labelled_cancelled(collected):
 async def _timed_wait(awaitable) -> None:
     with capture_metrics.timed("sink.put", implementation_name="TokenCaptureStore"):
         await awaitable
+
+
+@pytest.mark.asyncio
+async def test_a_failed_lookup_and_a_skipped_resolution_are_counted(collected, tmp_path):
+    class _Broken:
+        async def resolve(self, rollout_id, request_items):
+            raise RuntimeError("ledger unreadable")
+
+    context = CaptureContext(rollout_id="r1", model_call_id="c1", token_sink=None, lineage_store=_Broken())
+    token = set_token_sink(context)
+    try:
+        await resolve_parent(SEEDED_HISTORY)
+    finally:
+        reset_token_sink(token)
+
+    # A call committed without resolving its parent first.
+    context = CaptureContext(
+        rollout_id="r2", model_call_id="c1", token_sink=TokenCaptureStore(tmp_path), lineage_store=None
+    )
+    token = set_token_sink(context)
+    try:
+        await commit_entry(_entry("r2", "c1"))
+    finally:
+        reset_token_sink(token)
+
+    outcomes = _outcomes(collected)
+    assert outcomes[(f"parent_{ParentResolutionStatus.UNRESOLVED.value}", "lookup_error")] == 1
+    assert outcomes[(f"parent_{ParentResolutionStatus.UNRESOLVED.value}", "not_attempted")] == 1
 
 
 @pytest.mark.asyncio
@@ -347,9 +400,17 @@ def test_a_slow_operation_logs_once_per_interval(collected, monkeypatch, caplog)
     assert sum("Slow token-capture operation sink.put" in r.getMessage() for r in caplog.records) == 1
 
 
-def test_nothing_is_recorded_without_an_exporting_handle(monkeypatch):
-    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", None)
+@pytest.mark.parametrize("traces_only", [False, True])
+def test_nothing_is_recorded_without_a_metrics_exporter(monkeypatch, traces_only):
+    """A traces-only process exports spans but has no metrics exporter, so capture sites must stay idle."""
+
+    class _TracesOnly:
+        is_exporting = True
+
+    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _TracesOnly() if traces_only else None)
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", False)
     capture_metrics._reset_for_testing()
+    assert capture_metrics.timed("sink.put") is capture_metrics._NO_TIMER
     with capture_metrics.timed("sink.put") as timer:
         timer.tokens = 5
     capture_metrics.count("poisoned", "x")
@@ -376,6 +437,7 @@ MAX_RATIO_VS_NULLCONTEXT = 4.0
 def test_disabled_site_costs_about_an_empty_with_block(monkeypatch):
     """Ratio between two timings in the same process, never an absolute time."""
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", None)
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", False)
 
     def empty():
         with nullcontext():

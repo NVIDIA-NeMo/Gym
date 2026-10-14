@@ -72,6 +72,8 @@ def _load() -> bool:
     try:
         from nemo_gym.telemetry import token_capture_metrics as recorders_module
     except Exception:
+        # Permanent for this process: token-capture metrics stay off rather than retry the import per call.
+        logger.debug("Token-capture metrics are unavailable in this process", exc_info=True)
         _setup = False
         return False
     _setup, _recorders = setup_module, recorders_module
@@ -80,13 +82,15 @@ def _load() -> bool:
 
 
 def active() -> bool:
-    """Whether this process exports metrics. Cheap enough for every captured call."""
+    """Whether this process exports metrics. Cheap enough for every captured call.
+
+    A traces-only process exports but has no metrics exporter, so it records nothing here.
+    """
     if _setup is None and not _load():
         return False
     if _setup is False:
         return False
-    handle = _setup._TELEMETRY_HANDLE
-    return handle is not None and handle.is_exporting
+    return _setup.is_metrics_exporter_active()
 
 
 def implementation(component: Any) -> str:
@@ -173,7 +177,8 @@ def _record(operation: str, implementation_name: str, error: str, duration_ms: f
         if instruments is not None:
             instruments.record_operation(operation, implementation_name, error, duration_ms, tokens)
     except Exception:
-        pass
+        # Recording must never fail a capture operation.
+        logger.debug("Failed to record token-capture operation %s", operation, exc_info=True)
     if duration_ms >= SLOW_OPERATION_MS:
         now = time.monotonic()
         if now - _SLOW_LOGGED_AT.get(operation, -_SLOW_LOG_INTERVAL_S) >= _SLOW_LOG_INTERVAL_S:

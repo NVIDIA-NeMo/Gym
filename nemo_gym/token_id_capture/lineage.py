@@ -1072,11 +1072,12 @@ class FileLineageStore(IncrementalLineageStore):
         return await asyncio.to_thread(self._manifest, rollout_id)
 
     def _manifest(self, rollout_id: str) -> dict:
-        with self._locked(rollout_id):
-            rows = list(self._read(rollout_id))
-            if not rows and self._is_retired(rollout_id):
-                raise RolloutRetiredError(f"rollout {rollout_id} is retired")
-        return _manifest_from_rows(rollout_id, rows)
+        with capture_metrics.timed("ledger.manifest.in_thread", component=self):
+            with self._locked(rollout_id):
+                rows = list(self._read(rollout_id))
+                if not rows and self._is_retired(rollout_id):
+                    raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+            return _manifest_from_rows(rollout_id, rows)
 
     async def has_rows(self, rollout_id: str) -> bool:
         return await asyncio.to_thread(self._has_rows, rollout_id)
@@ -1093,6 +1094,10 @@ class FileLineageStore(IncrementalLineageStore):
         return await asyncio.to_thread(self._retire, rollout_ids)
 
     def _retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+        with capture_metrics.timed("ledger.retire.in_thread", component=self):
+            return self._retire_ledgers(rollout_ids)
+
+    def _retire_ledgers(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         from nemo_gym.token_id_capture.store import validate_rollout_ids
 
         rollout_ids = validate_rollout_ids(rollout_ids)
@@ -1114,7 +1119,8 @@ class FileLineageStore(IncrementalLineageStore):
     def _delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         from nemo_gym.token_id_capture.store import validate_rollout_ids
 
-        return self._remove(validate_rollout_ids(rollout_ids), unretire=True)
+        with capture_metrics.timed("ledger.delete.in_thread", component=self):
+            return self._remove(validate_rollout_ids(rollout_ids), unretire=True)
 
     def mark_started(self, rollout_id: str) -> None:
         """Record, for every server sharing this ledger, that a restored attempt has started.
