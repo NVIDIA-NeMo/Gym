@@ -130,15 +130,14 @@ harness implementations. Mutations verify missing, conflicting, and malformed
 evidence without prescribing which checks a real harness should pass.
 
 The [Trajectory Capability Matrix](/main/reference/trajectory-capabilities) is
-generated separately from fresh scripted harness runs. Its regeneration command
-requires passing runner, harness adapter, and checker unit tests at a specific
-Gym commit before replacing the table.
+updated automatically from scripted harness checks. It shows measured results
+at the linked Gym revision, independently of benchmark accuracy.
 
 ## Onboard a producer
 
 Enable `observability_enabled: true` and set `model_call_capture_dir` to a shared
 absolute directory. Route requests through Gym's correlated model URL and retain
-all attempts. See [Model-call Capture](/main/model-server/model-call-capture).
+all attempts. See [Model-Call Capture](/main/model-server/model-call-capture).
 
 Return `ng_agent_observations` with `AgentInvocation` and exact `ModelCallRef`
 keys (`model_call_id`, or unique `model_ref` plus `response_id`). Forward the

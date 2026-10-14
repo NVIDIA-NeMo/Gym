@@ -39,6 +39,7 @@ from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
+from nemo_gym._checkpoint.settings import CHECKPOINT_BLOCK
 from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, legacy_config_path_alias
 from nemo_gym.config_types import (
     AgentCompositionError,
@@ -183,6 +184,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     SKIP_VERIFICATION_REWARD_KEY_NAME,
     TELEMETRY_KEY_NAME,
     H2_PING_SIDECAR_KEY_NAME,
+    CHECKPOINT_BLOCK,
     ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
     ENVIRONMENT_SERVER_NAME_KEY_NAME,
     ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
@@ -262,6 +264,7 @@ ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 # An explicit capture id replaces the task and rollout derivation.
 # Set it when dispatches reuse task and rollout indices.
 # Otherwise two dispatches would share one capture key.
+# The suffix "-a<N>" is reserved for attempt-qualified ids, so a dataset row's id must not end with it.
 ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
