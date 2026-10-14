@@ -52,7 +52,7 @@ one, the task image (the agent's `/logs/artifacts` and `artifacts` entries are c
 sandbox first, sidecar hooks and artifacts included, each as the archive the agent's sandbox packed, so the
 verifier sees the modes the agent left). Compose environments start as
 a sandbox group when a `compose-images.json` with the sidecar images' recorded OCI configuration sits next to
-the task folders (or `compose_image_configs` points at one); on OpenSandbox the provider block also needs
+the task folders, written by `gym dataset fetch`; on OpenSandbox the provider block also needs
 `networking.enabled: true` (with `loopback_forwarding`) and `runtime_requirements.shm_size_metadata_key` (see
 [Compose tasks on OpenSandbox](#compose-tasks-on-opensandbox)); each service's working directory is created once its sandbox is up, as Docker creates a missing `working_dir` or `WORKDIR` at container create. `[environment.healthcheck]` is polled at seed.
 Tasks that declare GPUs run on the `gpu_sandbox_provider` block when one is set. The task's
@@ -163,6 +163,16 @@ Resource settings come from the task. `sandbox_resources_override`, `gpu_sandbox
 `request_gpu_type` and `verifier_grace_s` belong to later stack layers and are not configuration options
 in this PR.
 
+Every sandbox the server creates (the agent's, a Compose group's `main` service and a separate verifier's,
+sized by `[verifier.environment]`) is also told its CPU limit through the CPU-count hints `cpu_cap_env`
+derives from it: `OMP_NUM_THREADS`, `PYTHON_CPU_COUNT`, `PYTEST_XDIST_AUTO_NUM_WORKERS`, `GOMAXPROCS` and
+the other `CPU_CAP_ENV_VARS` in `nemo_gym/sandbox/utils.py`, each set to the limit's whole core count (an
+override moves them with the limit). They are always set, with no switch: on many clusters a sandbox sees
+the host's cores through `nproc` and `os.cpu_count()`, so build and test pools sized from them fan out far
+past a one or two CPU limit and thrash or get OOM-killed, and the hints are the portable cap. They are
+hints, not limits: the cgroup limit stays the provider's, and a variable the task declares itself, in
+`[environment].env`, in its image's `ENV` or in the verifier environment's `env`, wins on a key clash.
+
 Servers bind loopback (`127.0.0.1`) by default, the head server with its `/global_config_dict_yaml` endpoint
 included. A harness that calls the model server from inside the task sandbox (`calls_model_from_sandbox = True`
 on its agent class, or `sandbox_model_base_url` in its config) cannot reach loopback there, so
@@ -211,3 +221,24 @@ gym eval run environment_servers/harbor/data/tasks --agent hermes_agent --sandbo
 ```
 
 The loader generates the task mapping and dataset rows for that run.
+
+`harbor:<dataset>[@<version>]` resolves the Harbor registry and fetches the task folders into Gym's shared
+datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `./datasets`). `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`
+fetches a package-store dataset instead (for example `harbor:terminal-bench/terminal-bench@4.0.0`): every task
+package is downloaded by content hash into `<name>-<tag>/`, checked against Gym's task digest and recorded in
+`manifest.toml`. A local task folder, or a folder of task folders, works the same way.
+
+## Where settings live
+
+Four homes, one owner each. A setting sits on this server's config only if every dataset on the same
+deployment wants the same value; a unit test pins that list.
+
+| Home | File | Owner | Holds |
+|---|---|---|---|
+| Task | `task.toml` | task author | image, resources, timeouts, env, verifier, agent user (read-only once fetched) |
+| Dataset | `dataset.toml`, `[gym]` table | dataset author | `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`; `[gym.tasks."<id>".environment]` overrides in Harbor's own fields (`env` merges) |
+| Deployment | the `sandbox:` provider block | operator | image rewrites and registry credentials (`images`), root setup commands (`setup`), networking, shared-memory labels |
+| Run | run config | the run | provider selection, GPU routing, repeats, output paths, `sandbox_resources_override` for parity runs |
+
+`gym dataset init <name>` writes a dataset in this shape, and `gym dataset validate <folder>` with no extra
+config is the test that a dataset is self-contained.

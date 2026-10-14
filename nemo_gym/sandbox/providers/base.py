@@ -22,6 +22,12 @@ from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 
+# How long a provider may spend finding and deleting the sandbox a timed-out create left behind (one list
+# and one delete per orphan). A caller that puts its own deadline on a create leaves at least this much room
+# above the provider's budget, so the provider can report what it found before the caller gives up.
+ORPHAN_REAP_TIMEOUT_S = 60.0
+
+
 class SandboxStatus(str, Enum):
     """Provider-neutral sandbox lifecycle status."""
 
@@ -89,6 +95,35 @@ class SandboxResources:
             gpu=int(resources["gpu"]) if resources.get("gpu") is not None else None,
             gpu_type=str(resources["gpu_type"]) if resources.get("gpu_type") is not None else None,
         )
+
+
+# The resources a scheduler compares request against limit for; ``gpu_type`` is a selector, not a quantity.
+SCHEDULABLE_RESOURCE_KEYS = ("cpu", "memory_mib", "disk_gib", "gpu")
+
+
+def clamp_resource_requests(
+    requests: Mapping[str, Any] | SandboxResources,
+    limits: Mapping[str, Any] | SandboxResources,
+) -> tuple[dict[str, Any], dict[str, tuple[Any, Any]]]:
+    """Cap each scheduling request at the limit the spec declares for the same key.
+
+    Kubernetes never schedules a pod whose request exceeds its limit, and OpenSandbox reports such a
+    sandbox only as "pending allocation", so a request above a task's declared limit must not reach the
+    create call. Returns the requests with the offending keys set to their limit, and
+    ``{key: (request, limit)}`` for the keys that changed so the caller can log a warning naming them.
+    Keys the limits do not declare pass through untouched.
+    """
+    requested = requests if isinstance(requests, SandboxResources) else SandboxResources.from_mapping(requests)
+    limited = limits if isinstance(limits, SandboxResources) else SandboxResources.from_mapping(limits)
+    clamped = dict(requests.__dict__ if isinstance(requests, SandboxResources) else requests)
+    changed: dict[str, tuple[Any, Any]] = {}
+    for key in SCHEDULABLE_RESOURCE_KEYS:
+        request, limit = getattr(requested, key), getattr(limited, key)
+        if request is None or limit is None or request <= limit:
+            continue
+        changed[key] = (clamped[key], limit)
+        clamped[key] = limit
+    return clamped, changed
 
 
 @dataclass(frozen=True)

@@ -14,8 +14,10 @@ this module's globals, which is where tests patch them.
 
 import asyncio
 import json
+import logging
 import math
 import tempfile
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Awaitable
@@ -25,17 +27,23 @@ import yaml
 from environment_servers.harbor.session import resolve_env_templates
 from environment_servers.harbor.verifier import _verifier_image, _verifier_key
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxSpec, clamp_resource_requests
 from nemo_gym.sandbox.compose_config import adapt_non_root_sidecars, opensandbox_shm_labels, resolve_compose
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.models import HarborEnvironment
 
 
-# Added to `sandbox_ready_timeout_s` for the seed's own deadline on the create: room for the provider to
-# report and clean up a create that hit its (equal) budget before the seed gives up on it.
-SEED_CREATE_GRACE_S = 30.0
+LOGGER = logging.getLogger(__name__)
+
+# Added to `sandbox_ready_timeout_s` for this server's own deadline on a create. The provider caps its create
+# request at the ready timeout, so a pod that never schedules fails the request by then; the grace is room for
+# the provider to find and delete what that create left behind (its orphan-reap allowance) and report what it
+# found, before this server gives up on it. A provider attempt budget configured above the ready timeout
+# (`create.timeout_s`) is not covered: the deadline here is this server's promise.
+SEED_CREATE_GRACE_S = ORPHAN_REAP_TIMEOUT_S + 15.0
 
 
 class HarborSeedTimeoutError(RuntimeError):
@@ -110,27 +118,49 @@ class HarborSandboxMixin:
         resources = _sandbox_resources(environment, request_gpu_type=self.config.request_gpu_type) | (
             self.config.sandbox_resources_override or {}
         )
-        env = (
-            dict(self.config.sandbox_env)
-            | self.config.sandbox_env_by_task.get(task.task_id, {})
-            | resolve_env_templates(task_env)
-        )
-        if self.config.derive_cpu_env:
-            env = cpu_cap_env(resources.get("cpu")) | env
-        provider_options = dict(self.config.sandbox_provider_options)
-        resolved_image = self._rewrite_image(image or task.image)
-        if resolved_image != (image or task.image) and self.config.image_rewrite_auth:
-            provider_options["image_auth"] = dict(self.config.image_rewrite_auth)
+        # Every sandbox the server creates (the agent's, a Compose group's `main`, which starts from this spec,
+        # and a separate verifier's, from its own environment) tells its processes the CPU limit through the
+        # CPU-count hints (`OMP_NUM_THREADS`, `PYTHON_CPU_COUNT` and the other `CPU_CAP_ENV_VARS`), always:
+        # many clusters show a sandbox the host's cores, so pools sized from `nproc` fan out past a small
+        # limit. They are hints, the cgroup limit stays the provider's, and whatever the task declares
+        # (`[environment.env]`, the image's `ENV`, the verifier environment's `env`) wins on a key clash.
+        env = cpu_cap_env(resources.get("cpu")) | resolve_env_templates(task_env)
         return SandboxSpec(
-            image=resolved_image,
+            image=image or task.image,
             ttl_s=ttl,
             ready_timeout_s=self.config.sandbox_ready_timeout_s,
             workdir=workdir,
             env=env,
             metadata=metadata,
             resources=resources,
-            provider_options=provider_options,
+            provider_options=self._provider_options_within(resources, task, role),
         )
+
+    def _provider_options_within(self, resources: Mapping[str, Any], task: HarborTask, role: str) -> dict[str, Any]:
+        """The configured provider options, with scheduling requests capped at the task's declared limits.
+
+        A deployment's ``resource_requests`` (say ``disk_gib: 10`` for every sandbox) can exceed what a
+        task declares (``storage = "4G"``); Kubernetes never schedules that pod and the provider would only
+        see it pending. The provider clamps too; the warning here names the task.
+        """
+        options = dict(self.config.sandbox_provider_options)
+        requests = options.get("resource_requests")
+        if not isinstance(requests, Mapping):
+            return options
+        clamped, changed = clamp_resource_requests(requests, resources)
+        for key, (request, limit) in changed.items():
+            LOGGER.warning(
+                "sandbox_provider_options.resource_requests.%s=%s exceeds the %s limit %s task %s declares; "
+                "clamping the request to the limit so the sandbox can be scheduled",
+                key,
+                request,
+                key,
+                limit,
+                f"{task.task_id} ({role})",
+            )
+        if changed:
+            options["resource_requests"] = clamped
+        return options
 
     def _provider_ref(self, task: HarborTask) -> str:
         """Which top-level sandbox block runs this task: the GPU one when the task declares GPUs."""
@@ -171,16 +201,14 @@ class HarborSandboxMixin:
             ) from exc
 
     def _compose_image_configs(self, task: HarborTask) -> dict[str, Any]:
-        path = self.config.compose_image_configs
-        if path is None:
-            candidate = task.path.parent / COMPOSE_IMAGES_FILE
-            if not candidate.is_file():
-                raise RuntimeError(
-                    f"Compose task {task.task_id!r} needs recorded image configurations: set "
-                    f"`compose_image_configs` or place compose-images.json at {candidate}"
-                )
-            path = candidate
-        return json.loads(Path(path).read_text())
+        """The image configurations `gym dataset fetch` recorded next to the task folders."""
+        path = task.path.parent / COMPOSE_IMAGES_FILE
+        if not path.is_file():
+            raise RuntimeError(
+                f"Compose task {task.task_id!r} needs recorded image configurations at {path}; "
+                "prepare the dataset again to record them"
+            )
+        return json.loads(path.read_text())
 
     def _compose_document(self, task: HarborTask) -> dict[str, Any]:
         """The published overlay resolved against recorded image metadata, ready for the Compose adapter."""
@@ -267,6 +295,3 @@ class HarborSandboxMixin:
             self._sandboxes[_verifier_key(episode_key)] = sandbox
         await self._within_ready_deadline(sandbox.start(spec))
         return sandbox
-
-    def _rewrite_image(self, image: str | None) -> str | None:
-        return self.config.image_rewrites.get(image, image) if image else image

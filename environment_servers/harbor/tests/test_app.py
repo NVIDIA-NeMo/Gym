@@ -3,6 +3,7 @@
 
 import asyncio
 import errno
+import inspect
 import io
 import json
 import posixpath
@@ -19,6 +20,10 @@ from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from yarl import URL
 
+import nemo_gym.sandbox.providers.base as sandbox_base
+from environment_servers.harbor.app import (
+    HarborEnvironmentServerConfig,
+)
 from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S
 from environment_servers.harbor.tests.conftest import (
     COMPOSE_YAML,
@@ -43,8 +48,10 @@ from environment_servers.harbor.verifier import (
     select_reward,
     verifier_command,
 )
+from nemo_gym.base_environment_server import BaseEnvironmentServerConfig
 from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS, cpu_cap_env
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor import load_task
 from nemo_gym.tasks.harbor.models import HarborEnvironment
@@ -224,6 +231,21 @@ class TestEpisode:
         assert fragment in failure.failure_reason
         assert created == [] and server.server_client.calls == []
 
+    async def test_dataset_toml_edit_after_materialization_is_refused(self, tmp_path, monkeypatch):
+        server, task, _, created = make_server(tmp_path, monkeypatch)
+        dataset_file = task.path.parent / "dataset.toml"
+        dataset_file.write_text("[gym.defaults]\ntimeout_multiplier = 2.0\n")
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        # The rows were materialized with the multiplier at 2; the file is edited before the server runs.
+        dataset_file.write_text("[gym.defaults]\ntimeout_multiplier = 4.0\n")
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and response.failure.terminal
+        assert "changed since materialization" in response.failure.failure_reason and created == []
+        # Restored, the same mapping serves the task again.
+        dataset_file.write_text("[gym.defaults]\ntimeout_multiplier = 2.0\n")
+        assert (await run_episode(server, task, rollout="r2")).failure is None
+
     async def test_changed_folder_is_a_terminal_seed_failure(self, tmp_path, monkeypatch):
         server, task, _, created = make_server(tmp_path, monkeypatch)
         (task.path / "tests" / "test.sh").write_text("#!/bin/bash\necho 0 > /logs/verifier/reward.txt\n")
@@ -292,48 +314,29 @@ class TestEpisode:
         assert spec.metadata["nemo_gym_environment_server"] == "harbor_environment_server"
 
 
-class TestSetupCommands:
-    async def test_setup_commands_run_as_root_after_workdir(self, tmp_path, monkeypatch):
-        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
-        server.config.sandbox_setup_commands = ["sed -i s/a/b/ /etc/apt/sources.list", "apt-get update || true"]
-        response = await run_episode(server, task)
-        assert response.failure is None, response.failure
-        commands = [call["command"] for call in sandbox.execs]
-        assert commands[0] == "mkdir -p /app"
-        # The /logs folders come right after the workdir; operator setup commands follow, as root.
-        assert commands[2:4] == server.config.sandbox_setup_commands
-        assert all(call["user"] == "root" for call in sandbox.execs[2:4])
-        # The harness only gets its session once the sandbox is fully set up.
-        assert server.server_client.calls
-
-    async def test_failing_setup_command_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
-        class Failing(FakeSandbox):
-            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
-                if command == "false":
-                    return SandboxExecResult(stdout="", stderr="nope", return_code=1)
-                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
-
-        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, Failing())
-        server.config.sandbox_setup_commands = ["false"]
-        response = await run_episode(server, task)
-        assert response.failure.stage == "seed" and not response.failure.terminal
-        assert "nope" in response.failure.failure_reason and sandbox.stopped
-        assert server.server_client.calls == []
-
-
 class TestSeedWorkdirAndResources:
     async def test_seed_creates_the_logs_folders_and_per_task_env(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
-        server.config.sandbox_env_by_task = {"hello": {"CIRCLE_NODE_TOTAL": "3"}, "other": {"X": "1"}}
+        # Per-task environment comes from the dataset's own file, applied by the loader; the server sees plain tasks.
+        (task.path.parent / "dataset.toml").write_text(
+            '[gym.tasks."hello".environment]\nenv = { CIRCLE_NODE_TOTAL = "3" }\n[gym.tasks."other".environment]\nenv = { X = "1" }\n'
+        )
+        task = load_task(task.path)
+        # The applied dataset slice is part of the digest the rows and the mapping carry.
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
         monkeypatch.setattr(
             "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
         )
+        seeded: list = []
+        server.server_client.turn_hooks.append(lambda: seeded.append(server._sessions["r1"].task))
         assert (await run_episode(server, task)).failure is None
         commands = [c["command"] for c in sandbox.execs]
         assert commands[0] == "mkdir -p /app"
         logs = next(c for c in sandbox.execs if "/logs/artifacts" in c["command"])
         assert "chmod 777 /logs/agent /logs/verifier /logs/artifacts" in logs["command"] and logs["user"] == "root"
-        spec = server._sandbox_spec(task, "/app")
+        # The server resolves the task from its own snapshot; the dataset's settings must reach that copy.
+        assert seeded[0].path != task.path and seeded[0].env["CIRCLE_NODE_TOTAL"] == "3" and "X" not in seeded[0].env
+        spec = server._sandbox_spec(seeded[0], "/app")
         assert spec.env["CIRCLE_NODE_TOTAL"] == "3" and "X" not in spec.env
 
     async def test_image_workdir_used_when_task_sets_none(self, tmp_path, monkeypatch):
@@ -389,18 +392,20 @@ class TestSeedWorkdirAndResources:
         assert await server._prepare_workdir(named, task, "/work") == "/work"
         assert workdir_commands(named) == ["mkdir -p /work && chown runner /work"]
 
-    def test_resources_override_and_cpu_env(self, tmp_path, monkeypatch):
+    def test_resources_override_moves_the_cpu_hints_with_the_limit(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         monkeypatch.setattr(
             "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
         )
         spec = server._sandbox_spec(task, "/app")
-        assert spec.resources.cpu == 1.0 and spec.env["OMP_NUM_THREADS"] == "1"
+        # The sandbox gets the task's [environment].env over the CPU-count hints sized from its limit, nothing else.
+        assert spec.resources.cpu == 1.0 and spec.env == cpu_cap_env(1)
 
         server.config.sandbox_resources_override = {"cpu": 4, "memory_mib": 16384, "disk_gib": 30}
         spec = server._sandbox_spec(task, "/app")
         assert (spec.resources.cpu, spec.resources.memory_mib, spec.resources.disk_gib) == (4.0, 16384, 30)
-        assert spec.env["OMP_NUM_THREADS"] == "4"
+        # The hints describe the limit the sandbox actually runs under, so an override moves them too.
+        assert spec.env == cpu_cap_env(4) and spec.env["OMP_NUM_THREADS"] == "4"
 
         # The override merges over the task's resources, so a GPU request survives a CPU/memory override.
         task.config.environment.gpus = 1
@@ -410,8 +415,52 @@ class TestSeedWorkdirAndResources:
         task.config.environment.gpus = None
         task.config.environment.gpu_types = None
 
-        server.config.derive_cpu_env = False
-        assert "OMP_NUM_THREADS" not in server._sandbox_spec(task, "/app").env
+    async def test_cpu_hints_reach_every_sandbox_and_the_tasks_own_env_wins(self, tmp_path, monkeypatch):
+        """A task with `cpus = 2`: agent, Compose `main` and verifier specs all carry the hints for their own limit."""
+        toml = SEPARATE_TOML.replace("cpus = 2\n", "cpus = 3\n").replace(
+            "cpus = 1\n", 'cpus = 2\n\n[environment.env]\nOMP_NUM_THREADS = "8"\nTOOL = "x"\n'
+        )
+        server, task, _, _ = make_server(tmp_path, monkeypatch, toml=toml)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        assert (task.config.environment.cpus, task.config.verifier.environment.cpus) == (2, 3)
+
+        agent = server._sandbox_spec(task, "/app")
+        assert agent.resources.cpu == 2.0 and agent.env["TOOL"] == "x"
+        # Every hint names the task's two cores; the task's own OMP_NUM_THREADS wins over the hint.
+        assert {name: agent.env[name] for name in CPU_CAP_ENV_VARS} == cpu_cap_env(2) | {"OMP_NUM_THREADS": "8"}
+        assert agent.env == cpu_cap_env(2) | {"OMP_NUM_THREADS": "8", "TOOL": "x"}
+
+        # The separate verifier is sized by [verifier.environment], and so are its hints; the agent's env is not its.
+        verifier = server._sandbox_spec(
+            task, None, environment=task.config.verifier.environment, image=_verifier_image(task), role="verifier"
+        )
+        assert verifier.resources.cpu == 3.0 and verifier.env == cpu_cap_env(3)
+        assert verifier.env["OMP_NUM_THREADS"] == "3" and "TOOL" not in verifier.env
+
+        # A Compose group's main service starts from the agent's spec, hints included; sidecars get none.
+        (task.path / "task.toml").write_text(
+            COMPOSE_TOML.replace("cpus = 1\n", "cpus = 2\n") + '\n[environment.env]\nOMP_NUM_THREADS = "8"\n'
+        )
+        (task.path / "environment" / "docker-compose.yaml").write_text(COMPOSE_YAML)
+        (task.path.parent / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
+        compose_task = load_task(task.path)
+        assert compose_task.config.environment.cpus == 2
+        captured: dict = {}
+
+        class CapturingCompose:
+            def __init__(self, provider_config, path, *, service_specs, **kwargs):
+                captured["specs"] = service_specs
+
+            async def start(self):
+                return None
+
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandboxCompose", CapturingCompose)
+        await server._create_compose(compose_task, "r1/0")
+        main, api = captured["specs"]["main"], captured["specs"]["api"]
+        assert main.env == cpu_cap_env(2) | {"OMP_NUM_THREADS": "8"} and main.resources.cpu == 2.0
+        assert api.env == {} and api.resources.cpu is None
 
 
 TASK_TOOL_CONTEXT_DECLARATIONS = {
@@ -1591,31 +1640,63 @@ GREETING = "hi"
         assert server._agent_implementation() is None
 
 
-def test_image_rewrites_apply_to_agent_and_verifier_images(tmp_path, monkeypatch):
-    server, task, _, _ = make_server(tmp_path, monkeypatch)
-    (task.path / "task.toml").write_text(SEPARATE_TOML)
-    task = load_task(task.path)
-    server.config.image_rewrites = {"org/agent:1": "mirror/agent:derived", "org/verifier:1": "mirror/verifier:derived"}
-    monkeypatch.setattr(
-        "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
-    )
-    server.config.image_rewrite_auth = {"username": "u", "password": "p"}
-    spec = server._sandbox_spec(task, "/app")
-    assert spec.image == "mirror/agent:derived" and spec.provider_options["image_auth"] == {
-        "username": "u",
-        "password": "p",
+def test_server_config_holds_only_deployment_settings():
+    """A setting belongs here only if every dataset on the same deployment wants the same value.
+
+    Task facts stay in task.toml, dataset settings in dataset.toml's [gym] table, image mirrors and
+    setup commands in the sandbox provider. Adding a field means changing this set in the same PR.
+    """
+    own = set(HarborEnvironmentServerConfig.model_fields) - set(BaseEnvironmentServerConfig.model_fields)
+    assert own == {
+        "agent_server",
+        "tasksets",
+        "sandbox_provider",
+        "sandbox_ready_timeout_s",
+        "sandbox_ttl_slack_s",
+        "sandbox_provider_options",
+        "sandbox_metadata",
+        "sandbox_resources_override",
+        "gpu_sandbox_provider",
+        "request_gpu_type",
+        "verifier_grace_s",
+        "artifacts_dir",
     }
-    server.config.image_rewrites = {}
-    assert "image_auth" not in server._sandbox_spec(task, "/app").provider_options
-    server.config.image_rewrites = {"org/agent:1": "mirror/agent:derived", "org/verifier:1": "mirror/verifier:derived"}
-    verifier = server._sandbox_spec(
-        task, None, environment=task.config.verifier.environment, image=_verifier_image(task), role="verifier", ttl=1
-    )
-    assert verifier.image == "mirror/verifier:derived"
+    source = inspect.getsource(HarborEnvironmentServerConfig).lower()
+    assert not any(word in source for word in ("terminal", "tb4", "tb2", "swe", "nextjs", "hello-world"))
 
 
 class TestSeedGuards:
     """Defects from the first cluster run: requests above limits, and a create the ready timeout did not bound."""
+
+    def test_sandbox_spec_clamps_requests_above_the_tasks_limits(self, tmp_path, monkeypatch, caplog):
+        toml = TASK_TOML.replace("storage_mb = 10240", "storage_mb = 4096")
+        server, task, _, _ = make_server(
+            tmp_path,
+            monkeypatch,
+            toml=toml,
+            sandbox_provider_options={"resource_requests": {"cpu": 0.5, "memory_mib": 512, "disk_gib": 10}},
+        )
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {}})
+
+        with caplog.at_level("WARNING"):
+            spec = server._sandbox_spec(task, "/app")
+
+        assert spec.resources.disk_gib == 4
+        assert spec.provider_options["resource_requests"] == {"cpu": 0.5, "memory_mib": 512, "disk_gib": 4}
+        assert "resource_requests.disk_gib=10 exceeds the disk_gib limit 4 task hello (agent)" in caplog.text
+        # The configured options are not mutated, and a task within the requests gets them unchanged.
+        assert server.config.sandbox_provider_options["resource_requests"]["disk_gib"] == 10
+        caplog.clear()
+        server2, task2, _, _ = make_server(
+            tmp_path / "two", monkeypatch, sandbox_provider_options={"resource_requests": {"disk_gib": 10}}
+        )
+        spec2 = server2._sandbox_spec(task2, "/app")
+        assert spec2.provider_options == {"resource_requests": {"disk_gib": 10}} and caplog.text == ""
+        # "limits" and absent requests pass through untouched.
+        server3, task3, _, _ = make_server(
+            tmp_path / "three", monkeypatch, toml=toml, sandbox_provider_options={"resource_requests": "limits"}
+        )
+        assert server3._sandbox_spec(task3, "/app").provider_options == {"resource_requests": "limits"}
 
     async def test_cancelled_seed_leaves_the_stop_to_the_bounded_cleanup(self, tmp_path, monkeypatch):
         """The episode deadline fires during setup while the provider's stop hangs.
@@ -1678,6 +1759,8 @@ class TestSeedGuards:
         assert stopped == [True] and not server._sandboxes
         assert server.server_client.calls == []
         assert SEED_CREATE_GRACE_S > 0
+        # The grace covers the provider's orphan reap, so the seed sees what the reap found, not a bare timeout.
+        assert SEED_CREATE_GRACE_S >= sandbox_base.ORPHAN_REAP_TIMEOUT_S
 
     async def test_separate_verifier_create_is_bounded_by_the_ready_timeout(self, tmp_path, monkeypatch):
         """The same deadline bounds the verifier's create: the finished rollout is kept, masked, not held

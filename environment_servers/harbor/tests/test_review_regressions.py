@@ -25,6 +25,7 @@ from environment_servers.harbor.tests.conftest import (
     run_episode,
 )
 from nemo_gym.sandbox.transfer import SandboxTransferError
+from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.tasks.harbor import DIGEST_KEY, load_task
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.materialize import materialize_task
@@ -73,11 +74,10 @@ async def test_templates_resolve_at_use_without_changing_materialized_task(tmp_p
         + '\n[environment.env]\nTOKEN = "${HARBOR_TEST_TOKEN}"\n[verifier.env]\nTOKEN = "${HARBOR_TEST_TOKEN}"\n'
     )
     server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml)
-    server.config.derive_cpu_env = False  # keep the spec env to the task's own entries
     monkeypatch.setattr(
         "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
     )
-    assert server._sandbox_spec(task, "/app").env == {"TOKEN": "agent-secret"}
+    assert server._sandbox_spec(task, "/app").env == cpu_cap_env(1) | {"TOKEN": "agent-secret"}
     # The verifier resolves the template when it runs, not when the sandbox was created.
     during_turn(server, lambda: monkeypatch.setenv("HARBOR_TEST_TOKEN", "verifier-secret"))
     snapshots: list[Path] = []

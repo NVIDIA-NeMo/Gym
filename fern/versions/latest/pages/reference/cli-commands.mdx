@@ -33,8 +33,9 @@ gym dataset download          # download a dataset from HF (default) or GitLab
 gym dataset rm                # delete a dataset from GitLab
 gym dataset migrate           # move a dataset from GitLab to HF
 gym dataset render            # generate a dataset preview (materialize prompts)
-gym dataset validate <target> # run each Harbor task's reference solution through its verifier
 gym dataset collate           # validate and collate a dataset
+gym dataset init <name>       # scaffold a Harbor-format dataset (dataset.toml plus one task)
+gym dataset validate <target> # run each Harbor task's reference solution through its verifier
 
 # Environments
 gym env init                  # scaffold a resources server, environment, or benchmark
@@ -337,6 +338,47 @@ Commands for preparing, previewing, and managing datasets. By default dataset tr
 HuggingFace commands require an `HF_TOKEN` environment variable (or `huggingface-cli login`). GitLab commands authenticate via `mlflow_tracking_token` in your YAML config (or the `MLFLOW_TRACKING_TOKEN` environment variable). See [Downloading from HuggingFace](/data/download-huggingface) for HF authentication details.
 </Note>
 
+### `gym dataset init`
+
+Scaffold a dataset in the Harbor task format: `dataset.toml` with a `[gym]` table and one task with an
+instruction, a verifier and a reference solution. Refer to [Harbor Tasks](/main/data/harbor-tasks).
+
+| Option | Description |
+| --- | --- |
+| `NAME` | Dataset name as `org/name`; a bare name is written as `local/<name>`. The folder is the name without the org and must not exist yet. |
+| `--root DIR` | Where to create the folder (default: current directory). |
+| `--image IMAGE` | The task's prebuilt image (default: `python:3.12-slim`). |
+
+```bash
+gym dataset init my-dataset --image ubuntu:24.04   # dataset.toml names it local/my-dataset
+```
+
+### `gym dataset validate`
+
+Run each Harbor task's reference solution (`solution/solve.sh`) through its verifier with the oracle harness
+and print one line per task with its reward, or why there is none. `gym eval run TARGET --agent harbor_oracle`
+is the same run. Results go under `results/harbor/validation/<taskset>/` (`rollouts.jsonl` unless `--output`
+names another file, the generated run config and `skipped.json`), apart from any evaluation of the same target,
+so an evaluation never resumes from the oracle's rewards. The exit code is 0 when every selected solution scored
+1, and 1 when a solution scored below 1, was masked or failed, when a task folder did not load, or when no
+selected task had a solution to run. Refer to [Harbor Tasks](/main/data/harbor-tasks).
+
+| Option | Description |
+| --- | --- |
+| `TARGET` | A task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` hub reference. |
+| `--sandbox PROVIDER` | Sandbox provider for the task containers (for example `opensandbox`, `docker`). |
+| `--config PATH` | Config file to load. Repeatable. |
+| `--only-tasks PATTERNS` | Comma-separated task names or globs; only matching tasks are validated. |
+| `--exclude-tasks PATTERNS` | Comma-separated task names or globs to leave out. |
+| `--limit` | Maximum number of tasks to validate. |
+| `--concurrency` | Maximum number of concurrent tasks. |
+| `--output`, `-o` | Output rollouts JSONL file. |
+
+```bash
+gym dataset validate my-dataset --sandbox opensandbox
+gym dataset validate harbor:terminal-bench/terminal-bench@4.0.0 --sandbox opensandbox --only-tasks 'hello-*'
+```
+
 ### `gym dataset upload`
 
 Upload a prepared local JSONL dataset to HuggingFace (default) or GitLab.
@@ -473,28 +515,6 @@ gym dataset render \
 - **`gym dataset render`** — a focused, standalone step that applies a prompt template to raw rows to populate `responses_create_params.input`. No servers are started. Use it when you have raw data and just need to turn it into prompt-ready rows.
 - **`gym dataset collate`** — the full preparation pipeline for training: it can download missing datasets, validate data, and compute dataset metrics, writing train/validation splits and metrics artifacts. Use it to prepare and validate datasets for training or PR submission.
 </Note>
-
-### `gym dataset validate`
-
-Run each Harbor task's reference solution (`solution/solve.sh`) through its verifier with the oracle harness
-and print one line per task with its reward, or why there is none. `gym eval run TARGET --agent harbor_oracle`
-is the same run. Results go under `results/harbor/validation/<taskset>/` (`rollouts.jsonl`, the generated run
-config and `skipped.json`), apart from any evaluation of the same target, so an evaluation never resumes from
-the oracle's rewards. The exit code is 0 when every selected solution scored 1, and 1 when a solution scored
-below 1, was masked or failed, when a task folder did not load, or when no selected task had a solution to run.
-
-| Option | Description |
-| --- | --- |
-| `TARGET` | A task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` hub reference. |
-| `--sandbox PROVIDER` | Sandbox provider for the task containers (for example `opensandbox`, `docker`). |
-| `--config PATH` | Config file to load. Repeatable. |
-| `--limit` | Maximum number of tasks to validate. |
-| `--concurrency` | Maximum number of concurrent tasks. |
-
-```bash
-gym dataset validate my-dataset --sandbox opensandbox
-gym dataset validate harbor:terminal-bench/terminal-bench@4.0.0 --sandbox opensandbox --limit 5
-```
 
 ---
 
@@ -777,6 +797,8 @@ gym eval plan --schema
 ### `gym eval run`
 
 Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
+
+In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` hub reference. Refer to [Harbor Tasks](/main/data/harbor-tasks) for the layout and the `--sandbox`, `--only-tasks` and `--exclude-tasks` options that apply to such a target.
 
 | Option | Description |
 | --- | --- |
