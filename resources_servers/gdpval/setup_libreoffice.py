@@ -10,7 +10,9 @@
 
 The deployment container (where the gdpval resources server runs) does
 not ship libreoffice. We install on first server start so Office → PDF
-preconversion in ``preconvert.py`` actually produces sibling PDFs.
+preconversion in ``preconvert.py`` actually produces sibling PDFs. With a
+configured ``libreoffice_command``, ``ensure_libreoffice`` checks that command
+instead and installs nothing.
 """
 
 from __future__ import annotations
@@ -20,6 +22,9 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
+from typing import Sequence
 
 
 LOGGER = logging.getLogger(__name__)
@@ -48,6 +53,8 @@ _APT_PACKAGES = (
 # same mirror, which can take well over 10 minutes. Leave generous headroom:
 # in comparison mode a failed install aborts resources-server startup.
 _APT_INSTALL_TIMEOUT_S = 1800
+# A cold container start (e.g. an image on a shared filesystem) is slower than a host binary.
+_COMMAND_CHECK_TIMEOUT_S = 120
 
 
 def _run(cmd: list[str], *, timeout: int) -> tuple[int, str, str]:
@@ -105,8 +112,92 @@ def _javaldx_works() -> bool:
     return rc == 0 and bool(out.strip())
 
 
-def ensure_libreoffice() -> bool:
+def _write_probe_workbook(path: Path) -> None:
+    """One sheet with a formula and a chart: the content the javaldx check protects."""
+    from openpyxl import Workbook
+    from openpyxl.chart import BarChart, Reference
+
+    workbook = Workbook()
+    sheet = workbook.active
+    for row in (("Quarter", "Revenue"), ("Q1", 10), ("Q2", 30)):
+        sheet.append(row)
+    sheet["C2"] = "=SUM(B2:B3)"
+    chart = BarChart()
+    chart.add_data(Reference(sheet, min_col=2, min_row=1, max_row=3), titles_from_data=True)
+    sheet.add_chart(chart, "E2")
+    workbook.save(path)
+
+
+def _probe_converts(libreoffice_command: Sequence[str], root: Path | None) -> bool:
+    """Convert a probe workbook in place, in a fresh directory under *root* (the temp directory when None).
+
+    This is one LibreOffice run, like the first attempt of every real conversion. ``convert_to_pdf`` would retry
+    a workbook it could not convert from a copy in the temp directory, which hides a command that cannot see *root*.
+    """
+    from resources_servers.gdpval.preconvert import libreoffice_pdf_argv
+
+    if root is not None:
+        root.mkdir(parents=True, exist_ok=True)
+    probe_dir = Path(tempfile.mkdtemp(prefix="gdpval-lo-probe-", dir=root))
+    profile_dir = Path(tempfile.mkdtemp(prefix="lo-profile-"))
+    try:
+        probe = probe_dir / "probe.xlsx"
+        _write_probe_workbook(probe)
+        argv = libreoffice_pdf_argv(probe, probe_dir, profile_dir, libreoffice_command)
+        try:
+            rc, _, err = _run(argv, timeout=_COMMAND_CHECK_TIMEOUT_S)
+        except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
+            rc, err = None, repr(exc)
+        pdf = probe.with_suffix(".pdf")
+        if pdf.is_file() and pdf.read_bytes().startswith(b"%PDF"):
+            return True
+        LOGGER.warning(
+            "libreoffice_command %s did not convert a probe workbook in %s (rc=%s): %s",
+            libreoffice_command,
+            probe_dir,
+            rc,
+            (err or "").strip()[:300],
+        )
+        return False
+    finally:
+        shutil.rmtree(probe_dir, ignore_errors=True)
+        shutil.rmtree(profile_dir, ignore_errors=True)
+
+
+def _command_works(libreoffice_command: Sequence[str], probe_dirs: Sequence[Path] = ()) -> bool:
+    """Return True iff *libreoffice_command* runs and converts a probe workbook to PDF.
+
+    The probe converts a workbook in the temp directory that real conversions
+    use and under each of *probe_dirs*, so a container command that cannot see
+    one of them fails here instead of on every task.
+    """
+    try:
+        rc, out, err = _run([*libreoffice_command, "--version"], timeout=_COMMAND_CHECK_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        LOGGER.warning("libreoffice_command %s could not run: %r", libreoffice_command, exc)
+        return False
+    if rc != 0:
+        LOGGER.warning(
+            "libreoffice_command %s --version failed (rc=%d): %s",
+            libreoffice_command,
+            rc,
+            (err or "").strip()[:300],
+        )
+        return False
+
+    if not all(_probe_converts(libreoffice_command, root) for root in (None, *probe_dirs)):
+        return False
+    LOGGER.info("libreoffice_command ready: %s", out.strip())
+    return True
+
+
+def ensure_libreoffice(libreoffice_command: Sequence[str] | None = None, *, probe_dirs: Sequence[Path] = ()) -> bool:
     """Make sure libreoffice + a *functional* JRE are present on Linux.
+
+    With *libreoffice_command* (e.g. a container prefix), only that command is
+    checked, by ``--version`` and a real conversion in the temp directory and
+    under each of *probe_dirs*; the host packages, javaldx and apt below are not
+    used. *probe_dirs* is ignored for the host ``libreoffice``, which sees every path.
 
     Returns True if libreoffice + a usable JRE are available after the call.
 
@@ -125,6 +216,9 @@ def ensure_libreoffice() -> bool:
     tasks keep working; comparison-mode preconvert will surface its own
     per-file errors via ``preconvert.py``.
     """
+    if libreoffice_command is not None:
+        return _command_works(libreoffice_command, probe_dirs)
+
     if not sys.platform.startswith("linux"):
         LOGGER.warning(
             "auto-install only supports Linux (sys.platform=%s); GDPVal preconvert will be a no-op.",
@@ -186,5 +280,6 @@ def ensure_libreoffice() -> bool:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    ok = ensure_libreoffice()
+    # Optional argv: check a configured command, e.g. `apptainer exec ... libreoffice`.
+    ok = ensure_libreoffice(sys.argv[1:] or None)
     sys.exit(0 if ok else 1)
