@@ -1014,7 +1014,8 @@ async def test_run_routes_rollout_5xx_to_transient_failure_sidecar_contract() ->
     assert result_payload["error_class"] == TRANSIENT_FAILURE_CLASS
     assert result_payload["error_stage"] == "rollout"
     assert "503" in result_payload["error_message"]
-    assert result.instance_config == {"mask_sample": True}
+    assert result.mask_sample is True
+    assert "instance_config" not in result.model_dump()
     assert result.response.id == "conversational_tool_use_rollout_failed"
     assert agent.server_client.post.await_count == 3
 
@@ -1071,7 +1072,7 @@ async def test_run_routes_seed_rate_limit_to_transient_failure_sidecar_contract(
     assert result_payload[NG_FAILURE_CLASS_KEY] == TRANSIENT_FAILURE_CLASS
     assert result_payload["error_stage"] == "seed_session"
     assert "429" in result_payload["error_message"]
-    assert result.instance_config == {"mask_sample": True}
+    assert result.mask_sample is True
     assert agent.server_client.post.await_count == 1
 
 
@@ -1101,7 +1102,7 @@ async def test_run_routes_verify_5xx_to_transient_failure_sidecar_contract() -> 
     assert result_payload[NG_FAILURE_CLASS_KEY] == TRANSIENT_FAILURE_CLASS
     assert result_payload["error_stage"] == "verify"
     assert "502" in result_payload["error_message"]
-    assert result.instance_config == {"mask_sample": True}
+    assert result.mask_sample is True
     assert agent.server_client.post.await_count == 4
 
 
@@ -1135,7 +1136,7 @@ async def test_run_preserves_verified_semantic_zero_as_scored_result() -> None:
     assert NG_FAILURE_CLASS_KEY not in result_payload
     assert result_payload["result"]["judge_label"] == "fail"
     assert result_payload["result"]["profile"] == "general"
-    assert result.instance_config == {"mask_sample": False}
+    assert result.mask_sample is False
 
 
 async def test_run_does_not_convert_non_retryable_4xx_to_transient_failure() -> None:

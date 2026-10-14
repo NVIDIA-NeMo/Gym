@@ -114,7 +114,13 @@ class AgentCloseSessionResponse(BaseModel):
 
     agent_session_id: str
     agent_observations: AgentObservationBundle | None = None
-    resources_cookies: dict[str, str] | None = None
+    resources_cookies: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "The Resources Server cookie jar after the agent's tool calls. "
+            "None or an empty jar leaves the Environment Server's jar from the Resources seed unchanged."
+        ),
+    )
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):

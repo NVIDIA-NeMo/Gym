@@ -211,7 +211,6 @@ class AssayBenchVerifyResponse(AssayBenchVerifyRequest, BaseVerifyResponse):
 
 
 class AssayBenchResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: AssayBenchResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:

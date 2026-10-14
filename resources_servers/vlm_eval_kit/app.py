@@ -53,7 +53,6 @@ class Coordinator(BaseModel):
 
 
 class VlmEvalKitResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: VlmEvalKitResourcesServerConfig
 
     MMBench_DEV_EN_V11_sets: Dict[str, Coordinator] = Field(default_factory=lambda: defaultdict(Coordinator))
