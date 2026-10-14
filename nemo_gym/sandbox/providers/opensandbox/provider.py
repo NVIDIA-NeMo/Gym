@@ -1924,11 +1924,24 @@ class OpenSandboxProvider:
         command: str,
         *,
         cwd: str | None = None,
+        env: dict[str, str] | None = None,
         timeout_s: int | float | None = None,
+        user: str | int | None = None,
     ) -> SandboxExecResult:
         """Preserve background services that redirect their stdout and stderr."""
         if timeout_s is not None and timeout_s < 0:
             raise ValueError("timeout_s must be nonnegative")
+        # Native bash sessions expose only a working directory. Apply overrides
+        # inside the session, with env after su so account defaults cannot replace
+        # task-provided values. Quote argv rather than interpolating shell assignments.
+        if env:
+            command = shlex.join(
+                ["env", "--", *(f"{key}={value}" for key, value in env.items()), "bash", "-c", command]
+            )
+        if user is not None:
+            # su requires an account name; resolve numeric UIDs inside the sandbox.
+            account = f'"$(id -nu -- {user})"' if isinstance(user, int) else shlex.quote(user)
+            command = f"su -s /bin/sh -c {shlex.quote(command)} -- {account}"
         commands = handle.raw.commands
         session_id = await self._await_sdk_call(
             commands.create_session(working_directory=cwd),

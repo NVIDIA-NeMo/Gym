@@ -84,6 +84,7 @@ def test_migrates_a_config_outside_the_repository(tmp_path: Path) -> None:
         "kilocode_agent",
         "claude_code_agent",
         "osworld_agent",
+        "harbor_oracle_agent",
     ],
 )
 def test_migration_respects_agent_session_templates(
@@ -117,6 +118,7 @@ def test_migration_respects_agent_session_templates(
         "opencode_agent",
         "kilocode_agent",
         "claude_code_agent",
+        "harbor_oracle_agent",
     ],
 )
 def test_agent_session_capable_overlay_keeps_inherited_resources(tmp_path: Path, agent_type: str) -> None:

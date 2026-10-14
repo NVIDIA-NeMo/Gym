@@ -8,15 +8,17 @@ the working directory, the entrypoint launch and the stop flags, with the phased
 Harbor's collection order needs. Next to it live the workspace layout constants for the log
 and artifact folders, the task context file the agent harness reads, and the host template
 resolver for whole-value ${VAR} entries in task environments. The mixin holds the server
-methods that prepare the working directory, write the task context and describe sandbox
-access to the agent. The module sits below the verifier so that verifier code can be typed on
-HarborSession without importing the server.
+methods that prepare the working directory, write the task context, place the reference
+solution for the oracle and describe sandbox access to the agent. The module sits below the
+verifier so that verifier code can be typed on HarborSession without importing the server.
 """
 
+import logging
 import os
 import re
 import shlex
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 from fastapi import HTTPException
 
@@ -25,10 +27,17 @@ from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.transfer import exec_as_root, upload_dir
 from nemo_gym.tasks.harbor import HarborTask
+from nemo_gym.tasks.harbor.cli import ORACLE_AGENT
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 VERIFIER_LOGS_DIR = "/logs/verifier"
 AGENT_LOGS_DIR = "/logs/agent"
+# Where the oracle finds the task's reference solution: Harbor's oracle copies ``solution/`` here
+# (0.22.0 ``agents/oracle.py``, ``EnvironmentPaths.solution_dir``) and runs ``solve.sh`` from it.
+SOLUTION_DIR = "/solution"
 
 
 @dataclass
@@ -40,6 +49,9 @@ class HarborSession:
     identity: tuple[EpisodeId, TaskId]
     sandbox: AsyncSandbox
     workdir: str
+    # Environment the harness runs its commands with, handed over in its sandbox access: the host-resolved
+    # ``[solution].env`` when the harness is the oracle, nothing otherwise.
+    agent_env: dict[str, str] = field(default_factory=dict)
 
 
 _ENV_TEMPLATE = re.compile(r"\$\{([^}:]+)(?::-(.*))?\}")
@@ -69,9 +81,9 @@ class HarborSessionMixin:
     Harbor's collection order needs. Next to it live the workspace layout constants for the log
     and artifact folders, the task context file the agent harness reads, and the host template
     resolver for whole-value ${VAR} entries in task environments. The mixin holds the server
-    methods that prepare the working directory, write the task context and describe sandbox
-    access to the agent. The module sits below the verifier so that verifier code can be typed on
-    HarborSession without importing the server.
+    methods that prepare the working directory, write the task context, place the reference
+    solution for the oracle and describe sandbox access to the agent. The module sits below the
+    verifier so that verifier code can be typed on HarborSession without importing the server.
 
     """
 
@@ -93,6 +105,48 @@ class HarborSessionMixin:
         ):
             await upload_dir(sandbox, environment_dir, workdir)
 
+    def _agent_implementation(self) -> str | None:
+        """The implementation behind the configured agent instance: the one key under its ``responses_api_agents``.
+
+        ``None`` when the merged config does not show the instance in that shape (a test client, a block
+        with several implementations); the lookup for token capture reads the same block positionally.
+        """
+        ref = self.config.agent_server
+        instance = self.server_client.global_config_dict.get(ref.name)
+        implementations = instance.get(ref.type) if isinstance(instance, Mapping) else None
+        if not isinstance(implementations, Mapping) or len(implementations) != 1:
+            return None
+        return str(next(iter(implementations)))
+
+    async def _seed_solution(self, session: HarborSession) -> None:
+        """Place the task's reference solution for the oracle, as Harbor's oracle copies it into the environment.
+
+        Only an agent instance implemented by ``harbor_oracle_agent`` gets it: the seeded sandbox receives the
+        snapshot's ``solution/`` at ``/solution`` as root, opened to every user (the oracle runs ``solve.sh`` as
+        the task user, or the image's default user, who could not read a ``0700`` script or enter a private
+        folder the author's checkout kept), and the session carries the host-resolved ``[solution].env`` for the
+        harness's commands (Harbor 0.22.0 ``agents/oracle.py`` uploads the folder and resolves ``solution.env``
+        the same way). Any other harness never sees the solution. A task without ``solution/`` uploads nothing;
+        the oracle then reports it unvalidated.
+        """
+        implementation = self._agent_implementation()
+        if implementation is None:
+            # Not an oracle run as far as this server can tell. Say so once per episode: an oracle wired through
+            # a block this lookup cannot read would otherwise report every task as unvalidated.
+            LOGGER.warning(
+                "agent %r has no single responses_api_agents implementation in the run config, so no solution is "
+                "placed for it (the oracle, if that is what it is, will report every task as unvalidated)",
+                self.config.agent_server.name,
+            )
+            return
+        if implementation != ORACLE_AGENT:
+            return
+        task = session.task
+        session.agent_env = resolve_env_templates(task.config.solution.env)
+        solution = task.path / "solution"
+        if solution.is_dir():
+            await upload_dir(session.sandbox, solution, SOLUTION_DIR, make_readable=True)
+
     async def _sandbox_access(self, session: HarborSession) -> SandboxAccess:
         return SandboxAccess(
             connection=DirectSandboxConnection(
@@ -100,4 +154,6 @@ class HarborSessionMixin:
                 descriptor=await session.sandbox.serialize(),
             ),
             workdir=session.workdir,
+            user=session.task.user,
+            env=session.agent_env,
         )

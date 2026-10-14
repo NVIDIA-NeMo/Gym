@@ -3,21 +3,46 @@
 
 import asyncio
 import errno
+import io
 import json
+import posixpath
 import shutil
+import tarfile
 from pathlib import Path
 
 import pytest
 from aiohttp import ClientResponseError, RequestInfo
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
+from omegaconf import OmegaConf
 from yarl import URL
 
-from environment_servers.harbor.tests.conftest import TASK_TOML, FakeSandbox, episode, make_server, run_episode
+from environment_servers.harbor.tests.conftest import (
+    SOLVE_SH,
+    TASK_TOML,
+    FakeSandbox,
+    episode,
+    make_server,
+    run_episode,
+)
 from environment_servers.harbor.verifier import parse_reward_file, select_reward
 from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.tasks.harbor import load_task
+
+
+def uploaded_file(sandbox, name: str) -> list[bytes]:
+    """The contents of ``name`` in every archive the server uploaded: a single file travels as a one-file archive."""
+    found: list[bytes] = []
+    for data in sandbox.uploaded_archives:
+        try:
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+                for member in tar.getmembers():
+                    if member.isfile() and posixpath.basename(member.name) == name:
+                        found.append(tar.extractfile(member).read())
+        except tarfile.TarError:
+            continue
+    return found
 
 
 class TestRewardFile:
@@ -106,6 +131,8 @@ class TestEpisode:
             "workdir": "/app",
         }
         assert client.seed_bodies()[0]["task_id"] == {"taskset": "ds", "task_id": "hello"}
+        # The task's own agent budget travels in the seed, so the harness can stop in time.
+        assert client.seed_bodies()[0]["agent_timeout_sec"] == 300.0
         # The turn's cookie jar, not the seed's, travels to the close.
         assert client.calls[2][2]["cookies"] == {"session": "cookie-value"}
         # Verification ran only after the harness let go of the sandbox, then the sandbox was stopped.
@@ -502,3 +529,243 @@ class TestSeedGuards:
         release.set()
         await server.shutdown()
         assert sandbox.stopped and not server._sandboxes
+
+
+class TestOracleSolution:
+    """The seed places the task's reference solution for the Harbor oracle, and for no other harness.
+
+    Harbor's oracle (0.22.0 ``agents/oracle.py``) copies ``solution/`` to ``/solution`` and runs
+    ``bash /solution/solve.sh``; here the environment server does the copy, as root like its other seed
+    uploads, before the oracle's session opens. The oracle reads no task folder.
+    """
+
+    SOLUTION_TOML = (
+        TASK_TOML
+        + """
+[solution.env]
+GREETING = "hi"
+"""
+    )
+
+    @staticmethod
+    def solution_uploads(sandbox) -> list[dict]:
+        return [c for c in sandbox.execs if "tar -xzf" in c["command"] and "-C /solution" in c["command"]]
+
+    async def test_the_oracle_gets_the_solution_before_its_session_opens(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(
+            tmp_path, monkeypatch, toml=self.SOLUTION_TOML, agent_implementation="harbor_oracle_agent", solution=True
+        )
+        uploads_at_seed: list[int] = []
+        post = type(server.server_client).post
+
+        async def post_recording_uploads(client, server_name, url_path, **kwargs):
+            if url_path == "/v1/agent_sessions":
+                uploads_at_seed.append(len(self.solution_uploads(sandbox)))
+            return await post(client, server_name, url_path, **kwargs)
+
+        monkeypatch.setattr(type(server.server_client), "post", post_recording_uploads)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0
+        # One archive, extracted as root into /solution, then opened to every user (the task user runs it).
+        (upload,) = self.solution_uploads(sandbox)
+        assert upload["user"] == "root"
+        assert "chmod -R a+rX /solution" in upload["command"]
+        # The whole folder travels with its tree, and nothing the task digest ignores.
+        names = set()
+        for data in sandbox.uploaded_archives:
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+                members = {m.name for m in tar.getmembers()}
+                if "solve.sh" in members:
+                    names = members
+                    modes = {m.name: m.mode & 0o777 for m in tar.getmembers()}
+        # The upload takes the folder as is here; the digest's ignore rule joins the folder uploads with the
+        # Compose volumes work, which filters a stray __pycache__ out of every task upload.
+        assert names == {"solve.sh", "data", "data/answer.txt", "__pycache__", "__pycache__/x.pyc"}
+        assert modes["solve.sh"] == 0o700  # the archive keeps the author's mode
+        assert uploaded_file(sandbox, "solve.sh") == [SOLVE_SH.encode()]
+        # The upload preceded the agent seed, which carries the task user and the resolved [solution].env.
+        assert uploads_at_seed == [1]
+        seed = server.server_client.seed_bodies()[0]
+        assert "user" not in seed["sandbox_access"]  # the task declares no user, so none travels
+        assert seed["sandbox_access"]["env"] == {"GREETING": "hi"}
+        assert seed["agent_timeout_sec"] == 300.0
+
+    @pytest.mark.parametrize("implementation", ["hermes_agent", "test"])
+    async def test_other_harnesses_never_see_the_solution(self, tmp_path, monkeypatch, implementation):
+        server, task, sandbox, _ = make_server(
+            tmp_path, monkeypatch, toml=self.SOLUTION_TOML, agent_implementation=implementation, solution=True
+        )
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert self.solution_uploads(sandbox) == []
+        assert uploaded_file(sandbox, "solve.sh") == []
+        assert not any("/solution" in c["command"] for c in sandbox.execs)
+        seed = server.server_client.seed_bodies()[0]
+        assert "env" not in seed["sandbox_access"]
+
+    async def test_a_task_without_a_solution_uploads_nothing_for_the_oracle(self, tmp_path, monkeypatch):
+        """The oracle finds no /solution/solve.sh and reports the task unvalidated; the seed is not at fault."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, agent_implementation="harbor_oracle_agent")
+        assert not (task.path / "solution").exists()
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert self.solution_uploads(sandbox) == []
+        assert not any("/solution" in c["command"] for c in sandbox.execs)
+        assert "env" not in server.server_client.seed_bodies()[0]["sandbox_access"]
+
+    async def test_the_oracles_solution_env_resolves_on_the_host_at_seed(self, tmp_path, monkeypatch):
+        """`${VAR}` in [solution].env is the host's value for the oracle; a missing one is a terminal seed failure.
+
+        A model harness never runs the solution, so the same task runs for it whatever the host lacks.
+        """
+        toml = self.SOLUTION_TOML.replace('GREETING = "hi"', 'GREETING = "${HARBOR_TEST_GREETING}"')
+        monkeypatch.delenv("HARBOR_TEST_GREETING", raising=False)
+        server, task, sandbox, _ = make_server(
+            tmp_path, monkeypatch, toml=toml, agent_implementation="harbor_oracle_agent", solution=True
+        )
+
+        response = await run_episode(server, task)
+
+        assert response.failure.stage == "seed" and response.failure.terminal
+        assert "HARBOR_TEST_GREETING" in response.failure.failure_reason
+        assert server.server_client.paths() == []
+        assert sandbox.stopped and not server._sandboxes
+
+        monkeypatch.setenv("HARBOR_TEST_GREETING", "from host")
+        response = await run_episode(server, task, rollout="r2")
+        assert response.failure is None, response.failure
+        assert server.server_client.seed_bodies()[0]["sandbox_access"]["env"] == {"GREETING": "from host"}
+
+        monkeypatch.delenv("HARBOR_TEST_GREETING")
+        model_server, model_task, _, _ = make_server(
+            tmp_path / "model", monkeypatch, toml=toml, agent_implementation="hermes_agent", solution=True
+        )
+        response = await run_episode(model_server, model_task)
+        assert response.failure is None, response.failure
+
+    async def test_a_private_solution_is_readable_and_runnable_by_the_non_root_task_user(self, tmp_path, monkeypatch):
+        """The author's checkout kept ``solution/`` private (a 0700 script, a 0700 folder, a 0600 input) and the
+        user the oracle runs as, the task's ``[agent].user`` or else the image's default user, is not root. The
+        extraction runs as root and keeps those modes, so without the fix-up that user could neither read the
+        script nor enter the folder; the seed opens the tree, and the oracle's commands as that user succeed."""
+
+        class ModeAwareSandbox(FakeSandbox):
+            """Models the extracted tree: root extracts with --no-same-owner (owner root, archive modes kept), a
+            ``chmod -R a+rX`` opens it, and a command run as any other user is refused where ``other`` lacks the
+            read bit on the file or the search bit on a folder on the way."""
+
+            default_user = "runner"
+
+            def __init__(self):
+                super().__init__()
+                self.modes: dict[str, tuple[int, bool]] = {}
+                self.extracted: dict[str, int] = {}
+
+            def _allowed(self, path: str) -> bool:
+                parts = path.strip("/").split("/")
+                for depth in range(1, len(parts)):
+                    mode, _ = self.modes.get("/" + "/".join(parts[:depth]), (0o755, True))
+                    if not mode & 0o001:
+                        return False
+                mode, is_dir = self.modes.get(path, (0, False))
+                return bool(mode & 0o004) and not is_dir
+
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user})
+                if "tar -xzf" in command and "-C /solution" in command:
+                    assert user == "root"
+                    self.modes["/solution"] = (0o755, True)
+                    with tarfile.open(fileobj=io.BytesIO(self.uploaded_archives[-1]), mode="r:gz") as tar:
+                        for member in tar.getmembers():
+                            self.modes[f"/solution/{member.name}"] = (member.mode & 0o777, member.isdir())
+                    self.extracted = {path: mode for path, (mode, _) in self.modes.items()}
+                    if "chmod -R a+rX /solution" in command:
+                        for path, (mode, is_dir) in list(self.modes.items()):
+                            self.modes[path] = (mode | 0o444 | (0o111 if is_dir else 0), is_dir)
+                    return SandboxExecResult(stdout="", stderr="", return_code=0)
+                if (user or self.default_user) != "root":
+                    for path in [token for token in command.split() if token.startswith("/solution/")]:
+                        if not self._allowed(path):
+                            return SandboxExecResult(stdout="", stderr=f"{path}: Permission denied", return_code=126)
+                return SandboxExecResult(stdout="ok\n", stderr="", return_code=0)
+
+        sandbox = ModeAwareSandbox()
+        server, task, _, _ = make_server(
+            tmp_path,
+            monkeypatch,
+            sandbox,
+            toml=self.SOLUTION_TOML,
+            agent_implementation="harbor_oracle_agent",
+            solution=True,
+        )
+        assert (task.user or sandbox.default_user) != "root"
+        solution = task.path / "solution"
+        (solution / "data").chmod(0o700)
+        (solution / "data" / "answer.txt").chmod(0o600)
+        assert (solution / "solve.sh").stat().st_mode & 0o777 == 0o700
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        # What landed before the fix-up is the author's private tree, exactly as the archive carried it.
+        assert sandbox.extracted["/solution/solve.sh"] == 0o700
+        assert sandbox.extracted["/solution/data"] == 0o700
+        assert sandbox.extracted["/solution/data/answer.txt"] == 0o600
+        # The oracle's commands run as the task user (or the image's default user), not root, and succeed.
+        probe = await sandbox.exec("test -f /solution/solve.sh", user=task.user)
+        run = await sandbox.exec("bash /solution/solve.sh", user=task.user)
+        read = await sandbox.exec("cat /solution/data/answer.txt", user=task.user)
+        assert (probe.return_code, run.return_code, read.return_code) == (0, 0, 0), (probe, run, read)
+        assert sandbox.modes["/solution/solve.sh"] == (0o744, False)
+        assert sandbox.modes["/solution/data"] == (0o755, True)
+        # The check is real: a tree left as extracted would have refused the same user.
+        sandbox.modes = {path: (mode, sandbox.modes[path][1]) for path, mode in sandbox.extracted.items()}
+        assert (await sandbox.exec("bash /solution/solve.sh", user=task.user)).return_code == 126
+        assert (await sandbox.exec("cat /solution/data/answer.txt", user=task.user)).return_code == 126
+
+    async def test_a_sandbox_that_cannot_take_the_solution_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
+        """Like the other seed uploads: the transfer failed in the provider's sandbox, so the episode is retried."""
+
+        class RefusesSolution(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if "-C /solution" in command:
+                    self.execs.append({"command": command, "cwd": cwd, "env": env, "user": user, "seen": None})
+                    return SandboxExecResult(
+                        stdout="", stderr="tar: /solution: Cannot mkdir: Permission denied", return_code=1
+                    )
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        sandbox = RefusesSolution()
+        server, task, _, _ = make_server(
+            tmp_path,
+            monkeypatch,
+            sandbox,
+            toml=self.SOLUTION_TOML,
+            agent_implementation="harbor_oracle_agent",
+            solution=True,
+        )
+
+        response = await run_episode(server, task)
+
+        assert response.failure.stage == "seed" and not response.failure.terminal
+        assert "Permission denied" in response.failure.failure_reason
+        assert server.server_client.paths() == []
+        assert sandbox.stopped and not server._sandboxes
+
+    def test_the_implementation_is_read_from_the_agent_instance_block(self, tmp_path, monkeypatch):
+        server, _, _, _ = make_server(tmp_path, monkeypatch, agent_implementation="harbor_oracle_agent")
+        assert server._agent_implementation() == "harbor_oracle_agent"
+        # An instance the merged config does not show in that shape is not the oracle.
+        server.server_client.global_config_dict = OmegaConf.create({"agent": {"responses_api_agents": {}}})
+        assert server._agent_implementation() is None
+        server.server_client.global_config_dict = OmegaConf.create({"agent": {"host": "x"}})
+        assert server._agent_implementation() is None
+        server.server_client.global_config_dict = OmegaConf.create({})
+        assert server._agent_implementation() is None

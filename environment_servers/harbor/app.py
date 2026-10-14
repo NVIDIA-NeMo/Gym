@@ -12,8 +12,10 @@ rows were materialized (see ``nemo_gym.tasks.harbor``).
 - seed: check the row's digest against the mapping and the folder, start the task's
   image as a sandbox through the configured provider, create the working directory;
 - agent: open an agent session on the configured agent server, handing it a
-  ``SandboxAccess`` for that sandbox, post the task's ``responses_create_params`` to it,
-  then close the session and keep what the agent observed;
+  ``SandboxAccess`` for that sandbox (an agent instance implemented by the Harbor oracle,
+  ``harbor_oracle_agent``, first gets the snapshot's ``solution/`` at ``/solution`` and the
+  task's ``[solution].env``), post the task's ``responses_create_params`` to it, then close
+  the session and keep what the agent observed;
 - verify: run ``tests/test.sh`` inside the same sandbox (Harbor's shared verifier mode),
   then read ``/logs/verifier/reward.json`` or ``reward.txt``;
 - cleanup: stop the sandbox, whatever happened before.
@@ -275,6 +277,8 @@ class HarborEnvironmentServer(
         cleanup.register_cleanup("harbor sandbox", close_sandbox)
         try:
             session = await self._seed(request, episode_key)
+            # The sandbox is seeded; the oracle alone also gets the task's solution before its session opens.
+            await self._seed_solution(session)
             access = await self._sandbox_access(session)
         except HTTPException as error:
             # 4xx: the task or row is at fault and a retry would fail the same way. 5xx: the provider failed.
@@ -319,6 +323,7 @@ class HarborEnvironmentServer(
                     episode_id=request.episode_id,
                     task_id=request.task.task_id,
                     sandbox_access=access,
+                    agent_timeout_sec=session.task.config.agent.timeout_sec,
                 ).model_dump(mode="json"),
             )
             await raise_for_status(agent_create_http_response)

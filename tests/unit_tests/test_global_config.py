@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, PropertyMock
 from omegaconf import OmegaConf
 from omegaconf.errors import ConfigKeyError
 from pydantic import ValidationError
-from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
+from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, fixture, mark, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
@@ -1632,7 +1632,7 @@ contested: second_inner
         hydra_main_mock.return_value = hydra_main_wrapper
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
-        expected_ip = "abcd ip"
+        expected_ip = "192.0.2.20"
         gethostbyname_mock = MagicMock(return_value=expected_ip)
         monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", gethostbyname_mock)
 
@@ -3642,3 +3642,113 @@ class TestRolloutRunLabels:
 
         assert labels == {"judge": "judge", "judge_twin": "judge_twin", "grader": "grader"}
         assert label_runs(dict(reversed(list(agent_by_key.items())))) == labels
+
+
+def _absolute_ip_parse_config(settings: dict) -> GlobalConfigDictParserConfig:
+    return GlobalConfigDictParserConfig(
+        initial_global_config_dict=OmegaConf.create({"use_absolute_ip": True, **settings}),
+        skip_load_from_cli=True,
+        skip_load_from_dotenv=True,
+    )
+
+
+def test_explicit_default_host_skips_hostname_resolution(monkeypatch):
+    from socket import gaierror
+
+    # An explicit address wins even on a machine whose short hostname has no DNS entry.
+    resolver = MagicMock(side_effect=gaierror("hostname does not resolve"))
+    monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", resolver)
+    config = GlobalConfigDictParser().parse(_absolute_ip_parse_config({"default_host": "192.0.2.20"}))
+    assert config.head_server.host == "192.0.2.20"
+    resolver.assert_not_called()
+
+
+@mark.parametrize("resolved", [None, "127.0.1.1", "0.0.0.0"])
+def test_absolute_ip_reports_unusable_hostname(monkeypatch, resolved):
+    from socket import gaierror
+
+    from nemo_gym.config_types import ConfigError
+
+    resolver = (
+        MagicMock(side_effect=gaierror("hostname does not resolve"))
+        if resolved is None
+        else MagicMock(return_value=resolved)
+    )
+    monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", resolver)
+    with raises(ConfigError, match="default_host=.*reachable from the sandbox"):
+        GlobalConfigDictParser().parse(_absolute_ip_parse_config({}))
+
+
+class TestAbsoluteIpServerTypes:
+    """``absolute_ip_server_types`` scopes the address ``use_absolute_ip`` resolves to the server types it names."""
+
+    SERVERS = {
+        "model": {"responses_api_models": {"m": {"entrypoint": "app.py"}}},
+        "tools": {"resources_servers": {"r": {"entrypoint": "app.py", "domain": "other"}}},
+    }
+
+    @fixture(autouse=True)
+    def _network(self, monkeypatch):
+        monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", MagicMock(return_value="192.0.2.20"))
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", MagicMock(return_value=12345))
+
+    @staticmethod
+    def _hosts(config) -> dict[str, str]:
+        return {
+            "head": config.head_server.host,
+            "model": config.model.responses_api_models.m.host,
+            "tools": config.tools.resources_servers.r.host,
+        }
+
+    def test_named_types_get_the_address_and_the_head_stays_on_loopback(self):
+        config = GlobalConfigDictParser().parse(
+            _absolute_ip_parse_config({"absolute_ip_server_types": ["responses_api_models"], **self.SERVERS})
+        )
+        assert self._hosts(config) == {"head": "127.0.0.1", "model": "192.0.2.20", "tools": "127.0.0.1"}
+
+    def test_unset_moves_every_server_as_before(self):
+        config = GlobalConfigDictParser().parse(_absolute_ip_parse_config(dict(self.SERVERS)))
+        assert self._hosts(config) == {"head": "192.0.2.20", "model": "192.0.2.20", "tools": "192.0.2.20"}
+        config = GlobalConfigDictParser().parse(
+            _absolute_ip_parse_config({"absolute_ip_server_types": None, **self.SERVERS})
+        )
+        assert self._hosts(config) == {"head": "192.0.2.20", "model": "192.0.2.20", "tools": "192.0.2.20"}
+
+    def test_a_servers_own_host_and_an_explicit_default_host_still_win(self):
+        servers = {
+            "model": {"responses_api_models": {"m": {"entrypoint": "app.py", "host": "10.0.0.5"}}},
+            "tools": self.SERVERS["tools"],
+        }
+        config = GlobalConfigDictParser().parse(
+            _absolute_ip_parse_config({"absolute_ip_server_types": ["responses_api_models"], **servers})
+        )
+        assert self._hosts(config) == {"head": "127.0.0.1", "model": "10.0.0.5", "tools": "127.0.0.1"}
+        # `default_host` is the explicit, broader opt-in: it applies to every server, the list notwithstanding.
+        config = GlobalConfigDictParser().parse(
+            _absolute_ip_parse_config(
+                {"default_host": "192.0.2.30", "absolute_ip_server_types": ["responses_api_models"], **self.SERVERS}
+            )
+        )
+        assert self._hosts(config) == {"head": "192.0.2.30", "model": "192.0.2.30", "tools": "192.0.2.30"}
+
+    def test_without_use_absolute_ip_the_list_changes_nothing(self):
+        config = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.create(
+                    {"absolute_ip_server_types": ["responses_api_models"], **self.SERVERS}
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+            )
+        )
+        assert self._hosts(config) == {"head": "127.0.0.1", "model": "127.0.0.1", "tools": "127.0.0.1"}
+
+    @mark.parametrize(
+        "value, match",
+        [("responses_api_models", "must be a list"), (["models"], "unknown server types"), (True, "must be a list")],
+    )
+    def test_malformed_list_is_a_config_error(self, value, match):
+        from nemo_gym.config_types import ConfigError
+
+        with raises(ConfigError, match=match):
+            GlobalConfigDictParser().parse(_absolute_ip_parse_config({"absolute_ip_server_types": value}))

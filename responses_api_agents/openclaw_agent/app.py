@@ -466,6 +466,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     """Runs the OpenClaw CLI (openclaw agent --local --json)"""
 
     config: OpenClawAgentConfig
+    # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     sigterm_events: set = Field(default_factory=set)
     sigterm_handler_installed: bool = False
