@@ -66,7 +66,7 @@ def test_a_check_counts_rollouts_not_findings(collected_metrics):  # noqa: F811
         digest.verdict, outcome="scored", flagged_checks=(finding.check for finding in digest.findings)
     )
     flagged = _points(collected_metrics, gym_metrics.ROLLOUT_HEALTH_FLAGGED_INSTRUMENT)
-    assert flagged[_key(**{CHECK: "agent_turn_hollow"})] == 1
+    assert flagged == {_key(**{CHECK: "agent_turn_hollow", OUTCOME: "scored"}): 1}
     assert _points(collected_metrics, gym_metrics.ROLLOUT_HEALTH_VERDICT_INSTRUMENT) == {
         _key(**{VERDICT: "unhealthy", OUTCOME: "scored"}): 1
     }
@@ -84,8 +84,11 @@ def test_driver_helper_counts_verdicts_per_outcome(collected_metrics):  # noqa: 
         _key(**{VERDICT: "unhealthy", OUTCOME: "failed"}): 1,
         _key(**{VERDICT: "unobserved", OUTCOME: "scored"}): 1,
     }
-    flagged = _points(collected_metrics, gym_metrics.ROLLOUT_HEALTH_FLAGGED_INSTRUMENT)
-    assert flagged[_key(**{CHECK: "agent_turn_hollow"})] == 2
+    # A check counts the rollouts it flagged, split by outcome so the scored ones match the report.
+    assert _points(collected_metrics, gym_metrics.ROLLOUT_HEALTH_FLAGGED_INSTRUMENT) == {
+        _key(**{CHECK: "agent_turn_hollow", OUTCOME: "scored"}): 1,
+        _key(**{CHECK: "agent_turn_hollow", OUTCOME: "failed"}): 1,
+    }
 
 
 def test_ignored_checks_are_not_emitted(collected_metrics):  # noqa: F811

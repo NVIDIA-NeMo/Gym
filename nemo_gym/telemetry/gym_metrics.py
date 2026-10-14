@@ -89,8 +89,8 @@ The trajectory-level checks of the rollout health report, evaluated as each roll
 (``healthy``, ``unhealthy`` or ``unobserved``, as in the report) and ``nemo.gym.rollout.outcome``
 (``scored`` or ``failed``; the post-run report reads scored rollouts only).
 ``gym.rollout.health_flagged_total`` (counter): one per rollout *and* check with at least one finding,
-by ``nemo.gym.health.check`` (a check id from the health-check registry), so a check's count is the number of
-rollouts it flagged, not the number of findings. Checks in ``health_check_ignored_checks`` are not evaluated.
+by ``nemo.gym.health.check`` (a check id from the health-check registry) and ``nemo.gym.rollout.outcome``, so a
+check's count is the number of rollouts it flagged, not the number of findings. Checks in ``health_check_ignored_checks`` are not evaluated.
 """
 
 import logging
@@ -422,5 +422,5 @@ def record_rollout_health(verdict: str, *, outcome: str, flagged_checks: Iterabl
         _record_counter(
             ROLLOUT_HEALTH_FLAGGED_INSTRUMENT,
             "Rollouts flagged by a trajectory health check.",
-            {HEALTH_CHECK_ATTRIBUTE: check},
+            {HEALTH_CHECK_ATTRIBUTE: check, ROLLOUT_OUTCOME_ATTRIBUTE: outcome},
         )

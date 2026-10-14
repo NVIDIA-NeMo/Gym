@@ -9548,3 +9548,106 @@ class TestMultiAgentEnvironmentServers:
             ValueError, match="'outsider' is not an agent of environment server 'conversation': 'user', 'assistant'"
         ):
             RolloutCollectionHelper._validate_environment_servers([row], self._config())
+
+
+class TestLiveHealthEvaluation:
+    """The driver evaluates trajectory health as each rollout finishes, gated on telemetry and last in the loop."""
+
+    @staticmethod
+    def _config(tmp_path: Path, rows: int = 2) -> RolloutCollectionConfig:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            "\n".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                for i in range(rows)
+            )
+            + "\n"
+        )
+        return RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            route_failures_to_sidecar=True,
+            disable_health_check=True,
+        )
+
+    @staticmethod
+    def _install(monkeypatch: pytest.MonkeyPatch, *, bodies: dict[int, dict]) -> list[tuple[str, dict]]:
+        """Fake the servers (``bodies`` maps the row's ``x`` to its ``/run`` payload) and record health calls."""
+        evaluated: list[tuple[str, dict]] = []
+
+        async def post(server_name: str, url_path: str, json: dict, **kwargs):
+            if url_path == "/run":
+                return FakeResponse(200, bodies[json["x"]])
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "_record_rollout_health",
+            lambda result, outcome, ignored: evaluated.append((outcome, result)),
+        )
+        return evaluated
+
+    async def test_every_finished_rollout_is_evaluated_with_its_outcome(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        evaluated = self._install(
+            monkeypatch,
+            bodies={
+                0: {"reward": 1.0},
+                # A result that ran but failed in the environment goes to the sidecar and keeps its record.
+                1: {"reward": 0.0, NG_FAILURE_CLASS_KEY: "judge_invalid"},
+            },
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_metrics_exporter_active", lambda: True)
+
+        await RolloutCollectionHelper().run_from_config(self._config(tmp_path))
+
+        assert sorted(outcome for outcome, _ in evaluated) == ["failed", "scored"]
+
+    @pytest.mark.parametrize(
+        ("span_group", "exporter"),
+        [(True, False), (False, True), (False, False)],
+        ids=["tracing on, metrics export off", "tracing off, metrics export on", "both off"],
+    )
+    async def test_nothing_is_evaluated_without_tracing_and_an_active_metrics_exporter(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        span_group: bool,
+        exporter: bool,
+    ) -> None:
+        evaluated = self._install(monkeypatch, bodies={0: {"reward": 1.0}, 1: {"reward": 1.0}})
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: span_group)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_metrics_exporter_active", lambda: exporter)
+
+        await RolloutCollectionHelper().run_from_config(self._config(tmp_path))
+
+        assert evaluated == []
+
+    async def test_a_cancellation_at_the_health_await_finds_the_bookkeeping_done(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._install(monkeypatch, bodies={0: {"reward": 1.0}, 1: {"reward": 1.0}})
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_metrics_exporter_active", lambda: True)
+        seen_at_await: list[str] = []
+
+        async def cancelled_thread(*args, **kwargs):
+            seen_at_await.append(capsys.readouterr().out)
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(nemo_gym.rollout_collection.asyncio, "to_thread", cancelled_thread)
+
+        with pytest.raises(asyncio.CancelledError):
+            await RolloutCollectionHelper().run_from_config(self._config(tmp_path))
+
+        # The row was saved and the progress accounting for it had already run when the await was reached.
+        assert len(Path(tmp_path / "output.jsonl").read_bytes().splitlines()) >= 1
+        assert "rollouts for `my_agent`" in seen_at_await[0]

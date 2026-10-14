@@ -105,6 +105,7 @@ from nemo_gym.telemetry.gym_metrics import (
     record_rollout_completed,
     record_rollout_health,
 )
+from nemo_gym.telemetry.setup import is_metrics_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -2703,7 +2704,8 @@ class RolloutCollectionHelper(BaseModel):
         capture_dirs = model_call_capture_dirs_from_config(global_config)
         observability_enabled = observability_enabled_from_config(global_config)
         # Live health metrics follow telemetry alone; `disable_health_check` only gates the post-run report.
-        health_metrics_enabled = is_span_group_enabled(GymSpanGroup.ROLLOUT)
+        # Without an active metrics exporter the evaluation would feed nothing, so it is skipped.
+        health_metrics_enabled = is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_metrics_exporter_active()
         health_ignored_checks = frozenset(config.health_check_ignored_checks)
         # How a finalized rollout with an incomplete capture is treated
         # (token_id_capture.mask_incomplete_when_attributed): read once, applied to every rebuild below.
@@ -2868,6 +2870,8 @@ class RolloutCollectionHelper(BaseModel):
                 if completed.environment_server_type is not None:
                     result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
 
+                # Set below for a rollout whose trajectory is health-evaluated once the bookkeeping is done.
+                health_outcome: Optional[str] = None
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)
                 # No rollout happened, so there is nothing to capture, tokenize or average.
@@ -2966,8 +2970,8 @@ class RolloutCollectionHelper(BaseModel):
                     failures_file.write(serialized + b"\n")
                     failures_file.flush()
                     _record_rollout_outcome(result, "failed", dispatch_name)
-                    if health_metrics_enabled and not no_result:
-                        await asyncio.to_thread(_record_rollout_health, result, "failed", health_ignored_checks)
+                    if not no_result:
+                        health_outcome = "failed"
                     if batch_tracker is not None:
                         batch_failure_rows.append(_batch_status_row(result, batch_agent_refs))
                 else:
@@ -2975,8 +2979,7 @@ class RolloutCollectionHelper(BaseModel):
                     results_file.write(serialized + b"\n")
                     results_file.flush()
                     _record_rollout_outcome(result, "scored", dispatch_name)
-                    if health_metrics_enabled:
-                        await asyncio.to_thread(_record_rollout_health, result, "scored", health_ignored_checks)
+                    health_outcome = "scored"
                     persisted_count += 1
                     persisted_success_keys.add((result[TASK_INDEX_KEY_NAME], result[ROLLOUT_INDEX_KEY_NAME]))
                     if config.retain_results_in_memory:
@@ -3081,6 +3084,10 @@ class RolloutCollectionHelper(BaseModel):
                             )
 
                         export_metrics(step_metrics, step=int(current_pct))
+
+                # Last, so a cancellation here costs a health sample and never the bookkeeping above.
+                if health_metrics_enabled and health_outcome is not None:
+                    await asyncio.to_thread(_record_rollout_health, result, health_outcome, health_ignored_checks)
 
             counted = _failure_rows_counted_as_zero(
                 [failures_fpath], config.count_failure_classes_as_zero, persisted_success_keys
