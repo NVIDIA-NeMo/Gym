@@ -466,14 +466,16 @@ To swap a component, change the imported configuration and its matching implemen
 
 ### Select an execution mode
 
+Use a borrowed sandbox by default. When the benchmark's Resources Server supplies `SandboxAccess`, the benchmark keeps ownership of task setup, verification, and teardown, so swapping the agent cannot change how the task is scored. Use an agent-owned sandbox only when the Resources Server does not supply one, or when you run without a shared sandbox service. In that case, start with the [Docker provider](/main/infrastructure/sandbox/docker). The Local provider and the host path both run commands on the Agent Server host without isolation, so use them only for development and smoke tests.
+
 Hermes, Pi, and Codex select one of the following execution paths for each request. Check the adapter's README and configuration before you rely on a path.
 
-| Request path | Where the harness runs | Who cleans up |
-| --- | --- | --- |
-| Agent session seeded with `SandboxAccess` | The supplied task sandbox. | The agent stops its harness work and disconnects. The Resources Server destroys the sandbox. |
-| Agent session without `SandboxAccess`, with `sandbox_provider` configured | A sandbox that the agent creates. Task requirements must be compatible with this mode. | The agent stops the sandbox it created. |
-| Agent session without `SandboxAccess` or `sandbox_provider` | Nowhere: seed rejects the request. | Not applicable. Gym never falls back to host execution or a replacement environment. |
-| `/v1/responses` with no agent-session binding | The Agent Server host, if the adapter supports it. | The adapter cleans up its local invocation and temporary files. |
+| Request path | Where the harness runs | Who cleans up | When to use |
+| --- | --- | --- | --- |
+| Agent session seeded with `SandboxAccess` | The supplied task sandbox. | The agent stops its harness work and disconnects. The Resources Server destroys the sandbox. | Recommended. Use it whenever the benchmark's Resources Server supplies a task sandbox. |
+| Agent session without `SandboxAccess`, with `sandbox_provider` configured | A sandbox that the agent creates. Task requirements must be compatible with this mode. | The agent stops the sandbox it created. | The benchmark does not supply a task sandbox, or no shared sandbox service is available. Use a container provider such as Docker. |
+| Agent session without `SandboxAccess` or `sandbox_provider` | Nowhere: seed rejects the request. | Not applicable. Gym never falls back to host execution or a replacement environment. | Never. This row is a configuration error. |
+| `/v1/responses` with no agent-session binding | The Agent Server host, if the adapter supports it. | The adapter cleans up its local invocation and temporary files. | Development and smoke tests only. The task is not isolated from the host. |
 
 The compatibility `/run` endpoint requires an explicit `resources_server` binding and uses the adapter's host path. Setting `resources_server: null` does not disable host execution through `/v1/responses`. Setting `sandbox_provider` enables agent-owned sessions, but it does not move sessionless calls into a sandbox. Reject a stale or invalid session binding instead of treating it as a host request.
 
