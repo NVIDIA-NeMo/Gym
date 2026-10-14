@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import ConfigDict, PrivateAttr
 
@@ -16,6 +16,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
@@ -30,6 +31,7 @@ from responses_api_agents.spatialclaw_agent.app import (
 
 
 class SpatialClawResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     spatialclaw_url: str = SPATIALCLAW_URL
     spatialclaw_commit: str = SPATIALCLAW_COMMIT
     spatialclaw_root: str | None = None
@@ -57,6 +59,7 @@ class SpatialClawVerifyResponse(BaseVerifyResponse):
     extracted_answer: str
     native_score: float | None
     scored: bool
+    evaluation_completed: bool
 
 
 def _flatten_numeric(value: Any, prefix: str = "") -> dict[str, float | int]:
@@ -154,6 +157,7 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
             extracted_answer=extracted,
             native_score=native_score,
             scored=native_score is not None,
+            evaluation_completed=True,
         )
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
@@ -164,6 +168,8 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
             if not rollouts:
                 continue
             rollout = rollouts[0]
+            if rollout.get("mask_sample"):
+                continue
             sample = self._sample_by_id.get(str(rollout.get("sample_id", "")))
             if sample is None:
                 continue
@@ -173,14 +179,16 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
         original_data = benchmark.data
         benchmark.data = selected_samples
         try:
-            native_results = benchmark.evaluate(predictions, output_dir=None)
+            native_results = benchmark.evaluate(predictions, output_dir=None) if selected_samples else {}
         finally:
             benchmark.data = original_data
 
         metrics, _, _, _ = compute_pass_majority_metrics(
             tasks,
             score_fn=lambda rollout: (
-                {"native_score": float(rollout["native_score"])} if rollout.get("native_score") is not None else {}
+                {"native_score": float(rollout["native_score"])}
+                if not rollout.get("mask_sample") and rollout.get("native_score") is not None
+                else {}
             ),
             answer_key="extracted_answer",
         )
