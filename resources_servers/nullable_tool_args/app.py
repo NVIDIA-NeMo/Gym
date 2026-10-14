@@ -14,6 +14,7 @@
 # limitations under the License.
 import json
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 
@@ -34,8 +35,12 @@ class NullableToolArgsVerifyRequest(BaseVerifyRequest):
     verifier_metadata: dict
 
 
+class NullableToolArgsVerifyResponse(BaseVerifyResponse):
+    verifier_metadata: dict
+
+
 class NullableToolArgsVerifier:
-    async def verify(self, body: NullableToolArgsVerifyRequest) -> BaseVerifyResponse:
+    async def verify(self, body: NullableToolArgsVerifyRequest) -> NullableToolArgsVerifyResponse:
         calls = [item for item in body.response.output if item.type == "function_call"]
         try:
             args = json.loads(calls[0].arguments) if calls else {}
@@ -43,7 +48,14 @@ class NullableToolArgsVerifier:
             args = {}
         null_args = body.verifier_metadata["null_args"]
         reward = float(bool(calls) and all(name in args and args[name] is None for name in null_args))
-        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+        return NullableToolArgsVerifyResponse(**body.model_dump(), reward=reward)
+
+    def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        rewards_by_position = {}
+        for task in tasks:
+            for result in task:
+                rewards_by_position.setdefault(result["verifier_metadata"]["position"], []).append(result["reward"])
+        return {f"{position}/null_rate": sum(r) / len(r) for position, r in rewards_by_position.items()}
 
 
 class NullableToolArgsResourcesServer(NullableToolArgsVerifier, SimpleResourcesServer):

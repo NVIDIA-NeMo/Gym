@@ -58,3 +58,12 @@ def test_catch_all_tool_route_keeps_the_session_contract() -> None:
         ),
         keeps_state=False,
     )
+
+
+def test_null_rate_is_reported_per_position() -> None:
+    results = [
+        {"reward": 1.0, "verifier_metadata": {"position": "first"}},
+        {"reward": 0.0, "verifier_metadata": {"position": "first"}},
+        {"reward": 1.0, "verifier_metadata": {"position": "mid"}},
+    ]
+    assert _server().compute_metrics([results]) == {"first/null_rate": 0.5, "mid/null_rate": 1.0}

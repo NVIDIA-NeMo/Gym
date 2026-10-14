@@ -29,6 +29,7 @@ TITLES = ["Weekly sync", "Budget review", "1:1", "Design review", "Standup", "Re
 BUGS = ["Login page returns 500", "Export button does nothing", "Search is slow", "Typo on pricing page"]
 STATUS = ["pending", "shipped", "delivered", "cancelled"]
 
+# (name, description, {param: description}, nullable params, request templates, correct call arguments)
 TOOLS = [
     (
         "create_contact",
@@ -45,6 +46,7 @@ TOOLS = [
             "Save {first} {last}, {email}, to my contacts.",
             "New contact: {first} {last} ({email}). No middle name.",
         ],
+        {"first_name": "{first}", "last_name": "{last}", "email": "{email}"},
     ),
     (
         "create_event",
@@ -55,6 +57,7 @@ TOOLS = [
             "Put '{title}' on my calendar for {date}T{hour:02d}:00. It's a video call, no location.",
             "Schedule {title} at {date}T{hour:02d}:00 with no location.",
         ],
+        {"title": "{title}", "start": "{date}T{hour:02d}:00"},
     ),
     (
         "create_ticket",
@@ -66,9 +69,10 @@ TOOLS = [
         },
         ["assignee"],
         [
-            "Open a ticket titled '{bug}' with body '{bug} since the last deploy.' Leave it unassigned.",
+            "Open a ticket titled '{bug}' with body 'Reported by {first}.' Leave it unassigned.",
             "File an unassigned ticket: '{bug}'. Body: reported by {first}.",
         ],
+        {"title": "{bug}", "body": "Reported by {first}."},
     ),
     (
         "search_orders",
@@ -80,6 +84,7 @@ TOOLS = [
         },
         ["status", "since"],
         ["Show me all orders for customer C-{num}.", "List every order customer C-{num} has ever placed."],
+        {"customer_id": "C-{num}"},
     ),
     (
         "search_orders",
@@ -94,6 +99,7 @@ TOOLS = [
             "Find {status} orders for customer C-{num}, any date.",
             "Which orders for C-{num} are {status}? No date limit.",
         ],
+        {"customer_id": "C-{num}", "status": "{status}"},
     ),
     (
         "send_email",
@@ -107,8 +113,9 @@ TOOLS = [
         ["cc"],
         [
             "Email {email} with subject '{title}' and body 'See you there.'",
-            "Send {first} ({email}) a note titled '{title}' saying 'Running late.'",
+            "Send {first} ({email}) a note titled '{title}' saying 'See you there.'",
         ],
+        {"to": "{email}", "subject": "{title}", "body": "See you there."},
     ),
     (
         "update_profile",
@@ -116,6 +123,7 @@ TOOLS = [
         {"user_id": "User ID.", "phone": "New phone number, or null to clear it."},
         ["phone"],
         ["Remove the phone number from user u_{num}'s profile.", "Clear the phone field for u_{num}."],
+        {"user_id": "u_{num}"},
     ),
     (
         "book_flight",
@@ -128,15 +136,41 @@ TOOLS = [
         },
         ["return_date"],
         ["Book me a one-way flight from {a} to {b} on {date}.", "One-way {a} to {b}, leaving {date}, please."],
+        {"origin": "{a}", "destination": "{b}", "depart_date": "{date}"},
     ),
 ]
 
 
-def make_task(rng: random.Random) -> dict:
-    name, description, params, nullable, prompts = rng.choice(TOOLS)
+def make_tool(rng: random.Random, spec: tuple) -> dict:
+    name, description, params, nullable, _, _ = spec
+    as_any_of = rng.random() < 0.5
+    properties = {}
+    for param, param_description in params.items():
+        if param not in nullable:
+            properties[param] = {"type": "string", "description": param_description}
+        elif as_any_of:
+            properties[param] = {"anyOf": [{"type": "string"}, {"type": "null"}], "description": param_description}
+        else:
+            properties[param] = {"type": ["string", "null"], "description": param_description}
+    return {
+        "type": "function",
+        "name": name,
+        "description": description,
+        "strict": rng.random() < 0.5,
+        "parameters": {
+            "type": "object",
+            "properties": properties,
+            "required": list(params),
+            "additionalProperties": False,
+        },
+    }
+
+
+def make_request(rng: random.Random, spec: tuple) -> tuple[str, dict]:
+    """Return a user request for `spec` and the correct call arguments."""
     first, last = rng.choice(FIRST), rng.choice(LAST)
     a, b = rng.sample(AIRPORTS, 2)
-    prompt = rng.choice(prompts).format(
+    values = dict(
         first=first,
         last=last,
         email=f"{first}.{last}@example.com".lower(),
@@ -149,30 +183,31 @@ def make_task(rng: random.Random) -> dict:
         date=f"2026-{rng.randint(1, 12):02d}-{rng.randint(1, 28):02d}",
         hour=rng.randint(8, 17),
     )
-    as_any_of = rng.random() < 0.5
-    properties = {}
-    for param, param_description in params.items():
-        if param not in nullable:
-            properties[param] = {"type": "string", "description": param_description}
-        elif as_any_of:
-            properties[param] = {"anyOf": [{"type": "string"}, {"type": "null"}], "description": param_description}
-        else:
-            properties[param] = {"type": ["string", "null"], "description": param_description}
-    tool = {
-        "type": "function",
-        "name": name,
-        "description": description,
-        "strict": rng.random() < 0.5,
-        "parameters": {
-            "type": "object",
-            "properties": properties,
-            "required": list(params),
-            "additionalProperties": False,
-        },
-    }
+    _, _, _, nullable, prompts, args = spec
+    arguments = {k: v.format(**values) for k, v in args.items()} | dict.fromkeys(nullable)
+    return rng.choice(prompts).format(**values), arguments
+
+
+def make_task(rng: random.Random, position: str) -> dict:
+    """`first`: the model's first tool call. `mid`: an earlier correct call with null arguments is in the history."""
+    spec = rng.choice(TOOLS)
+    tools = [make_tool(rng, spec)]
+    history = []
+    if position == "mid":
+        earlier = rng.choice(TOOLS)
+        if earlier[0] != spec[0]:
+            tools.append(make_tool(rng, earlier))
+        prompt, arguments = make_request(rng, earlier)
+        history = [
+            {"role": "user", "content": prompt},
+            {"type": "function_call", "call_id": "call_0", "name": earlier[0], "arguments": json.dumps(arguments)},
+            {"type": "function_call_output", "call_id": "call_0", "output": json.dumps({"status": "ok"})},
+            {"role": "assistant", "content": "Done."},
+        ]
+    prompt, _ = make_request(rng, spec)
     return {
-        "responses_create_params": {"input": [{"role": "user", "content": prompt}], "tools": [tool]},
-        "verifier_metadata": {"null_args": nullable},
+        "responses_create_params": {"input": history + [{"role": "user", "content": prompt}], "tools": tools},
+        "verifier_metadata": {"null_args": spec[3], "position": position},
     }
 
 
@@ -180,8 +215,8 @@ def prepare(num_samples: int = 2000, seed: int = 0) -> Path:
     rng = random.Random(seed)
     OUTPUT_FPATH.parent.mkdir(parents=True, exist_ok=True)
     with OUTPUT_FPATH.open("w") as f:
-        for _ in range(num_samples):
-            f.write(json.dumps(make_task(rng)) + "\n")
+        for i in range(num_samples):
+            f.write(json.dumps(make_task(rng, "first" if i % 2 == 0 else "mid")) + "\n")
     print(f"Wrote {num_samples} samples to {OUTPUT_FPATH}")
     return OUTPUT_FPATH
 
