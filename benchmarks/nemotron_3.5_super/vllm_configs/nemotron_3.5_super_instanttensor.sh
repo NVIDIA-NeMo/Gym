@@ -23,6 +23,9 @@ export VLLM_SSM_CONV_STATE_LAYOUT=DS
 # @bxyu-nvidia: V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
 export VLLM_USE_V2_MODEL_RUNNER=0
 
+# @bxyu-nvidia: Needed for instanttensor weight loading
+export INSTANTTENSOR_BACKEND=AIO_BUFFERED
+
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 # @bxyu-nvidia: We set --prefix-match-unit 128 because the Mooncake store prefill lookup gets more expensive the smaller this number is
 # and caused prefill bottlenecks as a result when using Mooncake.
