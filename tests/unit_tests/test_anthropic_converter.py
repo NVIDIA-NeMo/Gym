@@ -335,7 +335,7 @@ class TestResponsesToAnthropicResponse:
         thinking = out["content"][0]
         assert thinking["type"] == "thinking"
         assert thinking["thinking"] == "step"
-        assert thinking["signature"] == "sig"
+        assert thinking["signature"] == "litellm_encrypted_reasoning:sig"
         assert out["stop_reason"] == "end_turn"
 
     def test_max_tokens_stop_reason(self) -> None:
