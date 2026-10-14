@@ -42,6 +42,7 @@ from tqdm.asyncio import tqdm
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.base_responses_api_model import (
+    await_model_call_capture_quiescence,
     clear_model_call_captures_for_rollouts,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
@@ -2856,6 +2857,11 @@ class RolloutCollectionHelper(BaseModel):
                 # when capture is off). Never alters the harness output/reward already in `result`.
                 # A failed episode that returned agent evidence made model calls worth joining.
                 if capture_dirs and (not no_result or NG_AGENT_OBSERVATIONS_KEY in result):
+                    # A cancelled call's capture write runs detached, so drain the claims this
+                    # rollout still holds before snapshotting; otherwise a late row is lost.
+                    rollout_id_for_capture = maybe_rollout_id_from_run_body(result)
+                    if rollout_id_for_capture is not None:
+                        await await_model_call_capture_quiescence(rollout_id_for_capture, capture_dirs)
                     merge_model_call_capture_into_record(
                         result,
                         capture_dirs,
