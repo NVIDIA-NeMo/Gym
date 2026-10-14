@@ -148,8 +148,6 @@ and the run scores 0 with no error.
 The Artificial Analysis API grades CritPt in batches of all 70 problems, so a full run (70
 problems x 5 repeats) makes 5 grading calls.
 
-- Serve the model with a context length that fits the prompt plus 245,760 output tokens (see
-  [Serving the model](#serving-the-model)).
 - Leave `PARALLEL` unset, or at 350 or more. A rollout holds its slot until its batch is
   graded, so with fewer slots no batch fills and the run fails once the 6-hour verify
   timeout expires.
@@ -379,14 +377,12 @@ over repeats, so two runs of the same recipe against the same endpoint will not 
 the last digit. Judge a difference against that spread, not against the exact published
 value.
 
-**Serving configuration moves scores as much as the eval configuration does.** vLLM
-version, tensor parallelism, cache dtype, prefix caching, context length
-(`--max-model-len`), and the reasoning and tool-call parsers all change results. To compare
-against the published numbers, serve the model as the recipes describe and point them at
-that. Running against an endpoint someone else operates works fine, but then a gap is
-ambiguous: you cannot tell whether it came from their serving stack or from the model. That
-is a sound way to measure a deployment you already have — it is not a basis for confirming
-published numbers.
+**Serve the model yourself to compare.** To compare against the published numbers, serve the
+model as [Serving the model](#serving-the-model) describes and point the recipes at it.
+Running against an endpoint someone else operates works fine, but then a gap is ambiguous:
+you cannot tell whether it came from their serving stack or from the model. That is a sound
+way to measure a deployment you already have — it is not a basis for confirming published
+numbers.
 
 **Check for failed answers.** An answer that fails, e.g. on a judge call, is left out of the
 score and written to `evaluator_rollouts_failures.jsonl` in the output directory. Compare

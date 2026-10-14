@@ -26,8 +26,9 @@
 #
 # Set in .env: POLICY_API_KEY
 #
-# The published run served the model with a shorter context, which also caps each answer,
-# thinking included; to match it, serve as in reproducibility.md, "Serving the model".
+# The published run's served context capped each answer, thinking included, at about 32,768
+# tokens (1.2% of answers reached it). max_output_tokens below caps it the same way, so serve
+# the model as for the other recipes.
 #
 # The dataset is not pinned to a revision: Gym loads the latest li-lab/MMLU-ProX, which had
 # 117,590 questions for these languages when the published number was produced. A different
@@ -37,6 +38,9 @@
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
 # Gym benchmark config this recipe builds on.
 benchmark_config: benchmarks/mmlu_prox/config.yaml
+
+responses_create_params:
+  max_output_tokens: 32768
 
 # The published run's 10 languages; the benchmark default prepares more.
 prepare_script_args:

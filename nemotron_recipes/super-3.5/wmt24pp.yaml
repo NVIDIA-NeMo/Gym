@@ -34,14 +34,17 @@
 # run.sh first sources wmt24pp.setup.sh, which sets this up and downloads the scorer model
 # once.
 #
-# The published run served the model with a shorter context, which also caps each
-# translation, thinking included; to match it, serve as in reproducibility.md, "Serving the
-# model".
+# The published run's served context capped each translation, thinking included, at about
+# 32,768 tokens. max_output_tokens below caps it the same way, so serve the model as for the
+# other recipes.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
 # Gym benchmark config this recipe builds on.
 benchmark_config: benchmarks/wmt24pp/config.yaml
+
+responses_create_params:
+  max_output_tokens: 32768
 
 prepare_script_args:
   # The published run's 9 target languages (the benchmark default prepares 55).

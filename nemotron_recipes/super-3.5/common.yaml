@@ -26,7 +26,8 @@ responses_create_params:
   temperature: 1.0
   top_p: 0.95
   # No output cap: most published runs sent none, so generation is bounded only by the
-  # served context length. A recipe whose run sent a cap sets it itself (CritPt).
+  # served context length. A recipe whose run sent a cap sets it itself (CritPt), and so do
+  # MMLU-ProX and WMT24++, whose runs were served with a shorter context.
   max_output_tokens: null
 
 policy_model:
