@@ -117,9 +117,19 @@ bare names must identify exactly one logged test, and parameter IDs are preserve
 R2E-Gym rows without test lists are graded
 with R2E-Gym's own rule: the test-status map from the run's short test summary must
 equal the row's `expected_output_json` exactly. The grading transcript is saved as
-`eval_output.txt` next to the rollout artifacts.
-Before running an R2E-Gym image's `run_tests.sh`, the grader
-links the image's `/r2e_tests` into `/testbed`, as R2E-Gym's own runtime does.
+`eval_output.txt` next to the rollout artifacts. Statuses come from the leading
+summary token, so status words inside parameter IDs or failure diagnostics do not
+change the verdict. ANSI colors are removed consistently from logs and expected
+keys. Expected maps retain the upstream encoding: file names are omitted, every
+`::` becomes `.`, and ` - ` suffixes are removed. The last reported phase wins,
+including an expected teardown `ERROR` after a passing test body. This legacy
+encoding can merge distinct parameter IDs; restoring their identity requires a
+dataset format decision. Explicit test lists use their separate identity rules;
+passing summary lines preserve arbitrary brackets in parameter IDs. Failure
+summary parsing still has limits for unmatched brackets in parameter IDs.
+
+Before running an R2E-Gym image's `run_tests.sh`, the grader links the image's
+`/r2e_tests` into `/testbed`, as R2E-Gym's own runtime does.
 
 Resolved patches receive reward `1`; other completed attempts receive `0`.
 Agent timeouts, evaluation timeouts, sandbox failures, and accidental successes

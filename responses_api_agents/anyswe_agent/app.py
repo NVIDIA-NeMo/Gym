@@ -170,7 +170,6 @@ def _as_list(value: Any) -> list[str]:
 
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-_R2E_DECOLOR = re.compile(r"\x1b\[\d+m")
 _TEST_STATUSES = ("PASSED", "FAILED", "ERROR", "XFAIL", "SKIPPED")
 _VERBOSE_TEST_LINE = re.compile(r"^(\S+::\S.*?)\s+(PASSED|FAILED|ERROR|XFAIL|SKIPPED)(?:\s+\[\s*\d+%\])?$")
 
@@ -229,7 +228,10 @@ def _r2e_resolved(instance: Dict[str, Any], log: str) -> bool:
         line = _ANSI_ESCAPE.sub("", raw_line).strip()
         fields = line.split(maxsplit=1)
         if len(fields) > 1 and fields[0] in _TEST_STATUSES:
-            _record_test_status(statuses, _r2e_summary_test_name(fields[1]), fields[0])
+            # PASSED lines have no diagnostic suffix. Parameter IDs are arbitrary text, including unmatched
+            # brackets and " - ", so parsing them as a failure explanation loses valid identities.
+            name = fields[1] if fields[0] == "PASSED" else _r2e_summary_test_name(fields[1])
+            _record_test_status(statuses, name, fields[0])
             continue
         # pytest's verbose per-test line "<node id> STATUS [ 42%]", for runners that suppress the -rA summary.
         verbose = _VERBOSE_TEST_LINE.match(line)
@@ -249,34 +251,36 @@ def _r2e_resolved(instance: Dict[str, Any], log: str) -> bool:
 
 
 def _r2e_parse_log_pytest(log: str) -> Dict[str, str]:
-    """R2E-Gym's own ``parse_log_pytest``: only the "short test summary info" section counts.
+    """Read R2E's short-summary map using its established, lossy key encoding.
 
-    A key is ``Class.test`` (the node id without its file), with any `` - message`` tail dropped.
+    File names are dropped, all ``::`` separators become dots (including inside parameter IDs), and failure
+    explanations are truncated at `` - ``. Keep the last reported phase, including a teardown ERROR after PASSED.
     """
-    status: Dict[str, str] = {}
+    statuses: Dict[str, str] = {}
     if not log or "short test summary info" not in log:
-        return status
-    for line in log.split("short test summary info")[1].strip().split("\n"):
-        if "PASSED" in line:
-            status[".".join(line.split("::")[1:])] = "PASSED"
-        elif "FAILED" in line:
-            status[".".join(line.split("::")[1:]).split(" - ")[0]] = "FAILED"
-        elif "ERROR" in line:
-            status[".".join(line.split("::")[1:]).split(" - ")[0]] = "ERROR"
-    return status
+        return statuses
+    for line in log.split("short test summary info")[1].splitlines():
+        fields = _ANSI_ESCAPE.sub("", line).strip().split(maxsplit=1)
+        if len(fields) != 2 or fields[0] not in ("PASSED", "FAILED", "ERROR"):
+            continue
+        status, text = fields
+        name = ".".join(text.split("::")[1:])
+        if status != "PASSED":
+            name = name.split(" - ")[0]
+        statuses[name] = status
+    return statuses
 
 
 def _r2e_expected_resolved(expected_output_json: Any, log: str) -> bool:
-    """R2E-Gym's own reward rule (``_calculate_reward_r2e``).
+    """R2E-Gym's expected-map reward rule, including expected FAILED and ERROR outcomes.
 
-    The parsed status map must equal ``expected_output_json`` key for key after decoloring and dropping
-    `` - message`` tails. Expected statuses are often FAILED or ERROR by design, so this is an exact match, not
-    "all passed".
+    Preserve the upstream serialized key schema on both sides. Its truncation can alias parameter IDs;
+    recovering those identities requires a dataset format change, not a different observed-log normalization.
     """
     if isinstance(expected_output_json, str):
         expected_output_json = json.loads(expected_output_json)
-    parsed = {_R2E_DECOLOR.sub("", k): v for k, v in _r2e_parse_log_pytest(_ANSI_ESCAPE.sub("", log)).items()}
-    expected = {_R2E_DECOLOR.sub("", k): v for k, v in dict(expected_output_json or {}).items()}
+    parsed = {_ANSI_ESCAPE.sub("", k): v for k, v in _r2e_parse_log_pytest(log).items()}
+    expected = {_ANSI_ESCAPE.sub("", k): v for k, v in dict(expected_output_json or {}).items()}
     parsed = {k.split(" - ")[0]: parsed[k] for k in sorted(parsed)}
     expected = {k.split(" - ")[0]: expected[k] for k in sorted(expected)}
     return bool(expected) and "" not in expected and parsed == expected
