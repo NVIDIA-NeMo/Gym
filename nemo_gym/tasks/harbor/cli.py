@@ -195,7 +195,15 @@ def _config_path(relative: str) -> Path:
 
 
 def _has_override(overrides: list[str], key: str) -> bool:
-    return any(token.lstrip("+").split("=", 1)[0] == key for token in overrides)
+    return _override_value(overrides, key) is not None
+
+
+def _override_value(overrides: list[str], key: str) -> str | None:
+    for token in overrides:
+        name, _, value = token.lstrip("+").partition("=")
+        if name == key:
+            return value
+    return None
 
 
 def build_run(
