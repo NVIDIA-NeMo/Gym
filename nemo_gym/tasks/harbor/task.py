@@ -3,16 +3,20 @@
 
 """Load one task folder, or a folder of task folders, from disk."""
 
+import fcntl
 import json
 import logging
+import os
 import re
+import time
 import tomllib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
-from nemo_gym.tasks.harbor.digest import content_hash
+from nemo_gym.tasks.harbor.digest import content_hash, context_digest
 from nemo_gym.tasks.harbor.dockerfile import (
     BaseImageConfig,
     DockerfileNeedsBuild,
@@ -33,6 +37,9 @@ DOCKERFILE = Path("environment") / "Dockerfile"
 # tasks wrote it (see ``nemo_gym.tasks.harbor.image_configs``): Compose sidecar images and the base image
 # of every Dockerfile the loader resolves.
 IMAGE_CONFIGS_FILE = "compose-images.json"
+# The images prepare built for Dockerfiles outside pull and overlay mode, next to the task folders, keyed by
+# Harbor's content hash of the task's ``environment/`` build context (see ``nemo_gym.tasks.harbor.image_build``).
+BUILT_IMAGES_FILE = "built-images.json"
 
 
 class HarborTaskError(ValueError):
@@ -63,6 +70,20 @@ class HarborTask:
     ``User`` (``None`` is root), not the Dockerfile's final ``USER`` or ``[agent].user``. When the
     base image's configuration is not known (a prebuilt image, or a Dockerfile resolved without
     it), the task's ``user`` stands in for it.
+
+    ``built_image`` is the image prepare built from the task's ``environment/`` folder when the
+    Dockerfile needed a build (``built-images.json``); ``image`` is then that image and the task
+    runs in pull mode from it. ``None`` in the other two modes and for a prebuilt image.
+
+    ``entrypoint`` is the image's ``Entrypoint`` as Docker would start it: the built image's recorded
+    one, or the base image's for a Dockerfile the loader resolves unless that Dockerfile wrote
+    ``ENTRYPOINT []``. ``None`` when the image records none or no configuration is recorded (a prebuilt
+    ``docker_image``). ``entrypoint_user`` and ``entrypoint_workdir`` are the ``User`` and ``WorkingDir``
+    the image starts with (``None`` is root and ``/``): what Docker gives its ``ENTRYPOINT`` and its
+    ``HEALTHCHECK``, independent of ``[agent].user`` and ``[environment].workdir``, which only shape the
+    commands run beside them. They are known whenever the image's configuration is, with or without an
+    entrypoint. ``image_healthcheck`` is the recorded Dockerfile ``HEALTHCHECK`` block (``Test``,
+    ``Interval``, ... as Docker records them), or ``None``.
     """
 
     path: Path
@@ -76,6 +97,11 @@ class HarborTask:
     user: str | None
     overlay: tuple[OverlayRun, ...] = ()
     sandbox_user: str | None = None
+    built_image: str | None = None
+    entrypoint: tuple[str, ...] | None = None
+    entrypoint_user: str | None = None
+    entrypoint_workdir: str | None = None
+    image_healthcheck: dict[str, Any] | None = None
 
     @property
     def needs_sandbox(self) -> bool:
@@ -99,16 +125,112 @@ def is_task_folder(path: Path) -> bool:
     return (Path(path) / TASK_FILE).is_file()
 
 
-def read_image_configs(folder: Path) -> dict[str, Any]:
-    """The image configurations recorded in ``folder`` (the tasks' parent), or ``{}`` when none were."""
-    path = Path(folder) / IMAGE_CONFIGS_FILE
+# The sidecar lock file next to a record file (``<file>.lock``), see :func:`record_lock`.
+RECORD_LOCK_SUFFIX = ".lock"
+# A reader that finds a record file unparsable reads it once more after this pause before giving up.
+RECORD_READ_RETRY_S = 0.05
+
+
+@contextmanager
+def record_lock(path: Path) -> Iterator[None]:
+    """Hold an exclusive lock on ``path``'s sidecar lock file (``<file>.lock``) for a read-modify-write of it.
+
+    Two Gym processes can share one datasets folder (``gym eval run`` and ``gym dataset validate`` of one
+    ``harbor:`` ref both record into it), so every read, merge and replace of a record file happens under
+    this lock or a concurrent writer's entries are lost. ``flock`` is per open file description, so threads
+    of one process are serialised as well. The lock file stays next to the record; it carries no content.
+    """
+    path = Path(path)
+    lock_path = path.with_name(path.name + RECORD_LOCK_SUFFIX)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o666)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def write_json_record(path: Path, data: dict[str, Any]) -> None:
+    """Replace the record file at ``path`` with ``data`` atomically: written sorted and indented to a temporary
+    file in the same directory, fsynced, then moved over ``path`` with ``os.replace``, so a reader opens either
+    the old file or the new one and never a truncated one. Callers merging into an existing record hold
+    :func:`record_lock` around the read, the merge and this call."""
+    path = Path(path)
+    text = json.dumps(dict(sorted(data.items())), indent=2, sort_keys=True) + "\n"
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    # os.open with 0o666 applies the umask like Path.write_text did; mkstemp would make the record 0600.
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def read_json_record(path: Path) -> dict[str, Any]:
+    """The JSON object in the record file at ``path``, or ``{}`` when the file is missing or not an object.
+
+    Writers replace the file atomically (:func:`write_json_record`), so a torn read should not happen; as
+    belt and braces a file that does not parse is read once more after a short pause (a record an older
+    writer is still truncating and rewriting) and :class:`HarborTaskError` names it if it stays invalid.
+    """
+    path = Path(path)
     if not path.is_file():
         return {}
-    try:
-        recorded = json.loads(path.read_text())
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise HarborTaskError(f"{path} is not valid JSON: {exc}") from exc
+    for attempt in (1, 2):
+        try:
+            recorded = json.loads(path.read_text())
+            break
+        except FileNotFoundError:
+            return {}
+        except (ValueError, UnicodeDecodeError) as exc:
+            if attempt == 1:
+                time.sleep(RECORD_READ_RETRY_S)
+                continue
+            raise HarborTaskError(
+                f"{path} is not valid JSON (read twice, {RECORD_READ_RETRY_S:g}s apart): {exc}"
+            ) from exc
     return recorded if isinstance(recorded, dict) else {}
+
+
+def read_image_configs(folder: Path) -> dict[str, Any]:
+    """The image configurations recorded in ``folder`` (the tasks' parent), or ``{}`` when none were."""
+    return read_json_record(Path(folder) / IMAGE_CONFIGS_FILE)
+
+
+def read_built_images(folder: Path) -> dict[str, Any]:
+    """The built images recorded in ``folder`` (the tasks' parent), or ``{}`` when none were."""
+    return read_json_record(Path(folder) / BUILT_IMAGES_FILE)
+
+
+def built_image(task_folder: Path) -> str | None:
+    """The image prepare built for the task's Dockerfile, when ``built-images.json`` records one."""
+    task_folder = Path(task_folder)
+    context = task_folder / DOCKERFILE.parent
+    if not context.is_dir():
+        return None
+    entry = read_built_images(task_folder.parent).get(context_digest(context))
+    image = entry.get("image") if isinstance(entry, dict) else None
+    return str(image) if image else None
+
+
+def _build_required(dockerfile: Path, reason: Exception) -> HarborTaskError:
+    return HarborTaskError(
+        f"{dockerfile} needs a build ({reason}) and no built image is recorded in "
+        f"{dockerfile.parent.parent.parent / BUILT_IMAGES_FILE}. `gym eval run` and `gym dataset validate` build it "
+        "when buildah, podman or docker is installed (configured by the `builds:` block, see "
+        "environment_servers/harbor/README.md), or declare [environment].docker_image with a prebuilt image."
+    )
 
 
 def dockerfile_base_image(task_folder: Path, declared_image: str | None) -> str | None:
@@ -212,6 +334,13 @@ def load_task(path: Path) -> HarborTask:
     base_known = False
     base_user: str | None = None
     dockerfile = path / DOCKERFILE
+    built: str | None = None
+    # What Docker starts the image with: the record of the image the sandbox runs (built image), or the
+    # base image's record carried through the Dockerfile's final USER and WORKDIR (pull and overlay mode).
+    entrypoint: tuple[str, ...] | None = None
+    entrypoint_user: str | None = None
+    entrypoint_workdir: str | None = None
+    image_healthcheck: dict[str, Any] | None = None
     if dockerfile.is_file():
         try:
             dockerfile_text = dockerfile.read_text()
@@ -221,11 +350,25 @@ def load_task(path: Path) -> HarborTask:
             parsed = parse_dockerfile(dockerfile_text)
         except DockerfileNeedsBuild as exc:
             if image is None:
-                raise HarborTaskError(
-                    f"{dockerfile} needs a build ({exc}); building Dockerfiles is not supported yet. "
-                    "Declare [environment].docker_image with a prebuilt image to run this task."
-                ) from exc
+                # Build mode: prepare built the context once and recorded the image next to the tasks.
+                built = built_image(path)
+                if built is None:
+                    raise _build_required(dockerfile, exc) from exc
             parsed = None
+        if built is not None:
+            # The built image is pulled like a prebuilt one; its recorded configuration gives the
+            # Dockerfile's final WORKDIR, ENV and USER.
+            record = read_image_configs(path.parent).get(built)
+            base = BaseImageConfig.from_record(record) if record is not None else None
+            image = built
+            if base is not None:
+                base_known = True
+                base_user = base.user
+                workdir = workdir or base.workdir
+                env = base.env | env
+                user = base.user
+                entrypoint, entrypoint_user, entrypoint_workdir = base.entrypoint, base.user, base.workdir
+                image_healthcheck = base.healthcheck
         if parsed is not None and (image is None or not parsed.has_runs):
             # A prebuilt image already holds whatever its Dockerfile's RUN lines did; only a
             # pull-mode Dockerfile contributes settings next to a declared image.
@@ -242,12 +385,34 @@ def load_task(path: Path) -> HarborTask:
                     "`gym dataset validate`) to record it."
                 ) from exc
             except DockerfileNeedsBuild as exc:
-                raise HarborTaskError(f"{dockerfile} needs a build ({exc})") from exc
-            image = image or resolved.image
-            workdir = workdir or resolved.workdir
-            env = resolved.env | env
-            user = resolved.user
-            overlay = resolved.runs
+                # An expansion the overlay cannot resolve: a build, unless prepare already built it.
+                built = built_image(path)
+                if built is None:
+                    raise _build_required(dockerfile, exc) from exc
+                record = read_image_configs(path.parent).get(built)
+                base = BaseImageConfig.from_record(record) if record is not None else None
+                image = built
+                base_known = base is not None
+                base_user = base.user if base is not None else None
+                if base is not None:
+                    workdir = workdir or base.workdir
+                    env = base.env | env
+                    user = base.user
+                    entrypoint, entrypoint_user, entrypoint_workdir = base.entrypoint, base.user, base.workdir
+                    image_healthcheck = base.healthcheck
+                resolved = None
+            if resolved is not None:
+                image = image or resolved.image
+                workdir = workdir or resolved.workdir
+                env = resolved.env | env
+                user = resolved.user
+                overlay = resolved.runs
+                if base is not None:
+                    # The image Docker would build from this Dockerfile keeps the base's entrypoint (unless
+                    # the Dockerfile cleared it) and healthcheck, started with its final USER and WORKDIR.
+                    entrypoint = None if resolved.entrypoint_cleared else base.entrypoint
+                    entrypoint_user, entrypoint_workdir = resolved.user, resolved.workdir
+                    image_healthcheck = base.healthcheck
     if config.agent.user is not None:
         user = str(config.agent.user)
 
@@ -268,6 +433,11 @@ def load_task(path: Path) -> HarborTask:
         user=user,
         overlay=overlay,
         sandbox_user=base_user if base_known else user,
+        built_image=built,
+        entrypoint=entrypoint,
+        entrypoint_user=entrypoint_user,
+        entrypoint_workdir=entrypoint_workdir,
+        image_healthcheck=image_healthcheck,
     )
 
 

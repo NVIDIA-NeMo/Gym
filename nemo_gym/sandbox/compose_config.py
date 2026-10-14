@@ -12,6 +12,7 @@ Adapted from Gym's Terminal Bench 4 server (``resources_servers/terminal_bench_4
 """
 
 import re
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -287,6 +288,63 @@ def residual_interpolation(value: Any, path: str = "") -> str | None:
         found = (residual_interpolation(v, f"{path}.{k}" if path else str(k)) for k, v in value.items())
         return next((r for r in found if r), None)
     return None
+
+
+# The keys the sandbox Compose adapter (``nemo_gym.sandbox.adapters.docker_compose``) starts. Every other key
+# of a document or a service is refused by name: at prepare, per task, and again by the adapter before it
+# provisions anything.
+SUPPORTED_COMPOSE_FIELDS = frozenset({"name", "services", "networks", "volumes"})
+SUPPORTED_SERVICE_FIELDS = frozenset(
+    {
+        "image",
+        "entrypoint",
+        "command",
+        "environment",
+        "working_dir",
+        "user",
+        "depends_on",
+        "healthcheck",
+        "expose",
+        "ports",
+        "networks",
+        "volumes",
+        "cpus",
+        "mem_limit",
+        "labels",
+        "restart",
+        "network_mode",
+        "cap_add",
+        "shm_size",
+        "x-sandbox",
+    }
+)
+
+
+def unsupported_compose_fields(document: Any) -> list[str]:
+    """The refusals the sandbox Compose adapter raises for the keys of ``document``: one message per offender in
+    document order (the top level first, then each service), empty when every key is one the adapter starts.
+
+    Pure, so prepare runs it on a task's resolved document and reports a refused field (``deploy``,
+    ``extra_hosts``, ``platform``, a sidecar ``build:``) per task before any sandbox starts, and the adapter
+    raises the first message at start. Only mappings are inspected: a document or service that is not one
+    fails the adapter's shape checks instead.
+    """
+    messages: list[str] = []
+    if not isinstance(document, Mapping):
+        return messages
+    unknown = sorted(str(key) for key in set(document) - SUPPORTED_COMPOSE_FIELDS)
+    if unknown:
+        messages.append(f"Unsupported Compose fields: {unknown}")
+    services = document.get("services")
+    if not isinstance(services, Mapping):
+        return messages
+    for name, service in services.items():
+        if not isinstance(service, Mapping):
+            continue
+        unknown = sorted(str(key) for key in set(service) - SUPPORTED_SERVICE_FIELDS)
+        if unknown:
+            messages.append(f"Service {name!r}: unsupported Compose fields {unknown}")
+    return messages
 
 
 def _compose_literals(value: Any) -> Any:

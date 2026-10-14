@@ -141,6 +141,9 @@ class SandboxSpec:
     entrypoint: list[str] | None = None
     provider_options: dict[str, Any] = field(default_factory=dict)
     ports: tuple[int, ...] | list[int] = field(default_factory=tuple)
+    # The user commands run as when an exec names none (a Dockerfile's final ``USER``). Providers that
+    # cannot set a container default apply it per exec through the sandbox facade.
+    user: str | int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.resources, SandboxResources):
