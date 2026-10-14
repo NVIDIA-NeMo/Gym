@@ -28,11 +28,12 @@ from nemo_gym import component_search_roots
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError
 from nemo_gym.path_utils import materialized_path_for
+from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE, read_dataset_config
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.hub import HubError, datasets_dir, fetch_ref, is_hub_ref
 from nemo_gym.tasks.harbor.image_configs import record_compose_images
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
-from nemo_gym.tasks.harbor.task import HarborTask, discover_tasks
+from nemo_gym.tasks.harbor.task import HarborTask, discover_tasks, is_task_folder
 from nemo_gym.tasks.harbor.validation_report import (
     _task_digests,
     _validation_key,
@@ -132,6 +133,7 @@ def prepare_target(
         )
     for task_id, error in errors.items():
         logger.warning("Skipping task %s: %s", task_id, error)
+    _check_dataset_task_keys(folder, tasks, errors)
     tasks, skipped = select_tasks(tasks, exclude or [], only)
     for task_id, reason in skipped:
         print(f"Skipping {task_id}: {reason}")
@@ -152,6 +154,22 @@ def prepare_target(
         output_dir=output_dir,
         skipped={task_id: str(error) for task_id, error in errors.items()},
     )
+
+
+def _check_dataset_task_keys(folder: Path, loaded: list[HarborTask], errors: dict[str, HarborTaskError]) -> None:
+    """Refuse a ``[gym.tasks."<id>"]`` table that names no task folder: a misspelt id would otherwise apply to nothing.
+
+    A target that is itself a task folder is prepared without its siblings, so the check is skipped for it.
+    """
+    if is_task_folder(folder):
+        return
+    try:
+        dataset = read_dataset_config(folder)
+    except ValueError:
+        return  # already reported per task by the loader
+    unknown = set(dataset.tasks) - {task.task_id for task in loaded} - set(errors)
+    if unknown:
+        raise ValueError(f"{folder / DATASET_FILE} [gym.tasks] names unknown tasks: {sorted(unknown)}")
 
 
 def runs_in_sandbox(impl_name: str, impl_config: Any) -> bool:
