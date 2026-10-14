@@ -46,6 +46,7 @@ launch's result still carries the harness's own exit code, which the supervisor 
 import asyncio
 import logging
 import time
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from shlex import quote
 from typing import Awaitable, Callable, Literal, Optional
@@ -474,6 +475,21 @@ async def _continue(sandbox: AsyncSandbox, launch: HarnessLaunch) -> bool:
 
 
 async def _stop(
+    sandbox: AsyncSandbox, launch: HarnessLaunch, exec_task: "asyncio.Future[SandboxExecResult]"
+) -> SandboxExecResult:
+    """Stop the launch inside the sandbox's checkpoint polling scope: the stopped launch's end, and the late
+    result of one that had ended, are seen within the scope's short poll interval instead of the command's
+    backed-off one (up to 30 s on OpenSandbox)."""
+    with _checkpoint_polling(sandbox):
+        return await _stop_launch(sandbox, launch, exec_task)
+
+
+def _checkpoint_polling(sandbox: AsyncSandbox) -> AbstractContextManager[None]:
+    polling = getattr(sandbox, "checkpoint_exec_polling", None)
+    return polling() if callable(polling) else nullcontext()
+
+
+async def _stop_launch(
     sandbox: AsyncSandbox, launch: HarnessLaunch, exec_task: "asyncio.Future[SandboxExecResult]"
 ) -> SandboxExecResult:
     started = time.monotonic()

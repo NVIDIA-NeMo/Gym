@@ -22,6 +22,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -38,6 +39,7 @@ from nemo_gym.sandbox.providers import (
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxBackgroundServices,
+    SupportsSandboxCheckpointPolling,
     SupportsSandboxEndpoint,
     SupportsSandboxPauseResume,
     SupportsSandboxPty,
@@ -438,6 +440,17 @@ class AsyncSandbox:
         if self._handle is None or self._stopped:
             return None
         return self._handle
+
+    def checkpoint_exec_polling(self) -> AbstractContextManager[None]:
+        """Accelerate completion checks for this sandbox while stopping for a checkpoint.
+
+        Providers without background polling support use a no-op scope. This changes completion detection,
+        not process signals, command deadlines or the checkpoint's safe-point requirements.
+        """
+        handle = self._require_handle()
+        if isinstance(self._provider, SupportsSandboxCheckpointPolling):
+            return self._provider.checkpoint_exec_polling(handle)
+        return nullcontext()
 
     async def start(
         self,

@@ -80,6 +80,8 @@ sandbox:
       # shipped swebench and opencode configs set 50ms).
       background_poll_initial_s: 0.5
       background_poll_interval_s: 30.0
+      # During checkpoint shutdown, wake existing sleeps and briefly cap command polls at one second.
+      checkpoint_background_poll_interval_s: 1.0
       # Per-request budget for status polls, which are small idempotent GETs:
       # without their own short budget, each poll against an unreachable
       # sandbox hangs for the full connection request_timeout_s (tuned for

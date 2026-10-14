@@ -22,7 +22,8 @@ import math
 import random
 import re
 import shlex
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
@@ -52,6 +53,13 @@ from nemo_gym.telemetry.span_groups import GymSpanGroup
 LOGGER = logging.getLogger(__name__)
 logging.getLogger("opensandbox").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+@dataclass(eq=False)
+class _BackgroundCommandPoll:
+    """Give each command its own wakeup when checkpoint polling scopes change."""
+
+    wakeup: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class _MissingSandboxTerminateFilter(logging.Filter):
@@ -635,6 +643,8 @@ class OpenSandboxOperationConfig:
     # Backs off from initial to interval.
     background_poll_initial_s: float = 0.25
     background_poll_interval_s: float = 2.0
+    # Only used during checkpoint shutdown; normal commands retain their existing backoff.
+    checkpoint_background_poll_interval_s: float = 1.0
     # Per-request budget for background-command status polls, which are small
     # idempotent GETs: without their own short budget, each poll against an
     # unreachable sandbox hangs for the shared request timeout (tuned for long
@@ -662,6 +672,11 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.background_poll_interval_s must be > 0")
         if self.background_poll_initial_s <= 0:
             raise ValueError("operations.background_poll_initial_s must be > 0")
+        if (
+            not math.isfinite(self.checkpoint_background_poll_interval_s)
+            or self.checkpoint_background_poll_interval_s <= 0
+        ):
+            raise ValueError("operations.checkpoint_background_poll_interval_s must be > 0")
         if self.status_poll_timeout_s is not None and self.status_poll_timeout_s <= 0:
             raise ValueError("operations.status_poll_timeout_s must be > 0")
 
@@ -800,6 +815,43 @@ class OpenSandboxProvider:
         # sweeps any still open; ended ones are retired on the next create/attach.
         self._pty_sessions: set[Any] = set()
         self._renewals: dict[str, asyncio.Task[None]] = {}
+        self._command_polls: dict[str, set[_BackgroundCommandPoll]] = {}
+        self._checkpoint_poll_scopes: dict[str, int] = {}
+
+    @contextmanager
+    def checkpoint_exec_polling(self, handle: SandboxHandle) -> Iterator[None]:
+        """Wake command waits and cap polling for this sandbox until the scope exits."""
+        sandbox_id = handle.sandbox_id
+        self._checkpoint_poll_scopes[sandbox_id] = self._checkpoint_poll_scopes.get(sandbox_id, 0) + 1
+        for poll in self._command_polls.get(sandbox_id, ()):
+            poll.wakeup.set()
+        try:
+            yield
+        finally:
+            remaining = self._checkpoint_poll_scopes[sandbox_id] - 1
+            if remaining:
+                self._checkpoint_poll_scopes[sandbox_id] = remaining
+            else:
+                del self._checkpoint_poll_scopes[sandbox_id]
+            for poll in self._command_polls.get(sandbox_id, ()):
+                poll.wakeup.set()
+
+    async def _wait_command_poll(self, poll: _BackgroundCommandPoll, *, interval_s: float) -> None:
+        """Wait for the next poll or a scope change, including an already delivered notification."""
+        if poll.wakeup.is_set():
+            poll.wakeup.clear()
+            return
+        sleep_task = asyncio.create_task(asyncio.sleep(interval_s))
+        wake_task = asyncio.create_task(poll.wakeup.wait())
+        try:
+            done, _ = await asyncio.wait({sleep_task, wake_task}, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+        finally:
+            sleep_task.cancel()
+            wake_task.cancel()
+            await asyncio.gather(sleep_task, wake_task, return_exceptions=True)
+            poll.wakeup.clear()
 
     def validate_runtime_requirements(self, *, cap_add: tuple[str, ...], shm_size: int | None) -> dict[str, str]:
         """Reject requirements without an operator-configured implementation."""
@@ -1948,6 +2000,36 @@ class OpenSandboxProvider:
         total_timeout_s: int | float | None,
         retries: int,
     ) -> SandboxExecResult:
+        """Register this command for checkpoint wakeups and release its waiter on every exit."""
+        poll = _BackgroundCommandPoll()
+        self._command_polls.setdefault(handle.sandbox_id, set()).add(poll)
+        try:
+            return await self._exec_background_poll(
+                handle,
+                command,
+                opts_kwargs,
+                sdk_timeout_s=sdk_timeout_s,
+                total_timeout_s=total_timeout_s,
+                retries=retries,
+                poll=poll,
+            )
+        finally:
+            polls = self._command_polls[handle.sandbox_id]
+            polls.remove(poll)
+            if not polls:
+                del self._command_polls[handle.sandbox_id]
+
+    async def _exec_background_poll(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        opts_kwargs: dict[str, Any],
+        *,
+        sdk_timeout_s: float | None,
+        total_timeout_s: int | float | None,
+        retries: int,
+        poll: _BackgroundCommandPoll,
+    ) -> SandboxExecResult:
         """Run a command as a background execution polled via short requests.
 
         The logs endpoint returns one combined stream, so unlike the foreground
@@ -2015,7 +2097,10 @@ class OpenSandboxProvider:
                     f"Timed out polling OpenSandbox background command; sandbox_id={handle.sandbox_id!r}, "
                     f"execution_id={execution_id!r}"
                 )
-            await asyncio.sleep(poll_interval)
+            interval_s = poll_interval
+            if handle.sandbox_id in self._checkpoint_poll_scopes:
+                interval_s = min(interval_s, self._operations.checkpoint_background_poll_interval_s)
+            await self._wait_command_poll(poll, interval_s=interval_s)
             poll_interval = min(poll_interval * 1.5, self._operations.background_poll_interval_s)
 
         # The execution has finished, so one call returns its whole buffer; the
