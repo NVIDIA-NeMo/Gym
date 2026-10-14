@@ -436,6 +436,32 @@ class AsyncSandboxCompose:
             interval = health.get("start_interval", "5s") if in_start_period else health.get("interval", "30s")
             await asyncio.sleep(_seconds(interval))
 
+    async def _create_workdir(self, name: str) -> None:
+        """Create the service's working directory once its sandbox is up, as Docker creates a missing
+        ``working_dir`` (or image ``WORKDIR``) at container create.
+
+        Every exec in the service defaults to that directory, this group's bootstrap ones included, and a
+        provider may refuse a command whose working directory does not exist (OpenSandbox answers 400): a
+        ``main`` started from a base image whose Dockerfile only names a ``WORKDIR`` has nothing else to create
+        it. Root from ``/``, else the default user; the caller owns it afterwards as it owns a plain sandbox's.
+        """
+        workdir = self._plans[name]["spec"].workdir
+        if not workdir or workdir == "/":
+            return
+        command = f"mkdir -p {shlex.quote(workdir)}"
+        sandbox = self.services[name]
+        try:
+            result = await sandbox.exec(command, cwd="/", user="root")
+        except Exception:
+            result = None
+        if result is None or result.return_code:
+            result = await sandbox.exec(command, cwd="/")
+        if result.return_code:
+            raise RuntimeError(
+                f"Service {name!r}: cannot create its working directory {workdir!r}: "
+                f"{result.stderr or result.stdout or f'exit status {result.return_code}'}"
+            )
+
     async def start(self):
         if self._started or self._closed:
             raise RuntimeError("Compose collection already started or closed")
@@ -452,6 +478,7 @@ class AsyncSandboxCompose:
                 for name in order:
                     self.services[name] = AsyncSandbox(self.provider, self._plans[name]["spec"], owns_provider=False)
                     await self.services[name].start()
+                    await self._create_workdir(name)
                     service = self.document["services"][name]
                     if service.get("cap_add") or service.get("shm_size") is not None:
                         await self.provider.configure_runtime(

@@ -16,10 +16,10 @@ This is an environment server: one `/run` call owns one whole episode, and no re
   seed request every sandboxed harness already accepts), posts the task's `responses_create_params` to it,
   then closes the session and keeps the harness's observations for the result. When the agent instance is
   implemented by `harbor_oracle_agent` (the key under its `responses_api_agents` block), the seed first
-  uploads the snapshot's `solution/` to `/solution`, as root like its other uploads, and the sandbox access
-  carries the host-resolved `[solution].env` as `env`; that is where Harbor's oracle copies and runs the
-  solution. No other harness receives the solution, and a task without `solution/` uploads nothing (the
-  oracle reports it unvalidated).
+  uploads the snapshot's `solution/` to `/solution`, as root like its other uploads and readable by the task
+  user, and the sandbox access carries the host-resolved `[solution].env` as `env`; that is where Harbor's
+  oracle copies and runs the solution. No other harness receives the solution, and a task without
+  `solution/` uploads nothing (the oracle reports it unvalidated).
 - Verify: clears `/tests` and `/logs/verifier`, uploads the snapshot's `tests/`, runs `bash /tests/test.sh`
   in the same sandbox, and downloads the verifier logs.
 - Cleanup: stops the sandbox after the episode, whatever happened before. Cancellation and the episode
@@ -49,9 +49,16 @@ Supported today: single-step tasks with a prebuilt `docker_image` or a base-imag
 (`FROM` plus `WORKDIR`/`ENV`/`LABEL`; `USER` is parsed, and an agent user override is rejected at seed);
 shared verifier mode, and separate verifier mode in `[verifier.environment].docker_image` or, without
 one, the task image (the agent's `/logs/artifacts` and `artifacts` entries are copied into the verifier
-sandbox first, each as the archive the agent's sandbox packed, so the verifier sees the modes the agent
-left). Dockerfile builds, Compose environments, multi-step tasks and in-sandbox MCP tools come in later
-milestones.
+sandbox first, sidecar hooks and artifacts included, each as the archive the agent's sandbox packed, so the
+verifier sees the modes the agent left). Compose environments start as
+a sandbox group when a `compose-images.json` with the sidecar images' recorded OCI configuration sits next to
+the task folders (or `compose_image_configs` points at one); on OpenSandbox the provider block also needs
+`networking.enabled: true` (with `loopback_forwarding`) and `runtime_requirements.shm_size_metadata_key` (see
+[Compose tasks on OpenSandbox](#compose-tasks-on-opensandbox)); each service's working directory is created once its sandbox is up, as Docker creates a missing `working_dir` or `WORKDIR` at container create. `[environment.healthcheck]` is polled at seed.
+Tasks that declare GPUs run on the `gpu_sandbox_provider` block when one is set. The task's
+`[[environment.mcp_servers]]` and `skills_dir` are written to `/tmp/.nemo-gym/task.json` in the agent's
+sandbox for harnesses that drive task MCP servers from inside it (mini-SWE does). Dockerfile builds and
+multi-step tasks come in later milestones.
 
 | Setting or feature | Behavior in this layer |
 | --- | --- |
@@ -82,7 +89,54 @@ again before `test.sh` runs. Linked verification roots (including `/logs`) are u
 without deleting their former targets. Helpers baked into `/tests` in an image are also removed; ship required helpers in
 the task's `tests/` directory instead. Preparation and transfers attempt root, with a fallback to the
 default image user when switching identity is unavailable. Target directory ownership and modes are
-preserved during extraction.
+preserved during extraction. Uploaded test files stay root-owned with the package's modes, as Harbor's
+`docker cp` leaves them, and only `test.sh` gets `chmod +x` as root before it runs as the verifier user
+(Harbor's `needs_chmod` rule for a `.sh` script), nothing is chowned or widened, so a package built under
+`umask 077` behaves as in Harbor: its `0600` files are readable by a root verifier and by no other
+`[verifier].user`.
+
+In separate mode a `/tests/test.sh` baked into the verifier image wins, as in Harbor, which never uploads the
+package's tests into a separate verifier (`skip_tests_upload`): the package's `tests/` is uploaded only when that
+file is absent. The check is on `test.sh` alone, not on the directory. An image that ships a `/tests` folder without
+a `test.sh` gets the package tree extracted into it, same-named files replaced and the rest merged in, so only a
+baked `test.sh` is protected. To grade a task's own image with the package's tests, drop the baked `test.sh` from
+that image, or ship a `tests/Dockerfile` so the verifier gets an image of its own (again, see the Verification row
+for what this layer supports).
+
+## Compose tasks on OpenSandbox
+
+The shipped `nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml` (what `--sandbox opensandbox`
+loads) has no networking block, and the Compose adapter refuses to start a group without one. Put an overlay
+like this one after it in `--config` (or in a `+config_paths` entry). The three blocks are the deployment's:
+service-to-service networking, the label the cluster reads a service's `shm_size` from, and the capability
+labels and probes a task that needs `SYS_PTRACE` is scheduled with. The optional second provider block shows
+how `gpu_sandbox_provider` routes the tasks that declare GPUs to a GPU pool while the rest stay on `sandbox`.
+
+```yaml
+sandbox:
+  opensandbox:
+    networking:
+      enabled: true
+      loopback_forwarding: true
+      # Runs in every container the provider creates, sidecars included: it must no-op where it does not apply.
+      setup_command: "command -v python3 >/dev/null 2>&1 || ! command -v apt-get >/dev/null 2>&1 || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3)"
+    runtime_requirements:
+      shm_size_metadata_key: nemo.nvidia.com/shm
+      capability_metadata:
+        SYS_PTRACE:
+          nemo.nvidia.com/ptrace: "true"
+      capability_probes:
+        SYS_PTRACE: "awk '/^CapEff:/ { print $2 }' /proc/self/status | { read caps; test $((0x$caps & (1 << 19))) -ne 0; }"
+
+# Optional: a second provider block for GPU tasks, named by the server's `gpu_sandbox_provider`.
+sandbox_gpu:
+  opensandbox: ${sandbox.opensandbox}
+
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      gpu_sandbox_provider: sandbox_gpu
+```
 
 ## Configuration and artifacts
 

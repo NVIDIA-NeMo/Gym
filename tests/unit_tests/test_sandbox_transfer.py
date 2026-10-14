@@ -3,6 +3,7 @@
 
 import asyncio
 import io
+import os
 import shutil
 import stat
 import tarfile
@@ -19,6 +20,7 @@ from nemo_gym.sandbox.transfer import (
     download_path,
     exec_as_root,
     remote_kind,
+    tar_extract_command,
     upload_archive,
     upload_dir,
     upload_path,
@@ -153,6 +155,49 @@ async def test_transfer_preserves_target_permissions_and_task_file_modes(tmp_pat
     process = await asyncio.create_subprocess_exec(str(target / "test.sh"), stdout=asyncio.subprocess.PIPE)
     stdout, _ = await process.communicate()
     assert process.returncode == 0 and stdout == b"works"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("busybox") is None, reason="BusyBox is required")
+async def test_transfer_works_with_busybox_tar_which_has_no_no_overwrite_dir_option(tmp_path):
+    source, target, bin_dir = tmp_path / "source", tmp_path / "target", tmp_path / "bin"
+    source.mkdir()
+    script = source / "test.sh"
+    script.write_text("#!/bin/sh\nprintf works")
+    script.chmod(0o751)
+    target.mkdir()
+    target.chmod(0o777)
+    # `tar` resolves to the BusyBox applet, as in an Alpine image.
+    bin_dir.mkdir()
+    (bin_dir / "tar").symlink_to(shutil.which("busybox"))
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}"}
+
+    async def busybox_sh(command: str) -> SandboxExecResult:
+        process = await asyncio.create_subprocess_exec(
+            "busybox", "sh", "-c", command, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), 60)
+        return SandboxExecResult(
+            stdout=stdout.decode(errors="replace"),
+            stderr=stderr.decode(errors="replace"),
+            return_code=process.returncode,
+        )
+
+    class BusyBoxSandbox:
+        async def upload(self, local, remote):
+            shutil.copyfile(local, remote)
+
+        async def exec(self, command, *, cwd, timeout_s, user):
+            return await busybox_sh(command)
+
+    probe = await busybox_sh("tar --no-overwrite-dir --help >/dev/null 2>&1 && echo gnu || echo busybox")
+    assert probe.stdout.strip() == "busybox", "the symlinked tar must be BusyBox's for this test to mean anything"
+    assert "--no-overwrite-dir" in tar_extract_command("/tmp/x.tar.gz", str(target))
+
+    await upload_dir(BusyBoxSandbox(), source, str(target))
+    assert (target / "test.sh").read_text() == "#!/bin/sh\nprintf works"
+    assert stat.S_IMODE((target / "test.sh").stat().st_mode) == 0o751
+    assert stat.S_IMODE(target.stat().st_mode) == 0o777
 
 
 def _archive(path, members):

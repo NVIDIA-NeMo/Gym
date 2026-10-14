@@ -42,6 +42,7 @@ from nemo_gym.sandbox.transfer import (
     download_dir,
     download_path,
     exec_as_root,
+    remote_kind,
     upload_archive,
     upload_dir,
 )
@@ -109,6 +110,17 @@ def verifier_command(budget: int) -> str:
     )
 
 
+async def _make_test_script_executable(sandbox: AsyncSandbox) -> None:
+    """``chmod +x`` on ``test.sh`` as root before it runs, as Harbor's verifier does.
+
+    Harbor uploads ``tests/`` as ``docker cp`` leaves it (root-owned, the package's modes), chmods the test
+    script alone because it is a ``.sh`` (``needs_chmod``), and runs it as the verifier user; it chowns
+    nothing and widens nothing, so a package built under ``umask 077`` is readable by a root verifier and by
+    no other user, there as here. The chmod's exit status is not read, as Harbor does not read it.
+    """
+    await exec_as_root(sandbox, f"chmod +x {TESTS_DIR}/test.sh", timeout_s=60)
+
+
 def parse_exit_record(directory: Path) -> tuple[int, int | None] | None:
     """``(exit code, elapsed seconds)`` from the wrapper's record, or None when the wrapper never finished.
 
@@ -167,6 +179,11 @@ def _verifier_image(task: HarborTask) -> str | None:
 def _verifier_key(episode_key: str) -> str:
     """The ownership key of an episode's separate-verifier sandbox."""
     return f"{episode_key}/verifier"
+
+
+def _is_main_service(name: str | None) -> bool:
+    """``None`` or ``"main"`` name the agent's own container; anything else is a Compose sidecar."""
+    return name in (None, "main")
 
 
 def _collected_artifacts(task: HarborTask) -> list[HarborArtifact]:
@@ -313,7 +330,8 @@ class HarborVerificationMixin:
         collected as the archives the agent's sandbox packs, staged through the host (the filtered
         host copy is the safety gate and a diagnostic) and restored from those archives into the same
         paths, with the modes the agent left (see :func:`upload_archive`), then ``tests/`` is uploaded
-        and ``test.sh`` runs there. Sidecar (Compose) artifacts and hooks are not collected yet.
+        and ``test.sh`` runs there. Collection is phased as Harbor's is: the main container's hooks and
+        artifacts, its stop, then the sidecars' hooks and artifacts, then the rest of the group is stopped.
         """
         task = session.task
         settings = task.config.verifier
@@ -329,64 +347,23 @@ class HarborVerificationMixin:
         artifacts_dir = logs_dir / "artifacts"
         verifier: AsyncSandbox | None = None
         try:
-            await self._run_collect_hooks(session)
-            restored: list[tuple[Path, str, str]] = []
-            for index, artifact in enumerate(_collected_artifacts(task)):
-                if artifact.service not in (None, "main"):
-                    LOGGER.warning(
-                        f"{task.task_id}: artifact {artifact.source!r} on sidecar {artifact.service!r} skipped"
-                    )
-                    continue
-                # Each artifact stages under its own root, and the archive its sandbox packed is kept beside
-                # that root (`NN.tar.gz`) for the restore: the staged copy went through the host's filter and
-                # carries widened modes, the archive carries the modes the agent left. Links are kept (below),
-                # so one artifact's tree may hold a link to anywhere; with a shared root a later artifact's
-                # path could run through it.
-                host = artifacts_dir / f"{index:02d}" / artifact.host_path
-                archive = artifacts_dir / f"{index:02d}.tar.gz"
-                # Best effort per artifact, as Harbor collects them: what the agent left behind (an
-                # unreadable tree, a link that escapes the folder, a device node, a file where a folder was
-                # expected, a path too long for this host) cannot mask the sample. Symbolic links travel as
-                # links, because the restore target is another sandbox, not the host. Anything else (a lost
-                # sandbox, a full disk, a dropped connection) is Gym's outage and still masks.
-                try:
-                    kind = await download_path(
-                        session.sandbox,
-                        artifact.source,
-                        host,
-                        links="keep",
-                        exclude=tuple(artifact.exclude),
-                        archive_copy=archive,
-                    )
-                except (
-                    SandboxTransferError,
-                    tarfile.TarError,
-                    FileExistsError,
-                    IsADirectoryError,
-                    NotADirectoryError,
-                ) as exc:
-                    LOGGER.warning(f"{task.task_id}: artifact {artifact.source!r} not collected: {exc}")
-                    continue
-                except OSError as exc:
-                    # Only the name-length error is the agent's tree (a path this host's filesystem cannot
-                    # hold); ENOSPC, EIO and the rest are this host's failure and must still mask, so no
-                    # blanket OSError clause.
-                    if exc.errno != errno.ENAMETOOLONG:
-                        raise
-                    LOGGER.warning(f"{task.task_id}: artifact {artifact.source!r} not collected: {exc}")
-                    continue
-                if kind is not None and host.is_symlink():
-                    # The artifact itself is a link: nothing to restore without following it on this host.
-                    LOGGER.warning(f"{task.task_id}: artifact {artifact.source!r} is a symbolic link, not restored")
-                    archive.unlink(missing_ok=True)
-                    continue
-                if kind is not None:
-                    restored.append((archive, kind, artifact.source))
-            # Harbor stops the agent's container before the verifier starts; nothing may keep running.
+            main_hooks = [hook for hook in settings.collect if _is_main_service(hook.service)]
+            sidecar_hooks = [hook for hook in settings.collect if not _is_main_service(hook.service)]
+            # Each artifact stages under its own numbered root (see ``_download_artifacts``), across both phases.
+            artifacts = list(enumerate(_collected_artifacts(task)))
+            main_artifacts = [(index, artifact) for index, artifact in artifacts if _is_main_service(artifact.service)]
+            sidecar_artifacts = [(i, artifact) for i, artifact in artifacts if not _is_main_service(artifact.service)]
+            await self._run_collect_hooks(session, main_hooks)
+            restored = await self._download_artifacts(session, main_artifacts, artifacts_dir)
+            # Harbor's phased collection: the agent's own container is stopped before the sidecars' hooks
+            # run and their artifacts are read, so no agent process can change a sidecar's state meanwhile.
+            await session.stop_main()
+            await self._run_collect_hooks(session, sidecar_hooks)
+            restored += await self._download_artifacts(session, sidecar_artifacts, artifacts_dir)
+            # Harbor stops the agent's containers before the verifier starts; nothing may keep running.
             # The episode key stays reserved until the episode's final cleanup, which releases it without
             # stopping the agent side again.
-            await session.sandbox.stop()
-            session.agent_sandbox_stopped = True
+            await session.stop_agent_side()
 
             verifier = await self._create_verifier_sandbox(task, episode_key=session.session_id)
             prepare = await exec_as_root(
@@ -396,15 +373,19 @@ class HarborVerificationMixin:
             )
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
-            await upload_dir(verifier, task.path / "tests", TESTS_DIR)
+            # A prebuilt verifier image usually ships /tests already, with the modes its tests expect.
+            # Only upload the package's tests when the image has none, as the old server did.
+            if await remote_kind(verifier, f"{TESTS_DIR}/test.sh") is None:
+                await upload_dir(verifier, task.path / "tests", TESTS_DIR)
             for archive, kind, source in restored:
                 await self._restore_artifact(verifier, task, archive, kind, source)
                 # The staged tree stays as the diagnostic; the archive served its purpose.
                 archive.unlink(missing_ok=True)
             # A sub-second task budget still gets one whole second: `timeout 0` would mean no limit.
             budget = max(1, math.ceil(settings.timeout_sec))
+            await _make_test_script_executable(verifier)
             result = await verifier.exec(
-                f"chmod +x {TESTS_DIR}/test.sh; {verifier_command(budget)}",
+                verifier_command(budget),
                 env=resolve_env_templates(settings.env),
                 timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
                 user=settings.user,
@@ -437,20 +418,26 @@ class HarborVerificationMixin:
             task, settings, result, logs_dir, started, timed_out=timed_out, rewards=rewards, problem=problem
         )
 
-    async def _run_collect_hooks(self, session: HarborSession) -> None:
-        """Run the task's ``[[verifier.collect]]`` hooks in the agent's sandbox, before anything is collected.
+    async def _run_collect_hooks(self, session: HarborSession, hooks: list[Any]) -> None:
+        """Run ``[[verifier.collect]]`` hooks in their services, before anything is collected from them.
 
         Harbor runs them in both verifier modes. A hook that exits non-zero, or runs past its
         ``timeout_sec``, is the task's business and only warns, as Harbor's best-effort hooks do; a hook
         the sandbox could not run at all is an outage and raises.
         """
         task = session.task
-        for hook in task.config.verifier.collect:
-            if hook.service not in (None, "main"):
-                LOGGER.warning(f"{task.task_id}: collect hook for sidecar {hook.service!r} skipped (no Compose yet)")
+        for hook in hooks:
+            try:
+                sandbox = session.service(hook.service)
+            except KeyError as exc:
+                LOGGER.warning(f"{task.task_id}: collect hook skipped: {exc}")
                 continue
-            result = await session.sandbox.exec(
-                hook.command, cwd=session.workdir, timeout_s=hook.timeout_sec + 30, user=hook.user
+            main = _is_main_service(hook.service)
+            result = await sandbox.exec(
+                hook.command if main else f"sh -c {shlex.quote(hook.command)}",
+                cwd=session.workdir if main else None,
+                timeout_s=hook.timeout_sec + 30,
+                user=hook.user,
             )
             if result.error_type == "timeout":
                 LOGGER.warning(f"{task.task_id}: collect hook timed out after {hook.timeout_sec:g}s: {hook.command!r}")
@@ -459,6 +446,68 @@ class HarborVerificationMixin:
                 raise SandboxProbeError(f"collect hook could not run: {result.error_type}: {hook.command!r}")
             if result.return_code:
                 LOGGER.warning(f"{task.task_id}: collect hook exited {result.return_code}: {hook.command!r}")
+
+    async def _download_artifacts(
+        self, session: HarborSession, artifacts: list[tuple[int, HarborArtifact]], artifacts_dir: Path
+    ) -> list[tuple[Path, str, str]]:
+        """Pull the numbered ``artifacts`` out of their services; returns ``(archive, kind, sandbox path)`` for the
+        ones found.
+
+        Each artifact stages under its own numbered root, and the archive its sandbox packed is kept beside
+        that root (``NN.tar.gz``) for the restore: the staged copy went through the host's filter and carries
+        widened modes, the archive carries the modes the agent left. Links are kept (below), so one
+        artifact's tree may hold a link to anywhere; with a shared root a later artifact's path could run
+        through it.
+        """
+        task = session.task
+        restored: list[tuple[Path, str, str]] = []
+        for index, artifact in artifacts:
+            try:
+                sandbox = session.service(artifact.service)
+            except KeyError as exc:
+                LOGGER.warning(f"{task.task_id}: artifact {artifact.source!r} skipped: {exc}")
+                continue
+            host = artifacts_dir / f"{index:02d}" / artifact.host_path
+            archive = artifacts_dir / f"{index:02d}.tar.gz"
+            # Best effort per artifact, as Harbor collects them: what the agent left behind (an
+            # unreadable tree, a link that escapes the folder, a device node, a file where a folder was
+            # expected, a path too long for this host) cannot mask the sample. Symbolic links travel as
+            # links, because the restore target is another sandbox, not the host. Anything else (a lost
+            # sandbox, a full disk, a dropped connection) is Gym's outage and still masks.
+            try:
+                kind = await download_path(
+                    sandbox,
+                    artifact.source,
+                    host,
+                    links="keep",
+                    exclude=tuple(artifact.exclude),
+                    archive_copy=archive,
+                )
+            except (
+                SandboxTransferError,
+                tarfile.TarError,
+                FileExistsError,
+                IsADirectoryError,
+                NotADirectoryError,
+            ) as exc:
+                LOGGER.warning(f"{task.task_id}: artifact {artifact.source!r} not collected: {exc}")
+                continue
+            except OSError as exc:
+                # Only the name-length error is the agent's tree (a path this host's filesystem cannot
+                # hold); ENOSPC, EIO and the rest are this host's failure and must still mask, so no
+                # blanket OSError clause.
+                if exc.errno != errno.ENAMETOOLONG:
+                    raise
+                LOGGER.warning(f"{task.task_id}: artifact {artifact.source!r} not collected: {exc}")
+                continue
+            if kind is not None and host.is_symlink():
+                # The artifact itself is a link: nothing to restore without following it on this host.
+                LOGGER.warning(f"{task.task_id}: artifact {artifact.source!r} is a symbolic link, not restored")
+                archive.unlink(missing_ok=True)
+                continue
+            if kind is not None:
+                restored.append((archive, kind, artifact.source))
+        return restored
 
     async def _run_shared_verifier(self, session: HarborSession) -> dict[str, Any]:
         """Run ``tests/test.sh`` in the agent's sandbox and read the reward it wrote.
@@ -479,7 +528,7 @@ class HarborVerificationMixin:
                 f"Could not create verifier logs under {self._artifacts_dir}: {type(exc).__name__}: {exc}",
             )
         try:
-            await self._run_collect_hooks(session)
+            await self._run_collect_hooks(session, settings.collect)
             # Replace agent-planted directory links before cleanup: find does not follow its starting
             # symlink, while tar does. Unlink /logs first without touching its former target.
             roots = (str(Path(VERIFIER_LOGS_DIR).parent), TESTS_DIR, VERIFIER_LOGS_DIR, AGENT_LOGS_DIR)
@@ -499,6 +548,7 @@ class HarborVerificationMixin:
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
             await upload_dir(sandbox, task.path / "tests", TESTS_DIR)
+            await _make_test_script_executable(sandbox)
             # One plain exec for the whole run. The provider keeps it alive for as long as
             # `timeout_s` says (OpenSandbox polls a background command, Docker streams), and
             # `timeout` inside the container is the cap that stops the tests themselves.

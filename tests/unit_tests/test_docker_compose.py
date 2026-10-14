@@ -1293,6 +1293,58 @@ async def test_explicit_entrypoint_runs_service(tmp_path):
         assert output.read_text() == "started"
 
 
+class WorkdirStrictShellProvider(ShellProvider):
+    """``ShellProvider`` with OpenSandbox's rule: an exec whose working directory does not exist is refused (400
+    ``working directory does not exist``), and, with ``no_root``, one that asks for ``root`` is refused too (a cell
+    that drops ``CAP_SETUID``)."""
+
+    def __init__(self, *, no_root=False):
+        super().__init__()
+        self.calls = []
+        self.no_root = no_root
+
+    async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        import os
+
+        self.calls.append((command, cwd, user))
+        if cwd is not None and not os.path.isdir(cwd):
+            raise RuntimeError(f"INVALID_REQUEST_BODY: working directory does not exist: {cwd}")
+        if user == "root" and self.no_root:
+            raise RuntimeError("switching to uid=0 gid=0 requires CAP_SETUID/CAP_SETGID")
+        return await super().exec(handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("no_root", [False, True])
+async def test_a_working_directory_the_image_lacks_is_created_before_the_first_exec(tmp_path, no_root):
+    """M35 D5: a pull-mode ``main`` (``FROM base`` plus ``WORKDIR /app``, nothing else) starts with the task's workdir
+    as its spec's, every exec defaults to it, and nothing created it: the group's own ``mkdir -p <runtime>`` was the
+    first command and OpenSandbox refused it. Docker creates a missing ``working_dir`` at container create; the group
+    now does the same once the sandbox is up, as root from ``/`` (or as the image's user where root is refused),
+    before anything else runs in the service."""
+    workdir = tmp_path / "app"
+    seen = tmp_path / "seen"
+    provider = WorkdirStrictShellProvider(no_root=no_root)
+    document = {
+        "services": {
+            "main": {
+                "image": "example/app:1",
+                "command": ["sh", "-c", f"pwd > {seen} && sleep 1"],
+                "working_dir": str(workdir),
+            }
+        }
+    }
+    async with make_compose(provider, document, poll_interval_s=0.01) as group:
+        await group._wait("main", "service_started")
+        assert workdir.is_dir()
+        assert seen.read_text().strip() == str(workdir)
+    assert provider.calls[0] == (f"mkdir -p {workdir}", "/", "root")
+    if no_root:
+        assert provider.calls[1] == (f"mkdir -p {workdir}", "/", None)
+    # Every later exec in the service ran in the directory the group had just created.
+    assert all(cwd == str(workdir) for _, cwd, _ in provider.calls[1 + no_root :]), provider.calls
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("startup", [{}, {"entrypoint": [], "command": []}])
 async def test_unresolved_startup_rejected_before_provisioning(startup):

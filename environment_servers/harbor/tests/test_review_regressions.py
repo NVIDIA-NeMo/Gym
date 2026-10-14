@@ -85,7 +85,7 @@ async def test_templates_resolve_at_use_without_changing_materialized_task(tmp_p
     response = await run_episode(server, task)
     assert response.result.reward == 1
     assert "agent-secret" not in response.model_dump_json() and "verifier-secret" not in response.model_dump_json()
-    run = next(call for call in sandbox.execs if "test.sh" in call["command"])
+    run = next(call for call in sandbox.execs if "test.sh" in call["command"] and "timeout" in call["command"])
     assert run["env"] == {"TOKEN": "verifier-secret"}
     assert task.env["TOKEN"] == "${HARBOR_TEST_TOKEN}"
     assert "agent-secret" not in materialize_task(task, "ds").model_dump_json()
@@ -108,7 +108,8 @@ async def test_unsupported_semantics_fail_before_provisioning(tmp_path, monkeypa
     assert created == []
 
 
-@pytest.mark.parametrize("build_file", [None, "Dockerfile", "docker-compose.yaml", "docker-compose.yml"])
+# A Compose file makes the task a Compose group (M13), covered by TestComposeAndRouting.
+@pytest.mark.parametrize("build_file", [None, "Dockerfile"])
 async def test_prebuilt_environment_files_only_uploaded_without_build_definition(tmp_path, monkeypatch, build_file):
     toml = TASK_TOML.replace("[environment]", '[environment]\ndocker_image = "ubuntu:24.04"')
     server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml)
