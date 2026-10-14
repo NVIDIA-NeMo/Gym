@@ -345,6 +345,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
     }
     assert response.output[-1].content[0].text == "done"
     assert response.usage.input_tokens == 4
+    assert response.metadata == {"terminus2_completed": "true", "terminus2_outcome": "completed"}
     assert response.usage.output_tokens == 3
     if not debug:
         set_level.assert_called_once_with(logging.WARNING)
