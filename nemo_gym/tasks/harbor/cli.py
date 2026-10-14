@@ -31,6 +31,7 @@ from nemo_gym.config_types import ConfigError
 from nemo_gym.path_utils import failures_path_for, materialized_path_for
 from nemo_gym.tasks.harbor.digest import DIGEST_KEY
 from nemo_gym.tasks.harbor.hub import HubError, datasets_dir, fetch_ref, is_hub_ref
+from nemo_gym.tasks.harbor.image_configs import record_compose_images
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
 from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError, discover_tasks
 
@@ -107,10 +108,10 @@ def prepare_target(
     A task folder that does not load is skipped with a warning (and listed in
     ``PreparedTaskset.skipped``) so the rest of the dataset still prepares.
 
-    Tasks matching an ``exclude`` glob, and Compose tasks (which the harbor environment server
-    cannot run yet), are left out of the rows and listed on stdout. ``rows_name`` names the rows
-    file inside the taskset's output folder: a run scopes it to its agent, so two agents prepared
-    with different selections on one taskset keep their own rows.
+    Tasks matching an ``exclude`` glob, or not matching an ``only`` glob, are left out of the
+    rows and listed on stdout. ``rows_name`` names the rows file inside the taskset's output folder:
+    a run scopes it to its agent, so two agents prepared with different selections on one taskset
+    keep their own rows.
     """
     if is_hub_ref(target):
         folder = fetch_ref(target, refresh_registry=refresh_registry)
@@ -135,6 +136,9 @@ def prepare_target(
         print(f"Skipping {task_id}: {reason}")
     if not tasks:
         raise ValueError(f"No runnable task left in {folder}")
+    images = record_compose_images(tasks, tasks[0].path.parent)
+    if images is not None:
+        print(f"Compose image configurations recorded in {images}")
     rows_path = output_dir / rows_name
     write_rows(tasks, taskset, rows_path)
     skipped_note = f", skipped {len(errors)}" if errors else ""
@@ -167,8 +171,6 @@ def select_tasks(
             skipped.append((task.task_id, "not in --only-tasks"))
         elif pattern is not None:
             skipped.append((task.task_id, f"excluded by --exclude-tasks {pattern!r}"))
-        elif task.needs_compose:
-            skipped.append((task.task_id, "Compose environments are not supported yet"))
         else:
             kept.append(task)
     return kept, skipped
