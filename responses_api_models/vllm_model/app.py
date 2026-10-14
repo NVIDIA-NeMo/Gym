@@ -96,6 +96,10 @@ def _is_context_length_error(error: ClientResponseError) -> bool:
     if "context length" in message or "max_tokens" in message:
         return True
 
+    # vLLM rejects an over-long multimodal prompt in its decoder-prompt length check.
+    if "decoder prompt" in message and "longer than the maximum model length" in message:
+        return True
+
     # llama.cpp supplies a dedicated error type, unlike vLLM's BadRequestError.
     try:
         payload = json.loads(message)

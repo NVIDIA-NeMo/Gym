@@ -84,6 +84,7 @@ from responses_api_models.vllm_model.app import (
     VLLMModel,
     VLLMModelConfig,
     _append_transport_io,
+    _is_context_length_error,
     _redacted_error_repr,
     _transport_images,
     _transport_log_context,
@@ -95,6 +96,22 @@ FIXED_TIME = 1691418000
 FIXED_UUID = "123"
 
 _TEST_LINEAGE = InMemoryLineageStore()
+
+
+@mark.parametrize(
+    "status, message",
+    [
+        (400, "Unknown tool schema"),
+        (400, "The configured maximum model length is invalid"),
+        (401, "The decoder prompt is longer than the maximum model length"),
+        (500, "CUDA unspecified launch failure"),
+        (500, "The decoder prompt is longer than the maximum model length"),
+    ],
+)
+def test_context_normalization_preserves_unrelated_provider_failures(status, message):
+    error = ClientResponseError(MagicMock(), (), status=status)
+    error.response_content = json.dumps({"error": {"message": message}}).encode()
+    assert not _is_context_length_error(error)
 
 
 def lineage_index():
@@ -850,6 +867,36 @@ class TestApp:
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         assert not self._setup_server(monkeypatch).config.propagate_context_overflow_errors
 
+    @mark.parametrize(
+        "status, code", [(429, "insufficient_quota"), (401, "invalid_api_key"), (403, "invalid_api_token")]
+    )
+    @mark.parametrize("use_completions_api", [False, True])
+    def test_permanent_endpoint_failure_preserves_http_contract(
+        self, monkeypatch: MonkeyPatch, status: int, code: str, use_completions_api: bool
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        server.config.use_completions_api = use_completions_api
+        error = PermanentEndpointError(MagicMock(), (), status=status, message="upstream permanent failure")
+        error.response_content = json.dumps({"error": {"code": code}}).encode()
+        client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        client.create_chat_completion = AsyncMock(side_effect=error)
+        client.create_completion = AsyncMock(side_effect=error)
+        server._clients = [client]
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+
+        assert response.status_code == status
+        assert response.json() == {"error": {"code": code}}
+        used = client.create_completion if use_completions_api else client.create_chat_completion
+        unused = client.create_chat_completion if use_completions_api else client.create_completion
+        used.assert_awaited_once()
+        unused.assert_not_called()
+
     @mark.parametrize("propagate", [False, True])
     @mark.parametrize("responses_api", [False, True])
     @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
@@ -858,8 +905,10 @@ class TestApp:
         [
             b'{"error":{"message":"maximum context length","code":400}}',
             b'{"error":{"type":"exceed_context_size_error","message":"request too long","code":400}}',
+            b'{"error":{"message":"The decoder prompt (length 128379) is longer than the maximum model length of '
+            b'128000.","code":400}}',
         ],
-        ids=["vllm", "llamacpp"],
+        ids=["vllm", "llamacpp", "vllm-decoder-prompt"],
     )
     def test_context_overflow_propagation_flag(
         self,

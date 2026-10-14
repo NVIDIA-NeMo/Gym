@@ -108,7 +108,7 @@ _GLOBAL_AIOHTTP_CONTROL_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY: bool = False
 _UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
-# Bound both the raw request prefix and its escaped representation to 4 KiB.
+# Bound the escaped, payload-free request shape to 4 KiB.
 _VALIDATION_ERROR_LOG_BODY_CHARS = 4096
 _VALIDATION_ERROR_LOG_MAX_ERRORS = 20
 _VALIDATION_ERROR_LOG_FIELD_CHARS = 256
@@ -211,24 +211,24 @@ async def _log_validation_exception(request: Request, exc: RequestValidationErro
         )
         return
 
-    raw_prefix = body[:_VALIDATION_ERROR_LOG_BODY_CHARS]
-    escaped_prefix, prefix_truncated = _escaped_log_prefix(
-        raw_prefix.decode("utf-8", errors="replace"), _VALIDATION_ERROR_LOG_BODY_CHARS
+    # A bounded raw prefix can still contain credentials or screenshot data.
+    # Preserve main's bounded diagnostics and 422 handling, but log shapes only.
+    body_shape, shape_truncated = _escaped_log_prefix(
+        json.dumps(_validation_body_shape(exc.body)), _VALIDATION_ERROR_LOG_BODY_CHARS
     )
-    body_truncated = len(body) > len(raw_prefix) or prefix_truncated
     extra.update(
         {
             "request_body_size_bytes": len(body),
-            "request_body_prefix": escaped_prefix,
-            "request_body_truncated": body_truncated,
+            "request_body_shape": body_shape,
+            "request_body_shape_truncated": shape_truncated,
         }
     )
     logger.warning(
-        "Request validation failed; request_body_size_bytes=%d request_body_truncated=%s request_body_prefix=%s "
+        "Request validation failed; request_body_size_bytes=%d request_body_shape_truncated=%s request_body_shape=%s "
         "validation_error_count=%d validation_errors_truncated=%s%s",
         len(body),
-        body_truncated,
-        escaped_prefix,
+        shape_truncated,
+        body_shape,
         len(errors),
         errors_truncated,
         errors_suffix,
@@ -247,6 +247,34 @@ async def _validation_exception_handler(request: Request, exc: RequestValidation
 
 NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_NAME"
 NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_BASE_URL"
+
+
+def _validation_value_shape(value: Any) -> dict[str, Any]:
+    """Describe validation input without logging its potentially sensitive payload."""
+
+    if isinstance(value, dict):
+        return {
+            "type": "object",
+            "field_count": len(value),
+            "fields": sorted(str(key) for key in value)[:50],
+        }
+    if isinstance(value, (list, tuple, set)):
+        return {"type": "array", "length": len(value)}
+    if isinstance(value, (str, bytes, bytearray)):
+        return {"type": "string" if isinstance(value, str) else "bytes", "length": len(value)}
+    return {"type": type(value).__name__}
+
+
+def _validation_body_shape(body: Any) -> dict[str, Any]:
+    """Return top-level field names and value shapes, never field values."""
+
+    if not isinstance(body, dict):
+        return _validation_value_shape(body)
+    return {
+        "type": "object",
+        "field_count": len(body),
+        "fields": {str(key): _validation_value_shape(value) for key, value in list(body.items())[:50]},
+    }
 
 
 class _PickleSafeRequestInfo(NamedTuple):
