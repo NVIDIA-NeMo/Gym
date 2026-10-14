@@ -29,6 +29,7 @@ from nemo_gym.tasks.harbor import HarborTask
 
 VERIFIER_LOGS_DIR = "/logs/verifier"
 AGENT_LOGS_DIR = "/logs/agent"
+ARTIFACTS_DIR = "/logs/artifacts"
 
 
 @dataclass
@@ -40,6 +41,10 @@ class HarborSession:
     identity: tuple[EpisodeId, TaskId]
     sandbox: AsyncSandbox
     workdir: str
+    # The episode key the sandbox is owned under (see ``_sandboxes``).
+    session_id: str
+    # Separate verification stops the agent's sandbox before test.sh runs; cleanup must not stop it twice.
+    agent_sandbox_stopped: bool = False
 
 
 _ENV_TEMPLATE = re.compile(r"\$\{([^}:]+)(?::-(.*))?\}")

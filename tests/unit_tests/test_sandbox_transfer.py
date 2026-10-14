@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import io
 import shutil
 import stat
 import tarfile
@@ -9,7 +10,39 @@ import tarfile
 import pytest
 
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.sandbox.transfer import exec_as_root, upload_dir
+from nemo_gym.sandbox.transfer import (
+    SandboxProbeError,
+    SandboxTransferError,
+    _unpack,
+    download_dir,
+    download_path,
+    exec_as_root,
+    remote_kind,
+    upload_archive,
+    upload_dir,
+    upload_path,
+)
+
+
+class LocalSandbox:
+    """Runs the transfer commands on this host, so tar, find and chmod do what they do in a sandbox."""
+
+    async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        process = await asyncio.create_subprocess_exec(
+            "bash", "-c", command, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_s)
+        return SandboxExecResult(
+            stdout=stdout.decode(errors="replace"),
+            stderr=stderr.decode(errors="replace"),
+            return_code=process.returncode,
+        )
+
+    async def upload(self, local, remote):
+        shutil.copyfile(local, remote)
+
+    async def download(self, remote, local):
+        shutil.copyfile(remote, local)
 
 
 @pytest.mark.asyncio
@@ -85,3 +118,289 @@ async def test_transfer_preserves_target_permissions_and_task_file_modes(tmp_pat
     process = await asyncio.create_subprocess_exec(str(target / "test.sh"), stdout=asyncio.subprocess.PIPE)
     stdout, _ = await process.communicate()
     assert process.returncode == 0 and stdout == b"works"
+
+
+def _archive(path, members):
+    """``members`` are ``(name, link)`` for a file (``None``) or symlink, or ``(name, link, "hard")``."""
+    with tarfile.open(path, "w:gz") as tar:
+        for name, link, *kind in members:
+            info = tarfile.TarInfo(name)
+            if link is None:
+                info.size = 2
+                tar.addfile(info, io.BytesIO(b"ok"))
+            else:
+                info.type = tarfile.LNKTYPE if kind == ["hard"] else tarfile.SYMTYPE
+                info.linkname = link
+                tar.addfile(info)
+
+
+def test_unpack_keeps_artifact_links_but_never_lets_a_member_escape(tmp_path):
+    venv = tmp_path / "venv.tar.gz"
+    _archive(venv, [("./report.txt", None), ("./bin/python", "/usr/bin/python3"), ("./up", "../../elsewhere")])
+    # Verifier output read on this host: a link to an absolute target is refused outright.
+    with pytest.raises(tarfile.FilterError):
+        _unpack(venv, tmp_path / "data")
+    # Artifacts on their way into another sandbox: links stay links, wherever they point (they are
+    # re-archived, never followed, on this host).
+    _unpack(venv, tmp_path / "keep", links="keep")
+    python = tmp_path / "keep" / "bin" / "python"
+    assert (tmp_path / "keep" / "report.txt").read_bytes() == b"ok"
+    assert python.is_symlink() and str(python.readlink()) == "/usr/bin/python3"
+    assert (tmp_path / "keep" / "up").is_symlink()
+    # A member whose own path lands outside the target is refused in both modes.
+    escaping = tmp_path / "escape.tar.gz"
+    _archive(escaping, [("../outside.txt", None)])
+    for links in ("data", "keep"):
+        with pytest.raises(tarfile.FilterError):
+            _unpack(escaping, tmp_path / f"escape-{links}", links=links)
+
+
+def test_hard_links_are_created_on_this_host_so_their_target_must_stay_inside(tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("host secret")
+    secret.chmod(0o600)
+    archive = tmp_path / "hard.tar.gz"
+    _archive(archive, [("./report.txt", "../secret.txt", "hard")])
+    for links in ("data", "keep"):
+        with pytest.raises(tarfile.FilterError):
+            _unpack(archive, tmp_path / f"hard-{links}", links=links)
+        assert not (tmp_path / f"hard-{links}" / "report.txt").exists()
+    # A hard link inside the tree (a virtualenv's duplicated files) is fine.
+    inside = tmp_path / "inside.tar.gz"
+    _archive(inside, [("./a", None), ("./b", "a", "hard")])
+    _unpack(inside, tmp_path / "inside", links="keep")
+    assert (tmp_path / "inside" / "b").read_bytes() == b"ok"
+
+
+def test_keep_mode_refuses_device_nodes_and_fifos_like_data_mode(tmp_path, caplog):
+    """`tar_filter` alone would create an agent's device node or FIFO on this host (a character device raised
+    PermissionError out of the per-artifact handler, a FIFO was created silently): both are refused in both
+    modes, and skipped with a warning where the caller asks for that."""
+    archive = tmp_path / "special.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        device = tarfile.TarInfo("./dev-null")
+        device.type, device.devmajor, device.devminor, device.mode = tarfile.CHRTYPE, 1, 3, 0o666
+        tar.addfile(device)
+        fifo = tarfile.TarInfo("./pipe")
+        fifo.type = tarfile.FIFOTYPE
+        tar.addfile(fifo)
+        plain = tarfile.TarInfo("./report.txt")
+        plain.size = 2
+        tar.addfile(plain, io.BytesIO(b"ok"))
+    for links in ("keep", "data"):
+        with pytest.raises(tarfile.SpecialFileError, match="special file"):
+            _unpack(archive, tmp_path / f"refused-{links}", links=links)
+        assert not (tmp_path / f"refused-{links}" / "pipe").exists()
+    with caplog.at_level("WARNING"):
+        _unpack(archive, tmp_path / "skipped", links="keep", skip_unsafe=True)
+    assert sorted(p.name for p in (tmp_path / "skipped").iterdir()) == ["report.txt"]
+    assert "Skipping unsafe diagnostic archive member './dev-null'" in caplog.text
+    assert "Skipping unsafe diagnostic archive member './pipe'" in caplog.text
+
+
+async def test_a_refused_archive_leaves_no_archive_copy_behind(tmp_path):
+    """The archive kept for the verifier exists only when the host's filtered copy was accepted."""
+    payload = tmp_path / "payload.tar.gz"
+    _archive(payload, [("../outside.txt", None)])
+
+    class Fake:
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+        async def download(self, remote, local):
+            shutil.copyfile(payload, local)
+
+    kept = tmp_path / "artifacts" / "00.tar.gz"
+    with pytest.raises(tarfile.FilterError):
+        await download_dir(Fake(), "/app/output", tmp_path / "artifacts" / "00", links="keep", archive_copy=kept)
+    assert not kept.exists()
+
+
+def test_kept_artifacts_stay_readable_by_their_owner(tmp_path):
+    """The host staging copy of a tree the agent left unreadable can still be re-archived; the host copy only,
+    the verifier receives the archive itself (see the mode round trip below)."""
+    archive = tmp_path / "modes.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        folder = tarfile.TarInfo("./locked")
+        folder.type = tarfile.DIRTYPE
+        folder.mode = 0o000
+        tar.addfile(folder)
+        hidden = tarfile.TarInfo("./locked/secret.bin")
+        hidden.mode = 0o000
+        hidden.size = 2
+        tar.addfile(hidden, io.BytesIO(b"ok"))
+        script = tarfile.TarInfo("./run.sh")
+        script.mode = 0o100
+        script.size = 2
+        tar.addfile(script, io.BytesIO(b"ok"))
+    _unpack(archive, tmp_path / "keep", links="keep")
+    assert (tmp_path / "keep" / "locked" / "secret.bin").read_bytes() == b"ok"
+    mode = (tmp_path / "keep" / "run.sh").stat().st_mode
+    assert mode & 0o600 == 0o600 and mode & 0o100  # readable, and still executable
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+async def test_restored_directory_replaces_what_the_target_held(tmp_path):
+    source, target = tmp_path / "source", tmp_path / "target"
+    source.mkdir()
+    (source / "kept.txt").write_text("agent output")
+    target.mkdir()
+    (target / "stale.txt").write_text("shipped by the verifier image, deleted by the agent")
+    (target / "sub").mkdir()
+    (target / "sub" / "old.txt").write_text("old")
+
+    await upload_path(LocalSandbox(), source, str(target))
+
+    assert sorted(p.name for p in target.iterdir()) == ["kept.txt"]
+    assert stat.S_IMODE(target.stat().st_mode) == 0o777
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+async def test_single_file_artifacts_keep_their_mode_bits_both_ways(tmp_path):
+    sandbox, agent, host, verifier = LocalSandbox(), tmp_path / "agent", tmp_path / "host", tmp_path / "verifier"
+    agent.mkdir()
+    tool = agent / "tool.sh"
+    tool.write_text("#!/bin/sh\nprintf built")
+    tool.chmod(0o755)
+
+    kind = await download_path(sandbox, str(tool), host / "renamed.sh", links="keep")
+    assert kind == "file" and stat.S_IMODE((host / "renamed.sh").stat().st_mode) == 0o755
+    assert sorted(p.name for p in host.iterdir()) == ["renamed.sh"]
+
+    await upload_path(sandbox, host / "renamed.sh", str(verifier / "bin" / "tool.sh"))
+    restored = verifier / "bin" / "tool.sh"
+    assert stat.S_IMODE(restored.stat().st_mode) == 0o755 and restored.read_text().endswith("printf built")
+    assert stat.S_IMODE((verifier / "bin").stat().st_mode) == 0o777
+    process = await asyncio.create_subprocess_exec(str(restored), stdout=asyncio.subprocess.PIPE)
+    stdout, _ = await process.communicate()
+    assert process.returncode == 0 and stdout == b"built"
+
+
+class RootLikeSandbox(LocalSandbox):
+    """A LocalSandbox whose tar extracts as root's does: root ignores the umask, this user's tar applies it."""
+
+    async def exec(self, command, **kwargs):
+        return await super().exec(f"umask 0; {command}", **kwargs)
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+async def test_the_verifier_receives_the_modes_the_agent_left_while_the_host_copy_is_widened(tmp_path):
+    """The reviewer's case: a 0444 artifact came back 0644 in the verifier because the host staging copy's widened
+    mode (tar_filter plus `| 0o600`) was re-archived. The verifier now receives the agent sandbox's own archive, so
+    read-only and world-writable modes survive; the host copy keeps its safe, widened modes."""
+    sandbox, agent, host, verifier = RootLikeSandbox(), tmp_path / "agent", tmp_path / "host", tmp_path / "verifier"
+    output = agent / "output"
+    output.mkdir(parents=True)
+    (output / "ro.txt").write_text("read-only")
+    (output / "ro.txt").chmod(0o444)
+    (output / "ww.txt").write_text("world-writable")
+    (output / "ww.txt").chmod(0o666)
+    (output / "wwdir").mkdir()
+    (output / "wwdir" / "x.sh").write_text("#!/bin/sh\nprintf built")
+    (output / "wwdir" / "x.sh").chmod(0o755)
+    (output / "wwdir").chmod(0o777)
+    archive = tmp_path / "artifacts" / "00.tar.gz"
+
+    kind = await download_path(sandbox, str(output), host / "output", links="keep", archive_copy=archive)
+    assert kind == "dir" and archive.is_file()
+    staged = {name: stat.S_IMODE((host / "output" / name).stat().st_mode) for name in ("ro.txt", "ww.txt", "wwdir")}
+    assert staged == {"ro.txt": 0o644, "ww.txt": 0o644, "wwdir": 0o755}
+
+    (verifier / "app" / "output").mkdir(parents=True)
+    (verifier / "app" / "output" / "stale").write_text("shipped by the verifier image")
+    await upload_archive(sandbox, archive, kind, str(verifier / "app" / "output"))
+    restored = verifier / "app" / "output"
+    assert sorted(p.name for p in restored.iterdir()) == ["ro.txt", "ww.txt", "wwdir"]
+    got = {name: stat.S_IMODE((restored / name).stat().st_mode) for name in ("ro.txt", "ww.txt", "wwdir")}
+    assert got == {"ro.txt": 0o444, "ww.txt": 0o666, "wwdir": 0o777}
+    assert stat.S_IMODE((restored / "wwdir" / "x.sh").stat().st_mode) == 0o755
+    # The restore target itself is prepared as before: cleared and world-writable, its own mode not overwritten
+    # by the archive's `./` entry.
+    assert stat.S_IMODE(restored.stat().st_mode) == 0o777
+
+    # A single read-only file travels the same way.
+    single = tmp_path / "artifacts" / "01.tar.gz"
+    kind = await download_path(sandbox, str(output / "ro.txt"), host / "ro.txt", links="keep", archive_copy=single)
+    assert kind == "file" and stat.S_IMODE((host / "ro.txt").stat().st_mode) == 0o644
+    await upload_archive(sandbox, single, kind, str(verifier / "etc" / "ro.txt"))
+    assert stat.S_IMODE((verifier / "etc" / "ro.txt").stat().st_mode) == 0o444
+    assert (verifier / "etc" / "ro.txt").read_text() == "read-only"
+    assert stat.S_IMODE((verifier / "etc").stat().st_mode) == 0o777
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+async def test_an_unreadable_file_round_trips_as_the_agent_left_it(tmp_path):
+    """A 0000 file (which only root's tar can pack in the agent sandbox, so the archive is built here): the
+    host copy is readable by its owner, the verifier's copy is 0000 again."""
+    archive = tmp_path / "artifacts" / "00.tar.gz"
+    archive.parent.mkdir()
+    with tarfile.open(archive, "w:gz") as tar:
+        hidden = tarfile.TarInfo("./secret.bin")
+        hidden.mode = 0o000
+        hidden.size = 2
+        tar.addfile(hidden, io.BytesIO(b"ok"))
+    _unpack(archive, tmp_path / "host", links="keep")
+    assert stat.S_IMODE((tmp_path / "host" / "secret.bin").stat().st_mode) == 0o600
+    await upload_archive(RootLikeSandbox(), archive, "dir", str(tmp_path / "verifier" / "out"))
+    assert stat.S_IMODE((tmp_path / "verifier" / "out" / "secret.bin").stat().st_mode) == 0o000
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+async def test_exclude_patterns_reach_tar_unanchored_as_harbor_passes_them(tmp_path):
+    """Harbor passes each artifact `exclude` pattern to `tar --exclude` verbatim, so `node_modules` leaves out
+    every directory of that name; the anchored form kept `sub/node_modules`. Asserted on the extracted tree,
+    which checking the generated flags alone misses."""
+    source = tmp_path / "build"
+    for relative in ("node_modules/x", "sub/node_modules/y", "sub/k", "cache/c", "a.log", "sub/b.log"):
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(relative)
+    target = tmp_path / "host"
+
+    await download_dir(LocalSandbox(), str(source), target, exclude=("node_modules", "./cache", "*.log"))
+
+    files = sorted(str(p.relative_to(target)) for p in target.rglob("*") if p.is_file())
+    assert files == ["sub/k"]
+    # `./cache` names the top-level folder only (member names start with `./`): a nested cache would stay.
+    (source / "sub" / "cache").mkdir()
+    (source / "sub" / "cache" / "n").write_text("nested")
+    nested = tmp_path / "host2"
+    await download_dir(LocalSandbox(), str(source), nested, exclude=("node_modules", "./cache", "*.log"))
+    assert sorted(str(p.relative_to(nested)) for p in nested.rglob("*") if p.is_file()) == ["sub/cache/n", "sub/k"]
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+async def test_remote_kind_answers_or_raises(tmp_path):
+    sandbox = LocalSandbox()
+    (tmp_path / "dir").mkdir()
+    (tmp_path / "file").write_text("x")
+    assert await remote_kind(sandbox, str(tmp_path / "dir")) == "dir"
+    assert await remote_kind(sandbox, str(tmp_path / "file")) == "file"
+    assert await remote_kind(sandbox, str(tmp_path / "absent")) is None
+
+    class Outage:
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+            return SandboxExecResult(stdout="", stderr="container gone", return_code=125, error_type="sandbox")
+
+    with pytest.raises(SandboxProbeError, match="Could not probe .*absent: sandbox: container gone") as info:
+        await remote_kind(Outage(), str(tmp_path / "absent"))
+    assert not isinstance(info.value, SandboxTransferError)
+
+
+async def test_a_link_at_the_artifact_root_is_never_followed_on_restore(tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "secret.txt").write_text("host file")
+    link = tmp_path / "artifact"
+    link.symlink_to(elsewhere, target_is_directory=True)
+
+    class Untouched:
+        async def exec(self, *args, **kwargs):
+            raise AssertionError("nothing may run in the sandbox")
+
+        upload = exec
+
+    with pytest.raises(SandboxTransferError, match="symbolic link"):
+        await upload_path(Untouched(), link, "/app/output")
+    with pytest.raises(SandboxTransferError, match="symbolic link"):
+        await upload_dir(Untouched(), link, "/app/output")
