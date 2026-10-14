@@ -347,6 +347,13 @@ def incomplete_reason_for_finish_reason(finish_reason: str | None) -> str | None
     return _FINISH_REASON_TO_INCOMPLETE_REASON.get(finish_reason)
 
 
+# Attribution-trail token ``resolve_terminal`` appends when the terminal call was chosen among
+# token-identical calls that recorded different finish reasons, with no witness singling one out.
+# The local projection and the staged rebuild withhold the truncation verdict when the trail
+# carries it, because the verdict would otherwise depend on which twin drew the smaller call id.
+FINISH_REASON_DISAGREEMENT_REASON = "finish_reason_disagreement"
+
+
 def response_finish_reason(payload: dict) -> str | None:
     """Return why a served response stopped, in the Chat Completions vocabulary.
 

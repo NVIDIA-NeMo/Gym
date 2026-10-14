@@ -83,7 +83,7 @@ from nemo_gym.token_id_capture.fingerprint import (
     assistant_fingerprint,
     canonicalize_tool_arguments,
 )
-from nemo_gym.token_id_capture.records import NAMESPACE_TOOL_DELIMITER, TokenEntry
+from nemo_gym.token_id_capture.records import FINISH_REASON_DISAGREEMENT_REASON, NAMESPACE_TOOL_DELIMITER, TokenEntry
 
 
 @dataclass(frozen=True)
@@ -204,7 +204,7 @@ def resolve_terminal(
         len({getattr(entry, "finish_reason", None) for entry in twins}) == 1
     )
     if not finish_reason_resolved:
-        reasons.append("finish_reason_disagreement")
+        reasons.append(FINISH_REASON_DISAGREEMENT_REASON)
     # The trail is kept even on success: a witness that abstained (e.g. a
     # duplicated response id) is a diagnosable defect even when another
     # witness attributes the rollout.
