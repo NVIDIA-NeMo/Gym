@@ -106,6 +106,12 @@ loopback exactly as on a run without a sandboxed harness. The oracle (`gym datas
 mini-SWE run their commands in the sandbox but call the model from the host, so nothing moves for them. A
 deployment that needs more servers reachable sets `absolute_ip_server_types` (or `default_host`, which applies
 to every server) explicitly; a config file or command-line override wins over the generated default.
+A registry fetch (`harbor:<dataset>`, below) reuses a task folder already in Gym's datasets folder when its
+`manifest.toml` pin names the registry's `git_url` and `path` with a full commit SHA, the folder has a
+`task.toml`, and no symlink in it leaves the folder. The recorded commit is kept on purpose when the registry's
+entry moves (a deleted folder is fetched again at that commit), and the fetch does not hash the folder's content
+(Harbor's own download reuses any non-empty folder without a check). Move the folder aside to fetch the
+registry's current copy.
 
 `harbor:<dataset>[@<version>]` resolves the Harbor registry and fetches task folders into Gym's shared
 datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `./datasets`). A local task folder, or a folder of task

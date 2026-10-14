@@ -1,0 +1,72 @@
+---
+title: "Evaluate Terminal-Bench 2.1 on the Harbor Path"
+description: "Run the 89 Terminal-Bench 2.1 tasks as published Harbor task folders through the harbor environment server."
+position: 5
+---
+
+# Evaluate Terminal-Bench 2.1 on the Harbor Path
+
+Terminal-Bench 2.1 is published as Harbor task folders. This page runs those folders exactly as published through
+the generic [`harbor` environment server](https://github.com/NVIDIA-NeMo/Gym/blob/main/environment_servers/harbor/README.md),
+with no Gym-side patching of `tests/test.sh` or `solution/solve.sh`. Results on this path are compared with Harbor's
+own numbers for the dataset, not one to one with the
+[`terminal_bench_2_1` Resources Server](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/terminal_bench_2_1/README.md),
+whose run-time fixes apply on its own path only (its benchmark folder is
+[`benchmarks/terminal_bench_2_1`](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_2_1/README.md)).
+Tasks whose published tests or solutions need those fixes score here as they do in Harbor.
+
+Run the commands below from the Gym repository root with Gym installed and a sandbox provider configured
+(the examples use `opensandbox`; see [OpenSandbox](/infrastructure/sandbox/opensandbox)).
+
+## Get the tasks
+
+Clone the dataset's repository and pin the commit the legacy benchmark runs from, so both paths grade the same
+task files:
+
+```bash
+git clone https://github.com/harbor-framework/terminal-bench-2-1
+git -C terminal-bench-2-1 checkout --detach 7131e4375048a0e408a8fb404b5f499d726b695b
+```
+
+`terminal-bench-2-1/tasks/` holds the 89 task folders (the `README.md` and `dataset.toml` beside them are not tasks
+and are ignored). Every command below takes that folder as its target, and the loader generates the task mapping
+and dataset rows for each run.
+
+## Check the reference solutions
+
+```bash
+gym dataset validate terminal-bench-2-1/tasks --sandbox opensandbox --output tb21-oracle.jsonl
+```
+
+Each task's `solution/solve.sh` runs through its own verifier with an oracle harness. Every solution must score 1,
+and the command exits non-zero otherwise. `--output` (`-o`) names the rollouts file, so the oracle run can be set
+against a later model run. `--limit N` validates the first N tasks and `--concurrency N` bounds the parallel
+sandboxes. On the package as published, the two tasks listed under [Known upstream noise](#known-upstream-noise)
+fail their own reference solutions, so this full-set command exits non-zero and names them in its report. That
+is the expected result, not a broken setup; every other task must score 1.
+
+## Run a model
+
+```bash
+gym eval run terminal-bench-2-1/tasks --agent terminus_2_sandboxed_agent --sandbox opensandbox \
+  --model-type openai_model --model <model> --model-url <url>
+```
+
+Terminus 2 drives the task sandbox the environment server started. The run's rows, generated configuration and
+rollouts are the artifacts every other `gym eval run` produces, so `gym eval aggregate` and the health check apply
+unchanged. Resource settings (CPUs, memory, storage) come from each task's `task.toml`. To match the legacy
+server's sandbox sizing for a like-for-like comparison, add a `--config` overlay that sets
+`sandbox_resources_override` on the generated `harbor_<taskset>_environment` block (an option of the `harbor`
+environment server).
+
+## Known upstream noise
+
+Two tasks are broken as published and fail on Harbor and on Gym alike until their images are fixed upstream:
+
+- `qemu-startup`
+- `qemu-alpine-ssh`
+
+Both images are Debian Bullseye, and their tests install packages from the Bullseye security repository, which the
+live Debian mirror no longer serves. Gym runs the tasks as published and does not repair them, so count these two
+as expected noise when comparing with Harbor's numbers. The `terminal_bench_2_1` Resources Server applies a
+security-snapshot repair on its own path only; that repair is not part of this one.
