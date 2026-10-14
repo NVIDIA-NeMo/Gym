@@ -79,6 +79,18 @@ def test_unknown_keys_are_preserved_not_rejected():
     assert config.some_future_knob == 7
 
 
+def test_removed_instrument_aiohttp_key_still_loads_and_exports_nothing(clean_otel_env):
+    """`instrument_aiohttp` was removed because nothing read it; configs that still set it keep loading."""
+    global_config = OmegaConf.create({"telemetry": {"enabled": True, "instrument_aiohttp": False}})
+    config = telemetry_config_from_global_config(global_config)
+    assert config.enabled is True
+    assert "instrument_aiohttp" not in TelemetryConfig.model_fields
+
+    configure_telemetry_env(config)
+    assert os.environ["NEMO_GYM_OTEL_ENABLED"] == "1"
+    assert "NEMO_GYM_OTEL_INSTRUMENT_AIOHTTP" not in os.environ
+
+
 def test_config_reads_the_telemetry_block_from_a_gym_config(clean_otel_env):
     global_config = OmegaConf.create(
         {
@@ -422,8 +434,9 @@ def test_server_requirements_pin_the_same_lens_this_process_runs(clean_otel_env)
 
 
 def test_server_requirements_include_the_instrumentation_packages(clean_otel_env):
-    """nemo-lens imports these lazily and raises ImportError without them, so a server
-    venv that lacks them loses inbound context extraction and every SERVER span."""
+    """nemo-lens imports the FastAPI instrumentor lazily and raises ImportError without it, so
+    a server venv that lacks it loses inbound context extraction and every SERVER span. The
+    aiohttp client instrumentor is not installed: nothing calls it."""
     pytest.importorskip("nemo.lens")
     clean_otel_env.setenv("NEMO_GYM_OTEL_ENABLED", "1")
 
@@ -431,7 +444,7 @@ def test_server_requirements_include_the_instrumentation_packages(clean_otel_env
 
     requirements = " ".join(server_venv_requirements())
     assert "opentelemetry-instrumentation-fastapi" in requirements
-    assert "opentelemetry-instrumentation-aiohttp-client" in requirements
+    assert "opentelemetry-instrumentation-aiohttp-client" not in requirements
 
 
 def test_missing_lens_yields_no_requirements_rather_than_an_unpinned_one(clean_otel_env):

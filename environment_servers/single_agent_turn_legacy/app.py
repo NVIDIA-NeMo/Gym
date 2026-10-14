@@ -22,6 +22,7 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnRequest,
@@ -33,11 +34,12 @@ from nemo_gym.task_materialization import materialize_task
 class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
     """Expose the old flat `/run` contract for one migrated pairing."""
 
-    ray_enabled = False
     config: SingleAgentTurnEnvironmentServerConfig
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
+        # Legacy rows still run the native protocol through run_request, so its episodes checkpoint too.
+        self.setup_environment_checkpoint(app)
         app.post("/run")(self.run_legacy)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
@@ -73,13 +75,13 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
         if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
             raise ValueError(f"Invalid episode attempt: {attempt!r}")
-        base_identity_row = dict(row)
-        base_identity_row[ATTEMPT_INDEX_KEY_NAME] = 0
-        rollout_id = maybe_rollout_id_from_run_body(base_identity_row) or (
+        # Decode the identity the way the agent does.
+        # An explicit id may carry the attempt suffix itself, as a restored attempt does.
+        capture_key = maybe_rollout_id_from_run_body(row) or (
             f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
         )
         return SingleAgentTurnRequest(
-            episode_id=EpisodeId(rollout_id=rollout_id, attempt=attempt),
+            episode_id=EpisodeId.from_capture_key(capture_key),
             task=materialize_task(row, taskset=task_source),
         )
 
@@ -95,12 +97,14 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
             }
             if response.failure.partial_response is not None:
                 failure["_ng_failure_partial_response"] = response.failure.partial_response.model_dump(mode="json")
+            if response.failure.agent_observations is not None:
+                failure[NG_AGENT_OBSERVATIONS_KEY] = response.failure.agent_observations.model_dump(mode="json")
             return failure
         if response.result is None:
             raise ValueError("Successful episode response has no result")
         result = response.result.model_dump(mode="json")
-        if result.get("ng_agent_observations") is None:
-            result.pop("ng_agent_observations", None)
+        if result.get(NG_AGENT_OBSERVATIONS_KEY) is None:
+            result.pop(NG_AGENT_OBSERVATIONS_KEY, None)
         result["agent_ref"] = agent_ref
         return result
 
