@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# GDPVal with Codex in place of Stirrup: same resources server, judges and multi-stage driver as config.yaml.
+# Codex runs in the task sandbox the resources server lends it and reaches the task tools
+# (finish, abandon_task_finish, web_search, fetch_web_page) over MCP. The rows use the harness-neutral prompt.
+#
+# Codex cannot set sampling or the per-call output limit for a Gym model server, so set them on the model
+# server, for example on openai_model in front of vLLM:
+#   policy_model:
+#     responses_api_models:
+#       openai_model:
+#         extra_body: {temperature: 1.0, top_p: 0.95, max_output_tokens: 32768}
+#
+#   gym eval prepare --benchmark gdpval/codex
+#   gym eval run --model-type vllm_model --benchmark gdpval/codex --split benchmark --output results/gdpval_codex.jsonl
+config_paths:
+  - benchmarks/gdpval/config.yaml
+
+# Drop the Stirrup agent; the environment server below runs Codex instead.
+gdpval_stirrup_agent: null
+
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      allowed_agents: [codex_agent]
+      expose_tools_over_mcp: true
+
+gdpval_codex_agent:
+  responses_api_agents:
+    codex_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      codex_version: 0.144.4
+      model_context_window: 262144
+      # Compact with room for a 32,768-token reply plus one turn of tool output; at 229,376 a prompt can
+      # pass the threshold by a token and, with the reply, overflow the window.
+      model_auto_compact_token_limit: 196608
+      # The Codex process, inside the environment server's 12600 s episode timeout.
+      timeout: 10800
+      session_close_timeout_seconds: 90
+      # A Codex MCP call that times out keeps running on the server and holds back the next call to it, so stay
+      # above the slowest web tool call: httpx gives each step of a search or fetch up to 180 s.
+      mcp_tool_timeout_seconds: 900
+      # finish does not end a Codex run: Codex keeps going until the model stops, a later finish or
+      # abandon_task_finish replaces the recorded call, and the resources server collects the files at the end.
+      datasets:
+        - name: gdpval
+          type: benchmark
+          jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark_harness_neutral.jsonl
+          prompt_config: benchmarks/gdpval/prompts/harness-neutral.yaml
+          prepare_script: benchmarks/gdpval/prepare_harness_neutral.py
+          num_repeats: 1
+
+gdpval_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        type: responses_api_agents
+        name: gdpval_codex_agent
+      resources_tool_transports: [mcp]
