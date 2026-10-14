@@ -31,6 +31,15 @@ from typing import Any, Callable
 
 import yaml
 
+from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError
+from nemo_gym.tasks.harbor.compose_variables import (
+    _warn_unset,
+    compose_variables,
+    inline_env_files,
+    residual_interpolation,
+    restore_compose_types,
+    substitute_with_empty,
+)
 from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
 from nemo_gym.tasks.harbor.models import HarborTaskConfig
@@ -54,12 +63,45 @@ def compose_file(task: HarborTask) -> Path | None:
     return None
 
 
-def compose_image_references(task: HarborTask) -> list[str]:
-    """Every image a Compose task starts: the task image for ``main`` and each sidecar's image."""
+def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
+    """The task's Compose overlay with ``env_file`` entries inlined and ``${VAR}`` references resolved.
+
+    Returns ``None`` for a task without a Compose file. Prepare and the resources server both read the
+    file through this function, so the document the sandbox starts is the one prepare validated, provided
+    both run with the same process environment (see :func:`compose_variables`). A required variable
+    (``${VAR:?msg}``) without a value, a task variable the host does not set or a missing ``env_file``
+    raises :class:`ImageConfigError` naming it; a variable nobody sets is an empty string, with a warning.
+    """
     path = compose_file(task)
     if path is None:
-        return []
+        return None
     document = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(document, dict):
+        raise ImageConfigError(f"{task.task_id}: {path.name} is not a mapping")
+    unset: set[str] = set()
+    try:
+        # Interpolate first, as Compose does, so an env_file path may use ${CONTEXT_DIR}; env_file values are then
+        # literal. Anything still carrying a ``$NAME`` afterwards fails here, at prepare, not at seed.
+        variables = compose_variables(task, unset=unset)
+        document = substitute_with_empty(document, variables, unset)
+        document = inline_env_files(document, path.parent, variables)
+        # Interpolation hands back strings; the adapter reads healthcheck ``disable`` and ``retries`` by type.
+        document = restore_compose_types(document)
+    except ComposeSubstitutionError as exc:
+        raise ImageConfigError(f"{task.task_id}: {path.name}: {exc}") from exc
+    _warn_unset(task, unset)
+    residual = residual_interpolation(document)
+    if residual is not None:
+        # The key path only: the value next to it may be a host secret.
+        raise ImageConfigError(f"{task.task_id}: {path.name}: unresolved interpolation left at {residual}")
+    return document
+
+
+def compose_image_references(task: HarborTask) -> list[str]:
+    """Every image a Compose task starts: the task image for ``main`` and each sidecar's image."""
+    document = load_compose_document(task)
+    if document is None:
+        return []
     services = document.get("services") or {}
     references: list[str] = []
     main_image = (services.get("main") or {}).get("image") or task.image
@@ -149,16 +191,34 @@ def record_image_configs(
 
 
 def record_compose_images(
-    tasks: list[HarborTask], folder: Path, *, client: RegistryClient | None = None
+    tasks: list[HarborTask],
+    folder: Path,
+    *,
+    client: RegistryClient | None = None,
+    skipped: dict[str, str] | None = None,
 ) -> Path | None:
     """Write ``compose-images.json`` in ``folder`` for the Compose tasks among ``tasks``.
 
-    Returns the file's path, or ``None`` when no task uses Compose.
+    Returns the file's path, or ``None`` when no task uses Compose. A task whose Compose file does not
+    resolve (an :class:`ImageConfigError` from :func:`load_compose_document`) does not stop the others:
+    with ``skipped`` given it is recorded there by task id with the reason and left out, otherwise one
+    :class:`ImageConfigError` at the end names every such task. An image the registry cannot resolve
+    still raises for the whole set, as :func:`record_image_configs` says.
     """
     references: dict[str, list[str]] = {}
+    failures: dict[str, str] = {}
     for task in tasks:
-        for reference in compose_image_references(task):
+        try:
+            task_references = compose_image_references(task)
+        except ImageConfigError as exc:
+            failures[task.task_id] = str(exc)
+            continue
+        for reference in task_references:
             references.setdefault(reference, []).append(task.task_id)
+    if failures and skipped is None:
+        raise ImageConfigError(f"{len(failures)} Compose task(s) do not resolve: " + "; ".join(failures.values()))
+    if failures:
+        skipped.update(failures)
     return record_image_configs(references, folder, client=client, what="Compose image")
 
 

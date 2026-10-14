@@ -8,12 +8,15 @@ SHA256 over sorted ``relative_path NUL file_sha256 LF`` records covering
 ``task.toml``, ``instruction.md``, ``README.md``, ``trajectory.json`` and everything
 under ``environment/``, ``tests/``, ``solution/`` and ``steps/``. The digest travels in
 ``task_data`` under :data:`DIGEST_KEY` so the resources server can refuse a row whose
-folder changed after materialization.
+folder changed after materialization. :func:`context_digest` is the other digest here: Harbor's environment
+id of a Dockerfile build context, which keys and names the images prepare builds.
 """
 
 import fnmatch
 import hashlib
 from pathlib import Path
+
+from nemo_gym.tasks.harbor.harbor_compat import environment_content_hash
 
 
 DIGEST_KEY = "_ng_digest"
@@ -23,7 +26,9 @@ _DIRECTORIES = ("environment", "tests", "solution", "steps")
 _IGNORED = ("__pycache__", "*.pyc", ".DS_Store", "*.swp", "*.swo", "*~")
 
 
-def _ignored(relative: str) -> bool:
+def is_ignored(relative: str) -> bool:
+    """Whether :func:`content_hash` skips the task file at ``relative`` (a posix path under the task folder):
+    editor leftovers and byte-code caches, matched on any path component."""
     parts = relative.split("/")
     return any(fnmatch.fnmatch(part, pattern) for part in parts for pattern in _IGNORED)
 
@@ -69,7 +74,25 @@ def content_hash(path: Path) -> str:
     digest = hashlib.sha256()
     for file in _covered_files(path):
         relative = file.relative_to(path).as_posix()
-        if _ignored(relative):
+        if is_ignored(relative):
             continue
         digest.update(_record(path, file))
     return digest.hexdigest()
+
+
+def context_digest(path: Path) -> str:
+    """Harbor's environment id of a Dockerfile build context (a task's ``environment/`` folder).
+
+    :func:`~nemo_gym.tasks.harbor.harbor_compat.environment_content_hash` over the folder: 32 hex
+    characters of SHA-256 over the sorted (relative path, bytes) of its regular files. Symbolic links and
+    anything under a :data:`~nemo_gym.tasks.harbor.harbor_compat._CONTENT_HASH_IGNORE_NAMES` member
+    (``__pycache__``, ``.git``, ``.DS_Store``) are skipped, and file modes are not part of it: parity with
+    Harbor's image name is the contract, not a complete cache identity. An empty folder hashes to its
+    name, as Harbor hashes it when the task declares no ``docker_image`` (one that does never reaches a
+    build). Two contexts with the same files get the same id, so it keys the build record (see
+    ``nemo_gym.tasks.harbor.image_build``).
+    """
+    path = Path(path)
+    if not path.is_dir():
+        raise ValueError(f"Not a build context folder: {path}")
+    return environment_content_hash(path)
