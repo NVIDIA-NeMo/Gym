@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import importlib.metadata
 import json
-import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +13,7 @@ from shlex import quote
 from typing import Any
 
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.uv_bootstrap import uv_for_sandbox
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.utils import read_text, upload_text
@@ -62,9 +62,7 @@ class StirrupSessionState(AgentSessionState):
         return check.return_code == 0
 
     async def _install_runtime(self, timeout: float) -> None:
-        uv_path = shutil.which("uv")
-        if uv_path is None:
-            raise RuntimeError("Stirrup agent server requires uv to install the sandbox runtime")
+        uv_path = await uv_for_sandbox(self.session.sandbox, self.session.workdir)
         uv = f"{RUNTIME_DIR}/uv"
         await self.session.sandbox.upload(uv_path, uv)
         venv = quote(f"{RUNTIME_DIR}/venv")

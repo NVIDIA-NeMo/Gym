@@ -273,3 +273,36 @@ def test_a_session_requiring_mcp_tools_is_rejected(client):
 
     with pytest.raises(ValueError, match="does not support required MCP"):
         _seed(client, sandbox_access=_sandbox_access(), tool_accesses=[_TOOL_ACCESS, mcp])
+
+
+async def test_the_runtime_installs_with_a_uv_built_for_the_sandbox_architecture(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from nemo_gym.agent_utils import uv_bootstrap
+
+    host_machine = uv_bootstrap.platform.machine().lower()
+    sandbox_machine = "x86_64" if host_machine in ("aarch64", "arm64") else "aarch64"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(uv_bootstrap.shutil, "which", lambda name: "/host/uv")
+    monkeypatch.setattr(uv_bootstrap, "_host_uv_version", lambda uv: "0.9.0")
+    downloads = []
+
+    def download(version, target, path):
+        downloads.append(target)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("uv")
+
+    monkeypatch.setattr(uv_bootstrap, "_download_uv", download)
+    probe = SimpleNamespace(return_code=0, stdout=f"Linux\n{sandbox_machine}\ngnu\n", stderr="")
+    installed = SimpleNamespace(return_code=0, stdout="", stderr="")
+    fake_sandbox = MagicMock(exec=AsyncMock(side_effect=[probe, installed]), upload=AsyncMock())
+    state = SimpleNamespace(
+        session=SimpleNamespace(sandbox=fake_sandbox, workdir="/root"),
+        _runtime_installed=AsyncMock(return_value=True),
+    )
+
+    await sandbox.StirrupSessionState._install_runtime(state, timeout=60)
+
+    (uploaded, _), _ = fake_sandbox.upload.await_args
+    assert downloads and sandbox_machine in downloads[0]
+    assert uploaded != "/host/uv" and Path(uploaded).read_text() == "uv"
