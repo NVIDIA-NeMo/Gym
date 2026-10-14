@@ -19,12 +19,13 @@
 #
 #   nemotron_recipes/super-3.5/run.sh browsecomp
 #
-# Set in .env: EXA_API_KEY, JUDGE_API_KEY
+# Set in .env: EXA_API_KEY, BROWSECOMP_JUDGE_API_KEY
 #
 # Needs an Exa API key (EXA_API_KEY; env.yaml -> exa_api_key) and the judge endpoint in
-# env.yaml (judge_base_url, judge_api_key) serving GLM-5.1 on Chat Completions. The run uses
-# Exa's "deep" search, which costs more per query than its default; the published run made
-# about 33 searches per question. run.sh first sources browsecomp.setup.sh.
+# env.yaml (browsecomp_judge_base_url, browsecomp_judge_api_key) serving GLM-5.1 on Chat
+# Completions. The run uses Exa's "deep" search, which costs more per query than its default;
+# the published run made about 33 searches per question. run.sh first sources
+# browsecomp.setup.sh.
 
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: 0a287243543020c1cc23f76f6004fcf3c83fc4a9
@@ -35,8 +36,8 @@ benchmark_config: benchmarks/browsecomp/config.yaml
 judge_model:
   responses_api_models:
     vllm_model:
-      base_url: ${judge_base_url}
-      api_key: ${judge_api_key}
+      base_url: ${browsecomp_judge_base_url}
+      api_key: ${browsecomp_judge_api_key}
       model: ${oc.select:browsecomp_judge_model_name,zai-org/GLM-5.1}
 
 browsecomp_benchmark_resources_server:

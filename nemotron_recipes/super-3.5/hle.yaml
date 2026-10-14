@@ -19,11 +19,11 @@
 #
 #   nemotron_recipes/super-3.5/run.sh hle
 #
-# Set in .env: HF_TOKEN, JUDGE_API_KEY
+# Set in .env: HF_TOKEN, HLE_JUDGE_API_KEY
 #
-# Needs HF_TOKEN (gated dataset; accept the terms on the Hub first), the judge endpoint in
-# env.yaml (judge_base_url, judge_api_key) and JUDGE_API_KEY in your shell; the endpoint
-# must serve gpt-5.6-luna on the Responses API (Gym posts to <judge_base_url>/responses).
+# Needs HF_TOKEN (gated dataset; accept the terms on the Hub first) and the judge endpoint in
+# env.yaml (hle_judge_base_url, hle_judge_api_key); the endpoint must serve gpt-5.6-luna on the
+# Responses API (Gym posts to <hle_judge_base_url>/responses).
 #
 # An answer whose judge call fails is left out of the score and written to
 # evaluator_rollouts_failures.jsonl; RESUME=1 retries it (the model answers again; 3 attempts
@@ -36,18 +36,20 @@
 # Gym commit the published number was produced with; run.sh pins to it.
 gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
 # Gym benchmark config this recipe builds on, plus the Gym file that defines the judge
-# server (judge_model), which reads judge_base_url, judge_api_key and judge_model_name.
+# server (judge_model).
 benchmark_config:
   - benchmarks/hle/config.yaml
   - resources_servers/labbench2_vlm/configs/judge_model_openai.yaml
 
 # Judge: gpt-5.6-luna at reasoning effort medium, instead of the benchmark default (the
 # model under test grading itself). Endpoint and key come from env.yaml; set
-# judge_model_name there only if your provider serves this model under a different id.
-judge_model_name: gpt-5.6-luna
+# hle_judge_model_name there only if your provider serves this model under a different id.
 judge_model:
   responses_api_models:
     openai_model:
+      openai_base_url: ${hle_judge_base_url}
+      openai_api_key: ${hle_judge_api_key}
+      openai_model: ${oc.select:hle_judge_model_name,gpt-5.6-luna}
       # As the published run sent it.
       extra_body:
         reasoning_effort: medium

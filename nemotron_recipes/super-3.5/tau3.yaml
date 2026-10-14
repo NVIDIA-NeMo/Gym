@@ -20,11 +20,12 @@
 #
 #   nemotron_recipes/super-3.5/run.sh tau3
 #
-# Set in .env: SIM_KEY
+# Set in .env: TAU3_USER_SIMULATOR_API_KEY
 #
-# Needs the simulator endpoint in env.yaml (judge_base_url, user_simulator_api_key) and
-# SIM_KEY in your shell; the endpoint must serve gpt-5.4-mini-2026-03-17 on
-# <judge_base_url>/chat/completions. Gym builds the tau2 agent's venv on the first run.
+# Needs the simulator endpoint in env.yaml (tau3_user_simulator_base_url,
+# tau3_user_simulator_api_key); the endpoint must serve gpt-5.4-mini-2026-03-17 on
+# <tau3_user_simulator_base_url>/chat/completions. Gym builds the tau2 agent's venv on the
+# first run.
 #
 # Gym installs the tau2 code from branch bxyu/nemo_gym_stable of
 # https://github.com/bxyu-nvidia/tau2-bench and prepares the tasks from its branch
@@ -47,15 +48,14 @@ policy_model:
       sequential_reasoning_allowed: false
 
 # User simulator: gpt-5.4-mini-2026-03-17 at reasoning effort medium, as the benchmark
-# config sets. Endpoint from env.yaml (the judge endpoint), key from SIM_KEY; set
-# user_simulator_model_name there only if your provider serves this model under another id.
-user_simulator_model_name: gpt-5.4-mini-2026-03-17
+# config sets. Endpoint and key from env.yaml; set tau3_user_simulator_model_name there only
+# if your provider serves this model under another id.
 gpt-5_4-mini-2026-03-17:
   responses_api_models:
     openai_model:
-      openai_base_url: ${judge_base_url}
-      openai_api_key: ${user_simulator_api_key}
-      openai_model: ${user_simulator_model_name}
+      openai_base_url: ${tau3_user_simulator_base_url}
+      openai_api_key: ${tau3_user_simulator_api_key}
+      openai_model: ${oc.select:tau3_user_simulator_model_name,gpt-5.4-mini-2026-03-17}
       # As in the published run: no max_output_tokens in the simulator's requests.
       extra_body:
         _delete_key: max_output_tokens

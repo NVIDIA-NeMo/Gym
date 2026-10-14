@@ -19,7 +19,7 @@
 #
 #   nemotron_recipes/super-3.5/run.sh gdpval
 #
-# Set in .env: TAVILY_API_KEY, JUDGE_API_KEY
+# Set in .env: TAVILY_API_KEY, GDPVAL_JUDGE_API_KEY
 #
 # Two ways to score (gdpval.setup.sh picks one):
 #   * rubric (default): judges score each deliverable against the task's rubric. Needs no
@@ -43,8 +43,9 @@
 #     then export GDPVAL_CONTAINER_PATH=<path to gdpval.sif>. On aarch64, five pinned packages
 #     that ship only x86_64 wheels are left out (see gdpval_aa_v2_arm64_exclusions.txt).
 #   * TAVILY_API_KEY for the agent's web search: one key, or '[key1,key2]' to rotate.
-#   * One judge endpoint (judge_base_url, judge_api_key in env.yaml) that serves all three
-#     panel judges below on <judge_base_url>/chat/completions; one is sampled per judge call.
+#   * One judge endpoint (gdpval_judge_base_url, gdpval_judge_api_key in env.yaml) that serves
+#     all three panel judges below on <gdpval_judge_base_url>/chat/completions; one is sampled
+#     per judge call.
 #     If it names them differently, set gdpval_judge_gpt_model, gdpval_judge_gemini_model and
 #     gdpval_judge_claude_model in env.yaml.
 #
@@ -64,8 +65,8 @@ benchmark_config: benchmarks/gdpval/config.yaml
 gdpval_judge_model:
   responses_api_models:
     openai_model:
-      openai_base_url: ${judge_base_url}
-      openai_api_key: ${judge_api_key}
+      openai_base_url: ${gdpval_judge_base_url}
+      openai_api_key: ${gdpval_judge_api_key}
       openai_model: ${oc.select:gdpval_judge_gemini_model,gemini-3.1-pro-preview}
       # As in the published run.
       max_concurrent_requests: 10

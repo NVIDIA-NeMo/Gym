@@ -18,11 +18,11 @@
 #
 #   nemotron_recipes/super-3.5/run.sh tau2
 #
-# Set in .env: SIM_KEY
+# Set in .env: TAU2_USER_SIMULATOR_API_KEY
 #
-# Needs the simulator endpoint in env.yaml (judge_base_url, user_simulator_api_key) and SIM_KEY in
-# your shell; the endpoint must serve Qwen3-235B-A22B-Instruct-2507-FP8 on
-# <judge_base_url>/chat/completions. Gym installs the tau2 code and data from
+# Needs the simulator endpoint in env.yaml (tau2_user_simulator_base_url,
+# tau2_user_simulator_api_key); the endpoint must serve Qwen3-235B-A22B-Instruct-2507-FP8 on
+# <tau2_user_simulator_base_url>/chat/completions. Gym installs the tau2 code and data from
 # https://github.com/bxyu-nvidia/tau2-bench (unpinned branches, as for tau3.yaml).
 
 gym_commit: 538886bff48f31a1567670fd5ed29c9ddfea59dd
@@ -35,7 +35,6 @@ policy_model:
 
 # User simulator: Qwen3-235B-A22B-Instruct-2507-FP8 instead of the benchmark default (gpt-5.2).
 # Set tau2_user_simulator_model_name in env.yaml only if your provider uses another id.
-tau2_user_simulator_model_name: Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
 tau2_benchmark_agent:
   responses_api_agents:
     tau2:
@@ -45,9 +44,9 @@ Qwen3-235B-A22B-Instruct-2507-FP8:
   responses_api_models:
     vllm_model:
       entrypoint: app.py
-      base_url: ${judge_base_url}
-      api_key: ${user_simulator_api_key}
-      model: ${tau2_user_simulator_model_name}
+      base_url: ${tau2_user_simulator_base_url}
+      api_key: ${tau2_user_simulator_api_key}
+      model: ${oc.select:tau2_user_simulator_model_name,Qwen/Qwen3-235B-A22B-Instruct-2507-FP8}
       replace_developer_role_with_system: true
       return_token_id_information: false
       uses_reasoning_parser: true

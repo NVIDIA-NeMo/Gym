@@ -50,7 +50,7 @@ time per copy. Set `PIN_GYM=0` to run against your current checkout instead.
 |---|---|---|
 | GPQA Diamond | Graduate-level science questions | [`gpqa.yaml`](./gpqa.yaml) |
 | HLE (text-only) | Humanity's Last Exam — hard, broad knowledge | [`hle.yaml`](./hle.yaml) |
-| HLE (vision) | The same, all questions including those with images | [`hle-vision.yaml`](./hle-vision.yaml) |
+| HLE (full) | The same, all questions including those with images | [`hle-vision.yaml`](./hle-vision.yaml) |
 | AA-LCR | Long-context reasoning | [`aa-lcr.yaml`](./aa-lcr.yaml) |
 | AA-Omniscience | Knowledge and hallucination | [`omniscience.yaml`](./omniscience.yaml) |
 | SciCode | Scientific coding, graded against numeric ground truth | [`scicode.yaml`](./scicode.yaml) † |
@@ -115,11 +115,12 @@ come back empty and score 0 without an error.
 
 ## Judges and graders
 
-Some recipes are graded by another model or service, or need one to play the user: HLE (text
-and vision), AA-LCR, AA-Omniscience, BrowseComp and GDPval-AA v2 (judge models), Tau2 and Tau3
+Some recipes are graded by another model or service, or need one to play the user: HLE (text-only
+and full), AA-LCR, AA-Omniscience, BrowseComp and GDPval-AA v2 (judge models), Tau2 and Tau3
 (user simulator) and CritPt (Artificial Analysis API). Each recipe pins the model it uses; you
-provide the endpoint in `env.yaml` and the keys in `.env`. Both templates list what each recipe
-needs, and the recipe's header says which API your endpoint must serve.
+provide its endpoint in `env.yaml` and its key in `.env`, separately for each recipe, so the
+judges can come from different providers. Both templates have a block per recipe, and the
+recipe's header says which API your endpoint must serve.
 
 ## Benchmarks needing extra setup
 
