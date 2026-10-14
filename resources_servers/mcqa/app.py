@@ -104,6 +104,7 @@ ANSWER_COLON_PAYLOAD_PATTERN = re.compile(r"(?im)[*_]{0,2}Answer[*_]{0,2}\s*:[*_
 # Match the reference MILU v2 regex filter, including its first-match semantics.
 MILU_V2_ANSWER_PATTERN = re.compile(
     r"(?i)(?:\\boxed\s*\{\s*\*?\s*([ABCD])\s*\*?\s*\}|answer is\s*\*?\(?\*?([ABCD])\*?\)?\*?)"
+)
 # Recognized Indic answer labels only; arbitrary labels such as "Eliminated
 # option" must never supply an answer. This fallback also requires a row opt-in.
 LOCALIZED_ANSWER_LABELS = frozenset(
