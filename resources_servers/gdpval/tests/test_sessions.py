@@ -85,7 +85,7 @@ def _seed(tmp_path: Path, *, session_id: str = "session", repeat: int = 1, url: 
     source.write_text("the brief")
     return ResourcesSeedSessionRequest(
         resources_session_id=session_id,
-        episode_id=EpisodeId(rollout_id=f"0-{repeat}", repeat=repeat),
+        episode_id=EpisodeId(rollout_id=f"0-{repeat}"),
         task_id=TaskId(taskset="gdpval:benchmark", task_id="task-1"),
         task_data={
             "task_id": "task-1",
@@ -303,11 +303,20 @@ def test_a_seed_for_another_task_than_its_data_is_rejected(server, root, tmp_pat
     assert not root.exists()
 
 
+def test_a_seed_whose_rollout_id_names_no_rollout_index_is_rejected(server, root, tmp_path):
+    seed = _seed(tmp_path).model_copy(update={"episode_id": EpisodeId(rollout_id="explicit")})
+
+    with pytest.raises(ValueError, match="does not end with a rollout index"):
+        _post_seed(TestClient(server.setup_webserver()), seed)
+
+    assert not root.exists()
+
+
 def test_a_session_is_bound_to_its_episode_and_task(server, root, tmp_path):
     client = TestClient(server.setup_webserver())
     seed = _seed(tmp_path)
     _post_seed(client, seed)
-    other_episode = seed.model_copy(update={"episode_id": EpisodeId(rollout_id="0-2", repeat=2)})
+    other_episode = seed.model_copy(update={"episode_id": EpisodeId(rollout_id="0-2")})
     other_close = ResourcesCloseSessionRequest(
         resources_session_id=seed.resources_session_id, episode_id=other_episode.episode_id
     )

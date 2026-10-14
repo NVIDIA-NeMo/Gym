@@ -233,7 +233,7 @@ def test_explicit_identity_does_not_require_collector_indexes(task_id_field: str
     assert response.json()["reward"] == 1.0
     seed_body = client.calls[0][2]["json"]
     assert seed_body["task_id"] == {"taskset": "resources", "task_id": "task"}
-    assert seed_body["episode_id"] == {"rollout_id": "explicit-rollout", "attempt": 2, "repeat": 0}
+    assert seed_body["episode_id"] == {"rollout_id": "explicit-rollout", "attempt": 2}
     assert client.calls[2][1] == "/ng-rollout/explicit-rollout-a2/v1/responses"
 
 
@@ -252,7 +252,7 @@ def test_task_identity_preserves_index_fallback_and_zero(task_fields: dict[str, 
     )
 
     assert request.task.task_id.task_id == expected_task_id
-    assert request.episode_id == EpisodeId(rollout_id="3-2", attempt=0, repeat=2)
+    assert request.episode_id == EpisodeId(rollout_id="3-2", attempt=0)
 
 
 @pytest.mark.parametrize(
@@ -263,9 +263,9 @@ def test_task_identity_preserves_index_fallback_and_zero(task_fields: dict[str, 
         # Gym's own retries stamp the attempt index.
         (
             {"_ng_task_index": 3, "_ng_rollout_index": 2, "_ng_attempt_index": 2},
-            EpisodeId(rollout_id="3-2", attempt=2, repeat=2),
+            EpisodeId(rollout_id="3-2", attempt=2),
         ),
-        ({"_ng_task_index": 3, "_ng_rollout_index": 2}, EpisodeId(rollout_id="3-2", attempt=0, repeat=2)),
+        ({"_ng_task_index": 3, "_ng_rollout_index": 2}, EpisodeId(rollout_id="3-2", attempt=0)),
     ],
 )
 def test_flat_rows_decode_the_capture_key_like_the_agent(identity: dict, expected: EpisodeId) -> None:
@@ -289,7 +289,7 @@ def test_a_restored_attempt_runs_under_its_capture_key() -> None:
     )
 
     assert response.status_code == 200
-    assert client.calls[0][2]["json"]["episode_id"] == {"rollout_id": "restored", "attempt": 1, "repeat": 0}
+    assert client.calls[0][2]["json"]["episode_id"] == {"rollout_id": "restored", "attempt": 1}
     assert client.calls[2][1] == "/ng-rollout/restored-a1/v1/responses"
 
 

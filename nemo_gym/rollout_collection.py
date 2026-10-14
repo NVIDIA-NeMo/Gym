@@ -308,9 +308,7 @@ def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     # An explicit id may carry the attempt suffix itself, as a restored attempt does.
     capture_key = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return {
-        "episode_id": EpisodeId.from_capture_key(capture_key)
-        .model_copy(update={"repeat": row.get(ROLLOUT_INDEX_KEY_NAME, 0)})
-        .model_dump(mode="json"),
+        "episode_id": EpisodeId.from_capture_key(capture_key).model_dump(mode="json"),
         "task": {
             "task_id": row["task_id"],
             "task_input": row["task_input"],

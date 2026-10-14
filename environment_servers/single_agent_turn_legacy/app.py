@@ -81,9 +81,7 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
             f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
         )
         return SingleAgentTurnRequest(
-            episode_id=EpisodeId.from_capture_key(capture_key).model_copy(
-                update={"repeat": row.get(ROLLOUT_INDEX_KEY_NAME, 0)}
-            ),
+            episode_id=EpisodeId.from_capture_key(capture_key),
             task=materialize_task(row, taskset=task_source),
         )
 

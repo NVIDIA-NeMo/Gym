@@ -21,6 +21,14 @@ def repeat_dir(root: Union[str, Path], task_id: str, repeat: int) -> Path:
     return task_dir(root, task_id) / f"repeat_{repeat}"
 
 
+def repeat_from_rollout_id(rollout_id: str) -> int:
+    """Read the repeat index from a rollout id, which Gym derives as ``"<task_index>-<rollout_index>"``."""
+    _, separator, repeat = rollout_id.rpartition("-")
+    if not separator or not repeat.isdigit():
+        raise ValueError(f"Rollout id {rollout_id!r} does not end with a rollout index ('<task>-<rollout>')")
+    return int(repeat)
+
+
 def repeat_dirs(task_dir: Path) -> List[Path]:
     """All deliverable dirs of a task, supporting both layouts.
 

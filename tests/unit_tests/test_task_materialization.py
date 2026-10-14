@@ -263,9 +263,9 @@ def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, expl
         # Gym's own retries stamp the attempt index.
         (
             {"_ng_task_index": 3, "_ng_rollout_index": 2, "_ng_attempt_index": 2},
-            EpisodeId(rollout_id="3-2", attempt=2, repeat=2),
+            EpisodeId(rollout_id="3-2", attempt=2),
         ),
-        ({"_ng_task_index": 3, "_ng_rollout_index": 2}, EpisodeId(rollout_id="3-2", attempt=0, repeat=2)),
+        ({"_ng_task_index": 3, "_ng_rollout_index": 2}, EpisodeId(rollout_id="3-2", attempt=0)),
     ],
 )
 def test_episode_request_decodes_the_capture_key_like_the_agent(identity, expected):

@@ -562,6 +562,7 @@ class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
 class _TaskSession:
     episode_id: EpisodeId
     task_id: TaskId
+    repeat: int
     sandbox: Optional[AsyncSandbox]
     reference_dir: Path
     # The finish or abandon_task_finish call the agent made.
@@ -644,6 +645,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             task = TaskData.model_validate(body.task_data)
             if body.task_id.task_id != task.task_id:
                 raise ValueError("TaskId does not match the GDPVal task_id")
+            repeat = persisted_layout.repeat_from_rollout_id(body.episode_id.rollout_id)
             reference_dir = Path(tempfile.mkdtemp(prefix="gdpval_ref_files_"))
             try:
                 reference_files = await self._download_reference_files(task, reference_dir)
@@ -657,7 +659,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             except BaseException:
                 shutil.rmtree(reference_dir, ignore_errors=True)
                 raise
-            session = _TaskSession(body.episode_id, body.task_id, sandbox, reference_dir)
+            session = _TaskSession(body.episode_id, body.task_id, repeat, sandbox, reference_dir)
             try:
                 response = await self._seed_response(session_id, session)
             except BaseException:
@@ -764,7 +766,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # The first /verify of a session copies the files out and stops the sandbox; later ones rescore them.
         if session.deliverables_dir is None:
             task_dir = persisted_layout.repeat_dir(
-                self.config.persist_deliverables_dir, session.task_id.task_id, session.episode_id.repeat
+                self.config.persist_deliverables_dir, session.task_id.task_id, session.repeat
             )
             await collect_deliverables(session.sandbox, session.finish_call, session.reference_dir, task_dir)
             await self._release(session)
