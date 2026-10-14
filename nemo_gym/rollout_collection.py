@@ -66,6 +66,7 @@ from nemo_gym.failure_kinds import (
     CANCELLED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
     ENVIRONMENT_SERVER_FAILED,
+    JUDGE_FAILED,
     is_namespaced,
     is_registered,
 )
@@ -134,7 +135,12 @@ from nemo_gym.rollout_recovery import (
 )
 from nemo_gym.rollout_store import RolloutStore
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
-from nemo_gym.telemetry.gym_metrics import UNREGISTERED_FAILURE_KIND, record_rollout_completed
+from nemo_gym.telemetry.gym_metrics import (
+    UNREGISTERED_FAILURE_KIND,
+    record_rollout_completed,
+    record_rollout_health,
+)
+from nemo_gym.telemetry.setup import is_metrics_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -230,6 +236,7 @@ NG_NO_PERSIST_KEY = "_ng_no_persist"
 # Set only by Gym, on the result it builds for a row the dispatch budget never started.
 NG_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+NG_FAILURE_JUDGE_ERROR_KEY = "_ng_failure_judge_error"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
 ENVIRONMENT_SERVER_FAILURE_CLASS = ENVIRONMENT_SERVER_FAILED
@@ -459,8 +466,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     # judge_failsafe is a built-in producer of these two legacy markers.
     # Accept only its declared failure form; other collector-owned keys remain forbidden.
     judge_markers = (
-        {"_ng_failure_class", "_ng_failure_judge_error"}
-        if result.get("_ng_failure_class") == "judge_failed" and result.get("failure_kind") == "judge_failed"
+        {NG_FAILURE_CLASS_KEY, NG_FAILURE_JUDGE_ERROR_KEY}
+        if result.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED and result.get("failure_kind") == JUDGE_FAILED
         else set()
     )
     reserved = sorted(key for key in result if _is_collector_key(key) and key not in judge_markers)
@@ -1771,6 +1778,20 @@ def _metric_failure_kind(failure_kind: Any) -> Optional[str]:
     return UNREGISTERED_FAILURE_KIND
 
 
+def _record_rollout_health(result: Dict[str, Any], outcome: str, ignored_checks: frozenset[str]) -> None:
+    """Evaluate the trajectory health checks on a finished rollout and count the verdict and flagged checks.
+
+    Gated on telemetry only, not on the post-run report switch. Never raises: telemetry must not fail a rollout.
+    """
+    from nemo_gym.rollout_health import evaluate_record
+
+    try:
+        digest = evaluate_record(result, ignored_checks)
+        record_rollout_health(digest.verdict, outcome=outcome, flagged_checks=(f.check for f in digest.findings))
+    except Exception:
+        logger.debug("Could not record rollout health metrics.", exc_info=True)
+
+
 def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dict[str, Any]:
     """One sidecar row for a `/run` call that came back without a result.
 
@@ -2864,6 +2885,10 @@ class RolloutCollectionHelper(BaseModel):
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
         capture_dirs = model_call_capture_dirs_from_config(global_config)
         observability_enabled = observability_enabled_from_config(global_config)
+        # Live health metrics follow the metrics exporter alone: `disable_health_check` only gates the post-run
+        # report, and span groups only select traces. Without an exporter the evaluation would feed nothing.
+        health_metrics_enabled = is_metrics_exporter_active()
+        health_ignored_checks = frozenset(config.health_check_ignored_checks)
         # Read the incomplete-capture policy once, then apply it to each rebuild.
         mask_incomplete_when_attributed = mask_incomplete_when_attributed_from_config(global_config)
         # Resolve the training-token store directory once.
@@ -3083,6 +3108,8 @@ class RolloutCollectionHelper(BaseModel):
                 if completed.environment_server_type is not None:
                     result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
 
+                # Set below for a rollout whose trajectory is health-evaluated once the bookkeeping is done.
+                health_outcome: Optional[str] = None
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)
                 # No score exists. Judge failures may still carry real generation evidence.
@@ -3188,12 +3215,24 @@ class RolloutCollectionHelper(BaseModel):
                     store.record_outcome(result)
                     outcome = "omitted" if store.disposition(row) == "omitted" else "failed"
                     _record_rollout_outcome(metric_result, outcome, dispatch_name)
+                    # Health eligibility is separate from scoring: typed failures have no score,
+                    # but a reported environment failure may retain an executed trajectory.
+                    if outcome == "failed" and (
+                        failure_class not in _NO_RESULT_FAILURE_CLASSES
+                        or (
+                            structured_failure
+                            and result["_ng_failure_record"]["source"] == "environment"
+                            and (NG_AGENT_OBSERVATIONS_KEY in result or NG_TRAJECTORY_KEY in result)
+                        )
+                    ):
+                        health_outcome = "failed"
                     if batch_tracker is not None:
                         batch_failure_rows.append(_batch_status_row(result, batch_agent_refs))
                 else:
                     # Success → main jsonl.
                     store.record_outcome(result, sync=capture_build_can_retire(token_capture_build))
                     _record_rollout_outcome(metric_result, "scored", dispatch_name)
+                    health_outcome = "scored"
                     if batch_tracker is not None:
                         batch_completed_rows.append(_batch_status_row(result, batch_agent_refs))
                     try:
@@ -3290,6 +3329,11 @@ class RolloutCollectionHelper(BaseModel):
                             )
 
                         export_metrics(step_metrics, step=int(current_pct))
+
+                # Last, so a cancellation here costs a health sample and never the bookkeeping above.
+                if health_metrics_enabled and health_outcome is not None:
+                    await asyncio.to_thread(_record_rollout_health, result, health_outcome, health_ignored_checks)
+
             collection_succeeded = True
 
         # The collection API already retains returned results. Reuse those

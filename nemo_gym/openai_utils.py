@@ -1159,6 +1159,10 @@ def accumulate_response_usage(
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
     usage: Optional[NeMoGymResponseUsage] = None
+    # OpenAI-compatible providers may return provider-specific service-tier names.
+    # The OpenAI SDK's Literal may not include those names.
+    # Preserve the reported value.
+    service_tier: Optional[str] = None
 
 
 ########################################
@@ -1208,6 +1212,8 @@ class NeMoGymChoice(Choice):
 
 class NeMoGymChatCompletion(ChatCompletion):
     choices: List[NeMoGymChoice]
+    # Providers can return deployment-specific tiers. Accept any string.
+    service_tier: Optional[str] = None
 
 
 ########################################
@@ -1414,6 +1420,27 @@ CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS = frozenset({"chat_template_kwargs", "thi
 
 class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_litellm_provider_specific_fields(cls, value: Any) -> Any:
+        """Drop ``provider_specific_fields`` from replayed assistant history.
+
+        litellm's ``Message.model_dump()`` emits that key on every assistant turn
+        (holding response fields it does not model, such as ``refusal``), and
+        harnesses built on litellm replay the dump verbatim. It carries nothing
+        a model server needs, and the strict message schema would reject it.
+        """
+        if not isinstance(value, dict) or not isinstance(value.get("messages"), list):
+            return value
+        value = value.copy()
+        value["messages"] = [
+            {k: v for k, v in message.items() if k != "provider_specific_fields"}
+            if isinstance(message, dict)
+            else message
+            for message in value["messages"]
+        ]
+        return value
 
     messages: List[NeMoGymChatCompletionMessageParam]
     model: Optional[Union[str, ChatModel]] = None
