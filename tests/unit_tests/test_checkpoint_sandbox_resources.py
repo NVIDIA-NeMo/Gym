@@ -9,6 +9,7 @@ from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import httpx
+import pytest
 from fastapi import FastAPI, Request
 from omegaconf import DictConfig
 from pydantic import JsonValue, PrivateAttr
@@ -22,7 +23,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.sandbox.access import SandboxAccess
-from nemo_gym.sandbox.checkpoint import SandboxSessionCheckpointer
+from nemo_gym.sandbox.checkpoint import SandboxSessionCheckpointer, checkpoint_state_dir
 from nemo_gym.sandbox.providers.base import SandboxSpec
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from tests.unit_tests.test_sandbox_checkpoint import FakeSnapshotProvider
@@ -43,7 +44,10 @@ class NotesServer(SimpleResourcesServer):
     _sandboxes: SandboxSessionCheckpointer = PrivateAttr(default=None)
 
     def setup_webserver(self) -> FastAPI:
-        self._sandboxes = SandboxSessionCheckpointer(self.provider, parallelism=4)
+        state_dir = checkpoint_state_dir(self.server_client.global_config_dict)
+        self._sandboxes = SandboxSessionCheckpointer(
+            self.provider, state_dir=state_dir, server_name=self.config.name, parallelism=4
+        )
         app = super().setup_webserver()
         app.post("/append")(self.append)
         return app
@@ -58,12 +62,12 @@ class NotesServer(SimpleResourcesServer):
         return {"sandbox_id": sandbox.handle.sandbox_id}
 
     async def verify(self, request: Request, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        # The episode is over: its sandbox and the snapshots of it go.
-        await self._sandboxes.stop(request.session[SESSION_ID_KEY], forget_snapshots=True)
+        # The episode is over: its sandbox goes. Its snapshots stay until a release drops their checkpoints.
+        await self._sandboxes.stop(request.session[SESSION_ID_KEY])
         return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
     async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
-        return await self._sandboxes.export(session_ids)
+        return await self._sandboxes.export(session_ids, checkpoint_id=checkpoint_id)
 
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
         await self._sandboxes.restore(states)
@@ -74,15 +78,21 @@ class NotesServer(SimpleResourcesServer):
     async def park_session_states(self, session_ids: list[str]) -> None:
         await self._sandboxes.park(session_ids)
 
+    async def release_external_state(self, kept_checkpoint_ids: list[str]) -> None:
+        await self._sandboxes.release(kept_checkpoint_ids)
+
     async def current_sandbox_access(self, session_id: str) -> SandboxAccess | None:
         if session_id not in self._sandboxes:
             return None
         return await self._sandboxes.access(session_id, provider_config_ref="sandbox", workdir="/work")
 
 
-def make_server(provider: FakeSnapshotProvider) -> tuple[NotesServer, httpx.AsyncClient]:
+def make_server(provider: FakeSnapshotProvider, state_dir: Path) -> tuple[NotesServer, httpx.AsyncClient]:
+    """A server whose snapshot index is under ``state_dir``; a second one over the same directory is a restart."""
     server_client = MagicMock(spec=ServerClient)
-    server_client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
+    server_client.global_config_dict = DictConfig(
+        {"checkpoint": {"enabled": True, "control_auth_token": "t", "state_dir": str(state_dir)}}
+    )
     config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="notes")
     server = NotesServer(config=config, server_client=server_client, provider=provider)
     app = server.setup_webserver()
@@ -110,7 +120,7 @@ VERIFY = {
 
 async def test_the_snapshot_is_committed_and_a_fresh_server_forks_it(tmp_path: Path) -> None:
     provider = FakeSnapshotProvider()
-    _, client = make_server(provider)
+    _, client = make_server(provider, tmp_path / "state")
     async with client:
         await client.post("/ng-rollout/r-a1/seed_session", json=SEED)
         await client.post("/append", json={"line": "one"})
@@ -131,7 +141,7 @@ async def test_the_snapshot_is_committed_and_a_fresh_server_forks_it(tmp_path: P
     assert snapshot["fs"] == ["echo one >> notes"]
 
     # Every Gym process dies. A fresh server restores the checkpoint and the replacement attempt replays "two".
-    restored, fresh = make_server(provider)
+    restored, fresh = make_server(provider, tmp_path / "state")
     async with fresh:
         fresh.cookies.update(cookies)
         restore = await fresh.post(
@@ -153,7 +163,7 @@ async def test_the_snapshot_is_committed_and_a_fresh_server_forks_it(tmp_path: P
 
 async def test_a_commit_that_no_longer_continues_a_restored_session_stops_its_sandbox(tmp_path: Path) -> None:
     provider = FakeSnapshotProvider()
-    _, client = make_server(provider)
+    _, client = make_server(provider, tmp_path / "state")
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
         await client.post("/append", json={"line": "one"})
@@ -162,7 +172,7 @@ async def test_a_commit_that_no_longer_continues_a_restored_session_stops_its_sa
             "/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path / "first")), headers=AUTH
         )
 
-    restored, fresh = make_server(provider)
+    restored, fresh = make_server(provider, tmp_path / "state")
     async with fresh:
         await fresh.post(
             "/ng-control/v1/checkpoint/restore",
@@ -187,11 +197,12 @@ async def test_a_commit_that_no_longer_continues_a_restored_session_stops_its_sa
     assert restored._sandboxes.session_ids == []
     assert provider.boxes[fork_id]["state"] == "stopped"
     assert len(provider.snapshots) == 1, "a retire keeps the snapshot: the first checkpoint still names it"
+    assert restored._sandboxes.indexed_snapshots == {"c1": ["snap-2"]}
 
 
-async def test_retire_stops_the_sandbox_and_refuses_the_attempts_later_calls() -> None:
+async def test_retire_stops_the_sandbox_and_refuses_the_attempts_later_calls(tmp_path: Path) -> None:
     provider = FakeSnapshotProvider()
-    server, client = make_server(provider)
+    server, client = make_server(provider, tmp_path / "state")
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
         await client.post("/append", json={"line": "one"})
@@ -209,7 +220,7 @@ async def test_retire_stops_the_sandbox_and_refuses_the_attempts_later_calls() -
 
 async def test_a_snapshot_failure_fails_the_commit_and_the_episode_continues_after_resume(tmp_path: Path) -> None:
     provider = FakeSnapshotProvider()
-    _, client = make_server(provider)
+    _, client = make_server(provider, tmp_path / "state")
     provider.fail[("snapshot", "sb-1")] = RuntimeError("registry push failed")
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
@@ -233,7 +244,7 @@ async def test_a_snapshot_failure_fails_the_commit_and_the_episode_continues_aft
 
 async def test_a_commit_the_controller_stops_after_kills_the_exported_sandboxes(tmp_path: Path) -> None:
     provider = FakeSnapshotProvider()
-    server, client = make_server(provider)
+    server, client = make_server(provider, tmp_path / "state")
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
         await client.post("/append", json={"line": "one"})
@@ -248,7 +259,7 @@ async def test_a_commit_the_controller_stops_after_kills_the_exported_sandboxes(
     assert provider.boxes["sb-1"]["state"] == "stopped" and server._sandboxes.session_ids == []
     [snapshot] = provider.snapshots.values()
     assert snapshot["fs"] == ["echo one >> notes"]
-    _, fresh = make_server(provider)
+    _, fresh = make_server(provider, tmp_path / "state")
     async with fresh:
         restore = await fresh.post(
             "/ng-control/v1/checkpoint/restore",
@@ -260,7 +271,7 @@ async def test_a_commit_the_controller_stops_after_kills_the_exported_sandboxes(
 
 async def test_a_park_failure_does_not_fail_the_stop_commit(tmp_path: Path) -> None:
     provider = FakeSnapshotProvider()
-    _, client = make_server(provider)
+    _, client = make_server(provider, tmp_path / "state")
     provider.fail[("close", "sb-1")] = RuntimeError("backend busy")
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
@@ -274,28 +285,66 @@ async def test_a_park_failure_does_not_fail_the_stop_commit(tmp_path: Path) -> N
     assert provider.boxes["sb-1"]["state"] == "running", "runs out its TTL; the checkpoint is durable regardless"
 
 
-async def test_verify_ends_the_episode_and_the_next_commit_deletes_its_snapshots(tmp_path: Path) -> None:
+async def test_verify_keeps_the_snapshots_and_a_release_deletes_those_of_dropped_checkpoints(tmp_path: Path) -> None:
     provider = FakeSnapshotProvider()
-    _, client = make_server(provider)
+    server, client = make_server(provider, tmp_path / "state")
+    async with client:
+        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        for checkpoint_id in ("c1", "c2"):
+            await client.post("/ng-control/v1/checkpoint/prepare", json=control(checkpoint_id), headers=AUTH)
+            await client.post(
+                "/ng-control/v1/checkpoint/commit",
+                json=control(checkpoint_id, checkpoint_dir=str(tmp_path / checkpoint_id)),
+                headers=AUTH,
+            )
+            await client.post("/ng-control/v1/checkpoint/resume", json=control(checkpoint_id), headers=AUTH)
+        verified = await client.post("/ng-rollout/r/verify", json=VERIFY)
+        # Checkpoints taken before the episode ended still restore it, so the snapshots stay.
+        assert provider.boxes["sb-1"]["state"] == "stopped" and len(provider.snapshots) == 2
+        kept = await client.post(
+            "/ng-control/v1/checkpoint/release", json=control("c2", kept_checkpoint_ids=["c2"]), headers=AUTH
+        )
+        await server._sandboxes.settle()
+        after_kept = dict(server._sandboxes.indexed_snapshots), set(provider.snapshots)
+        await client.post(
+            "/ng-control/v1/checkpoint/release", json=control("done", kept_checkpoint_ids=[]), headers=AUTH
+        )
+        await server._sandboxes.settle()
+
+    assert verified.status_code == 200, verified.text
+    assert kept.json() == {"released": True}
+    assert after_kept == ({"c2": ["snap-3"]}, {"snap-3"})
+    assert provider.snapshots == {} and server._sandboxes.indexed_snapshots == {}
+
+
+async def test_a_restarted_server_releases_the_snapshots_its_crashed_predecessor_took(tmp_path: Path) -> None:
+    provider = FakeSnapshotProvider()
+    _, client = make_server(provider, tmp_path / "state")
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
         await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
-        await client.post(
-            "/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path / "c1")), headers=AUTH
-        )
-        await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
-        assert len(provider.snapshots) == 1
-        verified = await client.post("/verify", json=VERIFY)
-        # The latest checkpoint still names the snapshot, and the controller may not have written the result yet.
-        assert provider.boxes["sb-1"]["state"] == "stopped" and len(provider.snapshots) == 1
-        await client.post("/ng-control/v1/checkpoint/prepare", json=control("c2"), headers=AUTH)
-        await client.post(
-            "/ng-control/v1/checkpoint/commit", json=control("c2", checkpoint_dir=str(tmp_path / "c2")), headers=AUTH
-        )
-        await client.post("/ng-control/v1/checkpoint/resume", json=control("c2"), headers=AUTH)
+        await client.post("/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path)), headers=AUTH)
 
-    assert verified.status_code == 200, verified.text
-    assert provider.snapshots == {}, "the new checkpoint names nothing of the finished episode"
+    # The process dies with checkpoint c1 never published; its replacement is told only c9 is kept.
+    restarted, fresh = make_server(provider, tmp_path / "state")
+    async with fresh:
+        await fresh.post(
+            "/ng-control/v1/checkpoint/release", json=control("c9", kept_checkpoint_ids=["c9"]), headers=AUTH
+        )
+        await restarted._sandboxes.settle()
+
+    assert provider.snapshots == {}
+
+
+def test_a_server_that_checkpoints_sandboxes_needs_a_state_dir() -> None:
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
+    config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="notes")
+    server = NotesServer(config=config, server_client=server_client, provider=FakeSnapshotProvider())
+
+    with pytest.raises(ValueError, match="checkpoint.state_dir is required"):
+        server.setup_webserver()
+    assert checkpoint_state_dir(DictConfig({"checkpoint": {"enabled": False}})) is None
 
 
 async def test_a_park_that_outlives_the_commit_deadline_still_stops_every_sandbox(tmp_path: Path) -> None:
@@ -308,7 +357,7 @@ async def test_a_park_that_outlives_the_commit_deadline_still_stops_every_sandbo
         await original_close(handle)
 
     provider.close = slow_close  # type: ignore[method-assign]
-    server, client = make_server(provider)
+    server, client = make_server(provider, tmp_path / "state")
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
         await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
@@ -328,7 +377,7 @@ async def test_a_park_that_outlives_the_commit_deadline_still_stops_every_sandbo
 
 async def test_sandbox_access_follows_the_sandbox_across_a_restore(tmp_path: Path) -> None:
     provider = FakeSnapshotProvider()
-    _, client = make_server(provider)
+    _, client = make_server(provider, tmp_path / "state")
     async with client:
         unknown = await client.post("/sandbox_access")
         await client.post("/ng-rollout/r-a1/seed_session", json=SEED)
@@ -340,7 +389,7 @@ async def test_sandbox_access_follows_the_sandbox_across_a_restore(tmp_path: Pat
         await client.post("/append", json={"line": "two"})  # the live sandbox moves on
         cookies = dict(client.cookies)
 
-    _, fresh = make_server(provider)
+    _, fresh = make_server(provider, tmp_path / "state")
     async with fresh:
         fresh.cookies.update(cookies)
         await fresh.post(
