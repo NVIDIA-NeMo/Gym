@@ -228,7 +228,6 @@ class TranslationWithJudgeVerifyResponse(TranslationWithJudgeVerifyRequest, Base
 
 
 class TranslationWithJudgeResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     # Adapted from Arena Hard / math_with_judge's equivalence-judge prompts,
     # rewritten as a direct 0-100 quality rating for translation adequacy +
     # fluency instead of a binary equivalence verdict.
