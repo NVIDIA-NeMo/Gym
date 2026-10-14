@@ -115,6 +115,9 @@ class CleanupContext:
             try:
                 async with asyncio.timeout(self.cleanup_timeout_seconds):
                     await entry.close()
+            except TimeoutError:
+                # The owner's expiry or reaping takes over; the earlier-registered callbacks still run.
+                LOGGER.error(f"Episode cleanup timed out: {entry.name} episode_id={self.episode_id}")
             except Exception:
                 LOGGER.exception(f"Episode cleanup failed: {entry.name}")
 
