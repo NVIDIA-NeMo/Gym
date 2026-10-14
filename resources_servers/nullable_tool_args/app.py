@@ -12,13 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Checks that a model fills required nullable tool arguments with JSON null.
-
-Models trained on chat templates that render null with Python ``str()`` learn to
-write the string "None" instead of null. Each task asks for one tool call whose
-``verifier_metadata.null_args`` should all be null.
-"""
-
 import json
 from pathlib import Path
 
@@ -59,7 +52,6 @@ class NullableToolArgsResourcesServer(NullableToolArgsVerifier, SimpleResourcesS
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
-        # Every task tool just acknowledges the call; only its arguments are scored.
         app.post("/{tool_name}")(self.tool)
         return app
 

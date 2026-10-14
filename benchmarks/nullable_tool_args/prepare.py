@@ -12,12 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Generate tasks where a required nullable tool argument must be JSON null.
-
-Each task gives the model one tool and a request that leaves the nullable fields
-unset (no middle name, no CC, one-way flight...). Names, values, schema style
-(``anyOf`` or a type list) and ``strict`` vary per task.
-"""
+"""Generate tasks whose required nullable tool arguments should be JSON null."""
 
 import argparse
 import json
@@ -34,7 +29,6 @@ TITLES = ["Weekly sync", "Budget review", "1:1", "Design review", "Standup", "Re
 BUGS = ["Login page returns 500", "Export button does nothing", "Search is slow", "Typo on pricing page"]
 STATUS = ["pending", "shipped", "delivered", "cancelled"]
 
-# name, description, {param: description}, nullable params, request templates
 TOOLS = [
     (
         "create_contact",
