@@ -110,8 +110,11 @@ Pi provides its own sandbox tools. To add the Resources server's tools, set
 before inference, with the cause in the error; an optional one is skipped and recorded as an
 `mcp_server_skipped` observation gap. Grant names may contain only letters, digits, `_` and `-`.
 A successful call of a tool listed in `finish_tool_names` (its name on the server, such as `finish`)
-ends the run, like Stirrup's finish tools. Responses name MCP calls `mcp__<grant name>__<tool name>`,
-which Gym strips before `/verify`; observations and model calls keep the names the model saw.
+ends the run when every tool call of that turn is such a call; Pi does not stop a turn that also ran
+another tool. Setup fails if no granted server offers a listed tool, so an optional grant that offers
+one is effectively required; without MCP grants the setting has no effect. Responses name MCP calls
+`mcp__<grant name>__<tool name>`, which Gym strips before `/verify`; observations and model calls
+keep the names the model saw.
 Required Resources HTTP tools (`direct_http`) are rejected. Sandbox sessions also reject host command,
 extra-argument, and environment overrides; those remain available on the local path.
 
