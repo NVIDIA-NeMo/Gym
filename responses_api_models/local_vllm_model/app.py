@@ -26,12 +26,21 @@ from ray import available_resources, cluster_resources
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from requests.exceptions import ConnectionError
-from vllm.entrypoints.openai.api_server import (
-    FlexibleArgumentParser,
-    cli_env_setup,
-    make_arg_parser,
-    validate_parsed_serve_args,
-)
+
+
+try:
+    # vLLM 0.29 moved the OpenAI server entry points from vllm.entrypoints.openai.api_server to
+    # vllm.entrypoints.launchers; the old module is a deprecated shim that no longer exports these.
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser, validate_parsed_serve_args
+    from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+except ImportError:  # Older vLLM, such as the macOS pin in setup.py.
+    from vllm.entrypoints.openai.api_server import (
+        FlexibleArgumentParser,
+        cli_env_setup,
+        make_arg_parser,
+        validate_parsed_serve_args,
+    )
 
 from nemo_gym.global_config import (
     DISALLOWED_PORTS_KEY_NAME,
