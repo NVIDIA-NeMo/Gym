@@ -2867,7 +2867,7 @@ class _WeatherResources(SimpleResourcesServer):
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict:
         return {session_id: self.calls[session_id] for session_id in session_ids if session_id in self.calls}
 
     async def restore_session_states(self, states: dict) -> None:

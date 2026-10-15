@@ -150,7 +150,8 @@ async def test_the_snapshot_is_committed_and_a_fresh_server_forks_it(tmp_path: P
             headers=AUTH,
         )
         await fresh.post("/ng-control/v1/checkpoint/resume", json=control("r1"), headers=AUTH)
-        replayed = await fresh.post("/append", json={"line": "two"})
+        # The replacement is attempt 2; a restored session takes calls only under its rollout prefix.
+        replayed = await fresh.post("/ng-rollout/r-a2/append", json={"line": "two"})
         await restored._sandboxes.settle()
 
     assert restore.status_code == 200, restore.text
@@ -398,7 +399,7 @@ async def test_sandbox_access_follows_the_sandbox_across_a_restore(tmp_path: Pat
             headers=AUTH,
         )
         await fresh.post("/ng-control/v1/checkpoint/resume", json=control("r1"), headers=AUTH)
-        after = (await fresh.post("/sandbox_access")).json()
+        after = (await fresh.post("/ng-rollout/r-a2/sandbox_access")).json()
 
     assert unknown.status_code == 404
     assert before["connection"]["descriptor"]["sandbox_id"] == "sb-1" and before["workdir"] == "/work"
