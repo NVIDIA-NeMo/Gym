@@ -110,7 +110,13 @@ Settings for starting the instance (`apptainer instance start`).
 | `start_timeout_s` | `600` | Max seconds to wait for `instance start` (`None` = no timeout). |
 | `extra_start_args` | `[]` | Extra raw flags appended to `instance start`. |
 | `apply_resource_limits` | `true` | Add CPU/memory cgroup flags from `SandboxSpec.resources`. |
-| `private_tmp` | `false` | Give each instance its own `/tmp` (`--no-mount tmp` plus a bind of a `tmp` dir inside the instance's staging dir) instead of sharing the host `/tmp` with every other sandbox on the node. |
+| `private_tmp` | `false` | Give each instance its own `/tmp` (`--no-mount tmp` plus a bind of a `tmp` dir inside the instance's staging dir). This also disables the host `/var/tmp` mount; only `/tmp` is rebound, leaving `/var/tmp` to the image. |
+
+Apptainer's `tmp` mount group covers both `/tmp` and `/var/tmp`
+([mount implementation](https://github.com/apptainer/apptainer/blob/v1.4.0/internal/pkg/runtime/engine/apptainer/container_linux.go#L1968-L1978)).
+With `private_tmp: true`, `/var/tmp` is read-only in a plain SIF image unless you
+separately configure a writable bind or overlay. Workloads that write there must
+provide that writable storage or use `/tmp` instead.
 
 ### `exec` — `ApptainerExecConfig`
 
