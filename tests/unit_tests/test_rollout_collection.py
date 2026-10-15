@@ -1759,6 +1759,54 @@ class TestRolloutCollection:
 
         assert started == [(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in rows]
 
+    @pytest.mark.parametrize("entry_point", ["run_examples", "_run_examples_with_metadata"])
+    @pytest.mark.parametrize("max_resident_tasks", [None, 2])
+    async def test_dispatch_releases_a_taken_result_while_rollouts_are_pending(
+        self, monkeypatch: pytest.MonkeyPatch, entry_point: str, max_resident_tasks: int | None
+    ) -> None:
+        # NeMo RL calls run_examples, and gym eval run consumes _run_examples_with_metadata.
+        # With retain_results_in_memory=false, a result the consumer has taken and dropped must be freed.
+        # Nothing in the dispatcher may keep it alive until the last rollout finishes.
+        class Result(dict):
+            """A /run result that supports weak references."""
+
+        rows = [
+            {
+                AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                TASK_INDEX_KEY_NAME: i,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for i in range(8)
+        ]
+        release = asyncio.Event()
+
+        async def post(*args, **kwargs):
+            # The first row finishes at once and every later row waits, so the run is still in progress.
+            if kwargs["json"][TASK_INDEX_KEY_NAME] != 0:
+                await release.wait()
+            return FakeResponse(200)
+
+        async def get_response_json(response: FakeResponse) -> Result:
+            return Result(reward=1)
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", get_response_json)
+
+        futures = getattr(RolloutCollectionHelper(), entry_point)(rows, max_resident_tasks=max_resident_tasks)
+        completed = await next(futures)
+        first_row, first_result = completed if entry_point == "run_examples" else (completed.row, completed.result)
+        assert first_row[TASK_INDEX_KEY_NAME] == 0
+        first_result_ref = weakref.ref(first_result)
+        del completed, first_row, first_result
+        gc.collect()
+
+        assert not release.is_set()
+        assert first_result_ref() is None
+
+        release.set()
+        for future in futures:
+            await future
+
     async def test_bounded_failure_propagates_with_concurrent_consumers(self) -> None:
         fail = asyncio.Event()
         block = asyncio.Event()
