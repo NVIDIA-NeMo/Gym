@@ -210,7 +210,7 @@ def _is_retryable_failure(row: Mapping[str, Any]) -> bool:
     """Whether a failed row is worth running again: the agent timed out, or the environment server hit an outage.
 
     An agent-stage failure of the environment server is a runner crash the model may have caused, so retrying
-    or waiving it would bias the fit. GDPVal's own failures are not retryable either: nothing repairs a
+    it, or waiving it without `tolerate_unresolved`, would bias the fit. GDPVal's own failures are not retryable either: nothing repairs a
     deliverable tree within the run.
     """
     if row.get(NG_TERMINAL_KEY) or row.get(NG_NO_PERSIST_KEY):

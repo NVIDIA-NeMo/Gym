@@ -215,8 +215,8 @@ selected reference. The ELO fit must be finite and include every selected
 reference. A row that could still be retried is waived only when its latest
 persisted failure is an agent timeout (`agent_timeout`) or an environment-server
 failure outside the agent stage, such as a dependency outage. A crash in the
-agent stage is never retried in process or waived.
-`tolerate_unresolved: true` waives any persisted failure class, including
+agent stage is never retried in process, and is waived only with
+`tolerate_unresolved: true`, which waives any persisted failure class, including
 agent-server outages (`agent_request_failed`), so set the coverage floors tight.
 It also accepts a missing reference deliverable (`reference_missing`) straight
 away. Otherwise GDPVal retries it across `--resume` launches for up to
