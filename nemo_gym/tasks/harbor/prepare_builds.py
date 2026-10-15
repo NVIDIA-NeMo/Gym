@@ -15,67 +15,36 @@ from pathlib import Path
 
 import yaml
 
-from nemo_gym.sandbox.compose_fields import unsupported_compose_fields
+from nemo_gym.sandbox.compose_fields import DEFAULT_PLATFORM, unsupported_compose_fields
 from nemo_gym.tasks.harbor.build_options import BUILDS_KEY, BuildOptions
-from nemo_gym.tasks.harbor.build_plan import DEFAULT_PLATFORM, DOCKERFILE_NAME, BuildError, BuildPlanEntry, plan_builds
+from nemo_gym.tasks.harbor.build_plan import DOCKERFILE_NAME, BuildError, BuildPlanEntry, plan_builds
 from nemo_gym.tasks.harbor.build_records import build_inputs_mismatch, recorded_image_mismatch
 from nemo_gym.tasks.harbor.build_tools import ImageBuilder
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.image_build import build_images
 from nemo_gym.tasks.harbor.image_configs import (
     COMPOSE_FILE_NAMES,
-    compose_file,
-    load_compose_document,
     restated_main_build_reason,
     with_built_images,
     without_pull_policy,
-    without_restated_main_build,
 )
 from nemo_gym.tasks.harbor.records import MAIN_SERVICE, read_built_images, read_image_configs, recorded_service_images
-from nemo_gym.tasks.harbor.task import HarborTask, is_task_folder
-
-
-REFUSED_NOTE = " (the sandbox Compose adapter does not start them)"
-
-
-def unsupported_compose_fields_error(task: HarborTask) -> HarborTaskError | None:
-    """Why the sandbox Compose adapter would refuse ``task``'s document at seed, or ``None`` when it starts it.
-
-    The document checked is the one the server hands the adapter (``environment_servers/harbor/app.py``,
-    ``_compose_document``): interpolated and ``env_file``-inlined by the loader, the services prepare built
-    carrying their recorded images without ``build:`` or ``pull_policy`` (``with_built_images``), ``pull_policy``
-    dropped from every other service, and ``main``'s ``build:`` dropped when it only restates Harbor's own build
-    of the task's Dockerfile (:func:`without_restated_main_build`; a build key Gym cannot apply without a build
-    is this task's reason). A field no provider starts (``deploy``, ``extra_hosts``, ``platform``, a sidecar
-    ``build:`` prepare recorded no build for) is then a per-task reason naming the service and the field,
-    recorded in ``skipped.json`` like a task that does not load, instead of a failure of every episode at seed.
-    """
-    path = compose_file(task)
-    document = load_compose_document(task)
-    if path is None or document is None:
-        return None
-    document = without_pull_policy(document)
-    if task.built_image is None:
-        document, reason = without_restated_main_build(task, document)
-        if reason is not None:
-            return HarborTaskError(f"{path.name}: {reason}")
-    refused = unsupported_compose_fields(document)
-    if not refused:
-        return None
-    return HarborTaskError(f"{path.name}: {'; '.join(refused)}{REFUSED_NOTE}")
+from nemo_gym.tasks.harbor.task import is_task_folder
 
 
 def refused_before_build(plan: list[BuildPlanEntry]) -> dict[str, HarborTaskError]:
-    """The field refusals of the tasks ``plan`` would build, read from their Compose files before any build runs.
+    """The key refusals of the tasks ``plan`` would build, read from their Compose files before any build runs.
 
-    :func:`unsupported_compose_fields_error` is the authoritative check, on the loader's document once the
-    tasks load. This one needs only key names, which interpolation and ``env_file`` inlining do not add, so it
-    reads the raw file the way the loader's document will look: ``pull_policy`` dropped, the ``build:`` of every
-    service the plan builds from the context dropped (they are about to be built and will run from their
-    recorded images) and ``env_file`` set aside, as the loader folds it into ``environment``. A task it names is
-    neither built nor pushed for an image no episode would start, and a build that would fail for it cannot stop
-    the preparation. A file that does not parse is left to the loader to report in its own words. The separate
-    verifier's ``tests/`` context is not checked: its image starts as a single sandbox, never through the adapter.
+    The authoritative check is ``check_task_compose_fields`` (:func:`record_compose_images` runs it on the loader's
+    document once the tasks load); this screen is its first step, the key allow-list
+    (:func:`~nemo_gym.sandbox.compose_config.unsupported_compose_fields`), which needs only key names, which
+    interpolation and ``env_file`` inlining do not add. It reads the raw file the way the loader's document will
+    look: ``pull_policy`` dropped, the ``build:`` of every service the plan builds from the context dropped (they
+    are about to be built and will run from their recorded images) and ``env_file`` set aside, as the loader folds
+    it into ``environment``. A task it names is neither built nor pushed for an image no episode would start, and a
+    build that would fail for it cannot stop the preparation, with the reason spelled as the loader-time check
+    spells it. A file that does not parse is left to the loader to report in its own words. The separate verifier's
+    ``tests/`` context is not checked: its image starts as a single sandbox, never through the adapter.
     Its entry is the one with ``BuildPlanEntry.verifier`` set; an ordinary sidecar that happens to be named
     ``verifier`` (kumo's) is a service of the ``environment/`` document like any other, built and substituted here.
 
@@ -131,9 +100,8 @@ def refused_before_build(plan: list[BuildPlanEntry]) -> dict[str, HarborTaskErro
                     services[name] = {key: value for key, value in service.items() if key != "env_file"}
         messages = unsupported_compose_fields(document)
         if messages:
-            refused.update(
-                dict.fromkeys(entry.tasks, HarborTaskError(f"{path.name}: {'; '.join(messages)}{REFUSED_NOTE}"))
-            )
+            where = f"{entry.context.name}/{path.name}"
+            refused.update({task_id: HarborTaskError(f"{task_id}: {where}: {messages[0]}") for task_id in entry.tasks})
     return refused
 
 

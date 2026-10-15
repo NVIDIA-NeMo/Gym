@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 import re
 import shlex
@@ -60,7 +61,9 @@ async def test_rejects_unsupported_network_before_creating_anything():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("field,value", [("privileged", True), ("restart", "always"), ("devices", ["/dev/fuse"])])
+@pytest.mark.parametrize(
+    "field,value", [("privileged", True), ("pre_stop", [{"command": "x"}]), ("devices", ["/dev/fuse"])]
+)
 async def test_rejects_unsupported_semantics_before_creating(field, value):
     provider = Provider()
     group = make_compose(provider, {"services": {"app": {"image": "app", field: value}}})
@@ -1363,7 +1366,7 @@ async def test_unresolved_startup_rejected_before_provisioning(startup):
         [],
         {"services": {"app": None}},
         {"services": {"app": {"image": "image", "environment": ["KEY=value"]}}},
-        {"services": {"app": {"image": "image", "ports": ["8000:80"]}}},
+        {"services": {"app": {"image": "image", "ports": [["8000", "80"]]}}},
         {"services": {"app": {"image": "image", "volumes": ["data:/data"]}}},
         {"services": {"app": {"image": "image", "depends_on": {"app": None}}}},
         {"services": {"app": {}}, "networks": ["default"]},
@@ -1375,7 +1378,7 @@ async def test_unresolved_yaml_shapes_fail_before_provisioning(tmp_path, documen
     path = tmp_path / "compose.yaml"
     path.write_text(yaml.safe_dump(document))
     provider = ShellProvider()
-    with pytest.raises(ValueError, match="mapping|upstream"):
+    with pytest.raises(ValueError, match="mapping|upstream|ports"):
         await AsyncSandboxCompose(provider, path).start()
     assert provider.created == []
 
@@ -1451,18 +1454,18 @@ async def test_spec_env_wins_over_compose_environment_only_where_the_caller_give
 
 @pytest.mark.asyncio
 async def test_unsupported_fields_are_refused_with_the_shared_message_before_creating():
-    """The adapter raises the first message of the pure field check prepare also runs, before it asks the provider
-    for anything; ``pull_policy`` is one of the refused keys, so the Harbor layer drops it upstream."""
+    """The adapter raises the first message of the pure key allow-list prepare also runs (the first step of the
+    one field check), before it asks the provider for anything."""
     from nemo_gym.sandbox.compose_fields import unsupported_compose_fields
 
     provider = Provider()
     document = {
         "services": {
             "main": {"image": "a"},
-            "task-server": {"image": "b", "platform": "linux/amd64", "deploy": {}, "pull_policy": "always"},
+            "task-server": {"image": "b", "platform": "linux/amd64", "logging": {}, "privileged": True},
         }
     }
-    expected = "Service 'task-server': unsupported Compose fields ['deploy', 'platform', 'pull_policy']"
+    expected = "Service 'task-server': unsupported Compose fields ['logging', 'privileged']"
     assert unsupported_compose_fields(document) == [expected]
     group = make_compose(provider, document)
     with pytest.raises(NotImplementedError, match=re.escape(expected)):
@@ -1493,3 +1496,590 @@ def test_a_bodiless_named_volume_declaration_counts_as_declared():
     missing = make_compose(VolumeProvider(), {**document, "volumes": {}})
     with pytest.raises(ValueError, match="Undeclared Compose volume: 'data'"):
         missing._validate()
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Compose service fields (M28)
+# --------------------------------------------------------------------------------------------------------------
+
+
+class HostsProvider(ShellProvider):
+    """Records the hosts each sandbox received."""
+
+    def __init__(self):
+        super().__init__()
+        self.hosts = {}
+
+    async def set_hosts(self, handle, hosts):
+        self.hosts[handle.sandbox_id] = dict(hosts)
+
+
+@pytest.mark.asyncio
+async def test_custom_networks_scope_which_services_see_each_other_and_extra_hosts_are_added():
+    """alibaba-ctf style: `restart: always` is recorded, a custom network scopes name resolution."""
+    provider = HostsProvider()
+    async with make_compose(
+        provider,
+        {
+            "services": {
+                "main": {"image": "img", "restart": "always", "networks": ["agent_network"]},
+                "target": {
+                    "image": "img",
+                    "restart": "always",
+                    "networks": {"agent_network": {"aliases": ["challenge"]}},
+                    "extra_hosts": ["licence.example:198.51.100.7"],
+                },
+                "aside": {"image": "img"},
+            },
+            "networks": {"agent_network": {"driver": "bridge"}},
+        },
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+    ) as group:
+        assert group.restart_policies == {"main": "always", "target": "always", "aside": "no"}
+        by_name = {
+            name: provider.hosts[sandbox._require_handle().sandbox_id] for name, sandbox in group.services.items()
+        }
+        main_ip, target_ip, aside_ip = (
+            "192.0.2." + group.services[n]._require_handle().sandbox_id for n in ("main", "target", "aside")
+        )
+        # main and target share agent_network: each sees the other by name and alias, neither sees aside.
+        assert by_name["main"] == {"main": main_ip, "target": target_ip, "challenge": target_ip}
+        assert by_name["target"] == {
+            "target": target_ip,
+            "challenge": target_ip,
+            "main": main_ip,
+            "licence.example": "198.51.100.7",
+        }
+        # aside is alone on the default network: only itself.
+        assert by_name["aside"] == {"aside": aside_ip}
+
+
+@pytest.mark.asyncio
+async def test_a_shared_named_network_puts_every_service_in_reach():
+    """o11y-bench style: one named network every service joins behaves like the default network."""
+    provider = HostsProvider()
+    document = {
+        "services": {name: {"image": "img", "networks": ["harbor-shared"]} for name in ("main", "grafana", "loki")},
+        "networks": {"harbor-shared": {"name": "harbor-shared"}},
+    }
+    async with make_compose(provider, document, default_command=["sleep", ".1"], poll_interval_s=0.01) as group:
+        for name, sandbox in group.services.items():
+            assert set(provider.hosts[sandbox._require_handle().sandbox_id]) == {"main", "grafana", "loki"}
+
+
+@pytest.mark.asyncio
+async def test_resolved_environment_must_name_a_peer_on_a_shared_network():
+    provider = HostsProvider()
+    group = make_compose(
+        provider,
+        {
+            "services": {
+                "app": {
+                    "image": "img",
+                    "networks": ["front"],
+                    "environment": {"DB_URL": "http://db:5432"},
+                    "x-sandbox": {"hosts": [], "resolve_environment": ["DB_URL"]},
+                },
+                "db": {"image": "img", "networks": ["back"]},
+            },
+            "networks": {"front": {}, "back": {}},
+        },
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+    )
+    with pytest.raises(ValueError, match="shares no network"):
+        await group.start()
+    assert provider.closed  # whatever was created was torn down
+
+
+@pytest.mark.asyncio
+async def test_extra_hosts_need_host_injection():
+    provider = ShellProvider()
+    group = make_compose(
+        provider,
+        {"services": {"app": {"image": "img", "extra_hosts": ["db:10.0.0.1"], "x-sandbox": {"hosts": []}}}},
+    )
+    with pytest.raises(ValueError, match="extra_hosts cannot be applied without host injection"):
+        await group.start()
+    assert not provider.created
+
+
+@pytest.mark.asyncio
+async def test_deploy_resources_size_the_service_sandbox_and_gpu_sidecars_run_on_their_own_provider():
+    from nemo_gym.sandbox.providers.base import SandboxSpec
+
+    cpu_provider, gpu_provider = HostsProvider(), HostsProvider()
+    gpu_provider.name = "gpu"
+    document = {
+        "services": {
+            "main": {"image": "img", "deploy": {"resources": {"limits": {"cpus": "2", "memory": "1g"}}}},
+            "model": {
+                "image": "img",
+                "cpus": "0.5",
+                "deploy": {
+                    "resources": {
+                        "reservations": {"devices": [{"driver": "nvidia", "capabilities": ["gpu"], "count": 1}]}
+                    }
+                },
+            },
+        }
+    }
+    async with make_compose(
+        cpu_provider,
+        document,
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+        service_providers={"model": gpu_provider},
+        service_specs={"model": SandboxSpec(resources={"gpu_type": "H100"}, ttl_s=30)},
+    ) as group:
+        assert group.services["main"]._provider is cpu_provider and group.services["model"]._provider is gpu_provider
+        (main_spec,) = cpu_provider.created
+        (model_spec,) = gpu_provider.created
+        assert (main_spec.resources.cpu, main_spec.resources.memory_mib, main_spec.resources.gpu) == (2.0, 1024, None)
+        # The legacy cpus key still counts when deploy says nothing about CPUs; the spec's gpu_type is kept.
+        assert (model_spec.resources.cpu, model_spec.resources.gpu, model_spec.resources.gpu_type) == (0.5, 1, "H100")
+        # Both providers resolved addresses and the sidecar on the GPU provider still sees main by name.
+        assert set(gpu_provider.hosts["1"]) == {"main", "model"}
+    assert cpu_provider.closed == ["1"] and gpu_provider.closed == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_service_providers_must_name_services_and_every_provider_must_network():
+    provider = ShellProvider()
+    group = make_compose(provider, {"services": {"app": {"image": "img"}}}, service_providers={"ghost": Provider()})
+    with pytest.raises(ValueError, match="service_providers names unknown services"):
+        await group.start()
+    group = make_compose(provider, {"services": {"app": {"image": "img"}}}, service_providers={"app": Provider()})
+    with pytest.raises(NotImplementedError, match="networking between sandboxes"):
+        await group.start()
+    assert not provider.created
+
+
+@pytest.mark.asyncio
+async def test_numeric_hook_users_reach_the_provider_as_integers_like_the_service_user():
+    """A hook's ``user: 0`` or ``user: "0"`` reaches the provider's exec as the integer 0, the form the service's own
+    decimal ``user`` takes in ``_prepare`` (OpenSandbox switches by ``uid`` for an int and by ``su <name>`` for a
+    string, and an image with a root account but none named "0" cannot run the latter). A name stays a string, and
+    a hook without ``user`` runs as the service's (review finding)."""
+
+    class UserRecordingProvider(ShellProvider):
+        def __init__(self):
+            super().__init__()
+            self.users = []
+
+        async def exec(self, handle, command, **kwargs):
+            if command == "true" or command.startswith("sh /tmp/"):
+                self.users.append((command, kwargs.get("user")))
+            return await super().exec(handle, command, **kwargs)
+
+    provider = UserRecordingProvider()
+    async with make_compose(
+        provider,
+        {
+            "services": {
+                "app": {
+                    "image": "img",
+                    "command": ["sleep", "5"],
+                    "user": "7",
+                    "post_start": [
+                        {"command": "true", "user": 0},
+                        {"command": "true", "user": "0"},
+                        {"command": "true", "user": " 1000 "},
+                        {"command": "true", "user": "root"},
+                        {"command": "true"},
+                    ],
+                }
+            }
+        },
+        poll_interval_s=0.01,
+    ) as group:
+        pass
+    assert [user for _, user in provider.users if _ == "true"] == [0, 0, 1000, "root", 7]
+    (service_user,) = [user for command, user in provider.users if command.startswith("sh /tmp/")]
+    assert service_user == 7
+    # The document the group validated carries the integer form, which a second check leaves unchanged.
+    assert [hook.get("user") for hook in group.document["services"]["app"]["post_start"]] == [0, 0, 1000, "root", None]
+
+
+@pytest.mark.asyncio
+async def test_post_start_hooks_run_in_order_after_the_service_starts_and_a_failure_fails_the_seed(tmp_path):
+    log = tmp_path / "hooks"
+    provider = ShellProvider()
+    async with make_compose(
+        provider,
+        {
+            "services": {
+                "app": {
+                    "image": "img",
+                    "command": ["sh", "-c", f"echo service >> {log}; sleep 5"],
+                    "post_start": [
+                        {"command": f"echo first >> {log}"},
+                        {"command": ["sh", "-c", f'echo "$HOOK_VAR" >> {log}'], "environment": {"HOOK_VAR": "second"}},
+                        {"command": f"pwd >> {log}", "working_dir": str(tmp_path)},
+                    ],
+                }
+            }
+        },
+        poll_interval_s=0.01,
+    ):
+        # Hooks run once the service's command has started, in order, and all three have run by the time the group is
+        # up; the service kept running. As under Compose, "started" means the service's process was launched, not
+        # that it printed anything: the group's started marker precedes the service command itself, so the hooks may
+        # all finish before "service" is written. The hooks' order is asserted on their own lines, and the service's
+        # line is waited for (bounded) before it is counted, once.
+        deadline = asyncio.get_running_loop().time() + 5
+        while "service" not in (lines := log.read_text().splitlines()):
+            assert asyncio.get_running_loop().time() < deadline, f"service never wrote its line: {lines}"
+            await asyncio.sleep(0.01)
+        assert [line for line in lines if line != "service"] == ["first", "second", str(tmp_path)]
+        assert lines.count("service") == 1
+    failing = make_compose(
+        provider,
+        {
+            "services": {
+                "app": {
+                    "image": "img",
+                    "command": ["sleep", "5"],
+                    "post_start": [{"command": "echo boom >&2; exit 3"}, {"command": f"touch {tmp_path}/never"}],
+                }
+            }
+        },
+        poll_interval_s=0.01,
+    )
+    with pytest.raises(RuntimeError, match=r"post_start hook 0 exited \(3\): boom"):
+        await failing.start()
+    assert not (tmp_path / "never").exists()
+    assert provider.closed == ["1", "2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("tmpfs", ["/run"]),
+        ("ulimits", {"nofile": 1024}),
+        ("sysctls", {"net.core.somaxconn": "1024"}),
+        ("security_opt", ["seccomp=unconfined"]),
+    ],
+)
+async def test_service_options_need_the_provider_capability_and_the_error_names_field_and_provider(field, value):
+    provider = ShellProvider()
+    group = make_compose(provider, {"services": {"app": {"image": "img", field: value}}})
+    with pytest.raises(
+        NotImplementedError, match=f"Service 'app': {field} is not supported by the test sandbox provider"
+    ):
+        await group.start()
+    assert not provider.created
+
+    class PartialProvider(ShellProvider):
+        SERVICE_OPTION_FIELDS = frozenset({"tmpfs"})
+
+        def service_options(self, **kwargs):
+            return {"run_args": ["--tmpfs", *kwargs["tmpfs"]]}
+
+    provider = PartialProvider()
+    group = make_compose(
+        provider,
+        {"services": {"app": {"image": "img", field: value}}},
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+    )
+    if field == "tmpfs":
+        async with group:
+            assert provider.created[0].provider_options == {"run_args": ["--tmpfs", "/run"]}
+    else:
+        with pytest.raises(NotImplementedError, match=f"{field} is not supported by the test sandbox provider"):
+            await group.start()
+        assert not provider.created
+
+
+@pytest.mark.asyncio
+async def test_service_options_and_pull_policy_merge_into_the_spec_provider_options():
+    from nemo_gym.sandbox.providers.base import SandboxSpec
+
+    class FullProvider(ShellProvider):
+        SERVICE_OPTION_FIELDS = frozenset({"tmpfs", "ulimits", "sysctls", "security_opt"})
+
+        def service_options(self, *, tmpfs=(), ulimits=None, sysctls=None, security_opt=()):
+            self.options = {"tmpfs": tmpfs, "ulimits": ulimits, "sysctls": sysctls, "security_opt": security_opt}
+            return {"run_args": ["--tmpfs", *tmpfs], "extensions": {"from": "options"}}
+
+        def pull_policy_options(self, policy):
+            return {"run_args": ["--pull", policy], "extensions": {"pull": policy}}
+
+    provider = FullProvider()
+    async with make_compose(
+        provider,
+        {
+            "services": {
+                "app": {
+                    "image": "img",
+                    "tmpfs": "/run",
+                    "ulimits": {"nofile": {"soft": 1, "hard": 2}},
+                    "sysctls": ["a=b"],
+                    "security_opt": ["x"],
+                    "pull_policy": "if_not_present",
+                    "platform": "linux/x86_64",
+                }
+            }
+        },
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+        service_specs={
+            "app": SandboxSpec(ttl_s=30, provider_options={"run_args": ["--init"], "extensions": {"k": "v"}})
+        },
+    ) as group:
+        assert provider.options == {
+            "tmpfs": ("/run",),
+            "ulimits": {"nofile": {"soft": 1, "hard": 2}},
+            "sysctls": {"a": "b"},
+            "security_opt": ("x",),
+        }
+        assert provider.created[0].provider_options == {
+            "run_args": ["--init", "--tmpfs", "/run", "--pull", "missing"],
+            "extensions": {"k": "v", "from": "options", "pull": "missing"},
+        }
+        assert group.pull_policies == {"app": "missing"}
+
+
+@pytest.mark.asyncio
+async def test_pull_policy_is_recorded_when_the_provider_cannot_apply_it_and_platform_must_match():
+    provider = ShellProvider()
+    async with make_compose(
+        provider,
+        {"services": {"app": {"image": "img", "pull_policy": "always", "platform": "linux/amd64"}}},
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+    ) as group:
+        assert group.pull_policies == {"app": "always"}
+        assert provider.created[0].provider_options == {}
+    provider = ShellProvider()
+    group = make_compose(
+        provider, {"services": {"app": {"image": "img", "platform": "linux/amd64"}}}, platform="linux/arm64"
+    )
+    with pytest.raises(ValueError, match="platform 'linux/amd64' does not match the deployment platform linux/arm64"):
+        await group.start()
+    assert not provider.created
+
+
+@pytest.mark.asyncio
+async def test_network_mode_service_shares_its_targets_networks():
+    class ForwardingProvider(HostsProvider):
+        def validate_port_forwarding(self):
+            pass
+
+        async def forward_ports(self, handle, target_address, ports, *, ready_file):
+            import asyncio
+            from pathlib import Path
+
+            Path(ready_file).touch()
+            await asyncio.sleep(3600)
+
+    provider = ForwardingProvider()
+    async with make_compose(
+        provider,
+        {
+            "services": {
+                "api": {"image": "img", "networks": ["back"], "expose": ["80"]},
+                "main": {"image": "img", "network_mode": "service:api"},
+                "web": {"image": "img", "networks": ["front"]},
+            },
+            "networks": {"back": {}, "front": {}},
+        },
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+    ) as group:
+        main_hosts = provider.hosts[group.services["main"]._require_handle().sandbox_id]
+        assert set(main_hosts) == {"main", "api"}
+
+
+class RecordingProvider(Provider):
+    """Sandboxes that exist only as records and answer every exec with success; records which provider each
+    forwarding relay, host injection and shared-storage call went through."""
+
+    def __init__(self, name, subnet):
+        super().__init__()
+        self.name = name
+        self.subnet = subnet
+        self.execs = []
+        self.hosts = {}
+        self.forwarded = []
+
+    async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        import asyncio
+
+        self.execs.append((handle.sandbox_id, command, user))
+        await asyncio.sleep(0)  # a real exec suspends, which lets the forwarding relay task run
+        return SandboxExecResult("", "", 0)
+
+    async def upload_file(self, handle, source_path, target_path):
+        pass
+
+    def validate_networking(self):
+        pass
+
+    async def network_address(self, handle):
+        return f"10.{self.subnet}.0.{handle.sandbox_id}"
+
+    async def set_hosts(self, handle, hosts):
+        self.hosts[handle.sandbox_id] = dict(hosts)
+
+    def validate_port_forwarding(self):
+        pass
+
+    async def forward_ports(self, handle, target_address, ports, *, ready_file):
+        import asyncio
+
+        self.forwarded.append((handle.sandbox_id, target_address, tuple(ports)))
+        await asyncio.Event().wait()
+
+    def shared_volume_metadata(self):
+        return {"storage": self.name}
+
+    def shared_volume_options(self, source, target, *, read_only=False):
+        return {"volumes": [{"source": source, "target": target, "read_only": read_only, "storage": self.name}]}
+
+
+@pytest.mark.asyncio
+async def test_forwarding_and_volumes_of_a_service_on_its_own_provider_go_through_that_provider():
+    """A sidecar on its own provider (a GPU block): its relay runs where its sandbox is, and its named volume is
+    initialized, seeded and mounted on that provider's shared storage, never the collection provider's."""
+    cpu, gpu = RecordingProvider("cpu", 1), RecordingProvider("gpu", 2)
+    document = {
+        "services": {
+            "db": {"image": "img", "expose": [5432]},
+            "side": {
+                "image": "img",
+                "network_mode": "service:db",
+                "volumes": [{"type": "volume", "source": "data", "target": "/data"}],
+            },
+        },
+        "volumes": {"data": {}},
+    }
+    async with make_compose(
+        cpu, document, default_command=["sleep", "1"], poll_interval_s=0.01, service_providers={"side": gpu}
+    ) as group:
+        side_id = group.services["side"]._require_handle().sandbox_id
+        # The relay was started on the provider that owns the forwarder's sandbox, towards db's address on cpu.
+        assert cpu.forwarded == [] and gpu.forwarded == [(side_id, "10.1.0.1", (5432,))]
+        # Init helper, copy-up seed and the service itself were all created on gpu; cpu only ran db.
+        assert [spec.image for spec in gpu.created] == ["alpine:3.22", "img", "img"]
+        assert [spec.image for spec in cpu.created] == ["img"]
+        helper, seed, side = gpu.created
+        assert helper.metadata == {"storage": "gpu"} and seed.metadata == {"storage": "gpu"}
+        assert side.metadata["storage"] == "gpu"
+        assert seed.provider_options["volumes"] == [
+            {"source": f"{group.project}/data", "target": "/tmp/compose-volumes", "read_only": False, "storage": "gpu"}
+        ]
+        assert side.provider_options["volumes"] == [
+            {"source": f"{group.project}/data", "target": "/data", "read_only": False, "storage": "gpu"}
+        ]
+        # The directory was made through gpu's helper; cpu, which runs no volumes, got no helper at all.
+        assert any(command.startswith("mkdir -p /tmp/compose-volumes/") for _, command, _ in gpu.execs)
+        assert group._volume_helper is None and len(group._volume_helpers) == 1
+    # Cleanup went through gpu's helper; both providers' sandboxes were closed.
+    assert any("rm -rf /tmp/compose-volumes/" in command for _, command, _ in gpu.execs)
+    assert not any("compose-volumes" in command for _, command, _ in cpu.execs)
+    assert sorted(gpu.closed) == ["1", "2", "3"] and cpu.closed == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_volumes_need_shared_storage_on_the_providers_that_run_them():
+    cpu, gpu = RecordingProvider("cpu", 1), Provider()
+    gpu.name = "plain"
+    document = {
+        "services": {"side": {"image": "img", "volumes": [{"type": "volume", "source": "data", "target": "/data"}]}},
+        "volumes": {"data": {}},
+    }
+    group = make_compose(cpu, document, service_providers={"side": gpu})
+    with pytest.raises(
+        NotImplementedError, match="Service 'side': the plain sandbox provider does not support shared"
+    ):
+        await group.start()
+    assert not cpu.created and not gpu.created
+
+
+class ChainForwardingProvider(HostsProvider):
+    def validate_port_forwarding(self):
+        pass
+
+    async def forward_ports(self, handle, target_address, ports, *, ready_file):
+        import asyncio
+        from pathlib import Path
+
+        Path(ready_file).touch()
+        await asyncio.sleep(3600)
+
+
+@pytest.mark.asyncio
+async def test_chained_network_mode_resolves_to_the_end_of_the_chain_in_declaration_order():
+    """a -> service:b -> service:c, declared in that order: every link is on c's networks (M27 started this
+    layout; the first M28 membership pass looked b up before it was filled)."""
+    provider = ChainForwardingProvider()
+    async with make_compose(
+        provider,
+        {
+            "services": {
+                "a": {"image": "img", "network_mode": "service:b"},
+                "b": {"image": "img", "network_mode": "service:c", "expose": [81]},
+                "c": {"image": "img", "networks": ["back"], "expose": [80]},
+                "d": {"image": "img"},
+            },
+            "networks": {"back": {}},
+        },
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+    ) as group:
+        assert group._memberships() == {"a": {"back"}, "b": {"back"}, "c": {"back"}, "d": {"default"}}
+        by_name = {
+            name: set(provider.hosts[sandbox._require_handle().sandbox_id]) for name, sandbox in group.services.items()
+        }
+        assert by_name["a"] == {"a", "b", "c"} and by_name["c"] == {"a", "b", "c"} and by_name["d"] == {"d"}
+
+
+@pytest.mark.asyncio
+async def test_a_network_mode_cycle_is_named_before_provisioning():
+    provider = ChainForwardingProvider()
+    group = make_compose(
+        provider,
+        {
+            "services": {
+                "a": {"image": "img", "network_mode": "service:b", "expose": [1]},
+                "b": {"image": "img", "network_mode": "service:c", "expose": [2]},
+                "c": {"image": "img", "network_mode": "service:b", "expose": [3]},
+            }
+        },
+    )
+    with pytest.raises(ValueError, match="Service 'a': network_mode cycle: b -> c -> b"):
+        await group.start()
+    assert not provider.created
+
+
+@pytest.mark.asyncio
+async def test_the_servers_normalized_gpu_reservation_passes_the_adapters_own_pass(tmp_path):
+    """What the environment server writes (deploy normalized once) is what the adapter reloads and normalizes again."""
+    import yaml
+
+    from nemo_gym.sandbox.compose_fields import check_compose_fields
+
+    cpu, gpu = HostsProvider(), HostsProvider()
+    document = check_compose_fields(
+        {
+            "services": {
+                "main": {"image": "img", "command": ["sleep", ".1"]},
+                "model": {
+                    "image": "img",
+                    "command": ["sleep", ".1"],
+                    "deploy": {"resources": {"reservations": {"devices": [{"capabilities": ["gpu"], "count": 1}]}}},
+                },
+            }
+        }
+    )
+    assert document["services"]["model"]["deploy"] == {"resources": {"reservations": {"gpus": 1}}}
+    path = tmp_path / "compose.yaml"
+    path.write_text(yaml.safe_dump(document, sort_keys=False))
+    async with AsyncSandboxCompose(cpu, path, service_providers={"model": gpu}, poll_interval_s=0.01) as group:
+        assert group.services["model"]._provider is gpu
+        (model_spec,) = gpu.created
+        assert model_spec.resources.gpu == 1

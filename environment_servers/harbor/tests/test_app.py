@@ -68,7 +68,7 @@ from environment_servers.harbor.verifier import (
 from nemo_gym import failure_kinds
 from nemo_gym.base_environment_server import BaseEnvironmentServerConfig
 from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
+from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle, SandboxSpec
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS, cpu_cap_env
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor import load_task
@@ -2020,6 +2020,41 @@ def _record_stop(stops: list[str], name: str, sandbox: FakeSandbox):
     return stop
 
 
+class StubProvider:
+    """A sandbox provider whose sandboxes exist only as records and answer every exec with success, enough for
+    the real Compose adapter to start a group through it."""
+
+    def __init__(self, name):
+        self.name = name
+        self.created: list[SandboxSpec] = []
+        self.closed: list[str] = []
+
+    async def create(self, spec):
+        self.created.append(spec)
+        return SandboxHandle(str(len(self.created)), self.name, None)
+
+    async def exec(self, handle, command, **kwargs):
+        return SandboxExecResult("", "", 0)
+
+    async def upload_file(self, handle, source_path, target_path):
+        pass
+
+    async def close(self, handle):
+        self.closed.append(handle.sandbox_id)
+
+    async def aclose(self):
+        pass
+
+    def validate_networking(self):
+        pass
+
+    async def network_address(self, handle):
+        return f"10.0.{len(self.name)}.{handle.sandbox_id}"
+
+    async def set_hosts(self, handle, hosts):
+        pass
+
+
 class TestComposeAndRouting:
     def compose_server(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch)
@@ -2260,7 +2295,7 @@ class TestComposeAndRouting:
         so a task file that only restates that (orca-bench, terminal_bench_aai) changes nothing there. Gym runs the
         Dockerfile without a build in pull and overlay mode, so the section is dropped and the document starts."""
         from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-        from nemo_gym.tasks.harbor.prepare_builds import unsupported_compose_fields_error
+        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
 
         server, task, _, _ = make_server(tmp_path, monkeypatch, dockerfile=dockerfile)
         (task.path / "environment" / "docker-compose.yaml").write_text(
@@ -2277,14 +2312,15 @@ class TestComposeAndRouting:
         group = AsyncSandboxCompose(NetworkedStubProvider(), "compose.yaml")
         group.document = document
         assert group._validate() == ["main"]
-        assert unsupported_compose_fields_error(task) is None
+        assert "build" not in check_task_compose_fields(task, load_compose_document(task))["services"]["main"]
 
     def test_a_main_build_key_gym_cannot_apply_without_a_build_is_a_task_error(self, tmp_path, monkeypatch):
         """A ``target`` (or ``args``, ``dockerfile_inline``, another ``dockerfile`` or ``context``) would change the image
         Harbor builds; without a build Gym cannot honour it, so the task is an error naming the key, as prepare already
         reported it into ``skipped.json``, instead of starting on the wrong image."""
         from nemo_gym.tasks.harbor.errors import HarborTaskError
-        from nemo_gym.tasks.harbor.prepare_builds import unsupported_compose_fields_error
+        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
+        from nemo_gym.tasks.harbor.registry import ImageConfigError
 
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         (task.path / "environment" / "docker-compose.yaml").write_text(
@@ -2299,18 +2335,29 @@ class TestComposeAndRouting:
         expected = "main.build.target cannot be applied in pull or overlay mode (Gym does not build this Dockerfile)"
         with pytest.raises(HarborTaskError, match=re.escape(expected)):
             server._compose_document(task)
-        assert str(unsupported_compose_fields_error(task)) == f"docker-compose.yaml: {expected}"
+        with pytest.raises(ImageConfigError) as info:
+            check_task_compose_fields(task, load_compose_document(task))
+        assert str(info.value) == f"hello: environment/docker-compose.yaml: {expected}"
 
-    def test_pull_policy_on_any_service_is_dropped_so_the_document_starts(self, tmp_path, monkeypatch):
-        """``pull_policy`` says when ``docker compose`` pulls an image before starting it; the sandbox has no pull
-        step to configure, so the key is dropped from every service in every image mode (here pull mode, where
-        ``main`` keeps everything else) instead of the adapter refusing it. Prepare's check sees the same document."""
+    def test_a_services_pull_policy_reaches_the_adapter_and_its_provider(self, tmp_path, monkeypatch):
+        """``pull_policy`` says when an image is pulled before it starts. A task's runtime policy (``always``,
+        ``missing`` with its spellings, ``never``) reaches the adapter in the server's document, which records it per
+        service and hands the provider's own form of it to the sandbox create where the provider can apply one; an
+        invalid value is the task's error, as prepare reports it (review: the key was dropped from every service
+        before the field check, by prepare and again here, so the advertised support never saw a task's setting).
+        Only ``pull_policy: build`` leaves, with the build it names (``test_built_images_stand_in...``)."""
         from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-        from nemo_gym.tasks.harbor.prepare_builds import unsupported_compose_fields_error
+        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
+        from nemo_gym.tasks.harbor.registry import ImageConfigError
+
+        class PullPolicyStubProvider(NetworkedStubProvider):
+            def pull_policy_options(self, policy):
+                return {"extensions": {"pull": policy}}
 
         server, task, _, _ = make_server(tmp_path, monkeypatch)
-        (task.path / "environment" / "docker-compose.yaml").write_text(
-            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n    pull_policy: missing\n"
+        compose = task.path / "environment" / "docker-compose.yaml"
+        compose.write_text(
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n    pull_policy: if_not_present\n"
             "  api:\n    image: org/api:1\n    pull_policy: always\n    expose: ['8080']\n"
         )
         records = json.loads((task.path.parent / IMAGE_CONFIGS_FILE).read_text())
@@ -2324,20 +2371,113 @@ class TestComposeAndRouting:
 
         document = server._compose_document(task)
 
-        assert all("pull_policy" not in service for service in document["services"].values())
+        assert document["services"]["main"]["pull_policy"] == "missing"
+        assert document["services"]["api"]["pull_policy"] == "always"
         assert document["services"]["api"]["expose"] == ["8080"]
-        group = AsyncSandboxCompose(NetworkedStubProvider(), "compose.yaml")
+        provider = PullPolicyStubProvider()
+        group = AsyncSandboxCompose(provider, "compose.yaml")
         group.document = document
         assert set(group._validate()) == {"main", "api"}
-        assert unsupported_compose_fields_error(task) is None
+        assert group.pull_policies == {"main": "missing", "api": "always"}
+        assert group._service_options == {
+            "main": provider.pull_policy_options("missing"),
+            "api": provider.pull_policy_options("always"),
+        }
+        # Prepare's check normalizes the same document the same way.
+        checked = check_task_compose_fields(task, load_compose_document(task))
+        assert {name: service["pull_policy"] for name, service in checked["services"].items()} == group.pull_policies
+        # A value Compose does not define is the task's error here as at prepare, not a silently dropped key.
+        compose.write_text(compose.read_text().replace("always", "whenever"))
+        with pytest.raises(
+            ImageConfigError, match=re.escape("service 'api' pull_policy 'whenever' is not a Compose value")
+        ):
+            server._compose_document(task)
+
+    def test_a_built_services_runtime_pull_policy_reaches_the_adapter_with_its_recorded_image(
+        self, tmp_path, monkeypatch
+    ):
+        """Build mode: a service prepare built keeps its runtime ``pull_policy`` (``always``, ``missing``, ``never``)
+        beside the recorded image that stands in for its ``build:``, so the server's document carries it to the
+        adapter and prepare's check normalizes it the same way; only ``pull_policy: build``, the policy naming that
+        build, leaves with it (review: ``with_built_images`` dropped every policy of a built service, so with a
+        recorded build preparation succeeded and the server and the adapter received no policy)."""
+        from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
+        from nemo_gym.tasks.harbor.digest import context_digest
+        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
+
+        class PullPolicyStubProvider(NetworkedStubProvider):
+            def pull_policy_options(self, policy):
+                return {"extensions": {"pull": policy}}
+
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        (task.path / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\nCOPY . /app\n")
+        (task.path / "environment" / "docker-compose.yaml").write_text(
+            'services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n    build: {context: "${CONTEXT_DIR}"}\n'
+            "    pull_policy: always\n"
+            "  api:\n    build: ./api\n    pull_policy: never\n    expose: ['8080']\n"
+            "  cache:\n    image: ${MAIN_IMAGE_NAME}_cache\n    build: ./cache\n    pull_policy: build\n"
+        )
+        digest = context_digest(task.path / "environment")
+        images = {
+            name: f"registry.example/ds/hb__{digest}{suffix}@sha256:" + fill * 64
+            for name, suffix, fill in (("main", "", "d"), ("api", "-api", "e"), ("cache", "-cache", "f"))
+        }
+        (task.path.parent / BUILT_IMAGES_FILE).write_text(
+            json.dumps(
+                {
+                    digest: {
+                        "tasks": ["hello"],
+                        "tool": "docker",
+                        "pushed": True,
+                        "services": {name: {"image": image} for name, image in images.items()},
+                    }
+                }
+            )
+        )
+        for name, image in images.items():
+            write_image_config(task.path.parent, image, Cmd=[name])
+        task = load_task(task.path)
+        assert task.built_image == images["main"]
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+
+        document = server._compose_document(task)
+
+        services = document["services"]
+        assert {name: service["image"] for name, service in services.items()} == images
+        assert not any("build" in service for service in services.values())
+        assert {name: service.get("pull_policy") for name, service in services.items()} == {
+            "main": "always",
+            "api": "never",
+            "cache": None,
+        }
+        assert services["api"]["expose"] == ["8080"]
+        provider = PullPolicyStubProvider()
+        group = AsyncSandboxCompose(provider, "compose.yaml")
+        group.document = document
+        assert set(group._validate()) == {"main", "api", "cache"}
+        assert group.pull_policies == {"main": "always", "api": "never"}
+        assert group._service_options == {
+            "main": provider.pull_policy_options("always"),
+            "api": provider.pull_policy_options("never"),
+        }
+        # Prepare's check, on the loader's document, keeps and normalizes the same policies.
+        checked = check_task_compose_fields(task, load_compose_document(task))
+        assert {name: service.get("pull_policy") for name, service in checked["services"].items()} == {
+            "main": "always",
+            "api": "never",
+            "cache": None,
+        }
 
     @staticmethod
     def capture_compose_specs(monkeypatch) -> dict:
         captured = {}
 
         class FakeComposeGroup:
-            def __init__(self, provider_config, path, *, service_specs, timeout_s):
+            def __init__(self, provider_config, path, *, service_specs, timeout_s, **options):
                 captured["specs"] = service_specs
+                captured["options"] = options
 
             async def start(self):
                 return None
@@ -2571,7 +2711,7 @@ class TestComposeAndRouting:
         captured = {}
 
         class FakeComposeGroup:
-            def __init__(self, provider_config, path, *, service_specs, timeout_s):
+            def __init__(self, provider_config, path, *, service_specs, timeout_s, **kwargs):
                 captured["specs"] = service_specs
 
             async def start(self):
@@ -2740,6 +2880,203 @@ class TestComposeAndRouting:
         assert response.failure is None, response.failure
         seed = server.server_client.seed_bodies()[0]
         assert seed["sandbox_access"]["connection"]["provider_config_ref"] == "sandbox_gpu"
+
+    def gpu_sidecar_server(self, tmp_path, monkeypatch, extra: str = ""):
+        """A CPU task whose kafka sidecar reserves one GPU (plus ``extra`` kafka lines); ``sandbox_gpu`` is the
+        GPU block, with its own metadata and networking."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        (task.path / "task.toml").write_text(COMPOSE_TOML.replace("cpus = 1", 'cpus = 1\ngpu_types = ["H100"]'))
+        (task.path / "environment" / "docker-compose.yaml").write_text(
+            COMPOSE_YAML
+            + "    deploy:\n      resources:\n        limits:\n          memory: 2g\n        reservations:\n"
+            "          devices:\n            - driver: nvidia\n              capabilities: [gpu]\n              count: 1\n"
+            + extra
+        )
+        (task.path.parent / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        server.config.gpu_sandbox_provider = "sandbox_gpu"
+        server.config.request_gpu_type = True
+        server.config.artifacts_dir = tmp_path / "artifacts"
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict",
+            lambda: {
+                "sandbox": {"opensandbox": {}},
+                "sandbox_gpu": {
+                    "opensandbox": {"networking": {"enabled": True}},
+                    "default_metadata": {"pool": "h100"},
+                },
+            },
+        )
+        return server, task
+
+    def test_gpu_sidecars_route_to_the_gpu_provider_per_service(self, tmp_path, monkeypatch):
+        """M28: a sidecar that reserves GPUs through deploy.resources runs on the GPU block, the task's main
+        service stays where the task's own declaration puts it, and the adapter gets per-service providers."""
+        import yaml
+
+        server, task = self.gpu_sidecar_server(tmp_path, monkeypatch)
+        captured = {}
+
+        class FakeComposeGroup:
+            def __init__(self, provider_config, path, *, service_specs, timeout_s, service_providers, platform):
+                captured.update(
+                    provider=provider_config,
+                    specs=service_specs,
+                    providers=service_providers,
+                    platform=platform,
+                    document=yaml.safe_load(Path(path).read_text()),
+                )
+
+            async def start(self):
+                return None
+
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandboxCompose", FakeComposeGroup)
+        asyncio.run(server._create_compose(task, "r1"))
+        # The task declares no GPUs itself: main stays on the task's block, kafka alone goes to the GPU block.
+        assert server._provider_ref(task) == "sandbox" and captured["provider"] == {"opensandbox": {}}
+        assert captured["providers"] == {"kafka": {"opensandbox": {"networking": {"enabled": True}}}}
+        kafka, api = captured["specs"]["kafka"], captured["specs"]["api"]
+        # The adapter applies deploy.resources; the server adds the task's gpu_type and the GPU block's metadata.
+        assert kafka.resources.gpu is None and kafka.resources.gpu_type == "H100"
+        assert kafka.metadata["pool"] == "h100" and kafka.metadata["harbor_role"] == "agent"
+        assert "pool" not in api.metadata and api.resources.gpu_type is None
+        assert captured["document"]["services"]["kafka"]["deploy"]["resources"] == {
+            "limits": {"memory": 2 * 1024**3},
+            "reservations": {"gpus": 1},
+        }
+        assert captured["platform"] == "linux/amd64"
+
+    async def test_gpu_sidecar_group_starts_through_the_real_adapter(self, tmp_path, monkeypatch):
+        """The document the server writes (deploy normalized once) passes the adapter's own pass over the reloaded
+        file, and the group starts with the GPU sidecar created on the GPU block's provider: the real
+        AsyncSandboxCompose, with only the provider construction replaced."""
+        server, task = self.gpu_sidecar_server(tmp_path, monkeypatch)
+        cpu, gpu = StubProvider("opensandbox"), StubProvider("opensandbox-gpu")
+        monkeypatch.setattr(
+            "nemo_gym.sandbox.adapters.docker_compose.create_provider",
+            lambda config: gpu if config == {"opensandbox": {"networking": {"enabled": True}}} else cpu,
+        )
+        compose = await server._create_compose(task, "r1")
+        try:
+            assert compose._ready and server._sandboxes["r1"] is compose
+            assert compose.services["main"]._provider is cpu and compose.services["kafka"]._provider is gpu
+            (kafka,) = gpu.created
+            # deploy.resources applied by the adapter, the task's gpu_type and the GPU block's metadata by the server.
+            assert (kafka.resources.gpu, kafka.resources.gpu_type, kafka.resources.memory_mib) == (1, "H100", 2048)
+            assert kafka.metadata["pool"] == "h100" and kafka.image == IMAGE_CONFIGS["org/kafka:1"]["image"]
+            assert [spec.image for spec in cpu.created] == [
+                IMAGE_CONFIGS["org/agent:1"]["image"],
+                IMAGE_CONFIGS["org/api:1"]["image"],
+            ]
+        finally:
+            await compose.stop()
+        assert gpu.closed == ["1"] and sorted(cpu.closed) == ["1", "2"]
+
+    def test_platform_at_seed_is_read_from_the_provider_options_as_at_prepare(self, tmp_path, monkeypatch):
+        from nemo_gym.tasks.harbor.registry import ImageConfigError
+
+        server, task, _, _, _ = self.compose_server(tmp_path, monkeypatch)
+
+        def declaring(platform):
+            (task.path / "environment" / "docker-compose.yaml").write_text(
+                COMPOSE_YAML + f"    platform: {platform}\n"
+            )
+            loaded = load_task(task.path)
+            server.config.tasksets["ds"].tasks["hello"] = loaded.digest
+            return loaded
+
+        arm = declaring("linux/arm64")
+        with pytest.raises(
+            ImageConfigError,
+            match="service 'kafka' platform 'linux/arm64' does not match the deployment platform linux/amd64",
+        ):
+            server._compose_document(arm)
+        # The same setting prepare reads (compose_platform_from_overrides) admits the task at seed, once the
+        # recorded images are for that platform too (the loader-side image check reads the same option).
+        server.config.sandbox_provider_options = {"platform": {"os": "linux", "arch": "arm64"}}
+        (task.path.parent / "compose-images.json").write_text(
+            json.dumps({image: {**record, "architecture": "arm64"} for image, record in IMAGE_CONFIGS.items()})
+        )
+        assert server._compose_platform() == "linux/arm64"
+        assert server._compose_document(arm)["services"]["kafka"]["platform"] == "linux/arm64"
+        with pytest.raises(ImageConfigError, match="does not match the deployment platform linux/arm64"):
+            server._compose_document(declaring("linux/amd64"))
+
+    def test_extra_hosts_on_a_non_root_sidecar_fail_prepare_and_seed_for_the_same_reason(self, tmp_path, monkeypatch):
+        from nemo_gym.sandbox.compose_fields import ComposeFieldError
+        from nemo_gym.tasks.harbor.image_configs import record_compose_images
+        from nemo_gym.tasks.harbor.registry import ImageConfigError
+
+        server, task, _, _, _ = self.compose_server(tmp_path, monkeypatch)
+        (task.path / "environment" / "docker-compose.yaml").write_text(
+            COMPOSE_YAML + "    extra_hosts: ['licence.example:198.51.100.7']\n"
+        )
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        reason = (
+            "service 'kafka' extra_hosts cannot be applied without host injection: the image runs as user 'appuser'"
+        )
+        # Prepare: the recorded configurations say kafka runs as appuser, so the task fails there, naming the service.
+        with pytest.raises(ImageConfigError, match="hello: environment/docker-compose.yaml: " + reason):
+            record_compose_images([task], task.path.parent, sandbox_provider="opensandbox")
+        # Seed: the server decides the host opt-out with the same predicate and refuses the same document.
+        with pytest.raises(ComposeFieldError, match=reason):
+            server._compose_document(task)
+        # A root kafka image takes the entries on both paths.
+        configs = {**IMAGE_CONFIGS, "org/kafka:1": {**IMAGE_CONFIGS["org/kafka:1"], "config": {"Cmd": ["kafka"]}}}
+        (task.path.parent / "compose-images.json").write_text(json.dumps(configs))
+        assert record_compose_images([task], task.path.parent, sandbox_provider="opensandbox") is not None
+        kafka = server._compose_document(task)["services"]["kafka"]
+        assert kafka["extra_hosts"] == {"licence.example": "198.51.100.7"} and "x-sandbox" not in kafka
+
+    def test_a_gpu_sidecars_options_are_checked_against_the_gpu_block_at_seed(self, tmp_path, monkeypatch):
+        from nemo_gym.tasks.harbor.registry import ImageConfigError
+
+        server, task = self.gpu_sidecar_server(tmp_path, monkeypatch, extra="    tmpfs: [/run]\n")
+        # Docker task block, OpenSandbox GPU block: kafka runs on the GPU block, which applies no tmpfs.
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict",
+            lambda: {"sandbox": {"docker": {}}, "sandbox_gpu": {"opensandbox": {}}},
+        )
+        with pytest.raises(
+            ImageConfigError, match="service 'kafka' tmpfs is not supported by the opensandbox sandbox provider"
+        ):
+            server._compose_document(task)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict",
+            lambda: {"sandbox": {"opensandbox": {}}, "sandbox_gpu": {"docker": {}}},
+        )
+        assert server._compose_document(task)["services"]["kafka"]["tmpfs"] == ["/run"]
+
+    def test_compose_document_normalizes_the_example_fields_and_names_what_the_provider_cannot_apply(
+        self, tmp_path, monkeypatch
+    ):
+        from nemo_gym.tasks.harbor.registry import ImageConfigError
+
+        server, task, _, _, _ = self.compose_server(tmp_path, monkeypatch)
+        # alibaba-ctf style: restart always and a custom network, which need nothing else.
+        (task.path / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: org/agent:1\n    restart: always\n    networks: [agent_network]\n"
+            "  api:\n    image: org/api:1\n    restart: always\n    networks:\n      agent_network:\n"
+            "        aliases: [challenge]\n  kafka:\n    image: org/kafka:1\n"
+            "networks:\n  agent_network:\n    driver: bridge\n"
+        )
+        task = load_task(task.path)
+        services = server._compose_document(task)["services"]
+        assert services["main"]["restart"] == "always" and services["main"]["networks"] == {"agent_network": {}}
+        assert services["api"]["networks"] == {"agent_network": {"aliases": ["challenge"]}}
+        # A field OpenSandbox cannot apply fails before any sandbox, naming the field and the provider.
+        (task.path / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: org/agent:1\n  api:\n    image: org/api:1\n"
+            "    sysctls:\n      net.core.somaxconn: 1024\n"
+        )
+        task = load_task(task.path)
+        with pytest.raises(
+            ImageConfigError,
+            match="hello: environment/docker-compose.yaml: service 'api' sysctls is not supported by the opensandbox",
+        ):
+            server._compose_document(task)
 
     async def test_failed_healthcheck_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
         server, task, compose, _, _ = self.compose_server(tmp_path, monkeypatch)
@@ -3729,9 +4066,6 @@ class TestGeneralization:
         (task.path.parent / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
         server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
         monkeypatch.setattr(
-            "environment_servers.harbor.sandboxes.resolve_provider_config", lambda ref, config: {"fake": {}}
-        )
-        monkeypatch.setattr(
             "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
         )
         monkeypatch.setattr("environment_servers.harbor.sandboxes._pull_retry_delay", lambda attempt: 0)
@@ -3739,8 +4073,9 @@ class TestGeneralization:
         verifier = FakeSandbox()
 
         class FlakyComposeGroup:
-            def __init__(self, provider_config, path, *, service_specs, timeout_s):
+            def __init__(self, provider_config, path, *, service_specs, timeout_s, service_providers, platform):
                 groups.append(self)
+                self.provider_config = provider_config
                 self.services: dict = {}
                 self.stopped = False
 
@@ -3766,6 +4101,8 @@ class TestGeneralization:
         assert response.failure is None, response.failure
         assert len(groups) == 2 and groups[0].stopped and groups[1].stopped
         assert response.result.reward == 1.0 and not server._sandboxes
+        # Each attempt is a fresh group on the task's block, whose registry name the seed-time field check ran against.
+        assert [g.provider_config for g in groups] == [{"opensandbox": {}}] * 2
 
     async def test_exhausted_compose_pull_retries_are_a_retryable_seed_failure(self, tmp_path, monkeypatch):
         from nemo_gym.sandbox.providers.base import SandboxCreateError
@@ -3776,9 +4113,6 @@ class TestGeneralization:
         (task.path.parent / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
         server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
         monkeypatch.setattr(
-            "environment_servers.harbor.sandboxes.resolve_provider_config", lambda ref, config: {"fake": {}}
-        )
-        monkeypatch.setattr(
             "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
         )
         monkeypatch.setattr("environment_servers.harbor.sandboxes._pull_retry_delay", lambda attempt: 0)
@@ -3787,7 +4121,7 @@ class TestGeneralization:
         class FailingComposeGroup:
             services: dict = {}
 
-            def __init__(self, provider_config, path, *, service_specs, timeout_s):
+            def __init__(self, provider_config, path, *, service_specs, timeout_s, service_providers, platform):
                 pass
 
             async def start(self):
@@ -3831,9 +4165,6 @@ class TestGeneralization:
         (task.path.parent / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
         server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
         monkeypatch.setattr(
-            "environment_servers.harbor.sandboxes.resolve_provider_config", lambda ref, config: {"fake": {}}
-        )
-        monkeypatch.setattr(
             "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
         )
         monkeypatch.setattr("environment_servers.harbor.sandboxes._pull_retry_delay", lambda attempt: 0)
@@ -3841,7 +4172,7 @@ class TestGeneralization:
         verifier = FakeSandbox()
 
         class FlakyComposeGroup:
-            def __init__(self, provider_config, path, *, service_specs, timeout_s):
+            def __init__(self, provider_config, path, *, service_specs, timeout_s, service_providers, platform):
                 groups.append(self)
                 self.services: dict = {}
                 self.stopped = 0
