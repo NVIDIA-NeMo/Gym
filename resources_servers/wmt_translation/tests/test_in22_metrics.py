@@ -90,6 +90,39 @@ def test_corpus_metrics_are_perfect_for_identical_english_text() -> None:
     assert metrics == pytest.approx({"chrf": 100.0, "chrf++": 100.0, "bleu": 100.0})
 
 
+# Frozen from the supplied reference utils.py, SHA-256:
+# da5ee94c4e74d82dc6d0a689802932f5a6cae0ecd8df0a9fb8ba5b522fc56481
+# SacreBLEU 2.6.0, IndicNLP 0.92, no UrduHack; provenance is in the IN22 README.
+@pytest.mark.parametrize(
+    ("language", "reference", "hypothesis", "expected"),
+    [
+        (
+            "en",
+            "Hello, world! This is a test.",
+            "Hello world; this is another test.",
+            {"chrf": 46.846724488, "chrf++": 43.965680971, "bleu": 12.256200970},
+        ),
+        (
+            "hi",
+            "क़लम से ख़त लिखा गया।",
+            "क़लम से खत लिखा गया।",
+            {"chrf": 75.123844648, "chrf++": 74.270091269, "bleu": 37.991784283},
+        ),
+        (
+            "ur",
+            "یہ ایک خوبصورت کتاب ہے۔",
+            "یہ ایک اچھی کتاب ہے ۔",
+            {"chrf": 42.191340425, "chrf++": 49.623907753, "bleu": 37.991784283},
+        ),
+    ],
+    ids=["english-punctuation", "hindi-nukta", "urdu"],
+)
+def test_corpus_metrics_match_frozen_reference_scores(
+    language: str, reference: str, hypothesis: str, expected: dict[str, float]
+) -> None:
+    assert corpus_metrics([reference], [hypothesis], language) == pytest.approx(expected, rel=0, abs=1e-6)
+
+
 def test_compute_metrics_groups_pairs_and_rollout_indices() -> None:
     tasks = [
         [
