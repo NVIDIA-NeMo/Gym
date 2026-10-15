@@ -1353,27 +1353,20 @@ def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: b
     ``retry_terminal_timeouts`` is for agents whose older builds incorrectly
     stamped per-attempt timeouts terminal. A timeout reflects the
     load/remaining walltime of that attempt, so it remains retryable (up to the
-    normal max-attempt cap). A skipped sample is unusable regardless of which
-    agent version wrote the sidecar and stays terminal.
+    normal max-attempt cap).
 
-    The class names below are ``_ng_failure_class`` labels that agents and
-    resources servers already write to the failures sidecar. They predate
-    ``nemo_gym.failure_kinds`` and are not registered there:
-
-    - ``timeout_exceeded`` (Stirrup, pinchbench): the per-task timeout; ``agent_timeout``
-      in the shared vocabulary.
-    - ``skipped`` (Stirrup): the sample cannot be run; no shared name.
+    ``timeout_exceeded`` is an ``_ng_failure_class`` label that agents already
+    write to the failures sidecar (pinchbench, nooa). It predates
+    ``nemo_gym.failure_kinds`` and is not registered there; ``agent_timeout`` is
+    the shared name.
 
     As ``failure_kinds`` requires, this function decides retryability for the
-    occurrence, under an explicit caller opt-in; the names carry no retry meaning.
+    occurrence, under an explicit caller opt-in; the name carries no retry meaning.
     """
     if not retry_terminal_timeouts:
         return bool(record.get(NG_TERMINAL_KEY))
-    failure_class = record.get(NG_FAILURE_CLASS_KEY)
-    if failure_class == "timeout_exceeded":
+    if record.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded":
         return False
-    if failure_class == "skipped":
-        return True
     return bool(record.get(NG_TERMINAL_KEY))
 
 
@@ -1571,8 +1564,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description=(
             "On resume, retry failures-sidecar rows of class `timeout_exceeded` even when they are stamped "
-            "`_ng_failure_terminal`, up to NEMO_GYM_MAX_ROLLOUT_ATTEMPTS, and `skipped` rows are never "
-            "retried, stamped or not. For sidecars "
+            "`_ng_failure_terminal`, up to NEMO_GYM_MAX_ROLLOUT_ATTEMPTS. For sidecars "
             "whose per-attempt timeouts were stamped terminal but should be retried. Off (default): a sidecar row "
             "is terminal iff it is stamped `_ng_failure_terminal`, so an agent that marks its timeouts terminal "
             "on purpose keeps them gated."
@@ -2416,7 +2408,7 @@ class RolloutCollectionHelper(BaseModel):
 - {len(original_input_rows)} original input rows
 - {len(successes_seen)} rows already done (in main jsonl)
 - {sum(attempts_by_key.values())} prior failure attempts ({len(attempts_by_key)} unique tasks) in sidecar
-- {len(terminal_keys)} sidecar-terminal (for example skipped) → not retried
+- {len(terminal_keys)} sidecar-terminal → not retried
 - {len(maxed_out)} hit max_attempts={max_attempts} → not retried
 - {len(input_rows)} rows that still need to be run"""
         )

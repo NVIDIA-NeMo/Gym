@@ -1119,7 +1119,6 @@ class TestLoadCacheKeysByStatus:
                     NG_FAILURE_CLASS_KEY: "timeout_exceeded",
                     NG_TERMINAL_KEY: True,
                 },
-                # Unstamped skip: terminal only under the opt-in contract.
                 {TASK_INDEX_KEY_NAME: 6, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "skipped"},
             ],
         )

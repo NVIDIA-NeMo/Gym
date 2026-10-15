@@ -6623,33 +6623,6 @@ class TestLongestFirstDispatch:
 
         assert [r[TASK_INDEX_KEY_NAME] for r in input_rows] == [0, 2, 3]
 
-    def test_skipped_without_terminal_flag_is_gated_only_when_opted_in(self, tmp_path: Path) -> None:
-        failures = [{TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "skipped"}]
-
-        config = self._write_resume_state(tmp_path, failures)
-        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
-        assert 1 in [r[TASK_INDEX_KEY_NAME] for r in input_rows]
-
-        config = self._write_resume_state(tmp_path, failures, retry_terminal_timeouts=True)
-        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
-        assert 1 not in [r[TASK_INDEX_KEY_NAME] for r in input_rows]
-
-    def test_skipped_failures_stay_terminal(self, tmp_path: Path) -> None:
-        failures = [
-            {
-                TASK_INDEX_KEY_NAME: 1,
-                ROLLOUT_INDEX_KEY_NAME: 0,
-                NG_FAILURE_CLASS_KEY: "skipped",
-                NG_TERMINAL_KEY: True,
-            }
-        ]
-        for retry_terminal_timeouts in (False, True):
-            config = self._write_resume_state(tmp_path, failures, retry_terminal_timeouts=retry_terminal_timeouts)
-
-            input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
-
-            assert 1 not in [r[TASK_INDEX_KEY_NAME] for r in input_rows]
-
     def test_explicitly_terminal_rows_stay_gated(self, tmp_path: Path) -> None:
         failures = [{TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_TERMINAL_KEY: True}]
         for retry_terminal_timeouts in (False, True):
@@ -6668,8 +6641,6 @@ class TestIsTerminalFailure:
         [
             ("timeout_exceeded", True, True, False),
             ("timeout_exceeded", False, False, False),
-            ("skipped", False, False, True),
-            ("skipped", True, True, True),
             ("agent_run_error", True, True, True),
             ("agent_run_error", False, False, False),
             (None, True, True, True),

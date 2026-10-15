@@ -448,7 +448,7 @@ def summarize_cache_usage(cache: CacheKeysByStatus, all_payloads: List[Dict], fi
         f"""Resumed from cache. Found:
 - {len(all_payloads)} total rows to be re-verified
 - {len(cache.successful_keys)} rows already done (in main jsonl)
-- {len(cache.terminal_keys)} sidecar-terminal (for example skipped) → not retried
+- {len(cache.terminal_keys)} sidecar-terminal → not retried
 - {len(cache.maxed_out_keys)} hit max_attempts → not retried
 - {len(filtered_payloads)} rows that still need to be run"""
     )
