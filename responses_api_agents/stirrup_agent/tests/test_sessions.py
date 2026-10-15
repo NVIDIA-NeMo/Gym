@@ -216,14 +216,18 @@ def test_a_remote_sandbox_needs_a_model_server_address_it_can_reach(client, monk
 
 
 def test_a_session_without_a_sandbox_or_a_provider_is_rejected(client):
-    with pytest.raises(ValueError, match="requires sandbox_access or a configured sandbox_provider"):
-        _seed(client, tool_accesses=[_TOOL_ACCESS])
+    response = _seed(client, tool_accesses=[_TOOL_ACCESS])
+
+    assert response.status_code == 422
+    assert "requires sandbox_access or a configured sandbox_provider" in response.json()["detail"]
 
 
 def test_a_session_with_two_direct_tool_accesses_is_rejected(client):
     second = _TOOL_ACCESS.model_copy(update={"name": "other.direct_http"})
-    with pytest.raises(ValueError, match="at most one direct HTTP tool access"):
-        _seed(client, sandbox_access=_sandbox_access(), tool_accesses=[_TOOL_ACCESS, second])
+    response = _seed(client, sandbox_access=_sandbox_access(), tool_accesses=[_TOOL_ACCESS, second])
+
+    assert response.status_code == 422
+    assert "at most one direct HTTP tool access" in response.json()["detail"]
 
 
 def test_an_episode_without_tools_needs_no_tool_access(agent, client, root, monkeypatch):
@@ -287,11 +291,13 @@ def test_without_a_lent_sandbox_or_tools_the_agent_starts_its_own_sandbox(agent,
 def test_request_tools_without_a_tool_access_are_rejected(client, root):
     _seed(client, sandbox_access=_sandbox_access(str(root)))
 
-    with pytest.raises(ValueError, match="grants no tool access"):
-        client.post(
-            f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
-            json={"input": "Write the report.", "model": "policy", "tools": _TOOLS},
-        )
+    response = client.post(
+        f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
+        json={"input": "Write the report.", "model": "policy", "tools": _TOOLS},
+    )
+
+    assert response.status_code == 422
+    assert "grants no tool access" in response.json()["detail"]
 
 
 def test_a_session_requiring_mcp_tools_is_rejected(client):
@@ -299,8 +305,10 @@ def test_a_session_requiring_mcp_tools_is_rejected(client):
         name="gdpval.mcp", required=True, connection=MCPStreamableHTTPConnection(url="http://resources:8000/mcp")
     )
 
-    with pytest.raises(ValueError, match="does not support required MCP"):
-        _seed(client, sandbox_access=_sandbox_access(), tool_accesses=[_TOOL_ACCESS, mcp])
+    response = _seed(client, sandbox_access=_sandbox_access(), tool_accesses=[_TOOL_ACCESS, mcp])
+
+    assert response.status_code == 422
+    assert "Stirrup does not support required MCP tool access: gdpval.mcp" in response.json()["detail"]
 
 
 async def test_the_runtime_installs_with_a_uv_built_for_the_sandbox_architecture(tmp_path, monkeypatch):

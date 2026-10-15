@@ -244,22 +244,22 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         owns_sandbox = body.sandbox_access is None
         if owns_sandbox:
             if self.config.sandbox_provider is None:
-                raise ValueError("Stirrup requires sandbox_access or a configured sandbox_provider")
+                raise HTTPException(422, "Stirrup requires sandbox_access or a configured sandbox_provider")
             provider_ref = self.config.sandbox_provider
             workdir = self.config.sandbox_config.get("workdir")
         else:
             connection = body.sandbox_access.connection
             if not isinstance(connection, DirectSandboxConnection):
-                raise ValueError("Stirrup supports only direct sandbox connections")
+                raise HTTPException(422, "Stirrup supports only direct sandbox connections")
             provider_ref = connection.provider_config_ref
             workdir = body.sandbox_access.workdir
         accesses = self.effective_tool_accesses(body)
         unsupported = [access.name for access in accesses if isinstance(access, MCPToolAccess) and access.required]
         if unsupported:
-            raise ValueError(f"Stirrup does not support required MCP tool access: {', '.join(unsupported)}")
+            raise HTTPException(422, f"Stirrup does not support required MCP tool access: {', '.join(unsupported)}")
         direct_accesses = [access for access in accesses if isinstance(access, DirectHTTPToolAccess)]
         if len(direct_accesses) > 1:
-            raise ValueError("Stirrup supports at most one direct HTTP tool access")
+            raise HTTPException(422, "Stirrup supports at most one direct HTTP tool access")
         tool_access = direct_accesses[0] if direct_accesses else None
 
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
@@ -317,7 +317,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         self, body: NeMoGymResponseCreateParamsNonStreaming, state: StirrupSessionState
     ) -> NeMoGymResponse:
         if body.tools and state.tool_access is None:
-            raise ValueError("The request has tools, but the session grants no tool access to call them")
+            raise HTTPException(422, "The request has tools, but the session grants no tool access to call them")
         max_completion_tokens_cap = self.config.max_completion_tokens_cap
         if body.max_output_tokens is not None:
             max_completion_tokens_cap = min(max_completion_tokens_cap, body.max_output_tokens)
