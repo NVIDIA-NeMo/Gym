@@ -42,8 +42,8 @@ from typing import Callable
 
 from nemo_gym.token_id_capture.records import (
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+    EngineRefusalRecord,
     ParentResolutionStatus,
-    RefusalRecord,
     TokenEntry,
     compute_digest,
 )
@@ -117,10 +117,10 @@ class BuildOutput:
     chains: list[Chain]
     quarantined: list[str] = field(default_factory=list)  # Model call IDs.
     notes: BuildNotes = field(default_factory=lambda: BuildNotes(builder=""))
-    # The digest of each buildable call's full token sequence (prompt and generation), keyed by
-    # call id. Token-identical retries share one digest; the projection uses it to recognize a
-    # refusal whose request continued a retry twin of the delivered terminal call.
-    sequence_digests: dict[str, str] = field(default_factory=dict)
+    # Every buildable entry by call id, the chains' members and the calls they dropped alike. The
+    # projection reads it to find the call an engine refusal continued; nothing is copied or
+    # hashed here, so a build without refusals pays nothing for it.
+    entries: dict[str, TokenEntry] = field(default_factory=dict)
 
 
 @dataclass(eq=False)  # Identity-based equality keeps nodes hashable.
@@ -343,7 +343,7 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
     prefix_index = _PrefixIndex() if needs_prefix_index else _NullPrefixIndex()
 
     nodes_by_call_id: dict[str, _Node] = {}
-    sequence_digests: dict[str, str] = {}
+    entries_by_call_id: dict[str, TokenEntry] = {}
     parent_link_failures: dict[str, int] = {}
     unresolved_parent_calls: list[str] = []
     for call_id in duplicate_conflicts:
@@ -360,7 +360,7 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
     for entry in ordered:
         prompt = list(entry.prompt_token_ids)
         node = _Node(entry=entry, cumulative=prompt + list(entry.generation_token_ids))
-        sequence_digests[entry.model_call_id] = compute_digest(node.cumulative)
+        entries_by_call_id[entry.model_call_id] = entry
         parent, ambiguous, note = _resolve_parent(node, nodes_by_call_id, prefix_index)
         if note:
             parent_link_failures[note] = parent_link_failures.get(note, 0) + 1
@@ -546,7 +546,7 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
         parent_link_failures=parent_link_failures,
         unresolved_parent_calls=unresolved_parent_calls,
     )
-    return BuildOutput(chains=chains, quarantined=quarantined, notes=notes, sequence_digests=sequence_digests)
+    return BuildOutput(chains=chains, quarantined=quarantined, notes=notes, entries=entries_by_call_id)
 
 
 _BUILDERS: dict[str, Callable[..., BuildOutput]] = {
@@ -626,29 +626,49 @@ def project_chain_to_output_items(chain: Chain) -> list[dict]:
 _INCOMPLETE_REASON_BY_FINISH_REASON = {"length": "max_output_tokens", "content_filter": "content_filter"}
 
 
-def _refusal_ended_the_chain(refusal: RefusalRecord, terminal: TokenEntry, out: BuildOutput) -> bool:
+def _engine_refusal_ended_the_chain(refusal: EngineRefusalRecord, terminal: TokenEntry, out: BuildOutput) -> bool:
     """Whether ``refusal`` was the harness's next request after the delivered terminal call and did not fit.
 
     Two conditions. The refusal carries the context-window code: an output-token parameter the
     engine rejected (``code`` is ``None``) says nothing about the conversation's length, so it is
-    reported in ``metrics["refusals"]`` but sets no verdict. And the refused request continued the
-    delivered terminal call: its request-time lineage names that call, or a call whose full token
-    sequence is identical to it (a retry twin) that was served before the refusal was recorded. A
-    twin served after the refusal is a successful re-serving of the call the refused request
-    continued, so the harness recovered from the refusal and the retained twin's own ending
-    stands. A refusal on another branch of the rollout, one that continued an earlier call the
-    harness later moved past, and one whose parent could not be resolved leave the verdict alone.
+    reported in ``metrics["engine_refusals"]`` but sets no verdict. And the refused request
+    continued the delivered terminal call: its request-time lineage names that call, or a call
+    whose full token sequence is identical to it (a retry twin) that was served before the
+    refusal was recorded. A twin served after the refusal is a successful re-serving of the call
+    the refused request continued, so the harness recovered from the refusal and the retained
+    twin's own ending stands. A refusal on another branch of the rollout, one that continued an
+    earlier call the harness later moved past, and one whose parent could not be resolved leave
+    the verdict alone.
+
+    Known limitation: an auxiliary request the harness sends after the session completed (a
+    summary or title call, or an end-of-session compaction) can carry the terminal call's whole
+    history, so it continues the terminal call in lineage too. Refused for the context window,
+    it marks the rollout ``incomplete`` although the harness finished on its own, and delivery
+    then replaces a harness ``completed`` status. A harness that reports its own ending signal
+    keeps the two apart; the capture alone cannot.
+
+    The twin comparison reads the two calls' token sequences from ``out.entries`` on demand, so
+    a build without refusals compares nothing.
     """
     if refusal.code != CONTEXT_LENGTH_EXCEEDED_ERROR_CODE or refusal.parent_call_id is None:
         return False
     if refusal.parent_call_id == terminal.model_call_id:
         return True
-    parent_digest = out.sequence_digests.get(refusal.parent_call_id)
-    if parent_digest is None or parent_digest != out.sequence_digests.get(terminal.model_call_id):
+    parent = out.entries.get(refusal.parent_call_id)
+    if parent is None or not _same_full_sequence(parent, terminal):
         return False
     # The refused request continued a retry twin of the delivered terminal call. The records'
     # timestamps order the two: a terminal served after the refusal superseded it.
     return refusal.created_at > terminal.created_at
+
+
+def _same_full_sequence(a: TokenEntry, b: TokenEntry) -> bool:
+    """Whether two calls' full token sequences, prompt and generation together, are identical."""
+    if len(a.prompt_token_ids) + len(a.generation_token_ids) != len(b.prompt_token_ids) + len(b.generation_token_ids):
+        return False
+    return list(a.prompt_token_ids) + list(a.generation_token_ids) == list(b.prompt_token_ids) + list(
+        b.generation_token_ids
+    )
 
 
 def project_main_chain_response(
@@ -657,7 +677,7 @@ def project_main_chain_response(
     model: str = "",
     *,
     finish_reason_resolved: bool = True,
-    refusals: tuple[RefusalRecord, ...] = (),
+    engine_refusals: tuple[EngineRefusalRecord, ...] = (),
 ) -> dict:
     """Rebuild the main chain as a Responses object whose output items are contiguous.
 
@@ -676,16 +696,16 @@ def project_main_chain_response(
     token-identical retries that recorded different finish reasons, so the status would otherwise
     depend on which twin drew the smaller call id.
 
-    ``refusals`` are the frozen snapshot's engine refusals. A refusal of the request that
+    ``engine_refusals`` are the frozen snapshot's engine refusals. A refusal of the request that
     continued the delivered terminal call, refused for the context window, also makes the payload
     ``incomplete`` with reason ``max_output_tokens``: the harness's next request did not fit, so
     the rollout ended at the model's limit although its last served call completed
-    (``_refusal_ended_the_chain`` states the two conditions). A refusal the harness recovered
+    (``_engine_refusal_ended_the_chain`` states the two conditions). A refusal the harness recovered
     from, with a call served after it (a token-identical retry of the terminal call that was
     served after the refusal included), a refusal on another branch of the rollout, a refusal of
     an output-token parameter, and one whose parent is unknown do not change the verdict. A
     refusal and a served ``length`` stop give the same status; the consumer's
-    ``metrics["refusals"]`` tells them apart.
+    ``metrics["engine_refusals"]`` tells them apart.
     """
     if not out.chains:
         raise ValueError("capture produced no safe trainable chain")
@@ -714,7 +734,9 @@ def project_main_chain_response(
     incomplete_reason = (
         _INCOMPLETE_REASON_BY_FINISH_REASON.get(terminal.finish_reason) if finish_reason_resolved else None
     )
-    if incomplete_reason is None and any(_refusal_ended_the_chain(refusal, terminal, out) for refusal in refusals):
+    if incomplete_reason is None and any(
+        _engine_refusal_ended_the_chain(refusal, terminal, out) for refusal in engine_refusals
+    ):
         incomplete_reason = "max_output_tokens"
     if incomplete_reason is not None:
         response["status"] = "incomplete"

@@ -48,7 +48,7 @@ from nemo_gym.token_id_capture.protocols import (
     TokenCaptureRetiredError,
     TokenCaptureSnapshot,
 )
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, RefusalRecord, TokenEntry
+from nemo_gym.token_id_capture.records import EngineRefusalRecord, ParentResolutionStatus, TokenEntry
 
 
 logger = logging.getLogger(__name__)
@@ -119,7 +119,7 @@ class TokenCaptureStore:
                 "version": 0,
                 "entry_digests": {},
                 "indexed_size": 0,
-                "refusals": [],
+                "engine_refusals": [],
             }
         state = orjson.loads(path.read_bytes())
         if not isinstance(state, dict):
@@ -320,7 +320,7 @@ class TokenCaptureStore:
     async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
         await asyncio.to_thread(self._begin_call, rollout_id, model_call_id)
 
-    def _refuse_call(
+    def _record_engine_refusal(
         self,
         rollout_id: str,
         model_call_id: str,
@@ -343,7 +343,7 @@ class TokenCaptureStore:
                 raise TokenCaptureRetiredError(f"Token capture for rollout {rollout_id} is retired")
             if state.get("frozen", False):
                 raise TokenCaptureFrozenError(f"Token capture for rollout {rollout_id} is already frozen")
-            refusals = [RefusalRecord.model_validate(record) for record in state.get("refusals") or []]
+            refusals = [EngineRefusalRecord.model_validate(record) for record in state.get("engine_refusals") or []]
             for existing in refusals:
                 if existing.model_call_id != model_call_id:
                     continue
@@ -353,7 +353,7 @@ class TokenCaptureStore:
                     f"Model call id {model_call_id!r} was refused with a different code for rollout {rollout_id!r}"
                 )
             refusals.append(
-                RefusalRecord(
+                EngineRefusalRecord(
                     model_call_id=model_call_id,
                     code=code,
                     created_at=time.time(),
@@ -361,11 +361,11 @@ class TokenCaptureStore:
                     parent_resolution=parent_resolution,
                 )
             )
-            state["refusals"] = [record.model_dump(mode="json") for record in refusals]
+            state["engine_refusals"] = [record.model_dump(mode="json") for record in refusals]
             state["version"] = int(state.get("version", 0)) + 1
             self._write_state(rollout_id, state)
 
-    async def refuse_call(
+    async def record_engine_refusal(
         self,
         rollout_id: str,
         *,
@@ -374,8 +374,10 @@ class TokenCaptureStore:
         parent_call_id: str | None = None,
         parent_resolution: ParentResolutionStatus | None = None,
     ) -> None:
-        """Record an engine refusal; see ``_refuse_call``."""
-        await asyncio.to_thread(self._refuse_call, rollout_id, model_call_id, code, parent_call_id, parent_resolution)
+        """Record an engine refusal; see ``_record_engine_refusal``."""
+        await asyncio.to_thread(
+            self._record_engine_refusal, rollout_id, model_call_id, code, parent_call_id, parent_resolution
+        )
 
     def _dangling_intents(self, rollout_id: str, entries: tuple[TokenEntry, ...], state: dict[str, Any]) -> list[str]:
         path = self.intents_path_for(rollout_id)
@@ -384,7 +386,7 @@ class TokenCaptureStore:
         # An entry or a refusal resolves an intent; a refused call never generated, so it was
         # not lost.
         resolved = {entry.model_call_id for entry in entries}
-        resolved.update(str(record["model_call_id"]) for record in state.get("refusals") or [])
+        resolved.update(str(record["model_call_id"]) for record in state.get("engine_refusals") or [])
         intents = [line.strip().decode("utf-8") for line in path.read_bytes().splitlines() if line.strip()]
         return [call_id for call_id in intents if call_id not in resolved]
 
@@ -417,7 +419,9 @@ class TokenCaptureStore:
                 incomplete=incomplete,
                 snapshot_id=str(state["snapshot_id"]),
                 version=int(state["version"]),
-                refusals=tuple(RefusalRecord.model_validate(record) for record in state.get("refusals") or []),
+                engine_refusals=tuple(
+                    EngineRefusalRecord.model_validate(record) for record in state.get("engine_refusals") or []
+                ),
             )
 
     async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:
@@ -446,7 +450,7 @@ class TokenCaptureStore:
         # without a fence, and a late writer never finds an index that points past missing records.
         state["indexed_size"] = 0
         state["entry_digests"] = {}
-        state["refusals"] = []
+        state["engine_refusals"] = []
         state["retired"] = True
         self._write_state(rollout_id, state, sync_root=False)
 

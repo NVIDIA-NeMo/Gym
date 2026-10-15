@@ -86,7 +86,7 @@ LEDGER_ROW_MISSING_RESPONSE_ID_REASON = "ledger_row_missing_response_id"
 # A committed ledger row lacks the chain or cumulative digest that verification anchors on.
 LEDGER_ROW_MISSING_CHAIN_HASH_REASON = "ledger_row_missing_chain_hash"
 
-# The error code the client receives, and a ``RefusalRecord`` carries, when the engine refused a
+# The error code the client receives, and a ``EngineRefusalRecord`` carries, when the engine refused a
 # request because the prompt does not fit the context window (OpenAI's name for that error). A
 # refusal that named only an output-token parameter carries no code.
 CONTEXT_LENGTH_EXCEEDED_ERROR_CODE = "context_length_exceeded"
@@ -129,7 +129,7 @@ def compute_digest(token_ids: list[int]) -> str:
     return hashlib.sha256(_DIGEST_DOMAIN + encode_token_ids(token_ids)).hexdigest()
 
 
-class RefusalRecord(BaseModel):
+class EngineRefusalRecord(BaseModel):
     """One model call the engine refused, so the rollout has no record for it.
 
     A refusal is not a lost capture: the call never generated, and the client was told why.

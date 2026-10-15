@@ -1103,7 +1103,7 @@ class TestApp:
         snapshot = store.freeze_now("r0")
         assert snapshot.entries == ()
         assert snapshot.incomplete is False
-        (record,) = snapshot.refusals
+        (record,) = snapshot.engine_refusals
         assert (record.model_call_id, record.code) == ("mc-1", "context_length_exceeded")
         assert record.created_at > 0
         # The dispatch resolved the request's lineage before the engine was called; a request with
@@ -1132,7 +1132,7 @@ class TestApp:
         assert response.json()["error"]["code"] is None
         snapshot = store.freeze_now("r0")
         assert snapshot.incomplete is False
-        assert [(record.model_call_id, record.code) for record in snapshot.refusals] == [("mc-1", None)]
+        assert [(record.model_call_id, record.code) for record in snapshot.engine_refusals] == [("mc-1", None)]
 
     def test_the_absorbed_overflow_records_no_refusal(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         # Without propagate_context_overflow_errors the caller sees an exhausted generation, not a
@@ -1146,7 +1146,7 @@ class TestApp:
         response = self._post_captured_chat_completion(server, store)
 
         assert response.status_code == 200
-        assert store.freeze_now("r0").refusals == ()
+        assert store.freeze_now("r0").engine_refusals == ()
 
     def test_an_uncaptured_request_is_still_refused_and_records_nothing(
         self, monkeypatch: MonkeyPatch, tmp_path

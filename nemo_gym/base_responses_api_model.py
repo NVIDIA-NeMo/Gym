@@ -1606,7 +1606,7 @@ def _record(
 async def _fail_uncommitted_external_call(context: CaptureContext | None) -> None:
     """Record a failure when an admitted worker call returns without commit coordinates.
 
-    A call the engine refused is skipped: ``record_refusal`` already wrote its definite reason.
+    A call the engine refused is skipped: ``capture_engine_refusal`` already wrote its definite reason.
     """
     if (
         context is None
@@ -1616,7 +1616,7 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         # A checkpoint gate owns a deferred row: it publishes it when the response starts,
         # and a call whose response never starts made no answer to record, so it is not poisoned.
         or context.deferred_commit is not None
-        or context.refusal_recorded
+        or context.engine_refusal_recorded
         or context.lineage_store is None
     ):
         return

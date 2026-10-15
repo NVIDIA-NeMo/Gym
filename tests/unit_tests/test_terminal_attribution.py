@@ -27,8 +27,8 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.token_id_capture import (
+    EngineRefusalRecord,
     ParentResolutionStatus,
-    RefusalRecord,
     TokenCaptureStore,
     TokenEntry,
     stamp_lineage,
@@ -895,7 +895,7 @@ def test_a_refusal_ends_the_rebuilt_response_only_when_it_continued_the_terminal
     # call (or a token-identical retry of it) ended the rollout at the model's limit. A refusal the
     # harness recovered from, one on an auxiliary branch, one of an output-token parameter, and one
     # whose parent is unknown leave the verdict alone, however late they were recorded.
-    record = RefusalRecord(
+    record = EngineRefusalRecord(
         **{"model_call_id": "call3", "code": "context_length_exceeded", "created_at": 3.5, **refusal}
     )
     built = _assemble(
@@ -904,7 +904,7 @@ def test_a_refusal_ends_the_rebuilt_response_only_when_it_continued_the_terminal
         "prefix_merging",
         "m",
         explicit_terminal_call_id="call2",
-        refusals=(record,),
+        engine_refusals=(record,),
     )
     assert built[MASK_SAMPLE_KEY] is False
     assert built["rebuilt_response"].get("status") == expected_status
@@ -923,7 +923,7 @@ def test_a_refusal_of_a_retry_twin_counts_only_when_the_retained_twin_preceded_i
     # Recorded before ``call2b`` was served (3.2), it was superseded by that successful re-serving:
     # the harness recovered, and the retained twin's own ending stands. Recorded after it, the
     # refusal is the harness's next request not fitting, and the rollout ended at the window.
-    record = RefusalRecord(
+    record = EngineRefusalRecord(
         model_call_id="call3",
         code="context_length_exceeded",
         created_at=refusal_created_at,
@@ -936,7 +936,7 @@ def test_a_refusal_of_a_retry_twin_counts_only_when_the_retained_twin_preceded_i
         "prefix_merging",
         "m",
         explicit_terminal_call_id="call2b",
-        refusals=(record,),
+        engine_refusals=(record,),
     )
     assert built[MASK_SAMPLE_KEY] is False
     assert built["rebuilt_response"].get("status") == expected_status
@@ -956,7 +956,7 @@ def test_finalize_reports_a_terminal_refusal_on_the_result(tmp_path):
         for entry in _completed_chain_entries():
             await store.put(entry.model_copy(update={"rollout_id": "t0-r0"}))
         await store.begin_call("t0-r0", "call3")
-        await store.refuse_call(
+        await store.record_engine_refusal(
             "t0-r0",
             model_call_id="call3",
             code="context_length_exceeded",
@@ -970,7 +970,7 @@ def test_finalize_reports_a_terminal_refusal_on_the_result(tmp_path):
     assert result.get(MASK_SAMPLE_KEY) is not True
     assert result["response"]["status"] == "incomplete"
     assert result["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
-    (refusal,) = result[TOKEN_CAPTURE_KEY]["refusals"]
+    (refusal,) = result[TOKEN_CAPTURE_KEY]["engine_refusals"]
     assert (refusal["model_call_id"], refusal["code"]) == ("call3", "context_length_exceeded")
     assert refusal["created_at"] > 3.0
     assert (refusal["parent_call_id"], refusal["parent_resolution"]) == (

@@ -30,7 +30,13 @@ from __future__ import annotations
 from typing import Awaitable, Callable
 
 from nemo_gym.token_id_capture.lineage import stamp_continuation
-from nemo_gym.token_id_capture.protocols import LineageResolver, TokenCaptureRetiredError, TokenSink, TokenSource
+from nemo_gym.token_id_capture.protocols import (
+    LineageResolver,
+    TokenCaptureFrozenError,
+    TokenCaptureRetiredError,
+    TokenSink,
+    TokenSource,
+)
 from nemo_gym.token_id_capture.records import (
     ParentResolutionStatus,
     TokenEntry,
@@ -102,7 +108,7 @@ async def run_conformance(
 
     Raise ``ConformanceError`` on the first failure.
     Lineage checks are skipped without a ``lineage_factory``.
-    The ``begin_call`` and ``refuse_call`` checks are skipped when the sink lacks the extension.
+    The ``begin_call`` and ``record_engine_refusal`` checks are skipped when the sink lacks the extension.
     """
     passed: list[str] = []
     closables: list = []
@@ -147,8 +153,8 @@ async def run_conformance(
     probe_sink = sink()
     if getattr(probe_sink, "begin_call", None) is not None:
         checks.append(("begin_call_custody", lambda r: _check_begin_call_custody(sink(), source(), r)))
-    if getattr(probe_sink, "refuse_call", None) is not None:
-        checks.append(("refuse_call_resolution", lambda r: _check_refuse_call_resolution(sink(), source(), r)))
+    if getattr(probe_sink, "record_engine_refusal", None) is not None:
+        checks.append(("engine_refusal_resolution", lambda r: _check_refuse_call_resolution(sink(), source(), r)))
 
     try:
         for name, check in checks:
@@ -311,10 +317,12 @@ async def _check_unconditional_retirement(sink: TokenSink, src: TokenSource, rol
     begin = getattr(sink, "begin_call", None)
     if begin is not None:
         await _require_fenced(name, begin(rollout_id, "call-4"), "a late begin_call")
-    refuse = getattr(sink, "refuse_call", None)
+    refuse = getattr(sink, "record_engine_refusal", None)
     if refuse is not None:
         await _require_fenced(
-            name, refuse(rollout_id, model_call_id="call-5", code="context_length_exceeded"), "a late refuse_call"
+            name,
+            refuse(rollout_id, model_call_id="call-5", code="context_length_exceeded"),
+            "a late record_engine_refusal",
         )
     _require(await _visible_entries(src, rollout_id) == 0, name, "a write after retirement became visible")
     again = await src.retire([rollout_id])
@@ -391,13 +399,13 @@ async def _check_begin_call_custody(sink: TokenSink, src: TokenSource, rollout_i
 
 
 async def _check_refuse_call_resolution(sink: TokenSink, src: TokenSource, rollout_id: str) -> None:
-    name = "refuse_call_resolution"
+    name = "engine_refusal_resolution"
     entry = _make_entry(rollout_id, "call-1", prompt=[11, 12], generation=[13, 14], request_items=_REQUEST, text="a")
     await sink.put(entry)
     begin = getattr(sink, "begin_call", None)
     if begin is not None:
         await begin(rollout_id, "call-2")
-    await sink.refuse_call(  # type: ignore[attr-defined]
+    await sink.record_engine_refusal(  # type: ignore[attr-defined]
         rollout_id,
         model_call_id="call-2",
         code="context_length_exceeded",
@@ -409,17 +417,25 @@ async def _check_refuse_call_resolution(sink: TokenSink, src: TokenSource, rollo
     _require(
         [
             (record.model_call_id, record.code, record.parent_call_id, record.parent_resolution)
-            for record in snapshot.refusals
+            for record in snapshot.engine_refusals
         ]
         == [("call-2", "context_length_exceeded", "call-1", ParentResolutionStatus.RESOLVED)],
         name,
-        f"the frozen snapshot does not report the refusal with its lineage: {snapshot.refusals!r}",
+        f"the frozen snapshot does not report the refusal with its lineage: {snapshot.engine_refusals!r}",
     )
     try:
-        await sink.refuse_call(rollout_id, model_call_id="call-3", code="context_length_exceeded")  # type: ignore[attr-defined]
-    except Exception:
-        return  # A hard fence is acceptable.
-    # A sink that accepts the late refusal must not stale the consumed snapshot's retirement:
-    # the refusal cannot change the sample that was already delivered.
+        await sink.record_engine_refusal(rollout_id, model_call_id="call-3", code="context_length_exceeded")  # type: ignore[attr-defined]
+    except TokenCaptureFrozenError:
+        return  # The hard fence the protocol names.
+    # A sink that accepts the late refusal must leave the frozen snapshot unchanged: the refusal
+    # cannot change the sample that was already delivered, so a second freeze reports the same
+    # snapshot, version and refusals, and the consumed snapshot's retirement is not staled.
+    again = await src.freeze(rollout_id)
+    _require(
+        (again.snapshot_id, again.version, again.engine_refusals)
+        == (snapshot.snapshot_id, snapshot.version, snapshot.engine_refusals),
+        name,
+        "a refusal after freeze changed the frozen snapshot",
+    )
     retired = await src.drop(rollout_id, snapshot_id=snapshot.snapshot_id, version=snapshot.version)
     _require(retired, name, "a refusal after freeze changed the version and staled the consumed snapshot")

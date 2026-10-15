@@ -132,9 +132,9 @@ class CaptureContext:
     deferred_commit: CaptureLedgerCommit | None = None
     # ``register_call_intent`` wrote a durable pre-dispatch intent to the sink.
     intent_registered: bool = False
-    # ``record_refusal`` recorded that the engine refused this call. The call has no
+    # ``capture_engine_refusal`` recorded that the engine refused this call. The call has no
     # entry, and the worker-custody sweep must not record it a second time as uncommitted.
-    refusal_recorded: bool = False
+    engine_refusal_recorded: bool = False
 
     @property
     def parent_call_id(self) -> str | None:
@@ -355,14 +355,14 @@ async def register_call_intent() -> None:
     context.intent_registered = True
 
 
-async def record_refusal(code: str | None) -> None:
+async def capture_engine_refusal(code: str | None) -> None:
     """Record that the engine refused the in-flight call before it generated anything.
 
     ``code`` is the error code the client received: ``context_length_exceeded`` for a prompt
     that does not fit the context window, ``None`` when the envelope carried no code.
 
-    On the local capture path the sink's optional ``refuse_call`` extension stores a
-    ``RefusalRecord`` and resolves the intent ``register_call_intent`` wrote, so the rollout
+    On the local capture path the sink's optional ``record_engine_refusal`` extension stores a
+    ``EngineRefusalRecord`` and resolves the intent ``register_call_intent`` wrote, so the rollout
     freezes complete. The record carries the request-time lineage decision ``resolve_parent``
     made before dispatch (the call the refused request continued), so the builder can tell a
     refusal that followed the delivered chain from one on another branch. A sink without the
@@ -386,7 +386,7 @@ async def record_refusal(code: str | None) -> None:
             return
         if context.token_sink is None:
             return
-        refuse = getattr(context.token_sink, "refuse_call", None)
+        refuse = getattr(context.token_sink, "record_engine_refusal", None)
         if refuse is None:
             _note_missing_refuse_call(context)
             return
@@ -399,7 +399,7 @@ async def record_refusal(code: str | None) -> None:
             parent_call_id=match.model_call_id if match is not None else None,
             parent_resolution=resolution.status if resolution is not None else None,
         )
-        context.refusal_recorded = True
+        context.engine_refusal_recorded = True
     except TokenCaptureFrozenError:
         # The freeze sealed the verdict, as for a late ``put``; see ``commit_entry``.
         logger.warning(
@@ -418,12 +418,20 @@ async def record_refusal(code: str | None) -> None:
 
 
 async def _record_external_refusal(context: CaptureContext) -> None:
-    """Write the refusal as a definite ledger failure for an admitted worker-custody call."""
+    """Write the refusal as a definite ledger failure for an admitted worker-custody call.
+
+    The ledger failure row carries the call id and ``ENGINE_REFUSED_CALL_REASON`` only: the
+    staging wire models declare no column for the error code or for the request-time lineage, so
+    a rollout rebuilt from staged records cannot tell a context-window refusal from an
+    output-parameter one and reports no truncation verdict for it (NVIDIA-NeMo/Gym#4647 tracks
+    carrying both). The row still names the call as one that served no completion, which the
+    framework's receipt builder reads through ``UNSERVED_CALL_FAILURE_REASONS``.
+    """
     ledger = context.lineage_store
     if context.capture_admission is None or context.committed or not isinstance(ledger, CaptureLedger):
         return
     await ledger.record_failure(context.rollout_id, context.model_call_id, ENGINE_REFUSED_CALL_REASON)
-    context.refusal_recorded = True
+    context.engine_refusal_recorded = True
 
 
 def _note_missing_refuse_call(context: CaptureContext) -> None:
@@ -435,7 +443,7 @@ def _note_missing_refuse_call(context: CaptureContext) -> None:
         _REFUSE_CALL_MISSING_NOTED[0] = True
     if first:
         logger.warning(
-            "Sink %s does not implement refuse_call: a call the engine refuses leaves its intent "
+            "Sink %s does not implement record_engine_refusal: a call the engine refuses leaves its intent "
             "dangling, and the rollout is masked (first seen on model call %s of rollout %s).",
             type(context.token_sink).__name__,
             context.model_call_id,

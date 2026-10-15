@@ -60,8 +60,8 @@ from nemo_gym.responses_converter import (
 from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY, _redacted_url, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
+    capture_engine_refusal,
     current_capture_context,
-    record_refusal,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.external_capture import (
@@ -1232,7 +1232,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if self.config.propagate_context_overflow_errors:
                     # The refused call generated nothing and gets no token record; the refusal
                     # record resolves the capture intent registered before dispatch.
-                    await record_refusal(_mark_propagated_overflow(e))
+                    await capture_engine_refusal(_mark_propagated_overflow(e))
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
@@ -1582,7 +1582,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if self.config.propagate_context_overflow_errors:
                     # The refused call generated nothing and gets no token record; the refusal
                     # record resolves the capture intent registered before dispatch.
-                    await record_refusal(_mark_propagated_overflow(e))
+                    await capture_engine_refusal(_mark_propagated_overflow(e))
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
