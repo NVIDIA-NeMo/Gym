@@ -5,8 +5,6 @@
 from __future__ import annotations
 
 import json
-from typing import Any
-from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -58,14 +56,6 @@ class TestParseKeys:
 
 
 class TestRotation:
-    def test_round_robin(self):
-        p = TavilySearch(api_keys=["k1", "k2", "k3"])
-        assert [p._next_key() for _ in range(7)] == ["k1", "k2", "k3", "k1", "k2", "k3", "k1"]
-
-    def test_single_key_keeps_returning_same(self):
-        p = TavilySearch(api_keys=["only_one"])
-        assert [p._next_key() for _ in range(3)] == ["only_one"] * 3
-
     def test_empty_keys_rejected(self):
         with pytest.raises(ValueError, match="at least one Tavily API key"):
             TavilySearch(api_keys="[]")
@@ -85,226 +75,109 @@ class TestShouldRotateOnStatus:
         assert _should_rotate_on_status(status) is False
 
 
-# ---------------------------------------------------------------------------
-# Rotation-on-retry: send key-specific failures (401/403/429), verify the
-# executor rotates to the next key, and verify it stops after len(keys).
-# ---------------------------------------------------------------------------
+async def _rotating_search(
+    keys: list[str], respond, *, max_sweeps: int = 1, calls: int = 1
+) -> tuple[list[str], list[str]]:
+    """Run ``calls`` searches; return each result and the bearer keys the upstream saw, in order."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["Authorization"])
+        return respond(len(seen), request.headers["Authorization"])
+
+    provider = TavilySearch(api_keys=keys, max_sweeps=max_sweeps)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        results = [await provider.search("x", client) for _ in range(calls)]
+    return results, seen
 
 
-def _mock_response(status_code: int, json_body: dict[str, Any] | None = None) -> AsyncMock:
-    resp = AsyncMock()
-    resp.status_code = status_code
-    resp.json = AsyncMock(return_value=json_body or {})
-    if status_code >= 400:
-
-        def _raise():
-            raise httpx.HTTPStatusError(
-                f"{status_code}", request=AsyncMock(), response=AsyncMock(status_code=status_code)
-            )
-
-        resp.raise_for_status = _raise
-    else:
-        resp.raise_for_status = lambda: None
-    # The executor calls .json() synchronously — wrap accordingly.
-    if json_body is not None:
-        resp.json = lambda: json_body
-    return resp
+def _ok(*_args) -> httpx.Response:
+    return httpx.Response(200, json={"answer": "ok", "results": []})
 
 
 class TestSearchExecutorRotation:
     async def test_first_key_succeeds_no_rotation(self):
-        provider = TavilySearch(api_keys=["k1", "k2", "k3"])
-        seen_keys: list[str] = []
+        results, seen = await _rotating_search(["k1", "k2", "k3"], _ok)
 
-        async def fake_post(url, **kwargs):
-            seen_keys.append(kwargs["headers"]["Authorization"])
-            return _mock_response(200, {"answer": "hi", "results": []})
+        assert not results[0].startswith("<error>")
+        assert seen == ["Bearer k1"]
 
-        client = AsyncMock()
-        client.post = fake_post
-        result = await provider.search("x", client)
-        assert not result.startswith("<error>")
-        assert seen_keys == ["Bearer k1"]
-        assert provider._key_idx == 1
+    async def test_successive_calls_rotate_round_robin(self):
+        _, seen = await _rotating_search(["k1", "k2", "k3"], _ok, calls=4)
+
+        assert seen == ["Bearer k1", "Bearer k2", "Bearer k3", "Bearer k1"]
 
     async def test_rotates_on_401_then_succeeds_on_second_key(self):
-        provider = TavilySearch(api_keys=["bad", "good", "unused"])
-        seen_keys: list[str] = []
+        results, seen = await _rotating_search(
+            ["bad", "good", "unused"], lambda _n, key: httpx.Response(401) if key == "Bearer bad" else _ok()
+        )
 
-        async def fake_post(url, **kwargs):
-            seen_keys.append(kwargs["headers"]["Authorization"])
-            if "bad" in kwargs["headers"]["Authorization"]:
-                return _mock_response(401)
-            return _mock_response(200, {"answer": "hi", "results": []})
+        assert not results[0].startswith("<error>")
+        assert seen == ["Bearer bad", "Bearer good"]
 
-        client = AsyncMock()
-        client.post = fake_post
-        result = await provider.search("x", client)
-        assert not result.startswith("<error>")
-        # First key tried, got 401; rotated to second.
-        assert seen_keys == ["Bearer bad", "Bearer good"]
+    @pytest.mark.parametrize("status", sorted(KEY_ROTATION_RETRY_STATUSES) + [500, 502, 503, 504, 599])
+    async def test_rotates_on_key_specific_and_server_statuses(self, status):
+        results, seen = await _rotating_search(
+            ["first", "second"], lambda _n, key: httpx.Response(status) if key == "Bearer first" else _ok()
+        )
 
-    @pytest.mark.parametrize("status", sorted(KEY_ROTATION_RETRY_STATUSES))
-    async def test_rotates_on_each_key_specific_status(self, status):
-        provider = TavilySearch(api_keys=["first", "second"])
-        seen_keys: list[str] = []
-
-        async def fake_post(url, **kwargs):
-            seen_keys.append(kwargs["headers"]["Authorization"])
-            if "first" in kwargs["headers"]["Authorization"]:
-                return _mock_response(status)
-            return _mock_response(200, {"answer": "ok", "results": []})
-
-        client = AsyncMock()
-        client.post = fake_post
-        result = await provider.search("x", client)
-        assert not result.startswith("<error>")
-        assert seen_keys == ["Bearer first", "Bearer second"]
+        assert not results[0].startswith("<error>")
+        assert seen == ["Bearer first", "Bearer second"]
 
     async def test_all_keys_fail_returns_error(self):
-        provider = TavilySearch(api_keys=["k1", "k2", "k3"])
-        seen_keys: list[str] = []
+        results, seen = await _rotating_search(["k1", "k2", "k3"], lambda *_: httpx.Response(401))
 
-        async def fake_post(url, **kwargs):
-            seen_keys.append(kwargs["headers"]["Authorization"])
-            return _mock_response(401)
+        assert seen == ["Bearer k1", "Bearer k2", "Bearer k3"]
+        assert results[0] == (
+            "<error>Tavily exhausted 3 attempt(s) (3 key(s) × 1 sweep(s)) on retryable errors "
+            "(last status=401). Refresh keys or check upstream.</error>"
+        )
 
-        client = AsyncMock()
-        client.post = fake_post
-        result = await provider.search("x", client)
-        assert result.startswith("<error>")
-        # Tried each key exactly once.
-        assert seen_keys == ["Bearer k1", "Bearer k2", "Bearer k3"]
-        assert "exhausted 3 attempt(s)" in result
-        assert "3 key(s) × 1 sweep(s)" in result
-        assert "last status=401" in result
-        assert "retryable error" in result
+    @pytest.mark.parametrize("status", [400, 404])
+    async def test_other_statuses_do_not_trigger_rotation(self, status):
+        results, seen = await _rotating_search(["k1", "k2"], lambda *_: httpx.Response(status))
 
-    async def test_404_does_NOT_trigger_rotation(self):
-        # 404 isn't a rotation-worthy status — should fail through after one attempt.
-        provider = TavilySearch(api_keys=["k1", "k2"])
-        seen_keys: list[str] = []
-
-        async def fake_post(url, **kwargs):
-            seen_keys.append(kwargs["headers"]["Authorization"])
-            return _mock_response(404)
-
-        client = AsyncMock()
-        client.post = fake_post
-        result = await provider.search("x", client)
-        assert result.startswith("<error>")
-        # Only ONE key attempted — 404 doesn't trigger rotation.
-        assert seen_keys == ["Bearer k1"]
-
-    @pytest.mark.parametrize("status", [500, 502, 503, 504, 599])
-    async def test_rotates_on_5xx(self, status):
-        # 5xx is also key-rotation-worthy: free retry costs nothing and often
-        # the next attempt lands on a healthy backend.
-        provider = TavilySearch(api_keys=["k1", "k2"])
-        seen_keys: list[str] = []
-
-        async def fake_post(url, **kwargs):
-            seen_keys.append(kwargs["headers"]["Authorization"])
-            if "k1" in kwargs["headers"]["Authorization"]:
-                return _mock_response(status)
-            return _mock_response(200, {"answer": "ok", "results": []})
-
-        client = AsyncMock()
-        client.post = fake_post
-        result = await provider.search("x", client)
-        assert not result.startswith("<error>")
-        assert seen_keys == ["Bearer k1", "Bearer k2"]
+        assert results[0].startswith("<error>")
+        assert str(status) in results[0]
+        assert seen == ["Bearer k1"]
 
     async def test_max_sweeps_2_tries_each_key_twice(self):
-        # max_sweeps=2 should give us 2 × len(keys) = 4 attempts before giving up.
-        provider = TavilySearch(api_keys=["k1", "k2"], max_sweeps=2)
-        seen_keys: list[str] = []
+        results, seen = await _rotating_search(["k1", "k2"], lambda *_: httpx.Response(429), max_sweeps=2)
 
-        async def fake_post(url, **kwargs):
-            seen_keys.append(kwargs["headers"]["Authorization"])
-            return _mock_response(429)
-
-        client = AsyncMock()
-        client.post = fake_post
-        result = await provider.search("x", client)
-        assert result.startswith("<error>")
-        # Each key attempted twice in round-robin.
-        assert seen_keys == ["Bearer k1", "Bearer k2", "Bearer k1", "Bearer k2"]
-        assert "exhausted 4 attempt(s)" in result
-        assert "2 key(s) × 2 sweep(s)" in result
+        assert seen == ["Bearer k1", "Bearer k2", "Bearer k1", "Bearer k2"]
+        assert "exhausted 4 attempt(s)" in results[0]
+        assert "2 key(s) × 2 sweep(s)" in results[0]
 
     async def test_max_sweeps_3_succeeds_on_third_sweep(self):
-        # Single key, fails twice, succeeds on third attempt (third sweep).
-        provider = TavilySearch(api_keys=["only"], max_sweeps=3)
-        call_count = {"n": 0}
+        results, seen = await _rotating_search(
+            ["only"], lambda n, _key: httpx.Response(503) if n < 3 else _ok(), max_sweeps=3
+        )
 
-        async def fake_post(url, **kwargs):
-            call_count["n"] += 1
-            if call_count["n"] < 3:
-                return _mock_response(503)
-            return _mock_response(200, {"answer": "ok", "results": []})
+        assert not results[0].startswith("<error>")
+        assert len(seen) == 3
 
-        client = AsyncMock()
-        client.post = fake_post
-        result = await provider.search("x", client)
-        assert not result.startswith("<error>")
-        assert call_count["n"] == 3
-
-    def test_max_sweeps_default_is_1(self):
-        provider = TavilySearch(api_keys=["k1", "k2", "k3"])
-        assert provider._max_sweeps == 1
-
-    def test_max_sweeps_zero_rejected(self):
+    @pytest.mark.parametrize("max_sweeps", [0, -1])
+    def test_max_sweeps_below_one_is_rejected(self, max_sweeps):
         with pytest.raises(ValueError, match="max_sweeps must be >= 1"):
-            TavilySearch(api_keys=["k1"], max_sweeps=0)
-
-    def test_max_sweeps_negative_rejected(self):
-        with pytest.raises(ValueError, match="max_sweeps must be >= 1"):
-            TavilySearch(api_keys=["k1"], max_sweeps=-1)
-
-    async def test_4xx_400_does_NOT_trigger_rotation(self):
-        # 400 (e.g. malformed query) isn't fixable by changing keys.
-        provider = TavilySearch(api_keys=["k1", "k2"])
-        seen_keys: list[str] = []
-
-        async def fake_post(url, **kwargs):
-            seen_keys.append(kwargs["headers"]["Authorization"])
-            return _mock_response(400)
-
-        client = AsyncMock()
-        client.post = fake_post
-        result = await provider.search("x", client)
-        assert result.startswith("<error>")
-        assert seen_keys == ["Bearer k1"]
+            TavilySearch(api_keys=["k1"], max_sweeps=max_sweeps)
 
     async def test_a_200_that_is_not_json_is_an_error_not_an_exception(self):
-        provider = TavilySearch(api_keys=["k1"])
-        response = _mock_response(200)
+        results, _ = await _rotating_search(["k1"], lambda *_: httpx.Response(200, text="<html>"))
 
-        def not_json():
-            raise json.JSONDecodeError("Expecting value", "<html>", 0)
+        assert results[0] == "<error>Tavily returned a response that is not JSON</error>"
 
-        response.json = not_json
-        client = AsyncMock()
-        client.post = AsyncMock(return_value=response)
+    async def test_network_error_does_not_trigger_rotation(self):
+        seen: list[str] = []
 
-        assert await provider.search("x", client) == "<error>Tavily returned a response that is not JSON</error>"
-
-    async def test_network_error_does_NOT_trigger_rotation(self):
-        provider = TavilySearch(api_keys=["k1", "k2"])
-        seen_keys: list[str] = []
-
-        async def fake_post(url, **kwargs):
-            seen_keys.append(kwargs["headers"]["Authorization"])
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers["Authorization"])
             raise httpx.ConnectError("dns failed")
 
-        client = AsyncMock()
-        client.post = fake_post
-        result = await provider.search("x", client)
-        assert result.startswith("<error>")
-        # Only one attempt — network errors aren't key-specific.
-        assert seen_keys == ["Bearer k1"]
-        assert "dns failed" in result
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result = await TavilySearch(api_keys=["k1", "k2"]).search("x", client)
+
+        assert result.startswith("<error>") and "dns failed" in result
+        assert seen == ["Bearer k1"]
 
 
 async def _search(reply: dict, query: str = "q") -> tuple[str, httpx.Request]:

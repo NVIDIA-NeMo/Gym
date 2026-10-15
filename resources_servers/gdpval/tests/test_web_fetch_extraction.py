@@ -116,11 +116,56 @@ def test_extraction_runs_off_the_event_loop(monkeypatch):
     assert threads and threads[0] is not threading.main_thread()
 
 
-def test_a_page_over_the_size_cap_is_cut_before_extraction(monkeypatch):
-    seen = []
+async def _read_streamed(chunks: list[bytes], encoding: str = "utf-8") -> tuple[str, int]:
+    """Run ``_read_page`` over a streamed body; return its text and how many chunks were pulled."""
+    pulled = 0
+
+    async def body():
+        nonlocal pulled
+        for chunk in chunks:
+            pulled += 1
+            yield chunk
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body(), headers={"content-type": f"text/html; charset={encoding}"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        return await tavily_search._read_page("https://example.test/p", client), pulled
+
+
+def test_a_page_over_the_size_cap_stops_being_read_and_is_cut(monkeypatch):
     monkeypatch.setattr(tavily_search, "MAX_BODY_BYTES", 1000)
-    monkeypatch.setattr(tavily_search, "_extract_page_text", lambda html: seen.append(len(html)) or "text")
 
-    _fetch("x" * 5000)
+    text, pulled = asyncio.run(_read_streamed([b"x" * 400] * 10))
 
-    assert seen == [1000]
+    assert text == "x" * 1000
+    assert pulled < 10, "the reader keeps pulling chunks after the cap"
+
+
+def test_the_cut_through_a_multibyte_character_decodes_with_a_replacement(monkeypatch):
+    monkeypatch.setattr(tavily_search, "MAX_BODY_BYTES", 1000)
+    chunks = [b"a" + "é".encode() * 250, "é".encode() * 250]
+
+    text, _ = asyncio.run(_read_streamed(chunks))
+
+    assert text == "a" + "é" * 499 + "\ufffd"
+
+
+def test_only_the_part_of_a_large_page_before_the_cap_reaches_the_model(monkeypatch):
+    monkeypatch.setattr(tavily_search, "MAX_BODY_BYTES", 1000)
+    head = "<html><body><main><p>The early paragraph is read.</p>"
+    filler = "<p>" + "padding words " * 30 + "</p>"
+    tail = "<p>The late paragraph is never read.</p></main></body></html>"
+    page = (head + filler * 5 + tail).encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=page, headers={"content-type": "text/html; charset=utf-8"})
+
+    async def run() -> str:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await fetch_web_page("https://example.test/p", client)
+
+    result = asyncio.run(run())
+
+    assert "The early paragraph is read." in result
+    assert "The late paragraph is never read." not in result

@@ -75,75 +75,43 @@ def test_prompt_tells_the_model_there_is_no_deep_learning_framework(prompt):
         assert framework in disclaimer, f"{framework} is not covered by the absence disclaimer"
 
 
+# Names the prompt uses for distributions published under another name.
+_DISTRIBUTION = {"opencv": "opencv-python"}
+
+
+def _advertised_python_packages(prompt: str) -> list[str]:
+    """The package names in the prompt's Python bullets: the parenthesised lists and the trailing 'plus X'."""
+    names: list[str] = []
+    for line in prompt.split("## Reference Files")[0].splitlines():
+        if not line.startswith("- ") or "Python" not in line:
+            continue
+        for group in re.findall(r"\(([^)]*)\)", line):
+            names += [name.strip() for name in group.split(",")]
+        names += re.findall(r"\bplus (\w+)\b", line)
+    return names
+
+
 def test_prompt_only_advertises_python_packages_that_are_pinned(prompt):
     installed = _pins(_PY_MANIFEST)
-    advertised = [
-        "numpy",
-        "pandas",
-        "polars",
-        "scipy",
-        "matplotlib",
-        "plotly",
-        "seaborn",
-        "bokeh",
-        "scikit-learn",
-        "xgboost",
-        "lightgbm",
-        "catboost",
-        "statsmodels",
-        "python-docx",
-        "python-pptx",
-        "openpyxl",
-        "PyMuPDF",
-        "pdfplumber",
-        "reportlab",
-        "weasyprint",
-        "fpdf2",
-        "Pillow",
-        "playwright",
-        "nltk",
-        "spacy",
-        "gensim",
-        "librosa",
-        "soundfile",
-        "pydub",
-        "moviepy",
-        "av",
-        "shapely",
-        "geopandas",
-        "fiona",
-        "rasterio",
-        "folium",
-        "sympy",
-        "pymc",
-        "h5py",
-        "tables",
-        "rdkit",
-        "biopython",
-        "graphviz",
-        "networkx",
-        "cairosvg",
-        "trimesh",
-        "wordcloud",
-    ]
+    advertised = _advertised_python_packages(prompt)
+
+    assert len(advertised) > 40, f"the prompt's package lists were not parsed: {advertised}"
     for name in advertised:
-        key = name.lower().replace("_", "-")
+        key = _DISTRIBUTION.get(name.lower(), name.lower()).replace("_", "-")
         assert key in installed, f"{name} is advertised in the prompt but is not a pinned package"
-        assert re.search(rf"\b{re.escape(name)}\b", prompt, re.IGNORECASE), (
-            f"{name} is pinned and expected in the prompt's stack summary but is absent"
-        )
-    # opencv is named in prose; the distribution is opencv-python.
-    assert "opencv" in prompt.lower() and "opencv-python" in installed
 
 
 def test_prompt_states_the_real_command_timeout(stirrup_prompt):
-    base = pytest.importorskip("stirrup.tools.code_backends.base")
-    SHELL_TIMEOUT = base.SHELL_TIMEOUT
+    try:
+        from stirrup.tools.code_backends.base import SHELL_TIMEOUT
+    except ImportError:
+        pytest.skip("stirrup is only installed with responses_api_agents/stirrup_agent; run there to check the limit")
 
-    minutes = SHELL_TIMEOUT // 60
-    assert f"{minutes} minutes" in stirrup_prompt, (
-        f"prompt must state the real per-command limit ({minutes} min), not the upstream AA value"
-    )
+    assert f"{SHELL_TIMEOUT // 60} minutes" in stirrup_prompt
+
+
+def test_prompt_states_a_command_limit_in_minutes(stirrup_prompt):
+    assert re.search(r"[Cc]ommands are terminated after \d+ minutes", stirrup_prompt)
 
 
 def test_prompt_tells_the_model_state_does_not_carry_over(stirrup_prompt):

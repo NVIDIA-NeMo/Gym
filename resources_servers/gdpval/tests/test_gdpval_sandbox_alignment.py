@@ -29,9 +29,23 @@ def _pins(path: Path) -> dict[str, str]:
     return out
 
 
-def test_python_manifest_is_the_published_419_pins():
+def _dockerfile() -> str:
+    """The Dockerfile without comment lines, so only what the build executes is matched."""
+    lines = _DOCKERFILE.read_text(encoding="utf-8").splitlines()
+    return "\n".join(line for line in lines if not line.lstrip().startswith("#"))
+
+
+def _published_count(path: Path) -> int:
+    """The package count the manifest's header states it was published with."""
+    header = path.read_text(encoding="utf-8").split("\n\n", 1)[0]
+    match = re.search(r"(\d+) (?:Python |system )?packages", header)
+    assert match, f"{path.name} header states no package count"
+    return int(match.group(1))
+
+
+def test_python_manifest_is_the_published_set():
     pins = _pins(_PY_MANIFEST)
-    assert len(pins) == 419, f"expected the published 419 pins, found {len(pins)}"
+    assert len(pins) == _published_count(_PY_MANIFEST)
     # Spot-check anchors from the published snapshot, including the ones that
     # force an x86_64 build.
     assert pins["numpy"] == "2.4.4"
@@ -40,34 +54,34 @@ def test_python_manifest_is_the_published_419_pins():
     assert all(v and v[0].isdigit() for v in pins.values()), "a pin has no concrete version"
 
 
-def test_apt_manifest_is_the_published_762_pins_on_trixie():
+def test_apt_manifest_is_the_published_set_on_trixie():
     pins = _pins(_APT_MANIFEST)
-    assert len(pins) == 762, f"expected the published 762 pins, found {len(pins)}"
+    assert len(pins) == _published_count(_APT_MANIFEST)
     # The closure being trixie-pinned is why the Dockerfile uses a trixie base.
     assert any("deb13" in v for v in pins.values()), "closure is not Debian 13 pinned"
     assert pins["python3.13"].startswith("3.13"), "reference sandbox is not CPython 3.13"
 
 
 def test_dockerfile_installs_the_pinned_manifest_rather_than_loose_names():
-    text = _DOCKERFILE.read_text(encoding="utf-8")
-    assert "FROM debian:trixie" in text, "base image must match the trixie-pinned closure"
+    text = _dockerfile()
+    assert re.search(r"^FROM debian:trixie\b", text, re.MULTILINE), "base image must match the trixie-pinned closure"
     # Debian's interpreter, not the docker python image's later patch release.
-    assert "python3.13 \\" in text, "the Debian interpreter must be installed explicitly"
-    assert '-r "$EFFECTIVE"' in text, "pins must be installed from a requirements file"
-    assert _PY_MANIFEST.name in text and _APT_MANIFEST.name in text, "manifests are not staged into the image"
+    assert re.search(r"^\s+python3\.13 \\$", text, re.MULTILINE), "the Debian interpreter must be installed explicitly"
+    assert re.search(r'^\$PIP -r "\$EFFECTIVE"$', text, re.MULTILINE), (
+        "pins must be installed from a requirements file"
+    )
+    for manifest in (_PY_MANIFEST, _APT_MANIFEST):
+        assert re.search(rf"^COPY {re.escape(manifest.name)} ", text, re.MULTILINE), f"{manifest.name} is not staged"
     # A loose `pip install pkg1 pkg2 ...` block would let versions drift away
     # from the published sandbox, which is the whole point of pinning.
     assert not re.search(r"pip install[^\n]*\\\n\s+[a-z0-9-]+ [a-z0-9-]+", text), "loose pip block reintroduced"
 
 
 def test_dockerfile_pins_the_interpreter_to_the_published_micro_version():
-    text = _DOCKERFILE.read_text(encoding="utf-8")
-    want = _pins(_APT_MANIFEST)["python3.13"].split("-", 1)[0]
-    assert want == "3.13.5", f"closure pins python3.13={want}; update this test deliberately"
-    major, minor, micro = want.split(".")
-    assert f"({major},{minor},{micro})" in text.replace(" ", ""), (
-        "the build must assert the interpreter micro version, not just 3.13"
-    )
+    want = tuple(_pins(_APT_MANIFEST)["python3.13"].split("-", 1)[0].split("."))
+    asserted = re.search(r"\(v\.major,\s*v\.minor,\s*v\.micro\)\s*==\s*\((\d+),\s*(\d+),\s*(\d+)\)", _dockerfile())
+    assert asserted, "the build must assert the interpreter micro version, not just 3.13"
+    assert asserted.groups() == want
 
 
 def test_arm64_exclusions_are_a_closed_documented_subset():
@@ -89,6 +103,5 @@ def test_dockerfile_does_not_reintroduce_deep_learning_frameworks():
 
 
 def test_verifier_script_is_staged_into_the_image():
-    text = _DOCKERFILE.read_text(encoding="utf-8")
-    assert "COPY verify_gdpval_sandbox.py /opt/gdpval/verify_gdpval_sandbox.py" in text
+    assert re.search(r"^COPY verify_gdpval_sandbox.py /opt/gdpval/verify_gdpval_sandbox.py$", _dockerfile(), re.M)
     assert (_CONTAINERS / "verify_gdpval_sandbox.py").exists()

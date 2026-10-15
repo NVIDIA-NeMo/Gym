@@ -125,6 +125,13 @@ def _verify(client: TestClient, **fields) -> dict:
     return response.json()
 
 
+def _close(client: TestClient, seed: ResourcesSeedSessionRequest, **update):
+    close = ResourcesCloseSessionRequest(
+        resources_session_id=seed.resources_session_id, episode_id=update.get("episode_id", seed.episode_id)
+    )
+    return client.post("/close_session", json=close.model_dump(mode="json"))
+
+
 def _files(directory: Path) -> dict[str, str]:
     return {p.relative_to(directory).as_posix(): p.read_text() for p in sorted(directory.rglob("*")) if p.is_file()}
 
@@ -185,28 +192,21 @@ def test_unjudged_deliverables_are_persisted_and_masked(server, root, tmp_path, 
     assert (Path(verified["deliverables_dir"]) / "report.md").read_text() == "the report"
 
 
-@pytest.mark.parametrize(
-    "paths, persisted",
-    [
-        (["a/report.md", "b/report.md"], {"report.md": "from b"}),
-    ],
-    ids=["same base name: the later one wins"],
-)
-def test_submitted_files_are_flattened_to_their_base_names(server, root, tmp_path, monkeypatch, paths, persisted):
+def test_submitted_files_are_flattened_to_their_base_names(server, root, tmp_path):
     client = TestClient(server.setup_webserver())
     _post_seed(client, _seed(tmp_path))
+    paths = ["a/report.md", "b/report.md"]
     for directory in ("a", "b"):
         (root / directory).mkdir()
         (root / directory / "report.md").write_text(f"from {directory}")
-    (root / "a" / "notes.md").write_text("notes")
     assert client.post("/finish", json={"reason": "done", "paths": paths}).status_code == 200
-    (root / "a" / "notes.md").unlink()
 
     task_dir = Path(_verify(client)["deliverables_dir"])
 
-    assert {k: v for k, v in _files(task_dir).items() if not k.startswith("reference_files/")} == {
+    assert _files(task_dir) == {
         "finish_params.json": json.dumps({"reason": "done", "paths": paths}, indent=2),
-        **persisted,
+        REFERENCE: "the brief",
+        "report.md": "from b",
     }
 
 
@@ -236,9 +236,12 @@ def test_tasks_without_submitted_files_record_how_they_ended(server, root, tmp_p
     assert sorted(p.name for p in task_dir.iterdir()) == ["finish_params.json", "reference_files"]
 
 
-def test_an_agent_that_ran_out_of_wall_time_is_a_masked_timeout_and_persists_nothing(server, root, tmp_path):
+def test_an_agent_that_ran_out_of_wall_time_is_a_masked_timeout_and_persists_nothing(
+    server, root, tmp_path, stopped, references
+):
     client = TestClient(server.setup_webserver())
-    _post_seed(client, _seed(tmp_path))
+    seed = _seed(tmp_path)
+    _post_seed(client, seed)
     (root / "report.md").write_text("half a report")
     client.post("/finish", json={"reason": "done", "paths": ["report.md"]})
 
@@ -248,16 +251,30 @@ def test_an_agent_that_ran_out_of_wall_time_is_a_masked_timeout_and_persists_not
     assert (verified["failure_kind"], verified["mask_sample"], verified["reward"]) == ("agent_timeout", True, 0.0)
     assert "_ng_failure_terminal" not in verified
     assert not (tmp_path / "persist").exists(), "the partial work is not collected or judged"
+    assert _close(client, seed).status_code == 200
+    assert len(stopped) == 1, "the sandbox is still released at close"
+    assert list(references.iterdir()) == []
 
 
-def test_an_agent_that_was_asked_to_stop_is_not_a_timeout(server, root, tmp_path):
+def test_an_agent_that_was_asked_to_stop_is_not_a_timeout(server, root, tmp_path, monkeypatch):
+    async def judge(**_kwargs):
+        return 1.0, {"score": 1.0}
+
+    monkeypatch.setattr("resources_servers.gdpval.scoring.score_with_rubric_visual", judge)
+    monkeypatch.setattr("resources_servers.gdpval.app.get_server_url", lambda name: "http://localhost:9999")
     client = TestClient(server.setup_webserver())
     _post_seed(client, _seed(tmp_path))
+    (root / "report.md").write_text("the report")
+    client.post("/finish", json={"reason": "done", "paths": ["report.md"]})
 
-    verified = _verify(client, response_metadata={"stop_reason": "cancelled"})
+    verified = _verify(
+        client, response_metadata={"stop_reason": "cancelled"}, rubric_json=[{"criterion": "clarity", "score": 1}]
+    )
 
-    assert verified.get("_ng_failure_class") != "agent_timeout"
-    assert Path(verified["deliverables_dir"]).is_dir(), "the files are collected and judged as usual"
+    assert "_ng_failure_class" not in verified
+    assert not verified["mask_sample"]
+    assert verified["reward"] == 1.0
+    assert (Path(verified["deliverables_dir"]) / "report.md").read_text() == "the report"
 
 
 def test_a_file_that_cannot_be_downloaded_fails_the_verification_and_persists_nothing(server, root, tmp_path):
@@ -456,10 +473,15 @@ def test_sessions_require_a_single_worker(tmp_path):
         _server(tmp_path, num_workers=2)
 
 
+def _restart(client: TestClient, tmp_path: Path) -> TestClient:
+    """A new server process over the same persist directory, reached with the old session cookie."""
+    return TestClient(_server(tmp_path).setup_webserver(), cookies=client.cookies)
+
+
 def test_a_session_that_is_gone_is_not_judged_on_the_transcript(server, root, tmp_path):
     client = TestClient(server.setup_webserver())
     _post_seed(client, _seed(tmp_path))
-    server._sessions.clear()
+    client = _restart(client, tmp_path)
 
     response = client.post("/verify", json=_verify_body().model_dump(mode="json"))
 
@@ -476,7 +498,7 @@ def test_a_request_with_no_session_and_no_deliverables_is_refused(server):
 def test_a_request_with_a_gone_session_and_an_explicit_deliverables_dir_is_judged(server, root, tmp_path):
     client = TestClient(server.setup_webserver())
     _post_seed(client, _seed(tmp_path))
-    server._sessions.clear()
+    client = _restart(client, tmp_path)
 
     verified = _verify(client, deliverables_dir=str(tmp_path / "stored"))
 
@@ -506,26 +528,170 @@ def test_a_reuse_request_for_a_directory_without_finish_params_is_not_found(serv
     assert response.status_code == 404
 
 
-def test_a_reuse_request_without_a_persisted_deliverable_is_not_found(server, tmp_path):
+def test_a_reuse_request_for_a_repeat_with_nothing_persisted_is_not_found(server, tmp_path):
     repeat_dir = persisted_layout.repeat_dir(tmp_path / "persist", "task-1", 0)
     repeat_dir.mkdir(parents=True)
     (repeat_dir / persisted_layout.FINISH_PARAMS_FILE).write_text("null")
-    body = GDPValVerifyRequest(
-        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-        response=NeMoGymResponse(
-            id="r",
-            created_at=0.0,
-            model="m",
-            object="response",
-            output=[],
-            parallel_tool_calls=False,
-            tool_choice="none",
-            tools=[],
-        ),
-        task_id="task-1",
-        reuse_cached_deliverable=True,
+
+    response = TestClient(server.setup_webserver()).post(
+        "/verify", json=_verify_body(reuse_cached_deliverable=True).model_dump(mode="json")
     )
 
-    response = TestClient(server.setup_webserver()).post("/verify", json=body.model_dump(mode="json"))
+    assert response.status_code == 404
+
+
+def test_a_reuse_request_when_nothing_was_ever_persisted_is_not_found(server):
+    response = TestClient(server.setup_webserver()).post(
+        "/verify", json=_verify_body(reuse_cached_deliverable=True, ng_rollout_index=3).model_dump(mode="json")
+    )
 
     assert response.status_code == 404
+
+
+def test_a_live_session_wins_over_a_reuse_request_and_an_explicit_deliverables_dir(server, root, tmp_path):
+    cached = persisted_layout.repeat_dir(tmp_path / "persist", "task-1", 1)
+    cached.mkdir(parents=True)
+    (cached / persisted_layout.FINISH_PARAMS_FILE).write_text("null")
+    (cached / "old.docx").write_text("an earlier rollout")
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed(tmp_path))
+    (root / "report.md").write_text("the report")
+    client.post("/finish", json={"reason": "done", "paths": ["report.md"]})
+
+    verified = _verify(
+        client, reuse_cached_deliverable=True, deliverables_dir=str(tmp_path / "stored"), ng_rollout_index=1
+    )
+
+    assert verified["deliverables_dir"] == str(cached)
+    assert "old.docx" not in _files(cached)
+    assert _files(cached)["report.md"] == "the report"
+
+
+def test_a_failure_after_the_download_stage_releases_the_claim_and_the_sandbox(
+    server, root, tmp_path, monkeypatch, stopped, references
+):
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    serialize = AsyncMock(side_effect=[RuntimeError("no descriptor"), {"sandbox_id": "local"}])
+    monkeypatch.setattr(AsyncSandbox, "serialize", serialize)
+
+    failed = _post_seed(client, _seed(tmp_path, session_id="a"))
+
+    assert failed.status_code == 500
+    assert len(stopped) == 1
+    assert list(references.iterdir()) == []
+    assert _post_seed(client, _seed(tmp_path, session_id="b")).status_code == 200
+
+
+def test_a_task_with_fewer_reference_urls_than_files_fails_the_seed(server, root, tmp_path, stopped, references):
+    seed = _seed(tmp_path)
+    seed.task_data["reference_files"] = [REFERENCE, "reference_files/abc/extra.txt"]
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+
+    assert _post_seed(client, seed).status_code == 500
+
+    assert not root.exists()
+    assert list(references.iterdir()) == []
+
+
+def test_a_closed_session_cannot_be_seeded_again(server, root, tmp_path, references):
+    client = TestClient(server.setup_webserver())
+    seed = _seed(tmp_path)
+    _post_seed(client, seed)
+    assert _close(client, seed).status_code == 200
+
+    with pytest.raises(ValueError, match="already closed"):
+        _post_seed(client, seed)
+
+
+def test_closing_a_closed_session_is_idempotent_only_for_its_own_episode(server, root, tmp_path, stopped, references):
+    client = TestClient(server.setup_webserver())
+    seed = _seed(tmp_path)
+    _post_seed(client, seed)
+    assert _close(client, seed).status_code == 200
+
+    assert _close(client, seed).status_code == 200
+    assert len(stopped) == 1
+    with pytest.raises(ValueError, match="does not match the closed resources session"):
+        _close(client, seed, episode_id=EpisodeId(rollout_id="0-2"))
+
+
+def test_abandoning_without_a_session_is_refused(server):
+    response = TestClient(server.setup_webserver()).post("/abandon_task_finish", json={"reason": "no inputs"})
+
+    assert response.status_code == 400
+
+
+def test_a_directory_is_not_a_submittable_file(server, root, tmp_path):
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed(tmp_path))
+    (root / "out").mkdir()
+
+    response = client.post("/finish", json={"reason": "done", "paths": ["out"]})
+
+    assert response.status_code == 400
+    assert "Files do not exist: ['out']" in response.json()["detail"]
+
+
+def test_the_agent_cannot_finish_into_a_sandbox_that_verify_released(server, root, tmp_path):
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed(tmp_path))
+    _verify(client)
+
+    assert client.post("/finish", json={"reason": "late", "paths": []}).status_code == 409
+    task_dir = Path(_verify(client)["deliverables_dir"])
+    assert json.loads((task_dir / "finish_params.json").read_text()) is None
+
+
+def test_a_failed_collection_fails_the_verification_even_when_nothing_is_judged(server, root, tmp_path):
+    server.config.judge_deliverables = False
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    _post_seed(client, _seed(tmp_path))
+    (root / "report.md").write_text("the report")
+    client.post("/finish", json={"reason": "done", "paths": ["report.md"]})
+    (root / "report.md").unlink()
+
+    response = client.post("/verify", json=_verify_body().model_dump(mode="json"))
+
+    assert response.status_code == 500
+
+
+def test_a_reuse_request_for_a_nonexistent_persist_directory_is_not_found(server):
+    response = TestClient(server.setup_webserver()).post(
+        "/verify", json=_verify_body(reuse_cached_deliverable=True).model_dump(mode="json")
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.fixture
+def failing_stop(monkeypatch) -> list[AsyncSandbox]:
+    """Every sandbox whose stop() was called; each stops for real, then raises."""
+    attempted: list[AsyncSandbox] = []
+    real_stop = AsyncSandbox.stop
+
+    async def stop(self: AsyncSandbox) -> None:
+        attempted.append(self)
+        await real_stop(self)
+        raise OSError("stop failed")
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    return attempted
+
+
+def test_shutdown_stops_every_sandbox_even_when_one_stop_fails(server, root, tmp_path, failing_stop):
+    with TestClient(server.setup_webserver()) as client:
+        _post_seed(client, _seed(tmp_path, session_id="a", repeat=0))
+        _post_seed(client, _seed(tmp_path, session_id="b", repeat=1))
+
+    assert len(failing_stop) == 2
+
+
+def test_a_close_whose_stop_fails_is_an_error_and_can_be_retried(server, root, tmp_path, monkeypatch, references):
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    seed = _seed(tmp_path)
+    _post_seed(client, seed)
+    monkeypatch.setattr(AsyncSandbox, "stop", AsyncMock(side_effect=[OSError("stop failed"), None]))
+
+    assert _close(client, seed).status_code == 500
+    assert _close(client, seed).status_code == 200
+    assert list(references.iterdir()) == []

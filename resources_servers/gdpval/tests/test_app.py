@@ -506,33 +506,36 @@ class TestApp:
         assert "_ng_failure_terminal" not in dumped
         assert (dumped["failure_kind"], dumped["mask_sample"]) == ("judge_failed", True)
 
-    @pytest.mark.parametrize(
-        ("error", "permanent"),
-        [
-            (RuntimeError("Error code: 413 - request entity too large"), True),
-            (RuntimeError("500 Internal Server Error"), False),
-        ],
-    )
     @pytest.mark.asyncio
-    async def test_verify_rubric_permanent_judge_error_is_terminal_and_others_stay_retryable(
-        self, error, permanent
-    ) -> None:
+    async def test_verify_rubric_permanent_judge_error_is_terminal(self) -> None:
         server = _server(reward_mode="rubric")
         body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}], deliverable_text="Text.")
+        error = RuntimeError("Error code: 413 - request entity too large")
 
         with (
             patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=error),
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
         ):
-            if not permanent:
-                with pytest.raises(RuntimeError, match="500 Internal Server Error"):
-                    await server.verify(_NO_SESSION, body)
-                return
             dumped = (await server.verify(_NO_SESSION, body)).model_dump()
 
         assert dumped["_ng_failure_class"] == "permanent_judge_error"
         assert dumped["_ng_failure_terminal"] is True
         assert (dumped["failure_kind"], dumped["mask_sample"]) == ("gdpval:permanent_judge_error", True)
+
+    @pytest.mark.asyncio
+    async def test_verify_rubric_other_judge_errors_stay_retryable(self) -> None:
+        server = _server(reward_mode="rubric")
+        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}], deliverable_text="Text.")
+
+        with (
+            patch(
+                "resources_servers.gdpval.scoring.score_with_rubric",
+                side_effect=RuntimeError("500 Internal Server Error"),
+            ),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+        ):
+            with pytest.raises(RuntimeError, match="500 Internal Server Error"):
+                await server.verify(_NO_SESSION, body)
 
     @pytest.mark.asyncio
     async def test_verify_rubric_passes_create_overrides_through(self) -> None:
@@ -1521,7 +1524,7 @@ class TestMultiReference:
                 await server.verify(_NO_SESSION, body)
 
     @pytest.mark.asyncio
-    async def test_a_transient_matchup_error_keeps_the_failure_retryable(self, tmp_path) -> None:
+    async def test_a_permanent_and_a_transient_matchup_error_together_stay_retryable(self, tmp_path) -> None:
         server, body = self._two_ref_server_and_body(tmp_path)
         errors = iter([RuntimeError("Error code: 413 - payload too large"), RuntimeError("500 Internal Server Error")])
 
@@ -1534,7 +1537,7 @@ class TestMultiReference:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            with pytest.raises(RuntimeError, match="all .* judge matchup"):
+            with pytest.raises(RuntimeError, match=r"all 2 judge matchup\(s\) failed .*500 Internal Server Error"):
                 await server.verify(_NO_SESSION, body)
 
     def test_aggregate_metrics_mle_and_per_reference_stats(self) -> None:

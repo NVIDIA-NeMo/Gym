@@ -29,10 +29,7 @@ def _global_config(candidate_root, references) -> dict:
     gdpval = {"reference_models": {name: {"deliverables_dir": str(root)} for name, root in references.items()}}
     if candidate_root is not None:
         gdpval["persist_deliverables_dir"] = str(candidate_root)
-    return {
-        "gdpval_resources_server": {"resources_servers": {"gdpval": gdpval}},
-        "gdpval_stirrup_agent": {"responses_api_agents": {"stirrup_agent": {}}},
-    }
+    return {"gdpval_resources_server": {"resources_servers": {"gdpval": gdpval}}}
 
 
 def _write_task(root, task_id: str, *, payload: bytes = b"x", finished: bool = True) -> None:
@@ -152,7 +149,7 @@ class TestFingerprintTransportRepair:
 
 
 class TestAssignmentRepairConfig:
-    def test_candidate_root_is_the_linked_agents_persist_dir(self, tmp_path) -> None:
+    def test_candidate_root_is_the_resources_servers_persist_dir(self, tmp_path) -> None:
         candidate, ra, rb = (tmp_path / name for name in ("candidate", "ra", "rb"))
         for root in (candidate, ra, rb):
             _write_task(root, "t0")
