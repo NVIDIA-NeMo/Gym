@@ -181,7 +181,7 @@ gdpval_resources_server:
       # Seed for reproducible per-call judge sampling (null = seed only on task
       # identity, still stable per task).
       judge_sampling_seed: ${oc.env:JUDGE_SAMPLING_SEED,null}
-      tavily_api_key: ${oc.env:TAVILY_API_KEY,dummy}
+      tavily_api_key: ${oc.env:TAVILY_API_KEY}
       persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR,output/gdpval/deliverables}
       # Names a top-level provider block such as nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml.
       sandbox_provider: sandbox
@@ -240,4 +240,6 @@ gdpval_environment_server:
         type: responses_api_agents
         name: gdpval_stirrup_agent
       resources_tool_transports: [direct_http]
-      default_episode_timeout_seconds: 12600
+      default_episode_timeout_seconds: 18000
+      max_concurrent_episodes: 32
+      queue_timeout_seconds: 86400
