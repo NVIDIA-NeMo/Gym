@@ -2047,11 +2047,13 @@ ATTRIBUTION_ENV_VARS = (
     "NEMO_GYM_TEAM",
     "NEMO_GYM_USER",
     "NEMO_GYM_WORKLOAD",
+    "NEMO_GYM_CLUSTER",
     "NEMO_GYM_RUN_ID",
     "NEMO_GYM_CONFIG_PATH",
     "SLURM_JOB_ACCOUNT",
     "SLURM_JOB_USER",
     "SLURM_JOB_NAME",
+    "SLURM_CLUSTER_NAME",
 )
 
 
@@ -2069,6 +2071,7 @@ async def test_create_injects_attribution_metadata(
     monkeypatch.setenv("NEMO_GYM_TEAM", "gym team")  # sanitized to a valid label value below
     monkeypatch.setenv("NEMO_GYM_USER", "alice")
     monkeypatch.setenv("NEMO_GYM_WORKLOAD", "swe-gym")
+    monkeypatch.setenv("SLURM_CLUSTER_NAME", "slurm-cluster")
     monkeypatch.setenv("NEMO_GYM_RUN_ID", "run-123")
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 10},
@@ -2082,6 +2085,7 @@ async def test_create_injects_attribution_metadata(
         "nemo-gym.nvidia.com/team": "gym_team",
         "nemo-gym.nvidia.com/user": "alice",
         "nemo-gym.nvidia.com/workload": "swe-gym",
+        "nemo-gym.nvidia.com/cluster": "slurm-cluster",
         "nemo-gym.nvidia.com/run": "run-123",
         "purpose": "test",
     }
@@ -2096,7 +2100,13 @@ async def test_create_spec_metadata_and_config_win_over_attribution_detection(
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 10},
         probe={"command": None},
-        attribution={"team": "cfg-team", "user": "cfg-user", "workload": "cfg-workload", "run": "cfg-run"},
+        attribution={
+            "team": "cfg-team",
+            "user": "cfg-user",
+            "workload": "cfg-workload",
+            "cluster": "cfg-cluster",
+            "run": "cfg-run",
+        },
     )
 
     await provider.create(SandboxSpec(image="image:tag", metadata={"nemo-gym.nvidia.com/team": "explicit-team"}))
@@ -2106,6 +2116,7 @@ async def test_create_spec_metadata_and_config_win_over_attribution_detection(
         "nemo-gym.nvidia.com/team": "explicit-team",
         "nemo-gym.nvidia.com/user": "cfg-user",
         "nemo-gym.nvidia.com/workload": "cfg-workload",
+        "nemo-gym.nvidia.com/cluster": "cfg-cluster",
         "nemo-gym.nvidia.com/run": "cfg-run",
     }
 
