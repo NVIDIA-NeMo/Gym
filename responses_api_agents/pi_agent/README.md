@@ -103,8 +103,19 @@ stdout and stderr so provider status messages do not hide the actual failure.
 Project extensions, skills, prompt templates, and themes are disabled; repository context
 files may still be read by Pi.
 
-Keep `resources_tool_transports: []`: Pi provides its own sandbox tools.
-Required Resources HTTP/MCP tools are rejected. Sandbox sessions also reject host command,
+Pi provides its own sandbox tools. To add the Resources server's tools, set
+`resources_tool_transports: [mcp]`: Pi registers each tool of an MCP grant as
+`<grant name>_<tool name>` through `gym_mcp.mjs`, and each call waits up to
+`sandbox_mcp_timeout_seconds` (default 300). A required grant that Pi cannot reach fails the episode
+before inference, with the cause in the error; an optional one is skipped and recorded as an
+`mcp_server_skipped` observation gap. Grant names may contain only letters, digits, `_` and `-`.
+A successful call of a tool listed in `finish_tool_names` (its name on the server, such as `finish`)
+ends the run when every tool call of that turn is such a call; Pi does not stop a turn that also ran
+another tool. Setup fails if no granted server offers a listed tool, so an optional grant that offers
+one is effectively required; without MCP grants the setting has no effect. Responses name MCP calls
+`mcp__<grant name>__<tool name>`, which Gym strips before `/verify`; observations and model calls
+keep the names the model saw.
+Required Resources HTTP tools (`direct_http`) are rejected. Sandbox sessions also reject host command,
 extra-argument, and environment overrides; those remain available on the local path.
 
 ## Requests and settings
@@ -189,6 +200,8 @@ detail, not a separate endpoint or a setup step users must run.
 - `sandbox_install_timeout_seconds`: sandbox runtime installation timeout (default 600)
 - `sandbox_bash_timeout_seconds`: maximum runtime of each sandbox bash tool call (default 900);
   shorter tool-requested deadlines are preserved
+- `sandbox_mcp_timeout_seconds`: maximum time of each call to a granted MCP tool (default 300)
+- `finish_tool_names`: granted MCP tools whose successful call ends the run (default none)
 - `session_close_timeout_seconds`: sandbox process cleanup timeout (default 60)
 
 ## Results and limits
@@ -215,8 +228,8 @@ evidence or failed release retains the handle for retry. Cleanup is cooperative,
 Local settings retain `output_token_policy` (`fixed` or `remaining_context`),
 `auto_compaction`, and an optional per-call `bash_timeout`. The dedicated
 `pi_sandboxed_agent` also uses this local adapter inside its sandbox and supplies
-`mcp_servers` for authenticated Gym tools. Sandbox sessions continue to reject
-required Resources tool access rather than silently ignoring it.
+`mcp_servers` for authenticated Gym tools. Sandbox sessions take Resources tools from MCP grants
+instead and reject required HTTP tool grants rather than silently ignoring them.
 
 Calls without an agent session retain local CLI compatibility. They do not use the
 Resources-owned task sandbox. Configure a Gym `model_server`, or supply an explicit Pi provider
