@@ -159,6 +159,23 @@ class TestApp:
         assert client._truncation_recovery is True
         assert agent._min_compaction_summary_words == 50
 
+    @pytest.mark.parametrize(
+        ("requested", "expected"),
+        [
+            ({"temperature": 0, "top_p": 0}, (0, 0)),
+            ({"temperature": 0.2, "top_p": 0.5}, (0.2, 0.5)),
+            ({}, (0.6, 0.95)),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_the_request_sampling_overrides_the_config_even_when_it_is_zero(self, requested, expected) -> None:
+        config = _make_config(temperature=0.6, top_p=0.95)
+        body = NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy", **requested)
+
+        client = (await _runner_payload(config, body))["client"]
+
+        assert (client["temperature"], client["top_p"]) == expected
+
     def test_output_history_preserves_nemo_user_tool_results(self) -> None:
         """Run-history export should keep NeMo user-role tool results as tool outputs."""
         history = [
