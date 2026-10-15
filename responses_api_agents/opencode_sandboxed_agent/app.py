@@ -84,9 +84,13 @@ from nemo_gym.server_utils import (
     raise_for_status,
 )
 from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
+from responses_api_agents.opencode_agent.runtime import (
+    OBSERVABILITY_PATCH,
+    OPENCODE_VERSION,
+    apply_observability_patch,
+)
 
 
-_ASSISTANT_MESSAGE_PLUGIN = Path(__file__).with_name("assistant_message_header.js")
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
 
 
@@ -265,6 +269,20 @@ def parse_opencode_observations(
                 "running": "incomplete",
                 "pending": "incomplete",
             }.get(native_status, "unknown")
+            if native_status == "completed" and part.get("tool") == "bash":
+                # Completion describes the tool lifecycle, not shell success. Timeout/abort
+                # can complete that lifecycle with a null exit code in the native artifact.
+                metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+                exit_code = metadata.get("exit")
+                if type(exit_code) is int:
+                    status = "completed" if exit_code == 0 else "failed"
+                else:
+                    status = "unknown"
+                    gaps.append(
+                        ObservationGap(
+                            code="tool_outcome_unavailable", invocation_id=session_id, detail=observed_call_id
+                        )
+                    )
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(
@@ -276,7 +294,7 @@ def parse_opencode_observations(
                         duration_ms=duration_ms,
                         timing_source="artifact" if started_at is not None else None,
                         status=status,
-                        error_type="tool_error" if native_status == "error" else None,
+                        error_type="tool_error" if status == "failed" else None,
                     )
                 )
             else:
@@ -415,7 +433,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
 
-    opencode_version: str
+    opencode_version: str = OPENCODE_VERSION
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
     remote_opencode_musl_binary_path: Optional[str] = None
@@ -515,7 +533,6 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
 
 
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: OpenCodeSandboxedAgentConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -793,28 +810,28 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         opencode_thinking_str = "--thinking"
 
-        if self.config.preinstalled_opencode:
-            install_str = f'test "$(opencode --version)" = {quote(self.config.opencode_version)}'
-        elif self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
-            if self.config.remote_opencode_musl_binary_path:
-                install_str = _build_remote_opencode_install_command(
-                    install_script_path=self.config.remote_opencode_install_script_path,
-                    binary_path=self.config.remote_opencode_binary_path,
-                    musl_binary_path=self.config.remote_opencode_musl_binary_path,
-                )
+        install_str = ":"
+        if not self.config.preinstalled_opencode:
+            if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
+                if self.config.remote_opencode_musl_binary_path:
+                    install_str = _build_remote_opencode_install_command(
+                        install_script_path=self.config.remote_opencode_install_script_path,
+                        binary_path=self.config.remote_opencode_binary_path,
+                        musl_binary_path=self.config.remote_opencode_musl_binary_path,
+                    )
+                else:
+                    install_str = (
+                        f"bash {quote(self.config.remote_opencode_install_script_path)} "
+                        f"--binary {quote(self.config.remote_opencode_binary_path)}"
+                    )
             else:
-                install_str = (
-                    f"bash {quote(self.config.remote_opencode_install_script_path)} "
-                    f"--binary {quote(self.config.remote_opencode_binary_path)}"
+                print(
+                    "Downloading and installing OpenCode in the sandbox. Please consider mounting or uploading the appropriate OpenCode binary instead!",
+                    file=sys.stderr,
                 )
-        else:
-            print(
-                "Downloading and installing OpenCode in the sandbox. Please consider mounting or uploading the appropriate OpenCode binary instead!",
-                file=sys.stderr,
-            )
-            install_str = f"""installer=$(mktemp) && curl -fL -o "$installer" https://opencode.ai/install \
-        && echo "Downloaded OpenCode installer to $installer" \
-        && VERSION={self.config.opencode_version} bash "$installer\""""
+                install_str = f"""installer=$(mktemp) && curl -fL -o "$installer" https://opencode.ai/install \
+            && echo "Downloaded OpenCode installer to $installer" \
+            && VERSION={self.config.opencode_version} bash "$installer\""""
 
         effective_config = await self._create_opencode_config(request)
         for name in self._runtime_plugins():
@@ -826,11 +843,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 build_agent[name] = value
         if self._model_call_capture_enabled():
             # Keep the plugin outside the task repo so it cannot enter a generated patch.
-            await sandbox.upload(_ASSISTANT_MESSAGE_PLUGIN, _REMOTE_ASSISTANT_MESSAGE_PLUGIN)
-            effective_config["plugin"] = [
-                *effective_config.get("plugin", []),
-                f"file://{_REMOTE_ASSISTANT_MESSAGE_PLUGIN}",
-            ]
+            await sandbox.upload(OBSERVABILITY_PATCH, _REMOTE_ASSISTANT_MESSAGE_PLUGIN)
+            apply_observability_patch(effective_config, plugin_path=Path(_REMOTE_ASSISTANT_MESSAGE_PLUGIN))
         opencode_config_content = json.dumps(effective_config)
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
@@ -863,7 +877,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         echo "Shell: $SHELL" \
         && {install_str} \
         {ripgrep_install_str} \
-        && export PATH=$HOME/.opencode/bin:$PATH \
+        && export PATH="$HOME/.opencode/bin:$PATH" \
+        && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
         && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
@@ -906,7 +921,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
         try:
             session_list_result = await sandbox.exec(
-                command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
+                command='export PATH="$HOME/.opencode/bin:$PATH" && opencode session list --format json',
                 env=session_env,
                 timeout_s=self.config.sandbox_timeout,
             )
@@ -915,7 +930,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             session_id = _extract_opencode_session_id(session_list_result.stdout or "")
             export_result = await sandbox.exec(
                 command=(
-                    "export PATH=$HOME/.opencode/bin:$PATH "
+                    'export PATH="$HOME/.opencode/bin:$PATH" '
                     f"&& opencode export {quote(session_id)} > {quote(export_remote_fpath)}"
                 ),
                 env=session_env,
@@ -961,29 +976,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             observations_local_fpath = results_dir / "opencode.db"
             observations_local_fpath.unlink(missing_ok=True)
             try:
-                # Release channels and OPENCODE_DB can change the database filename.
-                database_path_result = await sandbox.exec(
-                    command="export PATH=$HOME/.opencode/bin:$PATH && opencode db path",
-                    env=session_env,
-                )
-                observations_remote_fpath = (database_path_result.stdout or "").strip()
-                if (
-                    database_path_result.return_code != 0
-                    or database_path_result.error_type is not None
-                    or not observations_remote_fpath
-                ):
-                    raise RuntimeError(f"OpenCode database path lookup failed: {database_path_result.stderr}")
-                snapshot_script = (
-                    "import sqlite3,sys;"
-                    "source=sqlite3.connect(f'file:{sys.argv[1]}?mode=ro',uri=True);"
-                    "destination=sqlite3.connect(sys.argv[2]);"
-                    "source.backup(destination);destination.close();source.close()"
-                )
+                # OpenCode selects its own database and supplies SQLite even in images without Python.
+                # VACUUM INTO includes committed WAL data in one consistent, standalone snapshot.
+                snapshot_sql = "VACUUM INTO '" + snapshot_remote_fpath.replace("'", "''") + "'"
                 snapshot_result = await sandbox.exec(
-                    command=(
-                        f"python3 -c {quote(snapshot_script)} "
-                        f"{quote(observations_remote_fpath)} {quote(snapshot_remote_fpath)}"
-                    ),
+                    command=f'export PATH="$HOME/.opencode/bin:$PATH" && opencode db {quote(snapshot_sql)}',
+                    env=session_env,
                     timeout_s=self.config.sandbox_timeout,
                 )
                 if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:

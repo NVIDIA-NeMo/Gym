@@ -294,7 +294,6 @@ class AbstentionVerifyResponse(BaseVerifyResponse):
 
 
 class AbstentionServer(SimpleResourcesServer):
-    ray_enabled = False
     config: AbstentionConfig
 
     def setup_webserver(self) -> FastAPI:

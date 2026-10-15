@@ -58,7 +58,6 @@ class CritPtAgentVerifyResponse(BaseVerifyResponse):
 
 
 class CritPtAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: CritPtAgentConfig
 
     def model_post_init(self, context: Any) -> None:

@@ -181,7 +181,6 @@ def _create_evaluator(config: Any, models: Mapping[str, Any]) -> Any:
 class UserSimResourcesServer(SimpleResourcesServer):
     """Validate task identity and verify the Environment-owned UserSim result."""
 
-    ray_enabled = False
     config: UserSimResourcesServerConfig
     session_id_to_seed: dict[str, SeededUserSimEpisode] = {}
     closed_resources_session_ids: dict[str, float] = {}
