@@ -952,6 +952,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
             body = body.model_copy(update={"deliverables_dir": await self._collect_deliverables(session)})
         elif body.reuse_cached_deliverable and body.deliverables_dir is None:
             body = body.model_copy(update={"deliverables_dir": self._cached_deliverables_dir(body)})
+        elif body.deliverables_dir is None:
+            # A session that is gone (a restart, a checkpoint restore) took its files with it, and judging the
+            # transcript alone would score the agent as if it had submitted nothing.
+            raise HTTPException(
+                status_code=409, detail="No live GDPVal session and no deliverables_dir: there is nothing to judge"
+            )
         if not self.config.judge_deliverables:
             return GDPValVerifyResponse(
                 **body.model_dump(), reward=0.0, mask_sample=True, verify_mode=self.config.reward_mode

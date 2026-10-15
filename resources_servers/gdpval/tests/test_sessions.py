@@ -394,6 +394,33 @@ def test_sessions_require_a_single_worker(tmp_path):
         _server(tmp_path, num_workers=2)
 
 
+def test_a_session_that_is_gone_is_not_judged_on_the_transcript(server, root, tmp_path):
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed(tmp_path))
+    server._sessions.clear()
+
+    response = client.post("/verify", json=_verify_body().model_dump(mode="json"))
+
+    assert response.status_code == 409
+    assert "nothing to judge" in response.json()["detail"]
+
+
+def test_a_request_with_no_session_and_no_deliverables_is_refused(server):
+    response = TestClient(server.setup_webserver()).post("/verify", json=_verify_body().model_dump(mode="json"))
+
+    assert response.status_code == 409
+
+
+def test_a_request_with_a_gone_session_and_an_explicit_deliverables_dir_is_judged(server, root, tmp_path):
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed(tmp_path))
+    server._sessions.clear()
+
+    verified = _verify(client, deliverables_dir=str(tmp_path / "stored"))
+
+    assert verified["deliverables_dir"] == str(tmp_path / "stored")
+
+
 def test_a_reuse_request_without_a_session_scores_the_persisted_deliverable(server, tmp_path):
     repeat_dir = persisted_layout.repeat_dir(tmp_path / "persist", "task-1", 2)
     repeat_dir.mkdir(parents=True)

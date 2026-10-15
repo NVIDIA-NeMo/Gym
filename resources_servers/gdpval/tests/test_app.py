@@ -14,6 +14,7 @@
 # limitations under the License.
 import base64
 import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -63,8 +64,13 @@ def _server(reward_mode: str = "rubric", **extra) -> GDPValResourcesServer:
     return GDPValResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
+# A submission with no files: /verify needs a deliverables directory, and the empty one leaves the transcript to judge.
+_NO_FILES = tempfile.TemporaryDirectory()
+
+
 def _verify_request(**fields) -> GDPValVerifyRequest:
     deliverable_text = fields.pop("deliverable_text", "A text deliverable.")
+    fields.setdefault("deliverables_dir", _NO_FILES.name)
     return GDPValVerifyRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         response=NeMoGymResponse(
