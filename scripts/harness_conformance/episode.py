@@ -139,6 +139,8 @@ def _config(
         "probe_agent": {"responses_api_agents": {f"{harness}_agent": agent}},
         "probe_environment": {"environment_servers": {environment_type: environment}},
     }
+    if len(ports) > 4:
+        config["judge_model"] = {"responses_api_models": {"probe": {**server(ports[4]), "name": "judge_model"}}}
     if use_agent_sessions:
         config["probe_sandbox"] = {"local": {"concurrency": 1}}
     return config
@@ -166,7 +168,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     tasks = []
     servers = []
     with ExitStack() as stack:
-        sockets = [stack.enter_context(socket.socket()) for _ in range(4)]
+        sockets = [stack.enter_context(socket.socket()) for _ in range(5 if scenario.judge_verifier else 4)]
         for sock in sockets:
             sock.bind(("127.0.0.1", 0))
         config = _config(
@@ -210,10 +212,12 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
         try:
             apps = (
                 probe.model_app(assistant_message_header=client.assistant_message_header("policy_model")),
-                probe.resources_app(),
+                probe.resources_app(server_client=client),
                 agent.setup_webserver(),
                 environment.setup_webserver(),
             )
+            if scenario.judge_verifier:
+                apps += (probe.judge_app(),)
             for app, sock in zip(apps, sockets, strict=True):
                 server = _Server(uvicorn.Config(app, log_level="warning", timeout_graceful_shutdown=3))
                 servers.append(server)
