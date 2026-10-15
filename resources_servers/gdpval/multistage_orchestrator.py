@@ -75,6 +75,7 @@ from nemo_gym.base_responses_api_model import (
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
 )
+from nemo_gym.failure_kinds import AGENT_TIMEOUT
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -206,15 +207,18 @@ ACCEPTED_STAGE_ROW_COUNT_KEY = "accepted_stage_row_count"
 
 
 def _is_retryable_failure(row: Mapping[str, Any]) -> bool:
-    """Whether the environment server reported the episode as retryable, e.g. a timeout or a dependency outage.
+    """Whether a failed row is worth running again: the agent timed out, or the environment server hit an outage.
 
-    GDPVal's own failures are not: nothing repairs a deliverable tree within the run.
+    An agent-stage failure of the environment server is a runner crash the model may have caused, so retrying
+    or waiving it would bias the fit. GDPVal's own failures are not retryable either: nothing repairs a
+    deliverable tree within the run.
     """
-    return (
-        row.get(NG_FAILURE_CLASS_KEY) == ENVIRONMENT_SERVER_FAILURE_CLASS
-        and not row.get(NG_TERMINAL_KEY)
-        and not row.get(NG_NO_PERSIST_KEY)
-    )
+    if row.get(NG_TERMINAL_KEY) or row.get(NG_NO_PERSIST_KEY):
+        return False
+    failure_class = row.get(NG_FAILURE_CLASS_KEY)
+    if failure_class == AGENT_TIMEOUT:
+        return True
+    return failure_class == ENVIRONMENT_SERVER_FAILURE_CLASS and row.get("_ng_failure_stage") != "agent"
 
 
 def _is_success_row(row: Mapping[str, Any]) -> bool:

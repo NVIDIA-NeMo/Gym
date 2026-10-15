@@ -3768,7 +3768,7 @@ class TestCachedDeliverableReuse:
 
     @pytest.mark.parametrize(
         ("failure_stage", "dispatched_stages", "verified_stages"),
-        [("verification", [0], [0, 1]), ("agent", [0, 0], [1])],
+        [("verification", [0], [0, 1])],
     )
     async def test_a_retry_after_a_verification_failure_judges_the_persisted_deliverable(
         self,
@@ -4036,6 +4036,24 @@ class TestRetryableFailure:
     @pytest.mark.parametrize("failure_class", ["reference_missing", "judge_failed", "agent_request_failed"])
     def test_rejects_other_classes(self, failure_class: str) -> None:
         assert _is_retryable_failure({NG_FAILURE_CLASS_KEY: failure_class}) is False
+
+    def test_accepts_an_agent_timeout_unless_it_is_terminal_or_drained(self) -> None:
+        assert _is_retryable_failure({NG_FAILURE_CLASS_KEY: "agent_timeout"}) is True
+        assert _is_retryable_failure({NG_FAILURE_CLASS_KEY: "agent_timeout", NG_TERMINAL_KEY: True}) is False
+        assert _is_retryable_failure({NG_FAILURE_CLASS_KEY: "agent_timeout", NG_NO_PERSIST_KEY: True}) is False
+
+    @pytest.mark.parametrize(
+        ("stage", "retryable"),
+        [("agent", False), ("seed", True), ("verification", True), ("admission", True), (None, True)],
+    )
+    def test_an_environment_server_failure_in_the_agent_stage_is_a_crash_not_a_retry(
+        self, stage: Optional[str], retryable: bool
+    ) -> None:
+        row = {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS}
+        if stage is not None:
+            row["_ng_failure_stage"] = stage
+
+        assert _is_retryable_failure(row) is retryable
 
 
 class TestTolerateUnresolved:

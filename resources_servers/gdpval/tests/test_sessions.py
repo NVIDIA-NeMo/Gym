@@ -99,7 +99,7 @@ def _post_seed(client: TestClient, seed: ResourcesSeedSessionRequest):
     return client.post("/seed_session", json=seed.model_dump(mode="json"))
 
 
-def _verify_body(**fields) -> GDPValVerifyRequest:
+def _verify_body(response_metadata: dict[str, str] | None = None, **fields) -> GDPValVerifyRequest:
     return GDPValVerifyRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         response=NeMoGymResponse(
@@ -111,6 +111,7 @@ def _verify_body(**fields) -> GDPValVerifyRequest:
             parallel_tool_calls=False,
             tool_choice="none",
             tools=[],
+            metadata=response_metadata,
         ),
         task_id="task-1",
         **fields,
@@ -233,6 +234,30 @@ def test_tasks_without_submitted_files_record_how_they_ended(server, root, tmp_p
 
     assert json.loads((task_dir / "finish_params.json").read_text()) == finish_params
     assert sorted(p.name for p in task_dir.iterdir()) == ["finish_params.json", "reference_files"]
+
+
+def test_an_agent_that_ran_out_of_wall_time_is_a_masked_timeout_and_persists_nothing(server, root, tmp_path):
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed(tmp_path))
+    (root / "report.md").write_text("half a report")
+    client.post("/finish", json={"reason": "done", "paths": ["report.md"]})
+
+    verified = _verify(client, response_metadata={"stop_reason": "wall_time"})
+
+    assert verified["_ng_failure_class"] == "agent_timeout"
+    assert (verified["failure_kind"], verified["mask_sample"], verified["reward"]) == ("agent_timeout", True, 0.0)
+    assert "_ng_failure_terminal" not in verified
+    assert not (tmp_path / "persist").exists(), "the partial work is not collected or judged"
+
+
+def test_an_agent_that_was_asked_to_stop_is_not_a_timeout(server, root, tmp_path):
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed(tmp_path))
+
+    verified = _verify(client, response_metadata={"stop_reason": "cancelled"})
+
+    assert verified.get("_ng_failure_class") != "agent_timeout"
+    assert Path(verified["deliverables_dir"]).is_dir(), "the files are collected and judged as usual"
 
 
 def test_a_file_that_cannot_be_downloaded_fails_the_verification_and_persists_nothing(server, root, tmp_path):

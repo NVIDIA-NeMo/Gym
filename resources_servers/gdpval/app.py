@@ -63,7 +63,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.deliverables import is_deliverable
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import JUDGE_FAILED
+from nemo_gym.failure_kinds import AGENT_TIMEOUT, JUDGE_FAILED
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
@@ -537,6 +537,10 @@ def _permanent_judge_failure(
     )
 
 
+# The agent ran out of wall time. The row is retried like any other timeout and left out of the fit if it is waived.
+_AGENT_TIMEOUT = {NG_FAILURE_CLASS_KEY: AGENT_TIMEOUT, "failure_kind": AGENT_TIMEOUT, "mask_sample": True}
+
+
 # Recovered by `gym eval reverify --judge-failed-only`, which judges the persisted deliverable again.
 _JUDGE_FAILED = {NG_FAILURE_CLASS_KEY: JUDGE_FAILED, "failure_kind": JUDGE_FAILED, "mask_sample": True}
 
@@ -962,6 +966,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
         return routed, audio_capable, video_capable
 
     async def verify(self, request: Request, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
+        if (body.response.metadata or {}).get("stop_reason") == "wall_time":
+            return GDPValVerifyResponse(
+                **body.model_dump(), reward=0.0, verify_mode=self.config.reward_mode, **_AGENT_TIMEOUT
+            )
         session = self._sessions.get(request.session.get(SESSION_ID_KEY))
         if session is not None:
             body = body.model_copy(update={"deliverables_dir": await self._collect_deliverables(session)})

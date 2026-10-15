@@ -213,8 +213,9 @@ This example requires at least 90% of all planned calibration rows, at least 50%
 of each selected reference's assigned rows, and at least one judged row for every
 selected reference. The ELO fit must be finite and include every selected
 reference. A row that could still be retried is waived only when its latest
-persisted failure is one the environment server reports as retryable, such as a
-task timeout or a dependency outage.
+persisted failure is an agent timeout (`agent_timeout`) or an environment-server
+failure outside the agent stage, such as a dependency outage. A crash in the
+agent stage is never retried in process or waived.
 `tolerate_unresolved: true` waives any persisted failure class, including
 agent-server outages (`agent_request_failed`), so set the coverage floors tight.
 It also accepts a missing reference deliverable (`reference_missing`) straight
