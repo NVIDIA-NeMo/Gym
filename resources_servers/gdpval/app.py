@@ -727,7 +727,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
         directory = persisted_layout.repeat_dir(
             self.config.persist_deliverables_dir, body.task_id, body.ng_rollout_index or 0
         )
-        if not directory.is_dir() or not any(is_deliverable(path) for path in directory.iterdir()):
+        finished = (directory / persisted_layout.FINISH_PARAMS_FILE).is_file()
+        if not finished or not any(is_deliverable(path) for path in directory.iterdir()):
             raise HTTPException(status_code=404, detail=f"No cached deliverable at {directory}")
         return str(directory)
 

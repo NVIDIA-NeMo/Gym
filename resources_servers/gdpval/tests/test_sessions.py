@@ -99,9 +99,8 @@ def _post_seed(client: TestClient, seed: ResourcesSeedSessionRequest):
     return client.post("/seed_session", json=seed.model_dump(mode="json"))
 
 
-def _verify(client: TestClient, **fields) -> dict:
-    """POST /verify for the client's session; without a rubric the scorer answers without a judge."""
-    body = GDPValVerifyRequest(
+def _verify_body(**fields) -> GDPValVerifyRequest:
+    return GDPValVerifyRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         response=NeMoGymResponse(
             id="r",
@@ -116,7 +115,11 @@ def _verify(client: TestClient, **fields) -> dict:
         task_id="task-1",
         **fields,
     )
-    response = client.post("/verify", json=body.model_dump(mode="json"))
+
+
+def _verify(client: TestClient, **fields) -> dict:
+    """POST /verify for the client's session; without a rubric the scorer answers without a judge."""
+    response = client.post("/verify", json=_verify_body(**fields).model_dump(mode="json"))
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -185,9 +188,8 @@ def test_unjudged_deliverables_are_persisted_and_masked(server, root, tmp_path, 
     "paths, persisted",
     [
         (["a/report.md", "b/report.md"], {"report.md": "from b"}),
-        (["a/report.md", "a/notes.md"], {"report.md": "from a"}),
     ],
-    ids=["same base name: the later one wins", "a file that cannot be copied is skipped"],
+    ids=["same base name: the later one wins"],
 )
 def test_submitted_files_are_flattened_to_their_base_names(server, root, tmp_path, monkeypatch, paths, persisted):
     client = TestClient(server.setup_webserver())
@@ -231,6 +233,39 @@ def test_tasks_without_submitted_files_record_how_they_ended(server, root, tmp_p
 
     assert json.loads((task_dir / "finish_params.json").read_text()) == finish_params
     assert sorted(p.name for p in task_dir.iterdir()) == ["finish_params.json", "reference_files"]
+
+
+def test_a_file_that_cannot_be_downloaded_fails_the_verification_and_persists_nothing(server, root, tmp_path):
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    _post_seed(client, _seed(tmp_path))
+    (root / "report.md").write_text("the report")
+    assert client.post("/finish", json={"reason": "done", "paths": ["report.md"]}).status_code == 200
+    (root / "report.md").unlink()
+
+    response = client.post("/verify", json=_verify_body().model_dump(mode="json"))
+
+    assert response.status_code == 500
+    assert list((tmp_path / "persist" / "task_task-1").iterdir()) == [], "no partial directory is left behind"
+
+
+def test_a_retry_after_a_failed_download_replaces_nothing_and_then_succeeds(server, root, tmp_path):
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    _post_seed(client, _seed(tmp_path))
+    task_dir = persisted_layout.repeat_dir(tmp_path / "persist", "task-1", 1)
+    task_dir.mkdir(parents=True)
+    (task_dir / "stale.txt").write_text("from an earlier attempt")
+    (root / "report.md").write_text("the report")
+    client.post("/finish", json={"reason": "done", "paths": ["report.md"]})
+    (root / "report.md").unlink()
+
+    assert client.post("/verify", json=_verify_body().model_dump(mode="json")).status_code == 500
+    assert _files(task_dir) == {"stale.txt": "from an earlier attempt"}, "a failed collection leaves the old directory"
+
+    (root / "report.md").write_text("the report")
+    verified = _verify(client)
+
+    assert Path(verified["deliverables_dir"]) == task_dir
+    assert "stale.txt" not in _files(task_dir) and _files(task_dir)["report.md"] == "the report"
 
 
 def test_sessions_keep_their_finish_calls_and_files_apart(server, root, tmp_path):
@@ -362,11 +397,24 @@ def test_sessions_require_a_single_worker(tmp_path):
 def test_a_reuse_request_without_a_session_scores_the_persisted_deliverable(server, tmp_path):
     repeat_dir = persisted_layout.repeat_dir(tmp_path / "persist", "task-1", 2)
     repeat_dir.mkdir(parents=True)
+    (repeat_dir / persisted_layout.FINISH_PARAMS_FILE).write_text("null")
     (repeat_dir / "report.docx").write_text("deliverable")
 
     verified = _verify(TestClient(server.setup_webserver()), reuse_cached_deliverable=True, ng_rollout_index=2)
 
     assert verified["deliverables_dir"] == str(repeat_dir)
+
+
+def test_a_reuse_request_for_a_directory_without_finish_params_is_not_found(server, tmp_path):
+    repeat_dir = persisted_layout.repeat_dir(tmp_path / "persist", "task-1", 2)
+    repeat_dir.mkdir(parents=True)
+    (repeat_dir / "report.docx").write_text("a partial directory")
+
+    response = TestClient(server.setup_webserver()).post(
+        "/verify", json=_verify_body(reuse_cached_deliverable=True, ng_rollout_index=2).model_dump(mode="json")
+    )
+
+    assert response.status_code == 404
 
 
 def test_a_reuse_request_without_a_persisted_deliverable_is_not_found(server, tmp_path):

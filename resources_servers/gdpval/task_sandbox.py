@@ -15,6 +15,7 @@ import logging
 import os
 import shlex
 import shutil
+import uuid
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -93,20 +94,25 @@ async def collect_deliverables(
     """Copy the submitted files, the finish arguments and the reference files into ``task_dir``.
 
     Files land under their base names, so a later path with the same name replaces an earlier one. A file
-    that cannot be copied is skipped. ``finish_params.json`` holds ``null`` when the agent never finished.
+    that cannot be downloaded raises, since `/finish` confirmed it exists. ``task_dir`` is built beside its
+    final place and renamed into it, so a failure never leaves a partial directory. ``finish_params.json``
+    holds ``null`` when the agent never finished.
     """
-    await asyncio.to_thread(shutil.rmtree, task_dir, ignore_errors=True)
-    task_dir.mkdir(parents=True)
-    paths = (finish_call or {}).get("paths") or []
-    for path in paths:
-        try:
-            await sandbox.download(sandbox_path(path), task_dir / Path(path).name)
-        except Exception as error:
-            LOGGER.warning("Could not copy the submitted file %s: %s", path, error)
-    finish_params = None if finish_call is None else {k: v for k, v in finish_call.items() if k != "tool"}
-    (task_dir / persisted_layout.FINISH_PARAMS_FILE).write_text(json.dumps(finish_params, indent=2, default=str))
-    await asyncio.to_thread(shutil.copytree, reference_dir, task_dir, dirs_exist_ok=True)
-    await asyncio.to_thread(_make_group_readable, task_dir)
+    staging = task_dir.with_name(f".{task_dir.name}.{uuid.uuid4().hex}")
+    staging.mkdir(parents=True)
+    try:
+        for path in (finish_call or {}).get("paths") or []:
+            await sandbox.download(sandbox_path(path), staging / Path(path).name)
+        finish_params = None if finish_call is None else {k: v for k, v in finish_call.items() if k != "tool"}
+        (staging / persisted_layout.FINISH_PARAMS_FILE).write_text(json.dumps(finish_params, indent=2, default=str))
+        await asyncio.to_thread(shutil.copytree, reference_dir, staging, dirs_exist_ok=True)
+        await asyncio.to_thread(_make_group_readable, staging)
+        await asyncio.to_thread(shutil.rmtree, task_dir, ignore_errors=True)
+        await asyncio.to_thread(staging.rename, task_dir)
+    except BaseException:
+        # Synchronous so a second cancellation cannot interrupt the cleanup.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
 
 
 def _make_group_readable(task_dir: Path) -> None:
