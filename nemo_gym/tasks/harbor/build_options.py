@@ -109,26 +109,8 @@ def _check_platform(block: Mapping[str, Any]) -> None:
 
 
 def build_options_from_overrides(overrides: list[str]) -> BuildOptions:
-    """Read the ``builds:`` block from the configuration the command line names, before the run config exists.
-
-    Preparation builds images before the run config can be written, so the global configuration is not
-    composed yet. This merges the sources the user controls, in the global config's order (the files
-    the ``+config_paths`` tokens name, from ``--config`` and the asset selectors, then ``env.yaml``, then
-    the ``+``/``++`` overrides), and reads the block from the result. The full global config is still
-    parsed once, at dispatch, with the run config added.
-    """
-    from omegaconf import OmegaConf
-    from omegaconf.errors import InterpolationResolutionError
-
-    from nemo_gym.global_config import translate_interpolation_error
-
-    merged = _merged_cli_config(overrides)
-    block = merged.get(BUILDS_KEY)
-    try:
-        resolved = OmegaConf.to_container(block, resolve=True) if block is not None else None
-    except InterpolationResolutionError as exc:
-        raise translate_interpolation_error(exc) from exc
-    return BuildOptions.from_config({BUILDS_KEY: resolved})
+    """The ``builds:`` block of the configuration the command line names (see :func:`_block_from_overrides`)."""
+    return BuildOptions.from_config({BUILDS_KEY: _block_from_overrides(overrides, BUILDS_KEY)})
 
 
 def _merged_cli_config(overrides: list[str], config_files: Sequence[Path] = ()) -> Any:
@@ -163,16 +145,18 @@ def _merged_cli_config(overrides: list[str], config_files: Sequence[Path] = ()) 
 def _block_from_overrides(overrides: list[str], key: str, *, config_files: Sequence[Path] = ()) -> Any:
     """The ``key`` node (dotted) of the configuration the command names, resolved; a scalar as it is, ``None`` when
     absent. Only that node's own interpolations are evaluated, so a provider block's credentials are not needed
-    to read a sibling key. Merged as :func:`_merged_cli_config` does."""
+    to read a sibling key; a node that is configured but does not resolve (``builds: ${missing_profile}``) is
+    reported as a configuration error rather than read as absent. Merged as :func:`_merged_cli_config` does."""
     from omegaconf import OmegaConf
     from omegaconf.errors import InterpolationResolutionError
 
     from nemo_gym.global_config import translate_interpolation_error
 
-    block = OmegaConf.select(_merged_cli_config(overrides, config_files), key, throw_on_resolution_failure=False)
-    if not OmegaConf.is_config(block):
-        return block
+    merged = _merged_cli_config(overrides, config_files)
     try:
+        block = OmegaConf.select(merged, key)
+        if not OmegaConf.is_config(block):
+            return block
         return OmegaConf.to_container(block, resolve=True)
     except InterpolationResolutionError as exc:
         raise translate_interpolation_error(exc) from exc

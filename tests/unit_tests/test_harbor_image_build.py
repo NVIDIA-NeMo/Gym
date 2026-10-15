@@ -596,6 +596,27 @@ class TestBuildOptions:
         assert build_options_from_overrides(["+split=validation"]) == BuildOptions()
         assert sys.argv == ["gym", "eval", "run", "x"]
 
+    def test_an_unresolved_builds_block_is_a_configuration_error_not_the_defaults(self, sources, monkeypatch):
+        """Review (round 14): ``builds: ${missing_profile}`` was selected with resolution failures suppressed, so
+        the node read as absent and prepare ran with default build settings until the full configuration parse
+        reported the mistake. A configured node that does not resolve is the error it was in M28; a sibling
+        block that does not resolve is still left alone, since only the builds node's own interpolations run."""
+        from nemo_gym.global_config import ConfigInterpolationError
+        from nemo_gym.tasks.harbor.build_options import BuildOptions, build_options_from_overrides
+
+        dotenv, _ = sources
+        dotenv.write_text("builds: ${missing_profile}\n")
+        with pytest.raises(ConfigInterpolationError, match="missing_profile"):
+            build_options_from_overrides([])
+        dotenv.write_text("some_key: 1\n")
+        with pytest.raises(ConfigInterpolationError, match="missing_profile"):
+            build_options_from_overrides(["++builds=${missing_profile}"])
+        monkeypatch.delenv("NEMO_GYM_UNSET_VAR_FOR_THIS_TEST", raising=False)
+        dotenv.write_text(
+            "builds:\n  tool: docker\nsandbox:\n  opensandbox:\n    api_key: ${oc.env:NEMO_GYM_UNSET_VAR_FOR_THIS_TEST}\n"
+        )
+        assert build_options_from_overrides([]) == BuildOptions(tool="docker")
+
     def test_run_and_validate_read_the_block_before_preparing(self, tmp_path, monkeypatch, sources):
         """Both entry points hand the block of the command line's configuration to prepare."""
         import argparse
@@ -1391,6 +1412,11 @@ class TestSandboxProviderAtPrepare:
             harbor_cli, "gpu_sandbox_provider_from_overrides", lambda overrides, sandbox: f"g:{sandbox}"
         )
         monkeypatch.setattr(harbor_cli, "compose_platform_from_overrides", lambda overrides: "linux/arm64")
+        # The M22 readers of the same blocks are stubbed too: the sandbox file this test names does not exist.
+        monkeypatch.setattr(harbor_cli, "volume_sources_from_overrides", lambda overrides, sandbox: None)
+        monkeypatch.setattr(harbor_cli, "gpu_volume_sources_from_overrides", lambda overrides, sandbox: None)
+        monkeypatch.setattr(harbor_cli, "shared_storage_from_overrides", lambda overrides, sandbox: None)
+        monkeypatch.setattr(harbor_cli, "gpu_shared_storage_from_overrides", lambda overrides, sandbox: None)
         # The rows file is scoped to the agent, so the stub has to name one.
         monkeypatch.setattr(
             harbor_cli, "resolve_agent", lambda name: harbor_cli.AgentSelection(Path("a.yaml"), name, name)

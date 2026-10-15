@@ -3,6 +3,8 @@
 
 import asyncio
 import json
+import logging
+import os
 import re
 import shlex
 from copy import deepcopy
@@ -671,7 +673,9 @@ async def test_health_probe_timeout_retries_then_starts_dependent(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_path):
+@pytest.mark.parametrize("declaration", [{}, None], ids=["mapping", "null"])
+async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_path, declaration):
+    # ``volumes:\n  data:`` (a null declaration, the canonical Compose spelling) provisions like ``data: {}``.
     shared = tmp_path / "shared"
     external = shared / "operator-data"
     external.mkdir(parents=True)
@@ -715,7 +719,7 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
                     ],
                 },
             },
-            "volumes": {"data": {}},
+            "volumes": {"data": declaration},
         },
         default_command=["sleep", "1"],
         volume_sources={"/operator/source": "operator-data"},
@@ -1786,6 +1790,219 @@ async def test_post_start_hooks_run_in_order_after_the_service_starts_and_a_fail
     assert provider.closed == ["1", "2"]
 
 
+class RecordingShellProvider(ShellProvider):
+    """A ShellProvider that keeps every exec command and upload it was asked for."""
+
+    def __init__(self):
+        super().__init__()
+        self.commands = []
+        self.uploads = []
+
+    async def exec(self, handle, command, **kwargs):
+        self.commands.append(command)
+        return await super().exec(handle, command, **kwargs)
+
+    async def upload_file(self, handle, source_path, target_path):
+        self.uploads.append((str(source_path), str(target_path)))
+        await super().upload_file(handle, source_path, target_path)
+
+
+@pytest.mark.asyncio
+async def test_uploads_land_in_the_service_before_its_command_runs(tmp_path):
+    """M22: a task-folder bind mount, planned as ``x-sandbox.uploads``, is copied into the service after its
+    sandbox starts and before the service command, files and folders alike, readable by any user. The chmod is
+    never recursive and covers exactly the folders and files the upload touched, every folder ``mkdir -p``
+    created included (intermediates and the parent of a single file, which a restrictive root umask would leave
+    unreadable); a folder upload merges over what the target already holds (review findings). An empty folder tree
+    under the bound folder is recreated too, as a bind mount would carry it (review, round 14)."""
+    task = tmp_path / "task"
+    (task / "data" / "nested").mkdir(parents=True)
+    (task / "data" / "deep" / "er").mkdir(parents=True)
+    (task / "data" / "empty" / "nested").mkdir(parents=True)
+    (task / "seed.json").write_text('{"ok": true}')
+    (task / "data" / "a.txt").write_text("a")
+    (task / "data" / "nested" / "b.txt").write_text("b")
+    (task / "data" / "nested" / "b.txt").chmod(0o600)
+    (task / "data" / "deep" / "er" / "c.txt").write_text("c")
+    sandbox_root = tmp_path / "sandbox"
+    # What the image already ships under the target: kept (a merge), never chmod-ed.
+    (sandbox_root / "data" / "image").mkdir(parents=True)
+    (sandbox_root / "data" / "image" / "default.conf").write_text("image")
+    (sandbox_root / "data" / "image" / "default.conf").chmod(0o600)
+    result = tmp_path / "result"
+    document = {
+        "services": {
+            "api": {
+                "image": "image",
+                "command": [
+                    "sh",
+                    "-c",
+                    f"cat {sandbox_root}/app/seed.json {sandbox_root}/data/a.txt {sandbox_root}/data/nested/b.txt "
+                    f"{sandbox_root}/data/deep/er/c.txt > {result}",
+                ],
+                "x-sandbox": {
+                    "uploads": [
+                        {"source": str(task / "seed.json"), "target": f"{sandbox_root}/app/seed.json"},
+                        {"source": str(task / "data"), "target": f"{sandbox_root}/data"},
+                    ]
+                },
+            }
+        }
+    }
+    provider = RecordingShellProvider()
+    # The sandbox's root shell creates the folders with its own umask; a restrictive one leaves them 0700.
+    umask = os.umask(0o077)
+    try:
+        async with make_compose(provider, document, poll_interval_s=0.01, upload_root=task) as group:
+            await group._wait("api", "service_completed_successfully")
+    finally:
+        os.umask(umask)
+    assert result.read_text() == '{"ok": true}abc'
+    assert (sandbox_root / "data" / "nested" / "b.txt").stat().st_mode & 0o044 == 0o044
+    for created in ("app", "data/nested", "data/deep", "data/deep/er", "data/empty", "data/empty/nested"):
+        assert (sandbox_root / created).stat().st_mode & 0o055 == 0o055, created
+    # The empty folders arrive as folders (``mkdir -p`` entries of their own); only files are uploaded.
+    assert (sandbox_root / "data" / "empty" / "nested").is_dir()
+    assert list((sandbox_root / "data" / "empty" / "nested").iterdir()) == []
+    mkdirs = [shlex.split(command)[2:] for command in provider.commands if command.startswith("mkdir -p ")]
+    assert any({f"{sandbox_root}/data/empty", f"{sandbox_root}/data/empty/nested"} <= set(args) for args in mkdirs)
+    assert sorted(target for _, target in provider.uploads if target.startswith(f"{sandbox_root}/")) == [
+        f"{sandbox_root}/app/seed.json",
+        f"{sandbox_root}/data/a.txt",
+        f"{sandbox_root}/data/deep/er/c.txt",
+        f"{sandbox_root}/data/nested/b.txt",
+    ]
+    assert (sandbox_root / "data" / "image" / "default.conf").read_text() == "image"
+    assert (sandbox_root / "data" / "image" / "default.conf").stat().st_mode & 0o044 == 0
+    assert (sandbox_root / "data" / "image").stat().st_mode & 0o077 == 0o055  # pre-existing: untouched
+    chmods = [command for command in provider.commands if command.startswith("chmod")]
+    assert not any(command.startswith("chmod -R") for command in provider.commands)
+    touched = [shlex.split(command.removesuffix(" 2>/dev/null || true"))[2:] for command in chmods]
+    assert touched == [
+        [f"{sandbox_root}/app", f"{sandbox_root}/app/seed.json"],
+        [
+            f"{sandbox_root}/data",
+            f"{sandbox_root}/data/deep",
+            f"{sandbox_root}/data/deep/er",
+            f"{sandbox_root}/data/empty",
+            f"{sandbox_root}/data/empty/nested",
+            f"{sandbox_root}/data/nested",
+            f"{sandbox_root}/data/a.txt",
+            f"{sandbox_root}/data/deep/er/c.txt",
+            f"{sandbox_root}/data/nested/b.txt",
+        ],
+    ]
+    # Nothing above the sandbox root (which existed) is ever chmod-ed, "/" least of all.
+    assert all(path.startswith(f"{sandbox_root}/") for paths in touched for path in paths)
+
+
+@pytest.mark.asyncio
+async def test_names_the_task_digest_skips_are_not_uploaded(tmp_path):
+    """Review (round 14): ``./data:/data`` passes the planner's digest check on the folder, but the upload shipped
+    every file under it, ``environment/data/payload.pyc`` included, which ``content_hash`` skips: the bytes a
+    program loads could change with no change to the task digest, the manifest check or the server's check. The
+    upload leaves out exactly the names the digest skips (Harbor's packager publishes none of them), so what the
+    service sees is what the digest covers."""
+    from nemo_gym.tasks.harbor.digest import content_hash
+
+    task = tmp_path / "task"
+    data = task / "environment" / "data"
+    (data / "__pycache__").mkdir(parents=True)
+    (data / "cache").mkdir()
+    (data / "a.txt").write_text("a")
+    (data / "payload.pyc").write_bytes(b"before")
+    (data / "__pycache__" / "x.pyc").write_bytes(b"x")
+    (data / ".DS_Store").write_bytes(b"ds")
+    (data / "notes.txt~").write_text("backup")
+    (data / "cache" / "only.pyc").write_bytes(b"c")
+    before = content_hash(task)
+    (data / "payload.pyc").write_bytes(b"after")
+    assert content_hash(task) == before
+    sandbox_root = tmp_path / "sandbox"
+    result = tmp_path / "result"
+    document = {
+        "services": {
+            "api": {
+                "image": "image",
+                "command": ["sh", "-c", f"find {sandbox_root}/data | sort > {result}"],
+                "x-sandbox": {"uploads": [{"source": str(data), "target": f"{sandbox_root}/data"}]},
+            }
+        }
+    }
+    provider = RecordingShellProvider()
+    async with make_compose(provider, document, poll_interval_s=0.01, upload_root=task) as group:
+        await group._wait("api", "service_completed_successfully")
+    uploads = [(source, target) for source, target in provider.uploads if target.startswith(f"{sandbox_root}/")]
+    assert uploads == [(str(data / "a.txt"), f"{sandbox_root}/data/a.txt")]
+    # A folder that held only a skipped file is still a folder of the task; the skipped names never arrive.
+    assert result.read_text().splitlines() == [
+        f"{sandbox_root}/data",
+        f"{sandbox_root}/data/a.txt",
+        f"{sandbox_root}/data/cache",
+    ]
+    assert not any(
+        name in command for command in provider.commands for name in ("payload.pyc", "__pycache__", ".DS_Store", "~")
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_link_inside_an_uploaded_folder_is_refused_before_it_is_read(tmp_path):
+    # Review: ``is_file()`` follows links, so a link in a bound folder would upload a host file the planner never
+    # checked. The adapter refuses the folder, naming the link, before any file of it is uploaded.
+    task = tmp_path / "task"
+    (task / "data").mkdir(parents=True)
+    (task / "data" / "ok.txt").write_text("ok")
+    secret = tmp_path / "secret"
+    secret.write_text("host secret")
+    (task / "data" / "leak").symlink_to(secret)
+    sandbox_root = tmp_path / "sandbox"
+    document = {
+        "services": {
+            "api": {
+                "image": "image",
+                "command": ["sleep", "1"],
+                "x-sandbox": {"uploads": [{"source": str(task / "data"), "target": f"{sandbox_root}/data"}]},
+            }
+        }
+    }
+    provider = RecordingShellProvider()
+    with pytest.raises(RuntimeError, match=r"contains a link: .*data/leak"):
+        await make_compose(provider, document, poll_interval_s=0.01, upload_root=task).start()
+    assert provider.uploads == []
+    assert not (sandbox_root / "data" / "leak").exists()
+    assert len(provider.closed) == len(provider.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_upload_sources_must_lie_under_the_upload_root(tmp_path):
+    # Review blocker: upload sources are read in this process. A document assembled without the planner (or a
+    # root the planner never saw) cannot reach /etc/passwd or any file outside the root; no sandbox is created.
+    task = tmp_path / "task"
+    task.mkdir()
+    (task / "seed.json").write_text("{}")
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    (task / "link.json").symlink_to(outside)
+    for source in ("/etc/passwd", str(outside), str(task / "link.json"), str(task / ".." / "outside.json")):
+        provider = Provider()
+        document = {
+            "services": {"api": {"image": "image", "x-sandbox": {"uploads": [{"source": source, "target": "/x"}]}}}
+        }
+        with pytest.raises(ValueError, match="outside the upload root"):
+            await make_compose(provider, document, upload_root=task).start()
+        assert provider.created == []
+    # Without a root, uploads are refused outright: no caller may forget to vouch for one.
+    provider = Provider()
+    document = {
+        "services": {
+            "api": {"image": "image", "x-sandbox": {"uploads": [{"source": str(task / "seed.json"), "target": "/x"}]}}
+        }
+    }
+    with pytest.raises(ValueError, match="need an upload_root"):
+        await make_compose(provider, document).start()
+    assert provider.created == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "field, value",
@@ -2170,3 +2387,427 @@ async def test_the_servers_normalized_gpu_reservation_passes_the_adapters_own_pa
         assert group.services["model"]._provider is gpu
         (model_spec,) = gpu.created
         assert model_spec.resources.gpu == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "uploads,message",
+    [
+        ("seed.json:/app/seed.json", "list of source/target mappings"),
+        ([{"source": "x"}], "list of source/target mappings"),
+        ([{"source": "/nonexistent/seed.json", "target": "/app/seed.json"}], "does not exist"),
+        ([{"source": ".", "target": "app/seed.json"}], "absolute container path"),
+        ([{"source": ".", "target": "/app/../seed.json"}], "absolute container path"),
+        ([{"source": ".", "target": "/"}], "container root"),
+        ([{"source": ".", "target": "//"}], "container root"),
+        # M22 review: a dot-spelled root passed the `strip("/")` check and the folder merged into `/`.
+        ([{"source": ".", "target": "/."}], "container root"),
+        ([{"source": ".", "target": "//./"}], "container root"),
+        ([{"source": ".", "target": "/././"}], "container root"),
+    ],
+)
+async def test_malformed_uploads_fail_before_provisioning(uploads, message):
+    provider = Provider()
+    group = make_compose(
+        provider, {"services": {"api": {"image": "image", "x-sandbox": {"uploads": uploads}}}}, upload_root="."
+    )
+    with pytest.raises(ValueError, match=message):
+        await group.start()
+    assert provider.created == []
+
+
+@pytest.mark.asyncio
+async def test_upload_folder_creation_falls_back_to_the_default_user_and_reports_failure(tmp_path):
+    """The fake denies the folder, not the host (review, round 14: the old fake matched ``/forbidden/`` against
+    ``mkdir -p /forbidden`` and never fired, so the failure branch was the runner's lack of rights on ``/``);
+    the denied folder sits under ``tmp_path``, where the runner could create it, and is proven not to exist."""
+    seed = tmp_path / "seed.json"
+    seed.write_text("{}")
+    forbidden = tmp_path / "forbidden"
+
+    class NoRootProvider(ShellProvider):
+        def __init__(self):
+            super().__init__()
+            self.users = []
+
+        async def exec(self, handle, command, *, user=None, **kwargs):
+            if command.startswith("mkdir -p "):
+                self.users.append(user)
+                if user == "root":
+                    raise RuntimeError("identity switch not permitted")
+                if str(forbidden) in shlex.split(command.removeprefix("mkdir -p ")):
+                    return SandboxExecResult("", "mkdir: permission denied", 1)
+            return await super().exec(handle, command, user=user, **kwargs)
+
+    provider = NoRootProvider()
+    target = tmp_path / "sandbox" / "app" / "seed.json"
+    document = {
+        "services": {
+            "api": {
+                "image": "image",
+                "command": ["sleep", "1"],
+                "x-sandbox": {"uploads": [{"source": str(seed), "target": str(target)}]},
+            }
+        }
+    }
+    async with make_compose(provider, document, poll_interval_s=0.01, upload_root=tmp_path):
+        assert target.read_text() == "{}"
+    assert provider.users[:2] == ["root", None]
+
+    provider = NoRootProvider()
+    document["services"]["api"]["x-sandbox"]["uploads"][0]["target"] = f"{forbidden}/seed.json"
+    with pytest.raises(RuntimeError, match=re.escape(f"cannot create '{forbidden}/seed.json' for upload")):
+        await make_compose(provider, document, poll_interval_s=0.01, upload_root=tmp_path).start()
+    assert provider.users[:2] == ["root", None] and not forbidden.exists()
+    assert len(provider.closed) == len(provider.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_service_on_its_own_provider_resolves_external_volumes_through_that_providers_mapping():
+    """Review (round 13): a GPU-routed sidecar's volumes are seeded and mounted through its own provider, so its
+    external volume must resolve through that provider's ``volume_sources`` (``service_volume_sources``), not
+    the collection's; the default provider never sees the name, and an ordinary volume of a service on the
+    default provider stays managed there."""
+    cpu, gpu = RecordingProvider("cpu", 1), RecordingProvider("gpu", 2)
+    document = {
+        "services": {
+            "db": {"image": "img", "volumes": [{"type": "volume", "source": "data", "target": "/data"}]},
+            "model": {"image": "img", "volumes": [{"type": "volume", "source": "models", "target": "/models"}]},
+        },
+        "volumes": {"data": {}, "models": {"external": True}},
+    }
+    # The sidecar's own provider has no mapping for it: the collection's (the CPU block's ``cpu/models``) is not
+    # a fallback, since the volume is seeded and mounted on gpu's storage.
+    group = make_compose(
+        cpu,
+        document,
+        default_command=["sleep", "1"],
+        service_providers={"model": gpu},
+        volume_sources={"models": "cpu/models"},
+        service_volume_sources={"model": {}},
+    )
+    with pytest.raises(NotImplementedError, match="External volumes require a volume_sources mapping"):
+        await group.start()
+    assert not cpu.created and not gpu.created
+    async with make_compose(
+        cpu,
+        document,
+        default_command=["sleep", "1"],
+        poll_interval_s=0.01,
+        service_providers={"model": gpu},
+        volume_sources={"models": "cpu/models"},
+        service_volume_sources={"model": {"models": "gpu/models"}},
+    ) as group:
+        helper, model = gpu.created
+        assert helper.image == "alpine:3.22"  # no copy-up seed: the volume is external, so unmanaged
+        assert model.provider_options["volumes"] == [
+            {"source": "gpu/models", "target": "/models", "read_only": False, "storage": "gpu"}
+        ]
+        assert not any("gpu/models" in command or "cpu/models" in command for _, command, _ in gpu.execs)
+        # db's ordinary volume on cpu is the group's own: made under the project and copied up.
+        assert any(
+            command.startswith(f"mkdir -p /tmp/compose-volumes/{group.project}/data") for _, command, _ in cpu.execs
+        )
+        assert all("models" not in str(spec.provider_options) for spec in cpu.created)
+    group = make_compose(cpu, document, default_command=["sleep", "1"], service_volume_sources={"ghost": {}})
+    with pytest.raises(ValueError, match="service_volume_sources names unknown services"):
+        await group.start()
+
+
+@pytest.mark.asyncio
+async def test_two_groups_with_a_narrowed_mapping_keep_an_ordinary_volume_apart(tmp_path):
+    """The reviewer's reproduction (round 13): with the deployment-wide mapping forwarded whole, two groups
+    declaring an ordinary ``pgdata`` got one shared path with no initialization. Narrowed by the planner's
+    ``document_volume_sources``, each group gets its own project directory, made and copied up."""
+    from nemo_gym.sandbox.compose_config import document_volume_sources
+
+    document = {
+        "services": {"db": {"image": "img", "volumes": [{"type": "volume", "source": "pgdata", "target": "/pg"}]}},
+        "volumes": {"pgdata": {}},
+    }
+    deployment = {"pgdata": "datasets/pgdata"}
+    assert document_volume_sources(document, deployment) == {}
+    paths = []
+    for _ in range(2):
+        provider = RecordingProvider("cpu", 1)
+        async with make_compose(
+            provider,
+            json.loads(json.dumps(document)),
+            default_command=["sleep", "1"],
+            poll_interval_s=0.01,
+            volume_sources=document_volume_sources(document, deployment),
+        ) as group:
+            helper, seed, db = provider.created
+            (mount,) = db.provider_options["volumes"]
+            assert mount["source"] == f"{group.project}/pgdata"
+            assert any(
+                command.startswith(f"mkdir -p /tmp/compose-volumes/{group.project}/pgdata")
+                for _, command, _ in provider.execs
+            )
+            paths.append(mount["source"])
+    assert len(set(paths)) == 2
+    # The control: forwarded whole, the same document would share the deployment path and skip initialization.
+    provider = RecordingProvider("cpu", 1)
+    async with make_compose(
+        provider,
+        json.loads(json.dumps(document)),
+        default_command=["sleep", "1"],
+        poll_interval_s=0.01,
+        volume_sources=deployment,
+    ):
+        (helper, db) = provider.created
+        assert db.provider_options["volumes"][0]["source"] == "datasets/pgdata"
+
+
+@pytest.mark.asyncio
+async def test_service_setup_runs_after_the_sandbox_starts_and_before_uploads_and_the_command(tmp_path):
+    """Review (round 13): an overlay Dockerfile's RUN lines ran after main's bind-mount uploads and after its
+    command, so a `RUN` writing defaults clobbered the uploaded file and `RUN mkdir /data` failed on the folder
+    the upload created. ``service_setup`` runs first: setup, then the upload, then the command, as Harbor's
+    build precedes `compose up` with the mounts."""
+    task = tmp_path / "task"
+    task.mkdir()
+    (task / "seed.csv").write_text("uploaded")
+    sandbox_root = tmp_path / "sandbox"
+    sandbox_root.mkdir()  # the image's root; /data is what the RUN line creates
+    result = tmp_path / "result"
+    order = []
+
+    async def setup(sandbox):
+        order.append("setup")
+        # What a `RUN mkdir /data && echo default > /data/seed.csv` line does: it must not see the upload yet.
+        outcome = await sandbox.exec(f"mkdir {sandbox_root}/data && echo default > {sandbox_root}/data/seed.csv")
+        assert outcome.return_code == 0, outcome.stderr
+
+    document = {
+        "services": {
+            "main": {
+                "image": "image",
+                "command": ["sh", "-c", f"cat {sandbox_root}/data/seed.csv > {result}"],
+                "x-sandbox": {
+                    "uploads": [{"source": str(task / "seed.csv"), "target": f"{sandbox_root}/data/seed.csv"}]
+                },
+            },
+            "side": {"image": "image", "command": ["sleep", "1"]},
+        }
+    }
+    provider = RecordingShellProvider()
+    original_upload = provider.upload_file
+
+    async def upload_file(handle, source_path, target_path):
+        order.append("upload")
+        await original_upload(handle, source_path, target_path)
+
+    provider.upload_file = upload_file
+    async with make_compose(
+        provider, document, poll_interval_s=0.01, upload_root=task, service_setup={"main": setup}
+    ) as group:
+        await group._wait("main", "service_completed_successfully")
+    # The upload won over the RUN line's default, and the command read the uploaded bytes.
+    assert result.read_text() == "uploaded"
+    assert order[:2] == ["setup", "upload"] and order.count("setup") == 1  # side had no setup
+    setup_index = next(
+        i for i, command in enumerate(provider.commands) if command.startswith("mkdir ") and "/data &&" in command
+    )
+    run_index = next(i for i, command in enumerate(provider.commands) if "run.sh" in command and "/main/" in command)
+    assert setup_index < run_index
+
+    # A failing setup fails the start and stops the group; its own exception type comes out.
+    class SetupFailed(RuntimeError):
+        pass
+
+    async def failing(sandbox):
+        raise SetupFailed("RUN line 1/1 exited")
+
+    provider = RecordingShellProvider()
+    document["services"]["main"]["command"] = ["sleep", "1"]
+    with pytest.raises(SetupFailed, match="RUN line 1/1"):
+        await make_compose(
+            provider, document, poll_interval_s=0.01, upload_root=task, service_setup={"main": failing}
+        ).start()
+    assert len(provider.closed) == len(provider.created) == 1
+    with pytest.raises(ValueError, match="service_setup names unknown services"):
+        await make_compose(provider, document, upload_root=task, service_setup={"ghost": setup}).start()
+
+
+@pytest.mark.asyncio
+async def test_log_paths_exist_before_the_command_hooks_and_healthcheck_and_a_foreign_target_is_linked(
+    tmp_path, caplog
+):
+    """Review (round 13): with `/logs/verifier:/logs/verifier` dropped by the planner and a healthcheck needing
+    that folder, a clean image failed startup before the server's mkdir. ``x-sandbox.logs`` makes the adapter
+    create the path first; `/logs/artifacts:/app/output` keeps its target as a link to the source, also when
+    the image ships a folder there (round 13 follow-up: `test -e ||` left that folder, and the artifacts the
+    task wrote into it never reached `/logs/artifacts`, where they are collected from)."""
+    root = tmp_path / "sandbox"
+    root.mkdir()
+    logs_dir, output = root / "logs", root / "app" / "output"
+    seen = tmp_path / "seen"
+    document = {
+        "services": {
+            "main": {
+                "image": "image",
+                "command": ["sh", "-c", f"ls -d {logs_dir}/verifier > {seen} && sleep 1"],
+                "post_start": [{"command": f"test -d {logs_dir}/verifier && test -L {output}"}],
+                "healthcheck": {
+                    "test": ["CMD-SHELL", f"test -d {logs_dir}/verifier"],
+                    "interval": "0.01s",
+                    "retries": 1,
+                },
+                "x-sandbox": {
+                    "logs": [
+                        {"source": f"{logs_dir}/verifier", "target": f"{logs_dir}/verifier"},
+                        {"source": f"{logs_dir}/artifacts", "target": str(output)},
+                    ]
+                },
+            }
+        }
+    }
+    provider = RecordingShellProvider()
+    # The validator pins sources to Harbor's tree; this fixture runs on the host, so widen it for the test alone.
+    import nemo_gym.sandbox.adapters.docker_compose as adapter
+
+    original = adapter.LOGS_TREE
+    adapter.LOGS_TREE = str(logs_dir)
+    try:
+        async with make_compose(provider, document, poll_interval_s=0.01):
+            assert seen.read_text().strip() == f"{logs_dir}/verifier"
+            assert (logs_dir / "verifier").is_dir() and (logs_dir / "verifier").stat().st_mode & 0o777 == 0o777
+            assert output.is_symlink() and output.resolve() == (logs_dir / "artifacts").resolve()
+            (output / "x.txt").write_text("via link")
+            assert (logs_dir / "artifacts" / "x.txt").read_text() == "via link"
+        mkdir_index = next(i for i, c in enumerate(provider.commands) if c.startswith(f"mkdir -p {logs_dir}/verifier"))
+        run_index = next(i for i, c in enumerate(provider.commands) if "run.sh" in c and c.startswith("sh "))
+        assert mkdir_index < run_index
+        # A folder the image ships at the target (`RUN mkdir -p /app/output`) is replaced by the link, as Harbor's
+        # bind of one host folder hides it: what the task writes there is collected. The link exists before the
+        # uploads, so a task file bound under the target lands in the source, as under Harbor's `compose cp`.
+        output.unlink()
+        output.mkdir()
+        task = tmp_path / "task"
+        task.mkdir()
+        (task / "seed.json").write_text("{}")
+        shipped = json.loads(json.dumps(document))
+        del shipped["services"]["main"]["post_start"]
+        shipped["services"]["main"]["x-sandbox"]["uploads"] = [
+            {"source": str(task / "seed.json"), "target": f"{output}/seed.json"}
+        ]
+        provider = RecordingShellProvider()
+        async with make_compose(provider, shipped, poll_interval_s=0.01, upload_root=task):
+            assert output.is_symlink() and (logs_dir / "artifacts" / "seed.json").read_text() == "{}"
+            (output / "y.txt").write_text("over the shipped folder")
+            assert (logs_dir / "artifacts" / "y.txt").read_text() == "over the shipped folder"
+        link_index = next(i for i, c in enumerate(provider.commands) if "ln -sfn" in c)
+        upload_index = next(i for i, c in enumerate(provider.commands) if c.startswith(f"mkdir -p {output}"))
+        assert link_index < upload_index
+        # A shipped folder with contents (an image that carries solved outputs) goes too, as the bind would hide
+        # it from the agent, and the adapter says so; nothing of it leaks into the collected artifacts.
+        output.unlink()
+        output.mkdir()
+        (output / "solved.txt").write_text("shipped")
+        del shipped["services"]["main"]["x-sandbox"]["uploads"]
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.sandbox.adapters.docker_compose"):
+            async with make_compose(RecordingShellProvider(), shipped, poll_interval_s=0.01):
+                assert output.is_symlink() and not (logs_dir / "artifacts" / "solved.txt").exists()
+                assert not (logs_dir / "artifacts" / "output").exists()
+        assert [r for r in caplog.records if "was not empty" in r.getMessage() and str(output) in r.getMessage()]
+        # M22 review: a target spelled with a trailing separator (`${HOST_ARTIFACTS_PATH}:/app/output/`, valid at
+        # prepare) had its parent derived as the target itself, created, removed, then named as the link, which
+        # `ln` refuses (`No such file or directory`) and startup failed; a trailing dot (`/app/output/.`, also kept
+        # as written at prepare) failed one step earlier, `rm -rf` refusing to remove `.`. The lexical form is used
+        # first: on a missing target and on a shipped folder alike, and `/logs/verifier` bound at any spelling of
+        # itself (`/logs/verifier/`, `//logs/verifier`, `/logs//verifier`, `/logs/verifier/.`, `/logs/./verifier`)
+        # stays the path itself, never a link to itself.
+        verifier_spellings = (
+            f"{logs_dir}/verifier/",
+            f"/{logs_dir}/verifier",
+            f"{logs_dir}//verifier",
+            f"{logs_dir}/verifier/.",
+            f"{logs_dir}/./verifier",
+        )
+        for spelling, verifier_target in zip(("/", "//", "/.", "/./", "/.//"), verifier_spellings, strict=True):
+            trailing = json.loads(json.dumps(document))
+            trailing["services"]["main"]["x-sandbox"]["logs"] = [
+                {"source": f"{logs_dir}/verifier", "target": verifier_target},
+                {"source": f"{logs_dir}/artifacts", "target": f"{output}{spelling}"},
+            ]
+            for shipped_folder in (False, True):
+                output.unlink()
+                if shipped_folder:
+                    output.mkdir()
+                provider = RecordingShellProvider()
+                async with make_compose(provider, trailing, poll_interval_s=0.01):
+                    assert output.is_symlink() and output.resolve() == (logs_dir / "artifacts").resolve(), spelling
+                    (output / "z.txt").write_text(f"through the {spelling} target")
+                    assert (logs_dir / "artifacts" / "z.txt").read_text() == f"through the {spelling} target"
+                    assert (logs_dir / "verifier").is_dir() and not (logs_dir / "verifier").is_symlink()
+                assert any(c.endswith(f"ln -sfn {logs_dir}/artifacts {output}") for c in provider.commands), spelling
+                assert not any("ln -sfn" in c and c.endswith("/verifier") for c in provider.commands), verifier_target
+        # A target that nests its source only once spelled out (`/logs/.` is `/logs`) used to pass the guard and
+        # reach the shell, where the lexical form was linked: `rm -rf /logs` took the whole tree and `/logs` became
+        # a link to itself. Refused before the sandbox exists, like the plainly spelled nesting below.
+    finally:
+        adapter.LOGS_TREE = original
+    for entry, message in (
+        ({"source": "/var/log", "target": "/var/log"}, "is not under /logs"),
+        ({"source": "/logs/x", "target": "rel"}, "must be an absolute path"),
+        ({"source": "/logs/x", "target": "/"}, "is the container root"),
+        ({"source": "/logs/x", "target": "/."}, "is the container root"),
+        ({"source": "/logs/x", "target": "/././"}, "is the container root"),
+        ({"source": "/logs/x", "target": "/logs"}, "nest"),
+        ({"source": "/logs", "target": "/logs/x/"}, "nest"),
+        ({"source": "/logs/x", "target": "/logs/."}, "nest"),
+        ({"source": "/logs/x", "target": "/logs/./"}, "nest"),
+        ({"source": "/logs", "target": "/./logs/x"}, "nest"),
+        ({"source": "/logs/x", "target": "//logs"}, "nest"),
+        ({"source": "/logs/x/y", "target": "/logs//x/."}, "nest"),
+        ({"source": "/logs/x"}, "requires a list of source/target mappings"),
+    ):
+        provider = Provider()
+        group = make_compose(provider, {"services": {"main": {"image": "img", "x-sandbox": {"logs": [entry]}}}})
+        with pytest.raises(ValueError, match=message):
+            await group.start()
+        assert not provider.created
+
+
+class NoStdoutShellProvider(ShellProvider):
+    """``ShellProvider`` with the OpenSandbox provider's result contract: a command that printed nothing reports
+    ``stdout=None`` (``providers/opensandbox/provider.py``: ``"\\n".join(...) or None``)."""
+
+    async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        result = await super().exec(handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+        return SandboxExecResult(result.stdout or None, result.stderr or None, result.return_code)
+
+
+@pytest.mark.asyncio
+async def test_log_paths_are_prepared_when_the_provider_returns_no_stdout(tmp_path):
+    """M35 D3: a ``main`` that binds the ``/logs`` tree (the Harbor Compose template every kumo and swe-lancer task
+    restates) is prepared with ``mkdir -p ... && chmod 777 ...``, which prints nothing on success; a provider that
+    reports that as ``stdout=None`` crashed the seed with ``'NoneType' object has no attribute 'split'``."""
+    import nemo_gym.sandbox.adapters.docker_compose as adapter
+
+    logs_dir = tmp_path / "sandbox" / "logs"
+    document = {
+        "services": {
+            "main": {
+                "image": "image",
+                "command": ["sleep", "1"],
+                "x-sandbox": {"logs": [{"source": f"{logs_dir}/verifier", "target": f"{logs_dir}/verifier"}]},
+            }
+        }
+    }
+    original = adapter.LOGS_TREE
+    adapter.LOGS_TREE = str(logs_dir)
+    try:
+        async with make_compose(NoStdoutShellProvider(), document, poll_interval_s=0.01):
+            assert (logs_dir / "verifier").is_dir()
+        # A failure of that command is reported with what the provider gave, never a traceback on ``None``.
+        (logs_dir / "blocked").write_text("a file where the folder should be")
+        document["services"]["main"]["x-sandbox"]["logs"] = [
+            {"source": f"{logs_dir}/blocked", "target": f"{logs_dir}/blocked"}
+        ]
+        with pytest.raises(RuntimeError, match="cannot create .*blocked"):
+            await make_compose(NoStdoutShellProvider(), document, poll_interval_s=0.01).start()
+    finally:
+        adapter.LOGS_TREE = original
