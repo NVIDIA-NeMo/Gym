@@ -1771,7 +1771,7 @@ _MAX_FAILURE_BODY_CHARS = 2000
 
 def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name: str) -> None:
     """One ``gym.rollout.completed_total`` increment, after the driver wrote or omitted the attempt."""
-    if not is_span_group_enabled(GymSpanGroup.ROLLOUT):
+    if not is_metrics_exporter_active():
         return
     failure_class = result.get(NG_FAILURE_CLASS_KEY)
     # A scored row can echo failure fields through a verifier; only a failure class makes them labels.

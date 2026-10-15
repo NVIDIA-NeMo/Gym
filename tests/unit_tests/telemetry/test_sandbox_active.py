@@ -180,8 +180,9 @@ async def test_failed_close_keeps_the_sandbox_counted_until_a_retry_releases_it(
 
 
 @pytest.mark.asyncio
-async def test_sandbox_group_off_records_nothing(collected_metrics, monkeypatch):
+async def test_sandbox_records_nothing_without_the_group_or_a_metrics_exporter(collected_metrics, monkeypatch):
     monkeypatch.setattr(sandbox_api, "is_span_group_enabled", lambda group: False)
+    monkeypatch.setattr(sandbox_api, "is_metrics_exporter_active", lambda: False)
     sandbox = AsyncSandbox(FakeSandboxProvider(), SandboxSpec(image="img"))
     await sandbox.start()
     await sandbox.stop()

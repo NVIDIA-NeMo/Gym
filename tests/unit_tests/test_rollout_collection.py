@@ -95,7 +95,6 @@ from nemo_gym.rollout_collection import (
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
-from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
     LineageResolution,
     ParentResolutionStatus,
@@ -1945,7 +1944,7 @@ class TestRolloutCollection:
             require_complete=require_complete,
         )
         outcomes: list[dict] = []
-        monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_metrics_exporter_active", lambda: True)
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
             "record_rollout_completed",
@@ -2396,9 +2395,7 @@ class TestRolloutCollection:
             return FakeResponse(200, replies[json["x"]])
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
-        monkeypatch.setattr(
-            nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: group == GymSpanGroup.ROLLOUT
-        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_metrics_exporter_active", lambda: True)
 
         await RolloutCollectionHelper().run_from_config(
             RolloutCollectionConfig(
@@ -6437,7 +6434,7 @@ class TestDispatchBudget:
 
         monkeypatch.setattr(nemo_gym.rollout_collection, "finalize_rollout_token_capture", finalize)
         outcomes: list[str] = []
-        monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_metrics_exporter_active", lambda: True)
         monkeypatch.setattr(
             nemo_gym.rollout_collection, "record_rollout_completed", lambda outcome, **kw: outcomes.append(outcome)
         )

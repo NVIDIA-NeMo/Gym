@@ -49,6 +49,7 @@ from nemo_gym.telemetry.gym_metrics import (
     record_sandbox_exec_duration,
     record_sandbox_startup,
 )
+from nemo_gym.telemetry.setup import is_metrics_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -432,7 +433,8 @@ class AsyncSandbox:
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
 
-        if is_span_group_enabled(GymSpanGroup.SANDBOX):
+        # The span follows the `sandbox` span group and the metrics follow the metrics exporter, independently.
+        if is_span_group_enabled(GymSpanGroup.SANDBOX) or is_metrics_exporter_active():
             provider_name = self._telemetry_provider_name()
             started = time.perf_counter()
             with managed_span(
@@ -500,7 +502,7 @@ class AsyncSandbox:
         must redirect stdout and stderr. This mode does not accept per-command
         ``env`` or ``user`` overrides on providers with a service-preserving path.
         """
-        if not is_span_group_enabled(GymSpanGroup.SANDBOX):
+        if not (is_span_group_enabled(GymSpanGroup.SANDBOX) or is_metrics_exporter_active()):
             return await self._exec_uninstrumented(
                 command,
                 cwd=cwd,
