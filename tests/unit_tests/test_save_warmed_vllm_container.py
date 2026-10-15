@@ -178,6 +178,10 @@ def test_compile_caches_include_both_roles_without_mixing_replicas(helper: Modul
             directory.mkdir(parents=True)
             (directory / "metadata").write_text(str(node))
             (directory / f"binary-{node}").write_text(str(node))
+        shared = root / "torch_compile_cache" / "torch_aot_compile" / (config * 64) / "inductor_cache" / "2t"
+        shared.mkdir(parents=True)
+        (shared / "59d220.best_config").write_text(str(node))
+        (shared / f"kernel-{node}.so").write_bytes(bytes([node]))
         helper.dump_warmup(cache, root / "jit", root / "startup", stream, allow_empty=False)
     stream.seek(0)
     target = tmp_path / "image"
@@ -188,6 +192,13 @@ def test_compile_caches_include_both_roles_without_mixing_replicas(helper: Modul
             assert (directory / "metadata").read_text() == str(node)
             assert (directory / f"binary-{node}").read_text() == str(node)
             assert not (directory / "binary-2").exists()
+        shared = target / "torch_compile_cache" / "torch_aot_compile" / (config * 64) / "inductor_cache" / "2t"
+        assert (shared / "59d220.best_config").read_text() == str(node)
+        assert (shared / f"kernel-{node}.so").read_bytes() == bytes([node])
+    shared = target / "torch_compile_cache" / "torch_aot_compile" / ("a" * 64) / "inductor_cache" / "2t"
+    assert (shared / "kernel-2.so").read_bytes() == b"\x02"
+    helper.write_manifest(target / "cache", target / "aot", target / "startup", [])
+    assert helper.inspect_manifest(target / "cache", target / "aot", target / "startup") == []
 
 
 @pytest.mark.parametrize("damaged", [None, "autotune", "startup", "jit", "compile"])
@@ -232,7 +243,13 @@ def test_headless_warmup_exports_kernels_without_autotuning(helper: ModuleType, 
 
 @pytest.mark.parametrize(
     "name",
-    ["jit/../../outside.so", "startup/../../outside.json", "unexpected", "compile/../../outside"],
+    [
+        "jit/../../outside.so",
+        "startup/../../outside.json",
+        "unexpected",
+        "compile/../../outside",
+        f"compile/torch_aot_compile/{'a' * 64}/inductor_cache/../../outside",
+    ],
 )
 def test_warmup_archive_rejects_unexpected_paths(helper: ModuleType, tmp_path: Path, name: str) -> None:
     stream = io.BytesIO()

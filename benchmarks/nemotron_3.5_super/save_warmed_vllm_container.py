@@ -140,9 +140,14 @@ def dump_warmup(
 
 
 def compile_cache_group(name: str) -> str:
-    """Validate a relative cache path and identify its complete per-rank cache."""
+    """Identify a complete per-rank cache or a shared Inductor cache file."""
     if any(part in ("", ".", "..") for part in name.split("/")):
         raise ValueError(f"Invalid Torch compilation cache path: {name}")
+    # AOT mode also writes a hash-level Inductor cache shared by all ranks.
+    # Merge its files across nodes so ranks on other nodes retain their kernels;
+    # duplicate keys keep the first replica's entry.
+    if re.fullmatch(r"torch_aot_compile/[0-9a-f]{64}/inductor_cache/.+", name):
+        return name
     match = re.fullmatch(r"((?:[0-9a-f]{10}|torch_aot_compile/[0-9a-f]{64})/rank_[0-9]+_[0-9]+)/.+", name)
     if match is None:
         raise ValueError(f"Invalid Torch compilation cache path: {name}")
@@ -174,7 +179,8 @@ def install_warmup(cache_root: Path, aot_root: Path, startup_root: Path, source:
                     # metadata with another replica's binaries is unsafe.
                     if group not in compile_groups:
                         compile_groups[group] = len(caches)
-                        shutil.rmtree(compile_root / group, ignore_errors=True)
+                        if group != relative:
+                            shutil.rmtree(compile_root / group, ignore_errors=True)
                     if compile_groups[group] != len(caches):
                         continue
                     destination = compile_root / relative
@@ -221,7 +227,7 @@ def install_warmup(cache_root: Path, aot_root: Path, startup_root: Path, source:
     if plans:
         (cache_root / ".startup-plans-baked").write_text("Loaded automatically by sbatch_external_vllm.sh\n")
     print(f"Installed {len(libraries)} FlashInfer JIT modules and {len(plans)} startup plans", flush=True)
-    print(f"Installed {len(compile_groups)} Torch compilation caches (configuration/rank pairs)", flush=True)
+    print(f"Installed {len(compile_groups)} Torch cache groups (rank caches and shared Inductor files)", flush=True)
     return list(libraries.values())
 
 
