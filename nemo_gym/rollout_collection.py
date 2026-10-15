@@ -2355,9 +2355,31 @@ def _missing_rollout_rows_counted_as_zero(
     return counted
 
 
-def _read_jsonl(path: Path) -> List[Dict]:
+_READ_JSONL_YIELD_INTERVAL_S = 0.01
+
+
+async def _read_jsonl(path: Path) -> List[Dict]:
+    """Parse a whole JSONL artifact, letting other tasks on the event loop run between rows.
+
+    Parsing stays on the event loop thread instead of a worker thread.
+    The loop thread then reuses the memory it freed during collection for these rows.
+    A worker thread allocates from its own malloc arena, so the process would hold both.
+    """
+    rows = []
+    yielded_at = time.monotonic()
     with path.open("rb") as f:
-        return [orjson.loads(line) for line in f if line.strip()]
+        for line in f:
+            if line.strip():
+                rows.append(orjson.loads(line))
+            if time.monotonic() - yielded_at >= _READ_JSONL_YIELD_INTERVAL_S:
+                await asyncio.sleep(0)
+                yielded_at = time.monotonic()
+    return rows
+
+
+def _count_lines(path: Path) -> int:
+    with path.open("rb") as f:
+        return sum(1 for _ in f)
 
 
 def _coverage_report(
@@ -3492,13 +3514,20 @@ class RolloutCollectionHelper(BaseModel):
                 if health_metrics_enabled and health_outcome is not None:
                     await asyncio.to_thread(_record_rollout_health, result, health_outcome, health_ignored_checks)
 
-            counted = _failure_rows_counted_as_zero(
-                [failures_fpath], config.count_failure_classes_as_zero, persisted_success_keys
+            # The scans of whole artifacts after collection run in a worker thread.
+            # On the event loop they would stall telemetry, other tasks, and shutdown.
+            # The reloads that keep every row use `_read_jsonl` instead.
+            counted = await asyncio.to_thread(
+                _failure_rows_counted_as_zero,
+                [failures_fpath],
+                config.count_failure_classes_as_zero,
+                persisted_success_keys,
             )
             # Opted-in missing rollouts are scored as well, so a run they fill still has a score. Only
             # when this run aggregates: otherwise it scores nothing, and an empty run must still fail.
             missing: List[Dict[str, Any]] = (
-                _missing_rollout_rows_counted_as_zero(
+                await asyncio.to_thread(
+                    _missing_rollout_rows_counted_as_zero,
                     [config.materialized_jsonl_fpath],
                     [failures_fpath],
                     persisted_success_keys
@@ -3553,8 +3582,7 @@ class RolloutCollectionHelper(BaseModel):
             else:
                 assert upload_spool is not None
                 try:
-                    with upload_spool_fpath.open("rb") as upload_spool_reader:
-                        upload_results = [orjson.loads(line) for line in upload_spool_reader if line.strip()]
+                    upload_results = await _read_jsonl(upload_spool_fpath)
                     export_rollouts(upload_results)
                     del upload_results
                 finally:
@@ -3562,7 +3590,7 @@ class RolloutCollectionHelper(BaseModel):
 
         if not config.retain_results_in_memory and not config.disable_aggregation:
             # Aggregation consumes only successful rows from the main artifact.
-            persisted_results = _read_jsonl(output_fpath)
+            persisted_results = await _read_jsonl(output_fpath)
 
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
@@ -3590,7 +3618,9 @@ class RolloutCollectionHelper(BaseModel):
                 print(f"Counting {len(imputed)} materialized rollout(s) with no row as scored zeros")
                 counted.extend(imputed)
             # One run never reuses a (task, rollout), so its rows need no server to tell them apart.
-            _fill_task_fields(counted, persisted_results, [config.materialized_jsonl_fpath], _routing_identity)
+            await asyncio.to_thread(
+                _fill_task_fields, counted, persisted_results, [config.materialized_jsonl_fpath], _routing_identity
+            )
             # Appending leaves a missing early repeat behind the repeats that did land. The two
             # lists are zipped positionally downstream, so they are reordered together.
             scored_rows = persisted_results + counted
@@ -3615,7 +3645,7 @@ class RolloutCollectionHelper(BaseModel):
         _raise_for_aggregation_errors(aggregate_metrics_fpath)
 
         expected_rollouts = (
-            sum(1 for _ in config.materialized_jsonl_fpath.open("rb"))
+            await asyncio.to_thread(_count_lines, config.materialized_jsonl_fpath)
             if config.materialized_jsonl_fpath.exists()
             else len(input_rows) + persisted_count
         )
