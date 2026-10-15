@@ -150,3 +150,173 @@ class TestDefaultMessagesRoute:
         assert "event: message_start" in body
         assert "event: content_block_delta" in body
         assert "event: message_stop" in body
+
+
+def _build_thinking_only_response(model: str = "downstream-model") -> NeMoGymResponse:
+    return NeMoGymResponse(
+        id=f"resp_{uuid4().hex}",
+        created_at=int(time()),
+        model=model,
+        object="response",
+        output=[
+            {
+                "type": "reasoning",
+                "id": f"rs_{uuid4().hex}",
+                "summary": [{"type": "summary_text", "text": "still thinking..."}],
+            }
+        ],
+        tool_choice="auto",
+        parallel_tool_calls=True,
+        tools=[],
+    )
+
+
+class _ThinkingOnlyModel(SimpleResponsesAPIModel):
+    """A server whose model ends every generation with reasoning only (e.g. inside an unclosed <think>)."""
+
+    config: BaseResponsesAPIModelConfig
+    calls: int = 0
+    finalized: int = 0
+    model_config = {"arbitrary_types_allowed": True}
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        object.__setattr__(self, "calls", self.calls + 1)
+        return _build_thinking_only_response()
+
+    async def chat_completions(
+        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        raise NotImplementedError
+
+    async def _finalize_served_response(self, response) -> None:
+        object.__setattr__(self, "finalized", self.finalized + 1)
+
+
+class TestThinkingOnlyRetry:
+    _BODY = {"model": "claude-x", "max_tokens": 32, "messages": [{"role": "user", "content": "fix the bug"}]}
+
+    def _server(self, model_cls=_ThinkingOnlyModel, **config_overrides):
+        config = BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name="", **config_overrides)
+        server = model_cls(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        return TestClient(server.setup_webserver()), server
+
+    def test_disabled_by_default(self) -> None:
+        client, _ = self._server()
+        resp = client.post("/ng-rollout/retry-test/v1/messages", json=self._BODY)
+        assert resp.status_code == 200
+        assert resp.json()["content"][0]["type"] == "thinking"
+
+    def test_thinking_only_returns_retryable_529(self) -> None:
+        client, server = self._server(anthropic_thinking_only_max_retries=4)
+        resp = client.post("/ng-rollout/retry-test/v1/messages", json=self._BODY)
+        assert resp.status_code == 529
+        assert resp.json() == {
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "model returned a thinking-only turn; retry"},
+        }
+        assert resp.headers["x-should-retry"] == "true"
+        # The sampled generation is still finalized for capture.
+        assert server.finalized == 1
+
+    def test_streaming_request_also_gets_529(self) -> None:
+        client, _ = self._server(anthropic_thinking_only_max_retries=4)
+        resp = client.post("/ng-rollout/retry-test/v1/messages", json={**self._BODY, "stream": True})
+        assert resp.status_code == 529
+        assert resp.json()["error"]["type"] == "overloaded_error"
+
+    def test_visible_output_is_served_normally(self) -> None:
+        client, _ = self._server(model_cls=_BodyOnlyModel, anthropic_thinking_only_max_retries=4)
+        resp = client.post("/ng-rollout/retry-test/v1/messages", json=self._BODY)
+        assert resp.status_code == 200
+        assert resp.json()["content"] == [{"type": "text", "text": "hi from body-only"}]
+
+    def test_falls_through_after_max_retries_for_same_request(self) -> None:
+        client, server = self._server(anthropic_thinking_only_max_retries=2)
+        statuses = [client.post("/ng-rollout/retry-test/v1/messages", json=self._BODY).status_code for _ in range(3)]
+        assert statuses == [529, 529, 200]
+        assert server.calls == 3
+        # After a fall-through the tally for that body starts over.
+        assert client.post("/ng-rollout/retry-test/v1/messages", json=self._BODY).status_code == 529
+
+    def test_fall_through_returns_the_thinking_only_message(self) -> None:
+        client, _ = self._server(anthropic_thinking_only_max_retries=1)
+        assert client.post("/ng-rollout/retry-test/v1/messages", json=self._BODY).status_code == 529
+        resp = client.post("/ng-rollout/retry-test/v1/messages", json=self._BODY)
+        assert resp.status_code == 200
+        assert resp.json()["content"] == [{"type": "thinking", "thinking": "still thinking...", "signature": ""}]
+        assert resp.json()["stop_reason"] == "end_turn"
+
+    def test_different_request_bodies_count_separately(self) -> None:
+        client, _ = self._server(anthropic_thinking_only_max_retries=1)
+        assert client.post("/ng-rollout/retry-test/v1/messages", json=self._BODY).status_code == 529
+        other = {**self._BODY, "messages": [{"role": "user", "content": "something else"}]}
+        assert client.post("/ng-rollout/retry-test/v1/messages", json=other).status_code == 529
+        assert client.post("/ng-rollout/retry-test/v1/messages", json=self._BODY).status_code == 200
+
+    def test_identical_requests_in_different_rollouts_have_independent_budgets(self) -> None:
+        client, _ = self._server(anthropic_thinking_only_max_retries=1)
+        statuses = [
+            client.post(f"/ng-rollout/{rollout}/v1/messages", json=self._BODY).status_code
+            for rollout in ("independent-a", "independent-b", "independent-a", "independent-b")
+        ]
+        assert statuses == [529, 529, 200, 200]
+
+    def test_visible_response_resets_retry_budget(self) -> None:
+        class IntermittentModel(_ThinkingOnlyModel):
+            async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+                object.__setattr__(self, "calls", self.calls + 1)
+                return _build_response("visible") if self.calls == 2 else _build_thinking_only_response()
+
+        client, _ = self._server(model_cls=IntermittentModel, anthropic_thinking_only_max_retries=1)
+        statuses = [client.post("/ng-rollout/recovery/v1/messages", json=self._BODY).status_code for _ in range(3)]
+        assert statuses == [529, 200, 529]
+
+    def test_unprefixed_calls_are_served_without_an_ambiguous_retry_budget(self) -> None:
+        client, server = self._server(anthropic_thinking_only_max_retries=1)
+        for _ in range(3):
+            client.cookies.clear()
+            assert client.post("/v1/messages", json=self._BODY).status_code == 200
+        assert not server._thinking_only_retries
+
+    def test_model_instances_do_not_share_retry_budgets(self) -> None:
+        clients = [self._server(anthropic_thinking_only_max_retries=1)[0] for _ in range(2)]
+        assert [client.post("/ng-rollout/same/v1/messages", json=self._BODY).status_code for client in clients] == [
+            529,
+            529,
+        ]
+
+    def test_capacity_does_not_evict_active_retry_budgets(self, monkeypatch) -> None:
+        from nemo_gym import base_responses_api_model as module
+
+        monkeypatch.setattr(module, "_THINKING_ONLY_RETRIES_MAX_KEYS", 2)
+        _, server = self._server(anthropic_thinking_only_max_retries=2)
+        assert server._thinking_only_retry_due(("a", "body"), 2)
+        assert server._thinking_only_retry_due(("b", "body"), 2)
+        assert not server._thinking_only_retry_due(("c", "body"), 2)
+        assert server._thinking_only_retry_due(("a", "body"), 2)
+        assert not server._thinking_only_retry_due(("a", "body"), 2)
+        assert server._thinking_only_retry_due(("c", "body"), 2)
+        assert set(server._thinking_only_retries) == {("b", "body"), ("c", "body")}
+
+    def test_idle_retry_budgets_expire(self, monkeypatch) -> None:
+        from nemo_gym import base_responses_api_model as module
+
+        _, server = self._server(anthropic_thinking_only_max_retries=1)
+        now = module.time.monotonic()
+        server._thinking_only_retries[("expired", "body")] = (1, now - module._THINKING_ONLY_RETRIES_IDLE_SECONDS - 1)
+        server._thinking_only_retries[("active", "body")] = (1, now)
+        assert server._thinking_only_retry_due(("expired", "body"), 1)
+        assert not server._thinking_only_retry_due(("active", "body"), 1)
+
+    def test_token_limit_truncation_does_not_retry(self) -> None:
+        class TruncatedThinkingModel(_ThinkingOnlyModel):
+            async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+                result = _build_thinking_only_response().model_dump()
+                result.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+                return NeMoGymResponse.model_validate(result)
+
+        client, server = self._server(model_cls=TruncatedThinkingModel, anthropic_thinking_only_max_retries=2)
+        response = client.post("/ng-rollout/truncated/v1/messages", json=self._BODY)
+        assert response.status_code == 200
+        assert response.json()["stop_reason"] == "max_tokens"
+        assert not server._thinking_only_retries
