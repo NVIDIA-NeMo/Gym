@@ -64,15 +64,12 @@ VLLM_PREFILL_ARGS=(
     # MRV2 captures a one-token graph for the zero-draft schedule, but Mamba's
     # full-graph capture requires 1 + num_speculative_tokens. Keep prefill
     # piecewise until that dynamic-speculation capture path supports Mamba.
+    # Use sparse small-token buckets; retain coverage for large prefill batches.
     --compilation-config '{
         "cudagraph_mode": "PIECEWISE",
         "cudagraph_capture_sizes": [
-            6, 12, 18, 24, 30, 36, 42, 48,
-            72, 96, 144, 192, 240, 288, 336, 384,
-            480, 576, 672, 768,
-            864, 960, 1056, 1152, 1248, 1344, 1440, 1536,
-            1728, 1920, 2112, 2304, 2496, 2688, 2880, 3072,
-            3456, 3840, 4224, 4608, 4992, 5376, 5760, 6144,
+            6, 12, 24, 48, 96, 192, 384, 768,
+            1536, 3072, 4608, 6144,
             8192, 12288, 16384, 20480, 24576, 28672, 32768,
             40960, 49152, 57344, 65536, 67840
         ]
@@ -134,16 +131,15 @@ VLLM_DECODE_ARGS=(
             ]
         }
     }'
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    # Preserve fine small-batch buckets; larger decode buckets remain multiples
+    # of six for the default five-draft-token MTP configuration.
     --compilation-config '{
         "cudagraph_mode": "FULL_DECODE_ONLY",
         "cudagraph_capture_sizes": [
             6, 12, 18, 24, 30, 36, 42, 48,
-            72, 96, 144, 192, 240, 288, 336, 384,
-            480, 576, 672, 768,
-            864, 960, 1056, 1152, 1248, 1344, 1440, 1536,
-            1728, 1920, 2112, 2304, 2496, 2688, 2880, 3072,
-            3456, 3840, 4224, 4608, 4992, 5376, 5760, 6144
+            72, 96, 144, 192, 288, 384, 576, 768,
+            960, 1152, 1536, 1920, 2304, 2688, 3072,
+            3840, 4608, 5376, 6144
         ]
     }'
     --max-cudagraph-capture-size 6144
