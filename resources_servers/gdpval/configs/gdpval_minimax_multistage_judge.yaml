@@ -93,7 +93,7 @@ gdpval_resources_server:
       # past the ceiling.
       # The reference deliverables are NOT shipped with Gym: you must provide
       # each reference model's per-task `task_<task_id>/` deliverables yourself
-      # (the layout the Stirrup agent persists), produced by the exact model
+      # (the layout the GDPVal resources server persists), produced by the exact model
       # variant whose `elo` is listed. /gdpval/refs is only a placeholder.
       # Each deliverables_dir resolves to $GDPVAL_REFS_ROOT/<id>, defaulting to
       # /gdpval/refs/<id>. Three ways to point at your copies:
