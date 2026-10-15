@@ -4233,7 +4233,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         def _start_in_input_order() -> Iterator[Future]:
             # asyncio.as_completed creates its tasks from a set, so create them here to start rollouts in input order.
-            tasks = [asyncio.ensure_future(awaitable) for awaitable in awaitables]
+            # It drains this generator in order before it builds that set, so tasks are still created in input order.
+            # A finished task keeps its result, so a list of tasks would keep every /run result until the run ends.
+            # A generator leaves the consumer holding the only reference to a result once it takes one.
+            tasks = (asyncio.ensure_future(awaitable) for awaitable in awaitables)
             yield from tqdm.as_completed(
                 tasks,
                 desc="Collecting rollouts",
