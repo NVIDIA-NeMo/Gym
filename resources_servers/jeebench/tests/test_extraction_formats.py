@@ -161,3 +161,137 @@ def test_standalone_uncertainty_words_with_punctuation(word):
     from resources_servers.jeebench.extraction import uncertain
 
     assert uncertain(f"({word})")
+
+
+@pytest.mark.parametrize(
+    "text,kind,expected",
+    [
+        ("सही विवरण B और D हैं।", "MCQ(multiple)", "BD"),
+        ("Hence A, B and C are true and D is false; the calculation is consistent.", "MCQ(multiple)", "ABC"),
+        ("In particular A and C are the correct statements, B and D are not.", "MCQ(multiple)", "AC"),
+        ("Hence B is the only false statement and A, C and D are the true statements.", "MCQ(multiple)", "ACD"),
+        ("विशेष रूप से (A) और (B) तथा (D) सत्य हैं, (C) असत्य है।", "MCQ(multiple)", "ABD"),
+        ("The calculation gives the required ratio, which is option (A).", "MCQ", "A"),
+        ("i.e. option (B). This is the required coplanar point.", "MCQ", "B"),
+        ("Final Answer: (C), as it yields a valid configuration.", "MCQ", "C"),
+        ("A is true and B is false; A is false.", "MCQ", "None"),
+        ("Either A is true or B is true.", "MCQ(multiple)", "None"),
+        ("If A is correct, B is correct.", "MCQ(multiple)", "None"),
+        ("I don't think option A is correct.", "MCQ", "None"),
+        ("B is not false.", "MCQ", "None"),
+        ("A is correct; B also satisfies the conditions.", "MCQ(multiple)", "None"),
+        ("A is correct but the final answer is uncertain.", "MCQ", "None"),
+        ("Option A is incorrect; option B might be correct.", "MCQ", "None"),
+        ("A is true, and B is true", "MCQ(multiple)", "AB"),
+        ("A is true and B is true", "MCQ", "None"),
+    ],
+)
+def test_explanatory_option_conclusions(text, kind, expected):
+    assert extract_answer(text, kind)[0] == expected
+
+
+@pytest.mark.parametrize(
+    "text,question,expected",
+    [
+        (
+            "So the rate is given by\n\nY = 6.75\n\ni.e. r = 6.75e-5, with concentration irrelevant.",
+            "$Y$ का मान क्या है?",
+            "6.75",
+        ),
+        ("Y = 8.25\n\nThe corresponding rate is 8.25e-5.", "What is the value of $Y$?", "8.25"),
+        ("Y = 8.25\n\nThe corresponding rate is 8.25e-5.", "What is the value of $X$?", "None"),
+        ("Y = 2, 3\n\nThis is the coefficient.", "What is the value of $Y$?", "None"),
+        ("Y = 1,000\n\nThis is the coefficient.", "What is the value of $Y$?", "None"),
+        ("Y = 2\nY = 3\n\nThese are the two possible values.", "What is the value of $Y$?", "None"),
+        ("Y = 2 + x\n\nThis is the coefficient.", "What is the value of $Y$?", "None"),
+        ("Y = 2\n\nFinal answer: uncertain", "What is the value of $Y$?", "None"),
+        ("Y = 2\n\nI am unsure.", "What is the value of $Y$?", "None"),
+        ("Y = 2\n\nThis is an intermediate result.", "Assume $Y$ is constant.", "None"),
+    ],
+)
+def test_explicit_requested_variable(text, question, expected):
+    assert extract_answer(text, "Numeric", question=question)[0] == expected
+
+
+@pytest.mark.parametrize(
+    "text,kind,expected",
+    [
+        ("Final Answer: (A) (I) और (II)", "MCQ", "A"),
+        ("The statements (A), (B) and (D) are true, (C) is in general false.", "MCQ(multiple)", "ABD"),
+        (r"Hence A, C and D are true, B is false. The drag is $F_{D}=2$.", "MCQ(multiple)", "ACD"),
+        (r"$r=\dfrac14\approx0.25$", "Numeric", "0.25"),
+        (r"$27I^{2}=4\approx4.00$", "Numeric", "4.00"),
+        (r"Final answer: $x=2+3=5$", "Integer", "5"),
+        (r"Final answer: $x=2=3$", "Integer", "None"),
+        (r"Final answer: $x=m=5$", "Integer", "None"),
+        ("Assume A is correct.", "MCQ", "None"),
+    ],
+)
+def test_equations_and_statement_annotations(text, kind, expected):
+    assert extract_answer(text, kind)[0] == expected
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Final answer: 6.75. This is the required coefficient.", "6.75"),
+        ("Final answer: 6.75, as required.", "6.75"),
+        ("Final answer: The value is 2 + 3. This follows from symmetry.", "5.0"),
+        (r"Final answer: 6.75\times10^{-5}\;{\rm mol\,dm^{-3}s^{-1}}", "6.75e-05"),
+        ("Final answer: 2. Or it could be 3.", "None"),
+        ("Final answer: 2. This is not the answer.", "None"),
+        ("Final answer: 2, 3", "None"),
+        ("Final answer: 2, as n = 3", "None"),
+        ("Final answer: 2 + x. This is the required value.", "None"),
+    ],
+)
+def test_numeric_annotations_do_not_hide_other_values(text, expected):
+    assert extract_answer(text, "Numeric")[0] == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I considered option A.",
+        "The question lists option A.",
+        "Is A correct?",
+        "A is correct? B is correct?",
+        "I considered whether A is correct.",
+        "Final answer: 2. Probably.",
+    ],
+)
+def test_narrative_mentions_and_questions_are_not_selections(text):
+    kind = "Numeric" if "2." in text else "MCQ(multiple)"
+    assert extract_answer(text, kind) == ("None", "unparsed")
+
+
+def test_selection_prefix_cannot_hide_an_alternative_or_another_label():
+    assert extract_answer("This is A or option B.", "MCQ(multiple)") == ("None", "unparsed")
+    assert extract_answer("This is A and option B.", "MCQ(multiple)") == ("None", "unparsed")
+
+
+def test_multiple_requested_symbols_do_not_select_the_last_one():
+    text = "x = 2\ny = 3\n\nThese are the coefficients."
+    assert extract_answer(text, "Numeric", question="$x$ और $y$ का मान क्या है?")[0] == "None"
+
+
+@pytest.mark.parametrize(
+    "text,question,expected",
+    [
+        (r"T=\mu v^{2}" + "\n\n" + r"T=5\;{\rm N}", "What is the value of $T$?", "5.0"),
+        ("n = x/y\n\nThe range is reduced.\n\nn = 0.95", "What is the value of $n$?", "0.95"),
+        (r"\det A = 5", "$A$ के सारणिक का मान क्या है?", "5"),
+        ("The product of the four solutions is 1.", "$x$ के सभी मानों का गुणनफल क्या है?", "1"),
+        ("x = 2\n\n0.50 kg", "What is the value of $x$?", "0.5"),
+    ],
+)
+def test_requested_variable_does_not_override_a_standalone_final_answer(text, question, expected):
+    answer, method = extract_answer(text, "Numeric", question=question)
+    assert answer != "None" and float(answer) == float(expected)
+
+
+@pytest.mark.parametrize("question", ["What is the value of $x$ + 1?", "$x$ के मानों की संख्या क्या है?"])
+def test_requested_symbol_is_not_a_transformed_or_counted_quantity(question):
+    from resources_servers.jeebench.extraction import requested_symbol
+
+    assert requested_symbol(question) is None

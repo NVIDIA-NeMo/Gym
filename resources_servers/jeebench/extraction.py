@@ -15,7 +15,7 @@ import unicodedata
 from collections.abc import Callable
 
 
-PARSER_VERSION = "indic-formats-v2.7"
+PARSER_VERSION = "indic-formats-v2.8"
 MAX_PAYLOAD_CHARS = 4096
 # Answer/option vocabulary covers the fourteen languages in the Indic campaign.
 ANSWER_WORDS = (
@@ -177,6 +177,7 @@ OPTION_NOUNS = (
     "relations",
     "विकल्प",
     "कथन",
+    "विवरण",
     "उक्ति",
     "বিকল্প",
     "উক্তি",
@@ -241,7 +242,7 @@ VALUE_WORDS = (
     "تعداد",
 )
 UNCERTAIN = re.compile(
-    r"or|maybe|perhaps|uncertain|might|either|not|neither|incorrect|false"
+    r"or|maybe|perhaps|uncertain|unsure|possibly|probably|might|either|not|neither|incorrect|false"
     r"|या|अथवा|नहीं|गलत|অথবা|ভুল|અથવા|ಅಥವಾ|അല്ലെങ്കിൽ|ଅଥବା|ਜਾਂ|அல்லது|లేదా|یا|" + NEGATIVE_PATTERN,
     re.IGNORECASE,
 )
@@ -277,7 +278,7 @@ NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
 # Explicit units only; never discard arbitrary prose, alternatives, or inequalities.
 UNITS = re.compile(
     r"(?:(?:bar|atm|Pa|kPa|MPa|GPa|Torr|torr|K|°C|°|deg|degrees?|rad|radians?|mol|moles?|"
-    r"m|cm|mm|nm|pm|km|s|ms|min|h|kg|g|mg|N|J|kJ|eV|MeV|V|A|W|Hz|C|F|H|T|M|L|l|"
+    r"m|dm|cm|mm|nm|pm|km|s|ms|min|h|kg|g|mg|N|J|kJ|eV|MeV|V|A|W|Hz|C|F|H|T|M|L|l|"
     r"litres?|liters?|ohms?|Ω|बार|केल्विन|मोल|मीटर|सेकंड|जूल|न्यूटन)"
     r"(?:\^?[+-]?\d+)?[\s·*/]*)+"
 )
@@ -309,15 +310,19 @@ def clean_math(text: str) -> str:
 
 def numeric_value(text: str) -> str | None:
     """Parse a bounded literal arithmetic value, optionally followed by units."""
+    # Flatten integer powers before unwrapping nested legacy {\rm ...} units.
+    text = re.sub(r"\^\{([+-]?\d+)\}", r"^\1", text)
     text = clean_math(text).strip().rstrip(".।۔ ")
     if re.fullmatch(NUMBER, text):
         return text
     # Strip only an explicit recognized unit suffix (no scale/unit conversion).
     for match in re.finditer(r"\s+(?=[A-Za-z°Ω\u0900-\u097f])", text):
-        if UNITS.fullmatch(text[match.end() :]):
+        units = re.sub(r"\^\{([+-]?\d+)\}", r"^\1", text[match.end() :])
+        if UNITS.fullmatch(units):
             text = text[: match.start()].strip()
             break
     for _ in range(8):
+        text = re.sub(r"\\(dfrac|tfrac|frac)\s*(\d)\s*(\d)", r"\\\1{\2}{\3}", text)
         changed = re.sub(r"\\(?:dfrac|tfrac|frac)\{([^{}]+)\}\{([^{}]+)\}", r"((\1)/(\2))", text)
         if changed == text:
             break
@@ -375,6 +380,12 @@ def scalar_prefix(text: str, kind: str, normalize: Callable[[str, str], str | No
     number = numeric_value(text.removesuffix("%"))
     if number is not None:
         return normalize(number, kind)
+    # A prose annotation cannot introduce another value, expression or negation.
+    annotation = re.fullmatch(r"(.+?)(?:[.।۔]\s+|,\s+(?=as\b|which\b|because\b))([\w\s,.'’।۔-]+)", text)
+    if annotation and not re.search(r"\d|[_+-]", annotation[2]) and not uncertain(annotation[2]):
+        number = numeric_value(annotation[1])
+        if number is not None:
+            return normalize(number, kind)
     # Accept only these redundant annotations, not arbitrary prose or a second value.
     annotation = re.fullmatch(
         r"(.+?)[.।۔]\s*\((?:([0-9]+) is a non-negative integer|[A-Za-z]\s*=\s*([0-9]+))\.?\)", text
@@ -424,6 +435,59 @@ def _roman_to_option(match: re.Match[str]) -> str:
     return {"i": "A", "ii": "B", "iii": "C", "iv": "D"}[match[1].lower()]
 
 
+def choice_assertions(text: str, kind: str, normalize: Callable[[str, str], str | None]) -> str | None:
+    """Account for every label in one conclusion, including negative verdicts.
+
+    Only explicit lists and verdicts select options. Surrounding prose can explain
+    them but cannot contain an uncovered label, alternative or negation.
+    """
+    label = r"(?:[\[(]\s*[A-Da-d]\s*[\])]|(?<![\w{\\])(?-i:[A-D])(?![\w}]))"
+    connector = r"\s*(?:,\s*(?:and\s+)?|&|/|" + "|".join(map(re.escape, CONNECTORS)) + r")\s*"
+    labels = label + rf"(?:{connector}{label})*"
+    copula = rf"(?:(?:{COPULA_PATTERN}|being)\s+)?"
+    noun = rf"(?:{OPTION_PATTERN})(?!\w)"
+    verdict = rf"(?:{NEGATIVE_PATTERN}|{POSITIVE_PATTERN})(?!\w)"
+    assertion = re.compile(
+        rf"(?P<labels>{labels})\s+{copula}(?:in general\s+)?(?:the\s+)?(?:only\s+)?(?P<verdict>{verdict})"
+        rf"(?:\s+(?:{POSITIVE_PATTERN})(?!\w))?(?:\s+{noun})?(?:\s+(?:{COPULA_PATTERN})(?!\w))?",
+        re.I,
+    )
+    selection = re.compile(
+        rf"(?:(?:{POSITIVE_PATTERN})(?!\w)\s+{noun}\s*{copula}[:：]?\s*"
+        rf"|(?:(?:^|[,;]\s*)(?:the\s+)?|(?:\b(?:which is|this is|quoted as|corresponds to)|i\.e\.)"
+        rf"\s+[^.!?;]{{0,100}}?)\b(?:options?|choices?)\s*(?:(?:is|are)\s*)?[:：]?\s*)"
+        rf"(?P<labels>{labels})(?:\s+(?:{COPULA_PATTERN})(?!\w))?",
+        re.I,
+    )
+    positive, negative = set(), set()
+    covered = [False] * len(text)
+    for pattern in (assertion, selection):
+        for match in pattern.finditer(text):
+            if any(covered[match.start() : match.end()]):
+                continue
+            # Extract labels, not the letters of conjunctions such as 'and'.
+            values = [re.sub(r"[^A-Da-d]", "", m[0]).upper() for m in re.finditer(label, match["labels"])]
+            is_negative = pattern is assertion and match["verdict"].lower() in NEGATIVE_WORDS
+            (negative if is_negative else positive).update(values)
+            start, end = match.span() if pattern is assertion else match.span("labels")
+            covered[start:end] = [True] * (end - start)
+    remainder = "".join(" " if covered[i] else char for i, char in enumerate(text))
+    if (
+        not positive
+        or positive & negative
+        or re.search(label, remainder)
+        or uncertain(remainder)
+        or "?" in text
+        or re.search(
+            r"\b(?:if|unless|assuming|assume|suppose|whether|considered|possibly|probably|doubt|cannot|can't|don't|doesn't)\b",
+            text,
+            re.I,
+        )
+    ):
+        return None
+    return normalize("".join(sorted(positive)), kind)
+
+
 def explicit_choices(
     text: str, kind: str, normalize: Callable[[str, str], str | None], *, selected: bool = False
 ) -> str | None:
@@ -431,7 +495,8 @@ def explicit_choices(
     if kind not in {"MCQ", "MCQ(multiple)"} or len(text) > MAX_PAYLOAD_CHARS:
         return None
     text = clean_math(text)
-    text = re.sub(r"[\[(]\s*(i|ii|iii|iv)\s*[\])]", _roman_to_option, text, flags=re.I)
+    if not re.search(r"(?<!\w)[A-D](?!\w)", text):
+        text = re.sub(r"[\[(]\s*(i|ii|iii|iv)\s*[\])]", _roman_to_option, text, flags=re.I)
     direct = normalize(text, kind)
     if direct is not None:
         return direct
@@ -447,6 +512,9 @@ def explicit_choices(
 
     text = CONCLUSION_PATTERN.sub("", text).strip(" ,:।۔.")
     text = re.sub(r"(?i)^(?:after discussion\s+)?I conclude(?: that)?\s+", "", text)
+    assertions = choice_assertions(text, kind, normalize)
+    if assertions is not None:
+        return assertions
     # Split only between assertions, never within an option list.
     clauses = re.split(rf";|(?<=[a-z])\s*(?:,|\band\b)(?=\s*{label}\s+(?:{COPULA_PATTERN}))", text)
     yes, no = set(), set()
@@ -516,8 +584,8 @@ def payload_answer(
         # A scalar equation can state its value on the right of the last equality.
         # Do not accept lists of assignments, inequalities, or prose alternatives.
         equation = re.sub(r"\\(?:approx|simeq)(?![A-Za-z])|≈", "=", text)
-        if equation.count("=") == 1 and not re.search(r"[,;<>]|\\(?:leq?|geq?|pm)\b|\b(?:or|and)\b", equation):
-            left, right = equation.rsplit("=", 1)
+        if "=" in equation and not re.search(r"[,;<>]|\\(?:leq?|geq?|pm)\b|\b(?:or|and)\b", equation):
+            left, *values = equation.split("=")
             words = re.findall(r"(?<!\\)\b[A-Za-z]{3,}\b", left)
             allowed = {
                 "Product",
@@ -551,7 +619,11 @@ def payload_answer(
                 "right",
             }
             if all(word in allowed for word in words) and not re.search(r"[^\x00-\x7fΑ-ω]", left):
-                text = right.strip()
+                if len(values) > 1:
+                    numbers = [numeric_value(value) for value in values]
+                    if any(number is None for number in numbers) or len({float(n) for n in numbers}) != 1:
+                        return None
+                text = values[-1].strip()
         number = numeric_value(text)
         answer = normalize(number, kind) if number is not None else None
         return answer if answer is not None else explicit_scalar(text, kind, normalize)
@@ -604,6 +676,63 @@ def option_verdicts(text: str, kind: str) -> str | None:
     if kind == "MCQ" and len(choices) != 1:
         return None
     return choices or "None"
+
+
+def requested_symbol(question: str) -> str | None:
+    """Recognize a terminal request for the value of one explicitly typeset symbol."""
+    math_spans = list(re.finditer(r"\$([^$]+)\$|\\\((.*?)\\\)", question, re.S))
+    if not math_spans:
+        return None
+    last = math_spans[-1]
+    if len(math_spans) > 1:
+        gap = question[math_spans[-2].end() : last.start()]
+        if not re.search(r"[.!?।۔]", gap) and any(word in gap.split() for word in CONNECTORS):
+            return None
+    target = clean_math(last[1] or last[2])
+    suffix = question[last.end() :].strip()
+    prefix = question[max(0, last.start() - 50) : last.start()]
+    # Ask for the symbol itself, not e.g. the determinant of a matrix, product of
+    # its roots, or number of its possible values.
+    value_request = re.match(
+        r"(?:(?:का|के|की|को|નું|નો|ની|ৰ|এর|चा|ची|चे|ಯ|ದ|ന്റെ|ର|ਦਾ|ਦੀ|ਦੇ|இன்|யின்|کا|کی|کے)\s*)?"
+        r"(?:value\b|मान|मूल्य|মান|મૂલ્ય|ಮೌಲ್ಯ|മൂല്യം|ମୂଲ୍ୟ|ਮੁੱਲ|மதிப்பு|విలువ|قدر)",
+        suffix,
+        re.I,
+    )
+    if value_request and value_request.end() < len(suffix):
+        if unicodedata.category(suffix[value_request.end()])[0] in "LMN":
+            value_request = None
+    if (
+        not re.fullmatch(r"[A-Za-z]", target)
+        or len(suffix) > 120
+        or not (value_request or (re.search(r"\bvalue\s+of\s*$", prefix, re.I) and re.fullmatch(r"[?.।۔\s]*", suffix)))
+    ):
+        return None
+    return target
+
+
+def requested_scalar(text: str, target: str, kind: str, normalize: Callable[[str, str], str | None]) -> str | None:
+    """Read agreeing, complete assignments to the requested symbol, without solving."""
+    start = max(0, len(text) - MAX_PAYLOAD_CHARS)
+    if start:
+        start = text.find("\n", start)
+        if start == -1:
+            return None
+    tail = text[start:]
+    if uncertain(tail) or re.search(r"\b(?:if|unless|unsure|unknown|cannot)\b", tail, re.I):
+        return None
+    assignments = list(re.finditer(rf"(?<![\w\\]){target}\s*(?:=|≈|\\(?:approx|simeq)(?![A-Za-z]))\s*([^\n]+)", tail))
+    if not assignments:
+        return None
+    answers = []
+    for match in assignments:
+        # No prefix/last-number selection from lists, prose or symbolic equations.
+        number = numeric_value(match[1])
+        answer = normalize(number, kind) if number is not None else None
+        if answer is None or answer == "None":
+            return None
+        answers.append(answer)
+    return answers[0] if all(float(a) == float(answers[0]) for a in answers) else None
 
 
 def extract_formatted_answer(
@@ -662,6 +791,20 @@ def extract_formatted_answer(
             candidates.append((match.start(), payload, "answer_marker"))
             break
     lines = [line.strip() for line in text.splitlines() if line.strip() and line.strip() not in {"---", "```"}]
+    if not candidates and lines and kind in {"Numeric", "Integer"} and normalize(lines[-1], kind) is None:
+        target = requested_symbol(question)
+        last_paragraph = re.split(r"\n\s*\n", text.strip())[-1].strip()
+        standalone = last_paragraph == lines[-1] and (
+            numeric_value(lines[-1]) is not None
+            or (
+                target
+                and re.match(rf"^{target}\s*(?:=|≈|\\(?:approx|simeq)(?![A-Za-z]))", lines[-1])
+                and payload_answer(lines[-1], kind, normalize) is not None
+            )
+        )
+        if target and not standalone:
+            answer = requested_scalar(text, target, kind, normalize)
+            return (answer, "requested_variable") if answer is not None else ("None", "unparsed")
     if lines:
         # A trailing standalone value can follow a heading or prose explanation.
         answer = (
