@@ -33,9 +33,10 @@ import sys
 from pathlib import Path
 from time import time
 from traceback import format_exc
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import Request
+from anyio import fail_after
+from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
@@ -44,6 +45,8 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReleaseSessionRequest,
+    ReleaseSessionResponse,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -121,6 +124,7 @@ class ScaleSWESeedSessionRequest(ScaleSWEInstanceRequest, BaseSeedSessionRequest
 
 
 class ScaleSWESeedSessionResponse(BaseSeedSessionResponse):
+    supports_session_release: Literal[True] = True
     sandbox_handle: str
 
 
@@ -268,6 +272,21 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
             )
         finally:
             await self._stop_sandbox(original_sandbox)
+
+    async def release_session(self, request: Request, body: ReleaseSessionRequest) -> ReleaseSessionResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        sandbox = self._session_id_to_sandbox.get(session_id)
+        if sandbox is None:
+            raise HTTPException(status_code=409, detail="Session is not owned by this resource server")
+        descriptor = await sandbox.serialize()
+        if descriptor.get("sandbox_id") != body.sandbox_handle:
+            raise HTTPException(status_code=409, detail="Sandbox does not match this session")
+        self._session_id_to_sandbox.pop(session_id)
+        self._session_id_to_pristine_untracked.pop(session_id, None)
+        self._session_id_to_base_commit.pop(session_id, None)
+        with fail_after(60, shield=True):
+            await sandbox.stop()
+        return ReleaseSessionResponse(sandbox_handle=body.sandbox_handle)
 
     async def seed_session(self, request: Request, body: ScaleSWESeedSessionRequest) -> ScaleSWESeedSessionResponse:
         """Start the instance's image, then run ``pre_commands`` so the agent sees the prepared

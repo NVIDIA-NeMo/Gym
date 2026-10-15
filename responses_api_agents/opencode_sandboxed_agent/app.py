@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import os
 import sqlite3
 import sys
 from asyncio import Semaphore
@@ -25,14 +26,17 @@ from traceback import format_exc
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
+from anyio import fail_after
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
-from pydantic import ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReleaseSessionRequest,
+    ReleaseSessionResponse,
 )
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
@@ -77,10 +81,33 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
+    get_response_json,
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
+from nemo_gym.token_id_capture.agent_abort import CaptureAbortAcknowledgement, run_until_capture_failure
+from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+from nemo_gym.token_id_capture.control_routes import RolloutControlClient
+from nemo_gym.token_id_capture.staging.records import UNCOMMITTED_CALL_REASON
 from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
+
+
+def _trace_rollout_stage(request, rollout_id, stage, sandbox_id=None, error_type=None):
+    """Emit identity and stage only; never log bodies, cookies, commands, or exception messages."""
+    if not isinstance(rollout_id, str) or not rollout_id:
+        return
+    event = {
+        "event": "training_rollout_stage",
+        "time_unix_s": time(),
+        "process_id": os.getpid(),
+        "request_id": str(id(request)),
+        "rollout_id": rollout_id,
+        "session_id": request.session.get(SESSION_ID_KEY),
+        "stage": stage,
+        "sandbox_id": sandbox_id,
+        "error_type": error_type,
+    }
+    print(json.dumps(event, separators=(",", ":")), file=sys.stderr, flush=True)
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -459,6 +486,15 @@ class OpenCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
 
 
+class OpenCodeCaptureAbortResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["capture_aborted"] = "capture_aborted"
+    rollout_id: str
+    reason: str
+    sandbox_stopped: Literal[True] = True
+    verification_performed: Literal[False] = False
+
+
 class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     # Allow for benchmark params to propagate properly
     model_config = ConfigDict(extra="allow")
@@ -735,6 +771,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if self.config.tool_servers and not isinstance(getattr(request.state, "_ng_opencode_mcp", None), dict):
             raise ValueError("Configured tool servers require a seeded /run request")
         sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
+        trace_rollout_id = getattr(request.state, "_ng_observation_invocation_id", None)
 
         query = None
         # This can be modified to handle system/developer prompts too.
@@ -766,6 +803,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 )
             else:
                 install_str = (
+                    f"OPENCODE_VERSION={quote(self.config.opencode_version)} "
                     f"bash {quote(self.config.remote_opencode_install_script_path)} "
                     f"--binary {quote(self.config.remote_opencode_binary_path)}"
                 )
@@ -817,13 +855,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         run_error_type = None
         try:
+            _trace_rollout_stage(request, trace_rollout_id, "exec_start")
             result = await sandbox.exec(
                 command=command,
                 timeout_s=self.config.sandbox_timeout,
             )
+            _trace_rollout_stage(request, trace_rollout_id, "exec_done")
         except Exception as exc:
             result = None
             run_error_type = type(exc).__name__
+            _trace_rollout_stage(request, trace_rollout_id, "exec_error", error_type=run_error_type)
             print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
 
         if self.config.debug and result:
@@ -842,6 +883,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         export_remote_fpath = f"/tmp/opencode_{export_fname}"
         try:
             session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
+            _trace_rollout_stage(request, trace_rollout_id, "session_list_start")
             session_list_result = await sandbox.exec(
                 command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
                 env=session_env,
@@ -850,6 +892,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             if session_list_result.return_code != 0:
                 raise RuntimeError(f"Failed to list OpenCode sessions: {session_list_result}")
             session_id = _extract_opencode_session_id(session_list_result.stdout or "")
+            _trace_rollout_stage(request, trace_rollout_id, "export_start")
             export_result = await sandbox.exec(
                 command=(
                     "export PATH=$HOME/.opencode/bin:$PATH "
@@ -859,7 +902,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 timeout_s=self.config.sandbox_timeout,
             )
         except Exception:
+            _trace_rollout_stage(request, trace_rollout_id, "export_attempt_done")
             raise RuntimeError("Failed to export OpenCode results") from None
+        _trace_rollout_stage(request, trace_rollout_id, "export_attempt_done")
         if export_result.return_code != 0 or export_result.error_type:
             raise RuntimeError("OpenCode export command failed")
         if self.config.debug and export_result:
@@ -873,7 +918,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         results_dir.mkdir(parents=True, exist_ok=True)
         results_local_fpath = results_dir / export_fname
         results_local_fpath.unlink(missing_ok=True)
+        _trace_rollout_stage(request, trace_rollout_id, "export_download_start")
         await sandbox.download(export_remote_fpath, results_local_fpath)
+        _trace_rollout_stage(request, trace_rollout_id, "export_download_done")
 
         observations = None
         trajectory = (
@@ -892,6 +939,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     "destination=sqlite3.connect(sys.argv[2]);"
                     "source.backup(destination);destination.close();source.close()"
                 )
+                _trace_rollout_stage(request, trace_rollout_id, "observation_snapshot_start")
                 snapshot_result = await sandbox.exec(
                     command=(
                         f"python3 -c {quote(snapshot_script)} "
@@ -901,7 +949,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 )
                 if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:
                     raise RuntimeError("OpenCode database snapshot failed")
+                _trace_rollout_stage(request, trace_rollout_id, "observation_download_start")
                 await sandbox.download(snapshot_remote_fpath, observations_local_fpath)
+                _trace_rollout_stage(request, trace_rollout_id, "observation_download_done")
                 observations = parse_opencode_observations(
                     observations_local_fpath, observation_invocation_id, trajectory
                 )
@@ -995,6 +1045,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if collect_observations:
             run_result["_ng_agent_observations"] = observations
             run_result["_ng_trajectory"] = trajectory
+        _trace_rollout_stage(request, trace_rollout_id, "responses_return")
         self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = run_result
 
         response = NeMoGymResponse(
@@ -1019,18 +1070,44 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         pending.replace(results_dir / "generation.json")
         return response
 
+    async def _responses_with_capture_guard(self, request, body, sandbox, rollout_id):
+        if not self._token_id_capture_enabled():
+            return await self.responses(request, body.responses_create_params)
+        capture = TokenIdCaptureConfig.model_validate(self.server_client.global_config_dict).token_id_capture
+        if not capture.external_staging:
+            return await self.responses(request, body.responses_create_params)
+        if not rollout_id:
+            raise ValueError("Training capture requires a rollout identity")
+        control = RolloutControlClient(
+            self.resolve_model_base_url(self.config.model_server.name).removesuffix("/v1"),
+            auth_token=capture.resolve_control_auth_token(),
+            request_timeout_s=60.0,
+        )
+
+        async def read_manifest():
+            return await control.manifest(rollout_id)
+
+        return await run_until_capture_failure(
+            self.responses(request, body.responses_create_params),
+            read_manifest,
+            sandbox.stop,
+            rollout_id=rollout_id,
+            uncommitted_reason=UNCOMMITTED_CALL_REASON,
+        )
+
     async def run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
-    ) -> OpenCodeSandboxedAgentVerifyResponse:
+    ) -> OpenCodeSandboxedAgentVerifyResponse | OpenCodeCaptureAbortResponse:
         async with self._sem:
             return await self._run(request, body)
 
     async def _run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
-    ) -> OpenCodeSandboxedAgentVerifyResponse:
+    ) -> OpenCodeSandboxedAgentVerifyResponse | OpenCodeCaptureAbortResponse:
         cookies = request.cookies
         session_key = request.session[SESSION_ID_KEY]
         rollout_id = self.rollout_id_from_run(body)
+        _trace_rollout_stage(request, rollout_id, "seed_start")
 
         seed_session_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
@@ -1046,11 +1123,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # @bxyu-nvidia: "sandbox_handle" comes from resources_servers/swebench/app.py
         # Once we graduate to use the sandbox server, this will be in a generic seed_session type that can be model validated.
         seed_session_result = await seed_session_response.json()
+        _trace_rollout_stage(request, rollout_id, "seed_done", seed_session_result.get("sandbox_handle"))
         sandbox = await self._start_sandbox(
             sandbox_id=seed_session_result.get("sandbox_handle"),
             workdir=seed_session_result.get("workdir"),
         )
         self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
+        _trace_rollout_stage(request, rollout_id, "sandbox_connected", seed_session_result.get("sandbox_handle"))
 
         # Propagating the sandbox handle
         cookies["sandbox_id"] = session_key
@@ -1058,11 +1137,35 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request._cookies = cookies
         request.state._ng_observation_invocation_id = rollout_id
         observations = None
+        run_failed = False
         try:
-            response = await self.responses(request, body.responses_create_params)
+            _trace_rollout_stage(request, rollout_id, "responses_start")
+            response = await self._responses_with_capture_guard(request, body, sandbox, rollout_id)
+            _trace_rollout_stage(request, rollout_id, "responses_done")
+            if isinstance(response, CaptureAbortAcknowledgement):
+                # The guard already stopped the agent's handle; the resources server still owns its session.
+                _trace_rollout_stage(request, rollout_id, "capture_abort_ack")
+                resource_sandbox_id = seed_session_result.get("sandbox_handle")
+                if resource_sandbox_id:
+                    if seed_session_result.get("supports_session_release") is not True:
+                        raise RuntimeError("Capture abort requires resource session release support")
+                    _trace_rollout_stage(request, rollout_id, "release_start", resource_sandbox_id)
+                    release_result = await self.server_client.post(
+                        server_name=self.config.resources_server.name,
+                        url_path="/release_session",
+                        json=ReleaseSessionRequest(sandbox_handle=resource_sandbox_id).model_dump(),
+                        cookies=cookies,
+                    )
+                    await raise_for_status(release_result)
+                    released = ReleaseSessionResponse.model_validate(await get_response_json(release_result))
+                    if released.sandbox_handle != resource_sandbox_id:
+                        raise RuntimeError("Resource release acknowledgement has wrong sandbox identity")
+                _trace_rollout_stage(request, rollout_id, "release_done", resource_sandbox_id)
+                return OpenCodeCaptureAbortResponse(rollout_id=response.rollout_id, reason=response.reason)
             run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
             observations = run_result.pop("_ng_agent_observations", None)
             trajectory = run_result.pop("_ng_trajectory", None)
+            _trace_rollout_stage(request, rollout_id, "verify_start")
             response_dict = await verify_agent_response(
                 self.server_client,
                 self.config.resources_server,
@@ -1072,12 +1175,23 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 force_zero_reward=self.config.execution_failure_reward_zero
                 and run_result.get("opencode_failed", False),
             )
+            _trace_rollout_stage(request, rollout_id, "verify_done")
+        except BaseException:
+            run_failed = True
+            _trace_rollout_stage(request, rollout_id, "run_error", error_type=type(sys.exception()).__name__)
+            raise
         finally:
             del request.state._ng_observation_invocation_id
             del request.state._ng_opencode_mcp
+            stage = "error_sandbox_stop" if run_failed else "sandbox_stop"
             try:
-                await sandbox.stop()
+                # Disconnect cancellation must not interrupt sandbox cleanup.
+                with fail_after(60, shield=True):
+                    _trace_rollout_stage(request, rollout_id, f"{stage}_start")
+                    await sandbox.stop()
+                    _trace_rollout_stage(request, rollout_id, f"{stage}_done")
             except Exception:
+                _trace_rollout_stage(request, rollout_id, f"{stage}_error", error_type=type(sys.exception()).__name__)
                 print("Failed to stop sandbox", format_exc(), file=sys.stderr)
             finally:
                 self._sandbox_id_to_sandbox.pop(session_key, None)
@@ -1105,6 +1219,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             else:
                 observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_unavailable"))
             response_dict["ng_agent_observations"] = observations.model_dump(mode="json")
+        _trace_rollout_stage(request, rollout_id, "return_start")
         return OpenCodeSandboxedAgentVerifyResponse.model_validate(response_dict)
 
 

@@ -964,3 +964,93 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
     assert receipt["response"]["output"]
     assert receipt["response"]["status"] == result.response.status
     sandbox.stop.assert_awaited_once()
+
+
+class TestCaptureAbortGuard:
+    """Under external-staging capture, a poisoned rollout stops early and releases the resources session."""
+
+    @staticmethod
+    def _server(monkeypatch, seed_result: Dict[str, Any]):
+        import functools
+
+        from nemo_gym.token_id_capture import agent_abort
+
+        posted: list[tuple[str, Any]] = []
+
+        async def post(*, server_name, url_path, json=None, cookies=None):
+            posted.append((url_path, json))
+            response = MagicMock(cookies={})
+            response.json = AsyncMock(return_value=seed_result)
+            return response
+
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(side_effect=post)
+        client.global_config_dict = {
+            "token_id_capture": {"enabled": True, "external_staging": True, "rebuild_response": False}
+        }
+        monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "test-token")
+        server = OpenCodeSandboxedAgent(config=TestOpenCodeSandboxedAgent()._create_config(), server_client=client)
+        sandbox = MagicMock(stop=AsyncMock())
+        server._start_sandbox = AsyncMock(return_value=sandbox)
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "rollout_id_from_run", lambda self, body: "r1")
+        monkeypatch.setattr(
+            OpenCodeSandboxedAgent, "resolve_model_base_url", lambda self, name, rollout_id=None: "http://p:1/v1"
+        )
+
+        async def never_finishes(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", never_finishes)
+
+        class FakeControl:
+            def __init__(self, base_url, *, auth_token, request_timeout_s):
+                assert base_url == "http://p:1" and auth_token == "test-token"
+
+            async def manifest(self, rollout_id):
+                return SimpleNamespace(
+                    rollout_id=rollout_id, failures=[SimpleNamespace(reason="worker_capture_failed")]
+                )
+
+        monkeypatch.setattr(app_module, "RolloutControlClient", FakeControl)
+        monkeypatch.setattr(
+            app_module,
+            "run_until_capture_failure",
+            functools.partial(agent_abort.run_until_capture_failure, poll_interval_s=0.01),
+        )
+        monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            app_module, "get_response_json", AsyncMock(return_value={"sandbox_handle": "sbx-1", "released": True})
+        )
+        return server, sandbox, posted
+
+    async def test_poisoned_rollout_releases_the_resources_session_without_verification(self, monkeypatch):
+        server, sandbox, posted = self._server(
+            monkeypatch, {"sandbox_handle": "sbx-1", "supports_session_release": True}
+        )
+        request = MagicMock(cookies={}, session={SESSION_ID_KEY: "trial"})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
+        result = await server.run(request, body)
+        assert isinstance(result, app_module.OpenCodeCaptureAbortResponse)
+        assert (result.rollout_id, result.reason, result.verification_performed) == (
+            "r1",
+            "worker_capture_failed",
+            False,
+        )
+        assert [path for path, _ in posted] == ["/seed_session", "/release_session"]
+        assert posted[1][1] == {"sandbox_handle": "sbx-1"}
+        sandbox.stop.assert_awaited()
+        assert not server._sandbox_id_to_sandbox and not server._sandbox_id_to_run_result
+
+    async def test_abort_without_release_support_fails_and_still_stops_the_sandbox(self, monkeypatch):
+        server, sandbox, posted = self._server(monkeypatch, {"sandbox_handle": "sbx-1"})
+        request = MagicMock(cookies={}, session={SESSION_ID_KEY: "trial"})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
+        with raises(RuntimeError, match="session release support"):
+            await server.run(request, body)
+        assert [path for path, _ in posted] == ["/seed_session"]
+        sandbox.stop.assert_awaited()
+        assert not server._sandbox_id_to_sandbox

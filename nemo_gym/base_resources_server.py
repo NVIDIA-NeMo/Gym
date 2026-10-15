@@ -14,9 +14,9 @@
 # limitations under the License.
 from abc import abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, Optional, TypeVar
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 
@@ -69,7 +69,9 @@ def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
 
 
 # Tool names that would collide with the resources server's own endpoints if advertised over MCP.
-RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "close_session", "aggregate_metrics", "mcp"})
+RESERVED_MCP_TOOL_NAMES = frozenset(
+    {"verify", "seed_session", "close_session", "release_session", "aggregate_metrics", "mcp"}
+)
 
 
 class ReverifyMode(str, Enum):
@@ -168,6 +170,17 @@ class BaseSeedSessionRequest(BaseModel):
     pass
 
 
+class ReleaseSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sandbox_handle: str = Field(min_length=1)
+
+
+class ReleaseSessionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sandbox_handle: str
+    released: Literal[True] = True
+
+
 class BaseSeedSessionResponse(BaseModel):
     pass
 
@@ -235,6 +248,9 @@ class ResourcesCloseSessionResponse(BaseModel):
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
 
+    async def release_session(self, request: Request, body: ReleaseSessionRequest) -> ReleaseSessionResponse:
+        raise HTTPException(status_code=501, detail="Resource server does not support session release")
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
@@ -243,6 +259,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         app.post("/seed_session")(self.seed_session)
         app.post("/close_session")(self.close_resources_session)
+        app.post("/release_session")(self.release_session)
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
         app.post("/verify")(
             traced_verify_endpoint(
