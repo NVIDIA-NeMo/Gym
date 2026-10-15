@@ -32,6 +32,10 @@ MANIFEST_FILE = "manifest.toml"
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 _SHA = re.compile(r"[0-9a-f]{40}")
+# The fetch stages its clone inside the dataset folder (the same filesystem, for the atomic rename into
+# place). Hidden, so recursive task discovery, which skips dot-folders, never enters a staging directory an
+# interrupted fetch left behind: its clone holds another copy of each task.
+_STAGING_PREFIX = ".nemo-gym-harbor-"
 # Registry entries may only point at network git remotes: a URL scheme git fetches over,
 # or the scp-like `user@host:path` form. Anything else (file paths, `ext::`, option-looking
 # strings) is refused before it reaches a git command line.
@@ -420,7 +424,7 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
         by_repo.setdefault((task.git_url, commit), []).append(task)
 
     for (git_url, commit), tasks in by_repo.items():
-        with tempfile.TemporaryDirectory(prefix="nemo-gym-harbor-", dir=folder) as tmp:
+        with tempfile.TemporaryDirectory(prefix=_STAGING_PREFIX, dir=folder) as tmp:
             clone = Path(tmp) / "repo"
             _git("clone", "--quiet", "--filter=blob:none", "--no-checkout", "--", git_url, str(clone))
             _git("sparse-checkout", "set", "--no-cone", "--", *(task.path for task in tasks), cwd=clone)

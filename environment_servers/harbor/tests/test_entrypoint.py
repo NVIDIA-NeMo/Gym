@@ -664,7 +664,7 @@ class TestEntrypoint:
         # The verifier's /logs folders exist before its entrypoint starts, as in the seed; test.sh comes after.
         launched = verifier.index_of(f"sh {ENTRYPOINT_DIR}/run.sh")
         assert (
-            verifier.index_of("mkdir -p /tests /logs/verifier /logs/artifacts")
+            verifier.index_of("mkdir -p /tests /logs/verifier /logs/agent /logs/artifacts")
             < launched
             < verifier.index_of("test.sh")
         )

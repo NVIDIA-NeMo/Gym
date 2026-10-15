@@ -59,6 +59,7 @@ from nemo_gym.tasks.harbor.task import (
     HarborTask,
     dockerfile_base_image,
     is_task_folder,
+    iter_task_folders,
 )
 
 
@@ -281,17 +282,17 @@ def dockerfile_base_images(folder: Path, *, select: Callable[[str], bool] | None
     to report.
     """
     # Resolved like load_task does: overrides are keyed by the task folder's name and dataset.toml
-    # sits beside the task folders, or one level up for datasets/<name>/tasks/.
+    # sits at the dataset root (the task's parent for a single task folder, else the folder itself).
     folder = Path(folder).resolve()
     single = is_task_folder(folder)
-    children = [folder] if single else sorted(child for child in folder.iterdir() if child.is_dir())
+    children = [folder] if single else iter_task_folders(folder)
     try:
         dataset = read_dataset_config(folder.parent if single else folder)
     except ValueError:
         return {}
     images: dict[str, list[str]] = {}
     for child in children:
-        if not is_task_folder(child) or (select is not None and not select(child.name)):
+        if select is not None and not select(child.name):
             continue
         try:
             config = HarborTaskConfig.model_validate(tomllib.loads((child / TASK_FILE).read_text()))
