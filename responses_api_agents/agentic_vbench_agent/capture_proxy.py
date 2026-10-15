@@ -334,7 +334,10 @@ def task_tool_prompts(completion: dict) -> list[tuple[str, str]]:
     for choice in completion.get("choices") or []:
         for call in (choice.get("message") or {}).get("tool_calls") or []:
             function = call.get("function") or {}
-            if function.get("name") != "task":
+            # OpenCode resolves tool names case-insensitively, so mirror that
+            # behavior when attributing a spawned child to its task call.
+            name = function.get("name")
+            if not isinstance(name, str) or name.lower() != "task":
                 continue
             try:
                 arguments = json.loads(function.get("arguments") or "{}")

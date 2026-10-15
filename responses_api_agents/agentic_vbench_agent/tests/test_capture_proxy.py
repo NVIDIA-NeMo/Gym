@@ -294,12 +294,16 @@ def test_sessions_are_keyed_by_leading_context_and_children_attributed_to_task_c
             "content": "",
             "tool_calls": [
                 {"id": "call_task_1", "type": "function", "function": {"name": "task", "arguments": json.dumps({"description": "probe", "prompt": "Inspect clip A", "subagent_type": "general"})}},
+                {"id": "call_task_2", "type": "function", "function": {"name": "Task", "arguments": json.dumps({"description": "probe", "prompt": "Inspect clip B", "subagent_type": "general"})}},
                 {"id": "call_bash", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
             ],
         },
         "tool_calls",
     )
-    assert task_tool_prompts(spawn) == [("call_task_1", "Inspect clip A")]
+    assert task_tool_prompts(spawn) == [
+        ("call_task_1", "Inspect clip A"),
+        ("call_task_2", "Inspect clip B"),
+    ]
 
     route = EpisodeRoute(upstream="http://u", record_dir=tmp_path)
     parent_first = {"messages": [system, parent_open]}
