@@ -513,7 +513,7 @@ def run_health_checks(
     if not paths:
         raise ValueError("at least one rollout JSONL path is required")
     for path in paths:
-        if not raw_outcomes_are_selected(path):
+        if not raw_outcomes_are_selected(path, artifacts=(path,)):
             raise JournalHealthUnavailable(
                 "Health reports for histories with superseded outcomes are a follow-up to evaluation resume. "
                 "Run health checks on a merged selected-result projection from `gym eval aggregate`."

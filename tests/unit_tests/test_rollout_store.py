@@ -468,11 +468,11 @@ def test_exhaustion_counts_failures_but_not_interruptions_terminal_or_completed(
         # Row 4 has an unknown dispatched outcome; row 5 was never dispatched.
     reopened = RolloutStore.read(output)
     report = reopened.coverage()
-    assert report["attempts_exhausted"] == expected_exhausted
-    assert (report["failed"], report["unknown"], report["never_dispatched"], report["attempts"]) == (2, 2, 1, 5)
+    assert report["failure_budget_exhausted"] == expected_exhausted
+    assert (report["failed"], report["missing"], report["not_started"], report["attempts"]) == (2, 1, 1, 5)
     from nemo_gym.rollout_records import coverage_path_for
 
-    assert orjson.loads(coverage_path_for(output).read_bytes())["attempts_exhausted"] == expected_exhausted
+    assert orjson.loads(coverage_path_for(output).read_bytes())["failure_budget_exhausted"] == expected_exhausted
 
 
 @pytest.mark.parametrize("alias", [False, True])
@@ -649,7 +649,7 @@ async def test_source_alias_uses_the_same_selected_history(prepared_run, monkeyp
     )
     assert aggregate.call_args.args[0] == []
     report = orjson.loads(coverage_path_for(destination).read_bytes())
-    assert report["successful"] == 0 and report["unknown"] == 2 and len(report["shards"]) == 1
+    assert report["successful"] == 0 and report["not_started"] == report["missing"] == 1 and len(report["shards"]) == 1
     assert all((output.parent / name).read_bytes() == data for name, data in before.items())
 
 
@@ -665,7 +665,7 @@ def test_offline_coverage_declares_and_applies_timeout_retry_policy(prepared_run
     offline = RolloutStore.read(output, retry_terminal_timeouts=retry_timeouts).coverage()
     assert offline == online
     assert offline["retry_terminal_timeouts"] is retry_timeouts
-    assert offline["attempts_exhausted"] == int(retry_timeouts)
+    assert offline["failure_budget_exhausted"] == int(retry_timeouts)
 
 
 @pytest.mark.parametrize("previous", ["success", "failure", "none"])
@@ -708,7 +708,7 @@ async def test_missing_zero_uses_latest_attempt_without_changing_recovery(prepar
     assert [(row["_ng_task_index"], row["reward"]) for row in zeros] == [(0, 0.0)]
     assert len(supplied) == (2 if other == "unscored" else 1)
     report = orjson.loads(coverage_path_for(merged).read_bytes())
-    assert (report["expected"], report["unknown"], report["imputed"], report["scored"]) == (2, 1, 1, 1)
+    assert (report["expected"], report["missing"], report["imputed"], report["scored"]) == (2, 1, 1, 1)
     assert report["failures_counted_as_zero"] == 0
     assert not report["complete"]
     assert snapshot(output) == before
@@ -742,5 +742,65 @@ async def test_missing_zero_keeps_separate_journal_run_identities(prepared_run, 
     assert len(supplied) == 4
     assert sum(row["reward"] for row in supplied) == 1.0
     report = orjson.loads(coverage_path_for(merged).read_bytes())
-    assert (report["expected"], report["successful"], report["imputed"], report["unknown"]) == (4, 1, 3, 3)
+    assert (report["expected"], report["successful"], report["imputed"], report["not_started"]) == (4, 1, 3, 3)
     assert not report["complete"]
+
+
+@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("append_before_manifest", [False, True])
+def test_live_reader_does_not_consume_outcomes_newer_than_its_manifest(
+    prepared_run, monkeypatch, failure, append_before_manifest
+):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as writer:
+        first, second = writer.pending(3)
+        writer.record_dispatch(first)
+        writer.record_outcome(first | {"reward": 1.0})
+        read_bytes = Path.read_bytes
+        appended = False
+
+        def concurrent_read(path):
+            nonlocal appended
+            if path != manifest_path_for(output) or appended:
+                return read_bytes(path)
+            appended = True
+            old_manifest = read_bytes(path)
+            writer.record_dispatch(second)
+            writer.record_outcome(second | ({"_ng_failure_class": "judge_failed"} if failure else {"reward": 0.0}))
+            return read_bytes(path) if append_before_manifest else old_manifest
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "read_bytes", concurrent_read)
+            reader = RolloutStore.read(output)
+        assert appended
+        assert reader.selected("success") == [first | {"reward": 1.0}]
+        assert reader.failures() == []
+        assert reader.coverage()["missing" if append_before_manifest else "not_started"] == 1
+    current = RolloutStore.read(output)
+    assert current.coverage()["successful"] == (1 if failure else 2)
+    assert current.coverage()["failed"] == int(failure)
+
+
+def test_live_snapshot_does_not_relax_reservation_validation(prepared_run):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as writer:
+        row = writer.pending(3)[0]
+        with output.open("ab") as file:
+            file.write(orjson.dumps(row | {"reward": 1.0}) + b"\n")
+        with pytest.raises(ConfigError, match="no reserved attempt"):
+            RolloutStore.read(output)
+
+
+def test_health_reads_success_file_after_failed_attempt_is_retried(prepared_run):
+    from nemo_gym.rollout_health import run_health_checks
+    from nemo_gym.rollout_store import raw_outcomes_are_selected
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as writer:
+        row = writer.pending(3)[0]
+        writer.record_dispatch(row)
+        writer.record_outcome(row | {"_ng_failure_class": "judge_failed"})
+        writer.allocate_attempt(row)
+        writer.record_outcome(row | {"reward": 1.0, "response": {}})
+    assert not raw_outcomes_are_selected(output)  # Reverification still considers both files.
+    assert run_health_checks(output, workers=1).summary["run"]["artifacts"]["records"] == 1

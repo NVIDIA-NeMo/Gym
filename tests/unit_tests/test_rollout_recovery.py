@@ -675,7 +675,7 @@ async def test_repeated_interruption_reserves_new_identities_without_spending_re
                 await asyncio.gather(waiter, return_exceptions=True)
 
     reader = RolloutStore.read(output)
-    assert reader.coverage()["unknown"] == len(rows)
+    assert reader.coverage()["missing"] == len(rows)
     assert reader.coverage()["counted_failures"] == 0
     retry = reader.pending(3)
     assert len(retry) == len(rows)
@@ -881,7 +881,9 @@ async def test_terminal_skips_can_be_explicitly_scored_as_zero(runner_config, mo
     assert len(aggregate.await_args.args[0]) == 3
 
 
-async def test_reported_kill_shaped_failures_consume_bounded_attempts(runner_config, monkeypatch, capsys):
+async def test_reported_kill_shaped_failures_remain_retryable_without_spending_budget(
+    runner_config, monkeypatch, capsys
+):
     monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
 
     async def post(**kwargs):
@@ -902,18 +904,20 @@ async def test_reported_kill_shaped_failures_consume_bounded_attempts(runner_con
     runner_config.resume_from_cache = True
     await RolloutCollectionHelper().run_from_config(runner_config)
     await RolloutCollectionHelper().run_from_config(runner_config)
-    assert client.post.await_count == 5
+    assert client.post.await_count == 7
     output = Path(runner_config.output_jsonl_fpath)
     failures = list(read_records(collection.failures_path_for(output)))
-    assert len(failures) == 4
+    assert len(failures) == 6
     assert all("reward" not in row and "_ng_no_persist" not in row for row in failures)
     coverage = json.loads(coverage_path_for(output).read_text())
-    assert coverage["attempts"] == 5
-    assert coverage["attempts_exhausted"] == 2
+    assert coverage["attempts"] == 7
+    assert coverage["failure_budget_exhausted"] == 0
+    assert coverage["counted_failures"] == 0
+    assert coverage["progress_outcomes_recorded"] == 0
     assert coverage["max_rollout_attempts"] == 2
     printed = capsys.readouterr().out
     assert "execution 1" in printed
-    assert "Retry budget exhausted for 2 rollout(s) at the cap of 2" in printed
+    assert "Retry budget exhausted" not in printed
     assert str(collection.failures_path_for(output)) in printed
 
 
@@ -953,7 +957,7 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     helper = RolloutCollectionHelper()
     await helper.run_from_config(runner_config)
     report = json.loads(coverage_path_for(output).read_text())
-    assert [report[key] for key in ("successful", "failed", "intentionally_omitted", "unknown")] == [1, 1, 1, 0]
+    assert [report[key] for key in ("successful", "failed", "intentionally_omitted", "missing")] == [1, 1, 1, 0]
     assert (report["measured"], report["masked"]) == (0, 1)
     assert report["scored"] == 1 + int(count_failures_as_zero)
     assert report["failures_counted_as_zero"] == int(count_failures_as_zero)
@@ -966,8 +970,9 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
         "coverage/unscored": 0,
         "coverage/failed": 1,
         "coverage/omitted": 1,
-        "coverage/unknown": 0,
-        "coverage/attempts_exhausted": 0,
+        "coverage/not_started": 0,
+        "coverage/missing_outcomes": 0,
+        "coverage/failure_budget_exhausted": 0,
     }
     progress = [metrics for metrics in exported if "progress/total/rollouts_per_min" in metrics][-1]
     assert progress["progress/my_agent/masked_pct"] == 100.0
@@ -988,9 +993,15 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     assert collection.failures_path_for(output).read_bytes() == original_failures
     assert not journal_path_for(output).exists()
     report = json.loads(coverage_path_for(output).read_text())
-    assert [report[key] for key in ("successful", "failed", "intentionally_omitted", "unknown")] == [2, 0, 1, 0]
+    assert [report[key] for key in ("successful", "failed", "intentionally_omitted", "missing")] == [2, 0, 1, 0]
     assert (report["measured"], report["masked"], report["scored"], report["failures_counted_as_zero"]) == (1, 1, 2, 0)
-    assert sum(report[key] for key in ("measured", "masked", "failed", "intentionally_omitted", "unknown")) == 3
+    assert (
+        sum(
+            report[key]
+            for key in ("measured", "masked", "unscored", "failed", "intentionally_omitted", "not_started", "missing")
+        )
+        == 3
+    )
     assert exported[-1]["coverage/measured"] == 1 and exported[-1]["coverage/masked"] == 1
     assert exported[-1]["coverage/failed"] == 0
     assert len(list(read_records(collection.failures_path_for(output)))) == 2
@@ -1077,7 +1088,7 @@ async def test_runner_cancellation_closes_requests_before_return(runner_config, 
     assert stopped.is_set() and len(requests) == 1
     output = Path(runner_config.output_jsonl_fpath)
     report = json.loads(coverage_path_for(output).read_text())
-    assert (report["attempts"], report["unknown"], report["never_dispatched"]) == (1, 3, 2)
+    assert (report["attempts"], report["missing"], report["not_started"]) == (1, 1, 2)
     assert output.read_bytes() == collection.failures_path_for(output).read_bytes() == b""
 
 
@@ -1191,7 +1202,7 @@ async def test_budget_drained_work_resumes_without_consuming_attempts(runner_con
         await RolloutCollectionHelper().run_from_config(runner_config)
     output = Path(runner_config.output_jsonl_fpath)
     before = RolloutStore.read(output).coverage()
-    assert (before["attempts"], before["never_dispatched"]) == (0, 3)
+    assert (before["attempts"], before["not_started"]) == (0, 3)
     assert not post.called
     runner_config.resume_from_cache = True
     runner_config.dispatch_budget_s = None
@@ -1762,3 +1773,137 @@ async def test_batch_status_uses_current_journal_attempts(tmp_path, monkeypatch,
     assert offline["failures_by_class"] == expected_failures
     post.assert_not_awaited()
     assert output.read_bytes() == original_output
+
+
+@pytest.mark.parametrize("kind", ["admission", "kill_shaped", "judge_failed"])
+@pytest.mark.parametrize("mixed_success", [False, True])
+async def test_interruption_failures_do_not_spend_budget_or_create_retry_progress(
+    runner_config, monkeypatch, kind, mixed_success
+):
+    from nemo_gym.cli.eval import _check_saved_completion
+    from nemo_gym.rollout_recovery import IncompleteEvaluationError
+
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+    runner_config.require_complete = True
+    if kind == "admission":
+        Path(runner_config.input_jsonl_fpath).write_text(
+            "".join(
+                json.dumps({"task_id": {"taskset": "native", "task_id": str(i)}, "task_input": {}}) + "\n"
+                for i in range(3)
+            )
+        )
+        runner_config.environment_server_routes = {"native": "environment"}
+
+    async def post(**kwargs):
+        row = kwargs["json"]
+        if kind == "admission":
+            result = {"episode_id": row["episode_id"], "task_id": row["task"]["task_id"]}
+            if mixed_success and row["task"]["task_id"]["task_id"] == "0":
+                result["result"] = {"reward": 1.0}
+            else:
+                result["failure"] = {"failure_reason": "Queue deadline", "terminal": False, "stage": "admission"}
+            return FakeResponse(200, result)
+        if mixed_success and row["task"] == 0:
+            return FakeResponse(200, {"reward": 1.0, "response": {}})
+        return FakeResponse(200, {"_ng_failure_class": kind, "_ng_failure_message": "Interrupted or unavailable"})
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    if kind == "admission":
+        client.global_config_dict = OmegaConf.create({"environment": {"environment_servers": {"custom": {}}}})
+    output = Path(runner_config.output_jsonl_fpath)
+    for invocation in range(3):
+        expected_exit = (
+            (76 if invocation == 2 else 75)
+            if kind == "judge_failed"
+            else (75 if mixed_success and invocation == 0 else 1)
+        )
+        with pytest.raises(IncompleteEvaluationError) as error:
+            await RolloutCollectionHelper().run_from_config(runner_config)
+        assert error.value.exit_code == expected_exit
+        with pytest.raises(IncompleteEvaluationError) as saved_error:
+            _check_saved_completion(output)
+        assert saved_error.value.exit_code == expected_exit
+        reader = RolloutStore.read(output)
+        counted = (3 - int(mixed_success)) * (invocation + 1) if kind == "judge_failed" else 0
+        assert reader.coverage()["counted_failures"] == counted
+        assert len(reader.pending(3)) == (0 if kind == "judge_failed" and invocation == 2 else 3 - int(mixed_success))
+        assert all("reward" not in row for row in reader.failures())
+        runner_config.resume_from_cache = True
+
+
+async def test_non_json_http_200_is_persisted_as_terminal_protocol_failure(runner_config, monkeypatch):
+    from nemo_gym.rollout_recovery import IncompleteEvaluationError
+    from nemo_gym.server_utils import get_response_json
+
+    response = FakeResponse(200)
+    response.read = AsyncMock(return_value=b"<html>not JSON</html>")
+    install_fake_server_client(monkeypatch, AsyncMock(return_value=response))
+    monkeypatch.setattr(collection, "get_response_json", get_response_json)
+    with pytest.raises(IncompleteEvaluationError) as error:
+        await RolloutCollectionHelper().run_from_config(runner_config)
+    assert error.value.exit_code == 76
+    reader = RolloutStore.read(Path(runner_config.output_jsonl_fpath))
+    assert len(reader.failures()) == 3
+    assert reader.pending(3) == []
+    for row in reader.failures():
+        record = row["_ng_failure_record"]
+        assert record["delivery"] == "delivered"
+        assert record["failure"]["terminal"] is True
+        assert record["failure"]["failure_kind"] == "environment_protocol_violation"
+
+
+async def test_collector_passes_saved_reward_and_mask_to_outcome_metrics(runner_config, monkeypatch):
+    from unittest.mock import Mock
+
+    install_fake_server_client(
+        monkeypatch, AsyncMock(return_value=FakeResponse(200, {"reward": 0.5, "mask_sample": True, "response": {}}))
+    )
+    snapshots = []
+    observed = Mock(
+        side_effect=lambda result, outcome, name: snapshots.append((json.loads(json.dumps(result)), outcome))
+    )
+    monkeypatch.setattr(collection, "_record_rollout_outcome", observed)
+    await RolloutCollectionHelper().run_from_config(runner_config)
+    saved = list(read_records(Path(runner_config.output_jsonl_fpath)))
+    assert len(saved) == observed.call_count == 3
+    assert [result for result, outcome in snapshots] == saved
+    assert all(outcome == "scored" for result, outcome in snapshots)
+    runner_config.resume_from_cache = True
+    await RolloutCollectionHelper().run_from_config(runner_config)
+    assert observed.call_count == 3
+
+
+@pytest.mark.parametrize("code", ["ENOSYS", "EOPNOTSUPP", "ENOLCK"])
+def test_run_lock_reports_unsupported_filesystem(tmp_path, monkeypatch, code):
+    import errno
+
+    import nemo_gym.rollout_recovery as recovery
+
+    def unsupported(*args):
+        raise OSError(getattr(errno, code), "locking unavailable")
+
+    monkeypatch.setattr(recovery.fcntl, "flock", unsupported)
+    with pytest.raises(ConfigError, match="filesystem must support flock across all writer nodes"):
+        with recovery.run_lock(tmp_path / "out.jsonl"):
+            pytest.fail("Unsupported locking must refuse collection")
+
+
+def test_run_lock_refusal_names_owner_and_releases_after_exit(tmp_path, monkeypatch):
+    import os
+    import socket
+
+    from nemo_gym.rollout_recovery import run_lock, run_lock_path_for
+
+    output = tmp_path / "out.jsonl"
+    monkeypatch.setenv("SLURM_JOB_ID", "12345")
+    with run_lock(output):
+        holder = json.loads(run_lock_path_for(output).read_text())
+        assert holder == {"pid": os.getpid(), "host": socket.gethostname(), "SLURM_JOB_ID": "12345"}
+        with pytest.raises(ConfigError) as error:
+            with run_lock(output):
+                pytest.fail("A second writer must be refused")
+        assert str(os.getpid()) in str(error.value)
+        assert socket.gethostname() in str(error.value)
+        assert "12345" in str(error.value)
+    with run_lock(output):
+        pass  # Persisted owner metadata is not itself a lock.

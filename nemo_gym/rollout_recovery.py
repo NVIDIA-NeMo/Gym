@@ -18,12 +18,14 @@ The manifest stores digests, not configuration values or credentials. Recovery r
 completed rollouts; it does not checkpoint an agent's conversation or remote sandbox.
 """
 
+import errno
 import fcntl
 import hashlib
 import json
 import logging
 import os
 import re
+import socket
 import stat
 import warnings
 from collections.abc import Iterator, Mapping
@@ -491,9 +493,11 @@ def run_lock_path_for(output: Path) -> Path:
 def run_lock(output: Path, *, checkpoint_dir: Path | None = None) -> Iterator[None]:
     """Own a run before preparing inputs, restoring state, or writing artifacts.
 
-    Checkpoint controllers must hold this same context around restore and collection.
-    Lock the checkpoint directory as well when supplied, so two output paths cannot
-    concurrently restore or replace the same checkpoints. Kernel locks are released
+    Collection currently acquires its own lock in run_from_config; do not nest
+    it inside this context. Checkpoint integration must extend that acquisition to
+    cover restore and supply checkpoint_dir, rather than acquire a second lock.
+    When supplied, the directory lock prevents two outputs sharing checkpoints.
+    The filesystem must support flock across all writer nodes. Kernel locks are released
     on process death; the presence of an old lock file does not block recovery.
     """
     paths = {run_lock_path_for(output)}
@@ -506,9 +510,28 @@ def run_lock(output: Path, *, checkpoint_dir: Path | None = None) -> Iterator[No
             try:
                 fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:
+                file.seek(0)
+                holder = file.read(4096).decode("utf-8", errors="replace").strip() or "owner details unavailable"
                 raise ConfigError(
-                    f"Another collector owns this run ({path}). Wait for it to stop before resuming."
+                    f"Another collector owns this run ({path}; holder: {holder}). Wait for it to stop before resuming."
                 ) from error
+            except OSError as error:
+                if error.errno in {errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOLCK}:
+                    raise ConfigError(
+                        f"Cannot lock run at {path}: the filesystem must support flock across all writer nodes. "
+                        "Use a filesystem with distributed flock support; Lustre noflock disables it and "
+                        "localflock only locks within one node."
+                    ) from error
+                raise
+            file.seek(0)
+            file.truncate()
+            file.write(
+                json.dumps(
+                    {"pid": os.getpid(), "host": socket.gethostname(), "SLURM_JOB_ID": os.environ.get("SLURM_JOB_ID")}
+                ).encode()
+                + b"\n"
+            )
+            file.flush()
         yield
 
 
@@ -524,7 +547,7 @@ class IncompleteEvaluationError(RuntimeError):
 
     def __init__(self, message: str, *, retryable: bool = True, made_progress: bool = True) -> None:
         if retryable and not made_progress:
-            message += " No new outcomes were saved; automatic restarts use the infrastructure retry limit."
+            message += " No retry progress was made; automatic restarts use the infrastructure retry limit."
         super().__init__(message)
         # 75 continues productive work; an empty invocation must spend a bounded
         # infrastructure retry. 76 stops when another attempt cannot help.

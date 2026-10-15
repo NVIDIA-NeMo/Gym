@@ -1204,7 +1204,7 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         """Reject unfinished work; allow omissions alongside completed tasks.
 
         Drivers must supply whether any tasks can still be retried and whether
-        this invocation saved outcomes. Assuming either can cause endless
+        this invocation saved outcomes that made progress (not just interruptions). Assuming either can cause endless
         automatic restarts when a driver has no work left or makes no progress.
         """
         if not self.require_complete and not intentionally_omitted:
@@ -3272,7 +3272,7 @@ class RolloutCollectionHelper(BaseModel):
                 else:
                     # Success → main jsonl.
                     store.record_outcome(result, sync=capture_build_can_retire(token_capture_build))
-                    _record_rollout_outcome(metric_result, "scored", dispatch_name)
+                    _record_rollout_outcome(result, "scored", dispatch_name)
                     health_outcome = "scored"
                     _record_rollout_shape(row, result)
                     if batch_tracker is not None:
@@ -3393,7 +3393,8 @@ class RolloutCollectionHelper(BaseModel):
             f"of which {completion['measured']} measured, {completion['masked']} masked, "
             f"and {completion['unscored']} unscored; "
             f"{completion['failed']} failed, {completion['intentionally_omitted']} intentionally omitted, "
-            f"{completion['unknown']} unknown. Details: {coverage_path_for(output_fpath)}"
+            f"{completion['not_started']} not started, {completion['missing']} missing outcomes. "
+            f"Details: {coverage_path_for(output_fpath)}"
         )
         # Explicitly counted failures can provide a score even when no rollout
         # succeeded. Select attempts before applying that scoring policy.
@@ -3422,7 +3423,7 @@ class RolloutCollectionHelper(BaseModel):
                 f"None of the {len(input_rows)} dispatched rollouts produced a result "
                 f"{dict(failure_counts)}.{drained_note} Inspect {failures_fpath}; the run has no score to report.",
                 retryable=store.coverage()["retryable"] > 0,
-                made_progress=store.outcomes_recorded > 0,
+                made_progress=store.progress_outcomes_recorded > 0,
             )
         print(latency_tracker.summary())
 
@@ -3516,8 +3517,9 @@ class RolloutCollectionHelper(BaseModel):
                     "coverage/unscored": completion["unscored"],
                     "coverage/failed": completion["failed"],
                     "coverage/omitted": completion["intentionally_omitted"],
-                    "coverage/unknown": completion["unknown"],
-                    "coverage/attempts_exhausted": completion["attempts_exhausted"],
+                    "coverage/not_started": completion["not_started"],
+                    "coverage/missing_outcomes": completion["missing"],
+                    "coverage/failure_budget_exhausted": completion["failure_budget_exhausted"],
                     **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
                 }
             )
@@ -3552,7 +3554,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             completed=completion["successful"],
             intentionally_omitted=completion["intentionally_omitted"],
             retryable=completion["retryable"] > 0,
-            made_progress=store.outcomes_recorded > 0,
+            made_progress=store.progress_outcomes_recorded > 0,
         )
         return results
 
@@ -4750,8 +4752,11 @@ class RolloutAggregationHelper(BaseModel):
             "unscored": unscored_rollouts,
             "failed": sum(c["failed"] for c in components) if inventory_known else None,
             "intentionally_omitted": sum(c["intentionally_omitted"] for c in components) if inventory_known else None,
-            "unknown": sum(c["unknown"] for c in components) if inventory_known else None,
-            "attempts_exhausted": sum(c["attempts_exhausted"] for c in components) if inventory_known else None,
+            "not_started": sum(c["not_started"] for c in components) if inventory_known else None,
+            "missing": sum(c["missing"] for c in components) if inventory_known else None,
+            "failure_budget_exhausted": sum(c["failure_budget_exhausted"] for c in components)
+            if inventory_known
+            else None,
             "max_rollout_attempts": _get_max_rollout_attempts(),
             "retry_terminal_timeouts": config.retry_terminal_timeouts,
             "complete": inventory_known and all(c["complete"] for c in components),
@@ -4780,7 +4785,8 @@ class RolloutAggregationHelper(BaseModel):
                 f"\nCoverage: {completion['successful']} completed "
                 f"({completion['measured']} measured, {completion['masked']} masked, {completion['unscored']} unscored), "
                 f"{completion['failed']} failed, "
-                f"{completion['intentionally_omitted']} intentionally omitted, {completion['unknown']} unknown. "
+                f"{completion['intentionally_omitted']} intentionally omitted, "
+                f"{completion['not_started']} not started, {completion['missing']} missing outcomes. "
                 f"Details: {report_path}"
             )
         if get_exporters():  # pragma: no cover
@@ -4797,8 +4803,9 @@ class RolloutAggregationHelper(BaseModel):
                 metrics["coverage/missing"] = completion["expected"] - scored_rollouts
                 metrics["coverage/failed"] = completion["failed"]
                 metrics["coverage/omitted"] = completion["intentionally_omitted"]
-                metrics["coverage/unknown"] = completion["unknown"]
-                metrics["coverage/attempts_exhausted"] = completion["attempts_exhausted"]
+                metrics["coverage/not_started"] = completion["not_started"]
+                metrics["coverage/missing_outcomes"] = completion["missing"]
+                metrics["coverage/failure_budget_exhausted"] = completion["failure_budget_exhausted"]
             export_metrics(metrics)
 
         print(f"""Finished rollout aggregation! View results at:

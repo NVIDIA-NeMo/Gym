@@ -168,7 +168,7 @@ class _Outcome:
     elapsed_seconds: float | None
 
 
-def _indexed_records(path: Path) -> Iterator[tuple[RolloutRecord, dict]]:
+def _indexed_records(path: Path, *, end_offset: int | None = None) -> Iterator[tuple[RolloutRecord, dict]]:
     """Scan one record at a time, retaining its original byte coordinates."""
     if not path.exists():
         return
@@ -176,7 +176,12 @@ def _indexed_records(path: Path) -> Iterator[tuple[RolloutRecord, dict]]:
         stat = os.fstat(file.fileno())
         file_identity = (stat.st_dev, stat.st_ino)
         offset = 0
-        for number, raw in enumerate(file, 1):
+        number = 0
+        while end_offset is None or offset < end_offset:
+            raw = file.readline(-1 if end_offset is None else end_offset - offset)
+            if not raw:
+                break
+            number += 1
             record = RolloutRecord(path, offset, len(raw), number, file_identity=file_identity)
             offset += len(raw)
             if not raw.strip():
@@ -253,6 +258,15 @@ def _is_invalid_judge_migration(original: dict, migrated: dict) -> bool:
     }
 
 
+def is_interruption_failure(row: dict) -> bool:
+    """Identify failures that spend neither the failure budget nor retry progress."""
+    failure = row.get("_ng_failure_record")
+    return row.get("_ng_failure_class") == "kill_shaped" or (
+        isinstance(failure, dict)
+        and (failure.get("delivery") == "not_sent" or failure.get("failure", {}).get("stage") == "admission")
+    )
+
+
 class RolloutRecords:
     def __init__(self, manifest: RunManifest, expected: list[dict]):
         self.manifest = manifest
@@ -319,19 +333,18 @@ class RolloutRecords:
     def _payload(self, row: dict, record: RolloutRecord, *, legacy: bool = False) -> None:
         key = self.check_outcome(row, legacy=legacy)
         self.latest[key[0]] = max(key[1], self.latest.get(key[0], -1))
-        failure = row.get("_ng_failure_record")
-        delivery = failure.get("delivery") if isinstance(failure, dict) else "possibly_delivered"
+        interruption = is_interruption_failure(row)
         if (
             key not in self.payloads
             and row.get("_ng_failure_class") is not None
-            and delivery != "not_sent"
+            and not interruption
             and not row.get("_ng_failure_terminal")
         ):
             self.attempt_counts[key[0]] += 1
         if (
             key not in self.payloads
             and row.get("_ng_failure_class") is not None
-            and delivery != "not_sent"
+            and not interruption
             and row.get("_ng_failure_terminal")
             and not is_terminal_failure(row, retry_terminal_timeouts=True)
         ):
@@ -353,7 +366,15 @@ class RolloutRecords:
         self._payload(row, record)
 
     @classmethod
-    def load(cls, output: Path, manifest: RunManifest, *, import_legacy: bool = False) -> "RolloutRecords":
+    def load(
+        cls,
+        output: Path,
+        manifest: RunManifest,
+        *,
+        import_legacy: bool = False,
+        outcome_limits: dict[Path, int] | None = None,
+    ) -> "RolloutRecords":
+        """Index outcomes, optionally restricted to prefixes captured before the manifest read."""
         expected = list(read_records(materialized_path_for(output)))
         if _digest(expected) != manifest.materialized_digest:
             raise ConfigError("Saved materialized inputs do not match the run manifest.")
@@ -365,7 +386,9 @@ class RolloutRecords:
         # recorded order, preserving the old failure-count-based numbering.
         legacy_counts: Counter = Counter()
         for path in (failures_path_for(output), output):
-            for record, payload in _indexed_records(path):
+            for record, payload in _indexed_records(
+                path, end_offset=outcome_limits[path] if outcome_limits is not None else None
+            ):
                 if import_legacy and RUN_ID_KEY not in payload:
                     identity = logical_rollout_id(payload)
                     payload = dict(payload)
@@ -462,6 +485,8 @@ class RolloutRecords:
         counts = Counter(self.disposition(identity) for identity in self.expected)
         expected = len(self.expected)
         max_attempts = _get_max_rollout_attempts()
+        not_started = expected - len(self.latest)
+        missing = counts["unknown"] - not_started
         # A producer-masked result completed execution, so recovery still reuses
         # it. Report its measurement status separately, after selecting attempts.
         masked = sum(
@@ -486,13 +511,13 @@ class RolloutRecords:
             "unscored": unscored,
             "failed": counts["failure"],
             "intentionally_omitted": counts["omitted"],
-            "unknown": counts["unknown"],
-            "never_dispatched": expected - len(self.latest),
+            "not_started": not_started,
+            "missing": missing,
             "attempts": sum(
                 max(self.manifest.next_attempt.get(identity, 0), index + 1) for identity, index in self.latest.items()
             ),
             "counted_failures": sum(self.failure_count(identity) for identity in self.expected),
-            "attempts_exhausted": self.exhausted_count(max_attempts),
+            "failure_budget_exhausted": self.exhausted_count(max_attempts),
             "retryable": sum(
                 self._retryable(identity) and self.failure_count(identity) < max_attempts for identity in self.expected
             ),
@@ -500,6 +525,6 @@ class RolloutRecords:
             "retry_terminal_timeouts": self.retry_terminal_timeouts,
             "completion_fraction": counts["success"] / expected if expected else 1.0,
             "complete": counts["success"] == expected,
-            "reconciled": counts["unknown"] == 0,
+            "reconciled": missing == 0,
             "identity_verified": not (self.manifest.legacy_import or self.manifest.identity_overridden),
         }

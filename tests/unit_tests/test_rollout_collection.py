@@ -2757,8 +2757,9 @@ class TestRolloutCollection:
             "coverage/unscored": 0,
             "coverage/failed": 0,
             "coverage/omitted": 0,
-            "coverage/unknown": 1,
-            "coverage/attempts_exhausted": 0,
+            "coverage/not_started": 0,
+            "coverage/missing_outcomes": 1,
+            "coverage/failure_budget_exhausted": 0,
         }
         assert "Scored as zero because they left no row: 1 of 2 rollouts" in capsys.readouterr().out
 

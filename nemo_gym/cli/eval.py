@@ -657,7 +657,7 @@ def e2e_rollout_collection():  # pragma: no cover
         else:
             print(format_health_report(health_result))
 
-    if collection_completed:
+    if collection_completed and rollout_collection_config.require_complete:
         _check_saved_completion(output_fpath)
 
 
@@ -687,7 +687,7 @@ def _check_saved_completion(output: Path) -> None:
                 f"Partial artifacts retained at {output}. {guidance}",
                 retryable=retryable,
                 # Older coverage reports predate per-invocation progress.
-                made_progress=report.get("outcomes_recorded", 1) > 0,
+                made_progress=report.get("progress_outcomes_recorded", report.get("outcomes_recorded", 1)) > 0,
             )
 
 
@@ -710,7 +710,8 @@ def collect_rollouts():  # pragma: no cover
     init_telemetry(server_name="driver", server_type="driver")
     try:
         asyncio.run(rch.run_from_config(config))
-        _check_saved_completion(Path(config.output_jsonl_fpath))
+        if config.require_complete:
+            _check_saved_completion(Path(config.output_jsonl_fpath))
     finally:
         shutdown_telemetry()
 

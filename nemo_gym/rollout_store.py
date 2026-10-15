@@ -38,6 +38,7 @@ from nemo_gym.rollout_records import (
     RolloutRecords,
     _indexed_records,
     coverage_path_for,
+    is_interruption_failure,
     journal_path_for,
     logical_rollout_id,
     materialized_path_for,
@@ -61,12 +62,12 @@ def _record_output_write(started: float, raw: bytes) -> None:
         observer.write_bytes.record(len(raw))
 
 
-def raw_outcomes_are_selected(path: Path) -> bool:
+def raw_outcomes_are_selected(path: Path, *, artifacts: tuple[Path, ...] | None = None) -> bool:
     """Whether an existing row-oriented reader can read this run without filtering.
 
     A manifest alone does not require a different reader. Superseded rows,
     including answers superseded by interrupted attempts, do. Validate the whole
-    run even when the caller reads only the success file or only its sidecar.
+    run, but compare only the artifacts the caller actually reads when supplied.
     """
     output = resolve_rollout_owner(path)
     if journal_path_for(output).exists():
@@ -74,16 +75,18 @@ def raw_outcomes_are_selected(path: Path) -> bool:
     if not manifest_path_for(output).exists():
         return True
     store = RolloutStore.read(output)
+    paths = (
+        {artifact.resolve() for artifact in artifacts}
+        if artifacts is not None
+        else {output, failures_path_for(output)}
+    )
     selected = {
         (record.path, record.offset)
         for disposition in ("success", "failure", "omitted")
         for record in store.selected_records(disposition).values()
+        if record.path in paths
     }
-    raw = {
-        (record.path, record.offset)
-        for artifact in (output, failures_path_for(output))
-        for record, _ in _indexed_records(artifact)
-    }
+    raw = {(record.path, record.offset) for artifact in paths for record, _ in _indexed_records(artifact)}
     return raw == selected
 
 
@@ -99,6 +102,7 @@ class RolloutStore:
         self._results_file = self._failures_file = None
         self._allocated: set[tuple[str, int]] = set()
         self.outcomes_recorded: int = 0
+        self.progress_outcomes_recorded: int = 0
 
     @staticmethod
     def _unverified_manifest(output: Path) -> RunManifest:
@@ -232,9 +236,15 @@ class RolloutStore:
             )
         if not import_legacy and not path.exists():
             return None
+        outcome_limits = None
         if path.exists():
             if not output.exists() or not failures_path_for(output).exists():
                 raise ConfigError(f"Cannot read run {output}: rollout output or failure sidecar is missing.")
+            # Freeze the readable prefixes before loading reservations. Every
+            # outcome in these prefixes was reserved before its bytes were saved,
+            # so this later manifest covers them even while collection continues.
+            # Byte limits avoid retaining trajectories or scanning each file twice.
+            outcome_limits = {artifact: artifact.stat().st_size for artifact in (output, failures_path_for(output))}
             try:
                 manifest = RunManifest.model_validate_json(path.read_bytes())
             except (ValidationError, OSError) as error:
@@ -243,7 +253,9 @@ class RolloutStore:
             manifest = cls._unverified_manifest(output)
         else:
             return None
-        state = RolloutRecords.load(output, manifest, import_legacy=manifest.legacy_import)
+        state = RolloutRecords.load(
+            output, manifest, import_legacy=manifest.legacy_import, outcome_limits=outcome_limits
+        )
         state.retry_terminal_timeouts = retry_terminal_timeouts
         return cls(output, state, read_only=True)
 
@@ -341,6 +353,13 @@ class RolloutStore:
             os.fsync(file.fileno())
         self._state.outcome(result, record=record)
         self.outcomes_recorded += 1
+        if (
+            result.get("_ng_failure_class") is None
+            or result.get("_ng_omitted")
+            or result.get("_ng_failure_terminal")
+            or not is_interruption_failure(result)
+        ):
+            self.progress_outcomes_recorded += 1
         _record_output_write(write_started, raw)
 
     def record_omission(self, row: dict, reason: str) -> None:
@@ -423,5 +442,11 @@ class RolloutStore:
 
     def write_coverage(self, **reporting: int) -> None:
         atomic_write_json(
-            coverage_path_for(self.output), self.coverage() | reporting | {"outcomes_recorded": self.outcomes_recorded}
+            coverage_path_for(self.output),
+            self.coverage()
+            | reporting
+            | {
+                "outcomes_recorded": self.outcomes_recorded,
+                "progress_outcomes_recorded": self.progress_outcomes_recorded,
+            },
         )

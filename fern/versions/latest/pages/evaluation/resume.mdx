@@ -39,7 +39,10 @@ before buffered outcomes reach durable storage.
 
 The collector acquires an exclusive run lock before preparation or resume validation and holds it through reporting.
 A second collector targeting the same output is rejected. The operating system releases the lock after process death;
-an old lock file can remain safely. For parallel jobs, use separate output paths and aggregate afterward.
+an old lock file can remain safely. The file records the holder's process ID, host and Slurm job ID (when available),
+which a refused collector includes in its error. The filesystem must support `flock` across every writer node.
+Lustre `noflock` mounts do not support this lock; `localflock` mounts protect only one node and are insufficient for
+collectors on different nodes. For parallel jobs, use separate output paths and aggregate afterward.
 
 An infrastructure failure is eligible for another attempt according to the configured attempt limit and terminal markers.
 A completed wrong answer is a result, so it is not retried merely because its reward is zero.
@@ -81,13 +84,13 @@ reserved by the controller in the run manifest. An execution number is separate 
 
 `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS` limits counted failures per logical rollout (default: 3). Only a recorded,
 nonterminal failure whose request was delivered or possibly delivered consumes that budget. A collector interruption,
-a checkpoint continuation, or a failure known to occur before sending does not consume it. The shared record supports
+a checkpoint continuation, an admission timeout, a `kill_shaped` interruption, or a failure known to occur before sending does not consume it. The shared record supports
 `delivery: "not_sent"`; current collector transport failures conservatively use `possibly_delivered`. Terminal failures and
 intentional omissions stop retrying independently of the budget. The explicit terminal-timeout override makes those
 otherwise terminal failures eligible and counted under its existing opt-in policy.
 
 When the cap is reached, Gym reports the exhausted count and failure sidecar path. Raising the cap allows more retries.
-Coverage includes `counted_failures`, `attempts_exhausted`, and `max_rollout_attempts`. Its `attempts` field counts reserved
+Coverage includes `counted_failures`, `failure_budget_exhausted`, and `max_rollout_attempts`. Its `attempts` field counts reserved
 execution numbers, including reservations made immediately before an interruption; it is not the retry-budget counter.
 For example, three interruptions can reserve executions 0, 1, and 2 while consuming zero failures. The next resume can
 still start execution 3 with the original failure budget.
@@ -106,11 +109,11 @@ Incomplete final writes are repaired after history validation and before migrati
 survives an interrupted retry, but a newer recorded outcome can supersede that instruction.
 
 Offline aggregation accepts the same `+retry_terminal_timeouts=true` option. Coverage records the active
-`retry_terminal_timeouts` and `max_rollout_attempts` policy alongside `attempts_exhausted`; use the same settings as
+`retry_terminal_timeouts` and `max_rollout_attempts` policy alongside `failure_budget_exhausted`; use the same settings as
 collection to compare that diagnostic count. These settings do not change selected scores.
 
 Reported `kill_shaped` failures are persisted in the failure sidecar, even when the legacy producer
-also sets `_ng_no_persist`. They count toward the retry budget when nonterminal and delivered or possibly delivered. This differs from older collectors that discarded these failures and did not count them.
+also sets `_ng_no_persist`. Nonterminal `kill_shaped` failures consume no failure budget and do not count as progress for automatic restarts. Older collectors discarded these failures; retaining them preserves diagnostic evidence.
 A suppression without a reported failure is an intentional omission. Existing legacy reverification keeps its previous suppression behavior.
 
 The **newest reserved execution number** determines the current outcome. A late result from an older execution
@@ -129,21 +132,23 @@ Gym writes `<output_stem>_coverage.json` with an exact inventory:
 | `unscored` | Completed results without a numeric reward, including those also marked `mask_sample`. |
 | `failed` | Rollouts whose selected attempt reported a no-result failure. |
 | `intentionally_omitted` | Explicit producer omissions, including terminal `skipped` outcomes. |
-| `unknown` | Rollouts with no saved outcome, including work never dispatched. |
+| `not_started` | Rollouts with no reserved execution. |
+| `missing` | Rollouts whose newest reserved execution has no saved outcome. |
 | `retryable` | Rollouts eligible for another attempt under the active retry policy. Aggregate reports expose this per shard. |
-| `outcomes_recorded` | Outcomes saved during this collector invocation; used to distinguish productive continuation from an empty restart. |
+| `outcomes_recorded` | All outcomes saved during this collector invocation, including interruptions. |
+| `progress_outcomes_recorded` | Saved successes, omissions, terminal failures or counted failures; distinguishes productive continuation from infrastructure-only retries. |
 
 The existing `successful` field remains the completed-result total. The measurement split is additive:
 
 ```text
 successful = measured + masked + unscored
-expected = measured + masked + unscored + failed + intentionally_omitted + unknown
+expected = measured + masked + unscored + failed + intentionally_omitted + not_started + missing
 ```
 
 Counts describe the selected attempt for each logical rollout. Older attempts cannot count again or change whether
 the selected result is masked. Failure metadata on a completed result does not by itself make it a no-result failure.
 
-`complete` requires a completed result for every expected rollout; `reconciled` only requires that none remain unknown.
+`complete` requires a completed result for every expected rollout; `reconciled` means no reserved execution is missing an outcome. Tasks not yet started do not prevent reconciliation.
 A fully masked run can be complete while containing no unmasked measurements. Masking alone does not trigger recovery.
 Completed-result quality scoring follows the verifier/aggregation contract; these counts describe collection coverage.
 
@@ -154,8 +159,9 @@ An explicit `skipped` entry in `count_failure_classes_as_zero` includes terminal
 completion disposition remains intentionally omitted. Omissions without a failure payload cannot be scored this way.
 
 Collection and offline aggregation export the same counts as `coverage/measured`, `coverage/masked`, `coverage/unscored`, `coverage/failed`,
-`coverage/omitted`, and `coverage/unknown`. For legacy shards without a manifest or journal, observed measured/masked counts remain
-available, while expected, omitted, and unknown totals remain unknown.
+`coverage/omitted`, `coverage/not_started`, and `coverage/missing_outcomes`. The existing `coverage/missing` metric
+still means expected minus scored, which differs from missing execution outcomes. For legacy shards without a manifest
+or journal, observed measured/masked counts remain available, while the inventory categories cannot be determined.
 
 The coverage file is a snapshot written at collection start and cleanup. After an abrupt process kill it may be stale;
 resume or aggregate to reconstruct it from the manifest and saved outcomes. An incomplete final JSONL write is ignored during
@@ -163,8 +169,9 @@ reconciliation and its partial bytes are removed before appending. Malformed com
 An old materialized inventory alone does not establish validated completion coverage during aggregation.
 Merged rollout files are selected-result projections; keep the original shard artifacts for further recovery.
 
-Every newly collected run has recovery history, including its first collection. Health checks work when all saved
-rows still represent selected attempts. If a file contains superseded outcomes, automatic checks print a skip
+Every newly collected run has recovery history, including its first collection. Health checks work when all rows
+in the file being checked still represent selected attempts. A superseded failure in the separate failure sidecar
+does not prevent checking successful retries in the main file. If the checked file contains superseded outcomes, automatic checks print a skip
 message and standalone checks explain how to export a merged selected-result projection with `gym eval aggregate`.
 Collection and scoring still finish. Direct health reports for those histories remain a follow-up; they must not
 count old attempts as extra samples.
@@ -314,21 +321,29 @@ Restarting unfinished tasks from input is the scope of this change. Continuing a
 belongs to the checkpoint stack ([#3024](https://github.com/NVIDIA-NeMo/Gym/issues/3024)); it is not implemented here.
 Both paths must use the same controller rules:
 
-- Hold `run_lock(output, checkpoint_dir=...)` before run validation and checkpoint restore, through collection and reporting.
+- The collector currently holds `run_lock(output)` internally. Do not wrap `run_from_config` in another `run_lock`:
+  a second acquisition conflicts even in the same process. The checkpoint integration must extend the existing lock
+  to include `checkpoint_dir` and cover validation, restore, collection and reporting in one acquisition.
 - Validate the saved experiment first and associate each checkpoint with the manifest's run ID.
 - Reserve a target with `RolloutStore.allocate_attempt(row)` before restore or a fresh request. Checkpoint code uses that
   target; it must not independently add one. Failed restore reserves a new target before starting from input.
 - Continuation and interruption do not consume the failure budget. Only saved eligible failures do.
 
-After normal collection, the CLI exits with **75** if the evaluation is incomplete, tasks remain eligible for resume,
-and this invocation saved new outcomes. It exits with **1** if work remains retryable but no new outcomes were saved,
+The following incomplete-run exit codes apply when `require_complete=true`, which `gym eval submit` enables by
+default. Local `gym eval run` and standalone collection default to `require_complete=false` and can return **0** with
+partial results; use `+require_complete=true` to require completion.
+
+With completion required, the CLI exits with **75** if the evaluation is incomplete, tasks remain eligible for resume,
+and this invocation made progress. Saved successes, omissions, terminal failures and counted failures establish progress.
+Admission timeouts, nonterminal `kill_shaped` replies and failures known not to have been sent do not. It exits with **1**
+if work remains retryable but no progress was made,
 including a dispatch budget that drains every task. Such work can still resume after correcting the cause; automatic
 restarts spend the configured infrastructure retry limit instead of continuing forever. Increase the dispatch budget
 or reduce the drain margin if they prevented all work.
 
 The CLI exits with **76** if unfinished work includes terminal failures or exhausted retry budgets and nothing is
-eligible for retry. This is a compatibility change from older collection commands that could return 0 for these partial
-results: Slurm marks these evaluations FAILED. Intentional omissions do not hide other failed or unfinished tasks.
+eligible for retry. Slurm marks these evaluations FAILED. Local commands with `require_complete=false` retain
+their existing partial-result behavior. Intentional omissions do not hide other failed or unfinished tasks.
 
 If at least one task completed and the only gaps are intentional omissions, the CLI exits with **0** and warns with the
 completed, expected and omitted counts. If every task is omitted, it exits with **76**: there are no completed tasks to
@@ -344,15 +359,13 @@ still retries bare `_ng_no_persist` replies; its behavior is unchanged.
 
 The Slurm auto-resume chain continues after 75 without spending an infrastructure retry and stops after 76.
 Its accumulated walltime cap applies only when `max_walltime` is configured. Collection coverage exposes eligible
-tasks as `retryable` and new outcomes as `outcomes_recorded`; aggregate coverage includes `retryable` within each shard.
+tasks as `retryable` and progress as `progress_outcomes_recorded`; aggregate coverage includes `retryable` within each shard.
 Custom collection drivers calling `check_completion` must explicitly pass `retryable` (whether another attempt can
-help) and `made_progress` (whether this invocation saved new outcomes). Both are required; cached outcomes alone do
+help) and `made_progress` (whether this invocation saved outcomes that establish progress as described above). Both are required; cached outcomes alone do
 not establish progress.
 
-Code 0 means collection finished, possibly with the intentional omissions described above. An explicit Ctrl-C in
-`gym eval run` retains the existing cancellation behavior: it can return 0 with partial artifacts when
-`require_complete=false`. To learn how many tasks actually completed, inspect the core collector's coverage file, or
+Code 0 does not prove complete coverage when `require_complete=false`. An explicit Ctrl-C in `gym eval run`
+also retains the existing cancellation behavior: it can return 0 with partial artifacts when `require_complete=false`. To learn how many tasks actually completed, inspect the core collector's coverage file, or
 GDPVal's stage summaries (multistage does not write that coverage file). Ordinary errors keep their existing failure
-status. The library still supports returning partial results when `require_complete=false`; CLI status is
-checked separately. Checkpoint-triggered stops must use the same incomplete statuses when that integration lands.
+status. Both the library and CLI respect `require_complete`. Checkpoint-triggered stops must use the same incomplete statuses when that integration lands.
 End-to-end checkpoint restoration still requires validation with the checkpoint stack.

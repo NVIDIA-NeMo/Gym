@@ -94,22 +94,29 @@ def test_every_expected_rollout_has_one_disposition(run):
     recovered = RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
     coverage = recovered.coverage()
     assert (coverage["expected"], coverage["successful"], coverage["failed"]) == (5, 1, 1)
-    assert (coverage["intentionally_omitted"], coverage["unknown"], coverage["never_dispatched"]) == (1, 2, 1)
+    assert (coverage["intentionally_omitted"], coverage["missing"], coverage["not_started"]) == (1, 1, 1)
     assert not coverage["complete"] and not coverage["reconciled"]
     assert [row["_ng_task_index"] for row in recovered.pending(3)] == [1, 3, 4]
     assert recovered.selected("success")[0]["reward"] == 0.0
 
 
-@pytest.mark.parametrize("dispositions", product(("measured", "masked", "failed", "omitted", "unknown"), repeat=2))
+@pytest.mark.parametrize(
+    "dispositions",
+    product(("measured", "masked", "unscored", "failed", "omitted", "unknown", "not_started"), repeat=2),
+)
 def test_measurement_split_reconciles_without_changing_recovery(run, dispositions):
     output, manifest, rows = run
     with writer(run) as history:
         for row, disposition in zip(rows, dispositions):
+            if disposition == "not_started":
+                continue
             history.record_dispatch(row)
             if disposition == "omitted":
                 history.record_omission(row, "Intentionally skipped")
             elif disposition == "failed":
                 save(run, history, row, failure="agent_run_error")
+            elif disposition == "unscored":
+                history.record_outcome(row | {"execute_only": True, "response": {}})
             elif disposition != "unknown":
                 save(run, history, row | {"mask_sample": disposition == "masked"}, reward=0.0)
     recovered = RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
@@ -117,15 +124,24 @@ def test_measurement_split_reconciles_without_changing_recovery(run, disposition
     expected = Counter(dispositions)
     assert report["measured"] == expected["measured"]
     assert report["masked"] == expected["masked"]
-    assert report["successful"] == report["measured"] + report["masked"]
+    assert report["unscored"] == expected["unscored"]
+    assert report["successful"] == report["measured"] + report["masked"] + report["unscored"]
     assert report["failed"] == expected["failed"]
     assert report["intentionally_omitted"] == expected["omitted"]
-    assert report["unknown"] == expected["unknown"] + 3  # Remaining inventory was never dispatched.
-    assert sum(report[key] for key in ("measured", "masked", "failed", "intentionally_omitted", "unknown")) == 5
+    assert report["missing"] == expected["unknown"]
+    assert report["not_started"] == expected["not_started"] + 3
+    assert report["reconciled"] is (expected["unknown"] == 0)
+    assert (
+        sum(
+            report[key]
+            for key in ("measured", "masked", "unscored", "failed", "intentionally_omitted", "not_started", "missing")
+        )
+        == 5
+    )
     assert [row["_ng_task_index"] for row in recovered.pending(3)] == [
         i
         for i, disposition in enumerate((*dispositions, "unknown", "unknown", "unknown"))
-        if disposition in {"failed", "unknown"}
+        if disposition in {"failed", "unknown", "not_started"}
     ]
 
 
@@ -513,7 +529,7 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
     report = orjson.loads(
         coverage_path_for(merged if merge_shards else merged.with_stem("merged_aggregate")).read_bytes()
     )
-    assert (report["expected"], report["successful"], report["unknown"]) == (5, 1, 2)
+    assert (report["expected"], report["successful"], report["missing"], report["not_started"]) == (5, 1, 1, 1)
     assert (report["measured"], report["masked"], report["failed"], report["intentionally_omitted"]) == (
         int(not masked),
         int(masked),
@@ -522,7 +538,13 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
     )
     assert report["scored"] == 1 + int(count_failures_as_zero)
     assert report["failures_counted_as_zero"] == int(count_failures_as_zero)
-    assert sum(report[key] for key in ("measured", "masked", "failed", "intentionally_omitted", "unknown")) == 5
+    assert (
+        sum(
+            report[key]
+            for key in ("measured", "masked", "unscored", "failed", "intentionally_omitted", "not_started", "missing")
+        )
+        == 5
+    )
     assert exported[-1] == {
         "coverage/expected": 5,
         "coverage/scored": report["scored"],
@@ -533,8 +555,9 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
         "coverage/unscored": 0,
         "coverage/failed": 1,
         "coverage/omitted": 1,
-        "coverage/unknown": 2,
-        "coverage/attempts_exhausted": 0,
+        "coverage/not_started": 1,
+        "coverage/missing_outcomes": 1,
+        "coverage/failure_budget_exhausted": 0,
     }
     assert report["coverage_known"] and not report["complete"]
     assert len(list(read_records(output))) == 2  # Aggregating does not rewrite history.
@@ -570,7 +593,7 @@ async def test_legacy_aggregation_cannot_claim_complete_without_inventory(tmp_pa
         )
     )
     report = orjson.loads(coverage_path_for(merged).read_bytes())
-    assert report["expected"] is None and report["unknown"] is None
+    assert report["expected"] is None and report["missing"] is None and report["not_started"] is None
     assert (report["measured"], report["masked"]) == (int(not masked), int(masked))
     assert not report["coverage_known"] and not report["complete"]
     assert exported == [

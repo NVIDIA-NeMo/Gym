@@ -1102,7 +1102,9 @@ def test_cli_keeps_legacy_coverage_retryable(tmp_path, monkeypatch, report):
     output = tmp_path / "out.jsonl"
     coverage_path_for(output).write_bytes(orjson.dumps(report))
     monkeypatch.setattr(
-        cli, "get_global_config_dict", lambda: {"input_jsonl_fpath": "unused", "output_jsonl_fpath": str(output)}
+        cli,
+        "get_global_config_dict",
+        lambda: {"input_jsonl_fpath": "unused", "output_jsonl_fpath": str(output), "require_complete": True},
     )
     monkeypatch.setattr(collection.RolloutCollectionHelper, "run_from_config", AsyncMock())
     with pytest.raises(SystemExit) as error:
@@ -1626,7 +1628,7 @@ def test_saved_coverage_without_progress_or_retries_exits_76(tmp_path):
         _check_saved_completion(output)
     assert error.value.exit_code == 76
     assert "No tasks are eligible for retry" in str(error.value)
-    assert "No new outcomes were saved" not in str(error.value)
+    assert "No retry progress was made" not in str(error.value)
 
 
 def test_exit_1_message_names_the_infrastructure_retry_limit(tmp_path):
@@ -1638,7 +1640,7 @@ def test_exit_1_message_names_the_infrastructure_retry_limit(tmp_path):
         _check_saved_completion(output)
     assert error.value.exit_code == 1
     assert str(error.value).endswith(
-        "No new outcomes were saved; automatic restarts use the infrastructure retry limit."
+        "No retry progress was made; automatic restarts use the infrastructure retry limit."
     )
 
 
@@ -1682,7 +1684,11 @@ def test_h_collect_rollouts_cli_reads_real_coverage_writer(prepared_run, monkeyp
     monkeypatch.setattr(
         cli_eval,
         "get_global_config_dict",
-        lambda: {"input_jsonl_fpath": str(output.with_name("in.jsonl")), "output_jsonl_fpath": str(output)},
+        lambda: {
+            "input_jsonl_fpath": str(output.with_name("in.jsonl")),
+            "output_jsonl_fpath": str(output),
+            "require_complete": True,
+        },
     )
     monkeypatch.setattr(collection.RolloutCollectionHelper, "run_from_config", run_from_config)
     if complete:
