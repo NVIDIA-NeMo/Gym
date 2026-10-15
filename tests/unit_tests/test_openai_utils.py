@@ -1180,19 +1180,24 @@ class TestNeMoGymChatCompletionSchemas:
             with pytest.raises(ValidationError):
                 NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": [], field: "not-a-mapping"})
 
-    def test_ignored_client_fields_are_accepted_but_not_forwarded(self) -> None:
-        # litellm (e.g. under OpenHands) sends the Bedrock-only aws_region_name on every call.
-        assert CHAT_REQUEST_IGNORED_CLIENT_FIELDS == {"aws_region_name"}
+    @pytest.mark.parametrize("field", sorted(CHAT_REQUEST_IGNORED_CLIENT_FIELDS))
+    @pytest.mark.parametrize("value", [None, "us-east-1", 123, {"ignored": ["value"]}])
+    def test_ignored_client_fields_are_accepted_but_not_forwarded(self, field: str, value: object) -> None:
+        # The pinned OpenHands direct client includes aws_region_name even when unset (null).
+        # Every ignored field must be excluded regardless of its value or serialization mode.
+        assert NeMoGymChatCompletionCreateParamsNonStreaming.model_fields[field].exclude is True
         params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
-            {"messages": [{"role": "user", "content": "hi"}], "aws_region_name": "us-east-1"}
+            {"messages": [{"role": "user", "content": "hi"}], field: value}
         )
 
+        assert field in params.model_fields_set
         assert params.model_dump(exclude_unset=True) == {"messages": [{"role": "user", "content": "hi"}]}
-        assert "aws_region_name" not in params.model_dump()
-        assert "aws_region_name" not in params.model_dump_json()
+        assert field not in params.model_dump()
+        assert field not in orjson.loads(params.model_dump_json())
+        assert field not in orjson.loads(params.model_dump_json(exclude_unset=True))
 
-    def test_tool_message_accepts_legacy_name(self) -> None:
-        # litellm-based clients send {"role": "tool", "tool_call_id", "name", "content"}.
+    def test_tool_message_accepts_openhands_name(self) -> None:
+        # OpenHands' Message serializer includes name on tool-result messages.
         messages = [
             {"role": "user", "content": "hi"},
             {
