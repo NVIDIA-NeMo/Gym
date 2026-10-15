@@ -29,8 +29,16 @@ from nemo_gym import component_search_roots
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError
 from nemo_gym.path_utils import materialized_path_for
-from nemo_gym.tasks.harbor.build_options import BuildOptions, build_options_from_overrides
+from nemo_gym.sandbox.compose_config import deployment_platform
+from nemo_gym.sandbox.compose_fields import DEFAULT_PLATFORM
+from nemo_gym.tasks.harbor.build_options import (
+    BuildOptions,
+    _block_from_overrides,
+    _merged_cli_config,
+    build_options_from_overrides,
+)
 from nemo_gym.tasks.harbor.build_plan import (
+    DEFAULT_PLATFORM,
     BuildError,
 )
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE, read_dataset_config
@@ -41,8 +49,13 @@ from nemo_gym.tasks.harbor.image_configs import (
     record_base_images,
     record_compose_images,
 )
-from nemo_gym.tasks.harbor.materialize import run_config, write_rows
-from nemo_gym.tasks.harbor.prepare_builds import _build_dockerfiles, unsupported_compose_fields_error
+from nemo_gym.tasks.harbor.materialize import (
+    ENVIRONMENT_SERVER_IMPL,
+    ENVIRONMENT_SERVER_INSTANCE,
+    run_config,
+    write_rows,
+)
+from nemo_gym.tasks.harbor.prepare_builds import _build_dockerfiles
 from nemo_gym.tasks.harbor.records import read_image_configs
 from nemo_gym.tasks.harbor.registry import ImageConfigError
 from nemo_gym.tasks.harbor.task import HarborTask, discover_tasks, is_task_folder
@@ -76,6 +89,14 @@ USE_ABSOLUTE_IP_KEY = "use_absolute_ip"
 ABSOLUTE_IP_SERVER_TYPES_KEY = "absolute_ip_server_types"
 SANDBOX_REACHABLE_SERVER_TYPES = ("responses_api_models",)
 SANDBOX_PROVIDER_CONFIG = "nemo_gym/sandbox/providers/{provider}/configs/{provider}.yaml"
+# The top-level block the Harbor environment server reads its provider from by default (`sandbox_provider`).
+SANDBOX_BLOCK_KEY = "sandbox"
+# Where the server's settings sit in the configuration a command names: the shipped environment server instance
+# every run config inherits from. `gpu_sandbox_provider` names the block GPU-declaring tasks and GPU sidecars run
+# on; `sandbox_provider_options.platform` ({os, arch}) is the platform a service's `platform` must match.
+HARBOR_SERVER_KEY = f"{ENVIRONMENT_SERVER_INSTANCE}.environment_servers.{ENVIRONMENT_SERVER_IMPL}"
+GPU_SANDBOX_PROVIDER_KEY = f"{HARBOR_SERVER_KEY}.gpu_sandbox_provider"
+SANDBOX_PROVIDER_OPTIONS_KEY = f"{HARBOR_SERVER_KEY}.sandbox_provider_options"
 # Harness-specific settings a Harbor run needs; keyed by the agent implementation folder.
 AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
     # Hermes borrows the task sandbox and drives it through its terminal toolset. vLLM-only
@@ -92,6 +113,58 @@ AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
     "terminus_2_sandboxed_agent": {"num_workers": 1, "resources_server": None},
     "miniswe_sandboxed_agent": {"num_workers": 1},
 }
+
+
+def _block_provider_name(overrides: list[str], sandbox: str | None, block_key: str) -> str | None:
+    """The provider name a top-level sandbox block carries, read from its keys alone (never its values)."""
+    from omegaconf import OmegaConf
+
+    from nemo_gym.sandbox.config import SANDBOX_BLOCK_RESERVED_KEYS
+
+    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
+    block = OmegaConf.select(_merged_cli_config(overrides, files), block_key, throw_on_resolution_failure=False)
+    if block is None or not hasattr(block, "keys"):
+        return None
+    providers = [str(key) for key in block.keys() if key not in SANDBOX_BLOCK_RESERVED_KEYS]
+    return providers[0] if len(providers) == 1 else None
+
+
+def sandbox_provider_from_overrides(overrides: list[str], sandbox: str | None) -> str | None:
+    """The provider name (``opensandbox``, ``docker``, ...) of the ``sandbox:`` block the command names.
+
+    The block comes from the ``--sandbox`` provider file (when given) and the configuration the command line
+    names, merged as :func:`_merged_cli_config` does; only its keys are read, never its values, so provider
+    credentials are not needed at prepare. Prepare checks each Compose task's ``tmpfs``, ``ulimits``,
+    ``sysctls`` and ``security_opt`` against this provider's capabilities. ``None`` when no block names a
+    provider: the check then runs at seed, against the live provider.
+    """
+    return _block_provider_name(overrides, sandbox, SANDBOX_BLOCK_KEY)
+
+
+def gpu_sandbox_provider_from_overrides(overrides: list[str], sandbox: str | None) -> str | None:
+    """The provider name of the block GPU-declaring tasks and GPU sidecars run on: the environment server's
+    ``gpu_sandbox_provider`` in the configuration the command names (``GPU_SANDBOX_PROVIDER_KEY``), read like
+    :func:`sandbox_provider_from_overrides` reads the ``sandbox:`` block. ``None`` when no GPU block is set
+    (every service is then checked against the ``sandbox:`` block) or the block does not name one provider."""
+    block = _block_from_overrides(overrides, GPU_SANDBOX_PROVIDER_KEY)
+    if block is None:
+        return None
+    if not isinstance(block, str) or not block:
+        raise ValueError(f"`{GPU_SANDBOX_PROVIDER_KEY}` must name a top-level sandbox block; got {block!r}")
+    return _block_provider_name(overrides, sandbox, block)
+
+
+def compose_platform_from_overrides(overrides: list[str]) -> str:
+    """The platform a Compose service's ``platform`` must match at prepare: the environment server's
+    ``sandbox_provider_options.platform`` (``{os, arch}``) in the configuration the command names, else
+    linux/amd64, exactly as the server reads it at seed (``deployment_platform``).
+
+    Only the ``platform`` subkey is selected and resolved. The sibling options (volumes, credentials, a
+    ``${results_dir}`` the server's configuration parser defaults later) are not needed at prepare and are
+    not evaluated; a block that is not a mapping selects no platform and the default stands, the server's own
+    configuration validation names the malformed block at dispatch."""
+    platform = _block_from_overrides(overrides, f"{SANDBOX_PROVIDER_OPTIONS_KEY}.platform")
+    return deployment_platform({"platform": platform} if platform is not None else None)
 
 
 @dataclass(frozen=True)
@@ -130,6 +203,9 @@ def prepare_target(
     exclude: list[str] | None = None,
     only: list[str] | None = None,
     build: BuildOptions | None = None,
+    sandbox_provider: str | None = None,
+    gpu_sandbox_provider: str | None = None,
+    compose_platform: str = DEFAULT_PLATFORM,
     rows_name: str = "tasks.jsonl",
 ) -> PreparedTaskset:
     """Fetch (for hub references) and load the tasks, then write the rows file.
@@ -143,9 +219,12 @@ def prepare_target(
     rows and listed on stdout. Dockerfiles outside pull and overlay mode are built once and
     recorded before the tasks load, as ``build`` (the ``builds:`` configuration block) says; the
     default builds locally with docker, and pushes with the first tool on PATH when a repository
-    is named. ``rows_name`` names the rows file inside the taskset's output folder: a run scopes
-    it to its agent, so two agents prepared with different selections on one taskset keep their
-    own rows.
+    is named. Compose service fields are checked against ``sandbox_provider`` and ``gpu_sandbox_provider``,
+    the provider names of the ``sandbox:`` and GPU blocks, which decide the ``tmpfs``, ``ulimits``, ``sysctls``
+    and ``security_opt`` each service's provider can apply, and against ``compose_platform``, the deployment's (see
+    ``nemo_gym.tasks.harbor.image_configs.check_task_compose_fields``). ``rows_name`` names the rows file inside the taskset's output folder: a run
+    scopes it to its agent, so two agents prepared with different selections on one taskset keep their own
+    rows.
     """
     build = build or BuildOptions()
     if is_hub_ref(target):
@@ -211,9 +290,19 @@ def prepare_target(
         print(f"Skipping {task_id}: {reason}")
     if not tasks:
         raise _no_runnable_task(folder, errors)
-    # A Compose file that does not resolve leaves its task out the same way; the others' images are still recorded.
+    # A Compose file that does not resolve, or a field the sandbox Compose adapter would refuse at seed, leaves its
+    # task out the same way, with the field named, as an unloadable task is, not as a seed failure of every episode;
+    # the others' images are still recorded.
     unresolved: dict[str, str] = {}
-    images = record_compose_images(tasks, dataset_root, skipped=unresolved, platform=build.platform)
+    images = record_compose_images(
+        tasks,
+        dataset_root,
+        skipped=unresolved,
+        platform=build.platform,
+        sandbox_provider=sandbox_provider,
+        gpu_sandbox_provider=gpu_sandbox_provider,
+        compose_platform=compose_platform,
+    )
     if unresolved:
         for task_id, reason in unresolved.items():
             errors[task_id] = HarborTaskError(reason)
@@ -224,17 +313,6 @@ def prepare_target(
             raise _no_runnable_task(folder, errors)
     if images is not None:
         print(f"Compose image configurations recorded in {images}")
-    # The Compose adapter's field check, per task and before any sandbox exists: a field it does not start is
-    # a skipped task with the field named, as an unloadable task is, not a seed failure of every episode.
-    refused = {task.task_id: error for task in tasks if (error := unsupported_compose_fields_error(task))}
-    if refused:
-        errors.update(refused)
-        _write_skipped(output_dir, errors)
-        for task_id, error in refused.items():
-            logger.warning("Skipping task %s: %s", task_id, error)
-        tasks = [task for task in tasks if task.task_id not in refused]
-        if not tasks:
-            raise _no_runnable_task(folder, errors)
     rows_path = output_dir / rows_name
     write_rows(tasks, taskset, rows_path)
     skipped_note = f", skipped {len(errors)}" if errors else ""
@@ -493,13 +571,17 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
         validate_target(args, overrides, agent=agent)
         return
     try:
-        # The `builds:` block comes from the configuration the command names; the run config does not exist yet.
+        # The `builds:` and `sandbox:` blocks come from the configuration the command names; the run config
+        # does not exist yet.
         build = build_options_from_overrides(overrides)
         prepared = prepare_target(
             args.target,
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
             build=build,
+            sandbox_provider=sandbox_provider_from_overrides(overrides, sandbox),
+            gpu_sandbox_provider=gpu_sandbox_provider_from_overrides(overrides, sandbox),
+            compose_platform=compose_platform_from_overrides(overrides),
             rows_name=_rows_name(agent),
         )
     except (HarborTaskError, HubError, BuildError, ImageConfigError, ConfigError, ValueError, OSError) as exc:
@@ -619,6 +701,9 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
             build=build_options_from_overrides(overrides),
+            sandbox_provider=sandbox_provider_from_overrides(overrides, sandbox),
+            gpu_sandbox_provider=gpu_sandbox_provider_from_overrides(overrides, sandbox),
+            compose_platform=compose_platform_from_overrides(overrides),
             rows_name=_rows_name(agent),
         )
     except (
