@@ -27,6 +27,7 @@ class _Response:
     def __init__(self, payload: dict, cookies: dict[str, str] | None = None) -> None:
         self.payload = payload
         self.cookies = SimpleCookie(cookies or {})
+        self.headers = {}
         self.ok = True
         self.status = 200
 
@@ -111,7 +112,7 @@ async def test_session_composition_routes_collector_through_environment_and_resp
         TestClient(environment.setup_webserver()) as environment_http,
     ):
 
-        async def dispatch(*, server_name, url_path, json, cookies=None):
+        async def dispatch(*, server_name, url_path, json, cookies=None, headers=None):
             nonlocal seed_id, responses_body
             body = json.model_dump(mode="json") if isinstance(json, BaseModel) else json
             calls.append((server_name, url_path, body))

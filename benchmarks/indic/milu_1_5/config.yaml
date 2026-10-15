@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/mcqa/configs/mcqa.yaml
+
+milu_1_5_mcqa_resources_server:
+  _inherit_from: mcqa
+  resources_servers:
+    mcqa:
+      description: MILU-1.5 zero-shot generated-answer evaluation with separate strict boxed and normalized accuracy.
+      grading_mode: boxed_and_normalized
+
+milu_1_5_simple_agent:
+  _inherit_from: mcqa_simple_agent
+  responses_api_agents:
+    simple_agent:
+      max_steps: 1
+      resources_server:
+        name: milu_1_5_mcqa_resources_server
+      datasets:
+        - name: milu_1_5
+          type: benchmark
+          jsonl_fpath: benchmarks/indic/milu_1_5/data/milu_1_5_benchmark.jsonl
+          prepare_script: benchmarks/indic/milu_1_5/prepare.py
+          prompt_config: benchmarks/indic/milu_1_5/prompts/default.yaml
+          num_repeats: 1
+          license: CC-BY-4.0
+
+milu_1_5_mcqa_environment_server:
+  _inherit_from: mcqa_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: milu_1_5_simple_agent

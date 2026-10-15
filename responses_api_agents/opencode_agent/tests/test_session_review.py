@@ -37,7 +37,12 @@ def test_session_uploads_shared_plugin_only_with_model_capture(setup, enabled, t
         payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         plugin = Path(sandbox.directory) / OBSERVABILITY_PATCH.name
-        assert config.get("plugin", []) == ([plugin.as_uri()] if enabled else [])
+        task_env_plugin = Path(sandbox.directory) / "task_environment.mjs"
+        assert config["plugin"] == ([plugin.as_uri()] if enabled else []) + [task_env_plugin.as_uri()]
+        assert (
+            sandbox.files[str(task_env_plugin)]
+            == Path(__file__).parents[1].joinpath("task_environment.mjs").read_text()
+        )
         assert (str(plugin) in sandbox.files) is enabled
         if enabled:
             assert sandbox.files[str(plugin)] == OBSERVABILITY_PATCH.read_text()

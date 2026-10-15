@@ -64,7 +64,6 @@ import polars as pl
 import regex  # noqa: F401
 from fastapi import FastAPI, Request
 from openai import NOT_GIVEN
-from openai.types.chat import ChatCompletion
 from openai.types.chat.chat_completion_message_tool_call import (
     ChatCompletionMessageToolCall,
     Function,
@@ -73,7 +72,7 @@ from openai.types.responses import FunctionToolParam
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import SimpleResourcesServer
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput
+from nemo_gym.openai_utils import NeMoGymChatCompletion, NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput
 from resources_servers.toolsandbox.schemas import (
     ToolSandboxCloseRequest,
     ToolSandboxCloseResponse,
@@ -159,7 +158,7 @@ class _ServerClientUser(OpenAIAPIUser):
     async def teardown(self) -> None:  # no client to close
         pass
 
-    async def _model_inference(self, openai_messages, openai_tools) -> ChatCompletion:
+    async def _model_inference(self, openai_messages, openai_tools) -> NeMoGymChatCompletion:
         sampling = dict(self._sampling)
         # vLLM reasoning toggle rides in extra_body; flatten it into the body
         # since we POST raw JSON rather than going through the OpenAI SDK.
@@ -177,7 +176,7 @@ class _ServerClientUser(OpenAIAPIUser):
             json=req,
         )
         resp.raise_for_status()
-        return ChatCompletion.model_validate(await resp.json())
+        return NeMoGymChatCompletion.model_validate(await resp.json())
 
 
 class ToolSandboxResourcesServer(SimpleResourcesServer):

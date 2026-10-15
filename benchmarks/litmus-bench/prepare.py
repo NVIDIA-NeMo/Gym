@@ -22,11 +22,11 @@ BENCHMARK_DIR = Path(__file__).resolve().parent
 DATA_DIR = BENCHMARK_DIR / "data"
 HF_DATASET = "nvidia/Nemotron-RL-litmus-bench-v0.2"
 
-# Pin the source content and select subsets by the published question families.
+# Pin the public source content and select subsets by the published question families.
 RELEASE_FILE = (
     "validation.jsonl",
     2056,
-    "5a46a7412e0ca6ac92091fde426f639bb87e8de1312ed7e9829635d44f9dbb96",
+    "5a46a7412e0ca6ac92091fde426f639bb87e8de1312ed7e9829635d44f9dbb96",  # pragma: allowlist secret
 )
 SUBSET_FAMILIES = {
     "tier12": {"tier1_rdkit": 419, "tier2_rdkit": 581},

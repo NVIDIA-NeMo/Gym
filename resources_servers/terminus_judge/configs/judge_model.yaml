@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Judge model server for terminus_judge.yaml, which grades with a server named `judge_model`.
+# Set judge_base_url, judge_api_key, and judge_model_name (for example in env.yaml) to use a
+# separate judge. Each one that is unset falls back to the matching policy value, so by default
+# the policy endpoint and model also judge.
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:judge_base_url,${policy_base_url}}
+      openai_api_key: ${oc.select:judge_api_key,${policy_api_key}}
+      openai_model: ${oc.select:judge_model_name,${policy_model_name}}

@@ -15,6 +15,7 @@ from nemo_gym.agent_utils.supervisor_client import (
     OUTPUT_LOG_FILE,
     STOP_REQUEST_FILE,
     SUPERVISOR_FILE,
+    HarnessTerminationError,
     remove_session_directory,
     stop_and_confirm_cleanup,
     supervised_launch_command,
@@ -55,8 +56,17 @@ class SandboxSession[Artifacts]:
 
     A new session stages input and its supervisor, runs the harness process, then
     stops and collects artifacts. Execution retains the sandbox until close
-    releases it. A failed borrowed cleanup remains closing and can be retried;
-    an owned sandbox can fall back to provider stop. Closed means release succeeded.
+    releases it. Missing termination evidence remains retryable. A final negative
+    receipt skips capture, releases a borrowed connection and leaves teardown to
+    Resources; an owned sandbox falls back to provider stop. Closed means release succeeded.
+
+    On timeout or close, the supervisor preserves previously adopted children outside
+    the harness group and drains newly adopted children, including services orphaned
+    by in-flight tools during the stop. Preserved children can also be unfinished
+    background jobs; they remain until the sandbox owner destroys the sandbox.
+    Natural CLI exit has no adoption cutoff, so detached unfinished tools may remain.
+    Borrowed sandboxes stay available for Resources verification; owned sandboxes are
+    stopped on close. Unconfirmed harness termination prevents capture and verification.
 
     Each stop, collection and release phase is bounded by ``close_timeout`` (or
     the timeout passed to ``close``). Failed cleanup/release retains the handle
@@ -73,6 +83,7 @@ class SandboxSession[Artifacts]:
     cleanup: CleanupReceipt | None = field(default=None, init=False)
     artifacts: Artifacts | None = field(default=None, init=False)
     capture_error: Exception | None = field(default=None, init=False)
+    termination_error: HarnessTerminationError | None = field(default=None, init=False)
     sandbox_stopped: bool = field(default=False, init=False)
     _stage_task: asyncio.Future[SandboxCommand] | None = field(default=None, init=False)
     _exec_task: asyncio.Task[SandboxExecResult] | None = field(default=None, init=False)
@@ -159,7 +170,7 @@ class SandboxSession[Artifacts]:
             try:
                 await self._finish(timeout=close_timeout)
             except Exception:
-                LOG.exception("%s cleanup remains unconfirmed; close must retry", self.harness)
+                LOG.exception("%s harness termination was not confirmed; close must release the session", self.harness)
             raise
         await self._finish(timeout=close_timeout)
         if result.return_code != 0 and self.capture_error is not None:
@@ -172,9 +183,11 @@ class SandboxSession[Artifacts]:
         return cast(Artifacts, self.artifacts)
 
     async def stop_harness(self, *, timeout: float) -> None:
-        """Fence a delayed launch or confirm descendant cleanup before transport cancellation."""
+        """Confirm harness termination before capture and transport release."""
         if self.sandbox_stopped or not self.launch_started or self.cleanup is not None:
             return
+        if self.termination_error is not None:
+            raise self.termination_error
         try:
             async with asyncio.timeout(timeout):
                 self.cleanup = await stop_and_confirm_cleanup(
@@ -184,8 +197,11 @@ class SandboxSession[Artifacts]:
                     timeout=timeout,
                     harness=self.harness,
                 )
+        except HarnessTerminationError as error:
+            self.termination_error = error
+            raise
         except TimeoutError as error:
-            raise RuntimeError(f"{self.harness} launch outcome is unknown; cleanup deadline exceeded") from error
+            raise RuntimeError(f"{self.harness} launch outcome is unknown; termination deadline exceeded") from error
 
     async def _finish(self, *, timeout: float) -> None:
         self._finalize_task = _reuse_or_start(self._finalize_task, lambda: self._finalize(timeout=timeout))
@@ -218,12 +234,14 @@ class SandboxSession[Artifacts]:
                     self.capture_error = None
                 except Exception as error:
                     self.capture_error = error
-                    LOG.exception("%s artifact capture failed after confirmed cleanup", self.harness)
+                    LOG.exception("%s artifact capture failed after confirmed harness termination", self.harness)
             self._capture_attempted = True
         await self._release_exec(timeout=timeout)
 
     async def _release_exec(self, *, timeout: float) -> None:
-        if (self.cleanup is not None or self.sandbox_stopped) and self._exec_task is not None:
+        if (
+            self.cleanup is not None or self.termination_error is not None or self.sandbox_stopped
+        ) and self._exec_task is not None:
             await self._cancel_and_wait(self._exec_task, timeout=timeout)
 
     async def close(self, *, timeout: float) -> None:
@@ -234,13 +252,20 @@ class SandboxSession[Artifacts]:
     async def _close(self, *, timeout: float) -> None:
         try:
             await self._finish(timeout=timeout)
-        except Exception:
-            if not self.owns_sandbox:
+        except Exception as error:
+            if not self.owns_sandbox and not isinstance(error, HarnessTerminationError):
                 raise
-            # Container teardown remains the authority if graceful cleanup is unavailable.
-            LOG.exception("%s graceful cleanup failed; stopping owned sandbox", self.harness)
+            if self.owns_sandbox:
+                LOG.exception("%s session finalization failed; stopping owned sandbox", self.harness)
+            else:
+                # A negative receipt is final: retrying cannot confirm termination.
+                # Release the borrowed client so Resources can tear down the sandbox.
+                LOG.exception(
+                    "%s harness termination unconfirmed; releasing borrowed session for Resources teardown",
+                    self.harness,
+                )
             if not self._capture_attempted:
-                self.capture_error = RuntimeError(f"{self.harness} artifact capture unavailable during forced stop")
+                self.capture_error = error
         if self.owns_sandbox:
             if not self.sandbox_stopped:
                 async with asyncio.timeout(timeout):
@@ -248,6 +273,7 @@ class SandboxSession[Artifacts]:
                 self.sandbox_stopped = True
             await self._release_exec(timeout=timeout)
         else:
+            await self._release_exec(timeout=timeout)
             async with asyncio.timeout(timeout):
                 await remove_session_directory(
                     self.sandbox,

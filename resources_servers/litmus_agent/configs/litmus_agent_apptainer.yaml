@@ -73,7 +73,8 @@ litmus_agent_agent:
           source:
             type: huggingface
             repo_id: nvidia/Nemotron-RL-litmus-bench-v0.2
-            revision: c180425444ebcc6db8dafdb897e51a94927df62a
+            # Public dataset commit, pinned for reproducible downloads.
+            revision: c180425444ebcc6db8dafdb897e51a94927df62a  # pragma: allowlist secret
             artifact_fpath: train.jsonl
           license: CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1
         - name: example
