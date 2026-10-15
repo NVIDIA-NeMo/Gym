@@ -151,7 +151,8 @@ class RefusalRecord(BaseModel):
     # that runs before dispatch (the decision a served call's entry carries as ``parent_call_id``).
     # ``None`` for a root request, an unresolved continuation, or a record written before the
     # field existed. The builder counts a refusal as the rollout's ending only when this names
-    # the delivered terminal call or a call whose token sequence is identical to it.
+    # the delivered terminal call, or a call whose token sequence is identical to it and whose
+    # entry's ``created_at`` precedes this record's.
     parent_call_id: str | None = None
     # The status of that lineage decision; ``None`` when none was made or the record predates
     # the field.

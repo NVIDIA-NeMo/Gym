@@ -912,6 +912,38 @@ def test_a_refusal_ends_the_rebuilt_response_only_when_it_continued_the_terminal
     assert built["rebuilt_response"].get("incomplete_details") == expected_details
 
 
+@pytest.mark.parametrize(
+    ("refusal_created_at", "expected_status"),
+    [(3.1, None), (3.5, "incomplete")],
+    ids=["twin-served-after-the-refusal", "twin-served-before-the-refusal"],
+)
+def test_a_refusal_of_a_retry_twin_counts_only_when_the_retained_twin_preceded_it(refusal_created_at, expected_status):
+    # ``call2`` and ``call2b`` served the same tokens and the harness kept ``call2b``. A refusal
+    # that continued ``call2`` is placed against the retained twin by the records' timestamps.
+    # Recorded before ``call2b`` was served (3.2), it was superseded by that successful re-serving:
+    # the harness recovered, and the retained twin's own ending stands. Recorded after it, the
+    # refusal is the harness's next request not fitting, and the rollout ended at the window.
+    record = RefusalRecord(
+        model_call_id="call3",
+        code="context_length_exceeded",
+        created_at=refusal_created_at,
+        parent_call_id="call2",
+        parent_resolution=_RESOLVED,
+    )
+    built = _assemble(
+        "r",
+        _completed_chain_entries() + [_terminal_twin_entry()],
+        "prefix_merging",
+        "m",
+        explicit_terminal_call_id="call2b",
+        refusals=(record,),
+    )
+    assert built[MASK_SAMPLE_KEY] is False
+    assert built["rebuilt_response"].get("status") == expected_status
+    expected_details = {"reason": "max_output_tokens"} if expected_status else None
+    assert built["rebuilt_response"].get("incomplete_details") == expected_details
+
+
 def test_finalize_reports_a_terminal_refusal_on_the_result(tmp_path):
     # The store records the refusal and resolves the refused call's intent, so the frozen
     # snapshot is complete; the refusal reaches delivery as the builder's verdict and as a

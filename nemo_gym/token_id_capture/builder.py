@@ -633,16 +633,22 @@ def _refusal_ended_the_chain(refusal: RefusalRecord, terminal: TokenEntry, out: 
     engine rejected (``code`` is ``None``) says nothing about the conversation's length, so it is
     reported in ``metrics["refusals"]`` but sets no verdict. And the refused request continued the
     delivered terminal call: its request-time lineage names that call, or a call whose full token
-    sequence is identical to it (a retry twin). A refusal on another branch of the rollout, one
-    that continued an earlier call the harness later moved past, and one whose parent could not be
-    resolved leave the verdict alone.
+    sequence is identical to it (a retry twin) that was served before the refusal was recorded. A
+    twin served after the refusal is a successful re-serving of the call the refused request
+    continued, so the harness recovered from the refusal and the retained twin's own ending
+    stands. A refusal on another branch of the rollout, one that continued an earlier call the
+    harness later moved past, and one whose parent could not be resolved leave the verdict alone.
     """
     if refusal.code != CONTEXT_LENGTH_EXCEEDED_ERROR_CODE or refusal.parent_call_id is None:
         return False
     if refusal.parent_call_id == terminal.model_call_id:
         return True
     parent_digest = out.sequence_digests.get(refusal.parent_call_id)
-    return parent_digest is not None and parent_digest == out.sequence_digests.get(terminal.model_call_id)
+    if parent_digest is None or parent_digest != out.sequence_digests.get(terminal.model_call_id):
+        return False
+    # The refused request continued a retry twin of the delivered terminal call. The records'
+    # timestamps order the two: a terminal served after the refusal superseded it.
+    return refusal.created_at > terminal.created_at
 
 
 def project_main_chain_response(
@@ -675,7 +681,8 @@ def project_main_chain_response(
     ``incomplete`` with reason ``max_output_tokens``: the harness's next request did not fit, so
     the rollout ended at the model's limit although its last served call completed
     (``_refusal_ended_the_chain`` states the two conditions). A refusal the harness recovered
-    from, with a call served after it, a refusal on another branch of the rollout, a refusal of
+    from, with a call served after it (a token-identical retry of the terminal call that was
+    served after the refusal included), a refusal on another branch of the rollout, a refusal of
     an output-token parameter, and one whose parent is unknown do not change the verdict. A
     refusal and a served ``length`` stop give the same status; the consumer's
     ``metrics["refusals"]`` tells them apart.
