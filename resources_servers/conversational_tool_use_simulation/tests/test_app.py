@@ -578,6 +578,85 @@ async def test_first_user_stop_falls_back_to_reason_for_contact(monkeypatch) -> 
     assert fallbacks[0].startswith("invalid_user_message: ")
 
 
+def test_first_user_message_fallback_is_on_by_default() -> None:
+    # make_server always passes the flag, so build the config directly to see the code default.
+    config = ConversationalToolUseSimulationConfig(
+        host="0.0.0.0",
+        port=0,
+        entrypoint="app.py",
+        name="conversational_tool_use_simulation",
+    )
+
+    assert config.fallback_first_user_message is True
+
+
+async def test_first_user_fallback_row_is_scored_and_not_masked(monkeypatch) -> None:
+    server = make_server()
+    request = RequestStub()
+
+    await server.seed_session(
+        request,
+        ConversationalToolUseSeedSessionRequest(
+            domain_name="subscription support",
+            profile="general",
+            policy="policy",
+            customer_scenario={"reason_for_contact": "I need help."},
+        ),
+    )
+
+    async def stop_user_message(state):
+        return "###STOP###", None
+
+    monkeypatch.setattr(server, "_generate_user_message", stop_user_message)
+    first = await server.next_user_message(request)
+    assert first.message == "I need help."
+    await server.record_agent_message(request, RecordAgentMessageRequest(content="Sure, what is the issue?"))
+    final = await server.next_user_message(request)
+    assert final.terminal_state == "complete"
+
+    verified = await server.verify(request, make_verify_request())
+    assert verified.reward == 1.0
+    assert verified.mask_sample is False
+    assert verified.trajectory_invalid_reasons == []
+    assert verified.failure_labels == []
+    assert [message.text for message in verified.result.trajectory.messages] == [
+        "I need help.",
+        "Sure, what is the issue?",
+        "###STOP###",
+    ]
+    fallbacks = verified.result.source_artifacts["first_user_message_fallbacks"]
+    assert len(fallbacks) == 1
+    assert fallbacks[0].startswith("invalid_user_message: ")
+
+
+async def test_first_user_stop_is_retried_before_falling_back(monkeypatch) -> None:
+    server = make_server()
+    request = RequestStub()
+
+    await server.seed_session(
+        request,
+        ConversationalToolUseSeedSessionRequest(
+            domain_name="subscription support",
+            profile="general",
+            policy="policy",
+            customer_scenario={"reason_for_contact": "I need help."},
+        ),
+    )
+
+    replies = iter(["###STOP###", "Hi, I want to cancel my subscription."])
+
+    async def stop_then_valid_user_message(state):
+        return next(replies), None
+
+    monkeypatch.setattr(server, "_generate_user_message", stop_then_valid_user_message)
+    user_message = await server.next_user_message(request)
+
+    assert user_message.should_continue is True
+    assert user_message.message == "Hi, I want to cancel my subscription."
+    state = server.session_id_to_state["session_1"]
+    assert "first_user_message_fallbacks" not in state.source_artifacts
+
+
 async def test_first_user_stop_is_invalid_when_fallback_disabled(monkeypatch) -> None:
     server = make_server(fallback_first_user_message=False)
     request = RequestStub()
@@ -817,7 +896,7 @@ async def test_first_user_generation_error_falls_back_to_reason_for_contact(monk
 
 
 async def test_first_user_fallback_uses_default_when_reason_for_contact_is_unusable(monkeypatch) -> None:
-    for reason_for_contact in ("", "   ", "Cancel it. ###STOP###"):
+    for reason_for_contact in ("", "   ", "Cancel it. ###STOP###", "Transfer me. ###TRANSFER###"):
         server = make_server()
         request = RequestStub()
         await server.seed_session(
