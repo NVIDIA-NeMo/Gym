@@ -29,9 +29,15 @@ def test_explicit_values_win_over_env() -> None:
         team="cfg-team",
         user="cfg-user",
         workload="cfg-workload",
-        environ={"NEMO_GYM_TEAM": "env-team", "NEMO_GYM_USER": "env-user", "NEMO_GYM_WORKLOAD": "env-workload"},
+        cluster="cfg-cluster",
+        environ={
+            "NEMO_GYM_TEAM": "env-team",
+            "NEMO_GYM_USER": "env-user",
+            "NEMO_GYM_WORKLOAD": "env-workload",
+            "NEMO_GYM_CLUSTER": "env-cluster",
+        },
     )
-    assert resolved == {"team": "cfg-team", "user": "cfg-user", "workload": "cfg-workload"}
+    assert resolved == {"team": "cfg-team", "user": "cfg-user", "workload": "cfg-workload", "cluster": "cfg-cluster"}
 
 
 def test_nemo_gym_env_beats_slurm_env() -> None:
@@ -42,20 +48,29 @@ def test_nemo_gym_env_beats_slurm_env() -> None:
         "SLURM_JOB_USER": "slurm-user",
         "NEMO_GYM_WORKLOAD": "gym-workload",
         "SLURM_JOB_NAME": "slurm-job",
+        "NEMO_GYM_CLUSTER": "gym-cluster",
+        "SLURM_CLUSTER_NAME": "slurm-cluster",
     }
     assert resolve_attribution(environ=environ) == {
         "team": "gym-team",
         "user": "gym-user",
         "workload": "gym-workload",
+        "cluster": "gym-cluster",
     }
 
 
 def test_slurm_env_fallback() -> None:
-    environ = {"SLURM_JOB_ACCOUNT": "account", "SLURM_JOB_USER": "slurm-user", "SLURM_JOB_NAME": "job-name"}
+    environ = {
+        "SLURM_JOB_ACCOUNT": "account",
+        "SLURM_JOB_USER": "slurm-user",
+        "SLURM_JOB_NAME": "job-name",
+        "SLURM_CLUSTER_NAME": "slurm-cluster",
+    }
     assert resolve_attribution(environ=environ) == {
         "team": "account",
         "user": "slurm-user",
         "workload": "job-name",
+        "cluster": "slurm-cluster",
     }
 
 
