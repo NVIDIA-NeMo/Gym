@@ -237,6 +237,28 @@ def test_explicit_identity_does_not_require_collector_indexes(task_id_field: str
     assert client.calls[2][1] == "/ng-rollout/explicit-rollout-a2/v1/responses"
 
 
+@pytest.mark.parametrize("row_index, expected", [({"_ng_rollout_index": 2}, 2), ({}, None)])
+def test_seed_receives_the_rows_rollout_index_apart_from_an_explicit_rollout_id(row_index: dict, expected) -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    response = TestClient(adapter.setup_webserver()).post(
+        "/run",
+        json={
+            "task_id": "task",
+            # The suffix is not the repeat: a server must not have to parse it out of the ID.
+            "_ng_rollout_id": "batch-7",
+            **row_index,
+            "responses_create_params": {"input": "task"},
+        },
+    )
+
+    assert response.status_code == 200
+    seed_body = client.calls[0][2]["json"]
+    assert seed_body["episode_id"] == {"rollout_id": "batch-7", "attempt": 0}
+    assert seed_body["rollout_index"] == expected
+
+
 @pytest.mark.parametrize("task_fields, expected_task_id", [({}, "3"), ({"task_id": 0}, "0")])
 def test_task_identity_preserves_index_fallback_and_zero(task_fields: dict[str, int], expected_task_id: str) -> None:
     environment_server, client = _environment_server()

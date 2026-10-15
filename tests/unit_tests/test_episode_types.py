@@ -126,3 +126,12 @@ def test_unknown_execution_stage_is_optional_but_stage_aliases_are_rejected() ->
 )
 def test_materialized_task_row_identifies_routing_shape(row: dict[str, object], expected: bool) -> None:
     assert is_materialized_task_row(row) is expected
+
+
+def test_rollout_index_is_optional_and_non_negative() -> None:
+    request = _request().model_dump(mode="json")
+
+    assert _Request.model_validate(request).rollout_index is None
+    assert _Request.model_validate({**request, "rollout_index": 2}).rollout_index == 2
+    with pytest.raises(ValidationError):
+        _Request.model_validate({**request, "rollout_index": -1})

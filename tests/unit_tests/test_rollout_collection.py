@@ -44,6 +44,7 @@ from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
@@ -8919,6 +8920,7 @@ class TestEnvironmentServerRouting:
                     "task_data": {"instance_id": "instance"},
                 },
             },
+            "rollout_index": 0,
         }
 
     def test_taskset_route_requires_a_configured_environment_server(self) -> None:
@@ -9106,6 +9108,7 @@ class TestEnvironmentServerRouting:
         # The native row goes to its taskset's route as an episode request.
         assert calls["environment"]["task"]["task_id"]["taskset"] == "swe_pro"
         assert calls["environment"]["episode_id"] == {"rollout_id": "0-0", "attempt": 0}
+        assert calls["environment"]["rollout_index"] == 0
         # The flat row goes to the environment server fronting its agent, as today's flat body.
         assert calls["legacy_environment"] is flat_row
         assert calls["legacy_environment"][AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
@@ -9900,3 +9903,20 @@ class TestLiveHealthEvaluation:
         # The row was saved and the progress accounting for it had already run when the await was reached.
         assert len(Path(tmp_path / "output.jsonl").read_bytes().splitlines()) >= 1
         assert "rollouts for `my_agent`" in seen_at_await[0]
+
+
+@pytest.mark.parametrize(
+    "row, expected",
+    [
+        # An explicit rollout ID need not encode the repeat, so the index travels on its own.
+        ({ROLLOUT_ID_KEY_NAME: "batch-7", ROLLOUT_INDEX_KEY_NAME: 2}, {"rollout_index": 2}),
+        ({TASK_INDEX_KEY_NAME: 4, ROLLOUT_INDEX_KEY_NAME: 1}, {"rollout_index": 1}),
+        ({ROLLOUT_ID_KEY_NAME: "explicit"}, {}),
+    ],
+)
+def test_episode_request_carries_the_rows_rollout_index(row: dict, expected: dict) -> None:
+    row = {**row, "task_id": {"taskset": "t", "task_id": "x"}, "task_input": {}}
+
+    body = nemo_gym.rollout_collection._episode_request_body(row)
+
+    assert {key: body[key] for key in body.keys() - {"episode_id", "task"}} == expected

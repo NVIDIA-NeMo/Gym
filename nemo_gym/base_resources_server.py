@@ -231,6 +231,15 @@ class ResourcesSeedSessionRequest(BaseModel):
     episode_id: EpisodeId
     task_id: TaskId
     task_data: dict[str, JsonValue]
+    rollout_index: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Which repeat of the task this session serves, for state keyed by repeat (for example deliverables "
+            "persisted per repeat). Task data carries no `_ng_*` keys, so this is the only place a seed learns it. "
+            "`None` when the episode request does not carry it."
+        ),
+    )
 
 
 class ResourcesSeedSessionResponse(BaseModel):

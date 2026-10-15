@@ -128,6 +128,15 @@ class BaseEpisodeRequest(BaseModel, Generic[TaskInputT]):
 
     episode_id: EpisodeId
     task: MaterializedTask[TaskInputT]
+    # Kept out of EpisodeId: identity must stay recoverable from a capture key, which does not encode the repeat.
+    rollout_index: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Which repeat of the task this rollout is (the collector's `_ng_rollout_index`), "
+            "independent of an explicit rollout ID. `None` when the caller does not number repeats."
+        ),
+    )
 
 
 class BaseEpisodeResponse(BaseModel, Generic[EpisodeResultT]):
