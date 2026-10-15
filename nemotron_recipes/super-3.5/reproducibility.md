@@ -78,6 +78,22 @@ once `env.yaml` and `.env` are filled in (some need a judge or simulator endpoin
 [Judges and graders](#judges-and-graders); BrowseComp also needs an [Exa](https://exa.ai)
 search key).
 
+### Not covered by these recipes
+
+Some results in the tech report have no recipe here:
+
+| Benchmark | In the tech report | Why there is no recipe |
+|---|---|---|
+| BabyVision, CharXiv-RQ, MathVision, OCR-Reasoning, OCRBench-v2 (EN and ZH), V*, Video-MME-v2, MMLongBench-Doc | Table 10, Multimodal | Not yet onboarded to our open-source tools. They were run with each benchmark's official open-source implementation or with internal scaffolding that we plan to open source |
+| NV Chat Benchmark | Table 10 | An internal chat benchmark developed at NVIDIA |
+| HLE (with tools, text) | Table 10 | Produced with a separate internal harness |
+| BrowseComp (OpenCode) | Table 10 | Produced with an OpenCode-based harness that is not part of these recipes |
+| Text Arena | Table 11 | Elo ratings from human pairwise votes on Arena, not a benchmark run |
+
+The base-model results (Table 6) were collected with the NeMo Evaluator SDK and LM Evaluation
+Harness rather than NeMo Gym; their configurations are in the
+[NeMo Evaluator SDK examples](https://github.com/NVIDIA-NeMo/Evaluator/tree/main/examples).
+
 ## How a recipe is built
 
 Each recipe is one YAML file, `<benchmark>.yaml`, naming the Gym commit
