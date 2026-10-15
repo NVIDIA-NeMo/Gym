@@ -406,6 +406,35 @@ The benchmark config sets these Stirrup agent keys on
 | `min_compaction_summary_words` | `50` | `1` | Minimum words in a context-compaction summary, which rejects near-empty summaries that would erase progress on long sessions. After 3 rejected attempts the agent raises an error instead of replacing its history. |
 | `truncation_recovery` | `true` | `false` | After a call spends its whole completion budget without a usable tool call, run the next call with thinking disabled and a one-time instruction to act now. The budget is unchanged and the instruction is not recorded in the trajectory. Disabling thinking needs a model server that forwards request `chat_template_kwargs` (`forward_request_chat_template_kwargs: true` on `vllm_model`); otherwise only the instruction is sent. |
 
+## Run another harness
+
+`benchmarks/gdpval/<harness>.yaml` runs a session harness in place of Stirrup, with the same resources server,
+judges and multi-stage driver as `config.yaml`:
+
+```bash
+gym eval prepare --benchmark gdpval/<harness>
+gym eval run \
+    --model-type vllm_model \
+    --benchmark gdpval/<harness> \
+    --split benchmark \
+    --output results/gdpval_<harness>.jsonl
+```
+
+- The harness runs in the task sandbox the resources server lends it, with `/root` as its working directory.
+- It calls `finish`, `abandon_task_finish`, `web_search` and `fetch_web_page` over MCP: the resources server sets
+  `expose_tools_over_mcp: true` and the environment server sets `resources_tool_transports: [mcp]`. The model sees
+  them under the names the harness gives MCP tools.
+- The rows come from `data/gdpval_benchmark_harness_neutral.jsonl`, written by `prepare_harness_neutral.py`: the same
+  tasks without the tool list, which session harnesses reject, rendered with `prompts/harness-neutral.yaml`.
+- The harness calls the model server and the resources server's `/mcp` endpoint from inside the sandbox, so pass
+  `++use_absolute_ip=true` when the servers' default addresses are not reachable from it.
+- Pi compacts its context when the model server reports a context-length error, so pass that error through:
+  `propagate_context_overflow_errors: true` on `vllm_model` (by default it returns an empty, length-capped
+  completion), or `propagate_upstream_http_status_codes: [400]` on `openai_model` (by default it returns HTTP 500).
+  Otherwise a long Pi episode ends at the context limit instead of compacting. Codex compacts on its own token
+  count and ends the episode on a context-length error either way.
+- The prompt and the harness differ from the certified Stirrup setup, so these are not AA v2 scores.
+
 ## Multi-judge panel
 
 By default every GDPVal deliverable is graded by a **panel** of frontier LLM
