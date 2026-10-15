@@ -1,0 +1,11 @@
+Bengali/test-00000-of-00001.parquet: 190228009a12a4d334b65632c624e8a99ba3b079448b1686f4d48720a3d8d2c9  # pragma: allowlist secret
+English/test-00000-of-00001.parquet: d95f29f190a949ca0c16b1f11520ab62c431a577a89be8f2f7ae7c3755cadd10  # pragma: allowlist secret
+Gujarati/test-00000-of-00001.parquet: 467ae9783a60d139f342bf6bf106e6c703ae4a2fd2dfc26a4e0113a0d33b214a  # pragma: allowlist secret
+Hindi/test-00000-of-00001.parquet: 47f2fc230542f9b52453a06dcb478cca10d8416a28b7a4c0a155f4404b705ab3  # pragma: allowlist secret
+Kannada/test-00000-of-00001.parquet: faa47afd69ae045995d08a48d1f5279bfeba2bb1419698d30a8271f895512b12  # pragma: allowlist secret
+Malayalam/test-00000-of-00001.parquet: d8b2b0da7c33fab67e6aa054b8768091f9ec18362fab1abc6d59f59bf8415bbd  # pragma: allowlist secret
+Marathi/test-00000-of-00001.parquet: ce337fb6460c6e55ee5359d6f2b43d5c8c47eee78d15939cc9147e7507255a2d  # pragma: allowlist secret
+Odia/test-00000-of-00001.parquet: d7b13601047bbb7b488a71690f34ccb6723100ef1aec36faf1fd2452690f7f71  # pragma: allowlist secret
+Punjabi/test-00000-of-00001.parquet: b67d86dd9b89a93423ba4e9f2472d56f6e2da3658a33bde06a0278a3714f0aad  # pragma: allowlist secret
+Tamil/test-00000-of-00001.parquet: fcaaf3c5810ca688e912e9e5a907503fbc2a5966cb3c6cd1649b5d24cefbcc8b  # pragma: allowlist secret
+Telugu/test-00000-of-00001.parquet: a3ff7c99148dbd187aaa429eea71fa415fe4f592eb05309adf325024c8b28f21  # pragma: allowlist secret

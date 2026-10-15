@@ -242,3 +242,6 @@ resources_servers/cvdp/data/gym_cvdp_nonagentic_code_generation_no_commercial.js
 
 # Generated Terminal-Bench 4 dataset
 /benchmarks/terminal_bench_4/data/
+
+# Default shared datasets folder for Harbor-format tasks (see nemo_gym/tasks/harbor).
+datasets/

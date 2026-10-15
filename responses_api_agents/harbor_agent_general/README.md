@@ -23,6 +23,12 @@ harbor_agent_general:
 
       harbor_jobs_dir: ${harbor_jobs_dir}
 
+      ## Optional variables installed only for the lifetime of one Harbor Ray
+      ## task. Use this when task/agent configs contain ${VAR} references.
+      ## Values are passed as task arguments rather than Ray runtime_env values,
+      ## because Ray persists runtime_env values in its setup logs.
+      harbor_worker_env: {}
+
       ## Follows harbor.models.job.config:DatasetConfig spec.
       harbor_dataset:
         ...
@@ -41,6 +47,28 @@ harbor_agent_general:
 ```
 
 See [configs](./configs) for specific examples.
+
+> [!important]
+> The bridge converts Harbor's `agent/trajectory.json`, so the selected Harbor
+> agent must declare `capabilities.atif=True` and actually emit that file. Harbor
+> can run additional native agents, such as Pi, that do not emit ATIF; those
+> trials are not currently convertible into Gym rollouts by this bridge. Harbor
+> also has no generic image-capability flag, so local-image support must be
+> validated per agent and model provider.
+
+To inspect the exact agents and ATIF capabilities in the installed Harbor
+version:
+
+```bash
+python - <<'PY'
+from harbor.agents.factory import AgentFactory
+from harbor.models.trial.config import AgentConfig
+
+for name in AgentFactory.registered_names():
+    cls = AgentFactory.get_agent_class_from_config(AgentConfig(name=name))
+    print(f"{name}: atif={cls.capabilities.atif}")
+PY
+```
 
 ## Example
 
@@ -97,6 +125,17 @@ gym eval run --no-serve \
 ```
 
 ## Implementation Notes
+
+Relative job paths resolve from the agent process's working directory, and
+dataset paths are passed to Harbor unchanged. Built-in profiles can opt into
+repository-root resolution with `harbor_resolve_paths_from_gym_root: true`;
+absolute paths remain unchanged.
+
+Job names default to `t<task>-r<rollout>` for resuming trials. Set
+`harbor_unique_job_names: true` to append a fresh UUID for every rollout
+request, including retries, and prevent independent collections from colliding
+or reusing an old result. Prior job directories are preserved. LabBench2 enables
+both options; the generic Docker and Singularity configs retain their defaults.
 
 A few notable details make it more general than the [older implementation](../harbor_agent/README.md):
 - The Gym configurations now support the full Harbor spec same as the original Pydantic models (see `HarborAgentConfig` in [app.py](./app.py)), allowing a direct translation from a `harbor run` CLI/config to Gym config, without guesswork.

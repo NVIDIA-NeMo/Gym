@@ -134,6 +134,10 @@ omit request and response payloads; those remain in `CaptureStore`. If projectio
 remain attached and `gaps` includes `trajectory_projection_failed`. LabBench rows with the
 `multimodal_history_redacted` gap omit payload copies from `ng_trajectory`.
 
+A capture write started by a cancelled call runs detached, so a rollout's outstanding writes are
+waited for before its record is snapshotted. If one has not landed by the drain timeout, `gaps`
+includes `model_call_capture_pending`.
+
 The attachment is additive: it does not replace or rewrite the existing response, reward,
 `NeMoGymResponse`, token-id, or log-prob fields. Aggregate-metrics requests exclude it, and W&B
 rollout tables omit `ng_trajectory` and model-call request and response payloads.

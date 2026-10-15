@@ -181,6 +181,7 @@ behavior according to the evidence required by a check. A recorded gap is not au
 | `model_calls_unavailable`, `model_call_capture_incomplete`, `model_call_capture_records_unreadable`, `model_call_capture_unreadable` | Checks that require bound policy-model calls are unobserved. |
 | `model_call_reference_unmatched`, `model_call_reference_ambiguous`, `model_call_reference_conflict` | `trajectory_capture_mismatch` produces a finding because the available evidence contradicts itself. |
 | `model_call_ownership_unavailable` | No finding by itself. An unowned call can belong to an auxiliary model. |
+| `model_call_capture_pending` | No unobserved mapping. A claimed capture write that never landed is real data loss, so the usual missing-call findings still apply. |
 
 Other gap codes affect health only when a check defines an explicit rule for them. The original gap details remain in
 `ng_trajectory.gaps`; `rollout_verdicts.jsonl` records only the IDs of checks that were unobserved.

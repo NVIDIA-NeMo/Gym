@@ -67,6 +67,13 @@ def seed_verify_mode(headers: Optional[Mapping[str, str]]) -> StepMode:
 CHECKPOINT_RESTART_HEADER = "x-ng-checkpoint-restart"
 
 
+# A caller that closes its resources session with /close_session after verifying sends this on /verify.
+# A replayable verification then leaves the session tracked until that close,
+# so a checkpoint that keeps the caller's boundary from before the verification still exports the session.
+# Without it, a /verify ends the session, as it does for a caller that never closes.
+CHECKPOINT_CLOSE_FOLLOWS_HEADER = "x-ng-checkpoint-close-follows"
+
+
 def seed_restarts(headers: Optional[Mapping[str, str]]) -> bool:
     """Whether a seed reply says its session cannot be captured, so its episode must start over after a crash."""
     return (headers or {}).get(CHECKPOINT_RESTART_HEADER) == "1"
