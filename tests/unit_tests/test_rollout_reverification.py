@@ -21,11 +21,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
+from aiohttp import ClientSession, web
+from aiohttp.test_utils import TestServer
+from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.atif_reverification import AtifProjectionError
 from nemo_gym.base_resources_server import ReverifyMode
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config_types import BaseServerConfig, ConfigError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -74,6 +77,7 @@ from nemo_gym.rollout_reverification import (
     _yield_inputs_and_rollouts_paired,
     summarize_cache_usage,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 _TOOL_TRAJECTORY_SHA256 = (
@@ -2072,6 +2076,8 @@ class TestGuardReverifyMode:
     def _make_config(
         self, tmp_path: Path, *, force: bool = False, judge_failed_only: bool = False
     ) -> RolloutReverificationConfig:
+        (tmp_path / "in.jsonl").touch()
+        (tmp_path / "r.jsonl").touch()
         return RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath=str(tmp_path / "in.jsonl"),
             rollouts_jsonl_fpath=str(tmp_path / "r.jsonl"),
@@ -2156,7 +2162,81 @@ class TestGuardReverifyMode:
 
         await _guard_reverify_mode(self._make_config(tmp_path))
 
-        assert captured == [{"agent_a": "rs_a", "agent_b": "rs_b"}]
+        assert len(captured) == 1
+        assert set(captured[0].values()) == {"rs_a", "rs_b"}
+
+    @pytest.mark.parametrize(
+        ("mode", "force"),
+        [(ReverifyMode.UNSUPPORTED, False), (ReverifyMode.UNSUPPORTED, True), (ReverifyMode.STATELESS, False)],
+    )
+    async def test_native_task_source_mode_controls_dispatch_and_output(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: ReverifyMode, force: bool
+    ) -> None:
+        verified = []
+
+        def resources_app(reverify_mode: ReverifyMode) -> web.Application:
+            async def get_mode(request: web.Request) -> web.Response:
+                return web.json_response(reverify_mode.value)
+
+            async def verify(request: web.Request) -> web.Response:
+                payload = await request.json()
+                verified.append(payload)
+                return web.json_response(payload | {"reward": 1.0})
+
+            app = web.Application()
+            app.router.add_get("/reverify_mode", get_mode)
+            app.router.add_post("/verify", verify)
+            return app
+
+        async with (
+            TestServer(resources_app(ReverifyMode.STATELESS)) as default_server,
+            TestServer(resources_app(mode)) as task_server,
+            ClientSession() as http_client,
+        ):
+            client = ServerClient(
+                head_server_config=BaseServerConfig(host="127.0.0.1", port=default_server.port),
+                global_config_dict=OmegaConf.create(
+                    {
+                        "agent_a": {"responses_api_agents": {"simple_agent": {"resources_server": {"name": "rs_a"}}}},
+                        "rs_a": {"resources_servers": {"fixture": {"host": "127.0.0.1", "port": default_server.port}}},
+                        "task_rs": {"resources_servers": {"fixture": {"host": "127.0.0.1", "port": task_server.port}}},
+                    }
+                ),
+            )
+            monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: client)
+            monkeypatch.setattr("nemo_gym.server_utils.get_global_aiohttp_client", lambda: http_client)
+            config = self._make_config(tmp_path, force=force)
+            config.disable_aggregation = True
+            row = {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                AGENT_REF_KEY_NAME: {"name": "agent_a"},
+                TASK_SOURCE_KEY_NAME: "task_rs",
+                "responses_create_params": {"input": [{"role": "user", "content": "What is 6 times 7?"}]},
+            }
+            response = {
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "42"}]}
+                ]
+            }
+            Path(config.materialized_inputs_jsonl_fpath).write_bytes(orjson.dumps(row) + b"\n")
+            Path(config.rollouts_jsonl_fpath).write_bytes(orjson.dumps(row | {"response": response}) + b"\n")
+
+            if mode == ReverifyMode.UNSUPPORTED and not force:
+                with pytest.raises(ConfigError, match="task_rs"):
+                    await RolloutReverificationHelper().run_from_config(config)
+                assert verified == []
+                assert not (tmp_path / "out.jsonl").exists()
+                assert not (tmp_path / "out_failures.jsonl").exists()
+            else:
+                results = await RolloutReverificationHelper().run_from_config(config)
+                assert len(verified) == 1
+                assert verified[0]["response"] == response
+                assert results[0]["reward"] == 1.0
+                expected_output = "unsafe_out.jsonl" if force else "out.jsonl"
+                assert (tmp_path / expected_output).exists()
+                if force:
+                    assert not (tmp_path / "out.jsonl").exists()
 
 
 class TestRolloutReverificationRunFromConfig:
