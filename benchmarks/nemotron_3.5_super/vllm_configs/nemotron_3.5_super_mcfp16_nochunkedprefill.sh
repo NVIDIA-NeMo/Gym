@@ -36,7 +36,7 @@ VLLM_COMMON_ARGS=(
     --enable-auto-tool-choice
     --tool-call-parser qwen3_coder
     --reasoning-parser nemotron_v3
-    --enable-chunked-prefill
+    --no-enable-chunked-prefill
     --enable-prefix-caching
     --max-model-len 262144
     --kv-cache-dtype fp8
