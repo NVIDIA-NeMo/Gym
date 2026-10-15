@@ -361,11 +361,6 @@ def _partial_stage_outcome(
         # sample re-dispatchable intact. `tolerate_unresolved` never waives those.
         if result is None or result.get(NG_NO_PERSIST_KEY):
             return None
-        # A persisted failure class is required either way: `tolerate_unresolved`
-        # widens *which* failures are waivable, it never waives a row carrying no
-        # class at all.
-        if result.get(NG_FAILURE_CLASS_KEY) is None:
-            return None
         if not policy.tolerate_unresolved and not _is_retryable_failure(result):
             return None
 
