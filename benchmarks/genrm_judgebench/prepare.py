@@ -12,7 +12,7 @@ from benchmarks.genrm_judgebench.metrics import base_pair_id
 from resources_servers.genrm_eval.prepare import atomic_output, make_task
 
 
-REVISION = "57dd5e0b9817d07f05ec8f45a91b2ce1e310e308"
+REVISION = "57dd5e0b9817d07f05ec8f45a91b2ce1e310e308"  # pragma: allowlist secret
 OUTPUT = Path(__file__).parent / "data/judgebench_validation.jsonl"
 
 

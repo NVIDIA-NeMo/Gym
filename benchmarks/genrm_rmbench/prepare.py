@@ -10,7 +10,7 @@ from urllib.request import urlopen
 from resources_servers.genrm_eval.prepare import atomic_output, make_task
 
 
-COMMIT = "73c52d7b27b361621361ec959ac6c0eb9bb7a689"
+COMMIT = "73c52d7b27b361621361ec959ac6c0eb9bb7a689"  # pragma: allowlist secret
 URL = f"https://raw.githubusercontent.com/THU-KEG/RM-Bench/{COMMIT}/data/total_dataset.json"
 OUTPUT = Path(__file__).parent / "data/rmbench_validation.jsonl"
 
