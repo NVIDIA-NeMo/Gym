@@ -38,7 +38,6 @@ def wait_for_engines(urls: list[str], timeout: int) -> None:
         if not pending:
             print(f"All {len(urls)} vLLM endpoints are ready", flush=True)
             return
-        print(f"Waiting for {len(pending)}/{len(urls)} endpoints: {', '.join(pending)}", flush=True)
         time.sleep(min(5, max(0, deadline - time.monotonic())))
 
 
