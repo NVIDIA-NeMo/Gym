@@ -28,7 +28,7 @@ BENCHMARK_DIR = Path(__file__).resolve().parents[1]
 CONFIG_FPATH = BENCHMARK_DIR / "config.yaml"
 
 
-def _source_row(*, uuid: str = "litmus-1", answer: float = 1.9231974) -> dict:
+def _source_row(*, uuid: str = "litmus-1", answer: float | str = 1.9231974) -> dict:
     return {
         "dataset": "litmus_bench",
         "question_family": "tier5_admet_direct",
@@ -67,9 +67,14 @@ def _patch_release(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rows: list[d
 
 
 def test_prepare_downloads_release_and_preserves_scoring_and_provenance(monkeypatch, tmp_path) -> None:
-    rows = [_source_row(uuid="float"), _source_row(uuid="bool", answer=1)]
+    rows = [
+        _source_row(uuid="float"),
+        _source_row(uuid="bool", answer=1),
+        _source_row(uuid="string", answer=" Paris "),
+    ]
     rows[1]["answer_type"] = "bool"
     rows[1].pop("match")
+    rows[2].update(answer_type="string", output_regex=r"Answer:\s*(.+)", match={"rule": "string_eq"})
     calls = _patch_release(monkeypatch, tmp_path, rows)
 
     output_path = prepare_module.prepare()
@@ -105,7 +110,9 @@ def test_prepare_downloads_release_and_preserves_scoring_and_provenance(monkeypa
         (lambda row: row["responses_create_params"].update(tools=[{"type": "function"}]), "must not expose tools"),
         (lambda row: row.update(expected_answer=float("nan")), "finite and numeric"),
         (lambda row: row.update(expected_answer=True), "finite and numeric"),
-        (lambda row: row.update(answer_type="string"), "unsupported answer_type"),
+        (lambda row: row.update(answer_type="unsupported"), "unsupported answer_type"),
+        (lambda row: row.update(answer_type="string"), "expected_answer must be a string"),
+        (lambda row: row.update(expected_answer="1.5"), "finite and numeric"),
         (lambda row: row.update(answer_type="bool", expected_answer=2), "must be 0 or 1"),
         (lambda row: row.update(output_regex="("), "invalid output_regex"),
         (lambda row: row.update(output_regex="(one)(two)"), "exactly one capture group"),
@@ -177,11 +184,14 @@ def test_single_subset_and_local_export_use_same_validation(monkeypatch, tmp_pat
         ("float", 1.9231974, {"rule": "abs_window", "abs_tol": 0.3}, "2.1", "3"),
         ("float", 100, {"rule": "rel_window", "rel_tol": 0.1}, "105", "120"),
         ("bool", 1, None, "1", "0"),
+        ("string", "Paris", None, "  pArIs  ", "Berlin"),
     ],
 )
 async def test_prepared_rows_keep_verifier_semantics(answer_type, expected, match, correct, incorrect) -> None:
     row = _source_row(answer=expected)
     row["answer_type"] = answer_type
+    if answer_type == "string":
+        row["output_regex"] = r"Answer:\s*(.+)"
     if match is None:
         row.pop("match")
     else:

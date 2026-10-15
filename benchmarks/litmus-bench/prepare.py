@@ -60,10 +60,13 @@ def _validate_row(row: Mapping[str, Any], row_number: int) -> None:
         raise _row_error(row_number, f"missing required fields: {missing}")
     if row["method"] != "direct":
         raise _row_error(row_number, f"method must be 'direct', got {row['method']!r}")
-    if row["answer_type"] not in {"float", "bool"}:
+    if row["answer_type"] not in {"float", "bool", "string"}:
         raise _row_error(row_number, f"unsupported answer_type {row['answer_type']!r}")
     expected_answer = row["expected_answer"]
-    if (
+    if row["answer_type"] == "string":
+        if not isinstance(expected_answer, str):
+            raise _row_error(row_number, f"expected_answer must be a string, got {expected_answer!r}")
+    elif (
         isinstance(expected_answer, bool)
         or not isinstance(expected_answer, (int, float))
         or not math.isfinite(expected_answer)
