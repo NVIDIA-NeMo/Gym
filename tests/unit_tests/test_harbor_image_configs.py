@@ -16,6 +16,7 @@ from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.image_configs import (
     ImageConfigError,
     RegistryClient,
+    check_task_compose_fields,
     compose_image_references,
     compose_variables,
     dockerfile_base_images,
@@ -941,3 +942,160 @@ class TestRecordImageConfigsUnderTheLock:
         (tmp_path / "compose-images.json").write_text('{"redis:7-alpine": {"os": "linux"')
         with pytest.raises(HarborTaskError, match=r"compose-images\.json is not valid JSON \(read twice"):
             record_compose_images(discover_tasks(tmp_path), tmp_path, client=FakeClient())
+
+
+FIELD_FIXTURES = Path(__file__).parent / "fixtures" / "harbor_compose_fields"
+
+
+class TestComposeFields:
+    """M28: service fields get their meaning at prepare, and one the group cannot run fails naming the field."""
+
+    @pytest.mark.parametrize("name", ["ctf", "o11y"])
+    def test_the_example_datasets_prepare_with_nothing_else(self, tmp_path, name):
+        compose = (FIELD_FIXTURES / name / "environment" / "docker-compose.yaml").read_text()
+        write_task(tmp_path, name, compose=compose)
+        client = FakeClient()
+        path = record_compose_images(discover_tasks(tmp_path), tmp_path, client=client, sandbox_provider="opensandbox")
+        assert path == tmp_path / "compose-images.json"
+        assert MAIN_IMAGE in client.resolved
+
+    def test_the_document_the_server_reads_carries_the_normalized_fields(self, tmp_path):
+        compose = (FIELD_FIXTURES / "ctf" / "environment" / "docker-compose.yaml").read_text()
+        write_task(tmp_path, "ctf", compose=compose)
+        (task,) = discover_tasks(tmp_path)
+        document = check_task_compose_fields(task, load_compose_document(task), provider="opensandbox")
+        assert document["services"]["main"]["restart"] == "always"
+        assert document["services"]["main"]["networks"] == {"agent_network": {}}
+        assert document["services"]["target"]["networks"] == {"agent_network": {"aliases": ["challenge"]}}
+
+    def test_a_provider_option_the_deployment_cannot_apply_fails_prepare_naming_field_and_provider(self, tmp_path):
+        compose = f"services:\n  main:\n    image: {MAIN_IMAGE}\n  db:\n    image: redis:7\n    sysctls:\n      net.core.somaxconn: 1024\n"
+        write_task(tmp_path, "ctr", compose=compose)
+        tasks = discover_tasks(tmp_path)
+        with pytest.raises(
+            ImageConfigError,
+            match="ctr: environment/docker-compose.yaml: service 'db' sysctls is not supported by the opensandbox sandbox provider",
+        ):
+            record_compose_images(tasks, tmp_path, client=FakeClient(), sandbox_provider="opensandbox")
+        assert not (tmp_path / "compose-images.json").exists()
+        # Docker applies it as a run flag, so the same task prepares for a Docker deployment.
+        assert record_compose_images(tasks, tmp_path, client=FakeClient(), sandbox_provider="docker") is not None
+        # Without a provider name the check waits for the adapter, which has the live provider.
+        assert record_compose_images(tasks, tmp_path, client=FakeClient()) is not None
+
+    @pytest.mark.parametrize(
+        "snippet, message",
+        [
+            (
+                "    platform: linux/arm64\n",
+                "service 'db' platform 'linux/arm64' does not match the deployment platform linux/amd64",
+            ),
+            ("    restart: maybe\n", "service 'db' restart must be one of"),
+            ("    networks: [backend]\n", "service 'db' networks: 'backend' is not declared"),
+            (
+                "    deploy:\n      resources:\n        limits:\n          pids: 10\n",
+                "service 'db' deploy.resources.limits.pids is not supported",
+            ),
+            (
+                "    extra_hosts: ['host.docker.internal:host-gateway']\n",
+                "service 'db' extra_hosts: host-gateway is not available",
+            ),
+            (
+                "    post_start:\n      - command: id\n        privileged: true\n",
+                "service 'db' post_start\\[0\\].privileged is not supported",
+            ),
+        ],
+    )
+    def test_a_field_the_group_cannot_run_fails_prepare_naming_it(self, tmp_path, snippet, message):
+        compose = f"services:\n  main:\n    image: {MAIN_IMAGE}\n  db:\n    image: redis:7\n{snippet}"
+        write_task(tmp_path, "ctr", compose=compose)
+        with pytest.raises(ImageConfigError, match="ctr: environment/docker-compose.yaml: " + message):
+            record_compose_images(discover_tasks(tmp_path), tmp_path, client=FakeClient(), sandbox_provider="docker")
+
+    def test_a_gpu_sidecar_is_checked_against_the_gpu_block_provider(self, tmp_path):
+        """The server runs a sidecar that reserves GPUs on the gpu_sandbox_provider block, so prepare checks its
+        options against that block's provider; a task that declares GPUs itself runs everything there."""
+        sidecar = (
+            f"services:\n  main:\n    image: {MAIN_IMAGE}\n  model:\n    image: vllm/vllm-openai:v0.6\n"
+            "    tmpfs: [/run]\n    deploy:\n      resources:\n        reservations:\n          devices:\n"
+            "            - capabilities: [gpu]\n              count: 1\n"
+        )
+        write_task(tmp_path, "sidecar", compose=sidecar)
+        tasks = discover_tasks(tmp_path)
+        # Docker task block, OpenSandbox GPU block: the GPU sidecar lands on OpenSandbox, which applies no tmpfs.
+        with pytest.raises(
+            ImageConfigError,
+            match="sidecar: environment/docker-compose.yaml: service 'model' tmpfs is not supported by the opensandbox sandbox provider",
+        ):
+            record_compose_images(
+                tasks, tmp_path, client=FakeClient(), sandbox_provider="docker", gpu_sandbox_provider="opensandbox"
+            )
+        # The reverse pairing runs it: main on OpenSandbox declares nothing, the sidecar on Docker takes tmpfs.
+        assert (
+            record_compose_images(
+                tasks, tmp_path, client=FakeClient(), sandbox_provider="opensandbox", gpu_sandbox_provider="docker"
+            )
+            is not None
+        )
+        # task.toml declares GPUs: its own services run on the GPU block too, main included.
+        gpu_task = tmp_path / "gputask"
+        write_task(tmp_path, "gputask", compose=f"services:\n  main:\n    image: {MAIN_IMAGE}\n    tmpfs: [/run]\n")
+        with (gpu_task / "task.toml").open("a") as handle:
+            handle.write("gpus = 1\n")
+        (task,) = [task for task in discover_tasks(tmp_path) if task.task_id == "gputask"]
+        with pytest.raises(
+            ImageConfigError, match="service 'main' tmpfs is not supported by the opensandbox sandbox provider"
+        ):
+            check_task_compose_fields(task, load_compose_document(task), provider="docker", gpu_provider="opensandbox")
+        assert check_task_compose_fields(task, load_compose_document(task), provider="docker")["services"]["main"][
+            "tmpfs"
+        ]
+
+    def test_extra_hosts_on_a_non_root_sidecar_fail_prepare_once_the_image_user_is_known(self, tmp_path):
+        """The group starts a non-root sidecar without host injection, so its extra_hosts would be lost; prepare
+        learns the user from the recorded image configuration and fails there, naming task, file and service."""
+
+        class NonRootClient(FakeClient):
+            def image_config(self, reference):
+                record = super().image_config(reference)
+                if reference.startswith("grafana/"):
+                    record["config"] = {**record["config"], "User": "472"}
+                return record
+
+        compose = (
+            f"services:\n  main:\n    image: {MAIN_IMAGE}\n    extra_hosts: ['metrics.example:10.0.0.9']\n"
+            "  grafana:\n    image: grafana/grafana:11\n    extra_hosts: ['metrics.example:10.0.0.9']\n"
+        )
+        write_task(tmp_path, "o11y", compose=compose)
+        with pytest.raises(
+            ImageConfigError,
+            match="o11y: environment/docker-compose.yaml: service 'grafana' extra_hosts cannot be applied without "
+            "host injection: the image runs as user '472'",
+        ):
+            record_compose_images(
+                discover_tasks(tmp_path), tmp_path, client=NonRootClient(), sandbox_provider="docker"
+            )
+        # The same task with a root grafana image prepares; main takes host entries whatever its user.
+        root = tmp_path / "root"
+        root.mkdir()
+        write_task(root, "o11y", compose=compose)
+        assert record_compose_images(discover_tasks(root), root, client=FakeClient(), sandbox_provider="docker")
+
+    def test_platform_is_the_deployments_at_prepare_as_at_seed(self, tmp_path):
+        compose = (
+            f"services:\n  main:\n    image: {MAIN_IMAGE}\n  db:\n    image: redis:7\n    platform: linux/arm64\n"
+        )
+        write_task(tmp_path, "arm", compose=compose)
+        tasks = discover_tasks(tmp_path)
+        with pytest.raises(ImageConfigError, match="does not match the deployment platform linux/amd64"):
+            record_compose_images(tasks, tmp_path, client=FakeClient())
+        # The deployment's platform (sandbox_provider_options.platform, as the server reads it) admits the task.
+        assert (
+            record_compose_images(tasks, tmp_path, client=FakeClient(), compose_platform="linux/aarch64") is not None
+        )
+        with pytest.raises(
+            ImageConfigError,
+            match="arm: environment/docker-compose.yaml: service 'db' platform 'linux/arm64' does not match the "
+            "deployment platform linux/amd64",
+        ):
+            check_task_compose_fields(tasks[0], load_compose_document(tasks[0]), platform="linux/x86_64")

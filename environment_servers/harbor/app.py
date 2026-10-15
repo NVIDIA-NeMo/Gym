@@ -93,9 +93,11 @@ from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxExecResul
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.compose_config import (
     adapt_non_root_sidecars,
+    deployment_platform,
     opensandbox_shm_labels,
     resolve_compose,
     sandbox_platform,
+    service_gpus,
 )
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, SandboxCreateError
@@ -105,7 +107,9 @@ from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
 from nemo_gym.tasks.harbor.dockerfile import OverlayRun
 from nemo_gym.tasks.harbor.image_configs import (
+    check_task_compose_fields,
     load_compose_document,
+    task_declares_gpus,
     without_pull_policy,
     without_restated_main_build,
 )
@@ -696,9 +700,14 @@ def _pull_retry_delay(attempt: int) -> float:
     return base * random.uniform(0.5, 1.5)
 
 
+def _provider_name(provider_config: Any) -> str | None:
+    """The registry name of a resolved single-key provider config; ``None`` for a provider instance (tests)."""
+    return next(iter(provider_config)) if isinstance(provider_config, Mapping) else None
+
+
 def _needs_gpu(task: HarborTask) -> bool:
-    verifier_environment = task.config.verifier.environment
-    return bool(task.config.environment.gpus or (verifier_environment is not None and verifier_environment.gpus))
+    # The same predicate prepare routes the Compose capability check by (image_configs.check_task_compose_fields).
+    return task_declares_gpus(task)
 
 
 class HarborEnvironmentServer(
@@ -1065,13 +1074,15 @@ class HarborEnvironmentServer(
     def _compose_document(self, task: HarborTask) -> dict[str, Any]:
         """The published overlay resolved against recorded image metadata, ready for the Compose adapter."""
         image_configs = self._compose_image_configs(task)
+        global_config_dict = get_global_config_dict()
+        provider = resolve_provider_config(self._provider_ref(task), global_config_dict)
         # The same reader prepare used: env_file inlined, ${VAR} resolved from the task, not the process, and the
         # images prepare built standing in for the sidecars it built (and main when the task runs from its built
         # image), their build: and pull_policy dropped. The record was read once by load_task: no hashing here.
         document = load_compose_document(task)
         # The sandbox has no pull step to configure, so ``pull_policy`` is dropped from every service (the loader
-        # dropped it, with ``build:``, from the services prepare built). Prepare ran the adapter's field check on
-        # this same document (``nemo_gym.tasks.harbor.cli``).
+        # dropped it, with ``build:``, from the services prepare built). Prepare ran the same field check on this
+        # same document (``nemo_gym.tasks.harbor.image_configs``).
         document = without_pull_policy(document)
         if task.built_image is None:
             # A pull or overlay task's main build: that only restates Harbor's own build of the Dockerfile is
@@ -1079,13 +1090,30 @@ class HarborEnvironmentServer(
             document, reason = without_restated_main_build(task, document)
             if reason is not None:
                 raise HarborTaskError(f"{task.task_id}: {reason}")
+        # The same field check prepare ran, with the same inputs: deploy.resources, networks, extra_hosts, post_start
+        # and the rest take their normalized forms, each service is checked against the provider it runs on (a GPU
+        # sidecar against the GPU block's) and `platform` against this deployment's, so a field the deployment cannot
+        # apply fails here, before a sandbox. A provider instance in place of the config (tests) has no registry
+        # name; the adapter checks it live.
+        gpu_provider = (
+            resolve_provider_config(self.config.gpu_sandbox_provider, global_config_dict)
+            if self.config.gpu_sandbox_provider
+            else None
+        )
+        check_task_compose_fields(
+            task,
+            document,
+            provider=_provider_name(provider),
+            gpu_provider=_provider_name(gpu_provider),
+            platform=self._compose_platform(),
+        )
         # Every service of the group, GPU-routed or not, starts with the one configured set of provider options,
         # so the platform they request (OpenSandbox ``platform: {os, arch}``; linux/amd64 when unset) is the one
-        # each recorded image has to be for.
+        # each recorded image has to be for (and the one `_compose_platform` spelled for the field check above).
         platform = sandbox_platform(self.config.sandbox_provider_options)
         document = resolve_compose(document, task.image, image_configs, platform=platform)
+        # A non-root sidecar runs without host injection and so takes no extra_hosts: prepare refused that already.
         adapt_non_root_sidecars(document, image_configs)
-        provider = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         if "opensandbox" in provider:
             opensandbox_shm_labels(document)
         sidecars = {a.service for a in task.config.artifacts} | {h.service for h in task.config.verifier.collect}
@@ -1096,6 +1124,46 @@ class HarborEnvironmentServer(
             )
         return document
 
+    def _sidecar_provider_ref(self, task: HarborTask, service: dict[str, Any]) -> str:
+        """Which sandbox block runs a Compose sidecar: the GPU one when the service reserves GPUs through
+        ``deploy.resources`` and a GPU block is set, as ``_provider_ref`` routes the main service."""
+        if self.config.gpu_sandbox_provider and service_gpus(service):
+            return self.config.gpu_sandbox_provider
+        return self._provider_ref(task)
+
+    def _sidecar_spec(self, task: HarborTask, main_spec: SandboxSpec, service: dict[str, Any]) -> SandboxSpec:
+        """A sidecar's spec: the main spec's deployment settings, no task resources, env or user (the sidecar keeps
+        its own image's defaults; its ``deploy.resources`` are applied by the adapter). A GPU sidecar carries
+        the task's ``gpu_types[0]`` when ``request_gpu_type`` is on, as the main service does, and the GPU
+        block's ``default_metadata``. A sidecar keeps its own image's working directory (the adapter applies the
+        recorded WorkingDir); main's workdir is a path that exists only in main's image."""
+        resources: dict[str, Any] = {}
+        metadata = dict(main_spec.metadata)
+        if service_gpus(service):
+            gpu_types = task.config.environment.gpu_types
+            if gpu_types and self.config.request_gpu_type:
+                resources["gpu_type"] = gpu_types[0]
+            metadata = (
+                resolve_provider_metadata(self._sidecar_provider_ref(task, service), get_global_config_dict())
+                | self.config.sandbox_metadata
+                | {key: metadata[key] for key in ("nemo_gym_environment_server", "harbor_task", "harbor_role")}
+            )
+        return replace(
+            main_spec,
+            resources=resources,
+            env={},
+            user=None,
+            workdir=None,
+            metadata=metadata,
+            provider_options=dict(self.config.sandbox_provider_options),
+        )
+
+    def _compose_platform(self) -> str:
+        """The platform this deployment runs, for a service's ``platform`` to match: the provider options'
+        ``platform`` (OpenSandbox's ``{os, arch}``) when set, else linux/amd64, the one prepare records images for.
+        Prepare reads the same ``sandbox_provider_options`` (``compose_platform_from_overrides``), so both agree."""
+        return deployment_platform(self.config.sandbox_provider_options)
+
     async def _create_compose(self, task: HarborTask, episode_key: str) -> AsyncSandboxCompose:
         """Start the task's Compose group; the ``main`` service is the agent's sandbox."""
         # File reads (the Compose file, env_file, compose-images.json) off the event loop: seeds run concurrently.
@@ -1105,17 +1173,6 @@ class HarborEnvironmentServer(
         path = Path(tempfile.mkdtemp(prefix="compose-", dir=self._artifacts_dir)) / "compose.yaml"
         path.write_text(yaml.safe_dump(document, sort_keys=False))
         main_spec = self._sandbox_spec(task, task.workdir)
-        # Sidecars keep their own image's default user; the task's USER belongs to the main image only.
-        # A sidecar keeps its own image's working directory (the adapter applies the recorded WorkingDir); main's
-        # workdir is a path that exists only in main's image.
-        sidecar_spec = replace(
-            main_spec,
-            resources={},
-            env={},
-            user=None,
-            workdir=None,
-            provider_options=dict(self.config.sandbox_provider_options),
-        )
         # Harbor's order for main: image ENV (baked in, or the Dockerfile ENV the loader folded into task.env for a
         # pull or overlay task) < the task's Compose file < Harbor's env override file, which holds only the
         # host-resolved [environment].env (harbor 0.22.0 environments/docker/docker.py 363-370, environments/base.py
@@ -1131,8 +1188,22 @@ class HarborEnvironmentServer(
             main_spec,
             env={**main_spec.env, **compose_env, **resolve_env_templates(task.config.environment.env or {})},
         )
-        provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
-        service_specs = {name: main_spec if name == "main" else sidecar_spec for name in document["services"]}
+        global_config_dict = get_global_config_dict()
+        task_ref = self._provider_ref(task)
+        # Sidecars keep their own image's default user; the task's USER belongs to the main image only. A sidecar
+        # that reserves GPUs runs on the GPU block, per service, the way the main service does for the task.
+        service_specs: dict[str, SandboxSpec] = {}
+        service_providers: dict[str, Any] = {}
+        for name, service in document["services"].items():
+            if name == "main":
+                service_specs[name] = main_spec
+                continue
+            service_specs[name] = self._sidecar_spec(task, main_spec, service)
+            ref = self._sidecar_provider_ref(task, service)
+            if ref != task_ref:
+                service_providers[name] = resolve_provider_config(ref, global_config_dict)
+        provider_config = resolve_provider_config(task_ref, global_config_dict)
+        platform = self._compose_platform()
         # Ownership starts before start(): a group that fails half-way is still stopped whole, and a pull
         # failure of any service is retried with a fresh group, like a single sandbox's.
         return await self._start_with_pull_retries(
@@ -1140,7 +1211,12 @@ class HarborEnvironmentServer(
             key=episode_key,
             what="Compose group",
             make=lambda: AsyncSandboxCompose(
-                provider_config, path, service_specs=service_specs, timeout_s=self.config.sandbox_ready_timeout_s
+                provider_config,
+                path,
+                service_specs=service_specs,
+                timeout_s=self.config.sandbox_ready_timeout_s,
+                service_providers=service_providers,
+                platform=platform,
             ),
             start=lambda compose: compose.start(),
         )
