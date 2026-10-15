@@ -1553,6 +1553,134 @@ class TestServerUtils:
         assert record.getMessage().endswith("...[truncated]")
         assert len(record.getMessage()) < 5000
 
+    @mark.parametrize(("location", "body_unavailable"), [("body", False), ("query", False), ("body", True)])
+    async def test_validation_exception_message_names_failed_fields(
+        self, location: str, body_unavailable: bool, caplog: LogCaptureFixture
+    ) -> None:
+        # The summaries are also attached as ``extra``, which the default formatter drops,
+        # so the rendered message itself must say which field failed.
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        if body_unavailable:
+            request.body.side_effect = RuntimeError("body unavailable")
+        errors = [
+            {
+                "type": "extra_forbidden",
+                "loc": (location, "aws_region_name"),
+                "msg": "Extra inputs are not permitted",
+                "input": "must-not-be-logged",
+            }
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        message = caplog.records[-1].getMessage()
+        expected = {"type": "extra_forbidden", "loc": [location, "aws_region_name"]}
+        if location == "body":
+            expected["msg"] = "Extra inputs are not permitted"
+        rendered = message.split("validation_errors=", 1)[1].split(" validation_errors_truncated=", 1)[0]
+        assert nemo_gym.server_utils.json.loads(rendered) == [expected]
+        assert "must-not-be-logged" not in message
+        assert message.endswith("validation_errors_truncated=False")
+
+    @mark.parametrize("body_unavailable", [False, True])
+    async def test_validation_exception_message_bounds_rendered_errors(
+        self, body_unavailable: bool, caplog: LogCaptureFixture
+    ) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        if body_unavailable:
+            request.body.side_effect = RuntimeError("body unavailable")
+        long_msg = "m" * nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
+        errors = [
+            {"type": "value_error", "loc": ("body", f"field_{index}"), "msg": long_msg, "input": None}
+            for index in range(nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS)
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        record = caplog.records[-1]
+        rendered = record.getMessage().split("validation_errors=", 1)[1].split(" validation_errors_truncated=", 1)[0]
+        assert len(rendered) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_ERRORS_CHARS
+        assert rendered.endswith("...[truncated]")
+        assert record.validation_errors_truncated is False
+        assert record.validation_errors == [
+            {"type": error["type"], "loc": list(error["loc"]), "msg": long_msg} for error in errors
+        ]
+        assert record.getMessage().endswith("validation_errors_truncated=True ...[truncated]")
+
+    @mark.parametrize("invalid_body", [False, True])
+    def test_validation_exception_custom_header_query_messages_are_not_rendered(
+        self, invalid_body: bool, caplog: LogCaptureFixture
+    ) -> None:
+        from typing import Annotated
+
+        from fastapi import Body, FastAPI, Header, Query
+        from fastapi.testclient import TestClient
+        from pydantic import AfterValidator
+
+        def check(value: str) -> str:
+            raise ValueError(f"invalid api key {value}")
+
+        app = FastAPI()
+        app.exception_handler(RequestValidationError)(_validation_exception_handler)
+
+        @app.post("/validate")
+        async def validate(
+            count: Annotated[int, Body(embed=True)],
+            api_key: Annotated[str, Header(), AfterValidator(check)],
+            query_key: Annotated[str, Query(), AfterValidator(check)],
+        ) -> dict:
+            return {"count": count}
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"), TestClient(app) as client:
+            response = client.post(
+                "/validate",
+                json={"count": "invalid" if invalid_body else 1},
+                headers={"api-key": "sk-sensitive-header"},
+                params={"query_key": "sk-sensitive-query"},
+            )
+
+        assert response.status_code == 422
+        record = next(record for record in reversed(caplog.records) if record.name == "nemo_gym.server_utils")
+        message = record.getMessage()
+        assert "sk-sensitive-header" not in message
+        assert "sk-sensitive-query" not in message
+        assert "invalid api key" not in message
+        rendered = message.split("validation_errors=", 1)[1].split(" validation_errors_truncated=", 1)[0]
+        summaries = nemo_gym.server_utils.json.loads(rendered)
+        assert {tuple(summary["loc"]) for summary in summaries} == {
+            tuple(error["loc"]) for error in response.json()["detail"]
+        }
+        for summary in summaries:
+            assert ("msg" in summary) is (summary["loc"][0] == "body")
+        assert record.validation_error_count == (3 if invalid_body else 2)
+        assert hasattr(record, "request_body_prefix") is invalid_body
+        assert record.validation_errors_truncated is False
+        # Structured consumers keep the same bounded metadata, including custom messages.
+        assert record.validation_errors == [
+            {key: error[key] for key in ("type", "loc", "msg")} for error in response.json()["detail"]
+        ]
+
+    @mark.parametrize("location", [("path", "key"), ("cookie", "key"), (), ("unknown", "key"), None])
+    async def test_validation_exception_non_body_messages_are_not_rendered(
+        self, location: tuple[str, ...] | None, caplog: LogCaptureFixture
+    ) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"must-not-be-read")
+        errors = [{"type": "value_error", "loc": location, "msg": "invalid api key sk-sensitive-value"}]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        request.body.assert_not_awaited()
+        record = caplog.records[-1]
+        assert "sk-sensitive-value" not in record.getMessage()
+        assert '"msg"' not in record.getMessage()
+        assert record.validation_errors[0]["msg"] == errors[0]["msg"]
+
     async def test_validation_exception_does_not_log_body_for_query_error(self, caplog: LogCaptureFixture) -> None:
         request = MagicMock(spec=Request)
         request.body = AsyncMock(return_value=b"password=must-not-be-logged")
