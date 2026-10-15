@@ -200,6 +200,8 @@ class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str | Dict[str, Any] = "sandbox"
     sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
     sandbox_model_base_url: Optional[str] = None
+    # Applied to the agent box only; grading boxes keep their network to fetch test deps.
+    agent_network_policy: Optional[Dict[str, Any]] = None
     agent_runtime_source: str = "baked"
     swebench_tests_timeout: int = 1800
     swebench_agent_timeout: int = 2700
@@ -427,9 +429,14 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         params: AnySweInstanceConfig,
         *,
         files: Optional[Dict[str, str]] = None,
+        agent: bool = False,
     ) -> SandboxSpec:
         config = dict(params.sandbox_spec)
         provider_options = dict(config.pop("provider_options", {}))
+        if agent and params.agent_network_policy:
+            if "opensandbox" not in params.resolved_sandbox_provider:
+                raise ValueError("agent_network_policy requires the opensandbox sandbox provider")
+            provider_options["network_policy"] = dict(params.agent_network_policy)
         metadata = {
             **params.sandbox_default_metadata,
             **config.pop("metadata", {}),
@@ -575,6 +582,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         spec = self._sandbox_spec(
             params,
             files=files,
+            agent=True,
         )
         result = None
         sandbox_failed = False

@@ -546,6 +546,17 @@ async def _assert_async_sandbox_requires_spec_and_reports_unknown_status() -> No
     await plain.stop()
 
 
+def test_plugin_distributions_names_each_distribution_once(monkeypatch) -> None:
+    eps = [
+        SimpleNamespace(name="a", dist=SimpleNamespace(name="plugin-b")),
+        SimpleNamespace(name="b", dist=SimpleNamespace(name="plugin-b")),
+        SimpleNamespace(name="c", dist=SimpleNamespace(name="plugin-a")),
+        SimpleNamespace(name="d", dist=None),
+    ]
+    monkeypatch.setattr(provider_registry, "entry_points", lambda group: eps)
+    assert provider_registry.plugin_distributions() == ["plugin-a", "plugin-b"]
+
+
 def test_rewrite_image_validation() -> None:
     assert rewrite_image(None, []) is None
     assert rewrite_image("image:tag", [{"from": "other/", "to": "mirror/"}]) == "image:tag"

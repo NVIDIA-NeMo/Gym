@@ -1021,7 +1021,7 @@ def prefetch(
     ```bash
     # Pre-warm venvs for a specific config
     config_paths="responses_api_models/local_vllm_model/configs/local_vllm_model.yaml,\\
-    resources_servers/math/configs/math.yaml"
+    resources_servers/math_with_judge/configs/math_with_judge.yaml"
     gym env prefetch "+config_paths=[${config_paths}]"
     ```
     """

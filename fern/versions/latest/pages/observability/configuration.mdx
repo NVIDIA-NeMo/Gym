@@ -34,7 +34,7 @@ telemetry:
 | `service_name_per_server` | `true` | Append each server's config name, producing `nemo-gym/policy_model` and so on. |
 | `span_groups` | `default` | Which spans exist. See [Span Groups](/main/observability/span-groups). |
 | `exporter` | `otlp` | `otlp` or `console`. |
-| `traces_enabled` | `true` | Emit spans. |
+| `traces_enabled` | `true` | Emit spans. When false, NeMo Gym also skips FastAPI auto-instrumentation and outbound trace-context injection, so the `http.server.*` metrics are not reported. |
 | `metrics_enabled` | `true` | Emit metrics. |
 | `memory_profiling` | disabled | Sample host capacity and each managed server process tree. See below. |
 | `event_loop_sample_interval_seconds` | `1.0` | How often each event loop is sampled for lag. See below. |

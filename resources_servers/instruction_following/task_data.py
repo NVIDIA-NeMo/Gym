@@ -25,6 +25,11 @@ class TaskData(BaseModel):
         description="Task identifier; wire-required int, pass-through only.",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Stable upstream task identifier, when the benchmark provides one (IFEval: the source `key`).",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     instruction_id_list: List[str] = Field(
         description=(
             "Registry keys of the verifiable instructions to check "

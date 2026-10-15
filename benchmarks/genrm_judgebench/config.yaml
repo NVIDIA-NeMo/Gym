@@ -1,0 +1,31 @@
+config_paths:
+  - resources_servers/genrm_eval/configs/genrm_eval.yaml
+
+genrm_judgebench_resources_server:
+  _inherit_from: genrm_eval
+  resources_servers:
+    genrm_eval:
+      scoring_module: benchmarks.genrm_judgebench.metrics
+      metric_key: metrics/overall
+
+genrm_judgebench_benchmark_agent:
+  _inherit_from: genrm_eval_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: genrm_judgebench_resources_server
+      datasets:
+        - name: genrm_judgebench
+          type: benchmark
+          jsonl_fpath: benchmarks/genrm_judgebench/data/judgebench_validation.jsonl
+          prepare_script: benchmarks/genrm_judgebench/prepare.py
+          prompt_config: null
+          num_repeats: 1
+          license: MIT
+
+genrm_judgebench_environment_server:
+  _inherit_from: genrm_eval_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: genrm_judgebench_benchmark_agent
