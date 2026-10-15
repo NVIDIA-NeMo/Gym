@@ -892,3 +892,14 @@ async def test_boundary_payloads_are_not_built_without_checkpointing(monkeypatch
 
     # The return boundary's payload is the only dump of the verification result, and nothing records it here.
     assert dumps == []
+
+
+async def test_verify_says_that_the_resources_session_is_closed_afterwards() -> None:
+    environment_server, client = _environment_server()
+    await environment_server.run_request(_request())
+
+    [verify_call] = [call for _, path, call in client.calls if path == "/verify"]
+    paths = [path for _, path, _ in client.calls]
+    # So the Resources Server keeps the session tracked until the close, which then runs its close handler.
+    assert verify_call["headers"] == {"x-ng-checkpoint-close-follows": "1"}
+    assert paths.index("/close_session") > paths.index("/verify")

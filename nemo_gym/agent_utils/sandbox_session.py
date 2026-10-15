@@ -60,9 +60,13 @@ class SandboxSession[Artifacts]:
     receipt skips capture, releases a borrowed connection and leaves teardown to
     Resources; an owned sandbox falls back to provider stop. Closed means release succeeded.
 
-    Detached task services remain until the sandbox owner destroys the sandbox. Borrowed
-    sandboxes stay available for Resources verification; owned sandboxes are stopped
-    on close. Unconfirmed harness termination prevents capture and verification.
+    On timeout or close, the supervisor preserves previously adopted children outside
+    the harness group and drains newly adopted children, including services orphaned
+    by in-flight tools during the stop. Preserved children can also be unfinished
+    background jobs; they remain until the sandbox owner destroys the sandbox.
+    Natural CLI exit has no adoption cutoff, so detached unfinished tools may remain.
+    Borrowed sandboxes stay available for Resources verification; owned sandboxes are
+    stopped on close. Unconfirmed harness termination prevents capture and verification.
 
     Each stop, collection and release phase is bounded by ``close_timeout`` (or
     the timeout passed to ``close``). Failed cleanup/release retains the handle
