@@ -733,3 +733,50 @@ After `gym eval run` returns, the resources server's
   names it. If that stage is missing, incomplete or has no finite fit, the
   headline is withheld and `comparison/final_stage_degraded` is `1`. Rows without
   the field keep the **last** observed stage as the headline.
+
+## Migrating from earlier versions
+
+The task sandbox, the task tools, the deliverables and the failure labels moved from the Stirrup agent to the
+GDPVal resources server, so configs and commands written for the previous version need changes.
+
+**Do not `--resume` or re-judge outputs written before this change.** Multi-stage rows now offset the task index
+by stage, and failures use new labels (see below), so old rows and failure files do not pair with new ones. Rerun
+the benchmark, or use `gym eval reverify` on new output only.
+
+Regenerate the prepared data with `gym eval prepare --benchmark gdpval`. The prompt now comes from
+`prompts/default-stirrup.yaml` and rows carry a `reference_files_str` field, so an old
+`data/gdpval_benchmark.jsonl` fails with a missing-field error.
+
+### Removed Stirrup options
+
+Passing any of these to the Stirrup agent now fails at startup. Remove them from configs, overrides and
+scripts.
+
+| Removed | Replacement |
+|---------|-------------|
+| `judge_only` / `JUDGE_ONLY` | `gym eval reverify`, see [Deliverables and re-judging](#deliverables-and-re-judging) |
+| `execute_only` / `EXECUTE_ONLY` | `judge_deliverables: false` on the GDPVal resources server |
+| `rerun_incomplete` / `RERUN_INCOMPLETE` | `--resume`, then `gym eval reverify --judge-failed-only` for failed judgements |
+| `persist_deliverables_dir` | `persist_deliverables_dir` on the resources server (`PERSIST_DELIVERABLES_DIR`) |
+| `tavily_api_key`, `tavily_max_sweeps` | the same keys on the resources server |
+| `gdpval_container_path` / `GDPVAL_CONTAINER_PATH` | `GDPVAL_SANDBOX_IMAGE`, see below |
+| `system_prompt_template`, `user_prompt_template` / `SYSTEM_PROMPT_TEMPLATE`, `USER_PROMPT_TEMPLATE` | `prompt_config` on the dataset (`prompts/`) |
+
+The environment variables above are no longer read by the benchmark config. Setting one does nothing, so a run
+that used to skip the policy (`JUDGE_ONLY=true`) now runs it.
+
+### Other changes
+
+- **Sandbox:** the resources server starts an OpenSandbox sandbox and the agent runs inside it, instead of
+  Apptainer. Set `OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY` and `GDPVAL_SANDBOX_IMAGE`.
+- **Tavily:** `TAVILY_API_KEY` is required and read by the resources server. Without a key the agent used to fall
+  back to Stirrup's built-in web tools; now startup fails.
+- **Timeouts:** `STIRRUP_PER_TASK_TIMEOUT_S` is no longer read; the agent's `sandbox_runner_timeout_seconds`
+  (default 12600) replaces it. The environment server also sets `default_episode_timeout_seconds: 18000`,
+  `max_concurrent_episodes: 32` and `queue_timeout_seconds: 86400`.
+- **Rollout options:** the benchmark config no longer sets `retry_terminal_timeouts` or
+  `retry_invalid_judge_responses`. `+retry_invalid_judge_responses` no longer exists in core; passing it fails.
+- **Failure labels:** a rubric verification without a usable judgement is reported as `judge_failed` (it was
+  `judge_invalid`), and `gym eval reverify --judge-failed-only` recovers it.
+- **Multi-stage runs:** a reused deliverable is now judged through the resources server's `/verify` instead of
+  by the agent.

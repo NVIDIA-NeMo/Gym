@@ -271,6 +271,17 @@ class TestUploadRolloutsDeprecation:
         assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
 
 
+class TestRemovedRetryInvalidJudgeResponses:
+    @pytest.mark.parametrize("config_cls", [RolloutCollectionConfig, E2ERolloutCollectionConfig])
+    def test_it_is_rejected(self, config_cls):
+        extra = (
+            {"split": "benchmark"} if config_cls is E2ERolloutCollectionConfig else {"input_jsonl_fpath": "in.jsonl"}
+        )
+
+        with pytest.raises(ConfigError, match="`retry_invalid_judge_responses` was removed"):
+            config_cls(output_jsonl_fpath="out.jsonl", retry_invalid_judge_responses=True, **extra)
+
+
 class TestGetMaxRolloutAttempts:
     def test_default_when_unset(self, monkeypatch) -> None:
         monkeypatch.delenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", raising=False)

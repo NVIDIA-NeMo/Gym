@@ -44,6 +44,25 @@ def _make_config(**fields) -> StirrupAgentWrapperConfig:
     )
 
 
+@pytest.mark.parametrize(
+    "option",
+    [
+        "judge_only",
+        "execute_only",
+        "rerun_incomplete",
+        "persist_deliverables_dir",
+        "tavily_api_key",
+        "tavily_max_sweeps",
+        "gdpval_container_path",
+        "system_prompt_template",
+        "user_prompt_template",
+    ],
+)
+def test_removed_options_are_rejected(option):
+    with pytest.raises(ValueError, match=rf"removed options that are no longer supported: `{option}`"):
+        _make_config(**{option: "x"})
+
+
 async def _runner_payload(config: StirrupAgentWrapperConfig, body: NeMoGymResponseCreateParamsNonStreaming) -> dict:
     """The payload the agent server hands the sandbox runner for one episode."""
     wrapper = StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))

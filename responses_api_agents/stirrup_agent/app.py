@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Mapping, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_resources_server import BaseRunRequest
@@ -126,8 +126,32 @@ def _observations(output: Optional[dict[str, Any]], model_server: ModelServerRef
     return AgentObservationBundle(source="stirrup", records=records, gaps=gaps)
 
 
+_REMOVED_OPTIONS = [
+    "judge_only",
+    "execute_only",
+    "rerun_incomplete",
+    "persist_deliverables_dir",
+    "tavily_api_key",
+    "tavily_max_sweeps",
+    "gdpval_container_path",
+    "system_prompt_template",
+    "user_prompt_template",
+]
+
+
 class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_options(cls, data: Any) -> Any:
+        removed = [f"`{name}`" for name in _REMOVED_OPTIONS if name in (data or {})]
+        if removed:
+            raise ValueError(
+                f"Stirrup config includes removed options that are no longer supported: {', '.join(removed)}\n"
+                "See migration guide for details: benchmarks/gdpval/README.md"
+            )
+        return data
 
     agent_max_turns: int = Field(default=250, description="Maximum turns for the Stirrup agent")
     concurrency: int = Field(default=32, description="Maximum concurrent runs")

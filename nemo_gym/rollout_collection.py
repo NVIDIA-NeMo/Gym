@@ -1138,6 +1138,16 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         description="Environment server deployments keyed by materialized TaskId.taskset.",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_retry_invalid_judge_responses(cls, data):
+        if isinstance(data, Mapping) and "retry_invalid_judge_responses" in data:
+            raise ConfigError(
+                "`retry_invalid_judge_responses` was removed. A verifier that cannot produce a usable judgement "
+                "now returns a `judge_failed` row; recover those with `gym eval reverify --judge-failed-only`."
+            )
+        return data
+
     @model_validator(mode="after")
     def validate_environment_routing(self) -> "SharedRolloutCollectionConfig":
         if self.environment_routing_mode == "legacy" and self.environment_server_name is None:
