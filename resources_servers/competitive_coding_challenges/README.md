@@ -81,7 +81,7 @@ each shell command the way the NeMo Skills sandbox does (`/bin/bash` in a new se
 still come from each problem's `run.sh`.
 
 1. Build and push the image. It pins the toolchain of the NeMo Skills sandbox the baselines were
-   scored with (Debian 13, g++ 14.2.0-19):
+   scored with (Debian 13, g++ 14.2.0-19), including `python`, which some problems' `run.sh` call:
 
    ```bash
    docker build --platform linux/amd64 -t <registry>/ccc-verifier:<tag> resources_servers/competitive_coding_challenges/sandbox_image
@@ -95,12 +95,17 @@ still come from each problem's `run.sh`.
    python -m resources_servers.competitive_coding_challenges.split_problem_metadata "$CCC_TEST_FILE" <problem_dir>
    ```
 
+   The script reads `$CCC_TEST_FILE` one line at a time, so memory is bounded by its largest line,
+   not its total size (full RL problem sets exceed 100 GB).
+
    Make `<problem_dir>` available read-only at `sandbox_config.problem_data_dir` (default
    `/data/ccc`): a volume mount (`sandbox_config.provider_options.volumes`; for Docker,
-   `["<problem_dir>:/data/ccc:ro"]`) or a layer of the image. The server still loads
-   `test_file` itself to compute rewards and metrics.
+   `["<problem_dir>:/data/ccc:ro"]`) or a layer of the image. For large sets, put `<problem_dir>` in
+   object storage the provider can mount, as in the example below. If the provider mounts shared
+   storage into every sandbox by default, turn that off, so submissions cannot browse other data
+   for answers. The server still loads `test_file` itself to compute rewards and metrics.
 
-3. Enable the sandbox path:
+3. Enable the sandbox path, with command-line overrides:
 
    ```bash
    export CCC_SANDBOX_IMAGE=<registry>/ccc-verifier:<tag>
@@ -111,11 +116,49 @@ still come from each problem's `run.sh`.
        ++competitive_coding_challenges_resources_server.resources_servers.competitive_coding_challenges.test_batch_size=4
    ```
 
+   or with a config file passed after the server config. This example is for NVIDIA's OpenSandbox
+   cells on AWS, with the problem data in their shared S3 bucket:
+
+   ```yaml
+   # ccc_sandbox.yaml
+   # gym env start --config resources_servers/competitive_coding_challenges/configs/competitive_coding_challenges.yaml --config ccc_sandbox.yaml
+   config_paths:
+     - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+   competitive_coding_challenges_resources_server:
+     resources_servers:
+       competitive_coding_challenges:
+         sandbox_provider: sandbox
+         test_batch_size: 4
+         sandbox_config:
+           image: <registry>/ccc-verifier@sha256:<digest>
+           metadata:
+             # Grants CAP_SYS_RESOURCE so run.sh can lift the stack limit (see below).
+             nemo.nvidia.com/sys-resource: "true"
+             # Don't mount the whole shared bucket; mount only the problem data.
+             nemo.nvidia.com/s3-hostpath: "false"
+           provider_options:
+             volumes:
+               - name: ccc-data
+                 host:
+                   path: /mnt/s3/data/<prefix holding problem_dir>
+                 mountPath: /data/ccc
+                 readOnly: true
+   ```
+
+   Keys left out keep the server's defaults, such as `resources` (8 CPUs, 16 GiB) and the
+   deny-all `network_policy`.
+
    `num_parallel_requests` caps concurrent sandboxes. Time limits are wall-clock, so
    `test_batch_size` may not exceed `sandbox_config.resources.cpu` (8 by default); Communication
    tasks run a manager and the submission per test, so about half the CPUs keeps them from
    competing. The default `sandbox_config.provider_options.network_policy` denies all egress, so
    submissions cannot reach the network.
+
+   The sandbox must let `run.sh` raise the stack limit (`ulimit -s unlimited`): its hard
+   `RLIMIT_STACK` must be unlimited, or the process needs `CAP_SYS_RESOURCE`. Otherwise
+   deep-recursion solutions crash and score lower than in the NeMo Skills sandbox. On NVIDIA's
+   OpenSandbox cells, the `nemo.nvidia.com/sys-resource` metadata above grants the capability.
 
 A failure of the sandbox itself, not of the submission, returns `mask_sample: true` with
 `failure_kind` set to `provider_unavailable` (the sandbox could not start) or `verifier_error` (the
