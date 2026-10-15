@@ -97,6 +97,21 @@ class LegacyRun:
         the episode never holds up a checkpoint, is never exported, and starts over from its input after a crash."""
         await self._steps.mark_restart(self._key)
 
+    @property
+    def park_requested(self) -> bool:
+        """Whether a checkpoint has closed admission and waits for this run to reach a boundary."""
+        return self._steps.park_requested(self._key)
+
+    async def wait_park_requested(self) -> None:
+        """Return once a checkpoint asks this run to park, at once if one already has.
+
+        A ``wait`` step that may outlast a checkpoint's deadline, such as an agent harness running in a sandbox,
+        awaits this alongside its work. On the request it stops the work at a safe point, leaves the step, and
+        records a boundary that continues the work. That boundary parks the run until resume, the checkpoint
+        exports it, and after a crash the replacement attempt continues from it. A restart is never asked to park.
+        """
+        await self._steps.wait_park_requested(self._key)
+
 
 @dataclass(frozen=True)
 class RestoredAgentSession:
