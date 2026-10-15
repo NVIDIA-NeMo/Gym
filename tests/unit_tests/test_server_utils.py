@@ -1343,49 +1343,59 @@ class TestServerUtils:
         ]
 
     @mark.parametrize(
-        ("path", "send_partial_body", "expected"),
-        [
-            ("/v1/chat/completions", False, "before first byte (0 body bytes sent;"),
-            ("/ng-rollout/3-1/v1/messages", True, "mid-stream (7 body bytes sent;"),
-            ("/run", False, "before first byte"),
-        ],
+        "path", ["/v1/chat/completions", "/ng-rollout/3-1/v1/messages", "/run", "/tools/run", "/seed_session"]
     )
-    async def test_cancellation_middleware_logs_every_generating_disconnect(
-        self, capsys: CaptureFixture, path: str, send_partial_body: bool, expected: str
+    async def test_cancellation_middleware_samples_all_routes(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture, path: str
     ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
         handler_waiting = asyncio.Event()
 
         async def inner_app(scope, receive, send) -> None:
             await receive()
-            if send_partial_body:
-                await send({"type": "http.response.start", "status": 200, "headers": []})
-                await send({"type": "http.response.body", "body": b"event: ", "more_body": True})
             handler_waiting.set()
             await asyncio.Event().wait()
 
         middleware = ClientDisconnectCancellationMiddleware(inner_app)
-        incoming = asyncio.Queue()
-        await incoming.put({"type": "http.request", "body": b"{}", "more_body": False})
+        scope = {"type": "http", "method": "POST", "path": path, "client": ("127.0.0.1", 1234)}
 
         async def send(message):
             pass
 
-        scope = {"type": "http", "method": "POST", "path": path, "client": ("127.0.0.1", 1234)}
-        app_task = asyncio.create_task(middleware(scope, incoming.get, send))
-        await asyncio.wait_for(handler_waiting.wait(), timeout=1)
-        await incoming.put({"type": "http.disconnect"})
-        await asyncio.wait_for(app_task, timeout=1)
+        for _ in range(101):
+            handler_waiting.clear()
+            incoming = asyncio.Queue()
+            await incoming.put({"type": "http.request", "body": b"", "more_body": False})
+            app_task = asyncio.create_task(middleware(scope, incoming.get, send))
+            await asyncio.wait_for(handler_waiting.wait(), timeout=1)
+            await incoming.put({"type": "http.disconnect"})
+            await asyncio.wait_for(app_task, timeout=1)
 
-        assert middleware.num_cancelled == 1  # not a multiple of 100: only the per-path rule logs it
-        out = capsys.readouterr().out
-        assert f'127.0.0.1:1234 - "POST {path}" 499 CLIENT DISCONNECTED after ' in out
-        assert expected in out
+        assert middleware.num_cancelled == 101
+        assert capsys.readouterr().out == (
+            f'127.0.0.1:1234 - "POST {path}" 499 CLIENT DISCONNECTED (100 total for this server worker)\n'
+        )
 
-    async def test_cancellation_middleware_samples_disconnects_on_other_paths(self, capsys: CaptureFixture) -> None:
+    @mark.parametrize(
+        ("response", "phase"),
+        [("none", "before_response_start"), ("headers", "response_started"), ("keepalive", "response_started")],
+    )
+    async def test_cancellation_middleware_debug_phase(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture, response: str, phase: str
+    ) -> None:
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", True)
+        clock = iter([10.0, 12.5])
+        monkeypatch.setattr(nemo_gym.server_utils, "time", SimpleNamespace(monotonic=lambda: next(clock)))
         handler_waiting = asyncio.Event()
 
         async def inner_app(scope, receive, send) -> None:
             await receive()
+            if response != "none":
+                await send({"type": "http.response.start", "status": 200, "headers": []})
+            if response == "keepalive":
+                await send({"type": "http.response.body", "body": b": keep-alive\n\n", "more_body": True})
             handler_waiting.set()
             await asyncio.Event().wait()
 
@@ -1396,14 +1406,17 @@ class TestServerUtils:
         async def send(message):
             pass
 
-        scope = {"type": "http", "method": "POST", "path": "/seed_session", "client": ("127.0.0.1", 1234)}
+        scope = {"type": "http", "method": "POST", "path": "/v1/chat/completions", "client": ("127.0.0.1", 1234)}
         app_task = asyncio.create_task(middleware(scope, incoming.get, send))
         await asyncio.wait_for(handler_waiting.wait(), timeout=1)
         await incoming.put({"type": "http.disconnect"})
         await asyncio.wait_for(app_task, timeout=1)
 
         assert middleware.num_cancelled == 1
-        assert "499 CLIENT DISCONNECTED" not in capsys.readouterr().out
+        assert capsys.readouterr().out == (
+            '127.0.0.1:1234 - "POST /v1/chat/completions" 499 CLIENT DISCONNECTED '
+            f"after 2.5s {phase} (1 total for this server worker)\n"
+        )
 
     def test_upstream_error_log_has_bounded_body_and_redacted_url(self) -> None:
         request_info = RequestInfo(
