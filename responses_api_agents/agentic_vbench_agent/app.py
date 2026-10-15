@@ -84,6 +84,10 @@ class AgenticVBenchConfig(BaseResponsesAPIAgentConfig):
     model_context_tokens: int = Field(default=262144, gt=0)
     model_output_capability_tokens: int = Field(default=100000, gt=0)
     model_call_timeout_ms: int = Field(default=3_600_000, gt=0)
+    # OpenCode keeps complete tool output on disk while returning only a bounded
+    # preview to the model. These are observation limits, not command or reward limits.
+    opencode_tool_output_max_lines: int | None = Field(default=None, gt=0)
+    opencode_tool_output_max_bytes: int | None = Field(default=None, gt=0)
     # OpenCode context compaction. None keeps OpenCode's defaults (evaluation).
     # Training pins them: auto on with NeMo-RL context compaction, both off for
     # an append-only context under ordinary token capture.
@@ -329,6 +333,10 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
             ]
             if self.config.agent_timeout_multiplier is not None:
                 command.extend(["--agent-timeout-multiplier", str(self.config.agent_timeout_multiplier)])
+            if self.config.opencode_tool_output_max_lines is not None:
+                command.extend(["--tool-output-max-lines", str(self.config.opencode_tool_output_max_lines)])
+            if self.config.opencode_tool_output_max_bytes is not None:
+                command.extend(["--tool-output-max-bytes", str(self.config.opencode_tool_output_max_bytes)])
             if self.config.judge_protocol:
                 command.extend(["--judge-protocol", self.config.judge_protocol])
             if self.config.max_turns is not None:

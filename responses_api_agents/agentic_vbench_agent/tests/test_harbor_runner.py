@@ -543,6 +543,18 @@ def test_model_call_timeout_reaches_opencode_provider() -> None:
         make_job(model_timeout_ms=0)
 
 
+def test_native_tool_output_limits_reach_opencode_config() -> None:
+    opencode = make_job(tool_output_max_lines=400, tool_output_max_bytes=8192)["agents"][0]["kwargs"][
+        "opencode_config"
+    ]
+    assert opencode["tool_output"] == {"max_lines": 400, "max_bytes": 8192}
+    assert "tool_output" not in make_job()["agents"][0]["kwargs"]["opencode_config"]
+    with pytest.raises(ValueError, match="line limit"):
+        make_job(tool_output_max_lines=0)
+    with pytest.raises(ValueError, match="byte limit"):
+        make_job(tool_output_max_bytes=0)
+
+
 def test_hub_post_persistent_request_error_raises_without_rejecting_verification(
     hub_judge, monkeypatch: pytest.MonkeyPatch
 ) -> None:

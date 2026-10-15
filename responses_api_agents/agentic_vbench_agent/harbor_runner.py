@@ -49,6 +49,8 @@ def job_config(
     verifier_timeout_multiplier: float = 1.0,
     agent_timeout_multiplier: float | None = None,
     model_timeout_ms: int | None = None,
+    tool_output_max_lines: int | None = None,
+    tool_output_max_bytes: int | None = None,
     compaction_auto: bool | None = None,
     compaction_prune: bool | None = None,
     disable_title: bool = False,
@@ -71,6 +73,9 @@ def job_config(
     episode time without changing the verifier. ``model_timeout_ms`` is OpenCode's per-call
     provider timeout; Gym's model proxy replays a streamed completion only once it is
     complete, so the timeout must cover a whole 100k-token generation.
+    ``tool_output_max_lines``/``tool_output_max_bytes`` use OpenCode's native
+    observation truncation. The complete output remains available in its
+    tool-output directory; only the text returned to the model is bounded.
     ``compaction_auto``/``compaction_prune`` pin OpenCode's context compaction
     (``None`` keeps OpenCode's defaults: both on). Training with NeMo-RL token
     capture sets them explicitly: compaction on for framework-owned context
@@ -98,6 +103,10 @@ def job_config(
         raise ValueError("Agent timeout multiplier must be positive")
     if model_timeout_ms is not None and model_timeout_ms < 1:
         raise ValueError("Model call timeout must be positive")
+    if tool_output_max_lines is not None and tool_output_max_lines < 1:
+        raise ValueError("Tool output line limit must be positive")
+    if tool_output_max_bytes is not None and tool_output_max_bytes < 1:
+        raise ValueError("Tool output byte limit must be positive")
     provider_options = {
         "baseURL": endpoint.rstrip("/") if backend == "remote" else container_endpoint(endpoint),
         "apiKey": "unused",
@@ -178,6 +187,16 @@ def job_config(
         # Native OpenCode runs sibling task calls concurrently; a cap is applied by
         # the capture proxy, which serializes admission per session regardless.
         opencode_config.setdefault("experimental", {})["subagent_max_active"] = subagent_max_active
+    tool_output = {
+        key: value
+        for key, value in (
+            ("max_lines", tool_output_max_lines),
+            ("max_bytes", tool_output_max_bytes),
+        )
+        if value is not None
+    }
+    if tool_output:
+        opencode_config["tool_output"] = tool_output
     compaction = {
         key: value for key, value in (("auto", compaction_auto), ("prune", compaction_prune)) if value is not None
     }
@@ -488,6 +507,8 @@ def main() -> None:
         help="Scale the task's agent wall-clock budget; Harbor still verifies after the cap",
     )
     parser.add_argument("--model-timeout-ms", type=int, default=None)
+    parser.add_argument("--tool-output-max-lines", type=int, default=None)
+    parser.add_argument("--tool-output-max-bytes", type=int, default=None)
     parser.add_argument("--compaction-auto", choices=("true", "false"), default=None)
     parser.add_argument("--compaction-prune", choices=("true", "false"), default=None)
     parser.add_argument("--disable-title", action="store_true")
@@ -555,6 +576,8 @@ def main() -> None:
             verifier_timeout_multiplier=args.verifier_timeout_multiplier,
             agent_timeout_multiplier=args.agent_timeout_multiplier,
             model_timeout_ms=args.model_timeout_ms,
+            tool_output_max_lines=args.tool_output_max_lines,
+            tool_output_max_bytes=args.tool_output_max_bytes,
             compaction_auto=None if args.compaction_auto is None else args.compaction_auto == "true",
             compaction_prune=None if args.compaction_prune is None else args.compaction_prune == "true",
             disable_title=args.disable_title,

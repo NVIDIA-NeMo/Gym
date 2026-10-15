@@ -183,6 +183,8 @@ async def test_policy_server_endpoint_and_served_model(tmp_path: Path, monkeypat
         opencode_subagents_enabled=True,
         opencode_delegation_prompt=delegation_prompt,
         opencode_subagent_prompt=subagent_prompt,
+        opencode_tool_output_max_lines=400,
+        opencode_tool_output_max_bytes=8192,
     )
     endpoint, model = agent._model_endpoint(request())
     assert endpoint == "http://10.0.0.9:6100/policy_model/v1"
@@ -213,6 +215,8 @@ async def test_policy_server_endpoint_and_served_model(tmp_path: Path, monkeypat
     assert "--subagents" in command
     assert command[command.index("--delegation-prompt") + 1] == delegation_prompt
     assert command[command.index("--subagent-prompt") + 1] == subagent_prompt
+    assert command[command.index("--tool-output-max-lines") + 1] == "400"
+    assert command[command.index("--tool-output-max-bytes") + 1] == "8192"
     assert "--max-turns" not in command
     assert verified.reward == 1
     assert verified.equal_family_reward == pytest.approx(25 / 18)
@@ -403,6 +407,8 @@ def test_training_config_resolves_from_environment(monkeypatch: pytest.MonkeyPat
         "AGENTIC_VBENCH_CONTEXT_TOKENS": "20480",
         "AGENTIC_VBENCH_OUTPUT_TOKENS": "4096",
         "AGENTIC_VBENCH_MAX_TURNS": "12",
+        "AGENTIC_VBENCH_TOOL_OUTPUT_MAX_LINES": "400",
+        "AGENTIC_VBENCH_TOOL_OUTPUT_MAX_BYTES": "8192",
         "TRAIN_PATH": str(tmp_path / "train.jsonl"),
     }.items():
         monkeypatch.setenv(key, value)
@@ -428,6 +434,7 @@ def test_training_config_resolves_from_environment(monkeypatch: pytest.MonkeyPat
     assert config.opencode_disable_title is True and config.train_compaction_summaries is True
     assert config.model_context_tokens == 20480 and config.model_output_capability_tokens == 4096
     assert config.max_turns == 12 and config.backend == "remote" and config.judge_protocol == "nvinference-hybrid"
+    assert config.opencode_tool_output_max_lines == 400 and config.opencode_tool_output_max_bytes == 8192
     assert config.opencode_delegation_prompt is None
     assert config.opencode_subagent_prompt is None
     assert config.benchmark_root is None and config.credentials_file is None

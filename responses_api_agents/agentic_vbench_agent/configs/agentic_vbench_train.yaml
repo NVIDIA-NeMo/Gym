@@ -34,6 +34,9 @@ agentic_vbench_agent:
       model_context_tokens: ${oc.env:AGENTIC_VBENCH_CONTEXT_TOKENS,49152}
       model_output_capability_tokens: ${oc.env:AGENTIC_VBENCH_OUTPUT_TOKENS,8192}
       model_call_timeout_ms: ${oc.env:AGENTIC_VBENCH_MODEL_CALL_TIMEOUT_MS,3600000}
+      # Native OpenCode observation bounds. Full tool output remains on disk.
+      opencode_tool_output_max_lines: ${oc.env:AGENTIC_VBENCH_TOOL_OUTPUT_MAX_LINES,null}
+      opencode_tool_output_max_bytes: ${oc.env:AGENTIC_VBENCH_TOOL_OUTPUT_MAX_BYTES,null}
       opencode_compaction_auto: ${oc.env:AGENTIC_VBENCH_COMPACTION_AUTO,null}
       opencode_compaction_prune: ${oc.env:AGENTIC_VBENCH_COMPACTION_PRUNE,null}
       opencode_disable_title: ${oc.env:AGENTIC_VBENCH_DISABLE_TITLE,true}
