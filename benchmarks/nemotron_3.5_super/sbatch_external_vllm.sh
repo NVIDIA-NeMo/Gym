@@ -63,10 +63,6 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     fi
     mkdir -p "$(dirname "$SAVE_WARMED_CONTAINER")" slurm-logs
     SAVE_WARMED_CONTAINER="$(cd "$(dirname "$SAVE_WARMED_CONTAINER")" && pwd -P)/$(basename "$SAVE_WARMED_CONTAINER")"
-    if [[ -e "$SAVE_WARMED_CONTAINER" || -L "$SAVE_WARMED_CONTAINER" ]]; then
-        echo "ERROR: Refusing to overwrite $SAVE_WARMED_CONTAINER" >&2
-        exit 1
-    fi
 fi
 ENABLE_MOONCAKE=${ENABLE_MOONCAKE:-0}
 if [[ "$VLLM_MODE" == aggregated && "$ENABLE_MOONCAKE" != 0 ]]; then
