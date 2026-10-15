@@ -22,6 +22,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Discriminator,
+    Field,
     PrivateAttr,
     SerializationInfo,
     Tag,
