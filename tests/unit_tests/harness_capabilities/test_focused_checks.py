@@ -205,3 +205,25 @@ def test_missing_invocations_still_block_p0_step_and_tool_relationships():
     ):
         assert by_id[check_id]["tier"] == "P0"
         assert by_id[check_id]["status"] == "fail"
+
+
+@pytest.mark.parametrize("role", ["verifier", "agent", None])
+def test_only_explicit_verifier_calls_are_excluded_from_policy_steps(role):
+    record = evidence_record()
+    trajectory = record["ng_trajectory"]
+    judge = deepcopy(trajectory["model_calls"][0])
+    judge["model_call_id"] = "judge-call"
+    judge["response_metadata"]["response_id"] = "judge-response"
+    trajectory["model_calls"].append(judge)
+    invocation = {"invocation_id": "judge", "model_calls": [{"model_call_id": "judge-call"}]}
+    if role is not None:
+        invocation["role"] = role
+    trajectory["invocations"].append(invocation)
+    result = checks(record)
+    assert result["ownership.call_owner"]["status"] == "pass"
+    assert result["steps.attempt_accounting"]["status"] == ("pass" if role == "verifier" else "fail")
+    if role == "verifier":
+        trajectory["turns"][0]["model_calls"].append({"model_call_id": "judge-call"})
+        assert checks(record)["steps.attempt_accounting"]["status"] == "fail"
+        trajectory["invocations"].pop()
+        assert checks(record)["ownership.call_owner"]["status"] == "fail"

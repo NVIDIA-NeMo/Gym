@@ -938,7 +938,13 @@ class Inspector:
                 depends_on=("ownership.call_target",),
             )
         )
-        helpers = set()
+        helpers = {
+            index
+            for inv in self.invocations
+            if inv.get("role") == "verifier"
+            for reference in _objects(inv.get("model_calls"))
+            for index in _resolve(reference, self.calls)
+        }
         auxiliary_valid = True
         for observation in self.observations:
             if observation.get("kind") == "context_compaction":
@@ -1020,14 +1026,14 @@ class Inspector:
                 tier="P0",
                 evidence=("TE-9",),
                 location="$.ng_trajectory.turns[*].model_calls",
-                reason="every policy response needs one step; HTTP errors may be unbound and compaction calls stay separate",
+                reason="every policy response needs one step; HTTP errors may be unbound and auxiliary calls stay separate",
                 predicate=lambda: bool(policy)
                 and all((refs[i] == 1 for i in policy - http_errors))
                 and all((refs[i] <= 1 for i in http_errors))
                 and (not any((refs[i] for i in helpers))),
                 available=self.available,
                 applies=self.scope.steps,
-                depends_on=("steps.call_target", "steps.compaction_target"),
+                depends_on=("steps.call_target", "steps.compaction_target", "ownership.call_target"),
             )
         )
 

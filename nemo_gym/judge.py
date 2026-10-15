@@ -34,6 +34,7 @@ exception it sees, so covering a whole ``verify()`` would misfile ordinary bugs
 import functools
 import re
 from typing import Any, Awaitable, Callable, Type, TypeVar
+from uuid import uuid4
 
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -82,10 +83,17 @@ async def call_judge(
     ``/v1/chat/completions``), paired with the matching ``response_model``. The
     status check comes before parsing so an auth or server error reports the HTTP
     failure itself, not a validation error against the error body.
+    A unique verifier invocation header associates captured attempts, including
+    HTTP failures without response IDs, without adding policy turns.
     """
 
     async def _call() -> ResponseT:
-        http_response = await server_client.post(server_name=server_name, url_path=url_path, json=json)
+        http_response = await server_client.post(
+            server_name=server_name,
+            url_path=url_path,
+            json=json,
+            headers={"x-session-id": f"judge-{uuid4().hex}", "x-ng-invocation-role": "verifier"},
+        )
         await raise_for_status(http_response)
         return response_model.model_validate(await get_response_json(http_response))
 

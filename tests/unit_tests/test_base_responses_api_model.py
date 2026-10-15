@@ -389,7 +389,7 @@ def test_capture_assistant_message_header_round_trip(tmp_path, headers, expected
     async def send(_message):
         pass
 
-    request_headers = [(b"x-session-id", b"opencode-session"), *headers]
+    request_headers = [(b"x-session-id", b"opencode-session"), (b"x-ng-invocation-role", b"verifier"), *headers]
     asyncio.run(
         _CaptureMiddleware(
             app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
@@ -412,6 +412,7 @@ def test_capture_assistant_message_header_round_trip(tmp_path, headers, expected
         assert "client_assistant_message_id" not in exchange
     [call] = read_model_call_records(store, "header-round-trip")
     assert call.client_assistant_message_id == expected
+    assert call.client_invocation_role == "verifier"
     assert call.client_session_id == "opencode-session"
     assert call.response == {"output": []}
 

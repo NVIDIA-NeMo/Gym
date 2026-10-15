@@ -1080,6 +1080,8 @@ class ModelCallRecord(BaseModel):
         description="Persisted client assistant-message ID; retries may share it, model_call_id remains per attempt.",
     )
 
+    client_invocation_role: Optional[Literal["agent", "verifier"]] = None
+
     # Durable append order, not a causal or semantic order for concurrent calls.
     call_index: int
     model_ref: Optional[ModelServerRef] = None
@@ -1168,6 +1170,7 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
             if isinstance(exchange.get("client_assistant_message_id"), str)
             else None
         ),
+        client_invocation_role=exchange.get("client_invocation_role"),
         call_index=call_index,
         model_ref=exchange.get("model_ref"),
         model=model if isinstance(model, str) else None,
@@ -1578,6 +1581,7 @@ def _record(
     model_server_name: Optional[str],
     request_bytes: bytes,
     *,
+    client_invocation_role: Optional[str] = None,
     client_session_id: Optional[str] = None,
     client_assistant_message_id: Optional[str] = None,
     rollout_id: str,
@@ -1621,6 +1625,8 @@ def _record(
         }
         if client_session_id is not None:
             exchange["client_session_id"] = client_session_id
+        if client_invocation_role in {"agent", "verifier"}:
+            exchange["client_invocation_role"] = client_invocation_role
         if execution is not None:
             exchange.update(execution)
             if execution["local_response_reason"] == "context_length_exceeded":
@@ -1823,6 +1829,7 @@ class _CaptureMiddleware:
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
+        client_invocation_role = _unique_request_header(scope.get("headers") or [], b"x-ng-invocation-role")
         client_assistant_message_id = (
             _unique_request_header(scope.get("headers") or [], self._assistant_message_header)
             if self._assistant_message_header is not None
@@ -1947,6 +1954,7 @@ class _CaptureMiddleware:
                     dialect,
                     self._model_server_name,
                     bytes(request_body),
+                    client_invocation_role=client_invocation_role,
                     client_session_id=client_session_id,
                     client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
@@ -2020,6 +2028,7 @@ class _CaptureMiddleware:
                     dialect,
                     model_server_name,
                     request_bytes,
+                    client_invocation_role=client_invocation_role,
                     client_session_id=client_session_id,
                     client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,

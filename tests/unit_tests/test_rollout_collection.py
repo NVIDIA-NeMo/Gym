@@ -8625,7 +8625,8 @@ class TestTurnsFromModelCalls:
         assert "turns_unavailable" in {gap["code"] for gap in trajectory["gaps"]}
 
     @pytest.mark.parametrize("reference_key", ["model_call_id", "response_id"])
-    def test_judge_capture_does_not_become_a_policy_turn(self, reference_key: str) -> None:
+    @pytest.mark.parametrize("declared_verifier", [False, True])
+    def test_judge_capture_does_not_become_a_policy_turn(self, reference_key: str, declared_verifier: bool) -> None:
         from nemo_gym.health.checks import (
             _bind_policy_call_views,
             _normalized_trajectory_calls,
@@ -8680,18 +8681,52 @@ class TestTurnsFromModelCalls:
             },
         }
 
+        if declared_verifier:
+            result["ng_model_call_capture"]["calls"][1].update(
+                client_session_id="judge-invocation", client_invocation_role="verifier"
+            )
         _attach_trajectory_record(row, result)
 
         trajectory = result[NG_TRAJECTORY_KEY]
         assert [call["model_call_id"] for call in trajectory["model_calls"]] == ["policy", "judge"]
         assert [turn["model_calls"][0]["model_call_id"] for turn in trajectory["turns"]] == ["policy"]
-        turns, _ = _bind_policy_call_views(trajectory, _normalized_trajectory_calls(trajectory))
+        if declared_verifier:
+            assert trajectory["invocations"][1]["role"] == "verifier"
+            assert trajectory["invocations"][1]["model_calls"][0]["model_call_id"] == "judge"
+        turns, owned = _bind_policy_call_views(trajectory, _normalized_trajectory_calls(trajectory))
         assert _rollout_token_count_mismatch(result, turns, {"task_index": 0}) == []
+        assert _rollout_token_count_mismatch(result, owned, {"task_index": 0}) == []
         perf = _build_ng_perf(result, rollout_latency_ms=None)
         assert perf["num_turns"] == 1
         assert perf["prompt_tokens"] == 10
         assert perf["completion_tokens"] == 2
         assert perf["token_observability_coverage"] == 1.0
+
+
+@pytest.mark.parametrize("status", [200, 400])
+def test_collector_owns_explicit_judge_attempt_without_provider_response_id(status):
+    row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+    result = {
+        "ng_model_call_capture": {
+            "calls": [
+                {
+                    "model_call_id": "judge-call",
+                    "client_session_id": "judge-invocation",
+                    "client_invocation_role": "verifier",
+                    "status_code": status,
+                }
+            ]
+        }
+    }
+    trajectory = _build_trajectory_record(row, result)
+    assert trajectory.turns == []
+    assert len(trajectory.invocations) == 1
+    invocation = trajectory.invocations[0]
+    assert invocation.invocation_id == "judge-invocation" and invocation.role == "verifier"
+    assert invocation.model_calls[0].model_call_id == "judge-call"
+    assert invocation.model_calls[0].response_id is None
+    result[NG_TRAJECTORY_KEY] = trajectory.model_dump(mode="json")
+    assert _build_trajectory_record(row, result).invocations == trajectory.invocations
 
 
 class TestMaskingStepMetrics:

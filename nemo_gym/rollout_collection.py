@@ -540,6 +540,8 @@ def _turns_from_model_calls(
     invocation_by_call_id: dict[str, str] = {}
     invocation_by_response_id: dict[str, str] = {}
     for invocation in invocations:
+        if invocation.role != "agent":
+            continue
         for ref in invocation.model_calls:
             if ref.model_call_id:
                 invocation_by_call_id[ref.model_call_id] = invocation.invocation_id
@@ -728,6 +730,30 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             projected = TrajectoryModelCall.model_validate(merged)
             model_calls[position] = projected
 
+    # call_judge explicitly declares a verifier invocation at the request boundary.
+    # Its captured identity also owns failed attempts, which have no response ID.
+    verifier_invocations: dict[str, AgentInvocation] = {}
+    for raw_call in raw_calls:
+        if not isinstance(raw_call, dict) or raw_call.get("client_invocation_role") != "verifier":
+            continue
+        invocation_id = raw_call.get("client_session_id")
+        call_id = raw_call.get("model_call_id")
+        if not invocation_id or not call_id:
+            continue
+        invocation = verifier_invocations.setdefault(
+            invocation_id, AgentInvocation(invocation_id=invocation_id, role="verifier")
+        )
+        invocation.model_calls.append(ModelCallRef(model_call_id=call_id))
+    for invocation in verifier_invocations.values():
+        existing = next((item for item in invocations if item.invocation_id == invocation.invocation_id), None)
+        if existing is None:
+            invocations.append(invocation)
+        elif existing.role != "verifier":
+            gaps.append(ObservationGap(code="model_call_reference_conflict", invocation_id=invocation.invocation_id))
+        else:
+            known = {ref.model_call_id for ref in existing.model_calls}
+            existing.model_calls.extend(ref for ref in invocation.model_calls if ref.model_call_id not in known)
+
     for raw_gap in capture.get("gaps") or []:
         if isinstance(raw_gap, dict):
             try:
@@ -853,7 +879,8 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
         trajectory = TrajectoryRecord.model_validate(raw_trajectory)
     except Exception:
         return None
-    if not trajectory.invocations:
+    policy_invocations = [invocation for invocation in trajectory.invocations if invocation.role == "agent"]
+    if not policy_invocations:
         return None
 
     # Index captured calls by both identities ModelCallRef supports, mirroring
@@ -898,7 +925,7 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     seen_positions: set[int] = set()
     owned_calls = []
     owned_calls_by_invocation: Counter = Counter()
-    for invocation in trajectory.invocations:
+    for invocation in policy_invocations:
         for ref in invocation.model_calls:
             index = _match_call_index(ref)
             if index is None or index in seen_positions:
@@ -908,7 +935,7 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
             owned_calls_by_invocation[invocation.invocation_id] += 1
     tool_calls_by_invocation = Counter(tool.invocation_id for tool in trajectory.tool_calls)
     num_tool_calls = sum(
-        tool_calls_by_invocation.get(invocation.invocation_id, 0) for invocation in trajectory.invocations
+        tool_calls_by_invocation.get(invocation.invocation_id, 0) for invocation in policy_invocations
     )
 
     def _sum_tokens(attr: str) -> Optional[int]:
@@ -922,7 +949,7 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
         turns_by_invocation.get(invocation.invocation_id, 0)
         or owned_calls_by_invocation.get(invocation.invocation_id, 0)
         or 1
-        for invocation in trajectory.invocations
+        for invocation in policy_invocations
     )
     ng_perf: dict[str, Any] = {
         "num_turns": num_turns,

@@ -99,7 +99,7 @@ class TrajectoryTurn(ObservationModel):
 
 
 class AgentInvocation(ObservationModel):
-    """One root Agent or subagent conversation observed by a harness.
+    """One agent conversation or explicitly identified verifier model invocation.
 
     Harness adapters should report an iteration-limit event through an
     ``on_iteration_limit_reached(*, invocation_id: str) -> None`` observer hook.
@@ -110,6 +110,9 @@ class AgentInvocation(ObservationModel):
     """
 
     kind: Literal["agent_invocation"] = "agent_invocation"
+    role: Literal["agent", "verifier"] = Field(
+        default="agent", description="Whether this invocation executes the policy or evaluates its output."
+    )
     invocation_id: str
     parent_invocation_id: Optional[str] = None
     spawned_by_tool_call_id: Optional[str] = None
