@@ -93,7 +93,8 @@ async def collect_deliverables(
 ) -> None:
     """Copy the submitted files, the finish arguments and the reference files into ``task_dir``.
 
-    Files land under their base names, so a later path with the same name replaces an earlier one. A file
+    Files land under their base names, so a later path with the same name replaces an earlier one, and a reference
+    file replaces a submitted file at the same path. A file
     that cannot be downloaded raises, since `/finish` confirmed it exists. ``task_dir`` is built beside its
     final place and renamed into it, so a failure never leaves a partial directory. ``finish_params.json``
     holds ``null`` when the agent never finished.
