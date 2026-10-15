@@ -171,7 +171,13 @@ def _validation_error_summaries(errors: list[dict[str, Any]]) -> tuple[list[dict
 
 def _validation_errors_log_text(error_summaries: list[dict[str, Any]]) -> tuple[str, bool]:
     """Render the error summaries for the log message, bounded by ``_VALIDATION_ERROR_LOG_ERRORS_CHARS``."""
-    rendered = json.dumps(error_summaries, ensure_ascii=True, separators=(",", ":"))
+    # Custom validator messages can echo credentials from headers, queries, paths, or cookies.
+    # Keep their type and location visible without copying their messages into the default log.
+    message_summaries = [
+        summary if summary["loc"] and summary["loc"][0] == "body" else {key: summary[key] for key in ("type", "loc")}
+        for summary in error_summaries
+    ]
+    rendered = json.dumps(message_summaries, ensure_ascii=True, separators=(",", ":"))
     if len(rendered) <= _VALIDATION_ERROR_LOG_ERRORS_CHARS:
         return rendered, False
     suffix = "...[truncated]"
@@ -184,8 +190,8 @@ async def _log_validation_exception(request: Request, exc: RequestValidationErro
     # The summaries are also attached as ``extra``, but the default formatter drops extras,
     # so render them into the message too: a 422 log line should say which field failed.
     errors_text, errors_text_truncated = _validation_errors_log_text(error_summaries)
-    errors_truncated = errors_truncated or errors_text_truncated
-    errors_suffix = " ...[truncated]" if errors_truncated else ""
+    errors_log_truncated = errors_truncated or errors_text_truncated
+    errors_suffix = " ...[truncated]" if errors_log_truncated else ""
     extra = {
         "validation_error_count": len(errors),
         "validation_errors": error_summaries,
@@ -201,7 +207,7 @@ async def _log_validation_exception(request: Request, exc: RequestValidationErro
             "validation_errors_truncated=%s%s",
             len(errors),
             errors_text,
-            errors_truncated,
+            errors_log_truncated,
             errors_suffix,
             extra=extra,
         )
@@ -215,7 +221,7 @@ async def _log_validation_exception(request: Request, exc: RequestValidationErro
             "validation_error_count=%d validation_errors=%s validation_errors_truncated=%s%s",
             len(errors),
             errors_text,
-            errors_truncated,
+            errors_log_truncated,
             errors_suffix,
             extra=extra,
         )
@@ -241,7 +247,7 @@ async def _log_validation_exception(request: Request, exc: RequestValidationErro
         escaped_prefix,
         len(errors),
         errors_text,
-        errors_truncated,
+        errors_log_truncated,
         errors_suffix,
         extra=extra,
     )
