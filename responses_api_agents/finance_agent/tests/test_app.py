@@ -232,6 +232,7 @@ def _dotjson_mock(*json_responses: dict) -> AsyncMock:
         mock.read.side_effect = strings
         mock.content.read = AsyncMock(side_effect=[s.encode() for s in strings])
     mock.cookies = MagicMock()
+    mock.headers = {}
     return mock
 
 
@@ -278,7 +279,7 @@ class TestFinanceAgentConfig:
                 "tool_call_execution",
                 "tool_error_observation",
                 "raise_on_tool_http_error",
-                "sequential_done_tool_requires_success",
+                "done_tool_requires_success",
                 "done_tools",
             )
             if field in block
@@ -298,7 +299,7 @@ class TestFinanceAgentConfig:
         assert config.done_tools == expected_done_tools
         is_big_finance = instance in {"big_finance", "big_finance_benchmark_agent"}
         assert config.raise_on_tool_http_error is is_big_finance
-        assert config.sequential_done_tool_requires_success is is_big_finance
+        assert config.done_tool_requires_success is is_big_finance
 
     @pytest.mark.parametrize("field", _POLICY_FIELDS)
     def test_omitting_a_policy_field_is_rejected(self, field: str) -> None:
@@ -327,7 +328,7 @@ class TestFinanceAgentConfig:
         assert config.tool_call_execution == "sequential"
         assert config.tool_error_observation == "json"
         assert config.raise_on_tool_http_error is False
-        assert config.sequential_done_tool_requires_success is False
+        assert config.done_tool_requires_success is False
 
     def test_custom_config(self) -> None:
         config = _make_config(
@@ -605,6 +606,69 @@ class TestResponses:
         assert [item["role"] for item in res.json()["output"] if item["type"] == "message"] == ["assistant"]
         assert res.json()["output"][0]["content"][0]["text"] == "Revenue was $100B."
 
+    @pytest.mark.parametrize("empty_output", [False, True], ids=["reasoning-only", "empty"])
+    def test_finish_profile_stops_on_any_turn_without_tool_calls(self, empty_output: bool) -> None:
+        agent, client = _make_agent_and_client(_make_config(max_steps=5, prose_only_behavior="finish"))
+        model_response = _reasoning_response()
+        if empty_output:
+            model_response["output"] = []
+        agent.server_client.post.return_value = _dotjson_mock(model_response)
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        assert agent.server_client.post.call_count == 1
+        assert res.json()["metadata"]["stop_reason"] == "assistant_message"
+        assert res.json()["metadata"]["steps"] == "1"
+        assert res.json()["metadata"]["final_model_turn_start"] == "0"
+        assert [item["type"] for item in res.json()["output"]] == ([] if empty_output else ["reasoning"])
+        if not empty_output:
+            assert res.json()["output"][0]["summary"] == model_response["output"][0]["summary"]
+
+    @pytest.mark.parametrize("empty_output", [False, True], ids=["reasoning-only", "empty"])
+    def test_empty_final_turn_is_separated_from_earlier_assistant_prose(self, empty_output: bool) -> None:
+        agent, client = _make_agent_and_client(_make_config(max_steps=5, prose_only_behavior="finish"))
+        first_turn = _text_response("I still need to verify the answer.")
+        first_turn["output"].extend(_tool_call_response("sec_filing_search", "{}")["output"])
+        final_turn = _reasoning_response(resp_id="resp_2")
+        if empty_output:
+            final_turn["output"] = []
+        model_mock = _dotjson_mock(first_turn, final_turn)
+        agent.server_client.post = AsyncMock(side_effect=_route(model_mock, _dotjson_mock({"result": "data"})))
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        result = res.json()
+        assert result["metadata"]["stop_reason"] == "assistant_message"
+        model_calls = [
+            call for call in agent.server_client.post.call_args_list if call.kwargs["server_name"] == _MODEL_SERVER
+        ]
+        assert len(model_calls) == 2
+        final_start = int(result["metadata"]["final_model_turn_start"])
+        assert final_start == 3
+        assert [item["type"] for item in result["output"][final_start:]] == ([] if empty_output else ["reasoning"])
+        assert not [item for item in result["output"][final_start:] if item["type"] == "message"]
+        assert result["output"][0]["content"][0]["text"] == "I still need to verify the answer."
+
+    @pytest.mark.parametrize("instance", ["finance_agent", "finance_agent_v2"])
+    @pytest.mark.parametrize("empty_output", [False, True], ids=["reasoning-only", "empty"])
+    def test_existing_profiles_continue_after_turns_without_tools_or_prose(
+        self, instance: str, empty_output: bool
+    ) -> None:
+        agent, client = _make_agent_and_client(_make_config(policy=_shipped_policy(instance), max_steps=2))
+        model_response = _reasoning_response()
+        if empty_output:
+            model_response["output"] = []
+        agent.server_client.post.return_value = _dotjson_mock(model_response)
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        assert agent.server_client.post.call_count == 2
+        assert res.json()["metadata"]["stop_reason"] == "max_turns"
+        assert not [item for item in res.json()["output"] if item["type"] == "message"]
+
     def test_finish_profile_executes_tools_when_prose_and_calls_share_a_turn(self) -> None:
         config = _make_config(
             max_steps=3,
@@ -764,6 +828,7 @@ class TestResponses:
         config = _make_config(
             max_steps=1,
             tool_call_execution="concurrent",
+            done_tool_requires_success=True,
             tool_error_observation="error_prefix",
         )
         agent, client = _make_agent_and_client(config)
@@ -817,7 +882,7 @@ class TestResponses:
             max_steps=2,
             prose_only_behavior="finish",
             tool_error_observation="error_prefix",
-            sequential_done_tool_requires_success=True,
+            done_tool_requires_success=True,
         )
         agent, client = _make_agent_and_client(config)
         model_mock = _dotjson_mock(
@@ -834,6 +899,119 @@ class TestResponses:
         assert res.json()["metadata"]["stop_reason"] == "assistant_message"
         tool_outputs = [item for item in res.json()["output"] if item["type"] == "function_call_output"]
         assert tool_outputs[0]["output"] == "[ERROR] answer is required"
+
+    @pytest.mark.parametrize("execution", ["sequential", "concurrent"])
+    @pytest.mark.parametrize("requires_success", [False, True])
+    @pytest.mark.parametrize("is_error", [False, True])
+    def test_terminal_success_requirement_applies_to_both_execution_modes(
+        self, execution: str, requires_success: bool, is_error: bool
+    ) -> None:
+        agent, client = _make_agent_and_client(
+            _make_config(
+                max_steps=1,
+                tool_call_execution=execution,
+                tool_error_observation="error_prefix",
+                done_tool_requires_success=requires_success,
+            )
+        )
+        # Successful tool output can itself be JSON with an "error" field.
+        # Only the transport's explicit status determines whether it failed.
+        result = {"error": "answer is required"}
+        resource_mock = _dotjson_mock(result)
+        if is_error:
+            resource_mock.content.read.return_value = b"answer is required"
+        resource_mock.headers = {"x-nemo-gym-tool-error": str(is_error).lower()}
+        model_mock = _dotjson_mock(_tool_call_response("submit_final_result", "{}", call_id="terminal"))
+        agent.server_client.post = AsyncMock(side_effect=_route(model_mock, resource_mock))
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        expected_stop = "max_turns" if requires_success and is_error else "done_tool"
+        assert res.json()["metadata"]["stop_reason"] == expected_stop
+        assert json.loads(res.json()["metadata"]["tool_call_error_status"]) == {"terminal": is_error}
+        tool_outputs = [item for item in res.json()["output"] if item["type"] == "function_call_output"]
+        expected_output = "[ERROR] answer is required" if is_error else json.dumps(result)
+        assert [item["output"] for item in tool_outputs] == [expected_output]
+
+    @pytest.mark.parametrize("execution", ["sequential", "concurrent"])
+    def test_explicit_tool_error_status_handles_non_json_failures(self, execution: str) -> None:
+        agent, client = _make_agent_and_client(
+            _make_config(max_steps=1, tool_call_execution=execution, tool_error_observation="error_prefix")
+        )
+        resource_mock = _dotjson_mock({})
+        resource_mock.content.read.return_value = b"query is required"
+        resource_mock.headers = {"x-nemo-gym-tool-error": "true"}
+        model_mock = _dotjson_mock(_tool_call_response("sec_filing_search", "{}", call_id="search"))
+        agent.server_client.post = AsyncMock(side_effect=_route(model_mock, resource_mock))
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        assert json.loads(res.json()["metadata"]["tool_call_error_status"]) == {"search": True}
+        tool_outputs = [item for item in res.json()["output"] if item["type"] == "function_call_output"]
+        assert [item["output"] for item in tool_outputs] == ["[ERROR] query is required"]
+
+    @pytest.mark.parametrize(
+        "tool_output", ["[ERROR] This is a quoted log entry.", "1" * 5000], ids=["marker", "large-int"]
+    )
+    def test_explicitly_successful_output_is_preserved(self, tool_output: str) -> None:
+        agent, client = _make_agent_and_client(_make_config(max_steps=1, tool_error_observation="error_prefix"))
+        resource_mock = _dotjson_mock({})
+        resource_mock.content.read.return_value = tool_output.encode()
+        resource_mock.headers = {"x-nemo-gym-tool-error": "false"}
+        model_mock = _dotjson_mock(_tool_call_response("sec_filing_search", "{}", call_id="search"))
+        agent.server_client.post = AsyncMock(side_effect=_route(model_mock, resource_mock))
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        assert json.loads(res.json()["metadata"]["tool_call_error_status"]) == {"search": False}
+        tool_outputs = [item for item in res.json()["output"] if item["type"] == "function_call_output"]
+        assert [item["output"] for item in tool_outputs] == [tool_output]
+
+    @pytest.mark.parametrize("execution", ["sequential", "concurrent"])
+    def test_local_tool_failure_is_recorded_as_an_error(self, execution: str) -> None:
+        agent, client = _make_agent_and_client(
+            _make_config(
+                max_steps=1,
+                tool_call_execution=execution,
+                tool_error_observation="error_prefix",
+                done_tool_requires_success=True,
+            )
+        )
+        model_mock = _dotjson_mock(_tool_call_response("submit_final_result", "{}", call_id="terminal"))
+
+        def route_post(**kwargs):
+            if kwargs["server_name"] == _MODEL_SERVER:
+                return model_mock
+            raise ConnectionError("connection refused")
+
+        agent.server_client.post = AsyncMock(side_effect=route_post)
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        assert res.json()["metadata"]["stop_reason"] == "max_turns"
+        assert json.loads(res.json()["metadata"]["tool_call_error_status"]) == {"terminal": True}
+        tool_outputs = [item for item in res.json()["output"] if item["type"] == "function_call_output"]
+        assert len(tool_outputs) == 1
+        assert tool_outputs[0]["output"].startswith("[ERROR] Tool call failed: ConnectionError: connection refused")
+
+    def test_successful_output_with_error_field_does_not_trigger_abort_policy(self) -> None:
+        agent, client = _make_agent_and_client(_v2_config(max_steps=1, tool_error_observation="error_prefix"))
+        result = {"error": "RetryExhaustedError: quoted source text"}
+        resource_mock = _dotjson_mock(result)
+        resource_mock.headers = {"x-nemo-gym-tool-error": "false"}
+        model_mock = _dotjson_mock(_tool_call_response("sec_filing_search", "{}", call_id="search"))
+        agent.server_client.post = AsyncMock(side_effect=_route(model_mock, resource_mock))
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        assert res.json()["metadata"]["stop_reason"] == "max_turns"
+        tool_outputs = [item for item in res.json()["output"] if item["type"] == "function_call_output"]
+        assert [item["output"] for item in tool_outputs] == [json.dumps(result)]
 
     @pytest.mark.parametrize(
         ("instance", "tool_name"),

@@ -25,28 +25,38 @@ user turn. Shipped yaml does not need to set it.
 The v2 values mirror `vals-ai/finance-agent-v2` and are checked against the installed upstream
 package by `resources_servers/finance_agent_v2/tests/test_upstream_parity.py`.
 
-Three benchmark-neutral loop policies have compatibility-preserving defaults in the base
+Four benchmark-neutral loop policies have compatibility-preserving defaults in the base
 config:
 
 | Field | Values | Default |
 |-------|--------|---------|
-| `prose_only_behavior` | `nudge`: inject `no_tool_call_nudge`; `finish`: return the assistant text | `nudge` |
+| `prose_only_behavior` | `nudge`: inject `no_tool_call_nudge` after prose; `finish`: end any turn without tool calls, including empty or reasoning-only turns | `nudge` |
 | `tool_call_execution` | `sequential`; `concurrent` | `sequential` |
 | `tool_error_observation` | `json`: preserve the error payload; `error_prefix`: render `[ERROR] <message>` | `json` |
+| `done_tool_requires_success` | Require a successful terminal tool before ending either execution mode | `false` |
 
 The shipped Vals v1/v2 profiles therefore retain their existing nudge and sequential execution
 behavior without overrides. A profile whose protocol treats prose as the final answer can select
 `finish`. A profile whose tools are independent can select `concurrent`; every call in the turn is
 then executed, while `function_call_output` items are appended in the model's original call order.
-A successful terminal tool ends the loop after the complete concurrent batch finishes.
+`done_tool_requires_success` controls whether a failed terminal tool can end the loop in
+either mode. Concurrent execution always finishes the complete batch before ending.
 Both shipped BigFinance profiles select `finish`, `concurrent`, `error_prefix`, and
-`done_tools: [final_answer]`; profile tests load those values from the shipped
+`done_tools: [final_answer]`, with `done_tool_requires_success: true`; profile tests load those values from the shipped
 configs to guard against silent protocol drift.
+Custom overlays should use `done_tool_requires_success` in place of the earlier
+`sequential_done_tool_requires_success` key.
 
-Tool failures come back to the model as a tool result so the rollout survives. A failed terminal
-tool does not terminate the loop. Every response
+Tool failures come back to the model as a tool result so the rollout survives.
+Resources servers can set `x-nemo-gym-tool-error: true` or `false` on tool responses to
+identify failures explicitly. Successful response bodies are preserved even when they
+contain an `error` field or begin with `[ERROR]`. Responses without this header retain
+the legacy JSON error detection. Explicit per-call statuses are saved as a JSON mapping
+in response metadata under `tool_call_error_status` for stateless reverification.
+Every response
 carries `stop_reason` and `steps` in its metadata so a truncated trajectory is distinguishable from
-a submitted answer. Context overflow optionally drops the oldest exchange and retries
+a submitted answer. Prose completion also records `final_model_turn_start` so an empty
+final turn cannot reuse earlier analysis as its answer. Context overflow optionally drops the oldest exchange and retries
 (`truncate_on_overflow`), which is for eval only — during training the full trajectory has to be
 preserved for reward assignment.
 

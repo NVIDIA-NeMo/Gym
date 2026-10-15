@@ -98,7 +98,7 @@ def _decoded_object(raw: str) -> Optional[dict]:
     """JSON-decode *raw*, returning None unless it decodes to an object."""
     try:
         value = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
+    except (ValueError, RecursionError, TypeError):
         return None
     return value if isinstance(value, dict) else None
 
@@ -129,9 +129,9 @@ class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
     )
     prose_only_behavior: Literal["nudge", "finish"] = Field(
         default="nudge",
-        description="What to do when a turn contains assistant prose but no "
-        "tool call. 'nudge' injects no_tool_call_nudge and continues; "
-        "'finish' returns the assistant response immediately. "
+        description="What to do when a turn contains no tool call. "
+        "'nudge' injects no_tool_call_nudge after assistant prose and continues; "
+        "'finish' ends the run even when the response has no text. "
         "continue_if_not_tool_call=False takes precedence over this policy.",
     )
     tool_call_execution: Literal["sequential", "concurrent"] = Field(
@@ -144,16 +144,16 @@ class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
         default="json",
         description="How failed tool calls are shown to the model. 'json' keeps "
         "the shared loop's legacy JSON payload; 'error_prefix' renders the "
-        "BigFinance-compatible '[ERROR] <message>' observation.",
+        "'[ERROR] <message>' observation.",
     )
     raise_on_tool_http_error: bool = Field(
         default=False,
         description="Convert unsuccessful tool HTTP responses to error observations. "
         "False preserves the legacy behavior of forwarding their response bodies.",
     )
-    sequential_done_tool_requires_success: bool = Field(
+    done_tool_requires_success: bool = Field(
         default=False,
-        description="Require a successful terminal tool result before ending a sequential loop. "
+        description="Require a successful terminal tool result before ending either execution mode. "
         "False preserves termination whenever a terminal tool is invoked.",
     )
     max_time_seconds: Optional[float] = Field(
@@ -177,8 +177,8 @@ class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
         default_factory=lambda: ["submit_final_result"],
         description="Tool names that signal the agent loop should terminate. "
         "Sequential execution skips later calls when a terminal tool is "
-        "invoked; concurrent execution finishes the full batch and exits only "
-        "when a terminal call succeeds.",
+        "invoked; concurrent execution finishes the full batch. "
+        "done_tool_requires_success controls whether a failed terminal call can end either mode.",
     )
     model_call_timeout: Optional[float] = Field(
         default=None,
@@ -258,8 +258,8 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         return outputs[i:]
 
     @staticmethod
-    def _tool_error_message(tool_output: str) -> Optional[str]:
-        """Return the ``error`` string a tool reply carries, if any.
+    def _tool_error_message(tool_output: str, *, is_error: Optional[bool] = None) -> Optional[str]:
+        """Use explicit tool status when available, falling back to the legacy payload.
 
         Two shapes arrive here. A reply from the resource server is wrapped as
         ``{"results": "<payload>"}`` where the payload is itself a JSON string,
@@ -267,9 +267,11 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         separately. A tool call that never reached the server (timeout,
         transport failure) is rendered locally as a flat ``{"error": ...}``.
 
-        Only an ``error`` field counts, so a successful reply whose text merely
-        mentions an exception name is not mistaken for a failure.
+        Explicit status takes precedence over the payload, so successful tool
+        text can contain an ``error`` field without being classified as a failure.
         """
+        if is_error is not None:
+            return tool_output if is_error else None
         payload = _decoded_object(tool_output)
         if payload is None:
             return None
@@ -283,11 +285,11 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         error = payload.get("error")
         return error if isinstance(error, str) else None
 
-    def _aborting_error_type(self, tool_output: str) -> Optional[str]:
+    def _aborting_error_type(self, tool_output: str, *, is_error: Optional[bool] = None) -> Optional[str]:
         """Return the abort-worthy exception type named in *tool_output*, if any."""
         if not self.config.abort_on_tool_error_types:
             return None
-        error = self._tool_error_message(tool_output)
+        error = self._tool_error_message(tool_output, is_error=is_error)
         if error is None:
             return None
         return next(
@@ -295,11 +297,11 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             None,
         )
 
-    def _render_tool_observation(self, tool_output: str) -> str:
+    def _render_tool_observation(self, tool_output: str, *, is_error: Optional[bool] = None) -> str:
         """Render an error for the selected harness without changing success output."""
         if self.config.tool_error_observation != "error_prefix":
             return tool_output
-        error = self._tool_error_message(tool_output)
+        error = self._tool_error_message(tool_output, is_error=is_error)
         if error is not None:
             return f"[ERROR] {error}"
         return tool_output
@@ -308,9 +310,10 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         self,
         output_function_call: NeMoGymResponseFunctionToolCall,
         cookies: Any,
-    ) -> Tuple[str, Any]:
+    ) -> Tuple[str, Any, Optional[bool]]:
         """Execute one tool call and render failures as tool outputs."""
         response_cookies = None
+        is_error = None
         try:
             coro = self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -323,18 +326,23 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             if self.config.raise_on_tool_http_error:
                 await raise_for_status(api_response)
             tool_output = (await api_response.content.read()).decode()
+            error_header = api_response.headers.get("x-nemo-gym-tool-error")
+            if error_header in ("true", "false"):
+                is_error = error_header == "true"
         except asyncio.TimeoutError:
             logger.warning(
                 "Tool call '%s' timed out after %ss",
                 output_function_call.name,
                 self.config.tool_call_timeout,
             )
-            tool_output = json.dumps(
-                {
-                    "error": f"Tool call timed out after {self.config.tool_call_timeout}s. "
-                    "Please try a different approach or submit your final answer."
-                }
+            error = (
+                f"Tool call timed out after {self.config.tool_call_timeout}s. "
+                "Please try a different approach or submit your final answer."
             )
+            tool_output = (
+                error if self.config.tool_error_observation == "error_prefix" else json.dumps({"error": error})
+            )
+            is_error = True if self.config.tool_error_observation == "error_prefix" else None
         except Exception as e:
             logger.error(
                 "Tool call '%s' failed: %s: %s",
@@ -342,13 +350,15 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 type(e).__name__,
                 e,
             )
-            tool_output = json.dumps(
-                {
-                    "error": f"Tool call failed: {type(e).__name__}: {e}. "
-                    "Please try a different approach or submit your final answer."
-                }
+            error = (
+                f"Tool call failed: {type(e).__name__}: {e}. "
+                "Please try a different approach or submit your final answer."
             )
-        return tool_output, response_cookies
+            tool_output = (
+                error if self.config.tool_error_observation == "error_prefix" else json.dumps({"error": error})
+            )
+            is_error = True if self.config.tool_error_observation == "error_prefix" else None
+        return tool_output, response_cookies, is_error
 
     @staticmethod
     def _merge_cookies(cookies: Any, updates: List[Any]) -> Any:
@@ -371,6 +381,8 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
         new_outputs: List[Any] = []
+        tool_call_error_status: dict[str, bool] = {}
+        final_model_turn_start = 0
         usage = None
         step = 0
         last_model_response: Optional[NeMoGymResponse] = None
@@ -441,6 +453,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
 
             output = model_response.output
             last_model_response = model_response
+            final_model_turn_start = len(new_outputs)
             new_outputs.extend(output)
 
             usage = accumulate_response_usage(usage, model_response.usage)
@@ -454,8 +467,8 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 o for o in output if o.type == "message" and o.role == "assistant"
             ]
 
-            if not all_fn_calls and all_output_messages:
-                if not self.config.continue_if_not_tool_call:
+            if not all_fn_calls:
+                if all_output_messages and not self.config.continue_if_not_tool_call:
                     logger.info(
                         "Text-only turn on step %d with continue_if_not_tool_call=false — terminating agent loop",
                         step,
@@ -465,6 +478,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 if self.config.prose_only_behavior == "finish":
                     stop_reason = StopReason.ASSISTANT_MESSAGE
                     break
+            if not all_fn_calls and all_output_messages:
                 logger.info(
                     "Text-only turn on step %d — injecting no-tool-call nudge",
                     step,
@@ -480,27 +494,36 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 )
                 resources_server_cookies = self._merge_cookies(
                     resources_server_cookies,
-                    [cookies for _, cookies in results],
+                    [cookies for _, cookies, _ in results],
                 )
-                for output_function_call, (tool_output, _) in zip(all_fn_calls, results):
+                for output_function_call, (tool_output, _, is_error) in zip(all_fn_calls, results):
+                    if is_error is not None:
+                        tool_call_error_status[output_function_call.call_id] = is_error
                     new_outputs.append(
                         NeMoGymFunctionCallOutput(
                             type="function_call_output",
                             call_id=output_function_call.call_id,
-                            output=self._render_tool_observation(tool_output),
+                            output=self._render_tool_observation(tool_output, is_error=is_error),
                         )
                     )
 
-                # All calls in a concurrent batch run. A successful terminal
+                # All calls in a concurrent batch run. An accepted terminal
                 # call takes precedence over other failures in that same batch.
                 done = any(
-                    call.name in done_tools_set and self._tool_error_message(tool_output) is None
-                    for call, (tool_output, _) in zip(all_fn_calls, results)
+                    call.name in done_tools_set
+                    and (
+                        not self.config.done_tool_requires_success
+                        or self._tool_error_message(tool_output, is_error=is_error) is None
+                    )
+                    for call, (tool_output, _, is_error) in zip(all_fn_calls, results)
                 )
                 if done:
                     stop_reason = StopReason.DONE_TOOL
                 else:
-                    aborted = any(self._aborting_error_type(tool_output) for tool_output, _ in results)
+                    aborted = any(
+                        self._aborting_error_type(tool_output, is_error=is_error)
+                        for tool_output, _, is_error in results
+                    )
                     if aborted:
                         stop_reason = StopReason.ERROR
 
@@ -509,23 +532,25 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 continue
 
             for output_function_call in all_fn_calls:
-                tool_output, response_cookies = await self._execute_tool_call(
+                tool_output, response_cookies, is_error = await self._execute_tool_call(
                     output_function_call,
                     resources_server_cookies,
                 )
                 if response_cookies is not None:
                     resources_server_cookies = response_cookies
+                if is_error is not None:
+                    tool_call_error_status[output_function_call.call_id] = is_error
 
                 tool_response = NeMoGymFunctionCallOutput(
                     type="function_call_output",
                     call_id=output_function_call.call_id,
-                    output=self._render_tool_observation(tool_output),
+                    output=self._render_tool_observation(tool_output, is_error=is_error),
                 )
                 new_outputs.append(tool_response)
 
                 if output_function_call.name in done_tools_set and (
-                    not self.config.sequential_done_tool_requires_success
-                    or self._tool_error_message(tool_output) is None
+                    not self.config.done_tool_requires_success
+                    or self._tool_error_message(tool_output, is_error=is_error) is None
                 ):
                     logger.info(
                         "Tool '%s' signaled done — terminating agent loop",
@@ -535,7 +560,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                     stop_reason = StopReason.DONE_TOOL
                     break
 
-                if error_type := self._aborting_error_type(tool_output):
+                if error_type := self._aborting_error_type(tool_output, is_error=is_error):
                     logger.error(
                         "Tool '%s' raised %s — aborting rollout",
                         output_function_call.name,
@@ -587,6 +612,12 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             "stop_reason": stop_reason.value,
             "steps": str(step),
         }
+        if tool_call_error_status:
+            # Keep explicit provenance for stateless reverification without
+            # adding fields to the shared Responses API tool-output type.
+            last_model_response.metadata["tool_call_error_status"] = json.dumps(tool_call_error_status)
+        if stop_reason is StopReason.ASSISTANT_MESSAGE:
+            last_model_response.metadata["final_model_turn_start"] = str(final_model_turn_start)
         return last_model_response
 
     async def run(self, request: Request, body: FinanceAgentRunRequest) -> FinanceAgentVerifyResponse:

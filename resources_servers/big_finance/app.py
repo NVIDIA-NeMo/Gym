@@ -175,6 +175,25 @@ def _is_error_observation(output: str) -> bool:
     return isinstance(payload, dict) and isinstance(payload.get("error"), str)
 
 
+def _tool_call_error_statuses(response: NeMoGymResponse) -> dict[str, bool]:
+    """Read explicit error provenance retained by the agent for later reverification."""
+    raw = (response.metadata or {}).get("tool_call_error_status")
+    try:
+        statuses = json.loads(raw) if raw is not None else {}
+    except (TypeError, ValueError, RecursionError):
+        return {}
+    if not isinstance(statuses, dict):
+        return {}
+    return {call_id: status for call_id, status in statuses.items() if isinstance(status, bool)}
+
+
+def _tool_call_is_error(statuses: dict[str, bool], call_id: str | None, output: str) -> bool:
+    """Prefer transport provenance; preserve content detection for historical calls."""
+    if call_id is not None and call_id in statuses:
+        return statuses[call_id]
+    return _is_error_observation(output)
+
+
 def extract_final_answer(response: NeMoGymResponse) -> Optional[str]:
     """Extract only an answer accepted by the agent's recorded stop semantics."""
     stop_reason = (response.metadata or {}).get("stop_reason")
@@ -182,6 +201,22 @@ def extract_final_answer(response: NeMoGymResponse) -> Optional[str]:
         return None
 
     if stop_reason == "assistant_message":
+        turn_start = (response.metadata or {}).get("final_model_turn_start")
+        if turn_start is not None:
+            try:
+                index = int(turn_start)
+            except (TypeError, ValueError):
+                return None
+            if index < 0 or index > len(response.output):
+                return None
+            return (
+                "".join(
+                    _message_text(item)
+                    for item in response.output[index:]
+                    if getattr(item, "role", None) == "assistant"
+                )
+                or None
+            )
         # The response contains every turn. Only text after the last tool result
         # (or harness-injected user message) belongs to the final model turn.
         chunks: list[str] = []
@@ -194,6 +229,7 @@ def extract_final_answer(response: NeMoGymResponse) -> Optional[str]:
                 chunks.append(_message_text(item))
         return "".join(reversed(chunks)) or None
 
+    error_statuses = _tool_call_error_statuses(response)
     tool_outputs = {
         getattr(item, "call_id", None): str(getattr(item, "output", "") or "")
         for item in response.output
@@ -204,7 +240,7 @@ def extract_final_answer(response: NeMoGymResponse) -> Optional[str]:
         if getattr(item, "type", None) == "function_call" and getattr(item, "name", None) == "final_answer":
             call_id = getattr(item, "call_id", None)
             output = tool_outputs.get(call_id)
-            if output is not None and _is_error_observation(output):
+            if output is not None and _tool_call_is_error(error_statuses, call_id, output):
                 continue
             if stop_reason == "done_tool" and output is None:
                 continue
@@ -226,6 +262,7 @@ def format_trace(response: NeMoGymResponse) -> str:
     lines: list[str] = []
     step = -1
     in_model_batch = False
+    error_statuses = _tool_call_error_statuses(response)
     for item in response.output:
         item_type = getattr(item, "type", None)
         is_assistant_message = item_type == "message" and getattr(item, "role", None) == "assistant"
@@ -258,8 +295,8 @@ def format_trace(response: NeMoGymResponse) -> str:
             lines.append(f"tool_call {getattr(item, 'name', '')}({args})")
         elif item_type == "function_call_output":
             content = str(getattr(item, "output", "") or "")
-            is_error = _is_error_observation(content)
-            if content.startswith("[ERROR]"):
+            is_error = _tool_call_is_error(error_statuses, getattr(item, "call_id", None), content)
+            if is_error and content.startswith("[ERROR]"):
                 content = content[len("[ERROR]") :].lstrip()
             if len(content) > _TOOL_RESULT_CAP:
                 content = content[:_TOOL_RESULT_CAP] + "..."
@@ -385,23 +422,26 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
             tool = self._tools[name]
             if tool is None:
                 return PlainTextResponse(
-                    json.dumps({"error": f"Tool '{name}' is not configured."}),
-                    media_type="application/json",
+                    f"Tool '{name}' is not configured.",
+                    headers={"x-nemo-gym-tool-error": "true"},
                 )
             try:
                 # The shared agent records the HTTP response body verbatim as the
                 # function_call_output. Returning the upstream string directly keeps
                 # model-visible observations identical to the standalone harness.
-                return PlainTextResponse(await tool.run(body if isinstance(body, dict) else {}))
+                return PlainTextResponse(
+                    await tool.run(body if isinstance(body, dict) else {}),
+                    headers={"x-nemo-gym-tool-error": "false"},
+                )
             except ToolError as exc:
                 return PlainTextResponse(
-                    json.dumps({"error": str(exc)}),
-                    media_type="application/json",
+                    str(exc),
+                    headers={"x-nemo-gym-tool-error": "true"},
                 )
             except Exception as exc:  # noqa: BLE001 - tool errors are observations, not HTTP 500s
                 return PlainTextResponse(
-                    json.dumps({"error": f"unexpected tool error: {type(exc).__name__}: {exc}"}),
-                    media_type="application/json",
+                    f"unexpected tool error: {type(exc).__name__}: {exc}",
+                    headers={"x-nemo-gym-tool-error": "true"},
                 )
 
         return handler

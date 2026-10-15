@@ -91,6 +91,14 @@ The shared Gym `finance_agent` is configured here with
 These settings implement the standalone harness's prose fallback, concurrent
 execution of a returned tool-call batch, and terminal-tool and error-observation
 semantics without adding BigFinance-specific branches to the shared loop.
+`done_tool_requires_success: true` applies to both sequential and concurrent
+execution. A turn with no tool calls ends the run even when it contains only
+reasoning or no output; such a turn has no final answer.
+
+Tool failures are signaled explicitly by the resources server rather than inferred
+from an `error` field in successful content. The agent records per-call error
+statuses in rollout metadata, which the verifier also uses when rejudging. Older
+rollouts without this metadata retain the legacy error detection.
 
 With the OpenAI overlay, the policy model makes at most 13 upstream attempts per
 request; the independent judge makes at most 21. Each attempt has a 1,800-second
