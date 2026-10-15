@@ -1982,7 +1982,7 @@ class _EagerCompletionIterator:
     def __init__(self, awaitables: Iterator, *, total: int):
         self._awaitables = awaitables
         self._total = total
-        self._tasks: list[asyncio.Task] = []
+        self._tasks: set[Future] = set()
         self._completions: Optional[Iterator[Future]] = None
         self._closed = False
 
@@ -1994,10 +1994,13 @@ class _EagerCompletionIterator:
             raise StopIteration
         if self._completions is None:
             # asyncio.as_completed creates its tasks from a set, so create them here to start rollouts in input order.
-            self._tasks = [asyncio.ensure_future(awaitable) for awaitable in self._awaitables]
+            tasks = [asyncio.ensure_future(awaitable) for awaitable in self._awaitables]
+            self._tasks.update(tasks)
+            for task in tasks:
+                task.add_done_callback(self._on_done)
             self._completions = iter(
                 tqdm.as_completed(
-                    self._tasks,
+                    tasks,
                     desc="Collecting rollouts",
                     miniters=10,
                     total=self._total,
@@ -2006,6 +2009,14 @@ class _EagerCompletionIterator:
             )
         return next(self._completions)
 
+    def _on_done(self, task: Future) -> None:
+        # Retain only unfinished work for cancellation, including when list(iterator) has
+        # already exhausted the completion iterator. as_completed owns unconsumed outcomes.
+        self._tasks.discard(task)
+        if not task.cancelled():
+            # Retrieve failures even if no caller consumes this completion. Awaiting it still raises.
+            task.exception()
+
     async def aclose(self) -> None:
         if self._closed:
             return
@@ -2013,9 +2024,10 @@ class _EagerCompletionIterator:
         if self._completions is not None:
             # Close tqdm's as_completed generator so its progress bar is released.
             self._completions.close()
-        tasks = [task for task in self._tasks if not task.done()]
+        tasks = list(self._tasks)
         for task in tasks:
-            task.cancel()
+            if not task.done():
+                task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -2045,12 +2057,19 @@ class _RowResultIterator:
         return completed.row, completed.result
 
     async def aclose(self) -> None:
-        """Cancel every rollout task still running and wait for the cancellations to land.
+        """Cancel unfinished rollouts and await the end of their client tasks in this process.
 
-        Cancelling a task closes its `/run` request; the server side's
-        ``ClientDisconnectCancellationMiddleware`` then cancels the handler. Awaitables already
-        handed out but not yet awaited raise ``CancelledError``. Iteration stops afterwards. Safe
-        to call more than once.
+        Cancelling an in-flight `/run` request closes its connection. A server using
+        ``ClientDisconnectCancellationMiddleware`` subsequently cancels its handler. This method
+        does not wait for or acknowledge server/agent cleanup, which depends on the agent and may
+        continue after return; it does not guarantee sandbox release or retire an attempt.
+
+        A handed-out awaitable may return an already completed result or raise its exception,
+        including ``CancelledError`` for cancelled work. In bounded mode, an awaitable first
+        awaited after closure raises ``CancelledError`` even if a result was ready. This error
+        propagates in the awaiting caller's task without a call to that task's ``cancel()``;
+        ``asyncio.gather`` and ``TaskGroup`` treat it as cancellation. Iteration stops after closure.
+        Safe to call again after closure completes, or before first use (no rollouts start).
         """
         self._closed = True
         await self._completions.aclose()
@@ -3114,7 +3133,7 @@ class RolloutCollectionHelper(BaseModel):
             collection_succeeded = True
         finally:
             try:
-                if isinstance(completion_iterator, _BoundedCompletionIterator):
+                if hasattr(completion_iterator, "aclose"):
                     await completion_iterator.aclose()
             finally:
                 try:
@@ -3679,7 +3698,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         When ``max_resident_tasks`` is set, at most that many rollout tasks are admitted
         at once. When unset, all examples are scheduled as before. The collection
-        owner closes the bounded iterator on cancellation or error.
+        owner closes either iterator on completion, cancellation or error.
 
         ``dispatch_budget_s`` stops starting rows that many seconds after this call, and
         ``drain_margin_s`` stops sooner for rows that would not have time to finish. A row
@@ -3835,9 +3854,27 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         awaitable is awaited. None schedules all examples up front, as with
         ``asyncio.as_completed``.
 
-        To stop early, ``await`` the returned iterator's ``aclose()``: it cancels every rollout
-        still running (closing its `/run` request) and waits for the cancellations to land.
+        To stop early, ``await`` the returned iterator's ``aclose()``: it cancels unfinished
+        rollouts and waits for their client tasks in this process to end. Cancelling an in-flight
+        `/run` closes its connection; a server with ``ClientDisconnectCancellationMiddleware``
+        subsequently cancels its handler. Server/agent cleanup is not awaited or acknowledged,
+        depends on the agent, and may continue after return. Sandbox release is not guaranteed.
+        Handed-out awaitables may return completed results or raise their exceptions, including
+        ``CancelledError``; bounded awaitables first awaited after closure raise ``CancelledError``.
+        The error propagates in the awaiting caller's task even without cancelling that task,
+        and ``asyncio.gather`` and ``TaskGroup`` treat it as cancellation.
         Without it, abandoned rollouts keep running to completion in the background.
+
+        Use ``finally`` to close the iterator if collection stops early::
+
+            completions = helper.run_examples(examples)
+            try:
+                for future in completions:
+                    row, result = await future
+                    if should_stop(row, result):
+                        break
+            finally:
+                await completions.aclose()
 
         ``dispatch_budget_s`` stops starting rows that many seconds after this call, and
         ``drain_margin_s`` stops sooner for rows that would not have time to finish.
