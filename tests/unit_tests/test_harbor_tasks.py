@@ -15,6 +15,7 @@ import yaml
 
 import nemo_gym.tasks.harbor.build_options as build_options
 import nemo_gym.tasks.harbor.hub as hub_module
+import nemo_gym.tasks.harbor.manifest as manifest_module
 import nemo_gym.tasks.harbor.prepare_builds as prepare_builds
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTaskConfig, content_hash, discover_tasks, load_task
 from nemo_gym.tasks.harbor.cli import (
@@ -2178,20 +2179,20 @@ def test_manifest_publication_failure_keeps_previous_pins(tmp_path, registry_rep
         "",
         tuple(RegistryTask(name, registry_repo.as_uri(), "HEAD", f"tasks/{name}") for name in ("a", "b")),
     )
-    original = Path.replace
+    original = manifest_module.os.replace
 
     def fail_publication(path, target):
         if Path(target) == folder / "manifest.toml":
             raise OSError("interrupted manifest publication")
         return original(path, target)
 
-    monkeypatch.setattr(Path, "replace", fail_publication)
+    monkeypatch.setattr(manifest_module.os, "replace", fail_publication)
     with pytest.raises(OSError, match="interrupted manifest"):
         fetch_dataset(dataset, tmp_path / "datasets")
     assert (folder / "manifest.toml").read_bytes() == before
     assert (folder / "b" / "task.toml").is_file()
     assert not list(folder.glob(".manifest-*"))
-    monkeypatch.setattr(Path, "replace", original)
+    monkeypatch.setattr(manifest_module.os, "replace", original)
     (registry_repo / "tasks" / "b" / "instruction.md").write_text("new contents")
     commit_repo(registry_repo)
     with pytest.raises(HubError, match="no trustworthy source pin"):

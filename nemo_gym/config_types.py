@@ -449,6 +449,20 @@ class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, Ba
 
 
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]
+# The license values a dataset may declare, here and in a Harbor dataset's `[gym]` table.
+DatasetLicense = Union[
+    Literal["Apache 2.0"],
+    Literal["MIT"],
+    Literal["Creative Commons Attribution 4.0 International"],
+    Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
+    Literal["CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1"],
+    Literal["CC BY-SA 4.0"],
+    Literal["CC BY-NC 3.0"],
+    Literal["NVIDIA Internal Use Only, Do Not Distribute"],
+    Literal["NVIDIA Evaluation Dataset License Agreement"],
+    Literal["TBD"],
+    Literal["GNU General Public License v3.0"],
+]
 
 
 class GitlabDatasetSource(BaseModel):
@@ -491,21 +505,7 @@ class DatasetConfig(BaseModel):
     # Deprecated: kept working (and back-filled from/into `source`) for backward compatibility.
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
     huggingface_identifier: Optional[JsonlDatasetHuggingFaceIdentifer] = None
-    license: Optional[
-        Union[
-            Literal["Apache 2.0"],
-            Literal["MIT"],
-            Literal["Creative Commons Attribution 4.0 International"],
-            Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
-            Literal["CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1"],
-            Literal["CC BY-SA 4.0"],
-            Literal["CC BY-NC 3.0"],
-            Literal["NVIDIA Internal Use Only, Do Not Distribute"],
-            Literal["NVIDIA Evaluation Dataset License Agreement"],
-            Literal["TBD"],
-            Literal["GNU General Public License v3.0"],
-        ]
-    ] = None
+    license: Optional[DatasetLicense] = None
 
     @model_serializer(mode="wrap")
     def _omit_empty_preparation_fields(self, handler: Any) -> dict[str, Any]:

@@ -239,6 +239,13 @@ NG_ENVIRONMENT_SERVER_KEY = ENVIRONMENT_SERVER_STAMP_KEY_NAME
 # Implementation name under `environment_servers:`, so readers know which result type a record holds.
 NG_RESULT_TYPE_KEY = "_ng_result_type"
 NG_TASK_ID_KEY = "_ng_task_id"
+# Provenance stamps preparation writes into a materialized row's task_data (the same strings as
+# nemo_gym.tasks.harbor.digest's DIGEST_KEY and DATASET_DIGEST_KEY, which this module does not import).
+# The collector copies only these from a row onto its record: task_data is dataset-controlled, and any
+# other `_ng_*` key there (`_ng_no_persist`, `_ng_failure_class`, ...) would steer the collector.
+NG_DIGEST_KEY = "_ng_digest"
+NG_DATASET_DIGEST_KEY = "_ng_dataset_digest"
+PROVENANCE_KEYS = (NG_DIGEST_KEY, NG_DATASET_DIGEST_KEY)
 _NO_RESULT_FAILURE_CLASSES = frozenset(
     {
         AGENT_REQUEST_FAILED_FAILURE_CLASS,
@@ -388,6 +395,24 @@ def _is_collector_key(key: str) -> bool:
     replaces it with the canonical projection built from those turns.
     """
     return key.startswith("_ng_") or key in ("ng_model_call_capture", NG_PERF_KEY)
+
+
+def _task_data_provenance(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """The :data:`PROVENANCE_KEYS` of a materialized row's ``task_data``: provenance stamps for the record.
+
+    Preparation writes them (a Harbor row carries the task folder digest as ``_ng_digest`` and the
+    dataset digest as ``_ng_dataset_digest``) so that every results row names the inputs it ran, without
+    the materialized-inputs sidecar. An Environment Server never returns them (``_ng_*`` is the
+    collector's namespace), so the collector copies them from the row onto the record. Only the
+    allowlisted keys are copied: ``task_data`` comes from the dataset, and the collector reads other
+    ``_ng_*`` keys (``_ng_no_persist``, ``_ng_failure_class``, ``_ng_result_type``, ...) that a success
+    record does not carry, so a dataset could otherwise drop, reroute or relabel its own results.
+    """
+    task_input = row.get("task_input")
+    task_data = task_input.get("task_data") if isinstance(task_input, Mapping) else None
+    if not isinstance(task_data, Mapping):
+        return {}
+    return {key: task_data[key] for key in PROVENANCE_KEYS if key in task_data}
 
 
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -3435,9 +3460,13 @@ class RolloutCollectionHelper(BaseModel):
             for future in completion_iterator:
                 completed = await future
                 row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
-                if _materialized_taskset(row) is not None and _is_episode_response(result):
-                    # The row went out as an episode request, so the reply is a BaseEpisodeResponse.
-                    result = _episode_record(result)
+                if _materialized_taskset(row) is not None:
+                    if _is_episode_response(result):
+                        # The row went out as an episode request, so the reply is a BaseEpisodeResponse.
+                        result = _episode_record(result)
+                    # Result or failure, the record names the inputs it ran (task and dataset digests).
+                    for key, value in _task_data_provenance(row).items():
+                        result.setdefault(key, value)
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
