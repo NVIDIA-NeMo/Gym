@@ -75,10 +75,12 @@ def _resolved_config():
     )
 
 
+@pytest.mark.parametrize("timed_out", [False, True])
 async def test_session_composition_routes_collector_through_environment_and_responses(
-    setup, monkeypatch: pytest.MonkeyPatch
+    setup, monkeypatch: pytest.MonkeyPatch, timed_out: bool
 ):
     agent, sandbox = setup
+    sandbox.result.update(timed_out=timed_out, return_code=-9 if timed_out else 0)
     monkeypatch.chdir(Path(__file__).resolve().parents[3])
     # The benchmark's existing allowlist is unchanged; this integration is opt-in.
     monkeypatch.setenv("NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING", "1")
@@ -187,6 +189,7 @@ async def test_session_composition_routes_collector_through_environment_and_resp
     assert calls[0][0] == environment_name
     assert calls[3][2]["input"] == "Fix the code"
     assert "grader-only" not in json.dumps(calls[3][2])
+    assert responses_body["status"] == ("incomplete" if timed_out else "completed")
     assert responses_body["output"][-1]["content"][0]["text"] == "Fixed"
     assert responses_body["usage"]["total_tokens"] == 16
     assert not any(record.state is not None for record in agent._session_records.values())

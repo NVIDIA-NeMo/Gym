@@ -327,7 +327,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         collect_observations: bool = True,
         trajectory: Optional[TrajectoryRecord] = None,
-    ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle]:
+    ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle, bool]:
         """Run one headless OpenCode session and read its persisted artifact."""
         await self._ensure_local_runtime()
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
@@ -396,7 +396,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     invocation.status = run_status
             if timed_out:
                 observations.gaps.append(ObservationGap(code="agent_run_timeout"))
-            return output_items, usage, self.config.model, observations
+            return output_items, usage, self.config.model, observations, timed_out
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -419,7 +419,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             TrajectoryRecord(task_id="unscoped", rollout_id=rollout_id or "unscoped") if collect_observations else None
         )
 
-        output_items, usage, model_name, observations = await self._run_opencode(
+        output_items, usage, model_name, observations, timed_out = await self._run_opencode(
             user_message,
             system_prompt,
             rollout_id=rollout_id,
@@ -466,6 +466,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             created_at=int(time()),
             model=model_name,
             object="response",
+            status="incomplete" if timed_out else "completed",
             output=output_items,
             tool_choice=body.tool_choice,
             tools=body.tools,
@@ -575,7 +576,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
             )
             last = gym_resp.output[-1] if gym_resp.output else None
-            naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
+            # An assistant message alone does not establish that the run completed.
+            naturally = (
+                gym_resp.status == "completed"
+                and getattr(last, "type", None) == "message"
+                and getattr(last, "role", None) == "assistant"
+            )
 
             return OpenCodeAgentVerifyResponse.model_validate(
                 verify_json
