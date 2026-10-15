@@ -16,6 +16,7 @@ import asyncio
 import gc
 import json
 import pickle
+import signal
 import sys
 import warnings
 import weakref
@@ -3975,13 +3976,17 @@ class TestRolloutCollection:
         assert not upload_spool_fpath.exists()
 
     @pytest.mark.parametrize("window", [None, 3])
+    @pytest.mark.parametrize("timing_report", [False, True])
     async def test_run_from_config_processing_failure_cancels_resident_tasks(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         empty_global_config: MagicMock,
         window: int | None,
+        timing_report: bool,
+        capsys: pytest.CaptureFixture,
     ) -> None:
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
         offered = 12
         started: set[int] = set()
         cancelled: set[int] = set()
@@ -4033,6 +4038,7 @@ class TestRolloutCollection:
                 dispatch_budget_s=None,
                 drain_margin_s=None,
                 latency_tracker=None,
+                run_timing=None,
             ):
                 awaitables = map(
                     lambda row: self._post(
@@ -4054,6 +4060,7 @@ class TestRolloutCollection:
             input_jsonl_fpath=str(input_fpath),
             output_jsonl_fpath=str(tmp_path / "output.jsonl"),
             max_resident_rollout_tasks=window,
+            dispatch_start_report_within_s=60 if timing_report else None,
             disable_aggregation=True,
             disable_health_check=True,
             upload_rollouts=True,
@@ -4083,6 +4090,8 @@ class TestRolloutCollection:
         assert cancelled == started - {0}
         assert len(started) < offered if window else len(started) == offered
         assert not (tmp_path / "output.jsonl.upload.tmp").exists()
+        assert signal.getsignal(signal.SIGTERM) == previous_sigterm
+        assert ("Run timing summary" in capsys.readouterr().out) == timing_report
 
     async def test_run_from_config_non_retaining_resume_counts_cached_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
