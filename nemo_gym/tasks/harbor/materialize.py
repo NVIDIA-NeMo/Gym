@@ -16,8 +16,8 @@ from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError
 AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
 
 # Instance names in the generated run config, per taskset.
-RESOURCES_SERVER_IMPL = "harbor"
-ENVIRONMENT_SERVER_IMPL = "single_agent_turn"
+ENVIRONMENT_SERVER_IMPL = "harbor"
+ENVIRONMENT_SERVER_INSTANCE = "harbor_environment_server"
 
 
 def _instance_taskset(taskset: str) -> str:
@@ -25,11 +25,6 @@ def _instance_taskset(taskset: str) -> str:
     # the escape marker itself, so e.g. "2.0" and "2_2e0" cannot produce the same instance name.
     safe = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"  # pragma: allowlist secret
     return "".join(chr(byte) if byte in safe else f"_{byte:02x}" for byte in taskset.encode("utf-8"))
-
-
-def resources_server_instance(taskset: str) -> str:
-    """Return an override-compatible resources instance name without changing the taskset ID."""
-    return f"harbor_{_instance_taskset(taskset)}_resources_server"
 
 
 def agent_instance(taskset: str) -> str:
@@ -100,28 +95,22 @@ def run_config(
     agent_overrides: dict[str, Any] | None = None,
     sandbox_provider: str = "sandbox",
 ) -> dict[str, Any]:
-    """The run-config blocks that bind one taskset to the ``harbor`` resources server.
+    """The run-config blocks that bind one taskset to the ``harbor`` environment server.
 
-    The agent block inherits the selected harness config and points it at the taskset's
-    resources server. The environment server is a ``single_agent_turn`` instance. Rows
-    route to it by taskset.
+    The environment server block inherits the shipped ``harbor_environment_server`` config and
+    names the taskset's agent. The agent block inherits the selected harness config and declares
+    the taskset's rows as its validation dataset, which is where rollout collection looks for
+    datasets. Rows route to the environment server by taskset.
     """
-    resources_name = resources_server_instance(taskset)
     agent_name = agent_instance(taskset)
     environment_name = environment_server_instance(taskset)
     return {
         "environment_routing_mode": "taskset",
         "environment_server_routes": {taskset: environment_name},
-        resources_name: {
-            "resources_servers": {
-                RESOURCES_SERVER_IMPL: {
-                    "entrypoint": "app.py",
-                    "domain": "other",
-                    "sandbox_provider": sandbox_provider,
-                    # Verifier logs sit beside the run's rollouts, as an absolute path: the server
-                    # process runs from its own folder, so a relative default would land there.
-                    "artifacts_dir": str(Path(rows_path).resolve().parent / "verifier"),
-                    "tasksets": {taskset: taskset_mapping(tasks, folder)},
+        agent_name: {
+            "_inherit_from": agent_instance_name,
+            "responses_api_agents": {
+                agent_impl: {
                     "datasets": [
                         {
                             "name": taskset,
@@ -132,23 +121,19 @@ def run_config(
                             "jsonl_fpath": str(Path(rows_path).resolve()),
                         }
                     ],
-                }
-            }
-        },
-        agent_name: {
-            "_inherit_from": agent_instance_name,
-            "responses_api_agents": {
-                agent_impl: {
-                    "resources_server": {"type": "resources_servers", "name": resources_name},
                     **(agent_overrides or {}),
                 }
             },
         },
         environment_name: {
-            "_inherit_from": ENVIRONMENT_SERVER_IMPL,
+            "_inherit_from": ENVIRONMENT_SERVER_INSTANCE,
             "environment_servers": {
                 ENVIRONMENT_SERVER_IMPL: {
-                    "resources_server": {"type": "resources_servers", "name": resources_name},
+                    "sandbox_provider": sandbox_provider,
+                    # Verifier logs sit beside the run's rollouts, as an absolute path: the server
+                    # process runs from its own folder, so a relative default would land there.
+                    "artifacts_dir": str(Path(rows_path).resolve().parent / "verifier"),
+                    "tasksets": {taskset: taskset_mapping(tasks, folder)},
                     "agent_server": {"type": "responses_api_agents", "name": agent_name},
                 }
             },
