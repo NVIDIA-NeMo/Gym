@@ -18,9 +18,9 @@ from datasets import load_dataset
 
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data/jee_bench_benchmark.jsonl"
-SOURCE_ID = "anushakamathofficial/indic_jee_bench"
+SOURCE_ID = "ai4bharat/indic-jee-bench"
 # Public dataset revision, not a credential.
-SOURCE_REVISION = "d7566e75bf47dc3cfab7c6e4ddfc0b9b2dbb46e4"  # pragma: allowlist secret
+SOURCE_REVISION = "5ce209f9900a434ead4f040a52004f6fae8aa1f7"  # pragma: allowlist secret
 SOURCE_SPLIT = "test"
 LANGUAGES = {
     "en": "English",
@@ -124,9 +124,9 @@ def prepare(
     source_dir: str | None = None,
     output_fpath: str | None = None,
 ) -> Path:
-    """Load HF configurations or a local snapshot containing data/<language>/test.parquet.
+    """Load the wide HF test split or a local snapshot containing test.parquet.
 
-    All translated answers and identities are checked against the English config.
+    Translations share the original English answers and identities on each row.
     Missing translations are reported; they are never replaced by English rows.
     """
     selected = list(DEFAULT_LANGUAGES) if languages is None else languages
@@ -141,15 +141,26 @@ def prepare(
     ):
         raise ValueError("question_ids must contain unique description/index IDs")
     source_files = {}
+    if source_dir is None:
+        dataset = load_dataset(SOURCE_ID, split=SOURCE_SPLIT, revision=revision)
+    else:
+        path = Path(source_dir) / f"{SOURCE_SPLIT}.parquet"
+        source_files[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        dataset = load_dataset("parquet", data_files={SOURCE_SPLIT: str(path)}, split=SOURCE_SPLIT)
+    records = list(dataset)
 
     def load(language: str) -> dict[str, dict]:
-        if source_dir is None:
-            dataset = load_dataset(SOURCE_ID, language, split=SOURCE_SPLIT, revision=revision)
-        else:
-            path = Path(source_dir) / f"data/{language}/{SOURCE_SPLIT}.parquet"
-            source_files[str(path.relative_to(source_dir))] = hashlib.sha256(path.read_bytes()).hexdigest()
-            dataset = load_dataset("parquet", data_files={SOURCE_SPLIT: str(path)}, split=SOURCE_SPLIT)
-        return _index_rows(list(dataset), language)
+        column = "question" if language == "en" else f"question_{LANGUAGES[language]}_translation"
+        if any(column not in row for row in records):
+            raise ValueError(f"Missing source column: {column}")
+        return _index_rows(
+            [
+                {**row, "question": row[column], "language": LANGUAGES[language], "language_code": language}
+                for row in records
+                if language == "en" or row[column] is not None
+            ],
+            language,
+        )
 
     english = load("en")
     if len(english) != 515:
@@ -168,16 +179,16 @@ def prepare(
         missing = wanted - indexed.keys()
         if question_ids is not None and missing:
             raise ValueError(f"Requested translations missing for {language}: {sorted(missing)}")
-        records = [indexed[identity] for identity in english if identity in wanted and identity in indexed]
-        if not records:
+        selected_records = [indexed[identity] for identity in english if identity in wanted and identity in indexed]
+        if not selected_records:
             raise ValueError(f"No selected questions for {language}")
         coverage[language] = {
             "published_rows": len(indexed),
-            "selected_rows": len(records),
+            "selected_rows": len(selected_records),
             "missing_english_ids": sorted(english.keys() - indexed.keys()),
-            "judge_pass_stage": dict(Counter(record.get("judge_pass_stage") for record in records)),
+            "judge_pass_stage": dict(Counter(record.get("judge_pass_stage") for record in selected_records)),
         }
-        rows.extend(build_rows(records, language=language, revision=revision))
+        rows.extend(build_rows(selected_records, language=language, revision=revision))
 
     path = Path(output_fpath) if output_fpath else OUTPUT_FPATH
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -3,7 +3,7 @@
 
 # Indic JEEBench
 
-Evaluate [`anushakamathofficial/indic_jee_bench`](https://huggingface.co/datasets/anushakamathofficial/indic_jee_bench)
+Evaluate [`ai4bharat/indic-jee-bench`](https://huggingface.co/datasets/ai4bharat/indic-jee-bench)
 with the authors' zero-shot CoT prompt and partial-credit scoring. Reuses Gym's
 `simple_agent`, model adapters, and metric utilities.
 The small `jeebench` resources server handles all four question types.
@@ -60,25 +60,40 @@ gym eval prepare --benchmark indic/jee_bench \
   +use_cached_prepared_benchmarks=false
 ```
 
-The source is pinned to `d7566e75bf47dc3cfab7c6e4ddfc0b9b2dbb46e4`, split `test`.
-Default languages: `as bn gu hi kn ml mr ne or pa sa ta te ur`. The archived
-snapshot contains 7,208 translations: 515 per language except Odia and Sanskrit
-(514 each). English (`en`, 515 rows) is explicitly selectable. Preparation checks
-each translated ID, subject, type, and gold against the English configuration.
+The source is pinned to `5ce209f9900a434ead4f040a52004f6fae8aa1f7`, split `test`.
+Default languages: `as bn gu hi kn ml mr ne or pa sa ta te ur`. The snapshot
+contains 515 original questions and 14 translation columns, producing 7,210
+translated tasks. English (`en`, 515 rows) is explicitly selectable. Each language
+uses `question_<Language>_translation`; English uses `question`. Paper, index,
+subject, type, and gold are shared across languages on the source row.
 IDs combine paper and question number, e.g. `JEE Adv 2016 Paper 1/1`.
 
-All published translation quality flags are retained. Missing translations are
-reported in the generated manifest; no English fallback or quality filtering is
-applied. An explicitly requested missing question fails preparation.
+The dataset includes human-reviewed translation corrections; see its
+[dataset card](https://huggingface.co/datasets/ai4bharat/indic-jee-bench)
+for coverage and caveats. It does not publish per-row `judge_pass_stage` values;
+these remain null rather than implying a quality audit passed. Null translations
+are reported as missing in the generated manifest; empty or malformed text is
+rejected. No English fallback or quality filtering is applied. An explicitly
+requested missing question fails preparation.
 Generated data and manifests remain local and are gitignored.
 
-Use `hf auth login` for private Hub access. If the repository is unavailable, an
-existing local snapshot with `data/<language>/test.parquet` is supported:
+Use `hf auth login` if Hub access requires authentication. A local download with
+`test.parquet` at its root is also supported:
 
 ```bash
 python -m benchmarks.indic.jee_bench.prepare --languages hi \
-  --source-dir /path/to/snapshot
+  --source-dir /path/to/indic-jee-bench
 ```
+
+The source directory is configurable, not hard-coded to a cluster path. The local
+manifest records the parquet SHA-256 as well as the requested revision; when using
+a different snapshot, supply its commit with `--revision`.
+
+This replaces the earlier `anushakamathofficial/indic_jee_bench` source and its
+per-language parquet layout. Regenerate prepared inputs with
+`+use_cached_prepared_benchmarks=false`. Revised translations and the two filled
+Odia/Sanskrit cells mean earlier campaign scores must retain their old dataset
+provenance; rescoring old responses does not evaluate the updated questions.
 
 `--question-ids`, `--revision`, and `--output-fpath` are also available, or pass
 their underscore equivalents through `prepare_script_args`.
@@ -128,6 +143,9 @@ tests live in the model server suite; verifier and rescore integrity tests live
 in the JEEBench server suite. This keeps server imports outside core coverage.
 
 ## Validation in this checkout
+
+The evidence below used the previous `anushakamathofficial/indic_jee_bench`
+snapshot, not the current AI4Bharat translations.
 
 On 2026-10-11, `google/gemma-4-31B-it` (revision
 `842da3794eaa0b77d5f08bae87a17459d91ff475`) completed the eight-question Hindi/English

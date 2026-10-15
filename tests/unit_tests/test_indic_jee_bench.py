@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import importlib
 import json
 from copy import deepcopy
@@ -40,11 +41,21 @@ def source(monkeypatch):
             }
             for row in english
         ]
+    configs["wide"] = [
+        {
+            **{key: row[key] for key in (*prep.ALIGNMENT_FIELDS, "question")},
+            **{
+                f"question_{prep.LANGUAGES[lang]}_translation": configs[lang][i]["question"]
+                for lang in prep.DEFAULT_LANGUAGES
+            },
+        }
+        for i, row in enumerate(english)
+    ]
     calls = []
 
-    def load(repo, language, **kwargs):
-        calls.append((repo, language, kwargs))
-        return deepcopy(configs[language])
+    def load(repo, **kwargs):
+        calls.append((repo, kwargs))
+        return deepcopy(configs["wide"])
 
     monkeypatch.setattr(prep, "load_dataset", load)
     return configs, calls
@@ -52,8 +63,7 @@ def source(monkeypatch):
 
 def test_default_languages_and_ids_are_unique(source, tmp_path):
     configs, calls = source
-    configs["or"].pop()
-    configs["hi"][0]["judge_pass_stage"] = "failed_after_correction_review_needed"
+    configs["wide"][-1]["question_Odia_translation"] = None
     path = prep.prepare(output_fpath=str(tmp_path / "rows.jsonl"))
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     manifest = json.loads(path.with_suffix(".manifest.json").read_text())
@@ -61,9 +71,9 @@ def test_default_languages_and_ids_are_unique(source, tmp_path):
     assert len({row["uuid"] for row in rows}) == len(rows)
     assert {row["language"] for row in rows} == set(prep.DEFAULT_LANGUAGES)
     assert manifest["coverage"]["or"]["missing_english_ids"] == [prep.question_id(configs["en"][-1])]
-    assert manifest["coverage"]["hi"]["judge_pass_stage"]["failed_after_correction_review_needed"] == 1
-    assert len(calls) == 15
-    assert all(call[2] == {"split": "test", "revision": prep.SOURCE_REVISION} for call in calls)
+    assert all(row["judge_pass_stage"] is None for row in rows)
+    assert {row["source_id"] for row in rows} == {"ai4bharat/indic-jee-bench"}
+    assert calls == [(prep.SOURCE_ID, {"split": "test", "revision": prep.SOURCE_REVISION})]
 
 
 def test_english_and_smoke_selection_preserve_prompt_and_gold(source, tmp_path):
@@ -102,32 +112,34 @@ def test_invalid_selection(source, tmp_path, kwargs):
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("gold", "A"),
+        ("gold", "Z"),
+        ("question_Hindi_translation", ""),
+        ("question_Hindi_translation", 42),
         ("question", ""),
-        ("subject", "phy"),
-        ("language_code", "ta"),
-        ("language", "Tamil"),
+        ("subject", "invalid"),
         ("type", "unknown"),
         ("index", -1),
         ("gold", "AB"),
     ],
 )
-def test_bad_translation_or_changed_answer_rejected(source, tmp_path, field, value):
+def test_bad_translation_or_invalid_shared_metadata_rejected(source, tmp_path, field, value):
     configs, _ = source
-    configs["hi"][0][field] = value
+    configs["wide"][0][field] = value
     with pytest.raises(ValueError):
         prep.prepare(languages=["hi"], output_fpath=str(tmp_path / "rows.jsonl"))
 
 
 def test_missing_requested_translation_and_duplicate_rejected(source, tmp_path):
     configs, _ = source
-    missing = configs["hi"].pop()
+    missing = configs["wide"][-1]
+    missing["question_Hindi_translation"] = None
     with pytest.raises(ValueError, match="Requested translations missing"):
         prep.prepare(languages=["hi"], question_ids=[prep.question_id(missing)])
-    configs["hi"].append(configs["hi"][0])
+    configs["wide"].append(configs["wide"][0])
     with pytest.raises(ValueError, match="Duplicate"):
         prep.prepare(languages=["hi"])
-    configs["en"].pop()
+    configs["wide"].pop()
+    configs["wide"].pop()
     with pytest.raises(ValueError, match="515"):
         prep.prepare(languages=["hi"])
 
@@ -138,16 +150,24 @@ def test_local_snapshot_uses_same_conversion(source, monkeypatch, tmp_path):
     from datasets import load_dataset
 
     configs, _ = source
-    for lang in ["en", "hi"]:
-        path = tmp_path / f"data/{lang}/test.parquet"
-        path.parent.mkdir(parents=True)
-        pq.write_table(pa.Table.from_pylist(configs[lang]), path)
+    source_path = tmp_path / "test.parquet"
+    pq.write_table(pa.Table.from_pylist(configs["wide"]), source_path)
+    remote = prep.prepare(languages=["hi"], output_fpath=str(tmp_path / "remote.jsonl"))
     # Restore a real loader without requiring Hub access.
     monkeypatch.setattr(prep, "load_dataset", load_dataset)
     path = prep.prepare(languages=["hi"], source_dir=str(tmp_path), output_fpath=str(tmp_path / "rows.jsonl"))
     manifest = json.loads(path.with_suffix(".manifest.json").read_text())
     assert manifest["prepared_rows"] == 515
-    assert set(manifest["source_file_sha256"]) == {"data/en/test.parquet", "data/hi/test.parquet"}
+    assert path.read_bytes() == remote.read_bytes()
+    assert manifest["source_file_sha256"] == {"test.parquet": hashlib.sha256(source_path.read_bytes()).hexdigest()}
+
+
+def test_missing_translation_column_rejected(source, tmp_path):
+    configs, _ = source
+    del configs["wide"][0]["question_Hindi_translation"]
+    with pytest.raises(ValueError, match="Missing source column: question_Hindi_translation"):
+        prep.prepare(languages=["hi"], output_fpath=str(tmp_path / "rows.jsonl"))
+    assert not (tmp_path / "rows.jsonl").exists()
 
 
 def test_other_question_types_and_invalid_gold(source):
