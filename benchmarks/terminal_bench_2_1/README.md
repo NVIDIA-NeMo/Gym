@@ -158,10 +158,18 @@ a successful smoke, and one task does not establish a benchmark baseline.
 
 The supervisor stops live processes in the harness group and reaps its children before
 capture or verification. On timeout or close, it first records its already adopted
-children, typically services from completed tool calls. It then stops the harness and
-repeatedly drains newly adopted children, including in-flight tools in separate sessions,
-within the cleanup deadline. Earlier adopted services outside the harness group remain
-for Resources to stop after verification or episode failure.
+children. It then stops the harness and repeatedly drains newly adopted children,
+including in-flight tools in separate sessions, within the cleanup deadline. Previously
+adopted children outside the harness group remain for Resources to stop after verification
+or episode failure. This includes unfinished background jobs such as `make &` left by an
+earlier tool call, as well as services; either can continue writing during verification.
+
+To survive this forced-stop cleanup, a service must be outside the harness group and,
+before the stop, adopted by the supervisor or descended from a process that was. In the
+usual tool-launch path, let the process that launched it exit before the harness deadline
+or stop so that adoption can occur. A service still parented by an in-flight tool is
+adopted when that tool exits or is killed during the stop, and is drained with the
+in-flight tools.
 
 Natural CLI exit has no such cutoff: unfinished tools in separate sessions cannot be
 distinguished from services and may still change task files. Adoption races, PID reuse,
