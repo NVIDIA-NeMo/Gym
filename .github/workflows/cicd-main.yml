@@ -98,7 +98,7 @@ jobs:
 
   # Conformance is published separately as an optional check.
   harness_conformance:
-    name: Harness conformance
+    name: Harness conformance (non-blocking)
     needs: [pre-flight]
     uses: ./.github/workflows/harness-conformance.yml
     permissions:

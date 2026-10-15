@@ -128,7 +128,7 @@ jobs:
           echo "[Download conformance report and logs]($ARTIFACT_URL) — open probes/conformance_report.md in the artifact." >> "$GITHUB_STEP_SUMMARY"
 
   report:
-    name: Publish check (non-blocking)
+    name: Publish check
     needs: [select, probe]
     if: always()
     runs-on: ubuntu-latest

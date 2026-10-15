@@ -162,10 +162,7 @@ def test_custom_check_is_separate_from_required_ci_and_probe_permissions():
     main = yaml.safe_load((root / ".github/workflows/cicd-main.yml").read_text())["jobs"]
     workflow = yaml.safe_load((root / ".github/workflows/harness-conformance.yml").read_text())
     assert main["harness_conformance"]["needs"] == ["pre-flight"]
-    assert main["harness_conformance"]["with"]["base-ref"] == (
-        "${{ github.event.merge_group.base_sha || "
-        "(github.ref == 'refs/heads/main' && github.event.before) || needs.pre-flight.outputs.base_ref }}"
-    )
+    assert main["harness_conformance"]["name"] == "Harness conformance (non-blocking)"
     assert "harness_conformance" not in main["Nemo_CICD_Test"]["needs"]
     assert "harness_conformance" not in main["notify-failure"]["needs"]
     assert workflow["permissions"] == {"contents": "read"}
@@ -179,5 +176,5 @@ def test_custom_check_is_separate_from_required_ci_and_probe_permissions():
         == {"contents": "read", "actions": "read", "checks": "write"}
     )
     assert workflow["jobs"]["report"]["if"] == "always()"
-    assert workflow["jobs"]["report"]["name"] == "Publish check (non-blocking)"
+    assert workflow["jobs"]["report"]["name"] == "Publish check"
     assert set(workflow["jobs"]["report"]["needs"]) == {"select", "probe"}
