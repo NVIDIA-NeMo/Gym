@@ -14,6 +14,7 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 
+from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
 from nemo_gym.agent_utils import process_supervisor
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
@@ -27,6 +28,7 @@ from responses_api_agents.hermes_sandboxed_agent.runner import classify_stop, sp
 
 
 LOG = logging.getLogger(__name__)
+MAX_OUTPUT_BYTES = 1024 * 1024
 
 
 class HermesSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
@@ -148,6 +150,31 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         raise HTTPException(400, "Use /run: Hermes requires a resources-server seeded sandbox")
 
+    async def _download_output_tail(self, sandbox: AsyncSandbox, *, remote: str, local: Path) -> str:
+        # Bound bytes inside the sandbox: downloading first still permits unbounded
+        # transfer and memory use when a task service keeps writing diagnostics.
+        script = (
+            "import sys\n"
+            f"limit = {MAX_OUTPUT_BYTES}\n"
+            "marker = b'[Hermes output truncated; showing tail]\\n'\n"
+            "with open(sys.argv[1], 'rb') as source, open(sys.argv[2], 'wb') as target:\n"
+            "    size = source.seek(0, 2)\n"
+            "    prefix = marker if size > limit else b''\n"
+            "    count = min(size, limit - len(prefix))\n"
+            "    source.seek(size - count)\n"
+            "    target.write(prefix + source.read(count))\n"
+        )
+        bounded = f"{remote}/output.tail.log"
+        copied = await sandbox.exec(
+            f"{quote(self.config.runtime_python)} -I -c {quote(script)} "
+            f"{quote(remote + '/output.log')} {quote(bounded)}",
+            timeout_s=30,
+        )
+        if copied.return_code or copied.error_type:
+            raise RuntimeError(f"Could not bound Hermes output: {copied}")
+        await sandbox.download(bounded, local / "output.log")
+        return (local / "output.log").read_text(errors="replace")
+
     async def _run_in_sandbox(self, sandbox, body, rollout_id):
         started = monotonic()
         run_id = uuid4().hex
@@ -202,18 +229,25 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             executed = await sandbox.exec(
                 f"{quote(self.config.runtime_python)} -I {quote(remote + '/process_supervisor.py')} "
                 f"--timeout {self.config.sandbox_timeout} --receipt {quote(remote + '/cleanup.json')} -- "
-                f"{quote(self.config.runtime_python)} -I {quote(remote + '/runner.py')} {quote(remote + '/request.json')}",
+                f"{quote(self.config.runtime_python)} -I {quote(remote + '/runner.py')} {quote(remote + '/request.json')} "
+                f">{quote(remote + '/output.log')} 2>&1",
                 cwd=remote,
                 # The runner owns the model budget; leave time for process cleanup.
                 timeout_s=process_supervisor.exec_timeout(timeout=self.config.sandbox_timeout),
             )
             return_code, error_type = executed.return_code, executed.error_type
             stdout, stderr = executed.stdout or "", executed.stderr or ""
+            # Detached services can inherit worker output. A file prevents them
+            # from keeping the provider's response pipe open after termination.
+            try:
+                stdout += await self._download_output_tail(sandbox, remote=remote, local=local)
+            except Exception:
+                LOG.warning("Could not retrieve Hermes supervisor output; artifacts: %s", local, exc_info=True)
             await sandbox.download(f"{remote}/cleanup.json", local / "cleanup.json")
             receipt = json.loads((local / "cleanup.json").read_text())
             cleanup_confirmed = receipt.get("cleanup_confirmed") is True and receipt.get("error") is None
             if not cleanup_confirmed:
-                raise RuntimeError(f"Hermes cleanup was not confirmed: {receipt.get('error')}")
+                raise RuntimeError(f"Hermes harness termination was not confirmed: {receipt.get('error')}")
             if not return_code and receipt.get("return_code"):
                 return_code = receipt["return_code"]
             if receipt.get("timed_out"):
@@ -248,8 +282,9 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             )
         if launched and not cleanup_confirmed:
             # The resources owner will tear down the sandbox in run()'s finally.
-            # Do not extract a patch that a detached tool might still be changing.
-            raise RuntimeError(f"Hermes cleanup was not confirmed; artifacts: {local}")
+            # Do not extract a patch while the harness process group may still be writing.
+            # Processes that escaped that group remain the sandbox owner's responsibility.
+            raise RuntimeError(f"Hermes harness termination was not confirmed; artifacts: {local}")
         budget_timeout = error_type == "timeout" and result.get("stop_reason") == "wall_time"
         response = trajectory_response(result, body, self.config.model, None if budget_timeout else error_type)
         return response, {
@@ -327,6 +362,8 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                     url_path="/verify",
                     json=body.model_dump(mode="json") | {"response": response.model_dump(mode="json")},
                     cookies=cookies,
+                    # The finally block closes the session, so the resources server keeps tracking it until then.
+                    headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
                 )
                 await raise_for_status(verified)
                 result = await get_response_json(verified)

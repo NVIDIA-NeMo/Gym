@@ -75,6 +75,7 @@ from pydantic import ValidationError
 
 from nemo_gym import openai_utils as openai_utils_module
 from nemo_gym.openai_utils import (
+    CHAT_REQUEST_IGNORED_CLIENT_FIELDS,
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     MAX_NUM_TRIES,
     RESPONSES_TO_TRAIN,
@@ -142,6 +143,23 @@ class TestOpenAIUtils:
 
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+
+    @pytest.mark.parametrize("debug_enabled", [True, False])
+    async def test_failed_response_logs_request_only_when_request_debug_is_enabled(
+        self, monkeypatch, capsys, debug_enabled: bool
+    ) -> None:
+        import nemo_gym.server_utils
+
+        # set_global_aiohttp_client sets the flag on server_utils at startup, after openai_utils was imported.
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", debug_enabled)
+        monkeypatch.setattr(openai_utils_module, "raise_for_status", AsyncMock())
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        request_kwargs = {"url": "https://example.com/v1/chat/completions", "json": {"model": "m"}}
+
+        await client._raise_for_status(SimpleNamespace(ok=False), request_kwargs)
+
+        logged = "Request kwargs:" in capsys.readouterr().out
+        assert logged is debug_enabled
 
     async def test_explicit_attempt_cap_reaches_low_level_transport(
         self,
@@ -1178,6 +1196,37 @@ class TestNeMoGymChatCompletionSchemas:
         for field in CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS:
             with pytest.raises(ValidationError):
                 NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": [], field: "not-a-mapping"})
+
+    @pytest.mark.parametrize("field", sorted(CHAT_REQUEST_IGNORED_CLIENT_FIELDS))
+    @pytest.mark.parametrize("value", [None, "us-east-1", 123, {"ignored": ["value"]}])
+    def test_ignored_client_fields_are_accepted_but_not_forwarded(self, field: str, value: object) -> None:
+        # The pinned OpenHands direct client includes aws_region_name even when unset (null).
+        # Every ignored field must be excluded regardless of its value or serialization mode.
+        assert NeMoGymChatCompletionCreateParamsNonStreaming.model_fields[field].exclude is True
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+            {"messages": [{"role": "user", "content": "hi"}], field: value}
+        )
+
+        assert field in params.model_fields_set
+        assert params.model_dump(exclude_unset=True) == {"messages": [{"role": "user", "content": "hi"}]}
+        assert field not in params.model_dump()
+        assert field not in orjson.loads(params.model_dump_json())
+        assert field not in orjson.loads(params.model_dump_json(exclude_unset=True))
+
+    def test_tool_message_accepts_openhands_name(self) -> None:
+        # OpenHands' Message serializer includes name on tool-result messages.
+        messages = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "ls", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "name": "ls", "content": "ok"},
+        ]
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": messages})
+
+        assert params.model_dump(exclude_unset=True)["messages"][2] == messages[2]
 
     def test_custom_tool_and_training_tool_call_round_trip(self) -> None:
         payload = {
@@ -2343,7 +2392,11 @@ def test_chat_request_field_set_matches_sdk_without_deprecated_fields() -> None:
     Deprecated fields remain disabled.
     """
     sdk_fields = set(get_type_hints(CompletionCreateParamsNonStreaming, include_extras=True))
-    expected = (sdk_fields - {"function_call", "functions"}) | CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+    expected = (
+        (sdk_fields - {"function_call", "functions"})
+        | CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+        | CHAT_REQUEST_IGNORED_CLIENT_FIELDS
+    )
     actual = set(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields)
     assert actual == expected, (
         f"openai {openai.__version__} Chat request fields changed: "
@@ -2586,3 +2639,26 @@ def test_response_accepts_provider_specific_service_tier() -> None:
     response = NeMoGymResponse.model_validate(payload)
 
     assert response.service_tier == "on-demand"
+
+
+def test_chat_request_drops_litellm_provider_specific_fields_from_history() -> None:
+    from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+
+    params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+        {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+                    ],
+                    "provider_specific_fields": {"refusal": None},
+                },
+            ]
+        }
+    )
+
+    assert "provider_specific_fields" not in params.messages[1]
+    assert params.messages[1]["tool_calls"][0]["function"]["name"] == "bash"

@@ -188,11 +188,11 @@ from pydantic import (
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import (
-    _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG,
     MAX_NUM_TRIES,
     ClientResponse,
     ClientResponseError,
     get_response_json,
+    is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
     request,
 )
@@ -1367,6 +1367,9 @@ class NeMoGymChatCompletionAssistantMessageForTrainingParam(
 class NeMoGymChatCompletionToolMessageParam(ChatCompletionToolMessageParam):
     # Override the iterable which is annoying to work with.
     content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+    # Not in the OpenAI SDK type. OpenHands' Message serializer includes name
+    # alongside tool_call_id on tool-result messages.
+    name: NotRequired[str]
 
 
 class NeMoGymFunctionToolParam(FunctionToolParam):
@@ -1417,9 +1420,35 @@ NeMoGymChatCompletionToolChoiceOptionParam: TypeAlias = Union[
 # unknown keys keep failing validation while these documented contracts pass.
 CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS = frozenset({"chat_template_kwargs", "thinking", "output_config"})
 
+# Client-only fields sent by harnesses such as OpenHands. The strict chat request model
+# accepts them so the request is not rejected with a 422, but never serializes them, so
+# they are not forwarded to the backend.
+CHAT_REQUEST_IGNORED_CLIENT_FIELDS = frozenset({"aws_region_name"})
+
 
 class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_litellm_provider_specific_fields(cls, value: Any) -> Any:
+        """Drop ``provider_specific_fields`` from replayed assistant history.
+
+        litellm's ``Message.model_dump()`` emits that key on every assistant turn
+        (holding response fields it does not model, such as ``refusal``), and
+        harnesses built on litellm replay the dump verbatim. It carries nothing
+        a model server needs, and the strict message schema would reject it.
+        """
+        if not isinstance(value, dict) or not isinstance(value.get("messages"), list):
+            return value
+        value = value.copy()
+        value["messages"] = [
+            {k: v for k, v in message.items() if k != "provider_specific_fields"}
+            if isinstance(message, dict)
+            else message
+            for message in value["messages"]
+        ]
+        return value
 
     messages: List[NeMoGymChatCompletionMessageParam]
     model: Optional[Union[str, ChatModel]] = None
@@ -1470,6 +1499,12 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     thinking: Optional[Dict[str, Any]] = None
     output_config: Optional[Dict[str, Any]] = None
+
+    # Accepted and dropped (see ``CHAT_REQUEST_IGNORED_CLIENT_FIELDS``):
+    # - ``aws_region_name``: included (default null) in the pinned OpenHands fork's
+    #   direct NeMo Gym client kwargs, without passing through litellm.
+    # Do not type-check an ignored value: streaming ingress already dropped any value.
+    aws_region_name: object = Field(default=None, exclude=True)
 
     # Disallow deprecated args
     # function_call: FunctionCall
@@ -1691,7 +1726,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         await raise_for_status(response)
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
-        if not response.ok and _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+        if not response.ok and is_global_aiohttp_client_request_debug_enabled():
             print(f"Request kwargs: {json.dumps(request_kwargs)}")
 
         await raise_for_status(response)

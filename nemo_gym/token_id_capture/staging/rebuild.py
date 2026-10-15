@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Sequence
 
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.token_id_capture.staging.digest import (
     EXTRAS_DIGEST_VERSION,
     STAGING_DIGEST_VERSION,
@@ -107,13 +108,35 @@ def _verify_versions(receipt: RolloutReceipt) -> None:
         )
 
 
+def _staging_owner(receipt: RolloutReceipt, record: CallRecord) -> str:
+    """Return the capture key ``record`` was staged under.
+
+    A restored episode keeps the calls made before its checkpoint, staged under an earlier attempt of the same rollout.
+    Any other owner would splice a foreign rollout's tokens into this receipt.
+    """
+    if record.capture_key is None:
+        return receipt.rollout_id
+    try:
+        owner = EpisodeId.from_capture_key(record.capture_key)
+        current = EpisodeId.from_capture_key(receipt.rollout_id)
+    except ValueError as error:
+        raise _fail("foreign_capture_key", f"call {record.model_call_id}: {error}") from error
+    if owner.rollout_id != current.rollout_id or owner.attempt > current.attempt:
+        raise _fail(
+            "foreign_capture_key",
+            f"call {record.model_call_id} is staged under {record.capture_key}, "
+            f"which is not an earlier attempt of {receipt.rollout_id}",
+        )
+    return record.capture_key
+
+
 def _compare_manifest_fields(
     receipt: RolloutReceipt,
     record: CallRecord,
     snapshot: StagedCallBaseSnapshot,
 ) -> None:
     call_id = record.model_call_id
-    if snapshot.rollout_id != receipt.rollout_id:
+    if snapshot.rollout_id != _staging_owner(receipt, record):
         raise _fail("wrong_rollout", f"snapshot {call_id} belongs to {snapshot.rollout_id}")
     comparisons = {
         "model_call_id": snapshot.model_call_id,
