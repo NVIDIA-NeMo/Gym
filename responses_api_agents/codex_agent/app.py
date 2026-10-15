@@ -27,7 +27,7 @@ from contextlib import AsyncExitStack
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from time import time
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Mapping, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -66,6 +66,7 @@ from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
+from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.codex_agent.observability import read_codex_observations
 from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
@@ -74,6 +75,8 @@ from responses_api_agents.codex_agent.transport import rate_limit_proxy
 
 LOG = logging.getLogger(__name__)
 _SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
+# Characters of Codex stderr kept in the error of an activation that never started a turn.
+_STDERR_TAIL_CHARS = 2000
 _COMPACTION_ADVISORY = (
     "Heads up: Long threads and multiple compactions can cause the model to be less accurate. "
     "Start a new thread when possible to keep threads small and targeted."
@@ -115,6 +118,11 @@ fi
         bootstrap + f"python3 -I -c {shlex.quote(validate)} {shlex.quote(workdir)} "
         f"{shlex.quote(directory)} {shlex.quote(runtime)} && mkdir -p {shlex.quote(directory + '/home/.codex')}"
     )
+
+
+def _codex_mcp_server_name(name: str) -> bool:
+    """Whether Codex accepts ``name`` as an MCP server name."""
+    return re.fullmatch(r"[A-Za-z0-9_-]+", name) is not None
 
 
 def _toml_key(key: str) -> str:
@@ -424,6 +432,8 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # Extra config.toml content deep-merged over the generated base config (mcp_servers, features,
     # tools, model_verbosity, ...). Per-rollout Gym MCP entries take precedence on name collisions.
     extra_config: dict[str, Any] = Field(default_factory=dict)
+    # Per-call timeout Codex applies to Gym MCP tools (`tool_timeout_sec`); None leaves the CLI default.
+    mcp_tool_timeout_seconds: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
@@ -438,6 +448,13 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
             and self.model_auto_compact_token_limit > self.model_context_window * 9 // 10
         ):
             raise ValueError("model_auto_compact_token_limit must not exceed 90% of model_context_window")
+        return self
+
+    @model_validator(mode="after")
+    def validate_mcp_tool_timeout(self) -> "CodexAgentConfig":
+        """A tool call cannot outlast the Codex run that makes it."""
+        if self.mcp_tool_timeout_seconds is not None and self.mcp_tool_timeout_seconds > self.timeout:
+            raise ValueError("mcp_tool_timeout_seconds must not exceed timeout, which bounds the whole Codex run")
         return self
 
 
@@ -507,8 +524,27 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "/tmp/nemo-gym-codex"
         ):
             raise HTTPException(422, "Codex runtime/session files must be outside SandboxAccess.workdir")
-        if any(access.required for access in self.effective_tool_accesses(body)):
-            raise HTTPException(422, "Native Codex supports its own sandbox tools, not required HTTP/MCP tools")
+        tool_accesses = self.effective_tool_accesses(body)
+        unsupported = [
+            access.name for access in tool_accesses if access.required and not isinstance(access, MCPToolAccess)
+        ]
+        if unsupported:
+            raise HTTPException(
+                422,
+                "Native Codex supports only MCP tool grants; required grants it cannot use: "
+                + ", ".join(sorted(unsupported)),
+            )
+        # Codex cannot start an MCP server whose name has other characters; _granted_mcp_servers skips optional ones.
+        invalid = [
+            access.name
+            for access in tool_accesses
+            if isinstance(access, MCPToolAccess) and access.required and not _codex_mcp_server_name(access.name)
+        ]
+        if invalid:
+            raise HTTPException(
+                422,
+                "Codex MCP server names may contain only letters, digits, '-' and '_': " + ", ".join(sorted(invalid)),
+            )
         if self.config.model_server is None:
             raise HTTPException(422, "Native Codex requires a sandbox-reachable Gym model_server")
         if not self.config.codex_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.codex_version):
@@ -673,7 +709,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
         system: str,
     ) -> NeMoGymResponse:
         config = self._build_config(
-            self._resolve_call_base_url(state.request.episode_id.capture_key), developer_instructions=system
+            self._resolve_call_base_url(state.request.episode_id.capture_key),
+            developer_instructions=system,
+            mcp_servers=self._granted_mcp_servers(state.request),
         )
         await state.upload_text("home/.codex/config.toml", toml_dumps(config))
         command = self._build_command("-", state.session.workdir)
@@ -887,6 +925,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if failure is not None:
             raise failure
         if error:
+            if not started:
+                # Startup failures, such as a required MCP server that did not connect, are reported only on stderr.
+                stderr = await self._startup_stderr_tail(state)
+                if stderr:
+                    error = f"{error}; stderr: {stderr}"
             raise HTTPException(502, f"Codex execution failed: {error}")
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
@@ -913,6 +956,24 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 "codex_version": self.config.codex_version,
             },
         )
+
+    async def _startup_stderr_tail(self, state: CodexSandboxSession) -> str:
+        """The end of Codex's stderr, with the session's MCP grant headers redacted; empty if unreadable.
+
+        Codex can copy an MCP server's error body to stderr, and such a body may echo the request headers.
+        """
+        try:
+            stderr = await asyncio.wait_for(
+                state.read_text("stderr.log"), timeout=self.config.session_close_timeout_seconds
+            )
+        except Exception:
+            return ""
+        for access in self.effective_tool_accesses(state.request):
+            if isinstance(access, MCPToolAccess):
+                for value in access.connection.headers.values():
+                    if value:
+                        stderr = stderr.replace(value, "[redacted]")
+        return stderr.strip()[-_STDERR_TAIL_CHARS:]
 
     def _resolve_call_base_url(self, rollout_id: Optional[str]) -> str:
         """Provider base_url for the CLI's model calls (Codex appends ``/responses`` to it).
@@ -1145,19 +1206,50 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
         server_name = str(metadata.get("server_name") or self.config.resources_server.name)
         url_path = str(metadata.get("url_path") or "/mcp")
-        entry: dict[str, Any] = {
-            "url": f"{self._resources_server_base_url().rstrip('/')}/{url_path.lstrip('/')}",
-        }
         headers = metadata.get("headers")
-        if isinstance(headers, dict) and headers:
-            entry["http_headers"] = {str(key): str(value) for key, value in headers.items()}
-        else:
+        if not (isinstance(headers, dict) and headers):
+            headers = None
             LOG.warning(
                 "MCP seed metadata for %r has no headers; the tool endpoint will be called without a "
                 "session token and will reject the calls.",
                 server_name,
             )
-        return {server_name: entry}
+        url = f"{self._resources_server_base_url().rstrip('/')}/{url_path.lstrip('/')}"
+        return {server_name: self._mcp_server_entry(url, headers)}
+
+    def _granted_mcp_servers(self, request: AgentSeedSessionRequest) -> Optional[dict[str, Any]]:
+        """``mcp_servers`` config.toml entries for a session's MCP tool grants.
+
+        Codex connects when the activation starts. A required server that does not connect fails the
+        activation before the first model call; an optional one is left out of the tool list.
+        Codex runs one tool call at a time per server, and a call that times out keeps running on the server,
+        so ``mcp_tool_timeout_seconds`` should exceed the slowest call the server can make.
+        """
+        servers = {}
+        for access in self.effective_tool_accesses(request):
+            if not isinstance(access, MCPToolAccess):
+                continue
+            if not _codex_mcp_server_name(access.name):
+                # Seeding rejects such a name when the grant is required.
+                LOG.warning("Skipping optional MCP grant %r: Codex cannot start a server with that name", access.name)
+                continue
+            servers[access.name] = self._mcp_server_entry(
+                str(access.connection.url), access.connection.headers, required=access.required
+            )
+        return servers or None
+
+    def _mcp_server_entry(
+        self, url: str, headers: Optional[Mapping[str, Any]], *, required: bool = False
+    ) -> dict[str, Any]:
+        """One streamable HTTP ``mcp_servers`` entry; the session token rides on ``http_headers``."""
+        entry: dict[str, Any] = {"url": url}
+        if headers:
+            entry["http_headers"] = {str(key): str(value) for key, value in headers.items()}
+        if required:
+            entry["required"] = True
+        if self.config.mcp_tool_timeout_seconds is not None:
+            entry["tool_timeout_sec"] = float(self.config.mcp_tool_timeout_seconds)
+        return entry
 
     async def _create_response(
         self,
