@@ -16,6 +16,12 @@ from aiohttp import ClientError, ClientResponseError
 from fastapi import Body
 from pydantic import ConfigDict, Field
 
+from environment_servers.nemo_user_sim.episode_contracts import (
+    UserSimEpisodeFailure,
+    UserSimEpisodeRequest,
+    UserSimEpisodeResponse,
+    UserSimEpisodeResult,
+)
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
@@ -55,10 +61,6 @@ from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObser
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.server_utils import request as http_request
 from resources_servers.nemo_user_sim.episode_contracts import (
-    UserSimEpisodeFailure,
-    UserSimEpisodeRequest,
-    UserSimEpisodeResponse,
-    UserSimEpisodeResult,
     UserSimInvocation,
     UserSimSeedResponse,
     UserSimSimulationResult,
