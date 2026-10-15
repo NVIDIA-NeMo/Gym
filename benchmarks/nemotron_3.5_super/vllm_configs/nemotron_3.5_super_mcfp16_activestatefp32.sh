@@ -47,6 +47,7 @@ VLLM_COMMON_ARGS=(
     --mamba-ssm-cache-dtype float16
     --enable-mamba-cache-stochastic-rounding
     --mamba-cache-philox-rounds 5
+    --enable-mamba-fp32-active-state
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
     --skip-mm-profiling
