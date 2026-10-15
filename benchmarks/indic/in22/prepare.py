@@ -57,13 +57,13 @@ ALL_TRANSLATION_COLUMNS = {
 SUBSETS = {
     "gen": {
         "repo_id": "ai4bharat/IN22-Gen",
-        "revision": "e042ab3d3063110b1a85efa0a59bdbf8553bb928",
+        "revision": "e042ab3d3063110b1a85efa0a59bdbf8553bb928",  # pragma: allowlist secret
         "rows": 1024,
         "metadata_columns": {"context", "source", "url", "domain", "num_words", "bucket"},
     },
     "conv": {
         "repo_id": "ai4bharat/IN22-Conv",
-        "revision": "18cd45870ff0a9e65df9b80dbbcc615eec0e4899",
+        "revision": "18cd45870ff0a9e65df9b80dbbcc615eec0e4899",  # pragma: allowlist secret
         "rows": 1503,
         "metadata_columns": {"doc_id", "sent_id", "topic", "domain", "prompt", "scenario", "speaker", "turn"},
     },
