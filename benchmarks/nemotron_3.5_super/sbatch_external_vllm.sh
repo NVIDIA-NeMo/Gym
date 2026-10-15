@@ -13,7 +13,9 @@ set -euo pipefail
 # Input arguments and validation
 # PD (default): NUM_PREFILL_NODES=<P> NUM_DECODE_NODES=<D>
 # Aggregated: VLLM_MODE=aggregated NUM_NODES=<replicas> (defaults to one)
+# Two TP2 replicas per node: VLLM_MODE=aggregated VLLM_ENGINES_PER_NODE=2 NUM_NODES=1
 # Four TP1 replicas per node: VLLM_MODE=aggregated VLLM_ENGINES_PER_NODE=4 NUM_NODES=1
+# Disaggregated pools also support two TP2 replicas per node with VLLM_ENGINES_PER_NODE=2.
 # Disaggregated TP1 pools: VLLM_ENGINES_PER_NODE=4 NUM_PREFILL_NODES=1 NUM_DECODE_NODES=1
 VLLM_MODE="${VLLM_MODE:-pd}"
 VLLM_ENGINES_PER_NODE="${VLLM_ENGINES_PER_NODE:-1}"
@@ -34,9 +36,9 @@ case "$VLLM_MODE" in
         ;;
 esac
 case "$VLLM_ENGINES_PER_NODE" in
-    1 | 4) ;;
+    1 | 2 | 4) ;;
     *)
-        echo "ERROR: VLLM_ENGINES_PER_NODE must be 1 or 4." >&2
+        echo "ERROR: VLLM_ENGINES_PER_NODE must be 1, 2, or 4." >&2
         exit 1
         ;;
 esac
@@ -50,7 +52,7 @@ if [[ "$VLLM_MODE" == aggregated && "$ENABLE_MOONCAKE" != 0 ]]; then
     echo "ENABLE_MOONCAKE requires VLLM_MODE=pd" >&2
     exit 1
 fi
-# Independent mode starts one TP replica or four TP1 replicas per node. Coupled mode
+# Independent mode starts one TP replica, two TP2 replicas, or four TP1 replicas per node. Coupled mode
 # forms one multi-node DP/EP engine per tier for models that cannot fit per node.
 VLLM_PD_DEPLOYMENT_MODE="${VLLM_PD_DEPLOYMENT_MODE:-independent}"
 SLURM_COMMENT="${SLURM_COMMENT:-}"
@@ -71,8 +73,8 @@ if [[ "$VLLM_MODE" == aggregated && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; th
     echo "ERROR: VLLM_MODE=aggregated does not support VLLM_PD_DEPLOYMENT_MODE=coupled." >&2
     exit 1
 fi
-if [[ "$VLLM_ENGINES_PER_NODE" == 4 && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
-    echo "ERROR: VLLM_ENGINES_PER_NODE=4 requires VLLM_PD_DEPLOYMENT_MODE=independent." >&2
+if [[ "$VLLM_ENGINES_PER_NODE" != 1 && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
+    echo "ERROR: VLLM_ENGINES_PER_NODE=$VLLM_ENGINES_PER_NODE requires VLLM_PD_DEPLOYMENT_MODE=independent." >&2
     exit 1
 fi
 
@@ -104,8 +106,8 @@ ROUTER_PREFILL_POLICY="${ROUTER_PREFILL_POLICY:-cache_aware}"
 ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
 ROUTER_POLICY="${ROUTER_POLICY:-cache_aware}"
 ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
-if [[ "$VLLM_ENGINES_PER_NODE" == 4 && "$ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE" != 1 ]]; then
-    echo "ERROR: Four independent TP1 engines require ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE=1." >&2
+if [[ "$VLLM_ENGINES_PER_NODE" != 1 && "$ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE" != 1 ]]; then
+    echo "ERROR: Multiple independent engines require ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE=1." >&2
     exit 1
 fi
 # Optional whitespace-separated flags, e.g. ROUTER_ARGS="--balance-abs-threshold 32 --balance-rel-threshold 1.1".
@@ -235,7 +237,7 @@ export ENABLE_MOONCAKE=$ENABLE_MOONCAKE
 source "$VLLM_CONFIG"
 
 # Custom images contain patched AOT kernels and their build-time smoke check.
-# Do this once on every node before any prefill/decode/headless/TP1 workers fork.
+# Do this once on every node before any prefill/decode/headless workers fork.
 flashinfer_manifest=/opt/super-vl-evals/flashinfer-build.env
 if [[ -f "\$flashinfer_manifest" ]]; then
     if ! grep -qx 'FLASHINFER_REPLAY_VERIFIED=1' "\$flashinfer_manifest"; then
@@ -374,7 +376,7 @@ serve_prefill() {
     fi
     local profile_dir="\${PREFILL_PROFILE_DIR:-\${SLURM_SUBMIT_DIR:-\$PWD}/results/nsys}"
     mkdir -p "\$profile_dir"
-    # Background coupled heads and TP1 engines own their profiler/trigger.
+    # Background coupled heads and independent engines own their profiler/trigger.
     # The parent shell owns router and Mooncake cleanup.
     if (( BASH_SUBSHELL > 0 )); then
         trap cleanup_prefill_profile EXIT
@@ -621,21 +623,22 @@ else
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
-    serve_tp1_engines() {
+    serve_independent_engines() {
         local nixl_base_port=\$1
         shift
-        local arg skip_value engine_index worker_port service_pid failed_status
-        local -a visible_gpus tp1_args service_pids serve_command
+        local arg skip_value engine_index worker_port service_pid failed_status gpu_start gpu_mask
+        local tensor_parallel_size=$(( 4 / VLLM_ENGINES_PER_NODE ))
+        local -a visible_gpus engine_args service_pids serve_command
         # Respect the allocation's GPU order, including UUID-based masks.
         IFS=',' read -r -a visible_gpus <<< "\${CUDA_VISIBLE_DEVICES-0,1,2,3}"
         if (( \${#visible_gpus[@]} < 4 )); then
-            echo "ERROR: Four TP1 engines require at least four visible GPUs." >&2
+            echo "ERROR: $VLLM_ENGINES_PER_NODE independent engines require at least four visible GPUs." >&2
             exit 1
         fi
 
         # Model configs may specify TP/PP/DP for a full-node replica. Replace
         # those settings in both CLI forms, retaining unrelated model tuning.
-        tp1_args=()
+        engine_args=()
         skip_value=0
         for arg in "\$@"; do
             if (( skip_value )); then
@@ -647,27 +650,30 @@ else
                     skip_value=1 ;;
                 (--tensor-parallel-size=*|--pipeline-parallel-size=*|--data-parallel-size=*|--data-parallel-size-local=*|--api-server-count=*|-tp=*|-pp=*|-dp=*)
                     ;;
-                (*) tp1_args+=("\$arg") ;;
+                (*) engine_args+=("\$arg") ;;
             esac
         done
-        tp1_args+=(--tensor-parallel-size 1 --pipeline-parallel-size 1
+        engine_args+=(--tensor-parallel-size "\$tensor_parallel_size" --pipeline-parallel-size 1
             --data-parallel-size 1 --data-parallel-size-local 1 --api-server-count 1)
         # Install once before concurrent engines can race on the package manager.
         if [[ "$VLLM_MODE" == pd && "\${PROFILE_PREFILL:-0}" == 1 ]] && \
             (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
             ensure_nsys || return 1
         fi
-        for (( engine_index = 0; engine_index < 4; engine_index++ )); do
+        for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
             worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
             serve_command=(vllm serve)
             if [[ "$VLLM_MODE" == pd ]] && (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
                 serve_command=(serve_prefill "\$worker_port")
             fi
-            echo "Starting TP1 engine \$engine_index on GPU \${visible_gpus[engine_index]}, port \$worker_port"
-            CUDA_VISIBLE_DEVICES="\${visible_gpus[engine_index]}" \
+            gpu_start=\$(( engine_index * tensor_parallel_size ))
+            printf -v gpu_mask '%s,' "\${visible_gpus[@]:gpu_start:tensor_parallel_size}"
+            gpu_mask=\${gpu_mask%,}
+            echo "Starting TP\$tensor_parallel_size engine \$engine_index on GPUs \$gpu_mask, port \$worker_port"
+            CUDA_VISIBLE_DEVICES="\$gpu_mask" \
             VLLM_NIXL_SIDE_CHANNEL_HOST="\$this_node_hostname" \
             VLLM_NIXL_SIDE_CHANNEL_PORT=\$(( nixl_base_port + engine_index )) \
-            "\${serve_command[@]}" "$MODEL" --served-model-name "$MODEL_NAME" "\${tp1_args[@]}" \
+            "\${serve_command[@]}" "$MODEL" --served-model-name "$MODEL_NAME" "\${engine_args[@]}" \
                 --host "\$this_node_hostname" --port "\$worker_port" &
             worker_pids+=("\$!")
         done
@@ -683,7 +689,7 @@ else
                     failed_status=0
                     wait "\$service_pid" || failed_status=\$?
                     (( failed_status != 0 )) || failed_status=1
-                    echo "ERROR: TP1 engine or router process \$service_pid exited (status=\$failed_status)." >&2
+                    echo "ERROR: Independent engine or router process \$service_pid exited (status=\$failed_status)." >&2
                     exit "\$failed_status"
                 fi
             done
@@ -768,19 +774,19 @@ else
                 aggregated_args+=("\$arg")
             fi
         done
-        if (( $VLLM_ENGINES_PER_NODE == 4 )); then
-            serve_tp1_engines $PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT "\${aggregated_args[@]}"
+        if (( $VLLM_ENGINES_PER_NODE > 1 )); then
+            serve_independent_engines $PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT "\${aggregated_args[@]}"
         else
             vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${aggregated_args[@]}" \
                 --host \$this_node_hostname \
                 --port $WORKER_SERVER_PORT
         fi
-    elif (( $VLLM_ENGINES_PER_NODE == 4 )); then
+    elif (( $VLLM_ENGINES_PER_NODE > 1 )); then
         if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
-            serve_tp1_engines $PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
+            serve_independent_engines $PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
                 "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}"
         else
-            serve_tp1_engines $DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
+            serve_independent_engines $DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
                 "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}"
         fi
     elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
