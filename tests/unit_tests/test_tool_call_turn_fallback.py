@@ -225,11 +225,17 @@ def test_terminal_tool_fallback_refuses_an_id_reused_in_an_earlier_turn(dialect)
     original = _tool("functions.Bash:0", "Bash", '{"command":"ls"}')
     rewritten = _tool("functions.Bash:0", "Bash", '{"command":"rm -rf build"}')
     if dialect == "chat":
-        original = {"role": "assistant", "tool_calls": [{"id": original["call_id"], "function": {
-            "name": "Bash", "arguments": original["arguments"]}}]}
+        original = {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": original["call_id"], "function": {"name": "Bash", "arguments": original["arguments"]}}
+            ],
+        }
     elif dialect == "anthropic":
-        original = {"role": "assistant", "content": [{"type": "tool_use", "id": original["call_id"],
-            "name": "Bash", "input": {"command": "ls"}}]}
+        original = {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": original["call_id"], "name": "Bash", "input": {"command": "ls"}}],
+        }
     entry = _entry([_tool("functions.Bash:0", "Bash", '{"command":"ls"}')])
     transcript = [original, {"type": "function_call_output", "call_id": "functions.Bash:0", "output": "ok"}, rewritten]
     result = resolve_terminal([entry], {"id": "harness", "output": transcript})
