@@ -30,6 +30,7 @@ from nemo_gym.token_id_capture import (
     ParentResolutionStatus,
     TokenCaptureStore,
     TokenEntry,
+    apply_capture_incomplete_verdict,
     stamp_lineage,
 )
 from nemo_gym.token_id_capture.builder import run_builder
@@ -828,6 +829,35 @@ def test_finalize_keeps_a_harness_verdict_that_is_already_a_failure(tmp_path):
         [3, 4],
         [7, 8],
     ]
+
+
+@pytest.mark.parametrize(
+    ("status", "details", "changed", "expected"),
+    [
+        (None, None, True, ("incomplete", {"reason": "max_output_tokens"})),
+        ("completed", None, True, ("incomplete", {"reason": "max_output_tokens"})),
+        ("incomplete", {"reason": "result_missing"}, False, ("incomplete", {"reason": "result_missing"})),
+        ("failed", None, False, ("failed", None)),
+    ],
+    ids=["no-status", "completed", "incomplete-for-its-own-reason", "failed"],
+)
+def test_apply_capture_incomplete_verdict_keeps_a_harness_verdict_of_its_own(status, details, changed, expected):
+    # One precedence rule for both capture placements: a response that reported ``completed`` or
+    # no status takes the capture's verdict; one that reported ``incomplete`` or ``failed``
+    # itself keeps its status and its ``incomplete_details``.
+    response = {"id": "resp", "output": []}
+    if status is not None:
+        response["status"] = status
+    if details is not None:
+        response["incomplete_details"] = details
+    assert apply_capture_incomplete_verdict(response, "max_output_tokens") is changed
+    assert (response.get("status"), response.get("incomplete_details")) == expected
+
+
+def test_apply_capture_incomplete_verdict_leaves_a_complete_ending_alone():
+    response = {"id": "resp", "output": [], "status": "completed"}
+    assert apply_capture_incomplete_verdict(response, None) is False
+    assert response == {"id": "resp", "output": [], "status": "completed"}
 
 
 def test_finalize_withholds_a_cutoff_when_identified_servings_disagree(tmp_path):

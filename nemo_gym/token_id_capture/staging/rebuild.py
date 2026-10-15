@@ -108,6 +108,12 @@ class LinearizedRow:
         later call extended it. The mapping is the one the local capture path applies, and so is
         the abstention: an unresolved finish reason (``finish_reason_resolved`` is ``False``) gives
         no verdict rather than one that follows the call-id order of identical retries.
+
+        A framework consumer puts this verdict on the harness response with
+        ``nemo_gym.token_id_capture.apply_capture_incomplete_verdict``, the precedence rule the
+        local delivery applies as well: a harness that reported ``incomplete`` or ``failed``
+        itself keeps its own verdict, and only a response that reported ``completed`` or no
+        status takes this one.
         """
         if not self.finish_reason_resolved:
             return None

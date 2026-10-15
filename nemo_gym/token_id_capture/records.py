@@ -347,6 +347,26 @@ def incomplete_reason_for_finish_reason(finish_reason: str | None) -> str | None
     return _FINISH_REASON_TO_INCOMPLETE_REASON.get(finish_reason)
 
 
+def apply_capture_incomplete_verdict(response: dict, incomplete_reason: str | None) -> bool:
+    """Put the capture's truncation verdict on a harness response, under one precedence rule.
+
+    ``incomplete_reason`` is the ``incomplete_details.reason`` the capture derived for the
+    delivered chain: ``incomplete_reason_for_finish_reason`` of the terminal call's finish reason
+    on the local path, ``staging.rebuild.LinearizedRow.incomplete_reason`` under worker custody.
+    ``None`` means the chain ended on its own and leaves the response alone. The verdict is
+    written only when the harness reported no status or ``completed``: a harness that reported
+    ``incomplete`` or ``failed`` itself gave the more specific verdict and keeps its ``status`` and
+    ``incomplete_details``. Returns whether the response changed. Gym's delivery and a framework
+    that rebuilds from staged records both apply this rule, so a rollout gets the same verdict
+    whichever placement captured it.
+    """
+    if incomplete_reason is None or response.get("status") not in (None, "completed"):
+        return False
+    response["status"] = "incomplete"
+    response["incomplete_details"] = {"reason": incomplete_reason}
+    return True
+
+
 # Attribution-trail token ``resolve_terminal`` appends when the terminal call was chosen among
 # token-identical calls that recorded different finish reasons, with no witness singling one out.
 # The local projection and the staged rebuild withhold the truncation verdict when the trail

@@ -416,6 +416,9 @@ class CallRecord(_DigestWireModel):
     # ``tool_calls``, ``content_filter``), read from the served payload when the row is committed;
     # ``None`` when the payload stated none or the row predates the column. The rebuild reports the
     # terminal row's value so a framework can mark a ``length`` or ``content_filter`` ending incomplete.
+    # Like every column of this wire model, it binds the model server and the framework to one Gym
+    # version: the manifest route serializes it on every row, and a framework whose Gym predates the
+    # column rejects each row (``extra="forbid"``) as ``invalid_manifest_row``, as with ``capture_key``.
     finish_reason: StrictStr | None = None
 
     @model_validator(mode="after")
