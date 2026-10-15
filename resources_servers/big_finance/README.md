@@ -40,6 +40,12 @@ BigFinance's retry and timeout settings to its own `big_finance_policy_model`
 instance without changing the shared `policy_model`. Omit this overlay when
 selecting another model type.
 
+The independent judge defaults to `gpt-5-mini` for convenience. Judge model
+choice affects scores. To compare with published results, explicitly override
+`big_finance_judge_model_name` and match their judge model snapshot and grading
+settings, including the reward mode. Configure `big_finance_judge_base_url` and
+`big_finance_judge_api_key` as needed for that endpoint.
+
 ## Optional SEC cache
 
 To reuse SEC downloads across rollouts and server restarts, add these settings

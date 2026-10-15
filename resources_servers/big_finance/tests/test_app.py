@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -313,6 +314,97 @@ def _judge_response(text: str) -> bytes:
         }
     }
     return json.dumps(payload).encode()
+
+
+@pytest.mark.parametrize(
+    "serp_key,tavily_key,expected_backend,expected_key",
+    [
+        ("config-serp", None, "serpapi", "config-serp"),
+        (None, "config-tavily", "tavily", "config-tavily"),
+        ("config-serp", "config-tavily", "serpapi", "config-serp"),
+    ],
+)
+@pytest.mark.parametrize("host_keys", [{}, {"SERP_API_KEY": "host-serp", "TAVILY_API_KEY": "host-tavily"}])
+def test_web_search_configured_backend_preserves_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    serp_key: str | None,
+    tavily_key: str | None,
+    expected_backend: str,
+    expected_key: str,
+    host_keys: dict[str, str],
+) -> None:
+    for key in ("SERP_API_KEY", "TAVILY_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in host_keys.items():
+        monkeypatch.setenv(key, value)
+
+    tool = _server(serp_api_key=serp_key, tavily_api_key=tavily_key, web_search_timeout_s=12.5)._tools["web_search"]
+
+    # Access the backend only after checking that temporary credentials are gone.
+    assert {key: os.environ[key] for key in host_keys} == host_keys
+    for key in {"SERP_API_KEY", "TAVILY_API_KEY"} - host_keys.keys():
+        assert key not in os.environ
+    assert tool.backend.name == expected_backend
+    assert tool.backend.api_key == expected_key
+    assert tool.timeout_s == 12.5
+    assert tool.backend.timeout_s == 12.5
+
+
+def test_web_search_configured_backends_are_isolated_between_instances(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SERP_API_KEY", "host-serp")
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+
+    first = _server(serp_api_key="first-serp")._tools["web_search"]
+    second = _server(tavily_api_key="second-tavily")._tools["web_search"]
+    monkeypatch.setenv("SERP_API_KEY", "later-serp")
+    monkeypatch.setenv("TAVILY_API_KEY", "later-tavily")
+
+    assert first.backend.name == "serpapi"
+    assert first.backend.api_key == "first-serp"
+    assert second.backend.name == "tavily"
+    assert second.backend.api_key == "second-tavily"
+
+
+def test_web_search_without_configured_keys_selects_environment_lazily(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SERP_API_KEY", "initial-serp")
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    tool = _server()._tools["web_search"]
+    monkeypatch.delenv("SERP_API_KEY")
+    monkeypatch.setenv("TAVILY_API_KEY", "later-tavily")
+
+    assert tool.backend.name == "tavily"
+    assert tool.backend.api_key == "later-tavily"
+
+
+def test_web_search_without_any_key_defers_failure_until_use(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SERP_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    tool = _server()._tools["web_search"]
+
+    with pytest.raises(ValueError, match="requires either SERP_API_KEY"):
+        _ = tool.backend
+
+    monkeypatch.setenv("TAVILY_API_KEY", "available-later")
+    assert tool.backend.api_key == "available-later"
+
+
+def test_web_search_backend_selection_failure_restores_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SERP_API_KEY", "host-serp")
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    observed_keys: list[tuple[str | None, str | None]] = []
+
+    def fail_selection(tool: WebSearchTool) -> None:
+        observed_keys.append((os.environ.get("SERP_API_KEY"), os.environ.get("TAVILY_API_KEY")))
+        raise RuntimeError("backend selection failed")
+
+    monkeypatch.setattr(WebSearchTool, "backend", property(fail_selection))
+
+    with pytest.raises(RuntimeError, match="backend selection failed"):
+        _server(tavily_api_key="config-tavily")
+
+    assert observed_keys == [(None, "config-tavily")]
+    assert os.environ["SERP_API_KEY"] == "host-serp"
+    assert "TAVILY_API_KEY" not in os.environ
 
 
 def test_packaged_tool_surface_matches_pinned_snapshot() -> None:

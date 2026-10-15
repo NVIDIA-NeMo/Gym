@@ -41,9 +41,6 @@ behavior without overrides. A profile whose protocol treats prose as the final a
 then executed, while `function_call_output` items are appended in the model's original call order.
 `done_tool_requires_success` controls whether a failed terminal tool can end the loop in
 either mode. Concurrent execution always finishes the complete batch before ending.
-Both shipped BigFinance profiles select `finish`, `concurrent`, `error_prefix`, and
-`done_tools: [final_answer]`, with `done_tool_requires_success: true`; profile tests load those values from the shipped
-configs to guard against silent protocol drift.
 Custom overlays should use `done_tool_requires_success` in place of the earlier
 `sequential_done_tool_requires_success` key.
 

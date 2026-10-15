@@ -36,6 +36,13 @@ requests. Configure the policy model in the normal Gym overlay. Configure the
 independent judge with `big_finance_judge_base_url`,
 `big_finance_judge_api_key`, and `big_finance_judge_model_name`.
 
+The shipped `gpt-5-mini` judge is a convenient default. Judge model choice affects
+scores. When comparing with published results, explicitly override
+`big_finance_judge_model_name` and match the judge model snapshot and grading
+settings used for those results, including the reward mode. Set
+`big_finance_judge_base_url` and `big_finance_judge_api_key` as needed for the
+selected endpoint.
+
 BigFinance copies `policy_model` into its own `big_finance_policy_model`
 instance. The OpenAI overlay in the commands above applies its request settings
 only to that copy, leaving the shared model available with its original settings
