@@ -5,13 +5,18 @@
 The fake provider behaves like OpenSandbox with a durable snapshot store: a snapshot is an explicit copy of a
 running sandbox that lives until deleted, and a sandbox can be created from it. A checkpoint snapshots the
 agent's sandbox and leaves it running; a restore forks the snapshot under a new id.
+
+The last tests run the real OpenCode agent against this server, as a checkpointed rollout runs it.
 """
 
+import asyncio
 import json
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -19,10 +24,19 @@ import pytest
 from omegaconf import DictConfig
 from pytest import MonkeyPatch
 
+from nemo_gym._checkpoint.agent import AgentSessionRecord
+from nemo_gym._checkpoint.control import CheckpointRequest
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.checkpoint import SandboxCheckpointState
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.swebench.app import SwebenchResourcesServer, SwebenchResourcesServerConfig
+from responses_api_agents.opencode_sandboxed_agent.app import (
+    OpenCodeSandboxedAgent,
+    OpenCodeSandboxedAgentConfig,
+    OpenCodeSandboxedAgentRunRequest,
+)
 
 
 AUTH = {"authorization": "Bearer t"}
@@ -441,3 +455,295 @@ def test_checkpointing_without_a_state_dir_fails_at_startup(provider: SnapshotPr
 
     with pytest.raises(ValueError, match="checkpoint.state_dir is required"):
         SwebenchResourcesServer(config=config, server_client=server_client)
+
+
+# -- with the real OpenCode agent ----------------------------------------------------------------------------
+# The OpenCode agent borrows the session's sandbox. Its calls reach this server's app the way ServerClient sends
+# them (under the attempt's /ng-rollout prefix, with the session cookie), and its sandbox client runs commands in
+# the fake backend's sandboxes: ``opencode run`` runs until it is signalled or the test lets it finish, and a launch
+# leaves its session in the sandbox's history, so a snapshot carries it into a fork.
+
+OPENCODE_EXPORT = {"messages": [{"info": {"role": "user"}, "parts": [{"type": "text", "text": "fix the bug"}]}]}
+AGENT_CLOSE = CheckpointRequest(checkpoint_id="c1", deadline_ts=time.time() + 3600)
+
+
+def exec_result(stdout: str = "", return_code: int = 0) -> SimpleNamespace:
+    return SimpleNamespace(stdout=stdout, stderr="", return_code=return_code, error_type=None)
+
+
+def launches_in(provider: SnapshotProvider, sandbox_id: str) -> list[str]:
+    return [c for c in provider.boxes[sandbox_id]["commands"] if "opencode run" in c and "[o]pencode" not in c]
+
+
+class AgentSandbox:
+    """The agent's client for one sandbox of the fake backend."""
+
+    def __init__(self, provider: SnapshotProvider, sandbox_id: str, finish: asyncio.Event) -> None:
+        self.provider = provider
+        self.sandbox_id = sandbox_id
+        self.finish = finish
+        self.interrupted = asyncio.Event()
+
+    async def exec(self, command: str, timeout_s: Optional[float] = None, env: Any = None, **_: Any) -> Any:
+        history = self.provider._box(self.sandbox_id)["commands"]  # a sandbox that is gone raises
+        history.append(command)
+        if "[o]pencode run" in command:
+            self.interrupted.set()
+            return exec_result()
+        if "opencode run" in command:
+            interrupted = asyncio.ensure_future(self.interrupted.wait())
+            finished = asyncio.ensure_future(self.finish.wait())
+            try:
+                await asyncio.wait({interrupted, finished}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                interrupted.cancel()
+                finished.cancel()
+            if self.finish.is_set():
+                return exec_result("Shell: /bin/bash\nOpenCode run finished")
+            self.interrupted.clear()
+            return exec_result("Shell: /bin/bash\n", return_code=130)
+        data_home = (env or {}).get("XDG_DATA_HOME")
+        saved = any(f"XDG_DATA_HOME={data_home}" in c and "opencode run" in c for c in history[:-1])
+        if "session list" in command:
+            return exec_result('[{"id": "ses_1"}]' if saved else "[]")
+        if "opencode export" in command:
+            return exec_result(json.dumps(OPENCODE_EXPORT)) if saved else exec_result(return_code=1)
+        if "opencode db path" in command:
+            return exec_result("/tmp/db")
+        return exec_result()
+
+    async def upload(self, *_: Any, **__: Any) -> None:
+        pass
+
+    async def download(self, remote: str, local: Path) -> None:
+        if str(remote).endswith("export.json"):
+            Path(local).write_text(json.dumps(OPENCODE_EXPORT))
+
+    async def stop(self) -> None:
+        handle = SandboxHandle(sandbox_id=self.sandbox_id, provider_name=self.provider.name, raw=None)
+        await self.provider.close(handle)
+
+    async def disconnect(self) -> None:
+        pass
+
+
+class AppReply:
+    """An httpx response as the agent reads an aiohttp one."""
+
+    def __init__(self, response: httpx.Response) -> None:
+        self.status = response.status_code
+        self.ok = response.status_code < 400
+        self.headers = {key.lower(): value for key, value in response.headers.items()}
+        self.cookies = dict(response.cookies)
+        self._body = response.content
+        self.content = SimpleNamespace(read=AsyncMock(return_value=self._body))
+
+    async def json(self) -> Any:
+        return json.loads(self._body)
+
+    async def text(self) -> str:
+        return self._body.decode(errors="replace")
+
+    async def read(self) -> bytes:
+        return self._body
+
+    def raise_for_status(self) -> None:
+        if not self.ok:
+            raise RuntimeError(f"swebench replied {self.status}: {self._body[:300]!r}")
+
+
+class ResourcesLink:
+    """The agent's ServerClient.post onto this server's app, for one attempt."""
+
+    def __init__(self, client: httpx.AsyncClient, capture_key: str) -> None:
+        self.client = client
+        self.capture_key = capture_key
+        self.calls: list[str] = []
+
+    async def post(self, *, server_name: str = "", url_path: str, json: Any = None, cookies: Any = None, **_: Any):
+        path = f"/ng-rollout/{self.capture_key}{url_path}"
+        self.calls.append(path)
+        self.client.cookies.clear()
+        cookie_header = "; ".join(f"{name}={value}" for name, value in (cookies or {}).items())
+        response = await self.client.post(path, json=json, headers={"cookie": cookie_header} if cookie_header else {})
+        return AppReply(response)
+
+
+def make_opencode_agent(
+    tmp_path: Path, client: httpx.AsyncClient, capture_key: str, provider: SnapshotProvider, finish: asyncio.Event
+) -> tuple[OpenCodeSandboxedAgent, ResourcesLink]:
+    config = OpenCodeSandboxedAgentConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="opencode",
+        resources_server=ResourcesServerRef(type="resources_servers", name="swebench"),
+        model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        opencode_version="1.0",
+        preinstalled_opencode=True,
+        sandbox_provider="sandbox",
+        sandbox_config={},
+        sandbox_timeout=600,
+        opencode_max_context_window=1000,
+        artifacts_dir=str(tmp_path / "artifacts"),
+    )
+    link = ResourcesLink(client, capture_key)
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
+    server_client.post = link.post
+    agent = OpenCodeSandboxedAgent(config=config, server_client=server_client)
+    agent.setup_webserver()
+    agent._create_opencode_config = AsyncMock(return_value={})
+
+    async def connect(sandbox_id: Optional[str] = None, workdir: Optional[str] = None) -> AgentSandbox:
+        provider._box(sandbox_id or "")  # connecting to a sandbox that is gone fails, as on OpenSandbox
+        return AgentSandbox(provider, sandbox_id, finish)
+
+    agent._start_sandbox = connect
+    return agent, link
+
+
+class RunRequest:
+    """The agent's /run request; its ``cookies`` follow ``_cookies``, as Starlette's do."""
+
+    def __init__(self, session_id: str) -> None:
+        self._cookies: dict[str, str] = {}
+        self.session = {SESSION_ID_KEY: session_id}
+        self.state = SimpleNamespace()
+
+    @property
+    def cookies(self) -> dict[str, str]:
+        return self._cookies
+
+
+def run_request(session_id: str) -> RunRequest:
+    return RunRequest(session_id)
+
+
+def run_body(attempt: int = 0) -> OpenCodeSandboxedAgentRunRequest:
+    return OpenCodeSandboxedAgentRunRequest.model_validate(
+        {
+            **INSTANCE,
+            "responses_create_params": {"input": [{"role": "user", "content": "fix the bug"}]},
+            "_ng_rollout_id": EpisodeId(rollout_id="r", attempt=attempt).capture_key,
+        }
+    )
+
+
+async def until(predicate, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not met"
+        await asyncio.sleep(0.01)
+
+
+async def crash_and_continue(
+    provider: SnapshotProvider, tmp_path: Path, record: AgentSessionRecord, finish: asyncio.Event
+) -> tuple[Any, ResourcesLink, SwebenchResourcesServer]:
+    """Fresh servers over the same state: restore c1, then run the replacement attempt to its end."""
+    fresh_server, fresh = make_server(tmp_path / "state")
+    agent, link = make_opencode_agent(tmp_path, fresh, "r-a1", provider, finish)
+    async with fresh:
+        # As rollout collection restores: the checkpointed attempt, which the replacement r-a1 follows.
+        restore = await fresh.post(
+            "/ng-control/v1/checkpoint/restore",
+            json=control("r1", checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "r"}]),
+            headers=AUTH,
+        )
+        assert restore.status_code == 200, restore.text
+        await fresh.post("/ng-control/v1/checkpoint/resume", json=control("r1"), headers=AUTH)
+        await agent.checkpoint_participant.install([record], [EpisodeId(rollout_id="r")])
+        await agent.checkpoint_participant.open_admission()
+        finish.set()
+        result = await asyncio.wait_for(agent.run(run_request("agent-session-2"), run_body(attempt=1)), 30)
+        await fresh_server._checkpointer().settle()
+    return result, link, fresh_server
+
+
+async def test_opencode_continues_in_the_fork_of_its_sandbox_after_a_crash(
+    provider: SnapshotProvider, tmp_path: Path
+) -> None:
+    finish = asyncio.Event()
+    _, client = make_server(tmp_path / "state")
+    agent, link = make_opencode_agent(tmp_path, client, "r", provider, finish)
+    participant = agent.checkpoint_participant
+    async with client:
+        run = asyncio.create_task(agent.run(run_request("agent-session"), run_body()))
+        await until(lambda: "sb-1" in provider.boxes and launches_in(provider, "sb-1"))
+        # Checkpoint c1 in coordination's order: the agent stage parks the run, then this server prepares.
+        await participant.close_admission(AGENT_CLOSE)
+        await until(lambda: participant.readiness().ready)
+        prepared = await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
+        [record] = await participant.export(None, checkpoint_id="c1")
+        commit = await client.post(
+            "/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path)), headers=AUTH
+        )
+        # The process dies with the run parked; its sandbox goes on past the checkpoint.
+        run.cancel()
+        with suppress(asyncio.CancelledError):
+            await run
+    provider.boxes["sb-1"]["commands"].append("echo drift > file")
+
+    result, replacement, _ = await crash_and_continue(provider, tmp_path, record, finish)
+
+    assert prepared.status_code == 200 and commit.status_code == 200, (prepared.text, commit.text)
+    assert record.episode["next"] == "opencode" and record.episode["continue"] is True
+    assert link.calls[0] == "/ng-rollout/r/seed_session"
+    # The replacement asked which sandbox is current and continued OpenCode's session in the fork.
+    assert replacement.calls == ["/ng-rollout/r-a1/sandbox_access", "/ng-rollout/r-a1/verify"], "no re-seed"
+    fork = next(box for box, state in provider.boxes.items() if state["from_snapshot"] == "snap-2")
+    relaunch = launches_in(provider, fork)[-1]
+    assert "--continue" in relaunch and f"XDG_DATA_HOME={record.episode['data_home']}" in relaunch
+    assert "echo drift > file" not in provider.boxes[fork]["commands"], "the fork holds the checkpoint"
+    assert provider.boxes["sb-1"]["state"] == "stopped", "the superseded sandbox is stopped"
+    assert result.reward == 1.0 and result.opencode_finished is True
+
+
+async def test_opencode_asks_for_the_fork_when_the_checkpoint_came_before_its_first_launch(
+    provider: SnapshotProvider, tmp_path: Path
+) -> None:
+    """A checkpoint that opens while the sandbox is still being created parks the run at its first OpenCode
+    boundary (``continue: false``). After a crash the replacement still asks which sandbox is current."""
+    finish = asyncio.Event()
+    created = asyncio.Event()
+    create = provider.create
+
+    async def slow_create(spec: SandboxSpec) -> SandboxHandle:
+        await created.wait()
+        return await create(spec)
+
+    provider.create = slow_create
+    _, client = make_server(tmp_path / "state")
+    agent, link = make_opencode_agent(tmp_path, client, "r", provider, finish)
+    participant = agent.checkpoint_participant
+    async with client:
+        run = asyncio.create_task(agent.run(run_request("agent-session"), run_body()))
+        await until(lambda: link.calls == ["/ng-rollout/r/seed_session"])
+        # The seed is a replay step: the agent stage is ready at once; this server waits for the seed it serves.
+        await participant.close_admission(AGENT_CLOSE)
+        await until(lambda: participant.readiness().ready)
+        preparing = asyncio.create_task(client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH))
+        await asyncio.sleep(0.05)
+        provider.create = create
+        created.set()
+        prepared = await preparing
+        await until(lambda: (participant.legacy_episodes.exported().get("run:r") or {}).get("next") == "opencode")
+        [record] = await participant.export(None, checkpoint_id="c1")
+        commit = await client.post(
+            "/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path)), headers=AUTH
+        )
+        run.cancel()
+        with suppress(asyncio.CancelledError):
+            await run
+
+    result, replacement, _ = await crash_and_continue(provider, tmp_path, record, finish)
+
+    assert prepared.status_code == 200 and commit.status_code == 200, (prepared.text, commit.text)
+    assert record.episode["continue"] is False and record.episode["sandbox_handle"] == "sb-1"
+    assert launches_in(provider, "sb-1") == [], "OpenCode never started before the checkpoint"
+    assert replacement.calls == ["/ng-rollout/r-a1/sandbox_access", "/ng-rollout/r-a1/verify"]
+    fork = next(box for box, state in provider.boxes.items() if state["from_snapshot"] == "snap-2")
+    [launch] = launches_in(provider, fork)
+    assert "--continue" not in launch
+    assert provider.boxes["sb-1"]["state"] == "stopped"
+    assert result.reward == 1.0

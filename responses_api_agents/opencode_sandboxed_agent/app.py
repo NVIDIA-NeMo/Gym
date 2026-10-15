@@ -34,7 +34,7 @@ from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field, FilePath, JsonValue
 
 from nemo_gym._checkpoint.agent import LegacyRun, RestoredAgentSession, require_rollout
-from nemo_gym._checkpoint.steps import StepMode, seed_verify_mode
+from nemo_gym._checkpoint.steps import StepMode, seed_restarts, seed_verify_mode
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
@@ -74,6 +74,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
+from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.sandbox.agent_tools import (
     restricted_network_policy,
     sandbox_server_url,
@@ -1243,22 +1244,47 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         raise _OpenCodeInterrupted()
 
     async def _refresh_sandbox_access(
-        self, cookies: Dict[str, str], sandbox_handle: Optional[str], workdir: Optional[str]
+        self, cookies: Dict[str, str], *, sandbox_handle: Optional[str], workdir: Optional[str]
     ) -> tuple[Optional[str], Optional[str]]:
-        """The session's current sandbox from the resources server, or the known one if it offers no access."""
-        try:
-            response = await self.server_client.post(
-                server_name=self.config.resources_server.name, url_path="/sandbox_access", cookies=cookies
-            )
-            if getattr(response, "status", 200) == 404:
-                return sandbox_handle, workdir
-            await raise_for_status(response)
-            access = await response.json()
-        except Exception:
-            print("Could not refresh sandbox access; continuing with the known handle", format_exc(), file=sys.stderr)
+        """The session's current sandbox from the resources server; the known one if it lends none (404).
+
+        Any other failure raises: after a restore the known handle names the superseded sandbox, and running there
+        would be scored as the model's failure.
+        """
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name, url_path="/sandbox_access", cookies=cookies
+        )
+        if response.status == 404:
             return sandbox_handle, workdir
-        descriptor = (access.get("connection") or {}).get("descriptor") or {}
-        return str(descriptor.get("sandbox_id") or sandbox_handle), access.get("workdir") or workdir
+        await raise_for_status(response)
+        access = SandboxAccess.model_validate(await response.json())
+        return str(access.connection.descriptor.get("sandbox_id") or sandbox_handle), access.workdir
+
+    async def _saved_session_has_task(self, sandbox: AsyncSandbox, data_home: str) -> bool:
+        """Whether OpenCode's database in ``data_home`` holds a session whose first message is the task.
+
+        ``opencode run --continue`` reopens the newest session and silently starts an empty one when there is none,
+        so a relaunch continues only a session that already carries the task. Any failure reads as no session.
+        """
+        env = {"XDG_DATA_HOME": data_home}
+        opencode = 'export PATH="$HOME/.opencode/bin:$PATH" && opencode'
+        try:
+            listed = await sandbox.exec(command=f"{opencode} session list --format json", env=env, timeout_s=60)
+            if listed.return_code != 0:
+                return False
+            session_id = _extract_opencode_session_id(listed.stdout or "")
+            exported = await sandbox.exec(command=f"{opencode} export {quote(session_id)}", env=env, timeout_s=60)
+            if exported.return_code != 0:
+                return False
+            messages = json.loads(exported.stdout or "{}").get("messages")
+        except ValueError:
+            # No session in the data folder yet, or output that is not one: there is nothing to continue.
+            return False
+        except Exception:
+            print("Could not read OpenCode's saved session; starting it over", format_exc(), file=sys.stderr)
+            return False
+        first = messages[0] if isinstance(messages, list) and messages and isinstance(messages[0], dict) else {}
+        return (first.get("info") or {}).get("role") == "user"
 
     async def run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
@@ -1315,6 +1341,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 seed_session_result = await seed_session_response.json()
                 sandbox_handle = seed_session_result.get("sandbox_handle")
                 workdir = seed_session_result.get("workdir")
+            if legacy_run is not None and (
+                seed_restarts(getattr(seed_session_response, "headers", None)) or sandbox_handle is None
+            ):
+                # Nothing saves the sandbox OpenCode runs in: the resources server cannot capture its session, or
+                # the sandbox is the agent's own. The run is a restart: never parked, and after a crash it starts
+                # over from its input.
+                await legacy_run.mark_restart()
             stage = "opencode"
 
         request.state._ng_opencode_mcp = await self._seed_tool_servers(request, body)
@@ -1348,12 +1381,24 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                             await sandbox.disconnect()
                         except Exception:
                             print("Failed to release the sandbox client", format_exc(), file=sys.stderr)
-                if continue_session:
+                if legacy_run is not None:
                     # The resources server owns the sandbox: after a restore it is a fork of the checkpoint's
-                    # snapshot under a new id, and asking for access names it.
-                    sandbox_handle, workdir = await self._refresh_sandbox_access(cookies, sandbox_handle, workdir)
+                    # snapshot under a new id, so the id a boundary names is only a hint. Asking names the current one.
+                    sandbox_handle, workdir = await self._refresh_sandbox_access(
+                        cookies, sandbox_handle=sandbox_handle, workdir=workdir
+                    )
                 sandbox = await self._start_sandbox(sandbox_id=sandbox_handle, workdir=workdir)
                 self._sandbox_id_to_sandbox[session_key] = sandbox
+                if continue_session and not await self._saved_session_has_task(sandbox, data_home):
+                    # OpenCode was stopped before it saved the task, so --continue would open an empty session and the
+                    # model would never see the task: start over with the task, in a fresh data folder.
+                    continue_session = False
+                    data_home = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
+                if legacy_run is not None and legacy_run.park_requested:
+                    # A checkpoint asked this run to park before OpenCode started: park at the boundary instead of
+                    # starting OpenCode only to interrupt it during its install.
+                    stop_sandbox_on_exit = False
+                    continue
                 # Propagating the sandbox handle
                 cookies = _cookie_values(cookies) | {"sandbox_id": session_key}
                 request._cookies = cookies
@@ -1411,8 +1456,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         force_zero_reward=self.config.execution_failure_reward_zero
                         and run_result.get("opencode_failed", False),
                     )
-                # Record the result so a restore never runs a state-changing verification twice.
-                await boundary({"next": "return", "result": response_dict, "run_result": run_result})
+                # Record the result so a restore never runs a state-changing verification twice, with the trajectory
+                # and observations a replacement returns along with it.
+                await boundary(
+                    {
+                        "next": "return",
+                        "result": response_dict,
+                        "run_result": run_result,
+                        "observations": observations.model_dump(mode="json") if observations is not None else None,
+                        "trajectory": trajectory.model_dump(mode="json") if trajectory is not None else None,
+                    }
+                )
         finally:
             for attribute in ("_ng_observation_invocation_id", "_ng_opencode_mcp", "_ng_opencode_checkpoint"):
                 if hasattr(request.state, attribute):
