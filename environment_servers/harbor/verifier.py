@@ -62,6 +62,7 @@ from nemo_gym.sandbox.transfer import (
 )
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 from nemo_gym.tasks.harbor import HarborTask
+from nemo_gym.tasks.harbor.digest import is_ignored
 from nemo_gym.tasks.harbor.models import HarborArtifact
 
 
@@ -555,7 +556,7 @@ class HarborVerificationMixin:
                         task.verifier_image,
                         TESTS_DIR,
                     )
-                await upload_dir(verifier, task.path / "tests", TESTS_DIR)
+                await upload_dir(verifier, task.path / "tests", TESTS_DIR, ignore=is_ignored)
             for archive, kind, source in restored:
                 await self._restore_artifact(verifier, task, archive, kind, source)
                 # The staged tree stays as the diagnostic; the archive served its purpose.
@@ -763,7 +764,7 @@ class HarborVerificationMixin:
             )
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
-            await upload_dir(sandbox, task.path / "tests", TESTS_DIR)
+            await upload_dir(sandbox, task.path / "tests", TESTS_DIR, ignore=is_ignored)
             await _make_test_script_executable(sandbox)
             await self._upload_trajectory(sandbox, trajectory, logs_dir)
             # One plain exec for the whole run. The provider keeps it alive for as long as

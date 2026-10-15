@@ -12,18 +12,21 @@ services see each other by name, ``extra_hosts`` add hostnames, ``post_start``
 hooks run once the service is up, and ``tmpfs``, ``ulimits``, ``sysctls`` and
 ``security_opt`` need a provider that implements
 ``SupportsSandboxServiceOptions``. A service may run on its own provider
-(``service_providers``), the way a GPU sidecar lands on a GPU deployment.
+(``service_providers``), the way a GPU sidecar lands on a GPU deployment, and
+then resolves its external volumes through that provider's own mapping
+(``service_volume_sources``).
 """
 
 import asyncio
+import logging
 import re
 import shlex
 import tempfile
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from graphlib import CycleError, TopologicalSorter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -36,6 +39,7 @@ from nemo_gym.sandbox.compose_fields import (
     check_compose_fields,
     service_resources,
 )
+from nemo_gym.sandbox.compose_volumes import LOGS_TREE, first_link, lexical_target
 from nemo_gym.sandbox.providers import SandboxSpec, create_provider
 from nemo_gym.sandbox.providers.base import (
     COMPOSE_SERVICE_OPTION_FIELDS,
@@ -47,6 +51,12 @@ from nemo_gym.sandbox.providers.base import (
     SupportsSandboxServiceOptions,
     SupportsSandboxSharedStorage,
 )
+from nemo_gym.tasks.harbor.digest import is_ignored
+
+
+LOGGER = logging.getLogger(__name__)
+# Printed by the shell of ``_prepare_logs`` when it removed a non-empty target.
+_HIDDEN_MARK = "gym-logs-target-hidden"
 
 
 def _provider_name(provider) -> str:
@@ -91,6 +101,22 @@ class AsyncSandboxCompose:
     single-key config) for particular services; every provider must reach the others' sandboxes on
     the network. ``platform`` is the one the deployment runs, which a service's ``platform`` must
     match. ``restart_policies`` and ``pull_policies`` record what each service declared.
+
+
+    ``x-sandbox.uploads`` entries (files or folders copied into a service once it starts) are read in
+    this process, so every source must lie under ``upload_root``, the one folder the caller vouches for
+    (the task folder the planner validated against); a document with uploads and no root is refused.
+    ``x-sandbox.logs`` entries name the paths of Harbor's ``/logs`` tree a service bind-mounted: each
+    source is created, world-writable, before the service's command, hooks and healthcheck, and a target
+    elsewhere is linked to it, the way Docker creates both bind targets at container create.
+
+    ``volume_sources`` maps the external volume names and foreign bind paths of the collection's provider to
+    its shared storage; ``service_volume_sources`` gives a service on its own provider that provider's
+    mapping, which its volumes resolve through instead. ``service_setup`` names, per service, a coroutine
+    function the group awaits with that service's sandbox once it is created and its runtime is configured,
+    before its uploads, its command, its hooks and its healthcheck: the caller's own image setup (the Harbor
+    server runs an overlay Dockerfile's ``RUN`` lines there, so they precede the mounts and the command, as
+    a build precedes ``compose up``). An exception from it fails the start and stops the group.
     """
 
     def __init__(
@@ -105,6 +131,9 @@ class AsyncSandboxCompose:
         volume_sources: Mapping[str, str] | None = None,
         service_providers: Mapping[str, Any] | None = None,
         platform: str = "linux/amd64",
+        upload_root: str | Path | None = None,
+        service_volume_sources: Mapping[str, Mapping[str, str]] | None = None,
+        service_setup: Mapping[str, Callable[[AsyncSandbox], Awaitable[None]]] | None = None,
     ):
         self.provider = create_provider(provider) if isinstance(provider, Mapping) else provider
         self.service_providers = {
@@ -124,6 +153,9 @@ class AsyncSandboxCompose:
             raise ValueError("Compose timeout_s and poll_interval_s must be positive")
         self.volume_init_image = volume_init_image
         self.volume_sources = dict(volume_sources or {})
+        self.service_volume_sources = {name: dict(mapping) for name, mapping in (service_volume_sources or {}).items()}
+        self.service_setup = dict(service_setup or {})
+        self.upload_root = Path(upload_root).resolve() if upload_root is not None else None
         self.project = "compose-" + uuid.uuid4().hex
         self.services: dict[str, AsyncSandbox] = {}
         self._plans: dict[str, dict[str, Any]] = {}
@@ -142,6 +174,11 @@ class AsyncSandboxCompose:
     def _provider_for(self, name: str):
         """The provider a service runs on: its own from ``service_providers``, else the collection's."""
         return self.service_providers.get(name, self.provider)
+
+    def _volume_sources_for(self, name: str) -> dict[str, str]:
+        """The shared-storage mapping a service's volumes resolve through: its own provider's from
+        ``service_volume_sources``, else the collection's ``volume_sources``."""
+        return self.service_volume_sources.get(name, self.volume_sources)
 
     def _providers(self) -> list[Any]:
         """Every distinct provider of the collection, the default first."""
@@ -173,9 +210,14 @@ class AsyncSandboxCompose:
             raise NotImplementedError(str(error)) from error
         except ComposeFieldError as error:
             raise ValueError(str(error)) from error
-        unknown_services = set(self.service_providers) - set(services)
-        if unknown_services:
-            raise ValueError(f"service_providers names unknown services: {sorted(unknown_services)}")
+        for field, mapping in (
+            ("service_providers", self.service_providers),
+            ("service_volume_sources", self.service_volume_sources),
+            ("service_setup", self.service_setup),
+        ):
+            unknown_services = set(mapping) - set(services)
+            if unknown_services:
+                raise ValueError(f"{field} names unknown services: {sorted(unknown_services)}")
         networks = self.document.get("networks") or {}
         dependencies = {}
         for name, service in services.items():
@@ -223,8 +265,51 @@ class AsyncSandboxCompose:
                         self._service_options.get(name, {}), provider.pull_policy_options(policy)
                     )
             options = service.get("x-sandbox") or {}
-            if set(options) - {"hosts", "resolve_environment"}:
+            if set(options) - {"hosts", "resolve_environment", "uploads", "logs"}:
                 raise NotImplementedError(f"Service {name!r}: unsupported x-sandbox options")
+            logs = options.get("logs", [])
+            if not isinstance(logs, list) or any(
+                not isinstance(entry, Mapping) or set(entry) != {"source", "target"} for entry in logs
+            ):
+                raise ValueError(f"Service {name!r}: x-sandbox.logs requires a list of source/target mappings")
+            for entry in logs:
+                source, target = entry["source"], entry["target"]
+                if not isinstance(source, str) or not (source == LOGS_TREE or source.startswith(LOGS_TREE + "/")):
+                    raise ValueError(f"Service {name!r}: x-sandbox.logs source {source!r} is not under {LOGS_TREE}")
+                if not isinstance(target, str) or not target.startswith("/") or ".." in target.split("/"):
+                    raise ValueError(f"Service {name!r}: x-sandbox.logs target {target!r} must be an absolute path")
+                if not PurePosixPath(target).name:
+                    # `/.` and `/././` name the root as `/` does: the planner's rule, for a document it did not write.
+                    raise ValueError(f"Service {name!r}: x-sandbox.logs target {target!r} is the container root")
+                # Compared in the lexical form ``_prepare_logs`` links (`/logs/.` and `//logs` are `/logs`): the
+                # spelling must not get a nesting target past this check (M22 review).
+                source_path, target_path = lexical_target(source) + "/", lexical_target(target) + "/"
+                if source_path != target_path and (
+                    source_path.startswith(target_path) or target_path.startswith(source_path)
+                ):
+                    # The target is replaced by a link to the source: one inside the other would delete the
+                    # source or link it to itself.
+                    raise ValueError(f"Service {name!r}: x-sandbox.logs target {target!r} and source {source!r} nest")
+            uploads = options.get("uploads", [])
+            if not isinstance(uploads, list) or any(
+                not isinstance(entry, Mapping) or set(entry) != {"source", "target"} for entry in uploads
+            ):
+                raise ValueError(f"Service {name!r}: x-sandbox.uploads requires a list of source/target mappings")
+            if uploads and self.upload_root is None:
+                raise ValueError(f"Service {name!r}: x-sandbox.uploads need an upload_root to read sources from")
+            for entry in uploads:
+                source, target = entry["source"], entry["target"]
+                if not isinstance(source, str) or not Path(source).exists():
+                    raise ValueError(f"Service {name!r}: upload source {source!r} does not exist")
+                # Sources are read in this process: only the folder the caller vouches for, links resolved.
+                if not Path(source).resolve().is_relative_to(self.upload_root):
+                    raise ValueError(
+                        f"Service {name!r}: upload source {source!r} lies outside the upload root {self.upload_root}"
+                    )
+                if not isinstance(target, str) or not target.startswith("/") or ".." in target.split("/"):
+                    raise ValueError(f"Service {name!r}: upload target {target!r} must be an absolute container path")
+                if not PurePosixPath(target).name:
+                    raise ValueError(f"Service {name!r}: upload target {target!r} is the container root")
             selected = options.get("resolve_environment", [])
             if not isinstance(selected, list) or any(not isinstance(key, str) for key in selected):
                 raise ValueError("x-sandbox.resolve_environment requires a list of environment variable names")
@@ -289,7 +374,9 @@ class AsyncSandboxCompose:
                     "nocopy"
                 }:
                     raise NotImplementedError("Unsupported bind/volume options")
-                if volume["type"] == "bind" and volume["source"] not in self.volume_sources:
+                # Resolved through the mapping of the provider that runs the service (see _prepare_volumes).
+                volume_sources = self._volume_sources_for(name)
+                if volume["type"] == "bind" and volume["source"] not in volume_sources:
                     raise NotImplementedError("Remote bind mounts require a volume_sources mapping to shared storage")
                 if volume["type"] == "volume":
                     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", volume["source"]):
@@ -301,9 +388,9 @@ class AsyncSandboxCompose:
                     declaration = declared[volume["source"]] or {}
                     if set(declaration) - {"name", "external"}:
                         raise NotImplementedError("Unsupported named volume driver/options")
-                    if declaration.get("external") and volume["source"] not in self.volume_sources:
+                    if declaration.get("external") and volume["source"] not in volume_sources:
                         raise NotImplementedError("External volumes require a volume_sources mapping")
-                source = self.volume_sources.get(volume["source"], f"{self.project}/{volume['source']}")
+                source = volume_sources.get(volume["source"], f"{self.project}/{volume['source']}")
                 provider.shared_volume_options(source, volume["target"], read_only=volume.get("read_only", False))
         # Forwarding chains (a -> service:b -> service:c) resolve to one namespace; a cycle is named here, before
         # the dependency sort reports it anonymously.
@@ -487,13 +574,14 @@ class AsyncSandboxCompose:
             # Everything about a service's volumes happens on the provider that runs it: the directory on its
             # shared storage, the copy-up seed (a sandbox of the service's own spec) and the mount options.
             provider = self._provider_for(name)
+            volume_sources = self._volume_sources_for(name)
             metadata = provider.shared_volume_metadata()
             helper = await self._volume_helper_for(provider, root)
             mounts = []
             for volume in service["volumes"]:
                 source = volume["source"]
-                managed = source not in self.volume_sources
-                relative = self.volume_sources.get(source, f"{self.project}/{source}")
+                managed = source not in volume_sources
+                relative = volume_sources.get(source, f"{self.project}/{source}")
                 if managed:
                     result = await helper.exec(f"mkdir -p {shlex.quote(root + '/' + relative)}", user="root")
                     if result.return_code:
@@ -609,6 +697,142 @@ class AsyncSandboxCompose:
                     f"Compose service {name!r} post_start hook {index} exited ({result.return_code}): {detail}"
                 )
 
+    async def _exec_privileged(self, sandbox: AsyncSandbox, command: str):
+        """Run ``command`` as root, or as the sandbox's default user when it cannot switch users."""
+        try:
+            result = await sandbox.exec(command, user="root")
+        except Exception:
+            return await sandbox.exec(command)
+        return result if result.return_code == 0 else await sandbox.exec(command)
+
+    async def _upload(self, name: str) -> None:
+        """Copy each ``x-sandbox.uploads`` entry (a task file or folder a bind mount named) into the service.
+
+        Runs after the sandbox starts and before the service's command, so the process finds the files
+        where the Compose file mounted them. The receiving folders are created first, and the folders
+        and files the upload touched (every folder created for it, the folders the files landed in and
+        the files; nothing else under the target) are made readable by every user, for an image whose
+        process runs as a non-root user. A folder's tree is recreated under the target, empty folders
+        included (a program that expects the output or cache folder the task supplies finds it, as under
+        a bind mount), over whatever the image already has there (a merge, where a bind mount would hide
+        the image's folder). The names the task digest skips (``__pycache__``, ``*.pyc``, editor leftovers:
+        :func:`nemo_gym.tasks.harbor.digest.is_ignored`) are left out, so what reaches the service is what
+        the digest covers, and a link inside the folder is refused, naming it, rather than read through.
+        """
+        sandbox = self.services[name]
+        for entry in (self.document["services"][name].get("x-sandbox") or {}).get("uploads", []):
+            source, target = Path(entry["source"]), entry["target"]
+            if source.is_dir():
+                link = first_link(source)
+                if link is not None:
+                    raise RuntimeError(f"Service {name!r}: upload source {source} contains a link: {link}")
+                remotes: dict[Path, str] = {}
+                folders = {target}
+                for path in sorted(source.rglob("*")):
+                    relative = path.relative_to(source).as_posix()
+                    if is_ignored(relative):
+                        continue
+                    if path.is_dir():
+                        folders.add(target + "/" + relative)
+                    elif path.is_file():
+                        remotes[path] = target + "/" + relative
+                        folders.add(remotes[path].rsplit("/", 1)[0])
+            else:
+                remotes = {source: target}
+                folders = {target.rsplit("/", 1)[0] or "/"}
+            # Which folders ``mkdir -p`` is about to create, intermediates included: they are created with the
+            # root shell's umask, so they are in the chmod below; the folders that already exist above them are not.
+            created = await self._missing_folders(sandbox, folders)
+            result = await self._exec_privileged(
+                sandbox, "mkdir -p " + " ".join(shlex.quote(f) for f in sorted(folders))
+            )
+            if result.return_code:
+                raise RuntimeError(
+                    f"Service {name!r}: cannot create {target!r} for upload: {result.stderr or result.stdout}"
+                )
+            for path, remote in remotes.items():
+                await sandbox.upload(path, remote)
+            # Never recursive, never ``/``: the target may be a folder the image ships (``/etc``) or hold a
+            # shared-storage mount, and what already existed above the created folders is not this upload's.
+            touched = [*sorted((folders | created) - {"/"}), *remotes.values()]
+            for chunk in range(0, len(touched), 256):
+                paths = " ".join(shlex.quote(p) for p in touched[chunk : chunk + 256])
+                await self._exec_privileged(sandbox, f"chmod a+rX {paths} 2>/dev/null || true")
+
+    async def _prepare_logs(self, name: str) -> None:
+        """Create each ``x-sandbox.logs`` source (a path of Harbor's ``/logs`` tree the service bind-mounted) in
+        the service, world-writable, and link a target elsewhere to it.
+
+        Runs after the caller's image setup and before the uploads, the service's command, its ``post_start``
+        hooks and its healthcheck, where Harbor's bind sits between the image build and ``docker compose cp``:
+        a healthcheck that needs ``/logs/verifier`` passes on a clean image, and an upload under the target lands
+        in the source through the link. ``/logs/artifacts:/app/output`` under Harbor is a second mount of one
+        host folder that hides whatever the image has at the target, so here the target becomes a link to the
+        source unconditionally (``/logs/artifacts`` is where artifacts are collected from): a folder the image
+        ships there, or an overlay ``RUN mkdir -p`` created, is removed first, with a warning when it was not
+        empty, as a plain folder would keep the task's artifacts out of the collection and show the agent what
+        the mount hides.
+        """
+        sandbox = self.services[name]
+        for entry in (self.document["services"][name].get("x-sandbox") or {}).get("logs", []):
+            # A target spelled with a trailing separator or dot (`/app/output/`, `/app/output/.`, valid at prepare)
+            # names the folder; as the link's name it would make `ln` want an existing directory there, the one
+            # just removed, and `rm -rf` refuses a `.` entry outright. The lexical form, the one ``_validate``
+            # compared, drops both (M22 review).
+            source, target = lexical_target(entry["source"]), lexical_target(entry["target"])
+            quoted_source, quoted_target = shlex.quote(source), shlex.quote(target)
+            command = f"mkdir -p {quoted_source} && chmod 777 {quoted_source}"
+            if target != source:
+                parent = target.rsplit("/", 1)[0] or "/"
+                # An existing link is replaced by ``ln -sfn``. Anything else at the target goes: ``rmdir`` takes
+                # the empty folder quietly, a non-empty one or a file is removed and reported on stdout.
+                command += (
+                    f" && mkdir -p {shlex.quote(parent)}"
+                    f" && if [ -e {quoted_target} ] && [ ! -L {quoted_target} ]; then"
+                    f" rmdir {quoted_target} 2>/dev/null || {{ rm -rf {quoted_target} && echo {_HIDDEN_MARK}; }}; fi"
+                    f" && ln -sfn {quoted_source} {quoted_target}"
+                )
+            result = await self._exec_privileged(sandbox, command)
+            if result.return_code:
+                raise RuntimeError(
+                    f"Service {name!r}: cannot create {source!r} for {target!r}: "
+                    f"{result.stderr or result.stdout or f'exit status {result.return_code}'}"
+                )
+            # A provider may report a command that printed nothing as ``stdout=None`` (OpenSandbox does).
+            if _HIDDEN_MARK in (result.stdout or "").split():
+                LOGGER.warning(
+                    "Service %r: %s was not empty before it became a link to %s; its contents are gone, as a bind "
+                    "mount of %s there would hide them",
+                    name,
+                    target,
+                    source,
+                    source,
+                )
+
+    async def _missing_folders(self, sandbox: AsyncSandbox, folders: set[str]) -> set[str]:
+        """The paths ``mkdir -p`` would create for ``folders``: each one and its missing ancestors, below ``/``.
+
+        One probe lists every ancestor that does not exist yet; only paths from the candidate set are taken
+        from its output, so a name the shell printed oddly is dropped rather than chmod-ed. A probe that
+        fails reports nothing created: the chmod is best effort, the ``mkdir -p`` that follows is not.
+        """
+        candidates: set[str] = set()
+        for folder in folders:
+            parts = [part for part in folder.split("/") if part]
+            candidates.update("/" + "/".join(parts[:depth]) for depth in range(1, len(parts) + 1))
+        if not candidates:
+            return set()
+        probe = " ".join(shlex.quote(path) for path in sorted(candidates))
+        try:
+            result = await self._exec_privileged(
+                sandbox, f'for p in {probe}; do test -e "$p" || printf "%s\\n" "$p"; done'
+            )
+        except Exception:
+            return set()
+        if result.return_code:
+            return set()
+        return {line for line in (result.stdout or "").splitlines() if line in candidates}
+
     async def _wait(self, name, condition):
         if condition == "service_started":
             return
@@ -705,6 +929,15 @@ class AsyncSandboxCompose:
                             cap_add=tuple(service.get("cap_add") or ()),
                             shm_size=service.get("shm_size"),
                         )
+                    # The caller's image setup (an overlay Dockerfile's RUN lines) comes first, as a build precedes
+                    # `compose up`: then the mounts (the logs tree, then the uploads, as Harbor copies task files
+                    # into the mounted container), then, below, the command, hooks and healthcheck.
+                    if name in self.service_setup:
+                        await self.service_setup[name](self.services[name])
+                    if (service.get("x-sandbox") or {}).get("logs"):
+                        await self._prepare_logs(name)
+                    if (service.get("x-sandbox") or {}).get("uploads"):
+                        await self._upload(name)
                 hosts: dict[str, str] = {}
                 if self.services:
                     addresses: dict[str, str] = {}

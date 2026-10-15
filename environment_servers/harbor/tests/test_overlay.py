@@ -437,14 +437,17 @@ class TestOverlay:
         specs: dict[str, SandboxSpec] = {}
 
         class CapturingCompose(FakeCompose):
-            def __init__(self, provider_config, path, *, service_specs, timeout_s, **kwargs):
+            def __init__(self, provider_config, path, *, service_specs, timeout_s, service_setup, **kwargs):
                 super().__init__({"main": sandbox, "api": FakeSandbox(), "kafka": FakeSandbox()})
                 specs.update(service_specs)
+                self.setup = dict(service_setup)
                 # What a provider does with the spec's workdir: it exists, root-owned, before anything runs.
                 sandbox.created_in(service_specs["main"].workdir)
 
             async def start(self):
-                pass
+                # As the adapter does: the caller's setup (the overlay) runs on main once it exists.
+                for name, setup in self.setup.items():
+                    await setup(self.services[name])
 
         monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandboxCompose", CapturingCompose)
 

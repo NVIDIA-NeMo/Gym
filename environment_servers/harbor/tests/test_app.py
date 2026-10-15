@@ -22,6 +22,7 @@ from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from yarl import URL
 
+import environment_servers.harbor.overlay as overlay
 import nemo_gym.sandbox.providers.base as sandbox_base
 from environment_servers.harbor.app import (
     HarborEnvironmentServer,
@@ -2179,6 +2180,7 @@ class TestComposeAndRouting:
             "  kafka:\n    image: org/kafka:1\n    environment: ['KAFKA_TOPIC=${KAFKA_TOPIC:-events}']\n"
         )
         (task.path / "environment" / "api.env").write_text("API_MODE=replay\n")
+        (task.path / "environment" / "seed.json").write_text("{}")
         task = load_task(task.path)
         server.config.tasksets["ds"].tasks["hello"] = task.digest
 
@@ -2187,10 +2189,12 @@ class TestComposeAndRouting:
         assert response.failure is None, response.failure
         services = documents[0]["services"]
         assert services["main"]["image"] == IMAGE_CONFIGS["org/agent:1"]["image"]
-        # The server resolves the task from its snapshot, so the bind mount points into that copy.
-        (volume,) = services["main"]["volumes"]
-        assert volume.endswith("/hello/environment/seed.json:/app/seed.json:ro")
-        assert volume.startswith(server._snapshots.name) and not volume.startswith(str(task.path))
+        # The server resolves the task from its snapshot, so the bind mount (an upload since M22) points into
+        # that copy.
+        (upload,) = services["main"]["x-sandbox"]["uploads"]
+        assert upload["target"] == "/app/seed.json" and upload["source"].endswith("/hello/environment/seed.json")
+        assert upload["source"].startswith(server._snapshots.name) and not upload["source"].startswith(str(task.path))
+        assert "volumes" not in services["main"]
         assert services["api"]["environment"] == {"API_MODE": "replay"} and "env_file" not in services["api"]
         assert services["kafka"]["environment"] == {"KAFKA_TOPIC": "from-the-shell"}
 
@@ -2728,20 +2732,127 @@ class TestComposeAndRouting:
         monkeypatch.setattr(sandboxes_module, "resolve_provider_config", lambda ref, cfg: provider)
 
         async def run():
+            # The overlay runs inside the group's start (round 13), once main exists and before its command.
             compose = await server._create_compose(task, "r1")
+            await asyncio.sleep(0)  # the command's exec is a task the adapter started; let it record itself
             main = compose.services["main"]
-            bootstrap_users = {e["user"] for e in provider.execs}
+            useradd = next(i for i, e in enumerate(provider.execs) if "useradd" in e["command"])
+            run_sh = next(i for i, e in enumerate(provider.execs) if "run.sh" in e["command"])
+            assert useradd < run_sh
             assert provider.created[0].user is None and main.default_user is None
-            assert "agent" not in bootstrap_users, provider.execs
-            names = await server._apply_overlay(main, task)
+            # Nothing before the overlay created the user ran as it; the seed installs the default afterwards.
+            assert "agent" not in {e["user"] for e in provider.execs[:useradd]}, provider.execs
+            names = server._overlay_names.pop("r1")
             await server._set_default_user(main, task, names)
-            assert any("useradd" in e["command"] for e in provider.execs)
             assert main.default_user == "agent"
             # From here every exec that names no user runs as the task's user.
             await main.exec("id")
             assert provider.execs[-1]["user"] == "agent"
 
         asyncio.run(run())
+
+    def test_overlay_run_lines_precede_mains_uploads_and_command_in_a_compose_group(self, tmp_path, monkeypatch):
+        """Review (round 13): for an overlay Compose task, main's bind-mount uploads and its command ran inside the
+        group's start, before the seed applied the overlay, so a `RUN` writing defaults clobbered the uploaded
+        file and `RUN mkdir /data` failed on the folder the upload had created. The overlay now runs as main's
+        setup inside the start: RUN lines, then the uploads, then the command (Harbor's build, then `compose up`
+        with the mounts). A failing RUN line is still the seed's 422 reason, and leaves no names behind."""
+        import environment_servers.harbor.sandboxes as sandboxes_module
+        from nemo_gym.sandbox.providers.base import SandboxHandle
+
+        class RecordingProvider:
+            name = "fake"
+
+            def __init__(self):
+                self.events, self.created, self.closed = [], [], []
+
+            def __contains__(self, key):
+                return False
+
+            async def create(self, spec):
+                self.created.append(spec)
+                return SandboxHandle(str(len(self.created)), self.name, None)
+
+            async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                self.events.append(("exec", handle.sandbox_id, command))
+                if "exit 7" in command:
+                    return SandboxExecResult("", "boom", 7)
+                return SandboxExecResult("", "", 0)
+
+            async def upload_file(self, handle, source_path, target_path):
+                self.events.append(("upload", handle.sandbox_id, str(target_path)))
+
+            def validate_networking(self):
+                pass
+
+            async def network_address(self, handle):
+                return "192.0.2.1"
+
+            async def set_hosts(self, handle, hosts):
+                pass
+
+            async def close(self, handle):
+                self.closed.append(handle.sandbox_id)
+
+            async def aclose(self):
+                pass
+
+        server, task, _, _ = make_server(
+            tmp_path,
+            monkeypatch,
+            dockerfile="FROM ubuntu:24.04\nRUN mkdir -p /data && echo default > /data/seed.csv\n",
+        )
+        (task.path / "task.toml").write_text(TASK_TOML)
+        (task.path / "environment" / "seed.csv").write_text("uploaded")
+        (task.path / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n    command: ['sleep', 'infinity']\n"
+            "    volumes:\n      - ./seed.csv:/data/seed.csv\n      - ${HOST_VERIFIER_LOGS_PATH}:/logs/verifier\n"
+            "  side:\n    image: org/api:1\n    command: ['sleep', 'infinity']\n"
+        )
+        write_image_config(task.path.parent, "org/api:1", Cmd=["serve"])  # beside the base image's record
+        task = load_task(task.path)
+        assert task.overlay and task.needs_compose
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        provider = RecordingProvider()
+        monkeypatch.setattr(sandboxes_module, "get_global_config_dict", lambda: {"sandbox": {"docker": {}}})
+        monkeypatch.setattr(sandboxes_module, "resolve_provider_config", lambda ref, cfg: provider)
+
+        async def run():
+            compose = await server._create_compose(task, "r1")
+            await asyncio.sleep(0)  # the command's exec is a task the adapter started; let it record itself
+            main_id = compose.services["main"]._require_handle().sandbox_id
+            events = [(kind, what) for kind, sandbox_id, what in provider.events if sandbox_id == main_id]
+            overlay = next(i for i, (kind, what) in enumerate(events) if kind == "exec" and "echo default" in what)
+            upload = next(i for i, (kind, what) in enumerate(events) if kind == "upload" and what == "/data/seed.csv")
+            logs = next(
+                i
+                for i, (kind, what) in enumerate(events)
+                if kind == "exec" and what.startswith("mkdir -p /logs/verifier")
+            )
+            command = next(i for i, (kind, what) in enumerate(events) if kind == "exec" and "run.sh >" in what)
+            assert overlay < upload < command and logs < command, events
+            # The overlay ran once, on main only, and its result waits for the seed under the episode key.
+            assert sum(1 for kind, _, what in provider.events if kind == "exec" and "echo default" in what) == 1
+            assert server._overlay_names.pop("r1") == {}
+            # The group's start budget carries the overlay's own on top of the sandbox ready timeout.
+            assert (
+                compose.timeout_s == server.config.sandbox_ready_timeout_s + task.config.environment.build_timeout_sec
+            )
+            await server._stop_sandbox("r1")
+
+        asyncio.run(run())
+        assert server._sandboxes == {}
+        # A RUN line that fails is the task's Dockerfile failing: HarborOverlayError (the seed's 422), nothing kept.
+        (task.path / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\nRUN exit 7\n")
+        failing = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = failing.digest
+        provider = RecordingProvider()
+        with pytest.raises(overlay.HarborOverlayError, match="RUN line 1/1"):
+            asyncio.run(server._create_compose(failing, "r2"))
+        assert "r2" not in server._overlay_names and sorted(provider.closed) == sorted(h for h in provider.closed)
+        assert len(provider.closed) == len(provider.created) >= 1
+        # No upload or command ever ran on main after the failed line.
+        assert not any(kind == "upload" and what == "/data/seed.csv" for kind, _, what in provider.events)
 
     def test_sidecar_specs_do_not_inherit_the_task_user(self, tmp_path, monkeypatch):
         # Main's own user and working directory, neither of which a sidecar image has: a sidecar spec that
@@ -2775,6 +2886,88 @@ class TestComposeAndRouting:
         # Nor main's working directory: a sidecar's image decides its own (the adapter applies the recorded one).
         assert specs["main"].workdir == "/main-only"
         assert {name: spec.workdir for name, spec in specs.items() if name != "main"} == {"api": None, "kafka": None}
+
+    def test_compose_document_turns_task_bind_mounts_into_uploads_from_the_task_copy(self, tmp_path, monkeypatch):
+        # M22: the task-aw pattern, a sidecar bind-mounting ./seed.json from the task folder. The server plans it
+        # as an upload whose source is the file in its own task copy; named and external volumes resolve through
+        # the provider block's volume_sources, which also reaches the Compose adapter.
+        server, task, _, documents, _ = self.compose_server(tmp_path, monkeypatch)
+        (task.path / "environment" / "seed.json").write_text('{"records": []}')
+        (task.path / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: org/agent:1\n    volumes:\n      - ${HOST_VERIFIER_LOGS_PATH}:/logs/verifier\n"
+            "  api:\n    image: org/api:1\n    volumes:\n      - ./seed.json:/app/seed.json:ro\n      - models:/models\n"
+            "  kafka:\n    image: org/kafka:1\n    volumes:\n      - pgdata:/var/lib/kafka\n"
+            "volumes:\n  models:\n    external: true\n  pgdata:\n"
+        )
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        with pytest.raises(RuntimeError, match="external volume 'models' needs a `volume_sources` entry"):
+            server._compose_document(task)
+        # The deployment also maps `pgdata`, another task's external volume; this task's `pgdata` is ordinary.
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict",
+            lambda: {
+                "sandbox": {
+                    "opensandbox": {},
+                    "volume_sources": {"models": "shared/models", "pgdata": "datasets/pgdata"},
+                }
+            },
+        )
+        document = server._compose_document(task)
+        api, main = document["services"]["api"], document["services"]["main"]
+        assert api["x-sandbox"]["uploads"] == [
+            {"source": str(task.path / "environment" / "seed.json"), "target": "/app/seed.json"}
+        ]
+        assert api["volumes"] == [{"type": "volume", "source": "models", "target": "/models", "read_only": False}]
+        # The /logs tree is not a mount: the adapter creates it in main before main's command (round 13).
+        assert "volumes" not in main
+        assert main["x-sandbox"] == {"logs": [{"source": "/logs/verifier", "target": "/logs/verifier"}]}
+        captured = {}
+
+        class FakeComposeGroup:
+            def __init__(
+                self, provider_config, path, *, service_specs, timeout_s, volume_sources, upload_root, **kwargs
+            ):
+                captured["volume_sources"] = volume_sources
+                captured["upload_root"] = upload_root
+                captured["document"] = yaml.safe_load(Path(path).read_text())
+                captured["kwargs"] = kwargs
+
+            async def start(self):
+                return None
+
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandboxCompose", FakeComposeGroup)
+        asyncio.run(type(server)._create_compose(server, task, "r1"))  # compose_server() replaced the instance's
+        # Review (round 13): only what this document resolves externally reaches the adapter, which treats every
+        # name in its mapping as externally managed; the task's ordinary `pgdata` stays the group's own.
+        assert captured["volume_sources"] == {"models": "shared/models"}
+        assert captured["document"]["services"]["api"]["x-sandbox"]["uploads"] == api["x-sandbox"]["uploads"]
+        # The adapter may only read upload sources from the server's own task copy, the one the planner saw.
+        assert captured["upload_root"] == task.path
+        # No sidecar on another block, and no overlay: nothing per service, no setup callback.
+        assert captured["kwargs"]["service_volume_sources"] == {} and captured["kwargs"]["service_setup"] == {}
+
+    @pytest.mark.parametrize("service", ["main", "api"])
+    async def test_compose_document_refuses_a_task_authored_x_sandbox(self, tmp_path, monkeypatch, service):
+        # Review blocker: a task file that writes the planner's output form itself would have the server upload
+        # any readable host file into the sandbox. The seed fails naming the field; nothing starts.
+        server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
+        smuggled = "    x-sandbox:\n      uploads:\n        - {source: /etc/passwd, target: /tmp/passwd}\n"
+        (task.path / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: org/agent:1\n"
+            + (smuggled if service == "main" else "")
+            + "  api:\n    image: org/api:1\n"
+            + (smuggled if service == "api" else "")
+            + "  kafka:\n    image: org/kafka:1\n"
+        )
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        with pytest.raises(RuntimeError, match=f"service {service!r} declares x-sandbox"):
+            server._compose_document(task)
+        response = await run_episode(server, task)
+        assert response.failure is not None and response.failure.stage == "seed"
+        assert "x-sandbox" in response.failure.failure_reason
+        assert documents == []
 
     async def test_compose_task_seeds_a_group_and_leaves_task_context(self, tmp_path, monkeypatch):
         server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
@@ -2968,7 +3161,9 @@ class TestComposeAndRouting:
         captured = {}
 
         class FakeComposeGroup:
-            def __init__(self, provider_config, path, *, service_specs, timeout_s, service_providers, platform):
+            def __init__(
+                self, provider_config, path, *, service_specs, timeout_s, service_providers, platform, **kwargs
+            ):
                 captured.update(
                     provider=provider_config,
                     specs=service_specs,
@@ -2995,6 +3190,48 @@ class TestComposeAndRouting:
             "reservations": {"gpus": 1},
         }
         assert captured["platform"] == "linux/amd64"
+
+    def test_a_gpu_sidecar_resolves_its_external_volume_through_the_gpu_blocks_mapping(self, tmp_path, monkeypatch):
+        """Review (round 13): the reviewer's probe showed the GPU-routed sidecar handed `cpu/models`. The planner
+        checks it against the GPU block's mapping and the adapter gets that mapping for the sidecar alone, while
+        the group's own mapping stays the task's block's, narrowed to what the document uses."""
+        server, task = self.gpu_sidecar_server(
+            tmp_path,
+            monkeypatch,
+            extra="    volumes:\n      - models:/models\nvolumes:\n  models:\n    external: true\n",
+        )
+
+        def blocks(gpu_mapping):
+            return {
+                "sandbox": {"opensandbox": {}, "volume_sources": {"models": "cpu/models", "pgdata": "pg"}},
+                "sandbox_gpu": {
+                    "opensandbox": {"networking": {"enabled": True}},
+                    "default_metadata": {"pool": "h100"},
+                    **({"volume_sources": gpu_mapping} if gpu_mapping is not None else {}),
+                },
+            }
+
+        # Mapped in the task's block only: the sidecar runs on the GPU block, so the seed fails naming the volume.
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.get_global_config_dict", lambda: blocks(None))
+        with pytest.raises(RuntimeError, match="external volume 'models' needs a `volume_sources` entry"):
+            server._compose_document(task)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: blocks({"models": "gpu/models"})
+        )
+        captured = {}
+
+        class FakeComposeGroup:
+            def __init__(self, provider_config, path, *, volume_sources, service_volume_sources, **kwargs):
+                captured.update(volume_sources=volume_sources, service_volume_sources=service_volume_sources)
+
+            async def start(self):
+                return None
+
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandboxCompose", FakeComposeGroup)
+        asyncio.run(server._create_compose(task, "r1"))
+        assert captured["service_volume_sources"] == {"kafka": {"models": "gpu/models"}}
+        # The group's mapping is the task block's, kept to what the document resolves through it (not `pgdata`).
+        assert captured["volume_sources"] == {"models": "cpu/models"}
 
     async def test_gpu_sidecar_group_starts_through_the_real_adapter(self, tmp_path, monkeypatch):
         """The document the server writes (deploy normalized once) passes the adapter's own pass over the reloaded
@@ -3186,9 +3423,7 @@ GREETING = "hi"
                 if "solve.sh" in members:
                     names = members
                     modes = {m.name: m.mode & 0o777 for m in tar.getmembers()}
-        # The upload takes the folder as is here; the digest's ignore rule joins the folder uploads with the
-        # Compose volumes work, which filters a stray __pycache__ out of every task upload.
-        assert names == {"solve.sh", "data", "data/answer.txt", "__pycache__", "__pycache__/x.pyc"}
+        assert names == {"solve.sh", "data", "data/answer.txt"}
         assert modes["solve.sh"] == 0o700  # the archive keeps the author's mode; the chmod opens it in place
         assert uploaded_file(sandbox, "solve.sh") == [SOLVE_SH.encode()]
         # The upload preceded the agent seed, which carries the task user and the resolved [solution].env.
@@ -4125,7 +4360,9 @@ class TestGeneralization:
         verifier = FakeSandbox()
 
         class FlakyComposeGroup:
-            def __init__(self, provider_config, path, *, service_specs, timeout_s, service_providers, platform):
+            def __init__(
+                self, provider_config, path, *, service_specs, timeout_s, service_providers, platform, **kwargs
+            ):
                 groups.append(self)
                 self.provider_config = provider_config
                 self.services: dict = {}
@@ -4173,7 +4410,9 @@ class TestGeneralization:
         class FailingComposeGroup:
             services: dict = {}
 
-            def __init__(self, provider_config, path, *, service_specs, timeout_s, service_providers, platform):
+            def __init__(
+                self, provider_config, path, *, service_specs, timeout_s, service_providers, platform, **kwargs
+            ):
                 pass
 
             async def start(self):
@@ -4224,7 +4463,9 @@ class TestGeneralization:
         verifier = FakeSandbox()
 
         class FlakyComposeGroup:
-            def __init__(self, provider_config, path, *, service_specs, timeout_s, service_providers, platform):
+            def __init__(
+                self, provider_config, path, *, service_specs, timeout_s, service_providers, platform, **kwargs
+            ):
                 groups.append(self)
                 self.services: dict = {}
                 self.stopped = 0

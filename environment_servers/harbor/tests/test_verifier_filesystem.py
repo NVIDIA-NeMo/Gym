@@ -470,6 +470,11 @@ async def test_test_sh_alone_is_made_executable_as_root_and_the_package_modes_st
     (package / "data.txt").write_text("fixture\n")
     for name, mode in (("test.sh", 0o600), ("helper.sh", 0o600), ("data.txt", 0o400)):
         (package / name).chmod(mode)
+    # Review (round 14): names the task digest skips are not shipped; a `tests/helper.pyc` would be importable by
+    # a test while outside the digest, the manifest check and the server's own check.
+    (package / "helper.pyc").write_bytes(b"\x00")
+    (package / "__pycache__").mkdir()
+    (package / "__pycache__" / "test.cpython-313.pyc").write_bytes(b"\x00")
     sandbox = Recording()
     previous_umask = os.umask(0o077)
     try:
@@ -491,6 +496,7 @@ async def test_test_sh_alone_is_made_executable_as_root_and_the_package_modes_st
     assert commands[run] == verifier_command(120)
     modes = {name: stat.S_IMODE((tests / name).stat().st_mode) for name in ("test.sh", "helper.sh", "data.txt")}
     assert modes == {"test.sh": 0o700, "helper.sh": 0o600, "data.txt": 0o400}
+    assert sorted(path.name for path in tests.iterdir()) == ["data.txt", "helper.sh", "test.sh"]
 
 
 @pytest.mark.parametrize("image_owns_tests", [False, True])

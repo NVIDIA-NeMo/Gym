@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+import nemo_gym.tasks.harbor.build_options as build_options
 import nemo_gym.tasks.harbor.hub as hub_module
 import nemo_gym.tasks.harbor.prepare_builds as prepare_builds
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTaskConfig, content_hash, discover_tasks, load_task
@@ -2546,6 +2547,32 @@ def test_expected_harbor_cli_errors_are_concise(tmp_path, monkeypatch, capsys, t
     assert message in error and "Traceback" not in error
 
 
+@pytest.mark.usefixtures("fake_registry")
+@pytest.mark.parametrize("command", [["eval", "run"], ["dataset", "validate"]])
+def test_a_compose_volume_problem_in_a_task_folder_exits_cleanly(tmp_path, monkeypatch, capsys, command):
+    # Review: the planner's ImageConfigError (not a HarborTaskError) reached the user as a traceback at prepare.
+    import sys
+
+    from nemo_gym.cli.main import main
+
+    folder = tmp_path / "ds"
+    write_task(folder / "aw")
+    (folder / "aw" / "environment" / "docker-compose.yaml").write_text(
+        "services:\n  api:\n    image: nginx:1.27\n    volumes: [./missing.json:/app/seed.json]\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NEMO_GYM_DATASETS_DIR", str(tmp_path / "datasets"))
+    flags = ["--agent", "hermes_agent"] if command[0] == "eval" else []
+    monkeypatch.setattr(sys, "argv", ["gym", *command, str(folder), *flags])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
+    error = capsys.readouterr().err
+    assert "aw: environment/docker-compose.yaml: service 'api' binds './missing.json'" in error
+    assert "which the task folder does not contain" in error
+    assert "Traceback" not in error
+
+
 @pytest.mark.parametrize(
     "flags", [["--agent", "not-an-agent"], ["--agent", "hermes_agent", "--sandbox", "not-a-sandbox"]]
 )
@@ -2930,3 +2957,171 @@ def test_validation_summary_reports_verify_time_and_network_per_task(tmp_path):
     assert lines[0] == "task_id\tstatus\treward\tverify_s\tnetwork"
     assert "timed\toracle solved\t1.0\t12.3\tpublic" in lines
     assert "masked\tmasked (provider_unavailable)\t-\t3.0\tno-network" in lines
+
+
+class TestComposeVolumeSourcesAtPrepare:
+    """M22: ``volume_sources`` reaches prepare from the ``sandbox:`` block the command names."""
+
+    @pytest.fixture
+    def sources(self, tmp_path, monkeypatch):
+        import nemo_gym.tasks.harbor.cli as harbor_cli
+
+        dotenv = tmp_path / "env.yaml"
+        dotenv.write_text("some_key: 1\n")
+        monkeypatch.setattr(build_options, "_resolve_under_cwd_or_install", lambda rel: tmp_path / rel)
+        provider = tmp_path / "provider.yaml"
+        # Credentials interpolate from the environment, as the real provider files do; reading volume_sources
+        # must not need them.
+        provider.write_text(
+            "sandbox:\n  opensandbox:\n    connection:\n      api_key: ${oc.env:M22_UNSET_KEY}\n"
+            "  volume_sources:\n    pgdata: datasets/pgdata\n"
+        )
+        monkeypatch.setattr(harbor_cli, "resolve_sandbox_config", lambda name: provider)
+        monkeypatch.delenv("M22_UNSET_KEY", raising=False)
+        return dotenv, provider
+
+    def test_volume_sources_come_from_the_sandbox_file_and_overrides(self, tmp_path, sources):
+        from nemo_gym.tasks.harbor.cli import volume_sources_from_overrides
+
+        assert volume_sources_from_overrides([], None) is None
+        assert volume_sources_from_overrides([], "opensandbox") == {"pgdata": "datasets/pgdata"}
+        tokens = [
+            "++sandbox.volume_sources.pgdata=overridden/pg",
+            "++sandbox.volume_sources.models=m",
+            "+agent_name=a",
+        ]
+        assert volume_sources_from_overrides(tokens, "opensandbox") == {"pgdata": "overridden/pg", "models": "m"}
+        # A --config file sits above the provider file and below the ++ overrides; a host path is a plain key.
+        config = tmp_path / "run.yaml"
+        config.write_text("sandbox:\n  volume_sources:\n    pgdata: elsewhere/pg\n    /var/lib/models: models\n")
+        assert volume_sources_from_overrides([f'+config_paths=["{config}"]'], "opensandbox") == {
+            "pgdata": "elsewhere/pg",
+            "/var/lib/models": "models",
+        }
+        with pytest.raises(ValueError, match="volume_sources.*must be a mapping"):
+            volume_sources_from_overrides(["++sandbox.volume_sources=[pgdata]"], None)
+
+    def test_shared_storage_is_read_from_the_blocks_provider(self, tmp_path, sources):
+        """M35 D6: prepare answers whether the block's provider has shared storage from the one setting the server's
+        provider requires (``shared_storage.host_path``), without resolving the block's credentials; unknown (no
+        block, or none naming one provider) stays ``None`` and the seed decides."""
+        from nemo_gym.tasks.harbor.cli import (
+            GPU_SANDBOX_PROVIDER_KEY,
+            gpu_shared_storage_from_overrides,
+            shared_storage_from_overrides,
+        )
+
+        assert shared_storage_from_overrides([], None) is None
+        assert shared_storage_from_overrides([], "opensandbox") is False
+        assert (
+            shared_storage_from_overrides(
+                ["++sandbox.opensandbox.shared_storage.host_path=/mnt/shared"], "opensandbox"
+            )
+            is True
+        )
+        config = tmp_path / "run.yaml"
+        config.write_text("sandbox:\n  opensandbox:\n    shared_storage:\n      host_path: /mnt/efs/data/shared\n")
+        assert shared_storage_from_overrides([f'+config_paths=["{config}"]'], "opensandbox") is True
+        assert (
+            shared_storage_from_overrides(["++sandbox.opensandbox.shared_storage.host_path="], "opensandbox") is False
+        )
+        gpu_block = f"++{GPU_SANDBOX_PROVIDER_KEY}=sandbox_gpu"
+        assert gpu_shared_storage_from_overrides([], "opensandbox") is None
+        assert gpu_shared_storage_from_overrides([gpu_block], "opensandbox") is None
+        assert (
+            gpu_shared_storage_from_overrides([gpu_block, "++sandbox_gpu.opensandbox.connection.api_key=k"], None)
+            is False
+        )
+        assert (
+            gpu_shared_storage_from_overrides(
+                [gpu_block, "++sandbox_gpu.opensandbox.shared_storage.host_path=/mnt/gpu"], None
+            )
+            is True
+        )
+
+    def test_gpu_volume_sources_come_from_the_gpu_sandbox_provider_block(self, tmp_path, sources):
+        # Review: GPU-declaring tasks are seeded from the server's `gpu_sandbox_provider` block, so prepare reads
+        # that block's volume_sources too: None without a GPU block, {} for a GPU block without the key.
+        from nemo_gym.tasks.harbor.cli import GPU_SANDBOX_PROVIDER_KEY, gpu_volume_sources_from_overrides
+
+        gpu_block = f"++{GPU_SANDBOX_PROVIDER_KEY}=sandbox_gpu"
+        assert GPU_SANDBOX_PROVIDER_KEY == "harbor_environment_server.environment_servers.harbor.gpu_sandbox_provider"
+        assert gpu_volume_sources_from_overrides([], "opensandbox") is None
+        assert gpu_volume_sources_from_overrides([gpu_block], "opensandbox") == {}
+        assert gpu_volume_sources_from_overrides([gpu_block, "++sandbox_gpu.volume_sources.pgdata=gpu/pg"], None) == {
+            "pgdata": "gpu/pg"
+        }
+        # The sandbox block's mapping does not leak into the GPU block's.
+        assert gpu_volume_sources_from_overrides([gpu_block, "++sandbox.volume_sources.pgdata=pg"], None) == {}
+        config = tmp_path / "run.yaml"
+        config.write_text(
+            "harbor_environment_server:\n  environment_servers:\n    harbor:\n      gpu_sandbox_provider: sandbox_gpu\n"
+            "sandbox_gpu:\n  volume_sources:\n    models: gpu/models\n"
+        )
+        assert gpu_volume_sources_from_overrides([f'+config_paths=["{config}"]'], None) == {"models": "gpu/models"}
+        with pytest.raises(ValueError, match="must name a top-level sandbox block"):
+            gpu_volume_sources_from_overrides([f"++{GPU_SANDBOX_PROVIDER_KEY}=[a]"], None)
+
+    def test_run_and_validate_hand_volume_sources_to_prepare(self, tmp_path, monkeypatch, sources):
+        import argparse
+
+        import nemo_gym.tasks.harbor.cli as harbor_cli
+
+        seen = []
+
+        def fake_prepare(target, **kwargs):
+            seen.append((kwargs["volume_sources"], kwargs["gpu_volume_sources"]))
+            raise harbor_cli.HubError("stop here")
+
+        def fail(message):
+            raise SystemExit(message)
+
+        monkeypatch.setattr(harbor_cli, "prepare_target", fake_prepare)
+        # The rows file is scoped to the agent, so the stub has to name one.
+        monkeypatch.setattr(
+            harbor_cli, "resolve_agent", lambda name: harbor_cli.AgentSelection(Path("a.yaml"), name, name)
+        )
+        args = argparse.Namespace(
+            target=str(tmp_path), agent="a", sandbox="opensandbox", _parser=argparse.Namespace(error=fail)
+        )
+        with pytest.raises(SystemExit, match="stop here"):
+            harbor_cli.run_target(args, [])
+        with pytest.raises(SystemExit, match="stop here"):
+            harbor_cli.validate_target(
+                args,
+                [
+                    "++sandbox.volume_sources.pgdata=pg",
+                    f"++{harbor_cli.GPU_SANDBOX_PROVIDER_KEY}=sandbox_gpu",
+                    "++sandbox_gpu.volume_sources.pgdata=gpu/pg",
+                ],
+            )
+        assert seen == [({"pgdata": "datasets/pgdata"}, None), ({"pgdata": "pg"}, {"pgdata": "gpu/pg"})]
+
+    def test_prepare_fails_naming_an_unmapped_external_volume(self, tmp_path, fake_registry):
+        folder = tmp_path / "ds"
+        write_task(folder / "pg")
+        (folder / "pg" / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  db:\n    image: postgres:16\n    volumes: [pgdata:/var/lib/postgresql/data]\n"
+            "volumes:\n  pgdata: {external: true}\n"
+        )
+        # The volume the group cannot run leaves its task out with the reason, as a Compose file that does not
+        # resolve does; with no other task, prepare ends naming it.
+        with pytest.raises(ValueError, match="external volume 'pgdata' needs a `volume_sources` entry"):
+            prepare_target(str(folder), output_root=tmp_path / "out")
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", volume_sources={"pgdata": "pg"})
+        assert [task.task_id for task in prepared.tasks] == ["pg"]
+
+    def test_gpu_tasks_prepare_against_the_gpu_block(self, tmp_path, fake_registry):
+        # Review: with a GPU block configured, a GPU-declaring task passes or fails prepare in step with the
+        # block the server seeds it from, whichever of the two carries the mapping.
+        folder = tmp_path / "ds"
+        write_task(folder / "pg", toml=HELLO_TOML.replace("gpus = 0", "gpus = 1"))
+        (folder / "pg" / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  db:\n    image: postgres:16\n    volumes: [pgdata:/var/lib/postgresql/data]\n"
+            "volumes:\n  pgdata: {external: true}\n"
+        )
+        mapped = {"pgdata": "pg"}
+        with pytest.raises(ValueError, match="external volume 'pgdata' needs a `volume_sources` entry"):
+            prepare_target(str(folder), output_root=tmp_path / "out", volume_sources=mapped, gpu_volume_sources={})
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", gpu_volume_sources=mapped)
+        assert [task.task_id for task in prepared.tasks] == ["pg"]

@@ -717,3 +717,34 @@ class TestPrepareReportsRefusedFieldsPerTask:
             str(folder), output_root=tmp_path / "out", build=BuildOptions(enabled=False), exclude=["bad"]
         )
         assert [task.task_id for task in prepared.tasks] == ["good"] and prepared.skipped == {}
+
+    def test_a_malformed_volume_declaration_is_a_skipped_task_not_an_aborted_prepare(self, tmp_path):
+        """Review (round 14): ``volumes: {data: 123}`` escaped the planner as a ``TypeError`` (``set(123)``) and
+        aborted ``record_compose_images`` for the whole dataset; it is the planner's own error now, so the task is
+        reported in ``skipped.json`` with the volume named and its valid sibling is prepared. The same for a
+        long-form entry whose ``bind`` or ``volume`` options are not a mapping (M22 review: ``set(123)`` again)."""
+        folder = tmp_path / "ds"
+        folder.mkdir()
+        malformed = (
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n    volumes:\n      - data:/data\n"
+            "volumes:\n  data: 123\n"
+        )
+        nested = (
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n    volumes:\n"
+            "      - type: bind\n        source: ./seed.json\n        target: /seed.json\n        bind: 123\n"
+        )
+        write_task(folder, "malformed", compose=malformed)
+        write_task(folder, "nested", compose=nested)
+        write_task(folder, "good", compose="services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n")
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions(enabled=False))
+        assert [task.task_id for task in prepared.tasks] == ["good"]
+        assert prepared.skipped == {
+            "malformed": (
+                "malformed: environment/docker-compose.yaml: volume 'data': declaration must be a mapping, got 123"
+            ),
+            "nested": (
+                "nested: environment/docker-compose.yaml: service 'main' volumes: bind options must be a mapping, "
+                "got 123"
+            ),
+        }
+        assert json.loads((tmp_path / "out" / "ds" / "skipped.json").read_text()) == prepared.skipped
