@@ -178,12 +178,21 @@ class TestApp:
         py_executable.touch()
 
         captured = {}
+        monkeypatch.setattr(
+            responses_api_models.local_vllm_model.app,
+            "get_global_config_dict",
+            lambda: {"port_range_low": 12000, "port_range_high": 12100, "disallowed_ports": [12050]},
+        )
 
         class FakeActorClass:
             @staticmethod
             def options(**kwargs):
                 captured.update(kwargs)
-                return MagicMock()
+                actor = MagicMock()
+                actor.remote.side_effect = lambda **arguments: (
+                    captured.update(actor_arguments=arguments) or MagicMock()
+                )
+                return actor
 
         monkeypatch.setattr(responses_api_models.local_vllm_model.app, "LocalVLLMModelActor", FakeActorClass)
         monkeypatch.setattr(responses_api_models.local_vllm_model.app.ray, "get", lambda _: "http://localhost:1234/v1")
@@ -210,6 +219,8 @@ class TestApp:
         env_vars = captured["runtime_env"]["env_vars"]
         assert env_vars["PATH"].split(os.pathsep)[0] == str(venv_bin)
         assert captured["runtime_env"]["py_executable"] == str(py_executable)
+        assert captured["actor_arguments"]["port_range"] == (12000, 12100)
+        assert captured["actor_arguments"]["disallowed_ports"] == (12050,)
 
         # A server config can still override it.
         captured.clear()
