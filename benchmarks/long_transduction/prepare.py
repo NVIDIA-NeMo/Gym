@@ -50,6 +50,7 @@ import argparse
 import json
 import random
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -1129,133 +1130,137 @@ def generate(force: bool = False) -> None:
     all_adjs, all_nouns = _load_word_lists()
 
     total = 0
-    with OUTPUT_FPATH.open("w") as out:
-        for target_tokens in TARGET_TOKENS_LIST:
-            print(f"\n── target_tokens={target_tokens:,} ──────────────────────────────────────────")
+    # Publish only a complete dataset, preserving any previous output on failure.
+    with TemporaryDirectory(dir=OUTPUT_FPATH.parent, prefix=f".{OUTPUT_FPATH.name}.") as temporary_dir:
+        temporary_path = Path(temporary_dir) / OUTPUT_FPATH.name
+        with temporary_path.open("w") as out:
+            for target_tokens in TARGET_TOKENS_LIST:
+                print(f"\n── target_tokens={target_tokens:,} ──────────────────────────────────────────")
 
-            # Arithmetic chain: 3 variants per (max_operands, sample_idx).
-            for max_operands in MAX_OPERANDS_RANGE:
-                print(f"Generating sum max_operands={max_operands} ({N_SAMPLES} pairs)...")
-                for i in range(N_SAMPLES):
-                    expressions, n_tokens = _generate_expressions(max_operands, enc, target_tokens)
-                    for sample_type in SUM_TYPES:
-                        rng = _rng((target_tokens, max_operands, i, sample_type))
-                        sample = _build_sum_sample(expressions, max_operands, sample_type, n_tokens, rng)
-                        sample["target_tokens"] = target_tokens
-                        sample["responses_create_params"] = {"max_output_tokens": target_tokens * 3 // 2}
-                        out.write(json.dumps(sample) + "\n")
-                        total += 1
-                    print(
-                        f"  sum[{i + 1:2d}/{N_SAMPLES}] "
-                        f"{len(expressions)} expressions, ~{n_tokens:,} tokens, "
-                        f"emitted {len(SUM_TYPES)} variants"
-                    )
+                # Arithmetic chain: 3 variants per (max_operands, sample_idx).
+                for max_operands in MAX_OPERANDS_RANGE:
+                    print(f"Generating sum max_operands={max_operands} ({N_SAMPLES} pairs)...")
+                    for i in range(N_SAMPLES):
+                        expressions, n_tokens = _generate_expressions(max_operands, enc, target_tokens)
+                        for sample_type in SUM_TYPES:
+                            rng = _rng((target_tokens, max_operands, i, sample_type))
+                            sample = _build_sum_sample(expressions, max_operands, sample_type, n_tokens, rng)
+                            sample["target_tokens"] = target_tokens
+                            sample["responses_create_params"] = {"max_output_tokens": target_tokens * 3 // 2}
+                            out.write(json.dumps(sample) + "\n")
+                            total += 1
+                        print(
+                            f"  sum[{i + 1:2d}/{N_SAMPLES}] "
+                            f"{len(expressions)} expressions, ~{n_tokens:,} tokens, "
+                            f"emitted {len(SUM_TYPES)} variants"
+                        )
 
-            # UUID sort: 3 variants per (uuids_per_line, sample_idx).
-            for uuids_per_line in MAX_OPERANDS_RANGE:
-                print(f"Generating uuid_sort uuids_per_line={uuids_per_line} ({N_SAMPLES} samples)...")
+                # UUID sort: 3 variants per (uuids_per_line, sample_idx).
+                for uuids_per_line in MAX_OPERANDS_RANGE:
+                    print(f"Generating uuid_sort uuids_per_line={uuids_per_line} ({N_SAMPLES} samples)...")
+                    for i in range(N_SAMPLES):
+                        uuid_lines, n_tokens = _generate_uuid_lines(
+                            uuids_per_line,
+                            enc,
+                            seed_key=("uuid", target_tokens, uuids_per_line, i),
+                            target_tokens=target_tokens,
+                        )
+                        for sample_type in UUID_SORT_TYPES:
+                            rng = _rng((target_tokens, uuids_per_line, i, sample_type))
+                            sample = _build_uuid_sample(uuid_lines, uuids_per_line, sample_type, n_tokens, rng)
+                            sample["target_tokens"] = target_tokens
+                            sample["responses_create_params"] = {"max_output_tokens": target_tokens * 3 // 2}
+                            out.write(json.dumps(sample) + "\n")
+                            total += 1
+                        print(
+                            f"  uuid[{i + 1:2d}/{N_SAMPLES}] "
+                            f"{len(uuid_lines)} lines × {uuids_per_line} uuids, "
+                            f"~{n_tokens:,} tokens, emitted {len(UUID_SORT_TYPES)} variants"
+                        )
+
+                # CSV permutation: homogeneous and heterogeneous variants.
+                # Each variant uses N_SAMPLES grids × PERM_FRACTIONS difficulties.
+                for cell_type, cell_fn in [
+                    ("homogeneous", _new_csv_cell_homogeneous),
+                    ("heterogeneous", _new_csv_cell),
+                ]:
+                    type_name = f"csv_permutation_{cell_type}"
+                    print(f"Generating {type_name} ({N_SAMPLES} grids × {len(PERM_FRACTIONS)} perm_fractions)...")
+                    for i in range(N_SAMPLES):
+                        grid, n_tokens = _generate_csv_grid(
+                            enc,
+                            seed_key=("csv", cell_type, target_tokens, i),
+                            target_tokens=target_tokens,
+                            cell_fn=cell_fn,
+                            sample_type=type_name,
+                        )
+                        N = len(grid)
+                        for perm_fraction in PERM_FRACTIONS:
+                            rng = _rng(("csv", cell_type, target_tokens, i, perm_fraction))
+                            sample = _build_csv_sample(grid, perm_fraction, rng, n_tokens, type_name)
+                            sample["target_tokens"] = target_tokens
+                            sample["responses_create_params"] = {"max_output_tokens": target_tokens * 3 // 2}
+                            out.write(json.dumps(sample) + "\n")
+                            total += 1
+                        print(
+                            f"  {cell_type[:3]}[{i + 1:2d}/{N_SAMPLES}] "
+                            f"{N}×{N} grid, ~{n_tokens:,} tokens, "
+                            f"emitted {len(PERM_FRACTIONS)} perm_fraction variants"
+                        )
+
+                # CSV KV lookup: N_SAMPLES grids × VOCAB_FRACTIONS difficulties.
+                print(f"Generating csv_kv_lookup ({N_SAMPLES} grids × {len(VOCAB_FRACTIONS)} vocab_fractions)...")
                 for i in range(N_SAMPLES):
-                    uuid_lines, n_tokens = _generate_uuid_lines(
-                        uuids_per_line,
+                    M, sample_adjs, sample_nouns, n_tokens = _find_csv_kv_grid_size(
                         enc,
-                        seed_key=("uuid", target_tokens, uuids_per_line, i),
+                        seed_key=("csv_kv", target_tokens, i),
                         target_tokens=target_tokens,
+                        all_adjs=all_adjs,
+                        all_nouns=all_nouns,
                     )
-                    for sample_type in UUID_SORT_TYPES:
-                        rng = _rng((target_tokens, uuids_per_line, i, sample_type))
-                        sample = _build_uuid_sample(uuid_lines, uuids_per_line, sample_type, n_tokens, rng)
+                    for vocab_fraction in VOCAB_FRACTIONS:
+                        rng = _rng(("csv_kv", target_tokens, i, vocab_fraction))
+                        sample = _build_csv_kv_sample(M, vocab_fraction, sample_adjs, sample_nouns, rng, n_tokens)
                         sample["target_tokens"] = target_tokens
                         sample["responses_create_params"] = {"max_output_tokens": target_tokens * 3 // 2}
                         out.write(json.dumps(sample) + "\n")
                         total += 1
                     print(
-                        f"  uuid[{i + 1:2d}/{N_SAMPLES}] "
-                        f"{len(uuid_lines)} lines × {uuids_per_line} uuids, "
-                        f"~{n_tokens:,} tokens, emitted {len(UUID_SORT_TYPES)} variants"
+                        f"  kv[{i + 1:2d}/{N_SAMPLES}] "
+                        f"{M}×{M} grid, ~{n_tokens:,} tokens, "
+                        f"emitted {len(VOCAB_FRACTIONS)} vocab_fraction variants"
                     )
 
-            # CSV permutation: homogeneous and heterogeneous variants.
-            # Each variant uses N_SAMPLES grids × PERM_FRACTIONS difficulties.
-            for cell_type, cell_fn in [
-                ("homogeneous", _new_csv_cell_homogeneous),
-                ("heterogeneous", _new_csv_cell),
-            ]:
-                type_name = f"csv_permutation_{cell_type}"
-                print(f"Generating {type_name} ({N_SAMPLES} grids × {len(PERM_FRACTIONS)} perm_fractions)...")
-                for i in range(N_SAMPLES):
-                    grid, n_tokens = _generate_csv_grid(
-                        enc,
-                        seed_key=("csv", cell_type, target_tokens, i),
-                        target_tokens=target_tokens,
-                        cell_fn=cell_fn,
-                        sample_type=type_name,
-                    )
-                    N = len(grid)
-                    for perm_fraction in PERM_FRACTIONS:
-                        rng = _rng(("csv", cell_type, target_tokens, i, perm_fraction))
-                        sample = _build_csv_sample(grid, perm_fraction, rng, n_tokens, type_name)
-                        sample["target_tokens"] = target_tokens
-                        sample["responses_create_params"] = {"max_output_tokens": target_tokens * 3 // 2}
-                        out.write(json.dumps(sample) + "\n")
-                        total += 1
-                    print(
-                        f"  {cell_type[:3]}[{i + 1:2d}/{N_SAMPLES}] "
-                        f"{N}×{N} grid, ~{n_tokens:,} tokens, "
-                        f"emitted {len(PERM_FRACTIONS)} perm_fraction variants"
-                    )
-
-            # CSV KV lookup: N_SAMPLES grids × VOCAB_FRACTIONS difficulties.
-            print(f"Generating csv_kv_lookup ({N_SAMPLES} grids × {len(VOCAB_FRACTIONS)} vocab_fractions)...")
-            for i in range(N_SAMPLES):
-                M, sample_adjs, sample_nouns, n_tokens = _find_csv_kv_grid_size(
-                    enc,
-                    seed_key=("csv_kv", target_tokens, i),
-                    target_tokens=target_tokens,
-                    all_adjs=all_adjs,
-                    all_nouns=all_nouns,
-                )
-                for vocab_fraction in VOCAB_FRACTIONS:
-                    rng = _rng(("csv_kv", target_tokens, i, vocab_fraction))
-                    sample = _build_csv_kv_sample(M, vocab_fraction, sample_adjs, sample_nouns, rng, n_tokens)
-                    sample["target_tokens"] = target_tokens
-                    sample["responses_create_params"] = {"max_output_tokens": target_tokens * 3 // 2}
-                    out.write(json.dumps(sample) + "\n")
-                    total += 1
-                print(
-                    f"  kv[{i + 1:2d}/{N_SAMPLES}] "
-                    f"{M}×{M} grid, ~{n_tokens:,} tokens, "
-                    f"emitted {len(VOCAB_FRACTIONS)} vocab_fraction variants"
-                )
-
-            # Variable expansion: 3 variants per (n_variables, sample_idx).
-            for n_variables in N_VARIABLES_RANGE:
-                print(f"Generating var_expand n_variables={n_variables} ({N_SAMPLES} samples)...")
-                for i in range(N_SAMPLES):
-                    pool_rng = _rng(("var", target_tokens, n_variables, i))
-                    adjectives, nouns, definitions = _build_var_pool(n_variables, all_adjs, all_nouns, pool_rng)
-                    expressions, n_tokens = _generate_var_expressions(
-                        adjectives, nouns, definitions, pool_rng, enc, target_tokens
-                    )
-                    if expressions is None:
+                # Variable expansion: 3 variants per (n_variables, sample_idx).
+                for n_variables in N_VARIABLES_RANGE:
+                    print(f"Generating var_expand n_variables={n_variables} ({N_SAMPLES} samples)...")
+                    for i in range(N_SAMPLES):
+                        pool_rng = _rng(("var", target_tokens, n_variables, i))
+                        adjectives, nouns, definitions = _build_var_pool(n_variables, all_adjs, all_nouns, pool_rng)
+                        expressions, n_tokens = _generate_var_expressions(
+                            adjectives, nouns, definitions, pool_rng, enc, target_tokens
+                        )
+                        if expressions is None:
+                            print(
+                                f"  var[{i + 1:2d}/{N_SAMPLES}] "
+                                f"{n_variables} vars don't fit ~{target_tokens:,} tokens, skipped"
+                            )
+                            continue
+                        for sample_type in VAR_EXPAND_TYPES:
+                            rng = _rng((target_tokens, n_variables, i, sample_type))
+                            sample = _build_var_expand_sample(
+                                definitions, expressions, n_variables, sample_type, n_tokens, rng
+                            )
+                            sample["target_tokens"] = target_tokens
+                            sample["responses_create_params"] = {"max_output_tokens": target_tokens * 3 // 2}
+                            out.write(json.dumps(sample) + "\n")
+                            total += 1
                         print(
                             f"  var[{i + 1:2d}/{N_SAMPLES}] "
-                            f"{n_variables} vars don't fit ~{target_tokens:,} tokens, skipped"
+                            f"{n_variables} vars, {len(expressions)} expressions, "
+                            f"~{n_tokens:,} tokens, emitted {len(VAR_EXPAND_TYPES)} variants"
                         )
-                        continue
-                    for sample_type in VAR_EXPAND_TYPES:
-                        rng = _rng((target_tokens, n_variables, i, sample_type))
-                        sample = _build_var_expand_sample(
-                            definitions, expressions, n_variables, sample_type, n_tokens, rng
-                        )
-                        sample["target_tokens"] = target_tokens
-                        sample["responses_create_params"] = {"max_output_tokens": target_tokens * 3 // 2}
-                        out.write(json.dumps(sample) + "\n")
-                        total += 1
-                    print(
-                        f"  var[{i + 1:2d}/{N_SAMPLES}] "
-                        f"{n_variables} vars, {len(expressions)} expressions, "
-                        f"~{n_tokens:,} tokens, emitted {len(VAR_EXPAND_TYPES)} variants"
-                    )
+        temporary_path.replace(OUTPUT_FPATH)
 
     print(f"Done. Wrote {total} examples to {OUTPUT_FPATH}")
 

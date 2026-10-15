@@ -3,15 +3,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """Score model responses against long_transduction dataset ground truth.
 
-Supports five sample types — see `_SCORERS_BY_TYPE` in app.py for dispatch:
+Supports these sample types:
   - unnumbered_streaming_sum    : score_response
   - streaming_sum               : score_response_numbered
   - shuffled_streaming_sum      : score_response_numbered
   - streaming_uuid_sort         : score_uuid_sort
   - shuffled_streaming_uuid_sort: score_uuid_sort
+  - unnumbered_uuid_sort        : score_unnumbered_uuid_sort
   - unnumbered_var_expand       : score_var_expand_unnumbered
   - streaming_var_expand        : score_var_expand_numbered
   - shuffled_streaming_var_expand: score_var_expand_numbered
+  - csv_permutation_homogeneous : score_csv_permutation
+  - csv_permutation_heterogeneous: score_csv_permutation
+  - csv_kv_lookup               : score_csv_permutation
 
 Usage (as a library):
     from parse import score_response, score_uuid_sort
@@ -453,9 +457,9 @@ def _load_sample(dataset_path: Path, index: int) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Score a model response for long_sum.")
+    parser = argparse.ArgumentParser(description="Score a model response for long_transduction.")
     parser.add_argument("--output", required=True, help="File containing raw model output text.")
-    parser.add_argument("--dataset", help="Path to a long_sum JSONL dataset file.")
+    parser.add_argument("--dataset", help="Path to a long_transduction JSONL dataset file.")
     parser.add_argument("--index", type=int, default=0, help="Which sample to score against (default: 0).")
     parser.add_argument("--sample", help="Path to a single JSON sample file (alternative to --dataset/--index).")
     args = parser.parse_args()
@@ -470,7 +474,31 @@ def main() -> None:
         print("Error: provide --sample or --dataset.", file=sys.stderr)
         sys.exit(1)
 
-    scores = score_response(model_output, sample["expressions"])
+    scorers = {
+        "unnumbered_streaming_sum": (score_response, "expressions"),
+        "streaming_sum": (score_response_numbered, "expressions"),
+        "shuffled_streaming_sum": (score_response_numbered, "expressions"),
+        "unnumbered_uuid_sort": (score_unnumbered_uuid_sort, "uuid_lines"),
+        "streaming_uuid_sort": (score_uuid_sort, "uuid_lines"),
+        "shuffled_streaming_uuid_sort": (score_uuid_sort, "uuid_lines"),
+        "unnumbered_var_expand": (score_var_expand_unnumbered, "expressions"),
+        "streaming_var_expand": (score_var_expand_numbered, "expressions"),
+        "shuffled_streaming_var_expand": (score_var_expand_numbered, "expressions"),
+    }
+    csv_types = {"csv_permutation_homogeneous", "csv_permutation_heterogeneous", "csv_kv_lookup"}
+    sample_type = sample.get("type") or "unnumbered_streaming_sum"
+    if sample_type in csv_types:
+        scores, _, _ = score_csv_permutation(
+            model_output, sample["expected_output"], sample["n_rows"], sample["n_cols"]
+        )
+    elif sample_type in scorers:
+        scorer, field = scorers[sample_type]
+        scores = scorer(model_output, sample[field])
+    else:
+        parser.error(
+            f"Unsupported long_transduction sample type: {sample_type!r}. "
+            f"Supported types: {sorted(set(scorers) | csv_types)}."
+        )
 
     total = len(scores)
     print(f"Expression correct:  {sum(e for e, _, __ in scores)}/{total}")

@@ -664,18 +664,81 @@ def test_oversized_line_numbers_are_unparseable() -> None:
 
 
 @pytest.mark.parametrize("use_dataset", [False, True])
+@pytest.mark.parametrize("kind", [None, "unnumbered_streaming_sum", "streaming_sum", "shuffled_streaming_sum"])
 def test_arithmetic_scoring_cli(
-    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str], use_dataset: bool
+    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str], use_dataset: bool, kind: str | None
 ) -> None:
-    sample = {"expressions": [{"expr": "1+2", "answer": 3}]}
+    sample: dict[str, object] = {"expressions": [{"expr": "1+2", "answer": 3}]}
+    if kind is not None:
+        sample["type"] = kind
     sample_path = tmp_path / "sample.jsonl"
     sample_path.write_text(json.dumps(sample) + "\n")
     output_path = tmp_path / "output.txt"
-    output_path.write_text("1+2=3")
+    output_path.write_text("[1]1+2=3" if kind in {"streaming_sum", "shuffled_streaming_sum"} else "1+2=3")
     flag = "--dataset" if use_dataset else "--sample"
     monkeypatch.setattr(sys, "argv", ["parse.py", "--output", str(output_path), flag, str(sample_path)])
     parse.main()
-    assert "Answer correct:      1/1" in capsys.readouterr().out
+    result = capsys.readouterr().out
+    assert "Expression correct:  1/1" in result
+    assert "Answer correct:      1/1" in result
+    assert "Self-consistent:     1/1" in result
+
+
+@pytest.mark.parametrize("use_dataset", [False, True])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "unnumbered_uuid_sort",
+        "streaming_uuid_sort",
+        "shuffled_streaming_uuid_sort",
+        "unnumbered_var_expand",
+        "streaming_var_expand",
+        "shuffled_streaming_var_expand",
+        "csv_permutation_homogeneous",
+        "csv_permutation_heterogeneous",
+        "csv_kv_lookup",
+    ],
+)
+def test_other_task_scoring_cli(
+    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str], use_dataset: bool, kind: str
+) -> None:
+    sample: dict[str, object] = {"type": kind}
+    if "uuid_sort" in kind:
+        sample["uuid_lines"] = [["bbbbbbbb", "aaaaaaaa"]]
+        output = "aaaaaaaa,bbbbbbbb"
+    elif "var_expand" in kind:
+        sample["expressions"] = [{"expr": "abc+def", "answer": "big dog"}]
+        output = "big dog"
+    else:
+        output = ",col1\nrow1,1234"
+        sample.update(expected_output=output, n_rows=1, n_cols=1)
+    if kind.startswith(("streaming_", "shuffled_")):
+        output = "[1]" + output
+
+    sample_path = tmp_path / "sample.jsonl"
+    sample_path.write_text(json.dumps(sample) + "\n")
+    output_path = tmp_path / "output.txt"
+    output_path.write_text(output)
+    flag = "--dataset" if use_dataset else "--sample"
+    monkeypatch.setattr(sys, "argv", ["parse.py", "--output", str(output_path), flag, str(sample_path)])
+    parse.main()
+    result = capsys.readouterr().out
+    assert "Expression correct:  1/1" in result
+    assert "Answer correct:      1/1" in result
+    assert "Self-consistent:     1/1" in result
+
+
+def test_cli_rejects_unknown_type(tmp_path: Path, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]) -> None:
+    sample_path = tmp_path / "sample.json"
+    sample_path.write_text(json.dumps({"type": "unknown"}))
+    output_path = tmp_path / "output.txt"
+    output_path.write_text("1+2=3")
+    monkeypatch.setattr(sys, "argv", ["parse.py", "--output", str(output_path), "--sample", str(sample_path)])
+    with pytest.raises(SystemExit, match="2"):
+        parse.main()
+    result = capsys.readouterr()
+    assert "Unsupported long_transduction sample type: 'unknown'" in result.err
+    assert "Answer correct" not in result.out
 
 
 def test_cli_requires_ground_truth(tmp_path: Path, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]) -> None:
