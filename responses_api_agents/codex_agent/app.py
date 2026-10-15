@@ -33,9 +33,8 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
-from nemo_gym.agent_utils.process_supervisor import CLEANUP_PHASE_COUNT
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.agent_utils.task_timeout import resolve_agent_timeout
+from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -693,8 +692,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 # Gym receives the calls; never copy the direct OpenAI credential into this path.
                 "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
             },
-            "timeout": timeout,
-            "cleanup_timeout": self.config.session_close_timeout_seconds / CLEANUP_PHASE_COUNT,
         }
         raw = ""
         failure = None
@@ -913,6 +910,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 "harness_execution": "sandbox",
                 **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
                 "codex_version": self.config.codex_version,
+                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
             },
         )
 
@@ -1178,6 +1176,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         user_message, input_system = _extract_instruction(body.input)
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
 
         stdout, model_name, observations, timed_out = await self._run_codex(
             user_message,
@@ -1185,7 +1184,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             mcp_servers=mcp_servers,
             skills_path=skills_path,
             rollout_id=rollout_id,
-            timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
+            timeout=timeout,
         )
         output_items, usage = parse_exec_jsonl(stdout)
 
@@ -1230,6 +1229,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 ),
                 total_tokens=input_tokens + output_tokens,
             ),
+            metadata={AGENT_TIMEOUT_METADATA_KEY: str(timeout)},
         )
 
         if observations is not None:

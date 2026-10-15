@@ -1977,7 +1977,6 @@ def test_task_timeout_metadata_reaches_sandbox_supervisor(
         command = shlex.split(sandbox.launch.await_args.kwargs["command"])
         assert float(command[command.index("--timeout") + 1]) == expected
         assert agent.config.timeout == 1800
-        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
-        assert payload["timeout"] == expected
+        assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text

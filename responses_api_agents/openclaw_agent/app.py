@@ -739,6 +739,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             # Preserve the transcript in session observations, but let the environment
             # classify runtime/provider failures before it invokes the verifier.
             raise HTTPException(502, response.error.message)
+        response.metadata = {**(response.metadata or {}), AGENT_TIMEOUT_METADATA_KEY: str(timeout)}
         return response
 
     async def _collect_sandbox_response(
@@ -1242,6 +1243,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
         user_message, system_prompt = self._prompt_input(body)
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
 
         try:
             output_items, usage, model_name = await self._run_openclaw(
@@ -1249,7 +1251,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 system_prompt,
                 rollout_id=rollout_id,
                 observation_collector=observation_collector,
-                timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
+                timeout=timeout,
             )
         except TimeoutError:
             LOG.warning("OpenClaw timed out, padding empty output so the rollout scores instead of erroring")
@@ -1289,6 +1291,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=input_tokens + output_tokens,
             ),
+            metadata={AGENT_TIMEOUT_METADATA_KEY: str(timeout)},
         )
 
     async def responses(

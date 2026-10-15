@@ -421,6 +421,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         trajectory = (
             TrajectoryRecord(task_id="unscoped", rollout_id=rollout_id or "unscoped") if collect_observations else None
         )
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
 
         output_items, usage, model_name, observations = await self._run_opencode(
             user_message,
@@ -428,7 +429,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             rollout_id=rollout_id,
             collect_observations=collect_observations,
             trajectory=trajectory,
-            timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
+            timeout=timeout,
         )
         if collect_observations:
             observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
@@ -483,6 +484,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 ),
                 total_tokens=input_tokens + output_tokens,
             ),
+            metadata={AGENT_TIMEOUT_METADATA_KEY: str(timeout)},
         )
         if trajectory is not None:
             response = response.model_copy(update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")})
@@ -1028,6 +1030,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "harness_execution": "sandbox",
                 "opencode_version": self.config.opencode_version,
                 **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
+                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
             },
         )
 

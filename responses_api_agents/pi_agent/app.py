@@ -853,6 +853,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 "harness_execution": "sandbox",
                 **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
                 "pi_version": self.config.pi_version,
+                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
             },
         )
         conversation_input = [NeMoGymEasyInputMessage(role="system", content=system)] if system else []
@@ -1070,13 +1071,14 @@ class PiAgent(SimpleResponsesAPIAgent):
             [NeMoGymEasyInputMessage(role="system", content=system_prompt)] if system_prompt is not None else []
         )
         conversation_input.append(NeMoGymEasyInputMessage(role="user", content=user_message))
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
 
         output_items, usage, model_name, events = await self._run_pi(
             user_message,
             system_prompt,
             rollout_id=rollout_id,
             collect_observations=collect_observations,
-            timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
+            timeout=timeout,
         )
         observed_output_items = list(output_items)
         if not observed_output_items and events:
@@ -1116,6 +1118,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=input_tokens + output_tokens,
             ),
+            metadata={AGENT_TIMEOUT_METADATA_KEY: str(timeout)},
         )
         observations = AgentObservationBundle(source="pi")
         if collect_observations:

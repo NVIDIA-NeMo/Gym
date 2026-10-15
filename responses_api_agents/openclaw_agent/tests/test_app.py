@@ -1021,6 +1021,7 @@ async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget
         patch(f"{module}.asyncio.wait_for", wraps=asyncio.wait_for) as wait,
         patch.object(agent, "_workspace_root", return_value=work_dir),
     ):
-        await agent._create_response(body)
+        response = await agent._create_response(body)
     assert [call.kwargs["timeout"] for call in wait.await_args_list] == [agent.config.setup_timeout, expected]
+    assert response.metadata == {"agent_timeout_sec": str(float(expected))}
     assert agent.config.timeout == 1800
