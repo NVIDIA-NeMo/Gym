@@ -141,7 +141,9 @@ def read_result(output: Path, task: dict) -> dict:
     if len(task_results) != 1:
         raise RuntimeError(f"Expected one Harbor trial result, found {len(task_results)}")
     trial = json.loads(task_results[0].read_text())
-    task_name = trial.get("task_name", "").removeprefix("agentic-vbench/")
+    # Harbor reports task.toml's name (<namespace>/<task>); the benchmark uses the
+    # agentic-vbench namespace, generated custom tasks use their own.
+    task_name = trial.get("task_name", "").rsplit("/", 1)[-1]
     if task_name != task["task_id"]:
         raise ValueError(f"Harbor returned a mismatched task: {task_name}")
     trial_dir = task_results[0].parent

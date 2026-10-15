@@ -179,3 +179,12 @@ def test_custom_task_root_rejects_unknown_family_and_empty_root(tmp_path):
     (root / "tasks/agentic_vbench_understanding/x/task.toml").write_text("")
     # Families outside the benchmark's four are ignored, as for the pinned checkout.
     assert set(core.inventory(root)) == {"gen-assembly-1"}
+
+
+def test_read_result_accepts_custom_task_namespace(tmp_path):
+    task = fixture_result(tmp_path, reward="1")
+    result_path = tmp_path / "jobs/trial/repair1/result.json"
+    data = json.loads(result_path.read_text())
+    data["task_name"] = "curiosity-sdg/" + task["task_id"]
+    result_path.write_text(json.dumps(data))
+    assert core.read_result(tmp_path, task)["reward"] == 1
