@@ -328,9 +328,19 @@ def token_id_capture_config(global_config_dict: Any) -> TokenIdCaptureConfig:
     return TokenIdCaptureConfig.model_validate(global_config_dict or {})
 
 
-def token_id_capture_enabled_for_agent(global_config_dict: Any, agent_name: str | None) -> bool:
-    """Return whether one configured agent participates in capture."""
-    config = token_id_capture_config(global_config_dict)
+def token_id_capture_enabled_for_agent(
+    global_config_dict: Any,
+    agent_name: str | None,
+    *,
+    config: TokenIdCaptureConfig | None = None,
+) -> bool:
+    """Return whether one configured agent participates in capture.
+
+    Pass ``config`` when the caller already validated ``global_config_dict``.
+    A caller that checks many rollouts then validates the global config once instead of once per check.
+    """
+    if config is None:
+        config = token_id_capture_config(global_config_dict)
     settings = config.token_id_capture
     if not settings.enabled:
         return False
