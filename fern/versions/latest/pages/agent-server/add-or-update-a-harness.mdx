@@ -568,7 +568,7 @@ The supervisor's termination receipt and the harness's output come back through 
 
 ### Wire an adapter to `SandboxSession`
 
-Keep harness-specific response parsing and model and tool behavior in the adapter. The agent-session API in the base class owns session identity, activation retries, and retained close responses. `SandboxSession` handles the execution lifecycle underneath that API.
+Keep harness-specific response parsing and model and tool behavior in the adapter. The agent-session API in the base class owns session identity and retained close responses; the adapter owns activation retries. `SandboxSession` handles the execution lifecycle underneath that API.
 
 **1. Define the session state.** Subclass `AgentSessionState` and compose a `SandboxSession`. Implement two hooks:
 
