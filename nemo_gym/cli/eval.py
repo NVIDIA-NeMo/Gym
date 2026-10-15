@@ -659,11 +659,24 @@ def e2e_rollout_collection():  # pragma: no cover
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.telemetry.setup import (
+        configure_telemetry_env,
+        init_telemetry,
+        shutdown_telemetry,
+        telemetry_config_from_global_config,
+    )
 
-    config = RolloutCollectionConfig.model_validate(get_global_config_dict())
+    global_config_dict = get_global_config_dict()
+    config = RolloutCollectionConfig.model_validate(global_config_dict)
     rch = RolloutCollectionHelper()
 
-    asyncio.run(rch.run_from_config(config))
+    # A standalone driver starts no supervisor, so it sets up its own telemetry for the `gym.job` span and driver metrics.
+    configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
+    init_telemetry(server_name="driver", server_type="driver")
+    try:
+        asyncio.run(rch.run_from_config(config))
+    finally:
+        shutdown_telemetry()
 
 
 @exit_cleanly_on_config_error

@@ -15,7 +15,6 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CICD_MAIN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "cicd-main.yml"
 CLASSIFY_CHANGES_ACTION = REPO_ROOT / ".github" / "actions" / "classify-changes" / "action.yml"
-IS_MAIN_OR_RELEASE_REF_ACTION = REPO_ROOT / ".github" / "actions" / "is-main-or-release-ref" / "action.yml"
 FULL_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "full-test-suite.yml"
 GPU_E2E_CONFIG = REPO_ROOT / "tests" / "e2e" / "gpu_e2e.yaml"
 GPU_E2E_DATASET = REPO_ROOT / "tests" / "e2e" / "gpu_smoke.jsonl"
@@ -443,8 +442,8 @@ def test_cicd_docs_only_nightly_jobs_override_skipped_unit_status() -> None:
 def test_notify_failure_ref_check_allows_only_main_and_release_branches(
     ref: str, allowed: str, tmp_path: Path
 ) -> None:
-    action = yaml.safe_load(IS_MAIN_OR_RELEASE_REF_ACTION.read_text())
-    (script,) = (step["run"] for step in action["runs"]["steps"] if step.get("name") == "Check ref")
+    jobs = yaml.safe_load(CICD_MAIN_WORKFLOW.read_text())["jobs"]
+    (script,) = (step["run"] for step in jobs["notify-failure"]["steps"] if step.get("id") == "ref_check")
 
     output_path = tmp_path / f"github_output_{ref}"
     output_path.write_text("")
@@ -458,37 +457,39 @@ def test_notify_failure_ref_check_allows_only_main_and_release_branches(
     assert f"allowed={allowed}" in output_path.read_text(), (result.stdout, result.stderr)
 
 
-def test_notify_failure_uses_shared_ref_check_action() -> None:
-    for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
-        jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
-        steps = jobs["notify-failure"]["steps"]
-        (ref_check_step,) = (step for step in steps if step.get("name") == "Check ref is main or a release branch")
-
-        assert ref_check_step["uses"] == "./.github/actions/is-main-or-release-ref", workflow_file
-        assert any(step.get("name") == "Checkout repository" for step in steps), workflow_file
-
-
-def test_notification_workflows_pin_slack_rejection_handling() -> None:
+def test_notification_workflows_use_pinned_shared_summary_without_checkout() -> None:
     expected_action = (
-        "NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@f07495d7a01aad5578a407db8e0c4f4e395375f6"
+        "NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@631c404d00a9e60afc591cd071d35d2e18f82fc6"
     )
+    ref_scripts = []
     for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
         jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
-        steps = jobs["notify-failure"]["steps"]
+        notify = jobs["notify-failure"]
+        steps = notify["steps"]
+        (ref_step,) = (step for step in steps if step.get("id") == "ref_check")
         (notify_step,) = (step for step in steps if step.get("name") == "Notify Gym alerts channel")
 
+        ref_scripts.append(ref_step["run"])
+        assert ref_step["env"] == {"REF": "${{ github.ref_name }}"}
+        assert notify_step["if"] == "steps.ref_check.outputs.allowed == 'true'"
         assert notify_step["uses"] == expected_action, workflow_file
-
-
-def test_notify_failure_message_reports_friendly_trigger_label() -> None:
-    # The Slack message renders a "• Trigger: <expr>" bullet; assert the full
-    # GitHub expression (encoding-independent of the bullet) is present.
-    expected_trigger_expr = (
-        "Trigger: ${{ github.event_name == 'schedule' && 'Nightly schedule' "
-        "|| github.event_name == 'workflow_dispatch' && 'Manual dispatch' || 'Push to main' }}"
-    )
-    for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
-        assert expected_trigger_expr in workflow_file.read_text(), workflow_file
+        assert notify_step["with"] == {
+            "needs-json": "${{ toJSON(needs) }}",
+            "webhook": "${{ secrets.SLACK_WEBHOOK }}",
+        }
+        assert notify["environment"] == "main"
+        assert notify["permissions"] == {}
+        assert all("checkout" not in step.get("uses", "") for step in steps)
+        excluded_jobs = {"notify-failure", "merge-queue-notification"}
+        if workflow_file == CICD_MAIN_WORKFLOW:
+            # Harness P0 is reported separately and is not part of Gym's nightly gate.
+            excluded_jobs.add("harness_conformance")
+        assert set(notify["needs"]) == set(jobs) - excluded_jobs
+        assert "failure()" in notify["if"]
+        assert "always() && !cancelled()" in notify["if"]
+        assert "needs." not in notify["if"]
+        assert "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'" in notify["if"]
+    assert ref_scripts[0] == ref_scripts[1]
 
 
 def test_full_test_suite_runs_on_schedule_and_dispatch_not_push() -> None:

@@ -73,7 +73,10 @@ def _normalize(text: str) -> str:
 
 
 class EquivalenceRuleResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
+    # Each verification compares the answers by rule: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: EquivalenceRuleResourcesServerConfig
 
     async def verify(self, body: EquivalenceRuleVerifyRequest) -> EquivalenceRuleVerifyResponse:

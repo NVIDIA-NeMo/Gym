@@ -241,7 +241,10 @@ class TerminusJudgeVerifyResponse(BaseVerifyResponse):
 
 
 class TerminusJudgeResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
+    # Each verification checks schema and similarity and may call a judge: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: TerminusJudgeResourcesServerConfig
 
     def __init__(self, *args, **kwargs):

@@ -110,6 +110,7 @@ class RolloutDigest(BaseModel):
     model_calls: int = 0
     successful_model_calls: int = 0
     model_call_errors: int = 0
+    model_call_errors_usage_unknown: int = 0
     errors_by_status: dict[str, int] = Field(default_factory=dict)
     ended_on_error: bool = False
     duplicated_calls: int = 0
