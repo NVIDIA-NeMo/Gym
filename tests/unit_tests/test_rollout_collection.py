@@ -10648,3 +10648,30 @@ class TestLiveHealthEvaluation:
         # The row was saved and the progress accounting for it had already run when the await was reached.
         assert len(Path(tmp_path / "output.jsonl").read_bytes().splitlines()) >= 1
         assert "rollouts for `my_agent`" in seen_at_await[0]
+
+
+def test_episode_record_carries_the_failure_kind_into_the_sidecar_row() -> None:
+    """An Environment Server's failure kind (Harbor's ``harbor:task_deadline``) reaches the sidecar row as it left
+    the wire, under the key the metrics label reads; a failure that names no kind adds no key."""
+    import nemo_gym.rollout_collection as rollout_collection
+    from nemo_gym.episode_types import EpisodeFailure
+
+    failure = EpisodeFailure(
+        failure_reason="Episode exceeded the time budget",
+        terminal=False,
+        failure_kind="harbor:task_deadline",
+        stage="agent",
+    )
+    reply = {
+        "episode_id": {"rollout_id": "r", "attempt": 0},
+        "task_id": {"taskset": "ds", "task_id": "a"},
+        "failure": failure.model_dump(mode="json"),
+    }
+    record = rollout_collection._episode_record(reply)
+    assert record["failure_kind"] == "harbor:task_deadline" and record["_ng_failure_stage"] == "agent"
+    assert record[NG_TERMINAL_KEY] is False
+    assert rollout_collection._metric_failure_kind(record["failure_kind"]) == "harbor:task_deadline"
+    # Not a scored field: the metric-input copy of the row drops it with the other diagnostics.
+    assert "failure_kind" not in rollout_collection._counted_failure_row(record)
+    plain = rollout_collection._episode_record(reply | {"failure": {"failure_reason": "bad task", "terminal": True}})
+    assert "failure_kind" not in plain and not any(key.endswith("_step") for key in plain)

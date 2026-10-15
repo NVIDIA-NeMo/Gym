@@ -401,6 +401,9 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     Every Environment Server type is scored the same way: through the result's top-level ``reward``,
     with optional top-level ``reward_components``. A reward nested elsewhere in the result is stored as
     data, and a result without a top-level ``reward`` is unscored.
+
+    A failure's ``failure_kind`` is kept under that name, next to the ``_ng_failure_*`` diagnostics: it is
+    the key ``_record_rollout_outcome`` reads for the metric label and ``_counted_failure_row`` drops.
     """
     task_id = response.get("task_id")
     failure = response.get("failure")
@@ -417,6 +420,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         }
         if failure.get("stage") is not None:
             record["_ng_failure_stage"] = failure["stage"]
+        if failure.get("failure_kind") is not None:
+            record["failure_kind"] = failure["failure_kind"]
         if failure.get("partial_response") is not None:
             record["_ng_failure_partial_response"] = failure["partial_response"]
         if failure.get("agent_observations") is not None:

@@ -89,7 +89,7 @@ def summarize_validation(
     sidecar. A result supersedes failures for the same task/repeat, but never another repeat.
     ``expected`` contains the collector's selected, expanded input rows (after limit/repeats).
     """
-    lines = ["task_id\tstatus\treward"]
+    lines = ["task_id\tstatus\treward\tverify_s\tnetwork"]
     ok = True
     selected = {_validation_key(row): row for row in expected} if expected is not None else None
     results = {_validation_key(row): row for row in _validation_rows(rollouts)}
@@ -110,21 +110,27 @@ def summarize_validation(
             ok = False
             failure = failures.get(key)
             if failure is None:
-                lines.append(f"{label}\tmissing result\t-")
+                lines.append(f"{label}\tmissing result\t-\t-\t-")
             else:
                 message = failure.get("_ng_failure_message") or failure.get("_ng_failure_class") or "failed"
-                lines.append(f"{label}\tfailed: {str(message)[:120]}\t-")
+                lines.append(f"{label}\tfailed: {str(message)[:120]}\t-\t-\t-")
             continue
         oracle = _dig(row, "response", "metadata", "oracle")
         reward = row.get("reward")
+        # What the verifier cost and used, per task: its wall time and the network it ran under.
+        verify_s = row.get("verifier_seconds")
+        verify_note = (
+            f"{verify_s:.1f}" if isinstance(verify_s, (int, float)) and not isinstance(verify_s, bool) else "-"
+        )
+        network = row.get("verifier_network") or "-"
         if row.get("mask_sample"):
             ok = False
-            lines.append(f"{label}\tmasked ({row.get('failure_kind')})\t-")
+            lines.append(f"{label}\tmasked ({row.get('failure_kind')})\t-\t{verify_note}\t{network}")
         elif oracle == "unvalidated":
             # A selected reference solution disappearing is not a successful validation.
             if selected is not None:
                 ok = False
-            lines.append(f"{label}\tunvalidated (no solution/)\t-")
+            lines.append(f"{label}\tunvalidated (no solution/)\t-\t-\t-")
         else:
             # Only the oracle agent stamps `response.metadata.oracle` (``solved`` or ``failed`` here). A row
             # without it came from another producer, such as a model run that wrote to this file, and a
@@ -137,15 +143,15 @@ def summarize_validation(
                 ok = False
             kind = row.get("failure_kind")
             note = f" ({kind})" if kind else ""
-            lines.append(f"{label}\toracle {oracle or 'ran'}{note}\t{reward}")
+            lines.append(f"{label}\toracle {oracle or 'ran'}{note}\t{reward}\t{verify_note}\t{network}")
     if selected is None and not rollouts.is_file():
         ok = False
-        lines.append(f"-\tno rollouts written at {rollouts}\t-")
+        lines.append(f"-\tno rollouts written at {rollouts}\t-\t-\t-")
     for task_id in unvalidated:
-        lines.append(f"{task_id}\tunvalidated (no solution/)\t-")
+        lines.append(f"{task_id}\tunvalidated (no solution/)\t-\t-\t-")
     for task_id, reason in (skipped or {}).items():
         ok = False
-        lines.append(f"{task_id}\tskipped: {reason}\t-")
+        lines.append(f"{task_id}\tskipped: {reason}\t-\t-\t-")
     return ValidationReport(text="\n".join(lines), ok=ok)
 
 

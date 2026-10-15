@@ -60,6 +60,11 @@ DOCKERFILE = Path("environment") / "Dockerfile"
 COMPOSE_FILE_NAMES = ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
 
 
+# How deep below a dataset root `discover_tasks` looks for task folders. Datasets group tasks by
+# category at most a few levels deep; hidden folders are never entered.
+MAX_DISCOVERY_DEPTH = 6
+
+
 @dataclass(frozen=True)
 class HarborTask:
     """A task folder read into memory.
@@ -184,25 +189,34 @@ def is_task_folder(path: Path) -> bool:
     return (Path(path) / TASK_FILE).is_file()
 
 
-def built_service_images(task_folder: Path) -> dict[str, str]:
+def built_service_images(task_folder: Path, root: Path | None = None) -> dict[str, str]:
     """The images prepare built for the task's ``environment/`` context, by Compose service name (``{}`` when none
-    are recorded): ``main`` for the task's own Dockerfile, each built sidecar under its service name."""
+    are recorded): ``main`` for the task's own Dockerfile, each built sidecar under its service name.
+
+    ``root`` is the dataset folder the record sits in (the task's parent by default).
+    """
     task_folder = Path(task_folder)
     context = task_folder / DOCKERFILE.parent
     if not context.is_dir():
         return {}
-    return recorded_service_images(read_built_images(task_folder.parent).get(context_digest(context)))
+    folder = Path(root) if root is not None else task_folder.parent
+    return recorded_service_images(read_built_images(folder).get(context_digest(context)))
 
 
-def built_image(task_folder: Path) -> str | None:
-    """The image prepare built for the task's Dockerfile, when ``built-images.json`` records one."""
-    return built_service_images(task_folder).get(MAIN_SERVICE)
+def built_image(task_folder: Path, root: Path | None = None) -> str | None:
+    """The image prepare built for the task's Dockerfile, when ``built-images.json`` records one.
+
+    ``root`` is the dataset folder the record sits in (the task's parent by default).
+    """
+    return built_service_images(task_folder, root).get(MAIN_SERVICE)
 
 
-def _build_required(dockerfile: Path, reason: Exception) -> HarborTaskError:
+def _build_required(dockerfile: Path, reason: Exception, root: Path) -> HarborTaskError:
+    """``root`` is the dataset folder whose ``built-images.json`` the loader read: the task's parent, or the dataset
+    root of a task discovered deeper (the record is never next to a group folder)."""
     return HarborTaskError(
         f"{dockerfile} needs a build ({reason}) and no built image is recorded in "
-        f"{dockerfile.parent.parent.parent / BUILT_IMAGES_FILE}. `gym eval run` and `gym dataset validate` build it "
+        f"{root / BUILT_IMAGES_FILE}. `gym eval run` and `gym dataset validate` build it "
         "when buildah, podman or docker is installed (configured by the `builds:` block, see "
         "environment_servers/harbor/README.md), or declare [environment].docker_image with a prebuilt image."
     )
@@ -249,16 +263,19 @@ def read_instruction(path: Path) -> str:
     return "\n".join(lines)
 
 
-def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> HarborTask:
+def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[str, Any] | None = None) -> HarborTask:
     """Read ``path`` as one task. Raises :class:`HarborTaskError` when it is not one.
 
-    ``image_configs`` is the parent folder's recorded image configurations when the caller has
-    read them already (``discover_tasks`` reads the shared file once); otherwise they are read here.
+    ``root`` is the dataset folder whose files shape the task (``dataset.toml`` and the recorded
+    image configurations); it is the task's parent folder unless the task was discovered deeper.
+    ``image_configs`` is that folder's recorded image configurations when the caller has read them
+    already (``discover_tasks`` reads the shared file once); otherwise they are read here.
     """
     path = Path(path)
     if path.is_symlink():
         raise HarborTaskError(f"Task folder must not be a symlink: {path}")
     path = path.resolve()
+    root = path.parent if root is None else Path(root).resolve()
     if not is_task_folder(path):
         raise HarborTaskError(f"{path} has no {TASK_FILE}")
     try:
@@ -270,7 +287,7 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
         raise HarborTaskError(f"{path / TASK_FILE}: {exc}") from exc
     # The dataset's own settings sit beside the task folders and shape the effective task.toml.
     try:
-        dataset = read_dataset_config(path.parent)
+        dataset = read_dataset_config(root)
         config = apply_dataset_config(config, path.name, dataset)
     except ValueError as exc:
         raise HarborTaskError(str(exc)) from exc
@@ -326,7 +343,7 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
         nonlocal context_id, built_images
         if context_id is None and dockerfile.parent.is_dir():
             context_id = context_digest(dockerfile.parent)
-            built_images = recorded_service_images(read_built_images(path.parent).get(context_id))
+            built_images = recorded_service_images(read_built_images(root).get(context_id))
         return built_images
 
     # What Docker starts the image with: the record of the image the sandbox runs (built image), or the
@@ -348,12 +365,12 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
                 # Build mode: prepare built the context once and recorded the image next to the tasks.
                 built = recorded_builds().get(MAIN_SERVICE)
                 if built is None:
-                    raise _build_required(dockerfile, exc) from exc
+                    raise _build_required(dockerfile, exc, root) from exc
             parsed = None
         if built is not None:
             # The built image is pulled like a prebuilt one; its recorded configuration gives the
             # Dockerfile's final WORKDIR, ENV and USER.
-            record = read_image_configs(path.parent).get(built)
+            record = read_image_configs(root).get(built)
             base = BaseImageConfig.from_record(record) if record is not None else None
             image = built
             if base is not None:
@@ -367,12 +384,12 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
         if parsed is not None and (image is None or not parsed.has_runs):
             # A prebuilt image already holds whatever its Dockerfile's RUN lines did; only a
             # pull-mode Dockerfile contributes settings next to a declared image.
-            configs = image_configs if image_configs is not None else read_image_configs(path.parent)
+            configs = image_configs if image_configs is not None else read_image_configs(root)
             record = configs.get(parsed.image)
             try:
                 base = BaseImageConfig.from_record(record) if record is not None else None
             except ValueError as exc:
-                raise HarborTaskError(f"{path.parent / IMAGE_CONFIGS_FILE}: {parsed.image!r}: {exc}") from exc
+                raise HarborTaskError(f"{root / IMAGE_CONFIGS_FILE}: {parsed.image!r}: {exc}") from exc
             base_known = base is not None
             base_user = base.user if base is not None else None
             # The immutable reference the configuration was recorded at: what a task without a declared
@@ -383,7 +400,7 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
             except ImageConfigRequired as exc:
                 raise HarborTaskError(
                     f"{dockerfile}: {exc}, and the configuration of base image {parsed.image!r} is not recorded "
-                    f"in {path.parent / IMAGE_CONFIGS_FILE}. Prepare the dataset again (`gym eval run` or "
+                    f"in {root / IMAGE_CONFIGS_FILE}. Prepare the dataset again (`gym eval run` or "
                     "`gym dataset validate`) to record it."
                 ) from exc
             except DockerfileNeedsBuild as exc:
@@ -396,8 +413,8 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
                     # An expansion the overlay cannot resolve: a build, unless prepare already built it.
                     built = recorded_builds().get(MAIN_SERVICE)
                     if built is None:
-                        raise _build_required(dockerfile, exc) from exc
-                    record = read_image_configs(path.parent).get(built)
+                        raise _build_required(dockerfile, exc, root) from exc
+                    record = read_image_configs(root).get(built)
                     base = BaseImageConfig.from_record(record) if record is not None else None
                     image = built
                     base_known = base is not None
@@ -464,22 +481,22 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
             if verifier_context is None:
                 raise _verifier_definition_required(path)
             # Harbor's hash of tests/, paid once per task like environment/'s: the key of the verifier's record.
-            verifier_record = read_built_images(path.parent).get(context_digest(verifier_context))
+            verifier_record = read_built_images(root).get(context_digest(verifier_context))
             verifier_image = recorded_service_images(verifier_record).get(VERIFIER_SERVICE)
             if verifier_image is None:
-                raise _verifier_build_required(path)
+                raise _verifier_build_required(path, root)
         if verifier_image is not None:
             # The verifier image's recorded configuration: the server starts its entrypoint and polls its HEALTHCHECK
             # as it does the task image's, since Harbor `up --wait`s the verifier's image whether it built it or
             # pulled it. A built verifier image is always recorded; a declared one is when its reference is a
             # recorded base image (this task's own Dockerfile's, overlay or not, or another task's). Otherwise
             # nothing is recorded, as for a prebuilt docker_image, and nothing starts in it.
-            verifier_config_record = read_image_configs(path.parent).get(verifier_image)
+            verifier_config_record = read_image_configs(root).get(verifier_image)
             if verifier_config_record is not None:
                 try:
                     verifier_image_config = BaseImageConfig.from_record(verifier_config_record)
                 except ValueError as exc:
-                    raise HarborTaskError(f"{path.parent / IMAGE_CONFIGS_FILE}: {verifier_image!r}: {exc}") from exc
+                    raise HarborTaskError(f"{root / IMAGE_CONFIGS_FILE}: {verifier_image!r}: {exc}") from exc
 
     try:
         digest = task_digest(content_hash(path), dataset, path.name)
@@ -528,8 +545,44 @@ def task_digest(folder_digest: str, dataset: GymDatasetConfig, task_id: str) -> 
     return hashlib.sha256(f"{folder_digest}\n{json.dumps(applied, sort_keys=True)}".encode()).hexdigest()
 
 
+def iter_task_folders(root: Path, *, max_depth: int = MAX_DISCOVERY_DEPTH) -> list[Path]:
+    """Every task folder under ``root``, sorted by path: a folder with ``task.toml`` is a task, any other
+    folder is searched in turn, up to ``max_depth`` levels down. Hidden folders are skipped and symbolic
+    links are never followed (a linked task folder is listed, and ``load_task`` refuses it).
+
+    A task's ID is its folder name, so two task folders of the same name anywhere under ``root`` raise
+    :class:`HarborTaskError` here, before any caller (base-image recording, Dockerfile builds, discovery)
+    does work keyed by that name."""
+    root = Path(root)
+    found: list[Path] = []
+
+    def walk(folder: Path, depth: int) -> None:
+        for child in sorted(folder.iterdir()):
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            if is_task_folder(child):
+                # A symlinked task folder is listed so that load_task reports it; the walk never follows links.
+                found.append(child)
+            elif depth < max_depth and not child.is_symlink():
+                walk(child, depth + 1)
+
+    walk(root, 1)
+    seen: dict[str, Path] = {}
+    for child in found:
+        if child.name in seen:
+            raise HarborTaskError(
+                f"Duplicate Harbor task ID {child.name!r} under {root}: {seen[child.name]} and {child}"
+            )
+        seen[child.name] = child
+    return found
+
+
 def discover_tasks(root: Path, *, skipped: dict[str, HarborTaskError] | None = None) -> list[HarborTask]:
-    """A folder with ``task.toml`` is one task; otherwise its direct children are the tasks.
+    """A folder with ``task.toml`` is one task; otherwise its subfolders are searched for tasks.
+
+    The search is recursive (see :func:`iter_task_folders`), so a dataset may group its tasks in
+    folders; ``task_id`` stays the task folder's own name and must be unique across the dataset.
+    Dataset-level files (``dataset.toml``, the recorded image configurations) are read from ``root``.
 
     With ``skipped``, a child that fails to load is recorded there under its folder name
     and the others still load; without it the first failure raises. A root that is
@@ -540,7 +593,7 @@ def discover_tasks(root: Path, *, skipped: dict[str, HarborTaskError] | None = N
         raise HarborTaskError(f"{root} is not a directory")
     if is_task_folder(root):
         return [load_task(root)]
-    children = sorted(child for child in root.iterdir() if child.is_dir() and is_task_folder(child))
+    children = iter_task_folders(root)
     if not children:
         raise HarborTaskError(f"{root} is neither a task folder nor a folder of task folders (no {TASK_FILE} found)")
     # The recorded image configurations are shared by every child: read once, not once per task.
@@ -550,11 +603,11 @@ def discover_tasks(root: Path, *, skipped: dict[str, HarborTaskError] | None = N
     except HarborTaskError:
         image_configs = None
     if skipped is None:
-        return [load_task(child, image_configs=image_configs) for child in children]
+        return [load_task(child, root=root, image_configs=image_configs) for child in children]
     tasks: list[HarborTask] = []
     for child in children:
         try:
-            tasks.append(load_task(child, image_configs=image_configs))
+            tasks.append(load_task(child, root=root, image_configs=image_configs))
         except HarborTaskError as exc:
             skipped[child.name] = exc
     if not tasks:
