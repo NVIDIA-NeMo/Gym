@@ -21,7 +21,7 @@ big_finance_benchmark_agent:
       tool_call_execution: concurrent
       tool_error_observation: error_prefix
       raise_on_tool_http_error: true
-      sequential_done_tool_requires_success: true
+      done_tool_requires_success: true
       max_steps: 50
       model_call_timeout: null
       tool_call_timeout: null

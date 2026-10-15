@@ -369,6 +369,7 @@ async def test_routes_use_upstream_tool_output_and_stateless_reverify() -> None:
     handler = server._handler("final_answer")
     response = await handler({"answer": "$10 million"})
     assert response.body.decode() == "$10 million"
+    assert response.headers["x-nemo-gym-tool-error"] == "false"
     assert await server.get_reverify_mode() == ReverifyMode.STATELESS
 
 
@@ -379,7 +380,85 @@ async def test_tool_errors_preserve_upstream_message() -> None:
 
     response = await server._handler("web_search")({})
 
-    assert json.loads(response.body) == {"error": "query is required"}
+    assert response.body.decode() == "query is required"
+    assert response.headers["x-nemo-gym-tool-error"] == "true"
+
+
+@pytest.mark.parametrize(
+    "failure,expected",
+    [
+        (None, "Tool 'web_search' is not configured."),
+        (ToolError("query is required"), "query is required"),
+        (ValueError("invalid query"), "unexpected tool error: ValueError: invalid query"),
+    ],
+    ids=["unconfigured", "tool_error", "unexpected_error"],
+)
+def test_tool_failure_routes_return_explicit_status_and_raw_message(failure: Exception | None, expected: str) -> None:
+    server = _server()
+    if failure is None:
+        server._tools["web_search"] = None
+    else:
+        server._tools["web_search"].run = AsyncMock(side_effect=failure)
+
+    response = TestClient(server.setup_webserver()).post("/web_search", json={})
+
+    assert response.status_code == 200
+    assert response.headers["x-nemo-gym-tool-error"] == "true"
+    assert response.text == expected
+
+
+@pytest.mark.parametrize("payload", ['{"error":"Revenue was $10 million."}', "[ERROR] Revenue was $10 million."])
+@pytest.mark.parametrize("is_error", [False, True], ids=["returned_success", "raised_tool_error"])
+def test_tool_route_provenance_survives_serialized_reverification(payload: str, is_error: bool) -> None:
+    server = _server()
+    server._tools["final_answer"].run = (
+        AsyncMock(side_effect=ToolError(payload)) if is_error else AsyncMock(return_value=payload)
+    )
+    judge = json.dumps({"final_answer_correct": not is_error, "rubric": []})
+    raw = MagicMock(ok=True)
+    raw.read = AsyncMock(return_value=_judge_response(judge))
+    server.server_client.post = AsyncMock(return_value=raw)
+
+    with TestClient(server.setup_webserver()) as client:
+        tool_result = client.post("/final_answer", json={"answer": payload})
+        assert tool_result.status_code == 200
+        assert tool_result.text == payload
+        assert tool_result.headers["x-nemo-gym-tool-error"] == str(is_error).lower()
+        observation = f"[ERROR] {tool_result.text}" if is_error else tool_result.text
+        response = _response(
+            [
+                {
+                    "id": "call",
+                    "call_id": "final",
+                    "type": "function_call",
+                    "name": "final_answer",
+                    "arguments": json.dumps({"answer": payload}),
+                    "status": "completed",
+                },
+                {"type": "function_call_output", "call_id": "final", "output": observation},
+            ]
+        )
+        response.metadata = {
+            "stop_reason": "done_tool",
+            "tool_call_error_status": json.dumps({"final": is_error}),
+        }
+        # Reverify a deserialized rollout, without any live agent-side state.
+        request = BigFinanceVerifyRequest.model_validate_json(_request(response).model_dump_json())
+        result = client.post("/verify", json=request.model_dump(mode="json"))
+
+    assert result.status_code == 200
+    verified = result.json()
+    assert verified["final_answer"] == (None if is_error else payload)
+    assert verified["reward"] == float(not is_error)
+    assert verified["response"]["metadata"] == response.metadata
+    prompt = server.server_client.post.await_args.kwargs["json"].input[1].content
+    expected_answer = "[no final answer was produced]" if is_error else payload
+    assert f"AGENT'S FINAL ANSWER:\n{expected_answer}\n" in prompt
+    if is_error:
+        assert f"tool_result [ERROR]: {payload}" in prompt
+    else:
+        assert f"tool_result: {payload}" in prompt
+        assert "tool_result [ERROR]:" not in prompt
 
 
 def test_final_answer_and_trace_support_tool_and_prose() -> None:
@@ -463,6 +542,53 @@ def test_truncated_or_failed_terminal_call_does_not_become_final_answer() -> Non
     failed.metadata = {"stop_reason": "done_tool"}
     assert extract_final_answer(failed) is None
     assert "tool_result [ERROR]: answer is required" in format_trace(failed)
+
+
+@pytest.mark.parametrize(
+    "status_metadata",
+    [None, json.dumps({"another-call": False}), "[" * 10_000 + "0" + "]" * 10_000],
+    ids=["historical", "unrecorded_call", "malformed_metadata"],
+)
+def test_legacy_tool_error_detection_remains_available_without_call_provenance(status_metadata: str | None) -> None:
+    response = _response(
+        [
+            {
+                "id": "call",
+                "call_id": "final",
+                "type": "function_call",
+                "name": "final_answer",
+                "arguments": '{"answer":"invalid"}',
+                "status": "completed",
+            },
+            {"type": "function_call_output", "call_id": "final", "output": '{"error":"answer is required"}'},
+        ]
+    )
+    response.metadata = {"stop_reason": "done_tool"}
+    if status_metadata is not None:
+        response.metadata["tool_call_error_status"] = status_metadata
+
+    assert extract_final_answer(response) is None
+    assert 'tool_result [ERROR]: {"error":"answer is required"}' in format_trace(response)
+
+
+@pytest.mark.parametrize(
+    "last_turn,expected",
+    [
+        ([], None),
+        ([{"id": "reasoning", "type": "reasoning", "summary": []}], None),
+        ([_assistant_message("")], None),
+        ([_assistant_message("Final answer.")], "Final answer."),
+    ],
+    ids=["empty", "reasoning_only", "empty_message", "prose"],
+)
+def test_recorded_final_turn_boundary_prevents_reusing_prior_prose(
+    last_turn: list[dict], expected: str | None
+) -> None:
+    response = _response([_assistant_message("Earlier unfinished thought.")] + last_turn)
+    response.metadata = {"stop_reason": "assistant_message", "final_model_turn_start": "1"}
+    restored = NeMoGymResponse.model_validate_json(response.model_dump_json())
+
+    assert extract_final_answer(restored) == expected
 
 
 @pytest.mark.parametrize(
