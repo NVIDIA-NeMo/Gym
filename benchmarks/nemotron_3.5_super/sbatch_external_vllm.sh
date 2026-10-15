@@ -18,9 +18,10 @@ set -euo pipefail
 # Disaggregated pools also support two TP2 replicas per node with VLLM_ENGINES_PER_NODE=2.
 # Disaggregated TP1 pools: VLLM_ENGINES_PER_NODE=4 NUM_PREFILL_NODES=1 NUM_DECODE_NODES=1
 # SAVE_WARMED_CONTAINER=/shared/images/warmed.sqsh runs startup only (omit eval args),
-# collects all nodes' FlashInfer autotuning caches inside one image, exports it,
-# and exits. No autotuning-cache mount is used. Later runs with CONTAINER pointing
-# to that image automatically load the baked caches. Keep the same GPU type and
+# collects all nodes' FlashInfer autotuning caches, compiled JIT modules, and
+# vLLM startup plans inside one image, exports it, and exits. No cache mount is used.
+# Later runs with CONTAINER pointing to that image automatically load the baked
+# caches. Keep the same GPU type and
 # serving config; changed kernels/configs may need fresh tuning. Mounted model
 # weights, GPU memory and CUDA graphs are not captured. Output must not already exist.
 VLLM_MODE="${VLLM_MODE:-pd}"
@@ -276,8 +277,17 @@ if [[ -n "$SAVE_WARMED_CONTAINER" || -f "\$baked_cache/.baked" ]]; then
     mkdir -p "\$baked_cache"
     echo "Using image-local FlashInfer autotune cache: \$baked_cache on \$(hostname)"
 fi
+if [[ -n "$SAVE_WARMED_CONTAINER" || -f "\$baked_cache/.startup-plans-baked" ]]; then
+    export VLLM_CACHE_ROOT=/opt/super-vl-evals/vllm-cache
+    export VLLM_ENABLE_STARTUP_PLAN="\${VLLM_ENABLE_STARTUP_PLAN:-1}"
+    echo "Using image-local vLLM startup plans: \$VLLM_CACHE_ROOT/startup_plan on \$(hostname)"
+fi
 if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     PROFILE_PREFILL=0
+    export VLLM_ENABLE_STARTUP_PLAN=1
+    # Keep every worker's runtime JIT output inside its named container. The
+    # export step collects these libraries from all nodes and installs them as AOT.
+    export FLASHINFER_WORKSPACE_BASE=/opt/super-vl-evals/flashinfer-warmup-workspace
     touch "\$baked_cache/.warmup-start"
 fi
 
@@ -924,8 +934,8 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     (( completed_status == 0 )) || exit "\$completed_status"
     cache_warmup_step=""
 
-    # Transfer cache JSON over stdout; no cache directory is bind-mounted.
-    # One complete cache per config hash is retained, including both PD roles.
+    # Transfer binary archives over stdout; no cache directory is bind-mounted.
+    # Include both PD roles and headless workers' compiled modules/startup plans.
     cache_export_dir=\$(mktemp -d "$(dirname "$SAVE_WARMED_CONTAINER")/.vllm-warm.XXXXXX")
     for (( node_index = 0; node_index < \${#nodes[@]}; node_index++ )); do
         dump_args=()
@@ -936,7 +946,7 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
         srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=0 \
             --nodelist="\${nodes[node_index]}" --container-name="\$worker_container" \
             --container-writable --no-container-mount-home --container-workdir=/ \
-            python3 -c "\$warm_cache_helper" dump "\${dump_args[@]}" >> "\$cache_export_dir/caches.jsonl"
+            python3 -c "\$warm_cache_helper" dump "\${dump_args[@]}" >> "\$cache_export_dir/caches.tar"
     done
 
     # Stop the serving step before exporting. The named rootfs persists for the
@@ -944,11 +954,12 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     kill "\$server_step"
     wait "\$server_step" || true
     server_step=""
-    srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=0 \
+    # A GPU is needed to verify that the installed modules load with JIT disabled.
+    srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=1 \
         --nodelist="\${nodes[0]}" --container-name="\$worker_container" \
         --container-writable --no-container-mount-home --container-workdir=/ \
         --container-save="\$cache_export_dir/warmed.sqsh" \
-        python3 -c "\$warm_cache_helper" install < "\$cache_export_dir/caches.jsonl"
+        python3 -c "\$warm_cache_helper" install < "\$cache_export_dir/caches.tar"
     test -s "\$cache_export_dir/warmed.sqsh"
     # Publish only a successful export; a concurrent job must not overwrite it.
     ln "\$cache_export_dir/warmed.sqsh" "$SAVE_WARMED_CONTAINER"

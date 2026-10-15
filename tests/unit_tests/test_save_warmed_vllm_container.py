@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import io
 import json
 import os
+import tarfile
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock
@@ -60,6 +62,20 @@ def test_collect_requires_current_warmup(helper: ModuleType, tmp_path: Path) -> 
     assert helper.collect_caches(tmp_path, allow_empty=False) == {"a" * 64: contents}
 
 
+def test_rewarming_baked_image_accepts_reused_autotuning(helper: ModuleType, tmp_path: Path) -> None:
+    (tmp_path / ".warmup-start").touch()
+    (tmp_path / ".baked").touch()
+    directory = tmp_path / ("a" * 64)
+    directory.mkdir()
+    path = directory / "autotune_configs.json"
+    path.write_text('{"cached-tactic": 1}')
+    os.utime(path, (1, 1))
+    assert helper.collect_caches(tmp_path, allow_empty=False) == {"a" * 64: '{"cached-tactic": 1}'}
+    path.unlink()
+    with pytest.raises(ValueError, match="No autotuning caches"):
+        helper.collect_caches(tmp_path, allow_empty=False)
+
+
 def test_headless_node_may_have_no_cache(helper: ModuleType, tmp_path: Path) -> None:
     (tmp_path / ".warmup-start").touch()
     assert helper.collect_caches(tmp_path, allow_empty=True) == {}
@@ -98,3 +114,118 @@ def test_rejects_incompatible_replica_entries(helper: ModuleType, tmp_path: Path
     with pytest.raises(ValueError, match="incompatible cache entry sets"):
         helper.install_caches(tmp_path, [json.dumps({"a" * 64: '{"op1": 1}'}), json.dumps({"a" * 64: '{"op2": 2}'})])
     assert not (tmp_path / ".baked").exists()
+
+
+def test_warmup_archive_merges_kernels_and_startup_plans_from_all_nodes(helper: ModuleType, tmp_path: Path) -> None:
+    stream = io.BytesIO()
+    checkpoint = "checkpointing_ssu_s_f32_i_bf16_dt_bf16_w_bf16_a_f32_si_i32_d_64_ds_128_np_6_mw_16_hpg_16_ng_2"
+    materialize = "replayssm_materialize_s_f32_i_bf16_a_f32_d_64_ds_128_hpg_16_mw_16_pr_0"
+    for node, module in enumerate((checkpoint, materialize)):
+        root = tmp_path / str(node)
+        cache = root / "autotune"
+        cache.mkdir(parents=True)
+        (cache / ".warmup-start").touch()
+        config = cache / (str(node) * 64)
+        config.mkdir()
+        (config / "autotune_configs.json").write_text(json.dumps({f"role-{node}": 1}))
+        # Include the custom-image build namespace and GPU architecture.
+        directory = (
+            root / "jit" / "flashinfer-builds" / "build-hash" / ".cache/flashinfer/0.7.0/100a/cached_ops" / module
+        )
+        directory.mkdir(parents=True)
+        (directory / f"{module}.so").write_bytes(b"compiled-" + bytes([node]))
+        (directory / "kernel.cuda.o").write_bytes(b"do not export object files")
+        startup = root / "startup"
+        startup.mkdir()
+        for fingerprint in (str(node) * 16, "a" * 16):
+            (startup / f"startup_plan_{fingerprint}.json").write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "fingerprint": fingerprint,
+                        "kv_cache_memory_bytes": 1000 - node,
+                        "free_memory_baseline": 2000 + node,
+                    }
+                )
+            )
+        helper.dump_warmup(cache, root / "jit", startup, stream, allow_empty=False)
+
+    stream.seek(0)
+    target = tmp_path / "image"
+    libraries = helper.install_warmup(target / "autotune", target / "aot", target / "startup", stream)
+    assert {library.stem for library in libraries} == {checkpoint, materialize}
+    assert (target / "aot" / checkpoint / f"{checkpoint}.so").read_bytes() == b"compiled-\x00"
+    assert (target / "aot" / materialize / f"{materialize}.so").read_bytes() == b"compiled-\x01"
+    assert not list(target.rglob("*.o"))
+    assert len(list((target / "autotune").glob("*/autotune_configs.json"))) == 2
+    assert len(list((target / "startup").glob("*.json"))) == 3
+    shared_plan = json.loads((target / "startup" / f"startup_plan_{'a' * 16}.json").read_text())
+    assert shared_plan["kv_cache_memory_bytes"] == 999
+    assert shared_plan["free_memory_baseline"] == 2001
+    assert (target / "autotune" / ".startup-plans-baked").is_file()
+
+
+def test_headless_warmup_exports_kernels_without_autotuning(helper: ModuleType, tmp_path: Path) -> None:
+    (tmp_path / ".warmup-start").touch()
+    library = tmp_path / "jit/version/100a/cached_ops/module/module.so"
+    library.parent.mkdir(parents=True)
+    library.write_bytes(b"compiled")
+    stream = io.BytesIO()
+    helper.dump_warmup(tmp_path, tmp_path / "jit", tmp_path / "startup", stream, allow_empty=True)
+    stream.seek(0)
+    with tarfile.open(fileobj=stream) as archive:
+        assert archive.getnames() == ["autotune.json", "jit/module.so"]
+
+
+@pytest.mark.parametrize("name", ["jit/../../outside.so", "startup/../../outside.json", "unexpected"])
+def test_warmup_archive_rejects_unexpected_paths(helper: ModuleType, tmp_path: Path, name: str) -> None:
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as archive:
+        entry = tarfile.TarInfo(name)
+        entry.size = 1
+        archive.addfile(entry, io.BytesIO(b"x"))
+    stream.seek(0)
+    with pytest.raises(ValueError, match="Unexpected warmup archive entry"):
+        helper.install_warmup(tmp_path / "cache", tmp_path / "aot", tmp_path / "startup", stream)
+    assert not (tmp_path / "cache/.baked").exists()
+
+
+def test_warmup_archive_rejects_links_and_invalid_plans(helper: ModuleType, tmp_path: Path) -> None:
+    for is_link in (True, False):
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w") as archive:
+            entry = tarfile.TarInfo(f"startup/startup_plan_{'a' * 16}.json")
+            if is_link:
+                entry.type = tarfile.SYMTYPE
+                entry.linkname = "/outside"
+                archive.addfile(entry)
+            else:
+                entry.size = 2
+                archive.addfile(entry, io.BytesIO(b"{}"))
+        stream.seek(0)
+        with pytest.raises(ValueError, match="Unexpected warmup archive entry|Invalid startup plan"):
+            helper.install_warmup(tmp_path / "cache", tmp_path / "aot", tmp_path / "startup", stream)
+        assert not (tmp_path / "cache/.baked").exists()
+
+
+def test_baked_kernels_resolve_as_aot_before_load(
+    helper: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    library = tmp_path / "checkpointing_ssu.so"
+    load = MagicMock()
+    env = MagicMock()
+    env.get_aot_path.return_value = library
+    monkeypatch.setitem(helper.sys.modules, "tvm_ffi", MagicMock(load_module=load))
+    monkeypatch.setitem(helper.sys.modules, "flashinfer", ModuleType("flashinfer"))
+    monkeypatch.setitem(helper.sys.modules, "flashinfer.jit", MagicMock(env=env))
+    monkeypatch.setenv("FLASHINFER_DISABLE_JIT", "0")
+    helper.verify_libraries([library])
+    assert os.environ["FLASHINFER_DISABLE_JIT"] == "1"
+    env.get_aot_path.assert_called_once_with("checkpointing_ssu")
+    load.assert_called_once_with(str(library))
+
+    env.get_aot_path.return_value = tmp_path / "wrong.so"
+    load.reset_mock()
+    with pytest.raises(ValueError, match="does not resolve baked module"):
+        helper.verify_libraries([library])
+    load.assert_not_called()

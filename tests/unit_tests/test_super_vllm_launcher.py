@@ -674,6 +674,52 @@ sleep() { "$TEST_SLEEP" 0.01; }
                         result = subprocess.run([BASH, "-n"], input=command, text=True, capture_output=True, timeout=5)
                         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_warmed_container_scripts_have_valid_syntax(self) -> None:
+        for mode in ({}, {"VLLM_PD_DEPLOYMENT_MODE": "coupled"}, {"VLLM_MODE": "aggregated"}):
+            with self.subTest(mode=mode):
+                evaluation, serving, batch, submissions = self.capture_submission(
+                    env=mode | {"SAVE_WARMED_CONTAINER": f"{self.workdir}/warmed.sqsh"}
+                )
+                self.assertEqual(len(submissions), 1)
+                for name, command in (("evaluation", evaluation), ("serving", serving), ("batch", batch)):
+                    with self.subTest(script=name):
+                        if name == "batch":
+                            self.require_batch_bash()
+                        result = subprocess.run([BASH, "-n"], input=command, text=True, capture_output=True, timeout=5)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_warmed_container_uses_image_local_caches(self) -> None:
+        for mode in ("warmup", "baked", "legacy", "disabled"):
+            with self.subTest(mode=mode):
+                root = Path(self.workdir) / mode
+                cache = root / "flashinfer-autotune-cache"
+                cache.mkdir(parents=True)
+                if mode != "warmup":
+                    (cache / ".baked").touch()
+                if mode in ("baked", "disabled"):
+                    (cache / ".startup-plans-baked").touch()
+                _, serving, _, _ = self.capture_submission(
+                    env={"SAVE_WARMED_CONTAINER": f"{root}/warmed.sqsh"} if mode == "warmup" else {}
+                )
+                setup = "baked_cache=" + serving.split("baked_cache=", 1)[1].split("# Custom images", 1)[0]
+                setup = setup.replace("/opt/super-vl-evals", str(root))
+                inspect = r"""
+printf '%s\n' "${VLLM_CACHE_ROOT-unset}" "${VLLM_ENABLE_STARTUP_PLAN-unset}" "${FLASHINFER_WORKSPACE_BASE-unset}"
+"""
+                status, stdout, stderr = self.run_shell(
+                    setup + inspect, env={"VLLM_ENABLE_STARTUP_PLAN": "0"} if mode == "disabled" else {}
+                )
+                self.assertEqual(status, 0, stderr)
+                self.assertEqual(
+                    stdout.splitlines()[-3:],
+                    [
+                        "unset" if mode == "legacy" else str(root / "vllm-cache"),
+                        "unset" if mode == "legacy" else "0" if mode == "disabled" else "1",
+                        str(root / "flashinfer-warmup-workspace") if mode == "warmup" else "unset",
+                    ],
+                )
+                self.assertEqual((cache / ".warmup-start").exists(), mode == "warmup")
+
     def test_ultra_runtime_settings_preserve_launcher_network_defaults(self) -> None:
         """Ultra sets its model runner and state layout while inheriting the network defaults."""
         expected = {
