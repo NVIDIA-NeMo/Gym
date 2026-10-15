@@ -664,7 +664,6 @@ class RoleMRCVerifyResponse(BaseVerifyResponse):
 
 
 class RoleMRCResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: RoleMRCResourcesServerConfig
 
     _judge_semaphore: Any = PrivateAttr(default=None)

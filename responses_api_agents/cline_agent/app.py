@@ -434,8 +434,6 @@ class ClineAgent(SimpleResponsesAPIAgent):
     are not wired up.
     """
 
-    ray_enabled = False
-
     config: ClineAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
