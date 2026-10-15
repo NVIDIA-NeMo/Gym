@@ -19,6 +19,7 @@ from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, Resourc
 from nemo_gym.base_responses_api_model import ModelCallCaptureConfig, install_model_call_capture
 from nemo_gym.chat_streaming import synthesize_chat_completion_sse
 from nemo_gym.judge import call_judge
+from nemo_gym.observability.verifiers import observe_verifier
 from nemo_gym.openai_utils import NeMoGymChatCompletion
 from nemo_gym.responses_streaming import (
     flatten_namespace_tools,
@@ -410,6 +411,6 @@ class Probe:
         for prefix in ("", "/ng-rollout/{rollout_id}"):
             app.post(prefix + "/seed_session")(seed)
             app.post(prefix + "/close_session")(close)
-            app.post(prefix + "/verify")(verify)
+            app.post(prefix + "/verify")(observe_verifier(verify, enabled=True))
             app.post(prefix + "/bash")(bash)
         return app

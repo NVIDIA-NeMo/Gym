@@ -155,7 +155,7 @@ def test_missing_output_witness_cannot_qualify_artifacts(behavior_episode):
     ]
 
 
-@pytest.mark.parametrize("missing", [None, "judge_call", "grade_reference", "verifier_role"])
+@pytest.mark.parametrize("missing", [None, "judge_call", "grade_reference", "verifier_owner"])
 def test_judge_scenario_requires_witnessed_grade_and_verifier_ownership(missing):
     from copy import deepcopy
 
@@ -169,8 +169,8 @@ def test_judge_scenario_requires_witnessed_grade_and_verifier_ownership(missing)
     call["model_call_id"] = "judge-call"
     call["response_metadata"]["response_id"] = "judge-response"
     record["ng_trajectory"]["model_calls"].append(call)
-    owner = {"invocation_id": "judge", "role": "verifier", "model_calls": [{"model_call_id": "judge-call"}]}
-    record["ng_trajectory"]["invocations"].append(owner)
+    owner = {"invocation_id": "judge", "model_calls": [{"model_call_id": "judge-call"}]}
+    record["ng_trajectory"]["verifier_invocations"] = [owner]
     record["judgement_id"] = "judge-response"
     witness["judge_calls"] = [
         {"request": {"input": "CONFORMANCE_DONE"}, "response": {"id": "judge-response"}, "status_code": 200}
@@ -179,8 +179,9 @@ def test_judge_scenario_requires_witnessed_grade_and_verifier_ownership(missing)
         witness["judge_calls"] = []
     elif missing == "grade_reference":
         record.pop("judgement_id")
-    elif missing == "verifier_role":
-        owner["role"] = "agent"
+    elif missing == "verifier_owner":
+        record["ng_trajectory"]["verifier_invocations"] = []
+        record["ng_trajectory"]["invocations"].append(owner)
     result = inspect_behavior(
         witness,
         record,
