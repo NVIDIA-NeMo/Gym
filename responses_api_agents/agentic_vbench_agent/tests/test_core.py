@@ -145,3 +145,37 @@ def test_lock_falls_back_when_the_filesystem_refuses_flock(tmp_path, monkeypatch
     with core._locked(tmp_path / "x.lock"):
         pass
     assert (tmp_path / "x.lock").exists()
+
+
+def _custom_task(root, family, name):
+    task = root / "tasks" / f"agentic_vbench_{family}" / name
+    (task / "steps/solve").mkdir(parents=True)
+    (task / "task.toml").write_text('version = "1.0"\n')
+    (task / "steps/solve/instruction.md").write_text(f"# {name}\n")
+
+
+def test_custom_task_root_skips_pin_and_completeness_checks(tmp_path):
+    root = tmp_path / "generated"
+    root.mkdir()
+    (root / core.CUSTOM_TASKS_MARKER).write_text('{"source": "sdg"}\n')
+    _custom_task(root, "assembly", "gen-assembly-1")
+    _custom_task(root, "sequencing", "gen-sequencing-1")
+    assert core.ensure_checkout(root) == root.resolve()
+    tasks = core.inventory(root)
+    assert set(tasks) == {"gen-assembly-1", "gen-sequencing-1"}
+    revision = tasks["gen-assembly-1"]["benchmark_revision"]
+    assert revision.startswith("custom:") and revision != core.REVISION
+    assert len(core.dataset_rows(tasks, "assembly")) == 1
+
+
+def test_custom_task_root_rejects_unknown_family_and_empty_root(tmp_path):
+    root = tmp_path / "generated"
+    root.mkdir()
+    (root / core.CUSTOM_TASKS_MARKER).write_text("{}\n")
+    with pytest.raises(ValueError, match="no tasks"):
+        core.inventory(root)
+    _custom_task(root, "assembly", "gen-assembly-1")
+    (root / "tasks/agentic_vbench_understanding/x/steps/solve").mkdir(parents=True)
+    (root / "tasks/agentic_vbench_understanding/x/task.toml").write_text("")
+    # Families outside the benchmark's four are ignored, as for the pinned checkout.
+    assert set(core.inventory(root)) == {"gen-assembly-1"}
