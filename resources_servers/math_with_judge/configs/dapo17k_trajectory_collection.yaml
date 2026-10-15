@@ -1,0 +1,48 @@
+math_with_judge:
+  resources_servers:
+    math_with_judge:
+      entrypoint: app.py
+      # Grading uses math-verify only (should_use_judge: false), so the judge reference just needs to resolve.
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params: {
+        input: []
+      }
+      should_use_judge: false
+      domain: math
+      verified: false
+      description: DAPO17k train problems repeated for trajectory collection with math-verify
+      value: Collect rollouts on DAPO17k without training (NeMo RL is_trajectory_collection)
+math_with_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_with_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      # NeMo RL trajectory collection reads only the validation split, so the train problems go there.
+      # Own local file: collate checks each dataset against `<jsonl stem>_metrics.json`, and
+      # dapo17k_train_metrics.json describes dapo17k.yaml's train split.
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/math_with_judge/data/dapo17k_trajectory_collection_train.jsonl
+        # From YouJiacheng/DAPO-Math-17k-dedup
+        gitlab_identifier:
+          dataset_name: dapo17k
+          version: 0.0.1
+          artifact_fpath: dapo17k_train.jsonl
+        num_repeats: 16
+        license: Apache 2.0
+
+math_with_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: math_with_judge_simple_agent

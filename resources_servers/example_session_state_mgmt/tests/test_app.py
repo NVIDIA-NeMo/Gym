@@ -64,3 +64,11 @@ class TestApp:
 
         response = client.post("/get_counter_value", cookies=initial_request_cookies)
         assert response.json() == {"count": 2}
+
+    async def test_export_leaves_out_a_session_the_server_no_longer_holds(self) -> None:
+        config = StatefulCounterResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
+        server = StatefulCounterResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server.session_id_to_counter["live"] = 3
+
+        # Made-up state for the dropped session would restore a wrong counter.
+        assert await server.export_session_states(["live", "dropped"]) == {"live": {"count": 3}}
