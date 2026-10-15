@@ -24,6 +24,7 @@ from difflib import get_close_matches
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
+from ipaddress import ip_address
 from os import environ, getenv
 from pathlib import Path
 from platform import python_version
@@ -1535,11 +1536,27 @@ Found global config dict yaml:
 
         with open_dict(global_config_dict):
             use_absolute_ip = global_config_dict.setdefault(USE_ABSOLUTE_IP, False)
-        if use_absolute_ip and not parse_config.offline:
-            default_host = gethostbyname(gethostname())
-        else:
-            # Do one pass through all the configs validate and populate various configs for our servers.
-            default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
+        # An explicit address wins, including on machines whose short hostname has no DNS entry.
+        default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME)
+        if not default_host and use_absolute_ip and not parse_config.offline:
+            hostname = gethostname()
+            address_hint = (
+                "Set +default_host=<host address reachable from the sandbox>, or set +use_absolute_ip=false "
+                "only when the caller shares the servers' network namespace."
+            )
+            try:
+                default_host = gethostbyname(hostname)
+            except OSError as exc:
+                raise ConfigError(
+                    f"Cannot resolve host {hostname!r} for use_absolute_ip=true. {address_hint}"
+                ) from exc
+            address = ip_address(default_host)
+            if address.is_loopback or address.is_unspecified:
+                raise ConfigError(
+                    f"Host {hostname!r} resolves to {default_host}, which cannot advertise this host to a sandbox. "
+                    f"{address_hint}"
+                )
+        default_host = default_host or "127.0.0.1"
 
         # Only an absent or null block means "all defaults"; any other non-mapping (incl. false, 0, "" and []) is
         # malformed. `host` is not read here: it may reference a server host that validate_and_populate_defaults
