@@ -3,6 +3,8 @@
 
 import asyncio
 import json
+import math
+import shlex
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +23,8 @@ from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.tasks.harbor.materialize import materialize_task
+from nemo_gym.tasks.harbor.task import load_task
 from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig, _unique_usage_messages
 
 
@@ -1935,3 +1939,56 @@ def test_optional_diagnostics_preserve_valid_terminal_result(setup, diagnostics)
         gaps = {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
         assert "runtime_info_unavailable" in gaps
         assert ("worker_exit_code_unavailable" in gaps) == ("return_code" in diagnostics)
+
+
+@pytest.mark.parametrize(
+    "budget,expected", [(None, 1800), ("900.0", 900), ("12.5", 12.5), ("0.5", 0.5), ("3600", 1800), ("nan", 1800)]
+)
+def test_task_timeout_metadata_reaches_sandbox_supervisor(
+    setup: tuple[OpenClawAgent, Sandbox], tmp_path: Path, budget: str | None, expected: float
+) -> None:
+    agent, sandbox = setup
+    agent.config.timeout = 1800
+    (tmp_path / "task.toml").write_text("[agent]\ntimeout_sec = 900.0\n")
+    (tmp_path / "instruction.md").write_text("Fix the code")
+    (tmp_path / "tests").mkdir()
+    body = materialize_task(load_task(tmp_path), "timeout-test").task_input.responses_create_params
+    if budget != "900.0":
+        body.metadata = None if budget is None else {"agent_timeout_sec": budget}
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        session_id = created.json()["agent_session_id"]
+        response = client.post(
+            "/ng-rollout/openclaw-smoke-a2/v1/responses", json=body.model_dump(mode="json", exclude_unset=True)
+        )
+        assert response.status_code == 200, response.text
+        command = shlex.split(sandbox.launch.await_args.kwargs["command"])
+        assert float(command[command.index("--timeout") + 1]) == expected
+        assert agent.config.timeout == 1800
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        cli = payload["command"]
+        assert cli[cli.index("--timeout") + 1] == str(math.ceil(expected))
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+
+
+def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
+    setup: tuple[OpenClawAgent, Sandbox],
+) -> None:
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        session_id = created.json()["agent_session_id"]
+        path = "/ng-rollout/openclaw-smoke-a2/v1/responses"
+        rejected = client.post(
+            path, json={"input": "Fix the code", "metadata": {"agent_timeout_sec": "900.0", "ignored": "value"}}
+        )
+        assert rejected.status_code == 422
+        assert "metadata" in rejected.json()["detail"]
+        sandbox.launch.assert_not_awaited()
+        accepted = client.post(path, json={"input": "Fix the code", "metadata": {"agent_timeout_sec": "900.0"}})
+        assert accepted.status_code == 200, accepted.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text

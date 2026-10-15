@@ -32,6 +32,7 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -634,6 +635,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             value = getattr(body, name)
             if name in ("stream", "background") and value is False:
                 continue
+            if name == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
+                continue
             if value != field.get_default(call_default_factory=True):
                 raise HTTPException(422, f"Pi does not support request field {name}")
         if not 0 < self.config.max_output_tokens <= 2**53 - 1:
@@ -685,6 +688,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         await state.session.sandbox.upload(
             Path(__file__).with_name("outcome.mjs"), f"{state.session.session_dir}/outcome.mjs"
         )
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = [
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
@@ -726,7 +730,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         try:
             async with self.sem:
                 raw = await state.execute(
-                    payload, timeout=self.config.timeout, close_timeout=self.config.session_close_timeout_seconds
+                    payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
                 )
         except BaseException as failure:
             # Common finalization captures before close removes the session directory.
@@ -956,7 +960,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         *,
         rollout_id: Optional[str] = None,
         collect_observations: bool = True,
+        timeout: float | None = None,
     ) -> tuple[list[Any], dict[str, int], str, list[tuple[float, dict[str, Any]]]]:
+        timeout = self.config.timeout if timeout is None else timeout
         # Local callers still get automatic installation. Sandbox sessions never
         # enter this path, so their host does not need Pi, Node, or npm.
         if self._local_setup_task is None:
@@ -1020,23 +1026,21 @@ class PiAgent(SimpleResponsesAPIAgent):
                 stderr_task = asyncio.create_task(proc.stderr.read())
                 output_task = asyncio.gather(stdout_task, stderr_task, proc.wait())
                 try:
-                    (stdout, events), stderr, _ = await asyncio.wait_for(
-                        asyncio.shield(output_task), timeout=self.config.timeout
-                    )
+                    (stdout, events), stderr, _ = await asyncio.wait_for(asyncio.shield(output_task), timeout=timeout)
                 except asyncio.TimeoutError:
                     if proc.returncode is None:
                         proc.kill()
                     (_, events), _, _ = await output_task
                     events.append((time(), {"type": "_ng_process_exit", "timed_out": True}))
-                    LOG.warning("pi timed out after %ds", self.config.timeout)
+                    LOG.warning("pi timed out after %ss", timeout)
                     return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model, events
             else:
                 try:
-                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
                 except asyncio.TimeoutError:
                     proc.kill()
                     await proc.communicate()
-                    LOG.warning("pi timed out after %ds", self.config.timeout)
+                    LOG.warning("pi timed out after %ss", timeout)
                     return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model, events
 
             if proc.returncode == MCP_SETUP_ERROR_EXIT_CODE and self.config.mcp_servers:
@@ -1072,6 +1076,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             system_prompt,
             rollout_id=rollout_id,
             collect_observations=collect_observations,
+            timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
         )
         observed_output_items = list(output_items)
         if not observed_output_items and events:

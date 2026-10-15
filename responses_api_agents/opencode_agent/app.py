@@ -33,6 +33,7 @@ from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -327,8 +328,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         collect_observations: bool = True,
         trajectory: Optional[TrajectoryRecord] = None,
+        timeout: float | None = None,
     ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle]:
         """Run one headless OpenCode session and read its persisted artifact."""
+        timeout = self.config.timeout if timeout is None else timeout
         await self._ensure_local_runtime()
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
@@ -354,12 +357,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 env=env,
             )
             try:
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
                 proc.kill()
                 _, stderr = await proc.communicate()
                 timed_out = True
-                LOG.warning("opencode timed out after %ds", self.config.timeout)
+                LOG.warning("opencode timed out after %ss", timeout)
 
             if proc.returncode not in (0, None):
                 LOG.warning("opencode exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
@@ -425,6 +428,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             rollout_id=rollout_id,
             collect_observations=collect_observations,
             trajectory=trajectory,
+            timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
         )
         if collect_observations:
             observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
@@ -723,6 +727,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             value = getattr(body, key)
             if key in ("stream", "background") and value is False:
                 continue
+            if key == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
+                continue
             if value != field.get_default(call_default_factory=True):
                 raise HTTPException(
                     422,
@@ -867,6 +873,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if self._model_call_capture_enabled():
             apply_observability_patch(config, plugin_path=Path(state.session.session_dir) / OBSERVABILITY_PATCH.name)
         config.setdefault("plugin", []).append((Path(state.session.session_dir) / "task_environment.mjs").as_uri())
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = [f"{state.runtime}/opencode", "run", "--format", "json", "--title", "NeMo Gym"]
         if self.config.thinking:
             command.append("--thinking")
@@ -897,7 +904,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             async with self.sem:
                 await state.execute(
                     payload,
-                    timeout=self.config.timeout,
+                    timeout=timeout,
                     close_timeout=self.config.session_close_timeout_seconds,
                 )
         except BaseException as exc:
