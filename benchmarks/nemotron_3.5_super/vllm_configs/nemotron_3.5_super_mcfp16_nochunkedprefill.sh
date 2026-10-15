@@ -37,12 +37,12 @@ VLLM_COMMON_ARGS=(
     --tool-call-parser qwen3_coder
     --reasoning-parser nemotron_v3
     --no-enable-chunked-prefill
-    --enable-prefix-caching
+    --no-enable-prefix-caching
     --max-model-len 131072
     --kv-cache-dtype fp8
     --no-disable-hybrid-kv-cache-manager
     --block-size 128
-    --mamba-cache-mode align
+    --mamba-cache-mode none
     --mamba-backend flashinfer
     --mamba-ssm-cache-dtype float16
     --enable-mamba-cache-stochastic-rounding
@@ -54,10 +54,7 @@ VLLM_COMMON_ARGS=(
     --data-parallel-size-local 1
     --tensor-parallel-size 4
     --api-server-count 1
-    --enable-mamba-shared-prefix-checkpoint
-    --prefix-match-unit 128
-    --use-replayssm
-    --replayssm-buffer-len 16
+    --no-enable-mamba-shared-prefix-checkpoint
 )
 # @bxyu-nvidia: Lease duration is set to 180s since to give nodes a chance to pick up the request. Helps with resilience.
 # @bxyu-nvidia: We set num_speculative_tokens_per_batch_size to 0 here since prefill does not need to speculate any tokens, it just needs to know that we are speculating.
@@ -135,6 +132,6 @@ VLLM_DECODE_ARGS=(
         ]
     }'
     --max-cudagraph-capture-size 6144
-    --max-num-batched-tokens 33920
+    --max-num-batched-tokens 135680
     --max-num-seqs 1024
 )
