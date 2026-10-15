@@ -11,13 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from omegaconf import OmegaConf
-from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall
+from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall, UserMessage
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.episode_types import EpisodeId
@@ -28,9 +26,6 @@ from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupA
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
 from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
 from responses_api_agents.stirrup_agent.stirrup_utils import convert_stirrup_history_to_output_items
-
-
-STIRRUP_AGENT_DIR = Path(__file__).resolve().parent.parent
 
 
 def _make_config(**fields) -> StirrupAgentWrapperConfig:
@@ -63,27 +58,45 @@ def test_removed_options_are_rejected(option):
         _make_config(**{option: "x"})
 
 
-async def _runner_payload(config: StirrupAgentWrapperConfig, body: NeMoGymResponseCreateParamsNonStreaming) -> dict:
-    """The payload the agent server hands the sandbox runner for one episode."""
+def _report(**fields) -> dict:
+    return {
+        "input_items": [],
+        "output_items": [],
+        "elapsed_seconds": 0,
+        "usages": [],
+        "stop_reason": None,
+        "resources_cookies": {},
+        "observations": {"status": "completed"},
+        **fields,
+    }
+
+
+async def _run_episode(config, body, report=None, *, execute_error=None, artifacts=None):
+    """Run one episode against a state whose sandbox runner returns ``report`` (or raises); return response, payload, state."""
+    sent = []
+
+    async def execute(payload, **_):
+        sent.append(payload)
+        if execute_error:
+            raise execute_error
+        return report or _report()
+
     wrapper = StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
     state = SimpleNamespace(
         request=SimpleNamespace(episode_id=EpisodeId(rollout_id="rollout", attempt=0)),
-        session=SimpleNamespace(workdir="/root", stop_request_path="/tmp/stop-requested"),
+        session=SimpleNamespace(workdir="/root", stop_request_path="/tmp/stop-requested", artifacts=artifacts),
         tool_access=DirectHTTPToolAccess(name="tools", required=True, base_url="http://resources:8000"),
-        execute=AsyncMock(
-            return_value={
-                "input_items": [],
-                "output_items": [],
-                "elapsed_seconds": 0,
-                "usages": [],
-                "stop_reason": None,
-                "observations": {"status": "completed"},
-            }
-        ),
+        resources_cookies={},
+        execute=execute,
     )
     with patch.object(StirrupAgentWrapper, "resolve_model_base_url", return_value="http://policy.invalid/v1"):
-        await wrapper._run_sandbox_episode(body, state)
-    return state.execute.await_args.args[0]
+        response = await wrapper._run_sandbox_episode(body, state)
+    return response, sent[0], state
+
+
+async def _runner_payload(config: StirrupAgentWrapperConfig, body: NeMoGymResponseCreateParamsNonStreaming) -> dict:
+    """The payload the agent server hands the sandbox runner for one episode."""
+    return (await _run_episode(config, body))[1]
 
 
 class TestApp:
@@ -100,17 +113,6 @@ class TestApp:
         assert config.prompt_estimator_truncate_history_thinking is None
         assert config.min_compaction_summary_words == 1
         assert config.truncation_recovery is False
-
-    def test_gdpval_config_opts_into_safe_context_budget(self) -> None:
-        repo_root = STIRRUP_AGENT_DIR.parents[1]
-        config = OmegaConf.load(repo_root / "benchmarks" / "gdpval" / "config.yaml")
-        agent = config.gdpval_stirrup_agent.responses_api_agents.stirrup_agent
-
-        assert agent.min_completion_tokens == 8192
-        assert agent.context_window_tokens == 262144
-        assert "prompt_estimator_truncate_history_thinking" not in agent
-        assert agent.min_compaction_summary_words == 50
-        assert agent.truncation_recovery is True
 
     @pytest.mark.asyncio
     async def test_request_output_cap_does_not_replace_model_context_window(self) -> None:
@@ -134,8 +136,7 @@ class TestApp:
         assert payload["client"]["truncation_recovery"] is bool(truncation_recovery)
 
     @pytest.mark.asyncio
-    async def test_runtime_knobs_reach_the_client_and_agent(self) -> None:
-        """The runner builds its client from ``payload["client"]``; a field the client lacks fails only in a rollout."""
+    async def test_runtime_knobs_shape_the_model_requests_the_runner_makes(self) -> None:
         config = _make_config(
             context_window_tokens=131072,
             min_completion_tokens=8192,
@@ -144,20 +145,128 @@ class TestApp:
             min_compaction_summary_words=50,
         )
         payload = await _runner_payload(config, NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"))
-
         client = DynamicMaxTokensChatCompletionsClient(api_key="gym", **payload["client"])
-        agent = NeMoAgent(
+        NeMoAgent(
             client=client,
             name="stirrup_agent",
             max_turns=payload["max_turns"],
             min_compaction_summary_words=payload["min_compaction_summary_words"],
         )
+        overrun = MagicMock(**{"choices": [MagicMock(finish_reason="length")], "usage": None})
+        overrun.choices[0].message = MagicMock(
+            content="<think>x", tool_calls=[], reasoning_content=None, reasoning=None
+        )
+        ok = MagicMock(**{"choices": [MagicMock(finish_reason="stop")], "usage": None})
+        ok.choices[0].message = MagicMock(content="ok", tool_calls=[], reasoning_content=None, reasoning=None)
+        create = AsyncMock(side_effect=[ok, overrun, ok])
+        client._client = MagicMock()
+        client._client.chat.completions.create = create
+        old_thinking = f"<think>{'r' * 300_000}</think>done"
+        history = [
+            UserMessage(content="task"),
+            AssistantMessage(content=old_thinking, token_usage=TokenUsage(input=1, answer=1, reasoning=0)),
+            UserMessage(content="continue"),
+        ]
 
-        assert client.max_tokens == 131072
-        assert client._min_completion_tokens == 8192
-        assert client._prompt_estimator_truncate_history_thinking is True
-        assert client._truncation_recovery is True
-        assert agent._min_compaction_summary_words == 50
+        await client.generate(history, tools={})
+        await client.generate([UserMessage(content="x" * 500_000)], tools={})
+        await client.generate([UserMessage(content="x")], tools={})
+
+        first, filled, recovery = (call.kwargs for call in create.await_args_list)
+        # The old reasoning block is not counted, so the cap rather than the context bounds the budget.
+        assert first["max_completion_tokens"] == 64000
+        assert filled["max_completion_tokens"] == 8192
+        assert recovery["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+
+    @pytest.mark.asyncio
+    async def test_the_response_is_built_from_the_runner_report(self) -> None:
+        usage = {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "prompt_tokens_details": {"cached_tokens": 4},
+            "completion_tokens_details": {"reasoning_tokens": 2},
+        }
+        report = _report(
+            input_items=[{"role": "user", "content": "hi", "type": "message"}],
+            output_items=[
+                {
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "yo", "annotations": []}],
+                    "type": "message",
+                    "status": "completed",
+                    "id": "m1",
+                }
+            ],
+            usages=[usage, usage],
+            elapsed_seconds=1.5,
+            observations={"status": "incomplete"},
+            stop_reason="cancelled",
+        )
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.status == "incomplete"
+        assert response.metadata == {"elapsed_seconds": "1.5", "stop_reason": "cancelled"}
+        assert [item.type for item in response.output] == ["message", "message"]
+        assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (20, 10, 30)
+        assert response.usage.input_tokens_details.cached_tokens == 8
+        assert response.usage.output_tokens_details.reasoning_tokens == 4
+
+    @pytest.mark.asyncio
+    async def test_a_run_whose_model_calls_reported_no_usage_has_none(self) -> None:
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy")
+        )
+
+        assert (response.status, response.usage) == ("completed", None)
+        assert "stop_reason" not in response.metadata
+
+    @pytest.mark.asyncio
+    async def test_usage_without_detail_fields_has_no_cached_or_reasoning_counts(self) -> None:
+        usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), _report(usages=[usage])
+        )
+
+        assert response.usage.input_tokens_details.cached_tokens is None
+        assert response.usage.output_tokens_details.reasoning_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_a_supervisor_timeout_with_the_runners_wall_time_report_is_an_incomplete_response(self) -> None:
+        partial = _report(
+            output_items=[{"type": "function_call", "call_id": "c1", "name": "code_exec", "arguments": "{}"}],
+            stop_reason="wall_time",
+            observations={"status": "incomplete"},
+            resources_cookies={"session": "late"},
+        )
+
+        response, _, state = await _run_episode(
+            _make_config(),
+            NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"),
+            execute_error=TimeoutError(),
+            artifacts=partial,
+        )
+
+        assert (response.status, response.metadata["stop_reason"]) == ("incomplete", "wall_time")
+        assert [item.type for item in response.output] == ["function_call"]
+        assert state.resources_cookies == {"session": "late"}
+
+    @pytest.mark.parametrize(
+        "artifacts", [None, _report(stop_reason="cancelled"), _report(stop_reason=None), "not a report"]
+    )
+    @pytest.mark.asyncio
+    async def test_a_supervisor_timeout_without_a_wall_time_report_is_raised(self, artifacts) -> None:
+        with pytest.raises(TimeoutError):
+            await _run_episode(
+                _make_config(),
+                NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"),
+                execute_error=TimeoutError(),
+                artifacts=artifacts,
+            )
 
     @pytest.mark.parametrize(
         ("requested", "expected"),

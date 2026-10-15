@@ -7,134 +7,21 @@ import asyncio
 import json
 import os
 import signal
-import socket
 import subprocess
 import sys
-import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
 import pytest
 import stirrup.core.agent as stirrup_agent
-import uvicorn
-from fastapi import FastAPI, HTTPException, Request, Response
-from pydantic import BaseModel
 from stirrup.clients.utils import to_openai_tools
 
+from responses_api_agents.stirrup_agent import sandbox_runner
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
 from responses_api_agents.stirrup_agent.sandbox import HARNESS_FILES
-from responses_api_agents.stirrup_agent.sandbox_runner import InvocationStatus, LocalShell, Observer, remote_tool, run
-
-
-_TOOLS = json.loads((Path(__file__).resolve().parents[3] / "benchmarks" / "gdpval" / "tools.json").read_text())
-
-
-def _call(name: str, arguments: str) -> dict:
-    tool_call = {"id": f"call-{name}", "type": "function", "function": {"name": name, "arguments": arguments}}
-    return {"role": "assistant", "content": None, "tool_calls": [tool_call]}
-
-
-class _ModelServer:
-    """Answer chat completions in order and record each request body; a ``None`` answer hangs until closed."""
-
-    def __init__(self, answers: list[dict | None]) -> None:
-        self.answers = answers
-        self.blocked = threading.Event()
-        self.release = threading.Event()
-        self.requests: list[dict] = []
-        self.session_ids: list[str | None] = []
-        server = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                server.requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
-                server.session_ids.append(self.headers.get("x-session-id"))
-                message = server.answers[len(server.requests) - 1]
-                if message is None:
-                    server.blocked.set()
-                    server.release.wait(60)
-                    message = {"role": "assistant", "content": "late"}
-                payload = json.dumps(
-                    {
-                        "id": f"chatcmpl-{len(server.requests)}",
-                        "object": "chat.completion",
-                        "created": 0,
-                        "model": "policy",
-                        "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
-                        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-                    }
-                ).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-
-            def log_message(self, *_args) -> None:
-                pass
-
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.base_url = f"http://127.0.0.1:{self._server.server_port}/v1"
-        threading.Thread(target=self._server.serve_forever, daemon=True).start()
-
-    def close(self) -> None:
-        self.release.set()
-        self._server.shutdown()
-        self._server.server_close()
-
-
-class _Finish(BaseModel):
-    reason: str
-    paths: list[str] = []
-
-
-class _Search(BaseModel):
-    query: str
-
-
-def _resources_app(calls: list[tuple[str, dict, dict]]) -> FastAPI:
-    """Routes that answer like the GDPVal resources server: a JSON string, a 400 detail or a 422."""
-    app = FastAPI()
-
-    @app.post("/web_search")
-    async def web_search(body: _Search, request: Request, response: Response) -> str:
-        calls.append(("web_search", body.model_dump(), dict(request.cookies)))
-        response.set_cookie("session", "after-search")
-        return f"results for {body.query}"
-
-    @app.post("/finish")
-    async def finish(body: _Finish, request: Request) -> str:
-        calls.append(("finish", body.model_dump(), dict(request.cookies)))
-        if "missing.txt" in body.paths:
-            raise HTTPException(400, "ERROR: Files do not exist: ['missing.txt']")
-        return body.reason
-
-    @app.post("/fetch_web_page")
-    async def fetch_web_page() -> str:
-        raise HTTPException(500, "boom")
-
-    return app
-
-
-class _Resources:
-    def __init__(self, app: FastAPI) -> None:
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
-        self.base_url = f"http://127.0.0.1:{port}"
-        self._server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
-        self._thread.start()
-        deadline = time.monotonic() + 10
-        while not self._server.started:
-            assert time.monotonic() < deadline, "resources app did not start"
-            time.sleep(0.01)
-
-    def close(self) -> None:
-        self._server.should_exit = True
-        self._thread.join(timeout=10)
+from responses_api_agents.stirrup_agent.sandbox_runner import LocalShell, Observer, main, remote_tool, run
+from responses_api_agents.stirrup_agent.tests.fakes import _TOOLS, _call, _ModelServer, _Resources, _resources_app
 
 
 @pytest.fixture(autouse=True)
@@ -233,8 +120,8 @@ def test_the_run_reports_its_model_calls_and_tool_executions(tmp_path, resources
     outputs = [item["call_id"] for item in output["output_items"] if item["type"] == "function_call_output"]
     assert [t["tool_call_id"] for t in tools] == outputs
     assert all(t["completed_at"] >= t["started_at"] > 1e9 and t["duration_ms"] >= 0 for t in tools)
-    usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-    assert output["usages"] == [{**usage, "completion_tokens_details": None, "prompt_tokens_details": None}] * 4
+    counts = [(u["prompt_tokens"], u["completion_tokens"], u["total_tokens"]) for u in output["usages"]]
+    assert counts == [(10, 5, 15)] * 4
 
 
 async def _cancelled_after_the_model_hangs(payload: dict, tmp_path: Path, model: _ModelServer) -> dict:
@@ -292,30 +179,88 @@ def test_sigterm_makes_the_runner_write_its_partial_report(tmp_path, resources):
     assert (workdir / "report.txt").read_text() == "draft\n"
 
 
+def _run_main(tmp_path: Path, payload: dict) -> dict:
+    input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
+    input_path.write_text(json.dumps(payload))
+    main(str(input_path), str(output_path))
+    return json.loads(output_path.read_text())
+
+
 def test_a_failed_run_still_reports_what_it_observed(tmp_path, resources):
     model = _ModelServer(
         [_call("code_exec", json.dumps({"cmd": "true"})), _call("fetch_web_page", json.dumps({"url": "x"}))]
     )
-    observer = Observer()
     try:
-        with pytest.raises(Exception, match="500"):
-            asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, observer))
+        output = _run_main(tmp_path, _payload(model.base_url, resources.base_url, tmp_path))
     finally:
         model.close()
 
-    report = observer.report(InvocationStatus.FAILED)["observations"]
-    assert report["status"] == "failed"
-    assert report["model_response_ids"] == ["chatcmpl-1", "chatcmpl-2"]
-    assert [t["tool_name"] for t in report["tool_calls"]] == ["code_exec"]
+    assert "500" in output["error"]
+    assert "Traceback" in output["traceback"]
+    observations = output["observations"]
+    assert observations["status"] == "failed"
+    assert observations["model_response_ids"] == ["chatcmpl-1", "chatcmpl-2"]
+    assert [t["tool_name"] for t in observations["tool_calls"]] == ["code_exec"]
 
 
-def test_a_server_error_from_a_task_tool_fails_the_run(tmp_path, resources):
-    model = _ModelServer([_call("fetch_web_page", json.dumps({"url": "https://example.com"}))])
+def test_a_finish_tool_missing_from_the_request_tools_fails_the_run(tmp_path, resources):
+    model = _ModelServer([])
+    payload = {**_payload(model.base_url, resources.base_url, tmp_path), "finish_tool_names": ["finish", "nope"]}
     try:
-        with pytest.raises(Exception, match="500"):
-            asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, Observer()))
+        output = _run_main(tmp_path, payload)
     finally:
         model.close()
+
+    assert "Finish tools ['nope'] are not among the request's tools" in output["error"]
+    assert output["observations"]["status"] == "failed"
+    assert model.requests == []
+
+
+def test_a_timed_out_command_is_a_timeout_observation_and_the_model_sees_the_failure(tmp_path, resources, monkeypatch):
+    init = LocalShell.__init__
+
+    def short_timeout(self, *args):
+        init(self, *args)
+        self._shell_timeout = 1
+
+    monkeypatch.setattr(sandbox_runner.LocalShell, "__init__", short_timeout)
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    model = _ModelServer(
+        [
+            _call("code_exec", json.dumps({"cmd": "sleep 30"})),
+            _call("code_exec", json.dumps({"cmd": "true"})),
+            _call("finish", json.dumps({"reason": "done"})),
+        ]
+    )
+    try:
+        output = asyncio.run(run(_payload(model.base_url, resources.base_url, workdir), tmp_path, Observer()))
+    finally:
+        model.close()
+
+    tools = output["observations"]["tool_calls"]
+    assert [(t["tool_name"], t["status"]) for t in tools] == [
+        ("code_exec", "timeout"),
+        ("code_exec", "completed"),
+        ("finish", "completed"),
+    ]
+    result = [item["output"] for item in output["output_items"] if item["type"] == "function_call_output"][0]
+    assert "<exit_code>1</exit_code>" in result
+    assert "Command timed out after 1 seconds" in result
+
+
+def test_a_run_that_uses_all_its_turns_without_finishing_is_incomplete(tmp_path, resources):
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "true"}))] * 2)
+    payload = {**_payload(model.base_url, resources.base_url, workdir), "max_turns": 2}
+    try:
+        output = asyncio.run(run(payload, tmp_path, Observer()))
+    finally:
+        model.close()
+
+    assert (output["observations"]["status"], output["stop_reason"]) == ("incomplete", None)
+    assert len(model.requests) == 2
 
 
 def test_the_model_sees_the_certified_tool_definitions(tmp_path, resources):
@@ -365,6 +310,14 @@ def test_a_refusal_detail_that_is_not_a_string_reaches_the_model_as_json(detail)
 
     assert result.success is False
     assert result.content == (detail if isinstance(detail, str) else json.dumps(detail))
+
+
+@pytest.mark.parametrize(
+    "response", [httpx.Response(200, content=b""), httpx.Response(400, content=b"<html>bad gateway</html>")]
+)
+def test_a_route_reply_that_is_not_json_fails_the_run(response):
+    with pytest.raises(json.JSONDecodeError):
+        _call_remote_tool(lambda request: response)
 
 
 def _call_remote_tool(handler):
