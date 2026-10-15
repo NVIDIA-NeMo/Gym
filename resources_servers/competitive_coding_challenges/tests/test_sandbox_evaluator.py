@@ -166,6 +166,23 @@ def test_split_problem_metadata_round_trips(tmp_path: Path) -> None:
     assert by_competition == original
 
 
+def test_split_problem_metadata_streams_like_the_evaluator_load(tmp_path: Path) -> None:
+    # Several lines, two competitions, and one problem repeated: the later line must win, as it
+    # does when the evaluator loads the whole file.
+    first = _toy_metadata("true", "echo 1")
+    other = {"competition_id": "other", "metadata": {"toy2": _toy_metadata("true", "echo 2")["metadata"]["toy"]}}
+    replaced = _toy_metadata("true", "echo 3")
+    test_file = tmp_path / "metadata.jsonl"
+    test_file.write_text("\n".join(json.dumps(entry) for entry in (first, other, replaced)) + "\n\n")
+
+    assert split_problem_metadata(str(test_file), tmp_path / "problems") == 2
+    original, _ = _load_metadata_file(str(test_file))
+    for competition_id, problem_id in (("comp", "toy"), ("other", "toy2")):
+        split, _ = _load_metadata_file(problem_file(str(tmp_path / "problems"), competition_id, problem_id))
+        assert split == {competition_id: {problem_id: original[competition_id][problem_id]}}
+    assert original["comp"]["toy"]["run"] == "echo 3"
+
+
 class TestProcessSandbox:
     """The executor that replaces the NeMo Skills sandbox inside the verification sandbox."""
 

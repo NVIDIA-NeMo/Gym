@@ -21,28 +21,42 @@ Usage, from the repository root:
 Reads any metadata file the evaluator accepts (``test_file``) and writes
 ``OUTPUT_DIR/<competition>/<problem>.jsonl``, the layout ``sandbox_config.problem_data_dir``
 expects. Bake OUTPUT_DIR into the sandbox image or mount it read-only at that path.
+
+The file is read one line at a time, so memory is bounded by its largest line rather than its
+total size (full RL problem sets exceed 100 GB). When a problem appears more than once, the last
+occurrence wins, as when the evaluator loads ``test_file``.
 """
 
 import argparse
 import json
 from pathlib import Path
 
-from resources_servers.competitive_coding_challenges.ccc_eval import _load_metadata_file
+from resources_servers.competitive_coding_challenges.ccc_eval import (
+    _iter_metadata_entries,
+    _normalize_problem_metadata,
+)
 from resources_servers.competitive_coding_challenges.sandbox_evaluator import problem_file
 
 
 def split_problem_metadata(test_file: str, output_dir: Path) -> int:
-    """Write each problem's normalized metadata to its own file; return the number written."""
-    metadata_by_competition, _ = _load_metadata_file(test_file)
-    written = 0
-    for competition_id, problems in metadata_by_competition.items():
-        for problem_id, problem_metadata in problems.items():
-            path = Path(problem_file(str(output_dir), competition_id or None, problem_id))
-            path.parent.mkdir(parents=True, exist_ok=True)
-            entry = {"competition_id": competition_id, "metadata": {problem_id: problem_metadata}}
-            path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
-            written += 1
-    return written
+    """Write each problem's normalized metadata to its own file; return the number of problems."""
+    written = set()
+    with open(test_file, encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            # Each line is one entry, exactly as the evaluator's _load_metadata_file reads it.
+            for entry in _iter_metadata_entries([json.loads(line)]):
+                competition_id = str(entry.get("competition_id") or entry.get("competition") or "")
+                problems = entry.get("metadata") or entry.get("problems") or {}
+                for problem_id, problem_metadata in problems.items():
+                    path = Path(problem_file(str(output_dir), competition_id or None, problem_id))
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    normalized = _normalize_problem_metadata(problem_id, problem_metadata)
+                    entry_out = {"competition_id": competition_id, "metadata": {problem_id: normalized}}
+                    path.write_text(json.dumps(entry_out) + "\n", encoding="utf-8")
+                    written.add((competition_id, problem_id))
+    return len(written)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ competitive_coding_challenges_resources_server:
       # nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml) to compile and run each
       # submission in a fresh sandbox instead of the NeMo Skills sandbox. num_parallel_requests then
       # caps concurrent sandboxes, and test_batch_size must not exceed sandbox_config.resources.cpu.
+      # See the README ("Running in a provider sandbox") for a complete example config.
       sandbox_provider: null
       sandbox_config:
         image: ${oc.env:CCC_SANDBOX_IMAGE,null}
