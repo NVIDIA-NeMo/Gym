@@ -135,6 +135,7 @@ python scripts/run_harness_conformance.py --harness codex \
 | `retry_429` | Two 429 replies before the tool sequence | TE-1–TE-9, including distinct attempts with identical request bodies |
 | `retry_500` | One 500 reply before the tool sequence | TE-1–TE-9, including retained error payloads |
 | `model_error` | Persistent 400 reported to EnvServer as a failed response with the original error | TE-1, TE-2, TE-4, TE-7, TE-8; no grading-policy requirement |
+| `judge_verifier` | Final policy answer graded by a separate scripted judge; the saved grade references its verifier-owned call, which has no policy step | TE-1–TE-4, TE-6–TE-9 |
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
 
 Both Chat Completions and Responses are supported, including streaming. Supplied
