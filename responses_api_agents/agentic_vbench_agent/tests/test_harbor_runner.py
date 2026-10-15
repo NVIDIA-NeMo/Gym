@@ -477,3 +477,8 @@ def test_agent_setup_gets_a_longer_allowance_than_the_agent_budget() -> None:
     job = make_job()
     assert job["agent_setup_timeout_multiplier"] == harbor_runner.AGENT_SETUP_TIMEOUT_MULTIPLIER >= 3.0
     assert job["config"]["agent_timeout_multiplier"] is None if "config" in job else True
+
+
+def test_keep_task_images_disables_image_deletion():
+    assert make_job()["environment"]["delete"] is True
+    assert make_job(keep_task_images=True)["environment"]["delete"] is False

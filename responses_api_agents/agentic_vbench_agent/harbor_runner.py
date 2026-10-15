@@ -46,6 +46,7 @@ def job_config(
     verifier_timeout_multiplier: float = 1.0,
     model_timeout_ms: int | None = None,
     opencode_subagents: str = "default",
+    keep_task_images: bool = False,
 ) -> dict:
     """Create a single-attempt Harbor job using OpenCode's compatible provider.
 
@@ -111,7 +112,9 @@ def job_config(
         "agent_setup_timeout_multiplier": AGENT_SETUP_TIMEOUT_MULTIPLIER,
         "environment": {
             "import_path": "responses_api_agents.agentic_vbench_agent." + environment_class,
-            "delete": True,
+            # delete=True removes the task image after the trial (benchmark default). Keeping
+            # images lets repeated trials of the same task (trace generation) reuse one build.
+            "delete": not keep_task_images,
             "kwargs": {"runtime_root": str(runtime_root)},
         },
         "tasks": [{"path": str(task_path)}],
@@ -281,6 +284,11 @@ def main() -> None:
         choices=OPENCODE_SUBAGENT_MODES,
         default=os.environ.get("AGENTIC_VBENCH_OPENCODE_SUBAGENTS", "default"),
     )
+    parser.add_argument(
+        "--keep-task-images",
+        action="store_true",
+        help="keep task images after each trial so repeated trials reuse one build (default: delete)",
+    )
     args = parser.parse_args()
     if importlib.metadata.version("harbor") != "0.6.6":
         raise RuntimeError("AgenticVBench requires upstream harbor==0.6.6")
@@ -321,6 +329,7 @@ def main() -> None:
             verifier_timeout_multiplier=args.verifier_timeout_multiplier,
             model_timeout_ms=args.model_timeout_ms,
             opencode_subagents=args.opencode_subagents,
+            keep_task_images=args.keep_task_images,
         )
     )
     config_path = args.output / "harbor_job.json"
