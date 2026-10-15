@@ -155,11 +155,11 @@ def remote_tool(spec: FunctionToolParam, client: httpx.AsyncClient) -> Tool:
         response = await client.post(f"/{name}", json=arguments.model_dump())
         # A 422 (FastAPI's validation error) and a 400 (a call the route refused, e.g. finish without the files)
         # are mistakes the model can fix, so it sees them and the episode goes on.
-        if response.status_code == 422:
+        detail = response.json()["detail"] if response.status_code in (400, 422) else None
+        if response.status_code == 422 and isinstance(detail, list):
             # Answered in run_tool, which has the raw arguments the message quotes.
-            raise InvalidArguments(response.json()["detail"])
-        if response.status_code == 400:
-            detail = response.json()["detail"]
+            raise InvalidArguments(detail)
+        if response.status_code in (400, 422):
             return ToolResult(
                 content=detail if isinstance(detail, str) else json.dumps(detail),
                 success=False,

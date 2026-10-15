@@ -320,6 +320,19 @@ def test_a_route_reply_that_is_not_json_fails_the_run(response):
         _call_remote_tool(lambda request: response)
 
 
+def test_a_422_whose_detail_is_not_a_validation_error_list_reaches_the_model(tmp_path, resources):
+    model = _ModelServer(
+        [_call("finish", json.dumps({"reason": "unprocessable"})), _call("finish", '{"reason": "ok"}')]
+    )
+    try:
+        output = asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, Observer()))
+    finally:
+        model.close()
+
+    results = [item["output"] for item in output["output_items"] if item["type"] == "function_call_output"]
+    assert "reason is not accepted" in results[0]
+
+
 def _call_remote_tool(handler):
     async def call():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://resources") as client:
