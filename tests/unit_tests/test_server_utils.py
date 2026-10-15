@@ -28,6 +28,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
+from omegaconf.errors import ReadonlyConfigError
 from pydantic import ValidationError
 from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, fail, mark, raises
 from requests.exceptions import ProxyError
@@ -286,7 +287,9 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.server_utils.requests, "get", boom)
 
         client = ServerClient.load_from_global_config()
-        assert client.global_config_dict is global_config_dict
+        # The client holds its own read-only copy of the injected config.
+        assert client.global_config_dict == global_config_dict
+        assert client.global_config_dict is not global_config_dict
 
     def test_ServerClient_load_from_global_config_propogate_ConnectionError(self, monkeypatch: MonkeyPatch) -> None:
         global_config_dict = DictConfig(
@@ -506,6 +509,69 @@ class TestServerUtils:
             url="http://model/ng-rollout/rollout-1/training-token-capture/v1/chat/completions",
             headers={"x-existing": "value"},
         )
+
+    async def test_ServerClient_request_reads_global_config_once_per_server(self, monkeypatch: MonkeyPatch) -> None:
+        from nemo_gym.rollout_correlation import rollout_context
+
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=12345),
+            global_config_dict=DictConfig(
+                {
+                    "observability_enabled": True,
+                    "policy_model": {"responses_api_models": {"vllm_model": {"host": "model", "port": 1}}},
+                    "my_resources": {"resources_servers": {"my_server": {"host": "resources", "port": 2}}},
+                    "my_agent": {"responses_api_agents": {"simple_agent": {"host": "agent", "port": 3}}},
+                }
+            ),
+        )
+        monkeypatch.delenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME, raising=False)
+        monkeypatch.delenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME, raising=False)
+        request_mock = AsyncMock(return_value="response")
+        monkeypatch.setattr(nemo_gym.server_utils, "request", request_mock)
+
+        async def send_requests() -> list[str]:
+            request_mock.reset_mock()
+            with rollout_context("3-1"):
+                await server_client.post(server_name="policy_model", url_path="/v1/responses")
+                await server_client.post(server_name="my_resources", url_path="/verify")
+                await server_client.post(server_name="my_agent", url_path="/run")
+            return [call.kwargs["url"] for call in request_mock.await_args_list]
+
+        expected = [
+            "http://model:1/ng-rollout/3-1/v1/responses",
+            "http://resources:2/ng-rollout/3-1/verify",
+            "http://agent:3/run",
+        ]
+        assert await send_requests() == expected
+
+        # The first calls cached every lookup, so later calls to the same servers never read the config.
+        def forbid_config_read(*args, **kwargs):
+            raise AssertionError("ServerClient.request read the global config again")
+
+        with monkeypatch.context() as patched:
+            patched.setattr(DictConfig, "get", forbid_config_read)
+            patched.setattr(DictConfig, "__contains__", forbid_config_read)
+            patched.setattr(DictConfig, "__getitem__", forbid_config_read)
+            assert await send_requests() == expected
+
+    def test_ServerClient_holds_a_read_only_copy_of_the_global_config(self) -> None:
+        global_config_dict = DictConfig({"observability_enabled": False})
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=12345),
+            global_config_dict=global_config_dict,
+        )
+        assert server_client.rollout_attribution_enabled() is False
+
+        # A later write to the process-wide config, as initialize_ray makes, does not reach the client.
+        global_config_dict["observability_enabled"] = True
+        assert server_client.global_config_dict["observability_enabled"] is False
+
+        # Writing through the client, or replacing its config, fails instead of leaving its caches out of date.
+        with raises(ReadonlyConfigError):
+            server_client.global_config_dict["observability_enabled"] = True
+        with raises(ValidationError):
+            server_client.global_config_dict = global_config_dict
+        assert server_client.rollout_attribution_enabled() is False
 
     def test_BaseServer_load_config_from_global_config(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.

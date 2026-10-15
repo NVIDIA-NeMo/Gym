@@ -94,12 +94,13 @@ class _Client(ServerClient):
         return f"http://{server_name}:8000"
 
 
-def _environment_server() -> tuple[SingleAgentTurnEnvironmentServer, _Client]:
+def _environment_server(*, checkpoint: bool = False) -> tuple[SingleAgentTurnEnvironmentServer, _Client]:
     global_config = OmegaConf.create(
         {
             "resources": {"resources_servers": {"test": {"host": "resources", "port": 8000, "entrypoint": "app.py"}}},
             "agent": {"responses_api_agents": {"test": {"host": "agent", "port": 8001, "entrypoint": "app.py"}}},
         }
+        | ({"checkpoint": {"enabled": True, "control_auth_token": "t"}} if checkpoint else {})
     )
     response = _agent_response()
     client = _Client(
@@ -377,8 +378,7 @@ class _BlockingAgentClient(_Client):
 
 
 async def test_legacy_rows_take_part_in_checkpoints() -> None:
-    environment_server, client = _environment_server()
-    client.global_config_dict["checkpoint"] = {"enabled": True, "control_auth_token": "t"}
+    environment_server, client = _environment_server(checkpoint=True)
     blocking = _BlockingAgentClient(
         **client.model_dump(exclude={"calls", "responses"}),
         calls=[],

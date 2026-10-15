@@ -183,6 +183,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     config: BaseResponsesAPIAgentConfig
     _session_records: dict[str, _AgentSessionRecord] = PrivateAttr(default_factory=dict)
     _closed_session_records: OrderedDict[str, _AgentSessionRecord] = PrivateAttr(default_factory=OrderedDict)
+    # Lookups in the static global config, cached for the config object they were read from.
+    _cached_global_config: object = PrivateAttr(default=None)
+    _token_id_capture_run_flags: Optional[tuple[bool, bool]] = PrivateAttr(default=None)
+    _model_base_urls: dict[str, str] = PrivateAttr(default_factory=dict)
 
     @asynccontextmanager
     async def _locked_agent_session(self, session_id: str) -> AsyncIterator[_AgentSessionRecord]:
@@ -368,17 +372,35 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             return False
         return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False))
 
+    def _static_global_config(self) -> Any:
+        """Return the client's global config, dropping cached lookups if the client now holds a different config.
+
+        A ``ServerClient`` holds a read-only copy of the global config, so per-request lookups in it can be cached.
+        A mocked client's config can still be replaced, as tests do, and that must not serve stale values.
+        """
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        if global_config is not self._cached_global_config:
+            self._cached_global_config = global_config
+            self._token_id_capture_run_flags = None
+            self._model_base_urls.clear()
+        return global_config
+
     def _token_id_capture_enabled(self) -> bool:
         """Whether this agent explicitly opted into training-token capture."""
-        global_config = getattr(self.server_client, "global_config_dict", None)
-        if not isinstance(global_config, Mapping):
+        global_config = self._static_global_config()
+        if self._token_id_capture_run_flags is None:
+            block = (global_config.get(TOKEN_ID_CAPTURE_BLOCK) or {}) if isinstance(global_config, Mapping) else {}
+            if isinstance(block, Mapping):
+                self._token_id_capture_run_flags = (
+                    bool(block.get("enabled", False)),
+                    bool(block.get("all_agents", False)),
+                )
+            else:
+                self._token_id_capture_run_flags = (False, False)
+        enabled, all_agents = self._token_id_capture_run_flags
+        if not enabled:
             return False
-        block = global_config.get(TOKEN_ID_CAPTURE_BLOCK) or {}
-        if not isinstance(block, Mapping) or not block.get("enabled", False):
-            return False
-        return bool(block.get("all_agents", False)) or bool(
-            getattr(getattr(self, "config", None), "token_id_capture", False)
-        )
+        return all_agents or bool(getattr(getattr(self, "config", None), "token_id_capture", False))
 
     def rollout_id_from_run(self, body: Any) -> Optional[str]:
         """Return the capture id for a run request.
@@ -428,8 +450,12 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     def resolve_model_base_url(self, model_server_name: str, rollout_id: Optional[str] = None) -> str:
         """Resolve a model-server URL with an optional rollout prefix."""
-        server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
-        base_url = self.server_client._build_server_base_url(server_config)
+        global_config = self._static_global_config()
+        base_url = self._model_base_urls.get(model_server_name)
+        if base_url is None:
+            server_config = get_first_server_config_dict(global_config, model_server_name)
+            base_url = self.server_client._build_server_base_url(server_config)
+            self._model_base_urls[model_server_name] = base_url
         return f"{apply_rollout_prefix(base_url, rollout_id, token_capture=self._token_id_capture_enabled())}/v1"
 
     # TODO: right now there is no validation on the TypedDict NeMoGymResponseCreateParamsNonStreaming
