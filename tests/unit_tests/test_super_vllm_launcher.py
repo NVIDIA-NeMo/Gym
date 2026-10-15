@@ -258,7 +258,7 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
             "--log-level": "error",
             "--prometheus-host": "0.0.0.0",
             "--prometheus-port": "29000",
-            "--worker-startup-timeout-secs": "1200",
+            "--worker-startup-timeout-secs": "1800",
         }
         self.assertEqual(args.count("--vllm-pd-disaggregation"), 1)
         args = [arg for arg in args if arg != "--vllm-pd-disaggregation"]
@@ -976,6 +976,7 @@ trigger_prefill_profile() {
                     "ROUTER_PREFILL_POLICY": "round_robin",
                     "ROUTER_DECODE_POLICY": "random",
                     "ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE": "2",
+                    "ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS": "2400",
                 }
                 _, command = self.generate_commands(env=env)
                 _, _, _, router = self.serving_arguments(command, rank=0, coupled_head=mode == "coupled", env=env)
@@ -983,9 +984,14 @@ trigger_prefill_profile() {
                     ("--prefill-policy", "round_robin"),
                     ("--decode-policy", "random"),
                     ("--intra-node-data-parallel-size", "2"),
+                    ("--worker-startup-timeout-secs", "2400"),
                 ):
                     self.assertEqual(router.count(flag), 1)
                     self.assertEqual(router[router.index(flag) + 1], value)
+                self.assertEqual(
+                    self.settings(self.eval_arguments(env=env), "model_endpoint_readiness_timeout_seconds"),
+                    ["++model_endpoint_readiness_timeout_seconds=2400"],
+                )
 
     def test_independent_router_startup_failure_stops_launch(self) -> None:
         """Stop independent startup when the router exits during main's five-second startup check."""

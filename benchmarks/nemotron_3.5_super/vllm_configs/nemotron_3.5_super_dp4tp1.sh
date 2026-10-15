@@ -2,6 +2,9 @@
 
 NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-5}"
 
+# Cold FlashInfer autotuning and float32 ReplaySSM JIT builds exceed 10 minutes.
+export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-1800}"
+
 # Optional detailed Nsight Systems capture on PD prefill nodes only.
 # PROFILE_PREFILL=1 auto-installs nsys if needed in root Ubuntu containers.
 # After /health is ready, wait PREFILL_PROFILE_DELAY_SECONDS, then capture

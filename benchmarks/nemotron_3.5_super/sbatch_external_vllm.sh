@@ -105,6 +105,8 @@ DECODE_DP_RPC_PORT=13346
 ROUTER_PREFILL_POLICY="${ROUTER_PREFILL_POLICY:-cache_aware}"
 ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
 ROUTER_POLICY="${ROUTER_POLICY:-cache_aware}"
+# Shared startup deadline for router workers and Gym endpoint readiness.
+ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS="${ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS:-1800}"
 ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
 if [[ "$VLLM_ENGINES_PER_NODE" != 1 && "$ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE" != 1 ]]; then
     echo "ERROR: Multiple independent engines require ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE=1." >&2
@@ -189,7 +191,8 @@ gym eval run \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
     ++port_range_high=64000 \
-    "\${GYM_MODEL_PARAMS[@]}"
+    "\${GYM_MODEL_PARAMS[@]}" \
+    ++model_endpoint_readiness_timeout_seconds=$ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS
 
 
 if (( $EXPORT_TO_CSV )); then
@@ -544,7 +547,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             --port $ROUTER_SERVER_PORT \
             --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
             --request-timeout-secs 86400 \
-            --worker-startup-timeout-secs 1200 \
+            --worker-startup-timeout-secs "$ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS" \
             "\${router_common_args[@]}" &
         router_pid=\$!
         coupled_pids+=("\$router_pid")
@@ -707,7 +710,7 @@ else
             --port $ROUTER_SERVER_PORT \
             --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
             --request-timeout-secs 86400 \
-            --worker-startup-timeout-secs 1200 \
+            --worker-startup-timeout-secs "$ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS" \
             "\${router_common_args[@]}"
         )
 
