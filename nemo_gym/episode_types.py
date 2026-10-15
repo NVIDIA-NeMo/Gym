@@ -132,9 +132,12 @@ class BaseEpisodeRequest(BaseModel, Generic[TaskInputT]):
     rollout_index: int | None = Field(
         default=None,
         ge=0,
+        strict=True,
         description=(
-            "Which repeat of the task this rollout is (the collector's `_ng_rollout_index`), "
-            "independent of an explicit rollout ID. `None` when the caller does not number repeats."
+            "The row's `_ng_rollout_index`: the collector numbers each task's rollouts across every agent a row fans "
+            "out to, so a second agent's rollouts continue after the first's, and the numbers stay the same for a "
+            "materialized input. It is never parsed from `episode_id.rollout_id`, which may be explicit. "
+            "`None` when the caller does not number rollouts."
         ),
     )
 

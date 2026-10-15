@@ -133,5 +133,6 @@ def test_rollout_index_is_optional_and_non_negative() -> None:
 
     assert _Request.model_validate(request).rollout_index is None
     assert _Request.model_validate({**request, "rollout_index": 2}).rollout_index == 2
-    with pytest.raises(ValidationError):
-        _Request.model_validate({**request, "rollout_index": -1})
+    for invalid in (-1, True, "2"):
+        with pytest.raises(ValidationError):
+            _Request.model_validate({**request, "rollout_index": invalid})

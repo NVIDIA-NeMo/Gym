@@ -17,7 +17,16 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar, get_args
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    PrivateAttr,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+)
 from starlette.middleware import Middleware
 
 
@@ -234,12 +243,23 @@ class ResourcesSeedSessionRequest(BaseModel):
     rollout_index: int | None = Field(
         default=None,
         ge=0,
+        strict=True,
         description=(
-            "Which repeat of the task this session serves, for state keyed by repeat (for example deliverables "
-            "persisted per repeat). Task data carries no `_ng_*` keys, so this is the only place a seed learns it. "
+            "The episode request's `rollout_index` (the row's `_ng_rollout_index`), for state keyed by rollout "
+            "number, such as deliverables persisted per repeat. Task data carries no `_ng_*` keys and an Environment "
+            "Server's `/verify` body does not carry it either, so keep it in session state if verify needs it. "
             "`None` when the episode request does not carry it."
         ),
     )
+
+    # A return annotation would replace the public JSON Schema with that type.
+    @model_serializer(mode="wrap")
+    def _serialize_seed(self, handler: SerializerFunctionWrapHandler):
+        # Leave an unknown rollout index off the wire, so a Resources Server built before the field still accepts it.
+        result = handler(self)
+        if result.get("rollout_index") is None:
+            result.pop("rollout_index", None)
+        return result
 
 
 class ResourcesSeedSessionResponse(BaseModel):

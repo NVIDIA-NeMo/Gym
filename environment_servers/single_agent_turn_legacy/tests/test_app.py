@@ -256,7 +256,9 @@ def test_seed_receives_the_rows_rollout_index_apart_from_an_explicit_rollout_id(
     assert response.status_code == 200
     seed_body = client.calls[0][2]["json"]
     assert seed_body["episode_id"] == {"rollout_id": "batch-7", "attempt": 0}
-    assert seed_body["rollout_index"] == expected
+    assert seed_body.get("rollout_index") == expected
+    # An unknown index stays off the wire, so older Resources Servers still accept the seed.
+    assert ("rollout_index" in seed_body) == (expected is not None)
 
 
 @pytest.mark.parametrize("task_fields, expected_task_id", [({}, "3"), ({"task_id": 0}, "0")])

@@ -868,6 +868,17 @@ async def test_lost_resources_seed_response_still_attempts_close() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resources_seed_receives_the_requests_rollout_index() -> None:
+    server, client = _lifecycle_server()
+    client.responses = [ClientConnectionError("lost seed response"), _Response({})]
+
+    await server.run_request(_request().model_copy(update={"rollout_index": 3}))
+
+    assert client.calls[0][1] == "/seed_session"
+    assert client.calls[0][2]["json"].rollout_index == 3
+
+
+@pytest.mark.asyncio
 async def test_lost_agent_seed_response_still_attempts_agent_and_resources_close() -> None:
     server, client = _lifecycle_server()
     client.responses = [
