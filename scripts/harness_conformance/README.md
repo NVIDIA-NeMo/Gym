@@ -75,24 +75,25 @@ python scripts/run_harness_conformance.py \
 ```
 
 Run from a Gym checkout with Gym and the selected agents' Python requirements
-installed. Probes using agent sessions require Linux and install the adapter's
-pinned runtime during session setup, using Gym's local subprocess sandbox provider.
-Legacy probes require the selected `codex`, `pi`, and `opencode` executables on
-`PATH`; Hermes must be importable in the same Python environment. Missing
-dependencies or unsuccessful runtime installation are execution failures.
-Omitting `--harness` selects all four.
+installed. The probes require the selected `codex`, `pi`, and `opencode`
+executables on `PATH`; Hermes must be importable in the same Python environment.
+With `--agent-interface sessions`, the probes require Linux and install the
+adapter's pinned runtime during session setup, using Gym's local subprocess
+sandbox provider. Missing dependencies or unsuccessful runtime installation are
+execution failures. Omitting `--harness` selects all four.
 
 No model service or model credentials are needed. Each scenario starts fresh
 local model, resources, agent, and compatibility environment servers on dynamically assigned loopback ports.
-The runner prefers the agent session interface whenever the adapter implements
-session setup and close, including inherited implementations. It uses
-`single_agent_turn_legacy` to translate the probe's flat rows into Resources seed,
-Agent seed, correlated `/v1/responses`, Agent close, verification, and Resources
-close. The agent owns its local workspace because verification only reads retained
-output. An adapter with unimplemented session handlers uses `legacy_agent`, which
-relays to the agent's `/run`. Setup, execution, or cleanup failures during an agent
-session never trigger legacy fallback. Migrating an adapter to the shared session
-contract automatically switches its probes without changing the runner.
+The default environment is `legacy_agent`, which relays to the agent's `/run`.
+`--agent-interface sessions` selects `single_agent_turn_legacy` instead, which
+translates the probe's flat rows into Resources seed, Agent seed, correlated
+`/v1/responses`, Agent close, verification, and Resources close. The agent owns
+its local workspace because verification only reads retained output. The session
+interface requires an adapter that implements session setup and close, including
+inherited implementations; any other adapter is an execution failure. Setup,
+execution, or cleanup failures during an agent session never fall back to `/run`.
+Sessions are opt-in because the registered adapters do not yet pass P0 through
+them; CI and the published table measure the `/run` path.
 
 The existing Gym adapter runs its real harness and normal lifecycle;
 `RolloutCollectionHelper` produces the rollout and capture payloads. The runner

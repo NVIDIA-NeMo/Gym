@@ -27,6 +27,9 @@ from .registry import HARNESSES
 from .scenarios import SCENARIOS
 
 
+AGENT_INTERFACES = ("legacy", "sessions")
+
+
 class _Server(uvicorn.Server):
     # The episode process owns cancellation; the embedded servers must not
     # independently install competing signal handlers.
@@ -144,12 +147,16 @@ def _config(
     return config
 
 
-async def run_episode(*, harness: str, scenario_name: str, directory: Path, timeout: float) -> None:
+async def run_episode(
+    *, harness: str, scenario_name: str, directory: Path, timeout: float, agent_interface: str = "legacy"
+) -> None:
     """Start fresh servers and let Gym write the rollout without modifying the harness."""
     module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
     agent_cls = getattr(module, HARNESSES[harness])
     config_cls = getattr(module, HARNESSES[harness] + "Config")
-    use_agent_sessions = _supports_agent_sessions(agent_cls)
+    use_agent_sessions = agent_interface == "sessions"
+    if use_agent_sessions and not _supports_agent_sessions(agent_cls):
+        raise RuntimeError(f"the {harness} adapter does not implement agent sessions")
     if use_agent_sessions and sys.platform != "linux":
         raise RuntimeError(
             "Conformance probes using agent sessions require Linux; run the probes on a Linux host or in a container"
@@ -255,10 +262,15 @@ def main() -> None:
     parser.add_argument("--scenario", required=True, choices=[s.name for s in SCENARIOS])
     parser.add_argument("--directory", required=True, type=Path)
     parser.add_argument("--timeout", required=True, type=float)
+    parser.add_argument("--agent-interface", choices=AGENT_INTERFACES, default="legacy")
     args = parser.parse_args()
     asyncio.run(
         run_episode(
-            harness=args.harness, scenario_name=args.scenario, directory=args.directory.resolve(), timeout=args.timeout
+            harness=args.harness,
+            scenario_name=args.scenario,
+            directory=args.directory.resolve(),
+            timeout=args.timeout,
+            agent_interface=args.agent_interface,
         )
     )
 

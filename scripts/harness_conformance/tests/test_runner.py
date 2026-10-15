@@ -118,7 +118,15 @@ def test_session_runtime_does_not_require_host_cli(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "interface", ["legacy", "session", "session_setup_error", "session_response_error", "session_close_error"]
+    "interface",
+    [
+        "legacy",
+        "session",
+        "session_setup_error",
+        "session_response_error",
+        "session_close_error",
+        "session_unsupported",
+    ],
 )
 async def test_episode_selects_interface_and_collects_through_environment(tmp_path, monkeypatch, interface):
     from types import SimpleNamespace
@@ -191,8 +199,10 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
                 agent_observations=AgentObservationBundle(source="test"),
             )
 
+    # The default interface must relay to /run even when the adapter implements sessions.
     module = SimpleNamespace(
-        TestAgent=LegacyAgent if interface == "legacy" else SessionAgent, TestAgentConfig=BaseResponsesAPIAgentConfig
+        TestAgent=LegacyAgent if interface == "session_unsupported" else SessionAgent,
+        TestAgentConfig=BaseResponsesAPIAgentConfig,
     )
     monkeypatch.setitem(episode.HARNESSES, "codex", "TestAgent")
     monkeypatch.setattr(episode, "importlib", SimpleNamespace(import_module=lambda _: module))
@@ -201,11 +211,23 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
     monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
     monkeypatch.setenv("NEMO_GYM_CONFIG_DICT", "{}")
+    kwargs = {} if interface == "legacy" else {"agent_interface": "sessions"}
+
+    async def run_probe():
+        await episode.run_episode(
+            harness="codex", scenario_name="tool_success", directory=tmp_path, timeout=10, **kwargs
+        )
+
+    if interface == "session_unsupported":
+        with pytest.raises(RuntimeError, match="does not implement agent sessions"):
+            await run_probe()
+        assert not (tmp_path / "runtime.json").exists()
+        return
     if interface.endswith("error"):
         with pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts produced a result"):
-            await episode.run_episode(harness="codex", scenario_name="tool_success", directory=tmp_path, timeout=10)
+            await run_probe()
     else:
-        await episode.run_episode(harness="codex", scenario_name="tool_success", directory=tmp_path, timeout=10)
+        await run_probe()
 
     runtime = json.loads((tmp_path / "runtime.json").read_text())
     witness = json.loads((tmp_path / "witness.json").read_text())
@@ -604,6 +626,23 @@ def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch
     assert code == 2
     assert inspected == ["tool_success", "tool_failure"]
     assert summary["harnesses"]["pi"]["evidence"]["TE-1"] == {"required": 2, "observed": 0, "passed": 0}
+
+
+def test_suite_passes_agent_interface_to_each_episode(tmp_path, monkeypatch):
+    from scripts.harness_conformance import runner
+
+    commands = []
+
+    def record(command, **kwargs):
+        commands.append(command)
+        return {"returncode": 0, "timed_out": False}
+
+    monkeypatch.setattr(runner, "run_process", record)
+    run_suite(harnesses=["pi"], scenarios=SCENARIOS[:1], output=tmp_path / "default", timeout=1)
+    sessions = tmp_path / "sessions"
+    main(["--harness", "pi", "--scenario", "tool_success", "--agent-interface", "sessions", "--output", str(sessions)])
+    assert [c[-2:] for c in commands] == [["--agent-interface", "legacy"], ["--agent-interface", "sessions"]]
+    assert json.loads((sessions / "suite.json").read_text())["agent_interface"] == "sessions"
 
 
 def test_interrupted_run_does_not_publish_completed_summary(tmp_path, monkeypatch):

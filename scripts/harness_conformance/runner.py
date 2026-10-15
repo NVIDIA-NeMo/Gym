@@ -22,7 +22,7 @@ from nemo_gym.harness_capabilities.cli import digest_file, inspect_bundle, json_
 from nemo_gym.harness_capabilities.health import inspect_health
 from nemo_gym.harness_capabilities.results import gate_passes, render_matrices
 
-from .episode import HARNESSES
+from .episode import AGENT_INTERFACES, HARNESSES
 from .scenarios import SCENARIOS, SUITE, Scenario, suite_manifest
 
 
@@ -167,7 +167,12 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
 
 
 def run_suite(
-    *, harnesses: list[str], scenarios: tuple[Scenario, ...], output: Path, timeout: float
+    *,
+    harnesses: list[str],
+    scenarios: tuple[Scenario, ...],
+    output: Path,
+    timeout: float,
+    agent_interface: str = "legacy",
 ) -> tuple[dict, int]:
     """Run each requested harness/scenario in a fresh process and publish the completed report."""
     if not harnesses or not scenarios:
@@ -177,6 +182,7 @@ def run_suite(
     manifest = suite_manifest(scenarios)
     manifest.update(
         harnesses=harnesses,
+        agent_interface=agent_interface,
         timeout=timeout,
         python=sys.version,
         runner_sources={p.name: digest_file(p) for p in sorted(Path(__file__).parent.glob("*.py"))},
@@ -209,6 +215,8 @@ def run_suite(
                 str(directory),
                 "--timeout",
                 str(timeout),
+                "--agent-interface",
+                agent_interface,
             ]
             execution = run_process(command, directory=directory, timeout=timeout + 30)
             execution_error |= execution["returncode"] != 0 or execution["timed_out"]
@@ -276,6 +284,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output", type=Path, help="new directory for rollouts, captures, witnesses and reports")
     parser.add_argument("--timeout", type=float, default=90, help="seconds per harness episode (default: 90)")
+    parser.add_argument(
+        "--agent-interface",
+        choices=AGENT_INTERFACES,
+        default="legacy",
+        help="probe through the agent's /run (legacy, default) or through agent sessions (Linux only)",
+    )
     parser.add_argument("--list-scenarios", action="store_true")
     args = parser.parse_args(argv)
     if args.list_scenarios:
@@ -288,7 +302,13 @@ def main(argv: list[str] | None = None) -> int:
     harnesses = list(dict.fromkeys(args.harness or HARNESSES))
     scenarios = tuple(s for s in SCENARIOS if not args.scenario or s.name in args.scenario)
     try:
-        _, code = run_suite(harnesses=harnesses, scenarios=scenarios, output=args.output, timeout=args.timeout)
+        _, code = run_suite(
+            harnesses=harnesses,
+            scenarios=scenarios,
+            output=args.output,
+            timeout=args.timeout,
+            agent_interface=args.agent_interface,
+        )
     except (OSError, ValueError, TypeError, KeyError) as exc:
         print(f"runner_error: {exc}", file=sys.stderr)
         return 2
