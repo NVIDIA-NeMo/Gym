@@ -463,8 +463,6 @@ class OpenClawAgentVerifyResponse(BaseVerifyResponse):
 class OpenClawAgent(SimpleResponsesAPIAgent):
     """Runs the OpenClaw CLI (openclaw agent --local --json)"""
 
-    ray_enabled = False
-
     config: OpenClawAgentConfig
     sem: Semaphore = None
     sigterm_events: set = Field(default_factory=set)
@@ -504,10 +502,16 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenClaw sandbox execution requires an exact openclaw_version, for example 2026.6.11"
             )
-        if self.config.openclaw_config or self.config.max_output_tokens is not None or self.config.node_bin_dir:
+        if self.config.openclaw_config or self.config.node_bin_dir:
             raise HTTPException(
-                422,
-                "OpenClaw sandbox execution does not support openclaw_config, max_output_tokens, or node_bin_dir overrides",
+                422, "OpenClaw sandbox execution does not support openclaw_config or node_bin_dir overrides"
+            )
+        if self.config.max_output_tokens is not None and (
+            self.config.max_output_tokens <= 0
+            or (self.config.context_window is not None and self.config.max_output_tokens > self.config.context_window)
+        ):
+            raise HTTPException(
+                422, "OpenClaw sandbox max_output_tokens must be positive and not exceed context_window"
             )
         if self.config.openclaw_agent_id != "main":
             raise HTTPException(422, "OpenClaw sandbox execution currently requires openclaw_agent_id=main")
@@ -704,13 +708,13 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             "prompt": f"{system}\n\n{prompt}" if system else prompt,
             "cwd": state.session.workdir,
             "env": {
-                "HOME": f"{state.session.session_dir}/home",
-                "XDG_CACHE_HOME": f"{state.session.session_dir}/home/.cache",
                 "OPENCLAW_STATE_DIR": f"{state.session.session_dir}/home/.openclaw",
                 "OPENCLAW_CONFIG_PATH": f"{state.session.session_dir}/home/.openclaw/openclaw.json",
                 "OPENCLAW_TELEMETRY": "0",
                 "CLAWHUB_DISABLE_TELEMETRY": "1",
                 "OPENCLAW_EXEC_SHELL_SNAPSHOT": "0",
+                # The supervisor must retain the CLI in its process group.
+                "OPENCLAW_NO_RESPAWN": "1",
             },
         }
         try:

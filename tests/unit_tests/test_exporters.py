@@ -454,7 +454,7 @@ class TestMLflowExporter:
 
         mlflow_module.MlflowClient.assert_called_once_with(tracking_uri="https://tracking.example")
         client.create_experiment.assert_not_called()
-        client.create_run.assert_called_once_with("exp-1", run_name="run")
+        client.create_run.assert_called_once_with("exp-1", run_name="run", tags=None)
         assert exporter.run_id == "run-1"
         assert mlflow_module.environ["MLFLOW_TRACKING_TOKEN"] == "secret-token"  # pragma: allowlist secret
 
@@ -480,7 +480,20 @@ class TestMLflowExporter:
         MLflowExporter(mlflow_config).setup()
 
         client.create_experiment.assert_called_once_with("gym")
-        client.create_run.assert_called_once_with("exp-new", run_name="run")
+        client.create_run.assert_called_once_with("exp-new", run_name="run", tags=None)
+
+    def test_setup_passes_run_tags_and_description_as_one_tag_dict(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig
+    ) -> None:
+        mlflow_config["mlflow_run_tags"] = {"model": "m", "benchmark": "b"}
+        mlflow_config["mlflow_run_description"] = "m on b"
+
+        _, client = _open_mlflow_exporter(monkeypatch, mlflow_config)
+
+        # create_run only accepts a dict; the description is MLflow's mlflow.note.content tag.
+        client.create_run.assert_called_once_with(
+            "exp-1", run_name="run", tags={"model": "m", "benchmark": "b", "mlflow.note.content": "m on b"}
+        )
 
     def test_logging_before_setup_raises(self, mlflow_config: DictConfig) -> None:
         with pytest.raises(RuntimeError, match="not open"):

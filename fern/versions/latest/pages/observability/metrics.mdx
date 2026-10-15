@@ -11,14 +11,12 @@ is deliberately absent and why.
 These metrics answer "how is this software behaving?" — where time goes, what failed, how
 a configuration performs on hardware you do not control.
 
-They do not answer "how is my run doing?" Reward, accuracy, and benchmark scores are
-experiment telemetry. They belong in Weights & Biases or MLflow, which are built for
-comparing runs and keep data for the lifetime of a project. NeMo Gym already reports them
-through `AggregateMetricsMixin` and continues to do so, unchanged.
-
-Mirroring reward into OpenTelemetry would put a number in a system that aggregates across
-every deployment and retains for weeks. That is the wrong home for it, and the two systems
-would disagree the first time one dropped a sample.
+Benchmark scores such as pass@k are experiment telemetry. They belong in Weights & Biases or
+MLflow, which are built for comparing runs and keep data for the lifetime of a project. NeMo Gym
+reports them through `AggregateMetricsMixin`, unchanged. What NeMo Gym does export is the reward
+of each scored rollout as it arrives, so a broken run (all zeros, a sudden drop, many masked
+samples) shows up while it is still running. See
+[What the Reward Metrics Show](#what-the-reward-metrics-show).
 
 ## Metrics NeMo Gym Emits
 
@@ -27,10 +25,13 @@ would disagree the first time one dropped a sample.
 | `gym.rollout.duration_ms` | Histogram | ms | Wall-clock duration of one rollout, from the agent server's `/run`. |
 | `gym.verify.duration_ms` | Histogram | ms | Wall-clock duration of one verification. |
 | `gym.verify.success_rate` | Gauge | fraction | Cumulative fraction of verifications that completed. See below. |
-| `gym.servers.active` | Gauge | count | Number of servers the orchestrator started. |
+| `gym.servers.active` | Gauge | count | Number of servers the supervisor started. |
+| `gym.server.startup_stage_duration_ms` | Histogram | ms | One stage of one server's own startup, recorded by that server. The `nemo.gym.startup.stage` attribute names the stage. |
 | `gym.http.connection_pool.queue_duration_ms` | Histogram | ms | Time one queued connection acquisition waited for an aiohttp pool slot. |
 | `gym.http.connection_pool.connect_total` | Observable counter | count | All outbound aiohttp connection attempts (`connect()` calls), including attempts that later fail or are abandoned. |
 | `gym.rollout.completed_total` | Counter | count | Rollout attempts the collection driver finished handling, by outcome. See below. |
+| `gym.http.connection_pool.connect_duration_ms` | Histogram | ms | Time to open one new pooled connection, including DNS, TCP, and TLS setup. Reused connections record nothing. |
+| `gym.rollout.rewarded_total` | Counter | count | Scored rollout attempts that carry a reward, by reward range. See below. |
 | `gym.server.memory.usage` | Gauge | bytes | Current RSS or PSS for one managed server and its descendants. |
 | `gym.server.memory.sampled_peak` | Gauge | bytes | Largest value observed by the sampler for one managed server and its descendants. |
 | `gym.server.processes` | Gauge | count | Processes currently attributed to one managed server. |
@@ -51,9 +52,10 @@ Coverage comes from the output files, not this counter.
 
 `nemo.gym.rollout.outcome` is `scored` (written to the main output, masked and forced-zero
 results included), `failed` (written to the failures sidecar), or `omitted` (a no-persist
-result, such as a kill-shaped failure, written to neither). Rows drained by the dispatch budget
-never ran and are not counted. Every point carries `nemo.gym.rollout.dispatch.name`, the
-environment server or, when rows name none, the agent. Attempts with a failure class also carry
+result written to neither, such as a `kill_shaped` failure: a Slurm SIGTERM, a dead Ray actor, or
+an out-of-memory kill). Rows drained by the dispatch budget never ran and are not counted. Every
+point carries `nemo.gym.rollout.dispatch.name`, the environment server or, when rows name none, the
+agent. Attempts with a failure class also carry
 `nemo.gym.failure_class`, `nemo.gym.failure_kind` (a registered or `<server>:<kind>` namespaced
 kind, otherwise `unregistered`) and `nemo.gym.failure_type` (the exception class name). Free-text
 failure reasons never become attributes.
@@ -62,6 +64,122 @@ A failed `/run` is counted as `failed` with class `agent_request_failed` only wh
 `route_failures_to_sidecar` is on; otherwise it aborts the run. Only the serving collection path
 records the counter: `gym eval run --no-serve`, direct `run_examples` callers and rollout
 reverification do not.
+
+### What the Reward Metrics Show
+
+Every `scored` attempt that carries a numeric reward is counted once in
+`gym.rollout.rewarded_total`, at the same point as `gym.rollout.completed_total`. A result without a
+numeric reward is unscored, not a zero, and is not counted. Failed and omitted attempts have no
+reward.
+
+Rewards are whatever the environment's verifier returns: binary, partial credit, or a negative
+penalty. `nemo.gym.rollout.reward.range` sorts each one into `negative`, `zero`, `partial`
+(strictly between 0 and 1), `full` (exactly 1) or `above_one`.
+
+The counter also carries `nemo.gym.rollout.dispatch.name` and `nemo.gym.rollout.masked`, the
+result's `mask_sample`. Filter on `masked="false"` to leave out samples whose reward is not a valid
+measurement, as the aggregate metrics do.
+
+The share of `full` rollouts is a live view, not the benchmark score. Scores like pass@k or
+per-task averages are computed from all rollouts at the end by `/aggregate_metrics` and can differ
+from it.
+
+### Startup Metrics
+
+The stage histogram carries `nemo.gym.server.name`, `nemo.gym.server.type`, `nemo.gym.startup.stage`, and `nemo.gym.server.worker`. Stages are contiguous, so one process's stages add up to the time from its start to the moment it accepts connections.
+
+| Stage | What it covers |
+| --- | --- |
+| `venv_setup` | Venv creation and dependency installation in the launch shell. Near zero when `skip_venv_if_present` reuses a venv. |
+| `interpreter_start` | The server's interpreter starting and importing the server module and its dependencies. |
+| `worker_start` | Workers only. Runs from the main process handing off to Uvicorn to the worker entering `run_webserver`, which covers spawning the worker process and importing the server module. |
+| `load_config` | Loading the merged config and this server's section of it. |
+| `init_ray` | Starting or joining Ray, for servers that use it. |
+| `init_server` | Constructing the server object, including its `model_post_init` (external tool installs, model clients, caches). |
+| `init_telemetry` | Initialising OpenTelemetry in this process. |
+| `setup_webserver` | The server's `setup_webserver`, which registers its routes. |
+| `expose_tools_over_mcp` | Auto-exposing tools over MCP, for resources servers that enable it. |
+| `configure_app` | Liveness routes, middleware, instrumentation, and profiling. |
+| `uvicorn_startup` | From the end of app configuration until the app's own lifespan startup finishes, just before Uvicorn accepts connections. Work a server does in its lifespan, such as loading data, is part of this stage. Not recorded by the main process of a multi-worker server, which does not serve requests. |
+
+A server with `num_workers` above 1 runs `run_webserver` again in every Uvicorn worker. Each worker reports its own stages, starting at `worker_start`, with `nemo.gym.server.worker` set to true. The main process of that server reports the stages up to the hand-off to Uvicorn, with the attribute set to false. Filter or group by this attribute, so that a worker's `init_server` is not averaged with the main process's.
+
+There is no supervisor-side total. The supervisor learns that a server is ready from a health poll every few seconds, so its total would be the stages above plus polling delay. The total for each server is the `gym.startup.server` span in the startup trace.
+
+### Event Loop and Process Metrics
+
+These metrics are reported whenever metrics are exported. Every server process reports them, and the `process.pid` resource attribute tells apart the Uvicorn workers of one server.
+
+A Gym server answers every request on one asyncio event loop. When synchronous work holds that loop, every other request waits, even though no single request looks slow. Requests that arrive in bursts make this worse, because each one waits for the synchronous work of the requests ahead of it.
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.event_loop.lag_ms` | Histogram | ms | How late a sleeping coroutine wakes up, sampled once per interval. This is the signal that the event loop is busy. |
+| `gym.event_loop.tasks` | Gauge | count | Asyncio tasks that exist on the loop, reported only when `telemetry.event_loop_task_count` is true. This counts resident work, not a queue: a task waiting on the network counts as much as a runnable one. |
+| `gym.gc.pause_duration_ms` | Histogram | ms | Duration of one garbage collection, by `nemo.gym.gc.generation`. |
+| `gym.gc.collections_total` | Counter | count | Garbage collections, by `nemo.gym.gc.generation`. |
+| `gym.gc.collected_total` | Counter | count | Objects freed, by `nemo.gym.gc.generation`. |
+| `gym.gc.uncollectable_total` | Counter | count | Objects found but not freed, by `nemo.gym.gc.generation`. |
+| `gym.gc.count` | Gauge | count | Allocations counted toward the next collection, by `nemo.gym.gc.generation`. |
+| `process.cpu.time` | Counter | s | Process CPU time, by `cpu.mode` (`user` or `system`). |
+| `process.memory.usage` | Gauge | bytes | Resident memory of the process. |
+| `process.thread.count` | Gauge | count | Threads in the process. |
+| `process.open_file_descriptor.count` | Gauge | count | Open file descriptors, where the platform reports them. |
+| `gym.server.requests.in_flight` | Up/down counter | count | HTTP requests the server is handling. |
+| `gym.server.requests.cancelled_total` | Counter | count | Requests cancelled because the client disconnected before the response finished, by `http.route` and `nemo.gym.request.phase`. |
+| `gym.server.requests.unhandled_exceptions_total` | Counter | count | Requests whose handler raised an exception that no middleware turned into a response. A handled error, such as an `HTTPException`, is a response and is counted in `gym.server.responses_total` instead. |
+| `gym.server.responses_total` | Counter | count | Responses the server started sending, by `http.response.status_code`. It does not depend on the FastAPI instrumentor, so it reports 4xx and 5xx responses in any run with metrics on. |
+| `gym.http.client.requests.in_flight` | Up/down counter | count | Outbound calls through `server_utils.request` still waiting for their response headers. |
+
+`gym.server.requests.cancelled_total` uses registered route templates such as `/work/{item_id}`, never raw paths or rollout IDs. Rollout prefixes are removed before matching a template; requests without a matching route use `<unmatched>`. The phase is `before_response_start` until the ASGI `http.response.start` message has been sent, then `response_started`. A headers-only response and an SSE keepalive both count as `response_started`; this does not imply a model token was produced. Model-call capture's `ttft_ms` supplies token timing when capture is enabled.
+
+Sum the route and phase series to recover the server's cancellation total; no separate aggregate series is exported. Each server counts its own HTTP disconnect, so one cancelled rollout can count at both the agent and its downstream model server. These are request counts, not unique rollout counts.
+
+The stdout 499 line remains sampled once per 100 disconnects on every route. With `++global_aiohttp_client_request_debug=true`, the existing debug override logs each disconnect and adds elapsed seconds and response-start phase. Without debug logging, the sampled line has no timing or phase fields.
+
+The rollout driver, which is `gym eval run`, reports how much work it holds and where that work waits:
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.driver.rollouts.offered_total` | Counter | count | Rollouts handed to dispatch. |
+| `gym.driver.rollouts.resident` | Up/down counter | count | Rollout tasks that exist and have not finished, whether waiting for admission or running. |
+| `gym.driver.rollouts.active` | Up/down counter | count | Rollouts admitted past the concurrency limit and running. |
+| `gym.driver.admission_duration_ms` | Histogram | ms | Time one rollout waited for the concurrency limit before it started. |
+| `gym.driver.output_write_duration_ms` | Histogram | ms | Time to write and flush one rollout's output row. |
+| `gym.driver.output_write_bytes` | Histogram | bytes | Size of one rollout's output row. |
+| `gym.driver.materialize_duration_ms` | Histogram | ms | Time to read, repeat, and write a run's input rows before dispatch. |
+| `gym.driver.rollout.input_items` | Histogram | count | Input items one completed rollout started with. |
+| `gym.driver.rollout.output_items` | Histogram | count | Output items in one completed rollout's final response. |
+| `gym.driver.rollout.turns` | Histogram | count | Agent turns in one completed rollout. Recorded only when rollout observability produced the rollout's `ng_perf`. |
+| `gym.driver.rollout.tool_calls` | Histogram | count | Tool calls in one completed rollout, from `ng_perf`, or counted from the final response's `function_call` items without it. |
+
+Resident minus active is the number of rollouts waiting for admission. A standalone `gym eval run --no-serve` driver sets up its own telemetry from the `telemetry:` block, so it reports these metrics and the `gym.job` span too.
+
+`gym.event_loop.lag_ms` and `gym.event_loop.tasks` carry `nemo.gym.event_loop`, which is `server` for a server's own loop, `head_server` for the head server's loop inside the supervisor, and `driver` for the rollout driver's loop.
+
+The `process.*` metrics keep the OpenTelemetry process semantic-convention names, units, and `cpu.mode` attribute, so standard dashboards recognize them. The Gym metrics follow Gym's own conventions: durations in milliseconds with a `_ms` suffix, counters with a `_total` suffix, and attributes under `nemo.gym.`.
+
+The work stays off the request path. The event loop runs one sampling coroutine per interval. Process, garbage-collection, and request totals are plain counters that the exporter's background thread reads when it exports, so a request costs a few integer updates and no OpenTelemetry call.
+
+### Resources Operation Metrics
+
+Many resources servers limit expensive work, such as a verifier subprocess or a judge call, with a semaphore. When the limit is too small, verification waits in a queue that no request metric shows. A resources server reports that queue by wrapping its limited work in `nemo_gym.telemetry.resources_operations.resources_operation`:
+
+```python
+async with resources_operation(self._semaphore, operation="verify", executor="subprocess") as op:
+    result = await run_the_verifier()
+    if it_timed_out:
+        op.outcome = "timeout"
+```
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.resources.operation.queue_duration_ms` | Histogram | ms | Time one operation waited for its limit. |
+| `gym.resources.operation.duration_ms` | Histogram | ms | Time one operation ran inside its limit, by `nemo.gym.resources.operation.outcome`: `ok`, `error`, `timeout`, `cancelled`, or `crashed`. |
+| `gym.resources.operation.queued` | Up/down counter | count | Operations waiting for their limit. |
+| `gym.resources.operation.active` | Up/down counter | count | Operations running inside their limit. |
+
+Every metric carries `nemo.gym.resources.operation` (`verify`, `tool`, `judge`, or `other`) and `nemo.gym.resources.executor` (`inline`, `thread`, `process`, `subprocess`, or `other`). They are recorded only while metrics are exported. `math_with_judge` uses this contract for its SymPy verifier subprocesses.
 
 ### Memory Metrics
 
@@ -73,7 +191,7 @@ Host usage is `total - available`, matching the memory the operating system cann
 
 Descendants remain attributed while they stay in the server's Linux process tree. Detached or reparented processes and remote Ray actors are not included.
 
-Compare these series with `http.server.active_requests` while increasing workload concurrency. Separate server processes export their HTTP metrics independently, so sum active requests by Gym server name when a server uses several Uvicorn workers.
+Compare these series with `http.server.active_requests`, which requires traces, while increasing workload concurrency. Separate server processes export their HTTP metrics independently, so sum active requests by Gym server name when a server uses several Uvicorn workers.
 
 ### What `gym.verify.success_rate` Measures
 
@@ -88,22 +206,31 @@ carries last-value semantics, so a rate cannot be expressed directly. A long-liv
 therefore shows a figure that moves more slowly as it ages. Read it as "this process's
 success fraction so far," and use traces for anything finer.
 
-### Why Only the Orchestrator Reports `gym.servers.active`
+### Why Only the Supervisor Reports `gym.servers.active`
 
 `gym.servers.active` is a gauge, so the exported value is whichever process wrote last.
 If every server reported it, the result would be neither the fleet size nor any process's
-view of it. The orchestrator is the only process that knows how many servers it started,
+view of it. The supervisor is the only process that knows how many servers it started,
 so it is the only writer. It sets the count after startup and zero on shutdown.
 
 ## HTTP Metrics
 
 FastAPI auto-instrumentation emits the standard HTTP server metrics on every NeMo Gym
-server:
+server while traces are exported. The pinned instrumentation package uses the older
+OpenTelemetry HTTP semantic conventions:
 
-| Metric | Dimensions |
-| --- | --- |
-| `http.server.active_requests` | `http.server_name`, `http.method` |
-| `http.server.request.duration` | `http.route`, `http.request.method`, `http.response.status_code` |
+| Metric | Unit | Dimensions |
+| --- | --- | --- |
+| `http.server.active_requests` | requests | `http.server_name`, `http.method` |
+| `http.server.duration` | ms | `http.target`, `http.method`, `http.status_code` |
+| `http.server.request.size` | bytes | `http.target`, `http.method`, `http.status_code` |
+| `http.server.response.size` | bytes | `http.target`, `http.method`, `http.status_code` |
+
+`http.target` carries the route template, such as `/verify`, not the raw path.
+
+With `traces_enabled: false`, NeMo Gym does not install the instrumentor, because it costs
+every request tens of microseconds even when no span is exported. A metrics-only run
+therefore has no `http.server.*` metrics. Turn traces on to get them.
 
 Use these for request latency. They are dimensioned, so you can compare `/verify` against
 `/v1/responses`, or isolate 500s, which is what latency questions usually require.
@@ -138,7 +265,7 @@ it.
 At the pinned `nemo-lens` version, that instrument records without attributes. Every
 endpoint of every server type would land in one undimensioned histogram: a verification,
 an inference call, and a liveness probe sharing one set of buckets. The result answers no
-question anyone has. The dimensioned `http.server.request.duration` above supersedes it.
+question anyone has. The dimensioned `http.server.duration` above supersedes it.
 
 ## Enabling and Disabling
 
@@ -153,3 +280,33 @@ telemetry:
 Metrics export on a timer. The default interval is 10 seconds and is configurable with the
 standard `OTEL_METRIC_EXPORT_INTERVAL` environment variable, in milliseconds. A process
 that lives for less than one interval may exit before exporting anything.
+
+## Rollout Health Metrics
+
+The trajectory-level checks of the [rollout health report](/main/evaluation/rollout-health) also run as
+each rollout finishes, so problems show up while a run is still in progress. Both counters use the
+same check logic as the report. They depend only on telemetry being initialized with a metrics exporter, not on which span groups are
+enabled:
+`disable_health_check` turns off the post-run report, not these counters, and `health_check_ignored_checks`
+applies to both.
+
+| Metric | Dimensions |
+| --- | --- |
+| `gym.rollout.health_verdict_total` | `nemo.gym.health.verdict`, `nemo.gym.rollout.outcome` |
+| `gym.rollout.health_flagged_total` | `nemo.gym.health.check`, `nemo.gym.rollout.outcome` |
+
+`gym.rollout.health_verdict_total` counts each evaluated rollout once. The verdict is `healthy`,
+`unhealthy` or `unobserved`, with the meaning it has in the report. A rollout is `unobserved` when no
+check flagged it but at least one could not run, for example because `observability_enabled` is off
+and no trajectory was captured. Rollouts that never ran are not evaluated. A rollout that failed in its
+environment after the agent ran is evaluated when it returned agent evidence.
+
+Both counters carry the outcome, `scored` or `failed`. The post-run report reads scored rollouts only,
+so filter on `scored` to compare the two.
+
+`gym.rollout.health_flagged_total` counts a rollout once per check that produced at least one finding,
+however many findings that is. A check's value is therefore the number of rollouts it flagged, which is
+at most the number of unhealthy rollouts, while the sum over checks can be larger because one rollout
+can be flagged by several checks. The report's per-check issue counts are per finding. The check
+ids are the fixed ids of the rollout-level checks in the health report, plus `check_execution_error`.
+Neither counter has task or rollout identifiers as dimensions.
