@@ -28,6 +28,14 @@ class ComposeSubstitutionError(ValueError):
         super().__init__(message or f"unresolved Compose variable ${{{name}}}")
 
 
+class ComposeVolumeError(ValueError):
+    """A Compose ``volumes`` entry prepare cannot run; ``name`` is the volume, source or field it names."""
+
+    def __init__(self, name: str, message: str) -> None:
+        self.name = name
+        super().__init__(message)
+
+
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -273,6 +281,251 @@ def inline_env_files(document: dict, base_dir: Path, variables: dict[str, str] |
         if merged or "environment" in service:
             service["environment"] = {**merged, **_environment_mapping(name, service.get("environment"), variables)}
     return document
+
+
+# Short-syntax mount options: the first group is honoured, the second has no meaning without a Docker host.
+_VOLUME_OPTIONS = {"ro": {"read_only": True}, "rw": {"read_only": False}, "nocopy": {"nocopy": True}}
+_VOLUME_NOOP_OPTIONS = frozenset({"z", "Z", "cached", "delegated", "consistent"})
+# In-sandbox tree Harbor's ``${HOST_*_PATH}`` log mounts resolve to (see ``image_configs.LOG_MOUNT_PATHS``).
+LOGS_TREE = "/logs"
+
+
+def parse_volume(entry: Any, service: str) -> dict[str, Any]:
+    """One ``volumes`` entry as a long-syntax mapping: ``type``, ``source``, ``target``, ``read_only``
+    and, for a named volume, ``volume.nocopy``.
+
+    Short syntax ``SOURCE:TARGET[:OPTIONS]`` is parsed the way Compose does: a source starting with
+    ``.``, ``/`` or ``~`` is a bind mount, anything else a named volume. A bare ``TARGET`` (an anonymous
+    volume), a ``tmpfs``/``npipe``/``cluster`` type, a bind ``propagation`` or an unknown option raises
+    :class:`ComposeVolumeError` naming the field: nothing in a sandbox group stands in for it.
+    """
+    where = f"service {service!r} volumes"
+    if isinstance(entry, str):
+        parts = entry.split(":")
+        if len(parts) == 1 or not parts[0]:
+            raise ComposeVolumeError(entry, f"{where}: anonymous volume {entry!r} is not supported; name a source")
+        if len(parts) > 3:
+            raise ComposeVolumeError(entry, f"{where}: cannot parse {entry!r}")
+        source, target = parts[0], parts[1]
+        volume: dict[str, Any] = {"type": "bind" if source[0] in "./~" else "volume", "source": source}
+        volume["target"] = _checked_target(target, where)
+        volume["read_only"] = False
+        for option in parts[2].split(",") if len(parts) == 3 else []:
+            if option in _VOLUME_NOOP_OPTIONS or not option:
+                continue
+            if option not in _VOLUME_OPTIONS:
+                raise ComposeVolumeError(option, f"{where}: unsupported mount option {option!r} in {entry!r}")
+            if option == "nocopy":
+                volume.setdefault("volume", {})["nocopy"] = True
+            else:
+                volume.update(_VOLUME_OPTIONS[option])
+        return volume
+    if not isinstance(entry, dict):
+        raise ComposeVolumeError("volumes", f"{where}: entries must be strings or mappings, got {entry!r}")
+    unknown = set(entry) - {"type", "source", "target", "read_only", "bind", "volume", "consistency"}
+    if unknown:
+        raise ComposeVolumeError(sorted(unknown)[0], f"{where}: unsupported field(s) {sorted(unknown)}")
+    kind = entry.get("type", "volume")
+    if kind not in ("bind", "volume"):
+        raise ComposeVolumeError("type", f"{where}: volume type {kind!r} is not supported")
+    source, target = entry.get("source"), entry.get("target")
+    if kind == "bind" and not source:
+        raise ComposeVolumeError("source", f"{where}: a bind mount needs a source")
+    if not source:
+        raise ComposeVolumeError("source", f"{where}: anonymous volume for {target!r} is not supported; name a source")
+    target = _checked_target(target, where)
+    bind = entry.get("bind") or {}
+    if set(bind) - {"create_host_path"}:
+        raise ComposeVolumeError(
+            sorted(set(bind) - {"create_host_path"})[0], f"{where}: unsupported bind options {bind}"
+        )
+    options = entry.get("volume") or {}
+    if set(options) - {"nocopy"}:
+        raise ComposeVolumeError(
+            sorted(set(options) - {"nocopy"})[0], f"{where}: unsupported volume options {options}"
+        )
+    volume = {"type": kind, "source": str(source), "target": target, "read_only": bool(entry.get("read_only", False))}
+    if options.get("nocopy"):
+        volume["volume"] = {"nocopy": True}
+    return volume
+
+
+def _checked_target(target: Any, where: str) -> str:
+    """A mount target the group can serve: an absolute container path below ``/`` with no ``..`` segment.
+
+    The same rule for both syntaxes, and the one the Compose adapter applies to uploads, so a target it
+    would refuse fails at prepare naming the field (``target``).
+    """
+    if not isinstance(target, str) or not target.startswith("/") or ".." in target.split("/"):
+        raise ComposeVolumeError("target", f"{where}: target must be an absolute container path, got {target!r}")
+    if not target.strip("/"):
+        raise ComposeVolumeError("target", f"{where}: target {target!r} is the container root; mount below it")
+    return target
+
+
+def _bind_source(source: str, base_dir: Path, where: str) -> Path:
+    """A bind source as a host path: relative to ``base_dir`` (the Compose file's folder), ``~`` expanded.
+
+    ``~user`` for a user the host does not know cannot be resolved; it raises :class:`ComposeVolumeError`
+    naming the source, like any other bind source the task does not contain.
+    """
+    try:
+        path = Path(source).expanduser()
+    except RuntimeError as exc:
+        raise ComposeVolumeError(
+            source,
+            f"{where}: cannot resolve the home directory in bind source {source!r}; map it under `volume_sources`",
+        ) from exc
+    return path if path.is_absolute() else base_dir / path
+
+
+def first_link(folder: Path) -> Path | None:
+    """The first symbolic link anywhere under ``folder`` (files or folders), or ``None``.
+
+    A folder a Compose file binds is uploaded file by file; a link inside it would be read through,
+    reaching whatever it points at on the host, so the planner and the Compose adapter both refuse one.
+    """
+    return next((path for path in sorted(folder.rglob("*")) if path.is_symlink()), None)
+
+
+def absolute_link(path: Path, root: Path) -> Path | None:
+    """The first component of ``path`` below ``root`` that is a link with an absolute target, or ``None``.
+
+    The server plans a task on a copy of its folder (links copied as links), where an absolute target still
+    points into the original folder: a bind source reached through one resolves inside the task at prepare and
+    outside the copy at seed. The planner refuses it, as the hub refuses such a link in a fetched task
+    (``_validate_task_tree``), so the two agree. A relative link that stays inside the task is fine at both.
+    """
+    if not path.is_relative_to(root):
+        return None
+    current = root
+    for part in path.relative_to(root).parts:
+        current = current / part
+        if current.is_symlink() and current.readlink().is_absolute():
+            return current
+    return None
+
+
+def plan_compose_volumes(
+    document: dict,
+    base_dir: Path,
+    *,
+    root: Path | None = None,
+    volume_sources: dict[str, str] | None = None,
+) -> dict[str, list[dict[str, str]]]:
+    """Decide how each service's ``volumes`` run in a sandbox group. Mutates and returns per-service uploads.
+
+    A bind mount whose source is a file or folder of the task (under ``root``, default ``base_dir``;
+    relative paths resolve against ``base_dir``, as Compose resolves them against the Compose file)
+    becomes an upload into the service once it starts: the entry leaves ``volumes`` and joins
+    ``x-sandbox.uploads`` as ``{"source": <host path>, "target": <container path>}``. Named volumes
+    declared at top level stay, in long syntax, for the provider's shared storage; a volume declared
+    ``external: true``, and a bind source outside the task, resolve through ``volume_sources`` (the
+    ``sandbox`` block's mapping of volume name or host path to a shared-storage path) and raise
+    :class:`ComposeVolumeError` naming the volume when it is missing. A bind of Harbor's ``/logs``
+    tree onto ``main`` is dropped (the server creates that tree in the agent's sandbox); on a sidecar it
+    raises. A source the task does not contain, or a symlink that leaves it, raises naming the path; so does
+    a bound folder that contains a link, and a source reached through a link with an absolute target (see
+    :func:`absolute_link`). A service that already carries ``x-sandbox`` raises naming the field: that key
+    is this planner's output, not task input. A null top-level declaration (``volumes: {pgdata: null}``) is
+    normalised to ``{}``, the form the adapter reads.
+    """
+    base = Path(base_dir).resolve()
+    root = Path(root).resolve() if root is not None else base
+    sources = dict(volume_sources or {})
+    services = document.get("services") if isinstance(document, dict) else None
+    if not isinstance(services, dict):
+        return {}
+    declared = document.get("volumes")
+    if declared is None:
+        declared = {}
+    if not isinstance(declared, dict):
+        raise ComposeVolumeError("volumes", "top-level volumes must be a mapping")
+    # ``x-sandbox`` is what this planner (and the sidecar adaptation) write for the Compose adapter, never task
+    # input: an entry in the task file could name any host file as an upload source. Refused before anything
+    # else, so prepare fails with the field name.
+    for name, service in services.items():
+        if isinstance(service, dict) and "x-sandbox" in service:
+            raise ComposeVolumeError(
+                "x-sandbox", f"service {name!r} declares x-sandbox; it is written by Gym at prepare, not by the task"
+            )
+    # ``volumes:\n  pgdata:`` (a null declaration) is the canonical empty one; the adapter reads a mapping.
+    for volume_name, declaration in declared.items():
+        if declaration is None:
+            declared[volume_name] = {}
+    uploads: dict[str, list[dict[str, str]]] = {}
+    for name, service in services.items():
+        if not isinstance(service, dict) or "volumes" not in service:
+            continue
+        entries = service.pop("volumes")
+        if entries is None:
+            continue
+        if not isinstance(entries, list):
+            raise ComposeVolumeError("volumes", f"service {name!r} volumes must be a list")
+        kept: list[dict[str, Any]] = []
+        for entry in entries:
+            volume = parse_volume(entry, name)
+            source = volume["source"]
+            if volume["type"] == "volume":
+                if source not in declared:
+                    raise ComposeVolumeError(source, f"service {name!r} mounts undeclared volume {source!r}")
+                declaration = declared[source]
+                if not isinstance(declaration, dict) or set(declaration) - {"name", "external"}:
+                    field = next(iter(set(declaration) - {"name", "external"}), "volumes")
+                    raise ComposeVolumeError(field, f"volume {source!r}: unsupported option {field!r}")
+                if declaration.get("external") and source not in sources:
+                    raise ComposeVolumeError(
+                        source, f"external volume {source!r} needs a `volume_sources` entry in the sandbox block"
+                    )
+                kept.append(volume)
+                continue
+            host = _bind_source(source, base, f"service {name!r} volumes")
+            if str(host) == LOGS_TREE or str(host).startswith(LOGS_TREE + "/"):
+                if name == "main":
+                    continue  # the server creates /logs in the agent's sandbox; a sidecar cannot share it yet
+                raise ComposeVolumeError(
+                    source, f"service {name!r} binds the logs tree {source!r}; only `main` can mount {LOGS_TREE}"
+                )
+            resolved = host.resolve()
+            if resolved.is_relative_to(root):
+                if not host.exists():
+                    raise ComposeVolumeError(
+                        source, f"service {name!r} binds {source!r}, which the task folder does not contain"
+                    )
+                link = absolute_link(host, root)
+                if link is not None:
+                    # Fine here, but on the server's copy of the task the link still points at this folder.
+                    raise ComposeVolumeError(
+                        source,
+                        f"service {name!r} binds {source!r} through a link with an absolute target: {link}; "
+                        "make the link relative",
+                    )
+                link = first_link(resolved) if resolved.is_dir() else None
+                if link is not None:
+                    # The folder is uploaded file by file; a link would be read through to the host.
+                    raise ComposeVolumeError(
+                        source,
+                        f"service {name!r} binds {source!r}, which contains a link: {link}; links are not uploaded",
+                    )
+                uploads.setdefault(name, []).append({"source": str(resolved), "target": volume["target"]})
+                continue
+            if host.is_relative_to(root):
+                # A link inside the task folder that points out of it: not part of what prepare digested.
+                raise ComposeVolumeError(
+                    source, f"service {name!r} binds {source!r}, a link that leaves the task folder"
+                )
+            if source not in sources:
+                raise ComposeVolumeError(
+                    source,
+                    f"service {name!r} binds {source!r} from outside the task; map it under `volume_sources` in the "
+                    "sandbox block",
+                )
+            kept.append(volume)
+        if kept:
+            service["volumes"] = kept
+        if name in uploads:
+            service["x-sandbox"] = {"uploads": uploads[name]}
+    return uploads
 
 
 def residual_interpolation(value: Any, path: str = "") -> str | None:
@@ -531,7 +784,7 @@ def adapt_non_root_sidecars(document: dict, image_configs: dict) -> dict:
             for key, value in (service.get("environment") or {}).items()
             if isinstance(value, str) and urlsplit(value).scheme and urlsplit(value).hostname in services
         ]
-        options = {"hosts": []}
+        options = {**(service.get("x-sandbox") or {}), "hosts": []}
         if peers:
             options["resolve_environment"] = peers
         service["x-sandbox"] = options

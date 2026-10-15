@@ -22,6 +22,7 @@ from nemo_gym.tasks.harbor.image_configs import (
     dockerfile_base_images,
     load_compose_document,
     parse_image_ref,
+    plan_task_compose_volumes,
     record_base_images,
     record_compose_images,
     with_built_images,
@@ -721,6 +722,127 @@ class TestComposeVariablesAndEnvFile:
         write_task(tmp_path, "plain")
         (task,) = discover_tasks(tmp_path)
         assert load_compose_document(task) is None
+
+
+FIXTURES = Path(__file__).parent / "fixtures" / "harbor_compose_volumes"
+
+
+class TestComposeVolumesAtPrepare:
+    """M22: Compose volumes are planned at prepare, from the task folder and the deployment's ``volume_sources``."""
+
+    def write_task_aw(self, root: Path) -> Path:
+        task_dir = write_task(root, "task-aw")
+        for name in ("docker-compose.yaml", "seed.json"):
+            (task_dir / "environment" / name).write_bytes((FIXTURES / "task-aw" / "environment" / name).read_bytes())
+        return task_dir
+
+    def test_task_aw_seed_file_becomes_an_upload_into_the_sidecar(self, tmp_path):
+        self.write_task_aw(tmp_path)
+        (task,) = discover_tasks(tmp_path)
+        document = load_compose_document(task)
+        uploads = plan_task_compose_volumes(task, document)
+        assert uploads == {
+            "api": [{"source": str(task.path / "environment" / "seed.json"), "target": "/app/seed.json"}]
+        }
+        assert document["services"]["api"]["x-sandbox"]["uploads"] == uploads["api"]
+        assert "volumes" not in document["services"]["api"]
+        assert document["services"]["main"]["image"] == MAIN_IMAGE
+
+    def test_record_compose_images_fails_prepare_naming_an_unmapped_external_volume(self, tmp_path):
+        task_dir = write_task(
+            tmp_path,
+            "pg",
+            compose=f"""services:
+  main:
+    image: {MAIN_IMAGE}
+  db:
+    image: {SIDECAR_IMAGE}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:
+    external: true
+""",
+        )
+        (task,) = discover_tasks(tmp_path)
+        with pytest.raises(ImageConfigError, match=r"pg: environment/docker-compose.yaml: external volume 'pgdata'"):
+            record_compose_images([task], tmp_path, client=FakeClient())
+        assert not (tmp_path / "compose-images.json").exists()
+        # Mapped in the deployment's sandbox block, the same dataset prepares.
+        path = record_compose_images([task], tmp_path, client=FakeClient(), volume_sources={"pgdata": "pg/data"})
+        assert sorted(json.loads(path.read_text())) == sorted([MAIN_IMAGE, SIDECAR_IMAGE])
+        assert task_dir.is_dir()
+
+    @pytest.mark.parametrize("service", ["main", "api"])
+    @pytest.mark.parametrize("source", ["/etc/passwd", "OUTSIDE"])
+    def test_a_task_authored_x_sandbox_upload_fails_prepare_naming_the_field(self, tmp_path, service, source):
+        # Review blocker: a hub task's Compose file is untrusted. An ``x-sandbox.uploads`` written there (the
+        # planner's own output form) would have the server copy any readable host file into the sandbox.
+        outside = tmp_path / "outside" / "secret"
+        outside.parent.mkdir()
+        outside.write_text("secret")
+        source = str(outside) if source == "OUTSIDE" else source
+        smuggled = f"    x-sandbox:\n      uploads:\n        - {{source: {source}, target: /tmp/stolen}}\n"
+        compose = f"services:\n  main:\n    image: {MAIN_IMAGE}\n"
+        compose += smuggled if service == "main" else ""
+        compose += f"  api:\n    image: {SIDECAR_IMAGE}\n"
+        compose += smuggled if service == "api" else ""
+        write_task(tmp_path / "ds", "smuggler", compose=compose)
+        (task,) = discover_tasks(tmp_path / "ds")
+        document = load_compose_document(task)
+        with pytest.raises(
+            ImageConfigError,
+            match=f"smuggler: environment/docker-compose.yaml: service {service!r} declares x-sandbox",
+        ):
+            plan_task_compose_volumes(task, document)
+        with pytest.raises(ImageConfigError, match="x-sandbox"):
+            record_compose_images([task], tmp_path / "ds", client=FakeClient())
+        assert not (tmp_path / "ds" / "compose-images.json").exists()
+
+    def test_gpu_tasks_are_checked_against_the_gpu_blocks_volume_sources(self, tmp_path):
+        # Review: the server seeds a GPU-declaring task from the ``gpu_sandbox_provider`` block, so prepare checks
+        # its volumes against that block's mapping (empty when the block has none), not the ``sandbox`` block's.
+        compose = f"""services:
+  main:
+    image: {MAIN_IMAGE}
+  db:
+    image: {SIDECAR_IMAGE}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:
+    external: true
+"""
+        for name, gpus in (("cpu", 0), ("gpu", 1)):
+            task_dir = write_task(tmp_path, name, compose=compose)
+            toml = task_dir / "task.toml"
+            toml.write_text(toml.read_text() + f"gpus = {gpus}\n")
+        cpu, gpu = sorted(discover_tasks(tmp_path), key=lambda task: task.task_id)
+        mapped = {"pgdata": "pg/data"}
+        # No GPU block configured: every task is checked against the sandbox block.
+        assert record_compose_images([cpu, gpu], tmp_path, client=FakeClient(), volume_sources=mapped)
+        # A GPU block without the mapping: the GPU task fails at prepare, the CPU task does not.
+        with pytest.raises(ImageConfigError, match="gpu: .*external volume 'pgdata'"):
+            record_compose_images(
+                [cpu, gpu], tmp_path, client=FakeClient(), volume_sources=mapped, gpu_volume_sources={}
+            )
+        assert record_compose_images(
+            [cpu], tmp_path, client=FakeClient(), volume_sources=mapped, gpu_volume_sources={}
+        )
+        # The mirror: mapped under the GPU block only.
+        assert record_compose_images([gpu], tmp_path, client=FakeClient(), gpu_volume_sources=mapped)
+        with pytest.raises(ImageConfigError, match="cpu: .*external volume 'pgdata'"):
+            record_compose_images([cpu], tmp_path, client=FakeClient(), gpu_volume_sources=mapped)
+
+    def test_record_compose_images_fails_prepare_naming_an_unsupported_volume_field(self, tmp_path):
+        write_task(
+            tmp_path,
+            "tmpfs",
+            compose=f"services:\n  main:\n    image: {MAIN_IMAGE}\n    volumes:\n      - type: tmpfs\n        target: /scratch\n",
+        )
+        (task,) = discover_tasks(tmp_path)
+        with pytest.raises(ImageConfigError, match="volume type 'tmpfs' is not supported"):
+            record_compose_images([task], tmp_path, client=FakeClient())
 
 
 class TestRecordComposeImages:

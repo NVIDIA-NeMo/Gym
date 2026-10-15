@@ -40,10 +40,12 @@ from nemo_gym.sandbox.compose_config import (
     DEFAULT_PLATFORM,
     ComposeFieldError,
     ComposeSubstitutionError,
+    ComposeVolumeError,
     check_compose_fields,
     check_sidecar_extra_hosts,
     env_file_entries,
     inline_env_files,
+    plan_compose_volumes,
     residual_interpolation,
     substitute_compose,
 )
@@ -573,9 +575,29 @@ def without_pull_policy(document: dict[str, Any]) -> dict[str, Any]:
     return document
 
 
-def compose_image_references(task: HarborTask) -> list[str]:
+def plan_task_compose_volumes(
+    task: HarborTask, document: dict[str, Any], *, volume_sources: dict[str, str] | None = None
+) -> dict[str, list[dict[str, str]]]:
+    """Resolve the ``volumes`` of a task's Compose document for a sandbox group; mutates ``document``.
+
+    Bind mounts of the task's own files become ``x-sandbox.uploads`` entries (performed into the service
+    once it starts), named volumes stay for the provider's shared storage, and external volumes or bind
+    sources outside the task resolve through ``volume_sources`` (the sandbox block's mapping). Anything
+    the group cannot run raises :class:`ImageConfigError` naming the volume, path or field, so prepare
+    fails before a sandbox starts. Returns the uploads per service.
+    """
+    path = compose_file(task)
+    base_dir = path.parent if path is not None else task.path / "environment"
+    try:
+        return plan_compose_volumes(document, base_dir, root=task.path, volume_sources=volume_sources)
+    except ComposeVolumeError as exc:
+        raise ImageConfigError(f"{task.task_id}: {base_dir.name}/{path.name if path else ''}: {exc}") from exc
+
+
+def compose_image_references(task: HarborTask, document: dict[str, Any] | None = None) -> list[str]:
     """Every image a Compose task starts: the task image for ``main`` and each sidecar's image."""
-    document = load_compose_document(task)
+    if document is None:
+        document = load_compose_document(task)
     if document is None:
         return []
     services = document.get("services") or {}
@@ -763,6 +785,8 @@ def record_compose_images(
     sandbox_provider: str | None = None,
     gpu_sandbox_provider: str | None = None,
     compose_platform: str = DEFAULT_PLATFORM,
+    volume_sources: dict[str, str] | None = None,
+    gpu_volume_sources: dict[str, str] | None = None,
 ) -> Path | None:
     """Write ``compose-images.json`` in ``folder`` for the Compose tasks among ``tasks``.
 
@@ -771,9 +795,12 @@ def record_compose_images(
     ``gpu_sandbox_provider`` naming the providers of the ``sandbox:`` and ``gpu_sandbox_provider`` blocks for the
     capability check and ``compose_platform`` the deployment's, which a service's ``platform`` must match;
     ``platform`` is the one the images are recorded for, as :func:`record_image_configs` takes it (the built images'
-    ``builds.platform``). A task whose Compose file does not resolve (an
-    :class:`ImageConfigError` from :func:`load_compose_document`) or carries a field the group cannot run does
-    not stop the others: with ``skipped`` given it is recorded there by task id with the reason and left out,
+    ``builds.platform``). Each document's ``volumes`` are planned next (see :func:`plan_task_compose_volumes`), with
+    ``volume_sources`` standing for the deployment's external volumes; a task that declares GPUs is checked against
+    ``gpu_volume_sources`` instead when that is given (the ``gpu_sandbox_provider`` block's mapping, which is what
+    the server resolves such a task against; an empty mapping when that block has none). A task whose Compose file
+    does not resolve (an :class:`ImageConfigError` from :func:`load_compose_document`), carries a field the group
+    cannot run, or declares volumes it cannot run (the planner's :class:`ImageConfigError`) does not stop the others: with ``skipped`` given it is recorded there by task id with the reason and left out,
     otherwise one :class:`ImageConfigError` at the end names every such task. Its images are still recorded, so
     a fixed task file needs no new registry round-trip. Once the image configurations are recorded, a sidecar
     whose image runs as a non-root user (which the group starts without host injection) must declare no
@@ -788,11 +815,15 @@ def record_compose_images(
             document = load_compose_document(task)
             if document is None:
                 continue
-            for reference in compose_image_references(task):
+            for reference in compose_image_references(task, document):
                 references.setdefault(reference, []).append(task.task_id)
             check_task_compose_fields(
                 task, document, provider=sandbox_provider, gpu_provider=gpu_sandbox_provider, platform=compose_platform
             )
+            sources = (
+                gpu_volume_sources if gpu_volume_sources is not None and task_declares_gpus(task) else volume_sources
+            )
+            plan_task_compose_volumes(task, document, volume_sources=sources)
         except ImageConfigError as exc:
             failures[task.task_id] = str(exc)
             continue

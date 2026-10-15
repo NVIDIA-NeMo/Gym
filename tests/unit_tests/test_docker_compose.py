@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 import re
 import shlex
 from types import SimpleNamespace
@@ -669,7 +670,9 @@ async def test_health_probe_timeout_retries_then_starts_dependent(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_path):
+@pytest.mark.parametrize("declaration", [{}, None], ids=["mapping", "null"])
+async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_path, declaration):
+    # ``volumes:\n  data:`` (a null declaration, the canonical Compose spelling) provisions like ``data: {}``.
     shared = tmp_path / "shared"
     external = shared / "operator-data"
     external.mkdir(parents=True)
@@ -713,7 +716,7 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
                     ],
                 },
             },
-            "volumes": {"data": {}},
+            "volumes": {"data": declaration},
         },
         default_command=["sleep", "1"],
         volume_sources={"/operator/source": "operator-data"},
@@ -1646,6 +1649,155 @@ async def test_post_start_hooks_run_in_order_after_the_service_starts_and_a_fail
     assert provider.closed == ["1", "2"]
 
 
+class RecordingShellProvider(ShellProvider):
+    """A ShellProvider that keeps every exec command and upload it was asked for."""
+
+    def __init__(self):
+        super().__init__()
+        self.commands = []
+        self.uploads = []
+
+    async def exec(self, handle, command, **kwargs):
+        self.commands.append(command)
+        return await super().exec(handle, command, **kwargs)
+
+    async def upload_file(self, handle, source_path, target_path):
+        self.uploads.append((str(source_path), str(target_path)))
+        await super().upload_file(handle, source_path, target_path)
+
+
+@pytest.mark.asyncio
+async def test_uploads_land_in_the_service_before_its_command_runs(tmp_path):
+    """M22: a task-folder bind mount, planned as ``x-sandbox.uploads``, is copied into the service after its
+    sandbox starts and before the service command, files and folders alike, readable by any user. The chmod is
+    never recursive and covers exactly the folders and files the upload touched, every folder ``mkdir -p``
+    created included (intermediates and the parent of a single file, which a restrictive root umask would leave
+    unreadable); a folder upload merges over what the target already holds (review findings)."""
+    task = tmp_path / "task"
+    (task / "data" / "nested").mkdir(parents=True)
+    (task / "data" / "deep" / "er").mkdir(parents=True)
+    (task / "seed.json").write_text('{"ok": true}')
+    (task / "data" / "a.txt").write_text("a")
+    (task / "data" / "nested" / "b.txt").write_text("b")
+    (task / "data" / "nested" / "b.txt").chmod(0o600)
+    (task / "data" / "deep" / "er" / "c.txt").write_text("c")
+    sandbox_root = tmp_path / "sandbox"
+    # What the image already ships under the target: kept (a merge), never chmod-ed.
+    (sandbox_root / "data" / "image").mkdir(parents=True)
+    (sandbox_root / "data" / "image" / "default.conf").write_text("image")
+    (sandbox_root / "data" / "image" / "default.conf").chmod(0o600)
+    result = tmp_path / "result"
+    document = {
+        "services": {
+            "api": {
+                "image": "image",
+                "command": [
+                    "sh",
+                    "-c",
+                    f"cat {sandbox_root}/app/seed.json {sandbox_root}/data/a.txt {sandbox_root}/data/nested/b.txt "
+                    f"{sandbox_root}/data/deep/er/c.txt > {result}",
+                ],
+                "x-sandbox": {
+                    "uploads": [
+                        {"source": str(task / "seed.json"), "target": f"{sandbox_root}/app/seed.json"},
+                        {"source": str(task / "data"), "target": f"{sandbox_root}/data"},
+                    ]
+                },
+            }
+        }
+    }
+    provider = RecordingShellProvider()
+    # The sandbox's root shell creates the folders with its own umask; a restrictive one leaves them 0700.
+    umask = os.umask(0o077)
+    try:
+        async with make_compose(provider, document, poll_interval_s=0.01, upload_root=task) as group:
+            await group._wait("api", "service_completed_successfully")
+    finally:
+        os.umask(umask)
+    assert result.read_text() == '{"ok": true}abc'
+    assert (sandbox_root / "data" / "nested" / "b.txt").stat().st_mode & 0o044 == 0o044
+    for created in ("app", "data/nested", "data/deep", "data/deep/er"):
+        assert (sandbox_root / created).stat().st_mode & 0o055 == 0o055, created
+    assert (sandbox_root / "data" / "image" / "default.conf").read_text() == "image"
+    assert (sandbox_root / "data" / "image" / "default.conf").stat().st_mode & 0o044 == 0
+    assert (sandbox_root / "data" / "image").stat().st_mode & 0o077 == 0o055  # pre-existing: untouched
+    chmods = [command for command in provider.commands if command.startswith("chmod")]
+    assert not any(command.startswith("chmod -R") for command in provider.commands)
+    touched = [shlex.split(command.removesuffix(" 2>/dev/null || true"))[2:] for command in chmods]
+    assert touched == [
+        [f"{sandbox_root}/app", f"{sandbox_root}/app/seed.json"],
+        [
+            f"{sandbox_root}/data",
+            f"{sandbox_root}/data/deep",
+            f"{sandbox_root}/data/deep/er",
+            f"{sandbox_root}/data/nested",
+            f"{sandbox_root}/data/a.txt",
+            f"{sandbox_root}/data/deep/er/c.txt",
+            f"{sandbox_root}/data/nested/b.txt",
+        ],
+    ]
+    # Nothing above the sandbox root (which existed) is ever chmod-ed, "/" least of all.
+    assert all(path.startswith(f"{sandbox_root}/") for paths in touched for path in paths)
+
+
+@pytest.mark.asyncio
+async def test_a_link_inside_an_uploaded_folder_is_refused_before_it_is_read(tmp_path):
+    # Review: ``is_file()`` follows links, so a link in a bound folder would upload a host file the planner never
+    # checked. The adapter refuses the folder, naming the link, before any file of it is uploaded.
+    task = tmp_path / "task"
+    (task / "data").mkdir(parents=True)
+    (task / "data" / "ok.txt").write_text("ok")
+    secret = tmp_path / "secret"
+    secret.write_text("host secret")
+    (task / "data" / "leak").symlink_to(secret)
+    sandbox_root = tmp_path / "sandbox"
+    document = {
+        "services": {
+            "api": {
+                "image": "image",
+                "command": ["sleep", "1"],
+                "x-sandbox": {"uploads": [{"source": str(task / "data"), "target": f"{sandbox_root}/data"}]},
+            }
+        }
+    }
+    provider = RecordingShellProvider()
+    with pytest.raises(RuntimeError, match=r"contains a link: .*data/leak"):
+        await make_compose(provider, document, poll_interval_s=0.01, upload_root=task).start()
+    assert provider.uploads == []
+    assert not (sandbox_root / "data" / "leak").exists()
+    assert len(provider.closed) == len(provider.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_upload_sources_must_lie_under_the_upload_root(tmp_path):
+    # Review blocker: upload sources are read in this process. A document assembled without the planner (or a
+    # root the planner never saw) cannot reach /etc/passwd or any file outside the root; no sandbox is created.
+    task = tmp_path / "task"
+    task.mkdir()
+    (task / "seed.json").write_text("{}")
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    (task / "link.json").symlink_to(outside)
+    for source in ("/etc/passwd", str(outside), str(task / "link.json"), str(task / ".." / "outside.json")):
+        provider = Provider()
+        document = {
+            "services": {"api": {"image": "image", "x-sandbox": {"uploads": [{"source": source, "target": "/x"}]}}}
+        }
+        with pytest.raises(ValueError, match="outside the upload root"):
+            await make_compose(provider, document, upload_root=task).start()
+        assert provider.created == []
+    # Without a root, uploads are refused outright: no caller may forget to vouch for one.
+    provider = Provider()
+    document = {
+        "services": {
+            "api": {"image": "image", "x-sandbox": {"uploads": [{"source": str(task / "seed.json"), "target": "/x"}]}}
+        }
+    }
+    with pytest.raises(ValueError, match="need an upload_root"):
+        await make_compose(provider, document).start()
+    assert provider.created == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "field, value",
@@ -1976,3 +2128,67 @@ async def test_the_servers_normalized_gpu_reservation_passes_the_adapters_own_pa
         assert group.services["model"]._provider is gpu
         (model_spec,) = gpu.created
         assert model_spec.resources.gpu == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "uploads,message",
+    [
+        ("seed.json:/app/seed.json", "list of source/target mappings"),
+        ([{"source": "x"}], "list of source/target mappings"),
+        ([{"source": "/nonexistent/seed.json", "target": "/app/seed.json"}], "does not exist"),
+        ([{"source": ".", "target": "app/seed.json"}], "absolute container path"),
+        ([{"source": ".", "target": "/app/../seed.json"}], "absolute container path"),
+        ([{"source": ".", "target": "/"}], "container root"),
+        ([{"source": ".", "target": "//"}], "container root"),
+    ],
+)
+async def test_malformed_uploads_fail_before_provisioning(uploads, message):
+    provider = Provider()
+    group = make_compose(
+        provider, {"services": {"api": {"image": "image", "x-sandbox": {"uploads": uploads}}}}, upload_root="."
+    )
+    with pytest.raises(ValueError, match=message):
+        await group.start()
+    assert provider.created == []
+
+
+@pytest.mark.asyncio
+async def test_upload_folder_creation_falls_back_to_the_default_user_and_reports_failure(tmp_path):
+    seed = tmp_path / "seed.json"
+    seed.write_text("{}")
+
+    class NoRootProvider(ShellProvider):
+        def __init__(self):
+            super().__init__()
+            self.users = []
+
+        async def exec(self, handle, command, *, user=None, **kwargs):
+            if command.startswith("mkdir -p "):
+                self.users.append(user)
+                if user == "root":
+                    raise RuntimeError("identity switch not permitted")
+                if "/forbidden/" in command:
+                    return SandboxExecResult("", "mkdir: permission denied", 1)
+            return await super().exec(handle, command, user=user, **kwargs)
+
+    provider = NoRootProvider()
+    target = tmp_path / "sandbox" / "app" / "seed.json"
+    document = {
+        "services": {
+            "api": {
+                "image": "image",
+                "command": ["sleep", "1"],
+                "x-sandbox": {"uploads": [{"source": str(seed), "target": str(target)}]},
+            }
+        }
+    }
+    async with make_compose(provider, document, poll_interval_s=0.01, upload_root=tmp_path):
+        assert target.read_text() == "{}"
+    assert provider.users[:2] == ["root", None]
+
+    provider = NoRootProvider()
+    document["services"]["api"]["x-sandbox"]["uploads"][0]["target"] = "/forbidden/seed.json"
+    with pytest.raises(RuntimeError, match="cannot create '/forbidden/seed.json' for upload"):
+        await make_compose(provider, document, poll_interval_s=0.01, upload_root=tmp_path).start()
+    assert len(provider.closed) == len(provider.created) == 1

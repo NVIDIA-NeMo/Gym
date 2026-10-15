@@ -34,6 +34,7 @@ from nemo_gym.sandbox.compose_config import (
     ComposeFieldError,
     UnsupportedComposeFieldError,
     check_compose_fields,
+    first_link,
     service_resources,
 )
 from nemo_gym.sandbox.providers import SandboxSpec, create_provider
@@ -91,6 +92,11 @@ class AsyncSandboxCompose:
     single-key config) for particular services; every provider must reach the others' sandboxes on
     the network. ``platform`` is the one the deployment runs, which a service's ``platform`` must
     match. ``restart_policies`` and ``pull_policies`` record what each service declared.
+
+
+    ``x-sandbox.uploads`` entries (files or folders copied into a service once it starts) are read in
+    this process, so every source must lie under ``upload_root``, the one folder the caller vouches for
+    (the task folder the planner validated against); a document with uploads and no root is refused.
     """
 
     def __init__(
@@ -105,6 +111,7 @@ class AsyncSandboxCompose:
         volume_sources: Mapping[str, str] | None = None,
         service_providers: Mapping[str, Any] | None = None,
         platform: str = "linux/amd64",
+        upload_root: str | Path | None = None,
     ):
         self.provider = create_provider(provider) if isinstance(provider, Mapping) else provider
         self.service_providers = {
@@ -124,6 +131,7 @@ class AsyncSandboxCompose:
             raise ValueError("Compose timeout_s and poll_interval_s must be positive")
         self.volume_init_image = volume_init_image
         self.volume_sources = dict(volume_sources or {})
+        self.upload_root = Path(upload_root).resolve() if upload_root is not None else None
         self.project = "compose-" + uuid.uuid4().hex
         self.services: dict[str, AsyncSandbox] = {}
         self._plans: dict[str, dict[str, Any]] = {}
@@ -224,8 +232,28 @@ class AsyncSandboxCompose:
                         self._service_options.get(name, {}), provider.pull_policy_options(policy)
                     )
             options = service.get("x-sandbox") or {}
-            if set(options) - {"hosts", "resolve_environment"}:
+            if set(options) - {"hosts", "resolve_environment", "uploads"}:
                 raise NotImplementedError(f"Service {name!r}: unsupported x-sandbox options")
+            uploads = options.get("uploads", [])
+            if not isinstance(uploads, list) or any(
+                not isinstance(entry, Mapping) or set(entry) != {"source", "target"} for entry in uploads
+            ):
+                raise ValueError(f"Service {name!r}: x-sandbox.uploads requires a list of source/target mappings")
+            if uploads and self.upload_root is None:
+                raise ValueError(f"Service {name!r}: x-sandbox.uploads need an upload_root to read sources from")
+            for entry in uploads:
+                source, target = entry["source"], entry["target"]
+                if not isinstance(source, str) or not Path(source).exists():
+                    raise ValueError(f"Service {name!r}: upload source {source!r} does not exist")
+                # Sources are read in this process: only the folder the caller vouches for, links resolved.
+                if not Path(source).resolve().is_relative_to(self.upload_root):
+                    raise ValueError(
+                        f"Service {name!r}: upload source {source!r} lies outside the upload root {self.upload_root}"
+                    )
+                if not isinstance(target, str) or not target.startswith("/") or ".." in target.split("/"):
+                    raise ValueError(f"Service {name!r}: upload target {target!r} must be an absolute container path")
+                if not target.strip("/"):
+                    raise ValueError(f"Service {name!r}: upload target {target!r} is the container root")
             selected = options.get("resolve_environment", [])
             if not isinstance(selected, list) or any(not isinstance(key, str) for key in selected):
                 raise ValueError("x-sandbox.resolve_environment requires a list of environment variable names")
@@ -574,6 +602,81 @@ class AsyncSandboxCompose:
                     f"Compose service {name!r} post_start hook {index} exited ({result.return_code}): {detail}"
                 )
 
+    async def _exec_privileged(self, sandbox: AsyncSandbox, command: str):
+        """Run ``command`` as root, or as the sandbox's default user when it cannot switch users."""
+        try:
+            result = await sandbox.exec(command, user="root")
+        except Exception:
+            return await sandbox.exec(command)
+        return result if result.return_code == 0 else await sandbox.exec(command)
+
+    async def _upload(self, name: str) -> None:
+        """Copy each ``x-sandbox.uploads`` entry (a task file or folder a bind mount named) into the service.
+
+        Runs after the sandbox starts and before the service's command, so the process finds the files
+        where the Compose file mounted them. The receiving folders are created first, and the folders
+        and files the upload touched (every folder created for it, the folders the files landed in and
+        the files; nothing else under the target) are made readable by every user, for an image whose
+        process runs as a non-root user. A folder is copied file by file over whatever the image already
+        has under the target (a merge, where a bind mount would hide the image's folder); a link inside it
+        is refused, naming it, rather than read through.
+        """
+        sandbox = self.services[name]
+        for entry in (self.document["services"][name].get("x-sandbox") or {}).get("uploads", []):
+            source, target = Path(entry["source"]), entry["target"]
+            if source.is_dir():
+                link = first_link(source)
+                if link is not None:
+                    raise RuntimeError(f"Service {name!r}: upload source {source} contains a link: {link}")
+                files = sorted(path for path in source.rglob("*") if path.is_file())
+                remotes = {path: target + "/" + path.relative_to(source).as_posix() for path in files}
+                folders = {target, *(remote.rsplit("/", 1)[0] for remote in remotes.values())}
+            else:
+                remotes = {source: target}
+                folders = {target.rsplit("/", 1)[0] or "/"}
+            # Which folders ``mkdir -p`` is about to create, intermediates included: they are created with the
+            # root shell's umask, so they are in the chmod below; the folders that already exist above them are not.
+            created = await self._missing_folders(sandbox, folders)
+            result = await self._exec_privileged(
+                sandbox, "mkdir -p " + " ".join(shlex.quote(f) for f in sorted(folders))
+            )
+            if result.return_code:
+                raise RuntimeError(
+                    f"Service {name!r}: cannot create {target!r} for upload: {result.stderr or result.stdout}"
+                )
+            for path, remote in remotes.items():
+                await sandbox.upload(path, remote)
+            # Never recursive, never ``/``: the target may be a folder the image ships (``/etc``) or hold a
+            # shared-storage mount, and what already existed above the created folders is not this upload's.
+            touched = [*sorted((folders | created) - {"/"}), *remotes.values()]
+            for chunk in range(0, len(touched), 256):
+                paths = " ".join(shlex.quote(p) for p in touched[chunk : chunk + 256])
+                await self._exec_privileged(sandbox, f"chmod a+rX {paths} 2>/dev/null || true")
+
+    async def _missing_folders(self, sandbox: AsyncSandbox, folders: set[str]) -> set[str]:
+        """The paths ``mkdir -p`` would create for ``folders``: each one and its missing ancestors, below ``/``.
+
+        One probe lists every ancestor that does not exist yet; only paths from the candidate set are taken
+        from its output, so a name the shell printed oddly is dropped rather than chmod-ed. A probe that
+        fails reports nothing created: the chmod is best effort, the ``mkdir -p`` that follows is not.
+        """
+        candidates: set[str] = set()
+        for folder in folders:
+            parts = [part for part in folder.split("/") if part]
+            candidates.update("/" + "/".join(parts[:depth]) for depth in range(1, len(parts) + 1))
+        if not candidates:
+            return set()
+        probe = " ".join(shlex.quote(path) for path in sorted(candidates))
+        try:
+            result = await self._exec_privileged(
+                sandbox, f'for p in {probe}; do test -e "$p" || printf "%s\\n" "$p"; done'
+            )
+        except Exception:
+            return set()
+        if result.return_code:
+            return set()
+        return {line for line in (result.stdout or "").splitlines() if line in candidates}
+
     async def _wait(self, name, condition):
         if condition == "service_started":
             return
@@ -643,6 +746,8 @@ class AsyncSandboxCompose:
                             cap_add=tuple(service.get("cap_add") or ()),
                             shm_size=service.get("shm_size"),
                         )
+                    if (service.get("x-sandbox") or {}).get("uploads"):
+                        await self._upload(name)
                 hosts: dict[str, str] = {}
                 if self.services:
                     addresses: dict[str, str] = {}
