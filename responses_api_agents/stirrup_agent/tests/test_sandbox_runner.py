@@ -15,6 +15,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import httpx
 import pytest
 import stirrup.core.agent as stirrup_agent
 import uvicorn
@@ -348,6 +349,31 @@ def test_remote_tool_schema_is_the_rows_schema():
     tool = remote_tool(spec, client=None)
 
     assert to_openai_tools({tool.name: tool})[0]["function"]["parameters"] == spec["parameters"]
+
+
+@pytest.mark.parametrize("body", [{"found": True, "ids": [1, 2]}, [{"id": 1}], 7, None, "plain text"])
+def test_a_route_reply_that_is_not_a_string_reaches_the_model_as_json(body):
+    result = _call_remote_tool(lambda request: httpx.Response(200, content=json.dumps(body)))
+
+    assert result.success is True
+    assert result.content == (body if isinstance(body, str) else json.dumps(body))
+
+
+@pytest.mark.parametrize("detail", [{"error": "no such file"}, ["a", "b"], "ERROR: Files do not exist"])
+def test_a_refusal_detail_that_is_not_a_string_reaches_the_model_as_json(detail):
+    result = _call_remote_tool(lambda request: httpx.Response(400, json={"detail": detail}))
+
+    assert result.success is False
+    assert result.content == (detail if isinstance(detail, str) else json.dumps(detail))
+
+
+def _call_remote_tool(handler):
+    async def call():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://resources") as client:
+            tool = remote_tool({"name": "lookup", "parameters": {"type": "object", "properties": {}}}, client)
+            return await tool.executor(tool.parameters())
+
+    return asyncio.run(call())
 
 
 class TestLocalShell:

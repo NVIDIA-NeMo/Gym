@@ -159,10 +159,16 @@ def remote_tool(spec: FunctionToolParam, client: httpx.AsyncClient) -> Tool:
             # Answered in run_tool, which has the raw arguments the message quotes.
             raise InvalidArguments(response.json()["detail"])
         if response.status_code == 400:
-            return ToolResult(content=response.json()["detail"], success=False, metadata=ToolUseCountMetadata())
+            detail = response.json()["detail"]
+            return ToolResult(
+                content=detail if isinstance(detail, str) else json.dumps(detail),
+                success=False,
+                metadata=ToolUseCountMetadata(),
+            )
         # Anything else is an infrastructure failure: the run fails and the environment server retries a 5xx.
         response.raise_for_status()
-        return ToolResult(content=response.json(), metadata=ToolUseCountMetadata())
+        body = response.json()
+        return ToolResult(content=body if isinstance(body, str) else json.dumps(body), metadata=ToolUseCountMetadata())
 
     return Tool(name=name, description=spec.get("description") or "", parameters=params, executor=executor)
 
