@@ -5,6 +5,10 @@
 The ``append_note`` tool appends a line to a file inside the session's sandbox, and verification reads the
 file back and rewards 1.0 when it holds exactly the expected lines. The sandboxes live in the suite's fake
 sandbox backend, which outlives a Gym crash, and are checkpointed through ``SandboxSessionCheckpointer``.
+
+An agent that runs its own harness in the session's sandbox gets the sandbox's ID in the seed reply, as from the
+SWE-bench server, and asks ``/sandbox_access`` for the current one after a restore, which forks the sandbox
+under a new ID.
 """
 
 import sys
@@ -26,6 +30,7 @@ from nemo_gym.base_resources_server import (  # noqa: E402
     SimpleResourcesServer,
 )
 from nemo_gym.sandbox import create_provider  # noqa: E402
+from nemo_gym.sandbox.access import SandboxAccess  # noqa: E402
 from nemo_gym.sandbox.checkpoint import SandboxSessionCheckpointer, checkpoint_state_dir  # noqa: E402
 from nemo_gym.sandbox.config import resolve_provider_config  # noqa: E402
 from nemo_gym.sandbox.providers.base import SandboxSpec  # noqa: E402
@@ -50,6 +55,11 @@ class SandboxNotesVerifyRequest(BaseVerifyRequest):
     expected_notes: list[str]
 
 
+class SandboxNotesSeedSessionResponse(BaseSeedSessionResponse):
+    # For an agent that runs its harness inside the session's sandbox, as the SWE-bench server's agent does.
+    sandbox_handle: str
+
+
 class SandboxNotesResourcesServer(SimpleResourcesServer):
     ray_enabled = False
     checkpoint_mode = "exported"
@@ -67,11 +77,18 @@ class SandboxNotesResourcesServer(SimpleResourcesServer):
         app.post("/append_note")(self.append_note)
         return app
 
-    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> SandboxNotesSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._sandboxes:
             await self._sandboxes.create(session_id, SandboxSpec(image="notes:1", workdir="/work"))
-        return BaseSeedSessionResponse()
+        return SandboxNotesSeedSessionResponse(sandbox_handle=self._sandboxes.get(session_id).handle.sandbox_id)
+
+    async def current_sandbox_access(self, session_id: str) -> SandboxAccess | None:
+        if session_id not in self._sandboxes:
+            return None
+        return await self._sandboxes.access(
+            session_id, provider_config_ref=self.config.sandbox_provider, workdir="/work"
+        )
 
     async def append_note(self, request: Request, body: AppendNoteRequest) -> AppendNoteResponse:
         sandbox = self._sandboxes.get(request.session[SESSION_ID_KEY])
