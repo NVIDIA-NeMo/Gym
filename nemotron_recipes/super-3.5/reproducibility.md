@@ -124,7 +124,7 @@ vllm serve nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 \
   --no-enable-mamba-cache-stochastic-rounding \
   --max-model-len 262144 --max-num-seqs 1024 --max-num-batched-tokens 135680 \
   --limit-mm-per-prompt '{"image":128,"video":1}' --video-pruning-rate 0.5 \
-  --media-io-kwargs '{"video":{"fps":2,"num_frames":256}}' \
+  --allowed-local-media-path / --media-io-kwargs '{"video":{"fps":2,"num_frames":256}}' \
   --skip-mm-profiling --mm-encoder-attn-backend TORCH_SDPA
 ```
 
