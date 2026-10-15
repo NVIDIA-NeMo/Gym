@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any, ClassVar, Literal, Optional
 
 from big_finance_harness.tools import (
@@ -32,7 +33,6 @@ from big_finance_harness.tools import (
     ToolError,
     WebSearchTool,
 )
-from big_finance_harness.tools.web_search import _SerpApiBackend, _TavilyBackend
 from fastapi import Body, FastAPI
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
@@ -382,14 +382,31 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         cache = SecHttpCache(cache_dir=self.config.cache_dir, use_cache=self.config.use_cache)
-        backend = None
-        if self.config.serp_api_key:
-            backend = _SerpApiBackend(self.config.serp_api_key, self.config.web_search_timeout_s)
-        elif self.config.tavily_api_key:
-            backend = _TavilyBackend(self.config.tavily_api_key, self.config.web_search_timeout_s)
+        web_search = WebSearchTool(timeout_s=self.config.web_search_timeout_s)
+        if self.config.serp_api_key or self.config.tavily_api_key:
+            configured_keys = {
+                "SERP_API_KEY": self.config.serp_api_key,
+                "TAVILY_API_KEY": self.config.tavily_api_key,
+            }
+            previous_keys = {key: os.environ.get(key) for key in configured_keys}
+            try:
+                for key, value in configured_keys.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+                # Selection is lazy upstream. Cache this instance's configured
+                # backend before restoring the process environment.
+                _ = web_search.backend
+            finally:
+                for key, value in previous_keys.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
 
         self._tools: dict[str, Any] = {
-            "web_search": WebSearchTool(backend=backend, timeout_s=self.config.web_search_timeout_s),
+            "web_search": web_search,
             "edgar_search": (
                 CachedEdgarSearchTool(
                     cache=cache,
