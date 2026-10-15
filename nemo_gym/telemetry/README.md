@@ -87,8 +87,9 @@ cases, which is why every RL call site carries a second try/except.
 nemo-lens's `record_gym_metrics` records **without attributes** at the pinned commit.
 `gym.server.request_duration_ms` is therefore deliberately unused — undimensioned, it
 would merge every endpoint of every server type into one histogram. The FastAPI
-instrumentor's `http.server.request.duration`, dimensioned by route/method/status, is used
-instead. `gym.servers.active` is a gauge and is written by the supervisor only.
+instrumentor's `http.server.duration`, dimensioned by route/method/status, is used
+instead. The instrumentor is installed only while traces are exported, so a metrics-only
+run has no `http.server.*` metrics. `gym.servers.active` is a gauge and is written by the supervisor only.
 
 Memory metrics are Gym-owned because nemo-lens has no instrument for a logical server and all of its descendants. The supervisor owns the server root PIDs, so one sampler can report stable per-server RSS/PSS alongside host-wide capacity and pressure.
 
