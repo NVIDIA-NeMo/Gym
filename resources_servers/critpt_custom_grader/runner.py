@@ -201,7 +201,8 @@ def validate_job(job: Any, mode: str) -> str | None:
     if type(nonce) is not str or not _NONCE.fullmatch(nonce):
         return "invalid_job"
     limits = job.get("limits")
-    if type(limits) is not dict or set(limits) != set(LIMIT_FIELDS):
+    allowed = set(LIMIT_FIELDS) | ({"per_case_s"} if mode == COMPARE_MODE else set())
+    if type(limits) is not dict or not set(LIMIT_FIELDS) <= set(limits) <= allowed:
         return "invalid_job"
     for value in limits.values():
         if type(value) is not int or value <= 0 or value > 2**31:
@@ -913,19 +914,31 @@ def _run_worker(channel: int, job: dict) -> None:
 
 
 def _compare_worker(channel: int, job: dict) -> None:
-    """Worker side of a compare job: operator code over untrusted observations, under the same limits."""
+    """Worker side of a compare job: operator code over untrusted observations, under the same limits.
+
+    ``limits.per_case_s`` (optional) arms a wall-clock timer around every single comparison, so one heavy case cannot
+    consume the batch; a case that overruns it is reported ``uncertain``/``comparator_timeout``.
+    """
     code = _apply_limits(job["limits"])
+    compare_request = _result = None
     if code is None:
         try:
             try:
-                from .comparator import compare_request
+                from .comparator import _result, compare_request
             except ImportError:
-                from critpt_grader_rt.comparator import compare_request
+                from critpt_grader_rt.comparator import _result, compare_request
         except ImportError:
             code = "missing_dependency"
     if code is not None:
         _send(channel, {"event": "runner_error", "code": code})
         return
+    per_case_s = job["limits"].get("per_case_s")
+
+    def alarm(signum: int, frame: Any) -> None:
+        raise TimeoutError("per_case_budget")
+
+    if per_case_s:
+        signal.signal(signal.SIGALRM, alarm)
     _send(channel, {"event": "start"})
     _send(channel, {"event": "ready"})
     for case in job["cases"]:
@@ -938,7 +951,18 @@ def _compare_worker(channel: int, job: dict) -> None:
         }
         if "policy" in case:
             request["policy"] = case["policy"]
-        _send(channel, {"event": "item", "item": compare_request(request)})
+        try:
+            if per_case_s:
+                signal.setitimer(signal.ITIMER_REAL, per_case_s)
+            try:
+                item = compare_request(request)
+            finally:
+                if per_case_s:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+        except TimeoutError:
+            # The alarm landed after compare_request's own handler and before the timer reset.
+            item = _result("uncertain", "comparator", "comparator_timeout")
+        _send(channel, {"event": "item", "item": item})
     _send(channel, {"event": "done"})
 
 

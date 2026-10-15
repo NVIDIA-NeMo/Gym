@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded mathematical syntax, constructed directly into SymPy, only in Daytona.
+"""Bounded mathematical syntax, constructed directly into SymPy. In grading it runs only inside the grading
+sandbox of whichever provider the server is configured with, never in the server process.
 
 Grammar: decimal numbers, ASCII names, parentheses, + - * / ** (or ^), unary signs, bounded rational
 exponents, Rational(int, int), boolean literals, comma-separated tuples, the function table below, an
@@ -11,8 +12,9 @@ a fresh sympy.Function, never a library object, and member access parses only fo
 
 Unsupported notation is a representation error. For an expected/reference value it is preflight-unscorable,
 never a candidate mismatch. An externally enforced remote process deadline is still required. Equivalence uses
-algebraic identities, then a bounded, fully deterministic numeric fallback that samples both signs of the real
-line. An undecided pair stays None, never guessed.
+algebraic identities and bounded deterministic rewrites as proof; fixed positive real sample points only disprove
+(complex ones only for a symbol with an explicit non-real assumption: declared non-real, or complex of unknown
+reality). An undecided pair stays None, never guessed.
 """
 
 import ast
@@ -23,17 +25,18 @@ from decimal import Decimal
 from fractions import Fraction
 
 import sympy as sp
+from sympy.core.evalf import PrecisionExhausted
 
 from .codec import RepresentationError
 from .task_data import DECIMAL_PATTERN
 
 
 MAX_EXPRESSION_BYTES = 4096
-# Sized to admit a real stored polynomial, which runs to a few hundred tokens. The remote deadline is still
-# the ultimate bound, and the term and growth budgets below are unchanged.
+# Sized to admit a long written-out polynomial, which runs to a few hundred tokens. The remote deadline is still
+# the ultimate bound, and the term and growth budgets below still apply.
 MAX_SYNTAX_NODES = 2048
-# A written-out polynomial parses LEFT-nested, so its AST depth equals its term count. 512 admits a real
-# stored polynomial while the node budget above caps total size. It is also a recursion guard: build()
+# A written-out polynomial parses LEFT-nested, so its AST depth equals its term count. 512 admits a long
+# polynomial while the node budget above caps total size. It is also a recursion guard: build()
 # recurses once per level, and against SymPy 1.14 build() recurses safely well past this depth.
 MAX_SYNTAX_DEPTH = 512
 MAX_LITERAL_DIGITS = 128
@@ -92,8 +95,8 @@ _FUNCTIONS = {
     "besselj": (sp.besselj, 2, 2),
     "bessely": (sp.bessely, 2, 2),
 }
-# The one member-access form the corpus stores: a SymPy Interval constructor. Each name maps to the
-# (left_open, right_open) flags. No other attribute access parses.
+# The one member-access form that parses: a SymPy Interval constructor such as Interval.open(a, b). Each
+# constructor name maps to the (left_open, right_open) flags. No other attribute access parses.
 _INTERVAL_BOUNDS = {
     "open": (True, True),
     "closed": (False, False),
@@ -301,8 +304,8 @@ def parse_expression(text: str) -> sp.Expr:
                     raise RepresentationError("symbolic_arity")
                 return function(*(arg[0] for arg in args), evaluate=False), terms, bits
             # A name not in the table is an undefined function application built as sympy.Function(name)(*args),
-            # exactly what the reference grader's auto-function produces. A fresh Function is bound, never a
-            # library object, and at least one argument is required.
+            # so an application such as tr(rho) stays an opaque symbolic term instead of being rejected. A fresh
+            # Function is bound, never a library object, and at least one argument is required.
             if not node.args:
                 raise RepresentationError("symbolic_arity")
             return sp.Function(name)(*(arg[0] for arg in args), evaluate=False), terms, bits
@@ -316,15 +319,17 @@ def parse_expression(text: str) -> sp.Expr:
 def _simplified(expression: sp.Expr) -> sp.Expr:
     """Simplify within the growth bound, or keep the bounded raw expression.
 
-    A ``simplify`` that explodes past the node or bit bound is abandoned, not fatal, so a constant
-    expression stays comparable and ``equivalent`` falls back to a numeric check. A non-finite result
-    still raises, from ``_bounded_result``.
+    A ``simplify`` that explodes past the node or bit bound, or runs out of memory, is abandoned, not fatal,
+    so a constant expression stays comparable and ``equivalent`` falls back to a numeric check. A non-finite
+    result still raises, from ``_bounded_result``, and a timeout propagates to the caller.
     """
     try:
         simplified = sp.simplify(expression)
     except RepresentationError:
         raise
-    except Exception:
+    except TimeoutError:
+        raise  # the per-case timer belongs to the caller, never a failed simplify
+    except Exception:  # memory exhaustion included: the bounded raw expression is kept
         return expression
     try:
         return _bounded_result(simplified)
@@ -342,9 +347,9 @@ _NUMERIC_FALLBACK_ATOL = Fraction(1, 10**30)  # absolute floor, far above the ev
 _NUMERIC_FALLBACK_DIGITS = 50  # evalf working precision (decimal digits)
 _NUMERIC_SAMPLE_COUNT = 8  # sample points per free symbol
 _NUMERIC_MIN_DECIDED = 4  # decided sample points required to accept when symbols are free
-# Deterministic sample values, non-integer rationals of BOTH signs. Both signs are load-bearing: an
-# expression that agrees on the positive reals but differs on the negative reals (sqrt(z**2) against z) must
-# be found unequal. The values avoid 0, +-1 and every integer, so they miss common poles and branch points.
+# Deterministic sample values, non-integer rationals of both signs: _numeric_equivalent uses them signed, and the
+# disproof points below use their magnitudes. The values avoid 0, +-1 and every integer, so they miss common poles
+# and branch points.
 _NUMERIC_SAMPLE_BASE = (
     Fraction(3, 2),
     Fraction(-5, 2),
@@ -355,9 +360,9 @@ _NUMERIC_SAMPLE_BASE = (
     Fraction(23, 7),
     Fraction(-29, 8),
 )
-# Functions whose value turns on which side of a branch point the argument falls. The fixed samples can all
-# land on one side and miss the point, so an undecided difference that contains one stays None rather than
-# being accepted on samples.
+# Functions whose value turns on which side of a branch point the argument falls, and conjugate, which real
+# samples cannot tell from its argument. An evaluation can land on the wrong side of the point, so an undecided
+# constant difference that contains one stays None rather than being accepted on its numeric value.
 _BRANCH_FUNCTIONS = (
     sp.Abs,
     sp.sign,
@@ -370,6 +375,7 @@ _BRANCH_FUNCTIONS = (
     sp.re,
     sp.im,
     sp.arg,
+    sp.conjugate,
 )
 
 
@@ -427,12 +433,107 @@ def rational_expression(number: Fraction) -> sp.Expr:
     return sp.Rational(number.numerator, number.denominator)
 
 
-def equivalent(left: sp.Expr, right: sp.Expr) -> bool | None:
-    """Equivalence by algebra, then a bounded numeric fallback, else None.
+# expand_trig writes sin(N*x) as a degree-N multiple-angle polynomial before _bounded_result can see the result, so
+# an angle carrying an integer multiple above this bound skips that one rewrite.
+_MAX_TRIG_MULTIPLE = 32
+_EXPANDED_TRIG = (sp.sin, sp.cos, sp.tan, sp.cot, sp.sec, sp.csc, sp.sinh, sp.cosh, sp.tanh, sp.coth, sp.sech, sp.csch)
 
-    Structural equality decides first, then the simplified difference. When simplifying reaches the growth
-    bound, an operand does not support subtraction, or algebra leaves it undecided, the numeric fallback runs.
-    None means undecided, never guessed.
+
+def _bounded_expand_trig(expression: sp.Expr) -> sp.Expr:
+    """``sp.expand_trig``, or ``expression`` unchanged when a trig angle has an integer multiple above the bound."""
+    for function in expression.atoms(*_EXPANDED_TRIG):
+        for term in sp.Add.make_args(function.args[0]):
+            coefficient = term.as_coeff_Mul(rational=True)[0]
+            if term.free_symbols and coefficient.is_Integer and abs(coefficient) > _MAX_TRIG_MULTIPLE:
+                return expression
+    return sp.expand_trig(expression)
+
+
+# Deterministic rewrites that can PROVE a difference is zero. Each is bounded by _bounded_result. None of them can
+# certify inequality: in equivalent() a False comes from SymPy's assumptions, the exact polynomial check, a constant
+# difference's evaluation or a disproof point (positive real ones, and complex ones only under _declared_complex).
+_PROOF_REWRITES = (sp.expand, sp.cancel, sp.trigsimp, _bounded_expand_trig, sp.powsimp, sp.radsimp, sp.logcombine)
+# Disproof points: exact rationals with every coordinate positive. Physics quantities are positive by default, so a
+# disagreement that only a negative coordinate would show (sqrt(z**2) against z) is no disproof. Points 0-7 take the
+# magnitudes of the base values plus position/17, so no two symbols share a value. Point 8 puts every coordinate in
+# (0, 1), where an expression such as sqrt(1 - beta**2) is real: (position + 1)/(2*position + 3), so 1/3, 2/5, 3/7...
+_DISPROOF_POINT_COUNT = _NUMERIC_SAMPLE_COUNT + 1
+# Imaginary parts added to the first two disproof points. These complex points are evaluated only for a symbol
+# declared non-real, or complex with unknown reality (_declared_complex); parsed symbols carry no assumptions, so
+# production pairs never use them.
+_COMPLEX_SAMPLE_IMAG = (Fraction(1, 3), Fraction(-2, 5))
+
+
+def _disproof_point(index: int, position: int) -> sp.Rational:
+    """Coordinate ``position`` of disproof point ``index``: a fixed, exact, positive rational."""
+    if index == _NUMERIC_SAMPLE_COUNT:
+        value = Fraction(position + 1, 2 * position + 3)
+    else:
+        value = abs(_NUMERIC_SAMPLE_BASE[(index + position) % len(_NUMERIC_SAMPLE_BASE)]) + Fraction(position, 17)
+    return sp.Rational(value.numerator, value.denominator)
+
+
+def _declared_complex(left: sp.Expr, right: sp.Expr) -> bool:
+    """True when a symbol carries an explicit non-real assumption: declared non-real, or complex of unknown reality."""
+    symbols = left.free_symbols | right.free_symbols
+    return any(symbol.is_real is False or (symbol.is_complex and symbol.is_real is None) for symbol in symbols)
+
+
+def _disproof_value(expression: sp.Expr, assignment: dict, real_only: bool) -> sp.Expr | None:
+    """One finite value of ``expression`` at a disproof point, else None.
+
+    Evaluated strictly at 50 digits, so a value evalf cannot carry to full precision (PrecisionExhausted) is refused
+    and the point is skipped rather than counted. ``real_only`` also refuses a non-real value (the both-real rule)."""
+    try:
+        substituted = expression.subs(assignment) if assignment else expression
+        value = substituted.evalf(_NUMERIC_FALLBACK_DIGITS, strict=True)
+    except (PrecisionExhausted, TypeError, ValueError, ArithmeticError, RecursionError, AttributeError):
+        return None
+    if not (getattr(value, "is_number", False) and value.is_finite and (value.is_real or not real_only)):
+        return None
+    return value
+
+
+def _samples_disagree(left: sp.Expr, right: sp.Expr, rtol: Fraction = _NUMERIC_FALLBACK_RTOL) -> bool:
+    """True when a fixed disproof point tells the two expressions apart. Never certifies equality.
+
+    A positive real point counts only where both values are finite and real. A disagreement that only a negative
+    coordinate or a complex point would show leaves the pair undecided; the complex points are evaluated only for a
+    symbol declared non-real, or complex with unknown reality (_declared_complex).
+    """
+    symbols = sorted(left.free_symbols | right.free_symbols, key=str)
+    if len(symbols) > MAX_SYMBOLS:
+        return False
+    rtol_value = sp.Rational(rtol.numerator, rtol.denominator)
+    atol_value = sp.Rational(_NUMERIC_FALLBACK_ATOL.numerator, _NUMERIC_FALLBACK_ATOL.denominator)
+    points = [
+        {symbol: _disproof_point(index, position) for position, symbol in enumerate(symbols)}
+        for index in range(_DISPROOF_POINT_COUNT if symbols else 1)
+    ]
+    checks = [(point, True) for point in points]  # (assignment, real values only)
+    if _declared_complex(left, right):
+        for imag in _COMPLEX_SAMPLE_IMAG:
+            offset = sp.I * sp.Rational(imag.numerator, imag.denominator)
+            checks.extend(({symbol: value + offset for symbol, value in point.items()}, False) for point in points[:2])
+    for assignment, real_only in checks:
+        left_value = _disproof_value(left, assignment, real_only)
+        right_value = _disproof_value(right, assignment, real_only)
+        if left_value is None or right_value is None:
+            continue
+        if bool(abs(left_value - right_value) > rtol_value * max(abs(left_value), abs(right_value)) + atol_value):
+            return True
+    return False
+
+
+def equivalent(left: sp.Expr, right: sp.Expr) -> bool | None:
+    """Equivalence by proof, disproof at fixed positive real points, else None.
+
+    True only when the difference is structurally zero, simplifies to zero, is decided zero by SymPy's assumptions,
+    is the zero polynomial over an exact coefficient domain, or one bounded deterministic rewrite reduces it to zero;
+    a constant difference may also be decided by high-precision evaluation. False when the assumptions decide it, the
+    exact polynomial test does, or a disproof point gives two different finite real values (_samples_disagree).
+    Anything else is None: undecided, never guessed. A timeout propagates to the caller; memory exhaustion in one
+    rewrite is only a failed attempt.
     """
     if left == right:
         return True
@@ -440,10 +541,10 @@ def equivalent(left: sp.Expr, right: sp.Expr) -> bool | None:
         difference = _bounded_result(sp.simplify(left - right))
     except RepresentationError as exc:
         if exc.code == "symbolic_growth_limit":
-            return _numeric_equivalent(left, right)
+            return False if _samples_disagree(left, right) else None
         raise
     except (TypeError, ValueError, AttributeError, NotImplementedError):
-        return _numeric_equivalent(left, right)
+        return False if _samples_disagree(left, right) else None
     if difference == 0 or difference.is_zero is True:
         return True
     if difference.is_zero is False:
@@ -451,10 +552,29 @@ def equivalent(left: sp.Expr, right: sp.Expr) -> bool | None:
     symbols = sorted(difference.free_symbols, key=lambda symbol: symbol.name)
     try:
         if symbols and difference.is_polynomial(*symbols):
-            return bool(sp.Poly(difference, *symbols).is_zero)
+            polynomial = sp.Poly(difference, *symbols)
+            domain = polynomial.get_domain()
+            # Only exact coefficient arithmetic gives a verdict: ZZ, QQ, the Gaussian integers or rationals, or an
+            # algebraic field. Over a ring of transcendental constants a zero value can look nonzero
+            # (x*(atan(1/2) + atan(1/3) - pi/4)), so such a difference goes on to the samples.
+            if domain.is_ZZ or domain.is_QQ or domain.is_ZZ_I or domain.is_QQ_I or domain.is_AlgebraicField:
+                return bool(polynomial.is_zero)
     except (TypeError, ValueError, AttributeError, NotImplementedError, sp.PolynomialError):
-        # An expression the polynomial check cannot handle is treated as not a polynomial, not an error.
-        pass
-    if difference.has(*_BRANCH_FUNCTIONS):
-        return None
-    return _numeric_equivalent(left, right)
+        pass  # not a polynomial for this purpose
+    if not symbols:
+        if difference.has(*_BRANCH_FUNCTIONS):
+            return None
+        # A constant difference: 50-digit evaluation decides within rtol 1e-9, at one point when the operands are
+        # constants, or at the eight sample points (at least four decided) when their free symbols cancel.
+        return _numeric_equivalent(left, right)
+    if _samples_disagree(left, right):  # a cheap disproof before the rewrites saves the per-case budget
+        return False
+    for rewrite in _PROOF_REWRITES:
+        try:
+            if _bounded_result(rewrite(difference)) == 0:
+                return True
+        except TimeoutError:
+            raise  # the per-case timer belongs to the caller, never a failed rewrite
+        except Exception:  # memory exhaustion included: a failed rewrite, and the next one runs
+            continue
+    return None

@@ -1,126 +1,86 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Offline contribution configuration, NOT deployment clearance. Current same-UID
-# runner integrity is unresolved. Neither these limits nor a manifest authenticate results.
-# Compose an operator-owned policy_model config separately. No model, credentials,
-# snapshot identity, runtime qualification, or successful rollouts are supplied here.
-# This grader enforces its own request privacy at its HTTP boundary. It withholds request
-# bodies, validation detail, and provider exceptions from its logs and its error bodies.
-# The policy_model and the agent are separate stock components. They are not part of the
-# grader's privacy boundary. Route sensitive rollout content away from them at the operator
-# layer. Configuration is not an attestation.
-
+# Sandboxed grader for CritPt-like tasks with operator-supplied task data. Every reference, candidate and comparator
+# step runs in a sandbox created through Gym's sandbox API. Pick the provider by adding its config to config_paths:
+#   gym env start --config resources_servers/critpt_custom_grader/configs/critpt_custom_grader.yaml \
+#       --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml --model-type openai_model ...
+# Every shipped provider config binds the name `sandbox`, which `sandbox_provider` below references.
 critpt_custom_grader:
   resources_servers:
     critpt_custom_grader:
       entrypoint: app.py
       domain: coding
       verified: false
-      description: Stored-expectation Python grading with exact, tolerance, composite, and symbolic values.
-      request_privacy:
-        private_requests: true
-      request_policy:
-        no_resubmission: true
-        # One suite may take up to 1800 s, matching the historical grader's per-suite timeout, so
-        # every derived bound below grows with it. Strictly exceeds queue + job + six cleanup
-        # bounds: 6020 + 5900 + 360 = 12280.
-        deadline_seconds: 12310.0
-      num_workers: 1
-      expose_tools_over_mcp: false
-      # A second concurrent verify waits in the queue instead of a busy refusal. The queue
-      # window covers one full job plus its cleanup, so a waiter outlasts a job that runs to
-      # its deadline. --concurrency 1 stays recommended; this only stops row drops without it.
-      max_queued_jobs: 4
-      # A waiter must outlast one full job plus its cleanup. Derived from the 1800 s suite:
-      # job_timeout_s (5900) + 2 * cleanup_timeout_s (60) = 6020.
-      queue_timeout_s: 6020.0
-      # Server default numeric tolerance for a genuinely silent leaf, as decimal strings. This
-      # default (rtol 5e-12, atol 0) applies only to a leaf with no statement promise, no
-      # task-level tolerance and no per-leaf tolerance. It is not the grader that produced the
-      # delivered verdicts: those used authored per-leaf tolerances that the delivered task data
-      # does not carry. The public CritPt harness default is rtol 1e-5, atol 1e-8; an operator
-      # picks one. A statement-level promise, a task-level tolerance, and a per-leaf tolerance all
-      # keep precedence. This only replaces the fallback a leaf with no promise and no authored
-      # tolerance resolves to. Both must parse as finite, nonnegative decimals or startup is refused.
+      description: Sandboxed execution grader for CritPt-like tasks with operator-supplied expectations
+      value: Sandboxed, locally executed grading for CritPt-like tasks without an external grading API
+      sandbox_provider: sandbox
+      # Network isolation is the provider's job, not the grader's: the candidate sandbox runs untrusted code, so the
+      # provider configuration must block its egress. docker: sandbox.docker.create.network: none; e2b:
+      # sandbox.e2b.create.allow_internet_access: false; daytona: sandbox.daytona.create.network_block_all: true;
+      # OpenSandbox: a deny-by-default network_policy in sandbox_spec.provider_options (an OpenSandbox key that
+      # daytona, e2b and openshell reject). apptainer and enroot have no egress setting; local has no isolation at
+      # all and suits trusted inputs only.
+      sandbox_spec:
+        # The grading image: Python 3.13 with pinned pydantic, sympy, mpmath, numpy and scipy in the interpreter's own
+        # site-packages (the runner runs with -I), a non-root `grader` user and a /work directory it owns. See
+        # runtime/Dockerfile. OpenSandbox does not create the workdir, so it must exist in the image.
+        image: ${oc.env:CRITPT_CUSTOM_GRADER_IMAGE,docker.io/earakelyan93701/critpt-custom-grader-rt:2026.10}
+        # Must equal execution.workdir (default /work); every grading domain works in a directory below it.
+        workdir: /work
+        ready_timeout_s: 600
+        # Provider-side orphan backstop: job_timeout_s (9700) plus a margin. Startup refuses a value below
+        # job_timeout_s + cleanup_timeout_s (9760); null leaves the lifetime to the provider's default. docker,
+        # opensandbox, e2b and ecs_fargate enforce it; apptainer, enroot, openshell and local ignore it. Daytona does
+        # not read it: its stop, archive and delete intervals (create.auto_stop_interval,
+        # create.auto_archive_interval, create.auto_delete_interval) are the backstop there.
+        ttl_s: 10400
+        resources:
+          cpu: 1
+          memory_mib: 4096
+      execution:
+        interpreter: /usr/local/bin/python3
+        # Every runner command runs as this non-root identity (docker --user, su on opensandbox/enroot/apptainer).
+        # Set to null for the `local` provider, which cannot switch users; the host process must then be non-root.
+        exec_user: grader
+        # Limits: 1536 MiB of address space per process, single-threaded BLAS, 1800 s per suite.
+        memory_limit_mib: 1536
+        cpu_time_limit_s: 1800
+        max_processes: 64
+        suite_timeout_s: 1800
+        # One comparison case may take 20 s; a batch takes cases * 20 s + 30 s, never more than compare_timeout_s.
+        compare_per_case_s: 20
+        compare_timeout_s: 600
+        # Bounds one sandbox create: the provider's create and readiness wait, the spec's files and the workdir setup.
+        # Startup refuses a value below sandbox_spec.ready_timeout_s + 2 * transfer_timeout_s (600 + 120 = 720).
+        create_timeout_s: 900
+        transfer_timeout_s: 60
+        # The runner needs suite_deadline plus its 15 s reap/sweep budget to write a timeout result; keep >= 15.
+        exec_timeout_margin_s: 20
+        # At least every bound one job awaits: two runs and two compare batches at their deadlines plus two margins,
+        # three creates, 27 file transfers at transfer_timeout_s + 5 s and three stops:
+        # 2 * (1800 + 40) + 2 * (600 + 40) + 3 * 900 + 27 * (60 + 5) + 3 * 60 = 9595, rounded up to the next 100 s
+        # (9600) plus a 100 s buffer. Startup refuses a value below that sum.
+        job_timeout_s: 9700
+        cleanup_timeout_s: 60
+        max_candidate_source_bytes: 65536
+        # Jobs graded at once by this process; Gym's num_samples_in_parallel bounds the client side.
+        max_concurrent_jobs: 4
+      # Server default numeric tolerance for a leaf with no authored tolerance and no honoured statement promise:
+      # twelve significant digits (rtol 5e-12, atol 0). Authored tolerances always win; see README.
       comparison:
         default_rtol: "5e-12"
         default_atol: "0"
-      execution:
-        provider: daytona
-        # Mandatory operator inputs, not placeholder identities. The snapshot must
-        # be immutable and contain the chosen non-root user and interpreter.
-        snapshot: ???
-        os_user: ???
-        owner_id: ???
-        # Durable, operator-owned storage across restarts; not a temporary directory.
-        journal_dir: ???
-        network_block_all: true
-        network_allow_list: null
-        interpreter: /usr/bin/python3
-        workdir: /tmp/ng-grader
-        # The historical grader granted 1.5 GiB of address space inside a 2 GiB pod, with
-        # single-threaded BLAS and serial grading, so one runner is live at a time. 1536 MiB
-        # leaves headroom for the runner and the operating system in the 2 GiB snapshot. The code
-        # default is 2048 MiB, the value for a sandbox with 2 GiB or more.
-        memory_limit_mib: 1536
-        # One suite may take up to 1800 s, matching the historical grader's per-suite timeout, so
-        # cpu_time_limit_s rises with it. It must stay at or below suite_timeout_s +
-        # exec_timeout_margin_s (1800 + 20 = 1820).
-        cpu_time_limit_s: 1800
-        max_processes: 16
-        # The runner needs suite_deadline plus its own cleanup budget to write a timeout
-        # result. That budget is _REAP_BUDGET_S (10) + _SWEEP_BUDGET_S (5) = 15 s in
-        # runner.py. exec_timeout_margin_s must stay at or above 15 s, else the exec is cut
-        # before a clean timeout run returns, and the run is mislabelled as provider_exec.
-        # 20 s gives the 15 s budget plus 5 s of slack.
-        create_timeout_s: 120.0
-        transfer_timeout_s: 30.0
-        exec_timeout_margin_s: 20.0
-        # One suite may take up to 1800 s, matching the historical grader's per-suite timeout.
-        suite_timeout_s: 1800
-        compare_timeout_s: 30
-        # ExecutionPolicy currently counts 23 transfers and two exec margins (2 *
-        # exec_timeout_margin_s = 40):
-        # 2*(1800+40) + 2*(30+40) + 3*(120+4*30) + 23*(30+5) + 6*60 = 5705.
-        # job_timeout_s rounds that minimum up to the next 100 s (5800) and adds a 100 s buffer.
-        job_timeout_s: 5900.0
-        cleanup_timeout_s: 60.0
-        max_candidate_source_bytes: 65536
-        max_concurrent_jobs: 1
-
-global_aiohttp_client_request_debug: false
-observability_enabled: false
-profiling_enabled: false
-uvicorn_logging_show_200_ok: false
-telemetry:
-  enabled: false
-  traces_enabled: false
-  metrics_enabled: false
-  logs_enabled: false
-  instrument_aiohttp: false
-  span_groups: job  # Supported group list excludes HTTP_CLIENT; telemetry is off.
-token_id_capture:
-  enabled: false
-  all_agents: false
-
-# The stock simple_agent exposes /run and /aggregate_metrics. Collector-side aggregation
-# stays disabled because it reads response bodies. The grader withholds bodies at its own
-# boundary. Aggregation is left off to keep bodies out of the collector too. This also skips
-# collection's post-aggregation health checks. Real rollout metrics and their safe
-# aggregation route remain future work.
-disable_aggregation: true
-upload_rollouts: false
-num_samples_in_parallel: 1
-num_repeats: 1
-# The stock client may retry a /verify. The grader is safe under a retry. It grades one
-# job at a time and re-grades an idempotent request without any double-scoring. Cache resume
-# may redispatch a nonterminal row. Recovery must not regenerate a saved candidate.
+      # Optional directory for the per-task reference cache (memory only when null).
+      reference_cache_dir: null
+      # The startup probe creates one sandbox before the server reports ready, and Gym gives every server
+      # server_spinup_timeout_seconds (default 600) to get there. On a slow provider raise it above
+      # execution.create_timeout_s plus a margin (e.g. ++server_spinup_timeout_seconds=1200), or set this to false.
+      startup_probe: true
 
 critpt_custom_grader_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
-      num_workers: 1
       resources_server:
         type: resources_servers
         name: critpt_custom_grader
@@ -129,11 +89,17 @@ critpt_custom_grader_simple_agent:
         name: policy_model
       max_steps: 1
       skip_verification: false
-      token_id_capture: false
       datasets:
         - name: example
           type: example
           jsonl_fpath: resources_servers/critpt_custom_grader/data/example.jsonl
           num_repeats: 1
-          # DatasetConfig uses this spelling; the original reference sources carry SPDX headers.
           license: Apache 2.0
+
+critpt_custom_grader_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: critpt_custom_grader_simple_agent

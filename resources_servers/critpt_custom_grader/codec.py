@@ -9,7 +9,8 @@ Nodes: ["null"], ["bool", b], ["int", int_text], ["float", float_hex], ["fractio
 executable tag, and native third-party objects are never inspected.
 
 These functions do not deserialize Python objects. decode_value returns only exact built-in/stdlib types
-and the inert carriers above. The executor and comparator, including decoding, belong in Daytona, not the host.
+and the inert carriers above. The executor and comparator, including decoding, run inside the grading sandbox of
+whichever provider the server is configured with, not in the server process.
 """
 
 import json
@@ -78,9 +79,9 @@ def pointer_child(path: str, key: str | int) -> str:
     return path + "/" + str(key).replace("~", "~0").replace("/", "~1")
 
 
-# A non-string map key of a fixed safe type is stringified with str(), the way the historical grader keyed
-# maps, so a dict keyed by tuples or ints compares as it did there. An arbitrary object key is refused, never
-# stringified, so the codec never runs an unknown object's __str__.
+# A non-string map key of a fixed safe type is stringified with str(), so a dict keyed by tuples or ints
+# transports and compares by the text of its keys. An arbitrary object key is refused, never stringified, so
+# the codec never runs an unknown object's __str__.
 _STRINGIFIABLE_KEY_TYPES = (bool, int, float, Fraction, Decimal, complex, tuple, type(None))
 
 

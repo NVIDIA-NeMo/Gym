@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Host-safe codec unit tests: encode, decode and the wire bounds, on values built in-process.
 
-No candidate code, worker subprocess or external service runs. Production codec execution runs inside
-Daytona, but these tests do not require it. Hostile subprocess tests are in test_runner_remote.py.
+No candidate code, worker subprocess or external service runs. Production codec execution runs inside the
+grading sandbox of whichever provider the server is configured with, but these tests need no sandbox. Hostile
+subprocess tests are in test_runner_remote.py.
 """
 
 import json
@@ -233,7 +234,7 @@ def test_unrecognized_objects_are_not_inspected_or_coerced():
     assert error.value.attributable
 
     # An unsupported key type is refused without its __str__ being run. Whitelisted key types are
-    # stringified (see test_non_string_keys_stringify_like_the_historical_grader).
+    # stringified (see test_non_string_keys_are_stringified_with_str).
     class HostileKey:
         def __str__(self):
             raise AssertionError("must not stringify user object keys")
@@ -255,7 +256,7 @@ def test_unrecognized_objects_are_not_inspected_or_coerced():
         ({complex(1, 2): "c"}, {"(1+2j)": "c"}),
     ],
 )
-def test_non_string_keys_stringify_like_the_historical_grader(value, decoded):
+def test_non_string_keys_are_stringified_with_str(value, decoded):
     # A dict keyed by tuples or ints transports with str() keys, and decode returns a plain dict of string keys.
     wire_value = encode_value(value)
     assert wire_value["value"][0] == "map"

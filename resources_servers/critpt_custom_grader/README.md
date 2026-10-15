@@ -1,393 +1,236 @@
 # CritPt Custom Grader Resources Server
 
-Grades a model's Python solution against **stored expectations** by executing code in
-isolated Daytona sandboxes. The stored expectations are the oracle. The candidate never
-receives them.
-
-- Task type: single-turn. The agent emits one solution. The server executes and scores it.
-- Domain: `coding`.
-- Value kinds: exact, tolerance, composite, and symbolic.
-- Reward: binary. `1.0` when every scorable case matches, `0.0` on a demonstrated mismatch.
+A sandboxed grader for CritPt-like tasks with operator-supplied task data: Python problems whose answer is a function,
+graded against test cases and stored expectations, with numeric tolerances, exact integers, composite values, symbolic
+expressions, categorical strings and expected exceptions. Every reference, candidate and comparator step runs in a
+sandbox created through Gym's provider-neutral sandbox API, so the same server runs on OpenSandbox, docker, apptainer,
+enroot or the `local` provider by swapping one provider config. It does not call an external grading service and
+claims no parity with any hidden grader. It is a separate server from `resources_servers/critpt` and imports nothing
+from it.
 
 ## What it grades and how
 
-Each job runs three **separately owned** Daytona sandboxes in a fixed order:
+1. `/verify` receives an already generated response. The grader never generates candidates.
+2. Extraction: first ```` ```python ```` fence, else first bare fence, else the raw text. A completed response with no
+   usable assistant text, or a source that is empty, not valid UTF-8, holds a NUL byte or exceeds
+   `max_candidate_source_bytes`, scores 0.0 (`candidate_source_limit`) before any sandbox is created. A response that
+   did not complete is marked for regeneration (`response_incomplete`).
+3. A reference preflight runs the task's reference solution and compares every outcome with the stored expectations.
+   Candidate code runs only after the preflight passes. The preflight outcome is cached per task, so a task's
+   reference runs once per server process (`reference_cache_dir` also keeps entries on disk for later processes).
+4. The candidate runs in its own sandbox with only the source, the normalized inputs, the public runner package and
+   the operator's `sandbox_spec.files`. It never sees expectations or tolerances.
+5. The comparator, in a third sandbox, judges the candidate's outcomes per leaf. Tolerance precedence: an authored
+   per-leaf entry or task setting (`rtol`, `atol`) wins; otherwise the accuracy promise the problem statement makes
+   for the leaf, floored at the strict default (`rtol 5e-12`, `atol 0`); otherwise exactness for an integer
+   expectation; otherwise the server default (`comparison.default_rtol` and `default_atol`, shipped as `5e-12` and
+   `0`). A setting that gives only one of `rtol` and `atol` takes the strict default for the other. The statement is
+   read by a narrow extractor, described below.
+6. Symbolic answers use a bounded grammar built directly into SymPy. Two expressions are equal only when shown equal:
+   structural identity, simplification, SymPy's assumptions, an exact polynomial test, bounded deterministic rewrites
+   or, for a difference with no free symbols, a 50-digit evaluation (relative tolerance 1e-9); fixed positive real
+   sample points can only disprove. A float never equals a symbolic constant, even its rounding to the nearest
+   double (a symbolic expectation requires a symbolic answer, and numeric expectations carry tolerances); the
+   50-digit evaluation decides only differences that are exact constants on both sides. A pair that none of these
+   decides is never guessed: that case is uncertain (see 7), except that an expression which cannot be shown
+   equal to a numeric expectation is a mismatch.
+7. Candidate faults after a successful preflight (source error, suite timeout, exception, encoding error, worker
+   abort) score 0.0, and so does a value the comparator finds wrong or invalid (`candidate_mismatch`,
+   `candidate_invalid_output`). Reference faults, task-data defects and comparator uncertainty are unscorable and
+   masked, with one exception inside a row: a decided candidate-side failure on any case (a mismatch or an invalid
+   output) outranks candidate-side uncertainty on another case. The first failing case then names the category, and an
+   uncertain case is passed over, never counted equal. Only when no case fails outright does one uncertain case make
+   the row unscorable (`comparator_uncertain`). A reference fault or defect ends the row at preflight, before the
+   candidate runs; in the candidate batch an expectation defect outranks a decided failure and uncertainty and leaves
+   the row unscorable. A comparison that overruns its per-case budget (`execution.compare_per_case_s`) leaves that
+   case uncertain; in the candidate batch it therefore makes the row unscorable only when no other case fails
+   outright. A candidate batch that overruns its whole compare deadline is `candidate_invalid_output` at the case it
+   timed out on, which currently outranks a decided failure on an earlier case: a known limitation that changes only
+   the failure category and the first failed case, never whether the row passes.
 
-1. **Host bounds check.** The server validates the task and the candidate source on the host.
-   It parses nothing and executes nothing here.
-2. **Reference sandbox.** The stored reference source runs and produces one outcome per case.
-3. **Comparator sandbox (preflight).** The comparator checks every reference outcome against
-   the stored expectations. A reference outcome that contradicts an expectation, or that the
-   comparator cannot represent, stops the job. The candidate never runs.
-4. **Candidate sandbox.** Only after a clean preflight, the candidate source runs. It receives
-   its own source, the normalized inputs, and the public runner package. It receives no
-   expectations, no tolerances, no reference source, and no other case's material.
-5. **Comparator sandbox (candidate).** The same comparator sandbox judges the candidate output.
-6. **Cleanup.** Every owned sandbox is deleted, and the deletion is confirmed.
+### Accuracy promises in the problem statement
 
-The comparator is the sole verdict authority. It runs no task code and holds the stored
-expectations, which come from the task only and are never derived from a run. Reported values
-from any sandbox are unauthenticated observations. See "Integrity model" below.
+The comparator reads the statement (`problem`) for accuracy promises with a narrow, fixed set of patterns; anything
+else stays unrecognised rather than guessed at.
+
+- A number counts only when an accuracy keyword (error, accuracy, tolerance, precision, decimal places, significant
+  figures) claims it and its kind is stated. A scientific or power-of-ten number needs the word "absolute" or
+  "relative" near its keyword, in the same sentence; a percentage is relative; a digit count carries its own kind. The
+  value must lie above 1e-15 and at most 0.1.
+- "within", "correct to" and "agree to" claim nothing themselves. They borrow the claim and the kind of an accuracy
+  keyword in their own sentence that has no number of its own, so "relative error within 1e-6" and "tolerance: within
+  1%" count, while a bare "within 1%" does not. A sentence break stops a clause, but a colon right after an accuracy
+  keyword on the same line does not. A soft line wrap inside a sentence is not a sentence break: a newline reads as a
+  space when the line before it does not end in `.`, `;`, `:`, `?` or `!` and is no heading, table row or fence, and
+  the next line goes on with a lowercase ASCII letter, a digit, `$`, a backslash or `(` without starting a list item
+  or another Markdown block.
+- An error or failure rate is a measured quantity, not a tolerance: "physical error rate 0.1%" counts for nothing.
+- The promise that governs a leaf is the clause that names the leaf's key, else the loosest honoured clause.
+- A refused clause is visible only through `statement_promises`, an inspection helper; the `/verify` response carries
+  no clause data. `statement_promises` in `comparator.py` lists every clause it recognised, with the reason for each
+  refusal (`no_accuracy_keyword`, `no_kind`, `below_float64_resolution`, `too_loose_to_be_an_accuracy_claim`,
+  `unsupported_number`).
 
 ## Task data format
 
-A dataset row has two parts: `responses_create_params` (the model query) and the task grading
-spec. The spec may be flat on the row, nested under `verifier_metadata`, or nested under
-`task_data`. All three validate to the same schema (`task_data.py`).
-
-### Task fields
-
-| Field | Meaning |
-|---|---|
-| `schema_version` | Must be `1`. |
-| `problem_id` | Task identifier (1 to 256 characters). |
-| `reference_source` | Trusted reference solution source. Alias: `reference_code`. |
-| `entrypoint` | The function the candidate must define. A Python identifier. Alias: `entry`. |
-| `reference_entrypoint` | Optional. The reference's function. Defaults to `entrypoint`. |
-| `test_cases` | 1 to 64 cases. Alias: `testcases`. |
-| `problem` | Optional problem statement text. The comparator reads precision clauses from it. |
-| `code_template` | Optional. Provenance only. Never used to discover an entrypoint. |
-| `uuid` | Optional. |
-| `rtol`, `atol` | Optional task-level tolerance defaults. |
-| `tolerances` | Optional task-level per-leaf overrides, each with a `path` and `rtol`/`atol`. |
-| `input_conversions` | Optional. One entry per positional argument, at most 128: `null`, `"symbol"`, or `"function"`. Before each call, `"symbol"` turns a string argument into `sympy.Symbol(name)` and `"function"` into `sympy.Function(name)`. Other entries leave the argument alone. Keyword arguments are never converted. The reference and the candidate get the same conversions. |
-
-### Test case shapes
-
-A canonical case carries `args` (positional), `kwargs` (keyword), `expected`, and optional
-per-leaf `tolerances`. `expected` is either a value or an exception.
-
-Three delivered aliases are also accepted, exactly:
-
-- `{input, output}` — positional inputs and an expected value.
-- `{input, expected_error}` — positional inputs and an expected exception.
-- `{inputs, expected_output}` — keyword inputs and an expected value. An optional
-  `comparison_type` key is accepted on this shape only. It is text of at most 64 bytes or null,
-  validated and then dropped. No other unknown key is accepted on any shape.
-
-Inside an argument or an expected value, a map of exactly `{"__complex__": [re, im]}` whose two
-parts are finite reals is read as a complex number. Any other `__complex__` map stays a plain map.
-
-### Value kinds and tolerance policy
-
-Values are tagged on the wire (`codec.py`): null, bool, int, float, fraction, decimal,
-nonfinite, complex, list, tuple, map, set, and text tagged `str`, `symbolic`, or `legacy`.
-A SymPy expression that contains floating-point atoms is carried as `symbolic` text, the form the
-reference stores, and its decimal literals are read back exactly. A bare finite SymPy `Float` is
-carried as a float.
-
-- **Exact.** A categorical string expectation always compares exactly. An integer expectation
-  compares exactly unless a task-level tolerance or a statement promise applies to that leaf.
-- **Tolerance.** A numeric leaf passes when `|a - b| <= atol + rtol * |b|`, resolved separately
-  for every expected leaf.
-- **Composite.** Lists, tuples, and maps compare element by element. List and tuple transport
-  differences are ignored. A complex value is one leaf, each component checked against its own
-  reference part. With `atol` 0 a near-zero expected component is held to near-exact equality.
-- **Unordered.** A `set` matches a `set` or a plain list one-to-one without order, each member
-  matching exactly one member of the other side. A `set` against a scalar, complex, or map
-  expectation is a type mismatch. An undecided or budget-exhausted match is not scored
-  (`unordered_undecided`, `unordered_budget`). It is never a guess.
-- **Symbolic.** `symbolic` text is compared by algebraic equivalence (`symbolic.py`). `legacy`
-  text parses as a decimal or rational literal, then as bounded arithmetic notation, otherwise as
-  exact categorical text.
-
-Tolerance resolution for a leaf, in order: a non-emptied precision promise the statement makes
-for that leaf governs it, tighter or looser than an authored entry. Where the statement is
-silent, the leaf entry governs, else the task setting, else the server default, or exact for an
-integer expectation. A leaf entry whose path names no numeric or complex leaf is unused and
-dropped, not a defect. A malformed entry, one with no tolerance value or an unknown field, is an
-expected defect. A nonfinite expectation makes a value case unscorable.
-
-The server default for a silent numeric leaf is `rtol=5e-12`, `atol=0`. An operator sets it once
-under the grader config as decimal strings, and may loosen it there (for example to the
-`rtol=1e-5`, `atol=1e-8` of the public CritPt harness):
-
-```yaml
-comparison:
-  default_rtol: "5e-12"
-  default_atol: "0"
-```
-
-Both must parse as finite, nonnegative decimals or startup is refused. The server default never
-overrides a statement promise, a leaf entry, or a task setting. A leaf entry replaces the whole
-pair, and an explicit `0` stays `0`. The strict `rtol=5e-12`, `atol=0` also fills a missing
-component of a partial authored entry and floors a harvested statement promise where no author
-spoke, so a loosened server default cannot loosen a tight promise.
-
-A stated absolute promise larger than the leaf's own magnitude is emptied, not applied. Such a
-promise would accept any answer near zero, so it makes the leaf a free pass. The leaf then falls
-to the authored entry, else the strict `5e-12`/`0` floor where no author spoke, which can be
-tighter than the emptied promise.
-A promise equal to the leaf magnitude is kept. An authored window is never emptied by this guard.
-
-## Operator setup
-
-### Mandatory config values
-
-`configs/critpt_custom_grader.yaml` ships with four required operator inputs under `execution`,
-each marked `???`:
-
-| Value | What it must be |
-|---|---|
-| `snapshot` | A pinned, immutable Daytona snapshot identity. |
-| `os_user` | A non-root account name that exists in the snapshot. |
-| `owner_id` | A short label stamped on every owned sandbox for ownership attribution. |
-| `journal_dir` | A durable, operator-owned directory that survives restarts. Not a temp dir. |
-
-The server also needs an operator-composed `policy_model` config. This contribution supplies no
-model, no credentials, and no snapshot identity.
-
-This grader enforces its own request privacy at its HTTP boundary, independent of the model
-server. The stock model server is a separate component, and the grader does not control what it
-logs. A model server can record an upstream error body or a validation traceback, so a prompt or
-a value can reach that log. Route sensitive content away from the model server at the operator
-layer. The grader's own privacy guarantees, below, do not extend to it.
-
-The stock client may resend a generation, and the collector may retry a `/verify`. The grader is
-safe under a retry. It grades one job at a time and re-grades an idempotent request without any
-double-scoring. Each dispatch is scored on its own returned answer, so a duplicate generation
-costs at most one extra graded run and never affects scoring.
-
-### Execution limits
-
-The contributed config sets every execution bound to the values the acceptance replay ran with.
-An operator with a different snapshot size or task population changes them together, because the
-outer bounds derive from the suite timeout.
-
-| Value | Config | What it bounds |
-|---|---|---|
-| `memory_limit_mib` | 1536 | Address space (`RLIMIT_AS`) of one runner process. 1536 MiB leaves headroom for the runner and the operating system in a 2 GiB snapshot. A suite that needs more raises `MemoryError` inside the case and is scored on that outcome. |
-| `cpu_time_limit_s` | 1800 | CPU seconds of one runner process. It must stay at or below `suite_timeout_s + exec_timeout_margin_s`. |
-| `suite_timeout_s` | 1800 | Wall clock for one full test suite (reference or candidate). |
-| `compare_timeout_s` | 30 | Wall clock for one protected comparison run. |
-| `create_timeout_s`, `transfer_timeout_s` | 120, 30 | Sandbox create, and each upload or download. |
-| `exec_timeout_margin_s` | 20 | Extra time past the suite deadline so the runner can write a clean timeout result. It must stay at or above 15 s. |
-| `job_timeout_s`, `queue_timeout_s`, `deadline_seconds` | 5900, 6020, 12310 | The whole job, the wait in the queue, and the server request deadline. Each one strictly exceeds the sum of the bounds inside it. |
-| `max_concurrent_jobs`, `max_queued_jobs` | 1, 4 | See Known limitations. |
-
-A suite that runs past `suite_timeout_s` is reported as `candidate_timeout` (scored 0) or
-`reference_timeout` (unscorable). A reference that needs more memory or time than these bounds is
-a task-side limit, not a grader fault. The operator raises the bound and the snapshot size together.
-
-### The runtime snapshot
-
-The grader uploads its own runner and comparator package into each sandbox at job time, so the
-snapshot supplies the environment, not the grader code. The snapshot must contain:
-
-- The interpreter at `execution.interpreter` (default `/usr/bin/python3`).
-- The non-root `os_user` account, owning the workdir (`execution.workdir`, default `/tmp/ng-grader`).
-- The libraries pinned in `runtime/requirements.txt`: `pydantic==2.13.4`, `sympy==1.14.0` with
-  `mpmath==1.3.0`, `numpy==2.5.1`, and `scipy==1.18.0`. The runner and comparator need only
-  pydantic and sympy. Task reference and candidate code import numpy and scipy, so the snapshot
-  carries them at the versions the stored expectations were produced with.
-
-### The journal
-
-`journal_dir` holds one atomic record per job (`OwnershipJournal`), created mode `0700`. Each
-record carries the sandbox stable names, labels, and lifecycle states needed to reconcile
-ownership after a restart. It holds no task content, no expectations, and no source.
-
-### Daytona credentials
-
-The Daytona SDK reads credentials from its own environment variables. Set `DAYTONA_API_KEY`, or
-`DAYTONA_JWT_TOKEN` together with `DAYTONA_ORGANIZATION_ID`. Set `DAYTONA_API_URL` (or
-`DAYTONA_SERVER_URL`) and `DAYTONA_TARGET` when the target is not the SDK default. Never place a
-credential value in the config, on a command line, or in a log. `execution.api_url` and
-`execution.target` are optional non-credential connection settings.
-
-### Provider seam
-
-`execution.provider` selects the backend. Daytona is the only implemented backend
-(`Literal["daytona"]`). Other Gym sandbox providers can be added as adapters behind the same seam.
-
-The grader does not use the shared `AsyncSandbox` session wrapper. It uses its own small backend
-interface so that it can journal a sandbox before any upload, keep the SDK client alive after a
-delete to confirm the sandbox is gone, bound the result download from untrusted candidate code,
-and look a sandbox up by its journaled stable name after a crash. Four points of the Daytona
-adapter are provider-specific:
-
-1. **Stable-name lookup for reconciliation.** Reconciliation looks a sandbox up by its exact id,
-   or by its exact stable name when no id was learned, never by a prefix or list scan. After the
-   settle deadline (the create timeout plus a margin of max(2 × create timeout, 60 s)), an absent
-   lookup by stable name closes an ambiguous create as never made.
-2. **Snapshot plus pre-created user.** Create passes the pinned `snapshot_id` and the `os_user`,
-   whose account exists in the snapshot and owns the workdir.
-3. **SDK error classification.** Provider exceptions map to a fixed category vocabulary with
-   category-only diagnostics. Provider text never leaves the backend. Both the pinned SDK
-   generation (Daytona 0.183.0) and the newer typed-error model are supported.
-4. **Root exec with a privilege drop.** The Daytona toolbox runs every command as root. The
-   runner refuses to run as root, so the run command drops privileges to the operator-configured
-   `os_user` with `runuser -u <os_user> --`.
-
-Long runs use the session API, not a blocking exec, because a blocking `process.exec` through the
-Daytona proxy did not return once a command ran past about ten minutes. The grader starts each run
-as an asynchronous session command (`run_async`) under a fresh unguessable session id and polls
-the exit code every 5 s, each request under its own 30 s bound. A failed poll is retried while the
-deadline allows, so one transport blip cannot discard a finished run. A command that reports no
-exit before the deadline is provider uncertainty, never a scored failure. File uploads and
-downloads use the SDK file API under `transfer_timeout_s`.
+Rows carry `responses_create_params` (the prompt) and the task fields, either flat, under `verifier_metadata`, or
+under `task_data`. Task fields: `problem_id`, `reference_source` (alias `reference_code`), `entrypoint` (alias
+`entry`), optional `reference_entrypoint`, `test_cases` (alias `testcases`), optional `problem` (the statement, read
+for accuracy promises), `code_template`, `uuid`, `rtol`/`atol`, per-leaf `tolerances`, `input_conversions`. Test
+cases are `{"args": [...], "kwargs": {...}, "expected": {"kind": "value", "value": <wire>}}` or
+`{"expected": {"kind": "exception"}}`; legacy `{"input": [...], "output": ...}` cases are converted. Values travel in
+a tagged wire format (`critpt-value-v1`) that keeps integers and decimals exact; `data/example.jsonl` holds synthetic
+rows. Framework row keys (`agent_ref`, `task_source`, every `_ng_*` key) are stripped before validation; any other
+unknown key is a task-data defect.
 
 ## Running it
 
-Start the server with the grader config, a model server selected with `--model-type`, and the
-four mandatory execution overrides:
+Pick a provider config and a model; the provider block binds the name `sandbox` the server references:
 
 ```bash
 gym env start \
     --config resources_servers/critpt_custom_grader/configs/critpt_custom_grader.yaml \
-    --model-type openai_model \
-    --model <model-name> \
-    --model-url <model-base-url> \
-    '+policy_api_key=${oc.env:CRITPT_GRADER_MODEL_API_KEY}' \
-    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.snapshot=<snapshot>' \
-    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.os_user=<os-user>' \
-    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.owner_id=<owner-id>' \
-    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.journal_dir=<journal-dir>'
+    --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+    --model-type openai_model
+# gym env start stays in the foreground: run the next command from a second terminal while the servers are up
+gym eval run --no-serve +agent_name=critpt_custom_grader_simple_agent \
+    +input_jsonl_fpath=resources_servers/critpt_custom_grader/data/example.jsonl \
+    +output_jsonl_fpath=results/example_rollouts.jsonl '+limit=null'
 ```
 
-`CRITPT_GRADER_MODEL_API_KEY` holds the model server API key. OmegaConf's `oc.env` resolver reads
-it at startup, so the value never enters the config or a command line. Use `++policy_api_key=...`
-when the config already holds a value at that key.
+Provider credentials come from the provider's own config (OpenSandbox: `OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`).
+`CRITPT_CUSTOM_GRADER_IMAGE` overrides the grading image.
 
-Validate the committed example data. Collate instantiates the config, so it needs the same four
-execution overrides:
+### Startup check
 
-```bash
-gym dataset collate \
-    '+config_paths=[resources_servers/critpt_custom_grader/configs/critpt_custom_grader.yaml]' \
-    --mode example_validation \
-    --output-dir <out-dir> \
-    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.snapshot=<snapshot>' \
-    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.os_user=<os-user>' \
-    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.owner_id=<owner-id>' \
-    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.journal_dir=<journal-dir>'
-```
+Before it reports ready, the server starts one sandbox from the operator's `sandbox_spec` and checks that commands run
+as a non-root identity under `execution.exec_user`, that the provider accepts that identity, that the interpreter
+imports the pinned packages (`pydantic`, `sympy`, `numpy`, `scipy`), and that an upload to a nested path creates its
+parent directories, is found, with a plain-digit size, by the grader's own size command (`test -f`, then
+`stat -c %s`), and comes back byte for byte through the grader's own bounded download. The sandbox is stopped
+whatever the outcome. A failed check refuses to serve and names one of six categories:
 
-Collect rollouts over the five example rows, mirroring `data/example.jsonl`,
-`data/example_rollouts.jsonl`, and `data/example_metrics.json`:
+- `exec_user_unsupported`: the provider refuses `execution.exec_user`, or `id -u` reports an error or no uid.
+- `exec_user_is_root`: commands run as uid 0, which the runner refuses.
+- `interpreter_missing_dependency`: the import check reports an error: the interpreter cannot import the packages.
+- `provider_create`: the sandbox could not be created and set up within `execution.create_timeout_s`.
+- `upload_unsupported`: the nested upload failed; the size command raised, timed out, or did not find the file and
+  print plain digits; or the bounded download failed or returned other bytes.
+- `provider_exec`: only the `id -u` or the import-check command raised, or the host's bounded wait on it expired.
 
-```bash
-gym eval run --no-serve \
-    --agent critpt_custom_grader_simple_agent \
-    --input resources_servers/critpt_custom_grader/data/example.jsonl \
-    --output results/example_rollouts.jsonl \
-    --concurrency 1 \
-    '+limit=null'
-```
+`startup_probe: false` skips the check and the startup sandbox. Gym gives every server `server_spinup_timeout_seconds`
+(default 600 s) to become ready and the probe's sandbox create counts against it, so on a provider with a slow first
+image pull raise it above `execution.create_timeout_s` plus a margin, for example
+`++server_spinup_timeout_seconds=1200`.
 
-Pass `--concurrency 1` unless the operator raised the job limit. The collector reads the
-`--concurrency` flag, not the config's `num_samples_in_parallel`, and the grader cannot see it.
-The shipped default queues a second concurrent verify instead of refusing it: `max_queued_jobs`
-is `4` and `queue_timeout_s` covers about one full job. So a run without `--concurrency 1` queues
-rather than dropping rows, but a waiter completes only while its own cumulative wait stays within
-`queue_timeout_s`, not for as many jobs as the queue holds. A deep waiter behind several full jobs
-can time out although the queue had room. Concurrency past `1 + max_queued_jobs` still answers `busy`.
+### Providers
+
+| Provider | Status | `exec_user` | Memory and ttl enforced |
+|---|---|---|---|
+| opensandbox | validated end to end with `docker.io/earakelyan93701/critpt-custom-grader-rt:2026.10` | `su` wrapper | yes |
+| local | CI end-to-end test | must be `null` | no |
+| docker | supported | `--user` | yes |
+| apptainer, enroot | supported | `su` (needs root inside the container) | no |
+| daytona | selectable, not validated | only `create.os_user` | memory yes; `ttl_s` not read |
+
+- opensandbox: self-signed endpoints work with the shipped `tls_verify: false`.
+- local: the host process must be non-root; no isolation: trusted inputs only.
+- docker: set `sandbox.docker.create.network: none` for isolation.
+- enroot: with `exec_user: null` commands run as the invoking user (root when the container is started with
+  `create.remap_root`, which the runner refuses); a named `exec_user` goes through `su` and needs root inside the
+  container.
+- daytona: `ttl_s` is not read; the stop, archive and delete intervals (`create.auto_stop_interval`,
+  `create.auto_archive_interval`, `create.auto_delete_interval`) are the backstop. A blocking exec may not survive very
+  long runs through the Daytona proxy.
+
+### The grading image
+
+`runtime/Dockerfile`: `python:3.13-slim`, `runtime/requirements.txt` pinned in the interpreter's own site-packages
+(the runner runs with `-I`), a `grader` user (uid 1000), `/work` owned by it. Build it multi-arch and point
+`sandbox_spec.image` at it. Network isolation is a provider setting. The sandbox runtime's hard limits must allow an
+`RLIMIT_FSIZE` of at least 156,303,360 bytes and an `RLIMIT_NPROC` of at least `execution.max_processes`, which the
+runner sets on every task process; otherwise every run fails as `runner_error: limits` (non-terminal).
+
+### Configuration
+
+`sandbox_provider` (named block or inline `{provider: {...}}`), `sandbox_spec` (`image`, `workdir`, `ready_timeout_s`,
+`ttl_s`, `resources.cpu`, `resources.memory_mib`, `env`, `files`, `metadata`, `provider_options`), `execution`
+(`interpreter`, `workdir`, `exec_user`, `memory_limit_mib`, `cpu_time_limit_s`, `max_processes`, `suite_timeout_s`,
+`compare_per_case_s`, `compare_timeout_s`, `create_timeout_s`, `transfer_timeout_s`, `exec_timeout_margin_s`,
+`job_timeout_s`, `cleanup_timeout_s`, `max_candidate_source_bytes`, `max_concurrent_jobs`), `comparison`
+(`default_rtol`, `default_atol`), `reference_cache_dir` (memory only when null) and `startup_probe`.
+
+`sandbox_spec.files` maps an absolute sandbox path to text that the sandbox API uploads when a sandbox starts; every
+grading sandbox gets the same files, the candidate's included. `sandbox_spec.workdir` must exist in the image
+(OpenSandbox does not create it), each grading domain works in a directory below it, and `execution.workdir` must equal
+it.
+
+Startup refuses a configuration whose policy disagrees with the spec or whose bounds cannot hold one job: an
+`execution.create_timeout_s` below `sandbox_spec.ready_timeout_s + 2 * execution.transfer_timeout_s` (a null
+`ready_timeout_s` counts as 0), an `execution.workdir` that differs from `sandbox_spec.workdir`, and, when
+`sandbox_spec.ttl_s` is set, a `ttl_s` below the job deadline plus `execution.cleanup_timeout_s`. The job deadline is
+`execution.job_timeout_s`, or the sum of the bounds one job awaits when it is null; an explicit `job_timeout_s` may not
+be below that sum. The server block forbids unknown keys, nested blocks included, so a misspelt `sandbox_provider`
+fails startup instead of silently selecting the default `sandbox` block; it still accepts the keys Gym itself reads
+from a resources-server block, such as `allowed_agents` and `allowed_model_types`.
+
+The shipped values: 1800 s per suite (`suite_timeout_s`, with the same `cpu_time_limit_s`), 1536 MiB of address space
+per process, 64 processes, 20 s per comparison case in batches capped at 600 s, a 600 s readiness wait and four jobs at
+once. BLAS and OpenMP are always limited to one thread. `max_concurrent_jobs` bounds jobs inside this process; Gym's
+`num_samples_in_parallel` bounds the client side.
 
 ## Verify response contract
 
-`/verify` returns a `CritPtVerifyResponse`. Its fields:
+`reward` 0.0 or 1.0; `scored`; `mask_sample` (true on every unscored row); `category`; `cleanup_status`;
+`sandbox_observations` (per-domain provider, sandbox id, outcome, exit code, wall time); `failure_kind` and
+`failure_reason` on unscored rows. An unscored row also carries `_ng_failure_class` and `_ng_failure_subcategory`. Only
+a terminal unscorable row carries `_ng_failure_terminal` (true): a non-terminal row never has it, and a scored row
+carries no `_ng_failure_*` key.
 
-- `reward` — `0.0` or `1.0`.
-- `scored` — whether the reward is a real verdict about the candidate.
-- `category` — the outcome name.
-- `cleanup_status` — one of `not_started`, `resolved`, `unresolved`, `unknown`.
-- `problem_id` — the task id, or null when the task could not be parsed.
-- `responses_create_params`, `response` — the query and the saved candidate response.
-- `_ng_failure_class`, `_ng_failure_subcategory`, `_ng_failure_terminal` — set only when the
-  row is not a clean score. `failure_kind` carries the same value as `_ng_failure_class`. Two
-  class names come from core's `FAILURE_KINDS` registry (`nemo_gym/failure_kinds.py`). The third
-  uses the `critpt_custom_grader:` prefix that the registry asks for a server-specific kind.
+`cleanup_status` is `resolved` when no sandbox the row created is left running and `unresolved` when a stop failed: the
+sandbox then lives until the provider-side backstop reaps it, which is `sandbox_spec.ttl_s` where the provider enforces
+it (on Daytona, which does not read `ttl_s`, the stop, archive and delete intervals are the equivalent). `not_started`
+means the row was answered before any sandbox was created; `unknown` means the grader's result could not be read or the
+grader call itself raised.
 
-### Categories
+`/verify` and `/seed_session` answer a request they cannot process with a category-only body,
+`{"error": {"category": ...}}`:
 
-**Scored.** These carry a real reward.
+| Status | Category | When |
+|---|---|---|
+| 413 | `request_limit` | the request body is larger than 10 MiB |
+| 422 | `request_invalid` | not a JSON object, or a bad request shape (see below) |
+| 422 | `task_invalid` | `/seed_session` only: the task fields fail validation |
+| 503 | `server_not_ready` | `/verify` with the grader not running, once the request, task and source checks pass |
 
-- `passed` — every case matched. Reward `1.0`, cleanup `resolved`.
-- `candidate_mismatch` — the comparator found a mismatch. Reward `0.0`, cleanup `resolved`.
-- `candidate_invalid_output` — the comparator judged an observed value invalid. Reward `0.0`.
-- `candidate_source_limit` — the candidate source failed the host size or encoding contract, or a
-  completed response carried no usable source at all (an empty submission). Reward `0.0`.
-- `candidate_source_error`, `candidate_timeout`, `candidate_exception`, `candidate_encoding_error`,
-  `candidate_worker_abort` — after a completed preflight the candidate ran, but its process
-  reported a source error, exceeded the suite timeout, raised, returned an unencodable object, or
-  aborted. Reward `0.0`, cleanup `resolved`. A candidate cannot forge such a fault into a pass,
-  only into its own failure, so it is scored 0 rather than left unscored. A containment failure,
-  an external kill of the whole sandbox, an absent result file, or no reported process exit stay
-  provider-ambiguous and unscorable.
+A bad request shape is invalid prompt parameters, tools or `tool_choice`, or, on `/verify`, a `response` that is not a
+valid response. `responses_create_params` or `response` above 1 MiB, or beyond the JSON node, depth or type limits (an
+integer wider than 63 bits, a non-finite number), is `request_invalid` too; only a body above 10 MiB is
+`request_limit`. On `/verify` an invalid task is not an error status: it is a 200 row with category `task_invalid`,
+terminal. `server_not_ready` is answered only after the request, task and source checks have passed, so while the
+grader is not running (before startup finishes or after shutdown) an invalid task, an incomplete response or an
+unusable source still gets its 200 row.
 
-**Terminal, not scored.** A defect in the task or the reference. `_ng_failure_terminal` true,
-`_ng_failure_class` `verifier_error`.
+Categories. Scored: `passed`, `candidate_mismatch`, `candidate_invalid_output`, `candidate_source_limit`,
+`candidate_source_error`, `candidate_timeout`, `candidate_exception`, `candidate_encoding_error`,
+`candidate_worker_abort`. Unscorable, terminal (`verifier_error`): `task_invalid` (a row that fails task
+validation, or a stored expectation or policy the comparator cannot represent) and `reference_mismatch` (the
+reference does not reproduce its own expectation). Unscorable, non-terminal (`provider_unavailable`, re-graded by
+`gym eval reverify`): `exec_user_unsupported` (the provider refused `execution.exec_user`), `reference_error`,
+`reference_timeout`, `comparator_uncertain`, `provider_create`, `provider_exec`, `transfer_limit`, `result_invalid`,
+`*_no_result`, `job_deadline`, `server_draining`, `execution_unknown`. No usable source: category
+`response_incomplete`, failure class `critpt_custom_grader:response_incomplete` (regenerate the candidate).
 
-- `task_invalid` — the task spec is invalid.
-- `reference_invalid` — the reference contradicts its own stored expectation.
+The reference cache holds a passed preflight and exactly two refusals, `task_invalid` and `reference_mismatch`: facts
+about the task itself. Every other unscorable category describes the infrastructure or the configuration, so it is
+never cached. The key covers the task, the policy limits that reach the runner, the runtime files, the operator's
+`sandbox_spec.files` and `sandbox_spec.env`, the image and the default tolerance.
 
-**Not scored, not terminal.** Infrastructure uncertainty, `_ng_failure_class`
-`provider_unavailable`. Examples: `reference_error`, `reference_timeout`, `comparator_uncertain`,
-`provider_create`, `provider_exec`, `transfer_limit`, `result_invalid`, `queue_timeout`. The
-saved response is good, so reverification re-checks it once the server is healthy (see "Recovery").
+## Recovery
 
-**Not scored, not terminal, needs a new candidate.** `_ng_failure_class`
-`critpt_custom_grader:response_incomplete`.
-
-- `response_incomplete` — the saved response did not complete, or carries an incomplete or error
-  envelope, so it has no usable source. The grader rejects it the same way on every pass, so
-  reverification never resolves it. Regenerate the row with `gym eval run --resume`. A response
-  that DID complete with no error but carries no usable source is instead an empty submission,
-  scored `0.0` as `candidate_source_limit`.
-
-Three categories the operator reads as signals about the server, not the task:
-
-- `busy` — a job was already running and the one-job limit was reached. `max_concurrent_jobs` is
-  pinned to exactly `1`, so serialize verify calls, or raise `max_queued_jobs` to widen the wait
-  queue.
-- `ownership_unresolved` — the server could not confirm it deleted its sandboxes. The next job
-  reconciles the leftover records first, so a transient provider delay clears on its own. A restart
-  also reconciles the journal at startup (see "Recovery").
-- `execution_unknown` — an unexpected or uncorrelated execution outcome. A conservative catch-all,
-  never a verdict about the task.
-
-## Privacy
-
-The server runs with `request_privacy.private_requests: true`.
-
-**Guaranteed.** Request bodies, validation details, provider exceptions, and task sources are not
-logged. Errors return a fixed category-only body. FastAPI auto-instrumentation is not applied, so
-no server span records the request URL or headers. The saved response is an opaque, bounded
-recovery artifact, not a diagnostic.
-
-**Not guaranteed.** Provider-side storage is outside the server's control. A sandbox provider may
-retain data on its own systems. Privacy at the server does not extend to the Daytona backend.
-
-## Integrity model
-
-The sandbox reporting channel is unauthenticated by design. Grading integrity does not rest on
-trusting reported values. It rests on the candidate never receiving the expected values or
-tolerances, on expectations being task-stored and never derived from a run, and on the comparator
-running no task code. A forged candidate value must still equal the hidden stored expectation to
-pass, which the candidate cannot know and was always free to return legitimately.
-
-The same-UID Python supervisor is containment machinery, not an authentication boundary. Every
-trust claim also requires an operator-enforced runtime that protects the supervisor and its
-dependencies from same-UID interference, privilege escalation, and escape. This contribution does
-not qualify that runtime.
-
-## Recovery and the at-least-once contract
-
-The system is at-least-once, not exactly-once. Each attempt is scored independently, and the
-latest attempt stands, so no double count enters a win rate.
-
-**Restart after a crash.** A crash can leave an unresolved record in the journal directory. On the
-next start the server builds the grader and runs reconciliation before it serves any request. A
-record whose sandbox is already gone clears itself. A record whose sandbox still exists is deleted
-by its exact stable name. A record that cannot resolve yet, such as a create still inside its
-settle deadline, is retried before the first job is admitted. The operator does not edit the
-journal by hand. Point the restarted server at the same `journal_dir` and let reconciliation run.
-
-**Re-grade a saved candidate.** A `provider_unavailable` row holds a good saved candidate that
-the grader could not score. `gym eval reverify` re-sends the saved response with no new model call.
-Core has no option that selects failure rows by class. `--judge-failed-only` selects only
-`judge_failed` rows, so it does not recover these. Select the rows yourself: take the latest
-attempt per rollout, drop rollouts that already succeeded, and keep `provider_unavailable`.
+The server is stateless (`/reverify_mode` is `stateless`). Non-terminal rows sit in `<rollouts>_failures.jsonl`, with
+one row per attempt. Take the latest attempt of each rollout that is not already in `<rollouts>.jsonl`, keep the
+`provider_unavailable` ones and re-grade them without a model call:
 
 ```bash
 jq -cn --slurpfile ok <(jq -c '[._ng_task_index, ._ng_rollout_index]' <rollouts>.jsonl) '
@@ -396,81 +239,41 @@ jq -cn --slurpfile ok <(jq -c '[._ng_task_index, ._ng_rollout_index]' <rollouts>
   | to_entries[] | select($done[.key] | not) | .value
   | select(._ng_failure_class == "provider_unavailable")' \
   <rollouts>_failures.jsonl > <retry>.jsonl
-
-gym eval reverify \
-    --config resources_servers/critpt_custom_grader/configs/critpt_custom_grader.yaml \
-    --model-type openai_model \
-    '+policy_model_name=<model-name>' \
-    '+policy_base_url=<model-base-url>' \
-    '+policy_api_key=${oc.env:CRITPT_GRADER_MODEL_API_KEY}' \
+# Stop the gym env start servers first: reverify launches its own server stack, with a head server on the same port.
+gym eval reverify --config resources_servers/critpt_custom_grader/configs/critpt_custom_grader.yaml \
+    --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml --model-type openai_model \
     '+model_endpoint_readiness_timeout_seconds=0' \
-    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.snapshot=<snapshot>' \
-    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.os_user=<os-user>' \
-    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.owner_id=<owner-id>' \
-    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.journal_dir=<journal-dir>' \
-    --inputs <rollouts>_materialized_inputs.jsonl \
-    --rollouts <retry>.jsonl \
-    --output <recovered>.jsonl \
-    --concurrency 1
-```
-
-`gym eval reverify` starts its own servers, so stop `gym env start` first. Only one grader process
-may use the `journal_dir`. Reverify has no `--model` or `--model-url` flag. Pass the model with the
-`policy_*` overrides instead. Reverify never calls the model, so
-`model_endpoint_readiness_timeout_seconds=0` skips the wait for a model endpoint. `gym eval run`
-writes `<rollouts>_materialized_inputs.jsonl` next to its output.
-
-Rows that fail again go to `<recovered>_failures.jsonl`. To score the union, start the servers
-again with `gym env start` and the same config. Aggregate needs the running head server. Then run:
-
-```bash
+    --inputs <rollouts>_materialized_inputs.jsonl --rollouts <retry>.jsonl --output <recovered>.jsonl
+# Run gym env start again with the same configs: aggregate reads the config from the head server and posts to each
+# agent server's /aggregate_metrics endpoint.
 gym eval aggregate -i "'<rollouts>.jsonl,<recovered>.jsonl'" -o <merged>.jsonl
 ```
 
-Keep the inner single quotes. Without them, Hydra rejects the comma list as an ambiguous value. Do
-not include `<retry>.jsonl` in that list.
+Sandboxes are single-use and stopped in a `finally`; `sandbox_spec.ttl_s`, where the provider enforces it, and the
+metadata labels (`ng-grader-job`, `ng-grader-domain`) are the provider-side backstop. Daytona does not read `ttl_s`;
+its stop, archive and delete intervals (`create.auto_stop_interval`, `create.auto_archive_interval`,
+`create.auto_delete_interval`) are its equivalent.
+OpenSandbox operators can reap leftovers with `nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py`.
 
-**Regenerate a candidate.** Use `gym eval run --resume` only when no usable saved candidate
-exists: a `critpt_custom_grader:response_incomplete` row, or an `agent_run_error` or
-`agent_request_failed` row (a lost outer `/run` response, or a `/verify` call that returned an
-error body such as a 503). Resume re-dispatches every non-terminal failure row of every class and
-calls the model again, so it also regenerates `provider_unavailable` rows. Before you resume,
-append `<recovered>.jsonl` to `<rollouts>.jsonl` so that resume skips the rows that reverify
-already scored. `verifier_error` rows are terminal and are never retried.
+## Integrity model
+
+A result file is read only behind a process exit the provider reports, is shape-checked without decoding values, and
+must carry the paired status and the nonce the host wrote. None of this authenticates a result: same-UID code in the
+candidate sandbox can forge its own failure and its own unscorability, never a pass, because expectations never enter
+that sandbox and the comparator alone decides. Killing the runner's supervisor is `candidate_no_result`, a corrupt or
+oversized result file is `result_invalid` or `transfer_limit`, and a `runner_error` envelope (`result_limit`, for
+example) is `provider_exec`; each of these rows is masked out of `accuracy_scorable`. Where candidates may be
+adversarial, read `accuracy_all`, which counts every unscorable row as not passed. The runner refuses to run as uid 0.
 
 ## Tests
 
-Host-safe suites run on any host and cover the schema, codec, comparator, execution controller,
-and runner protocol:
-
-```bash
-gym env test --resources-server critpt_custom_grader
-```
-
-The remote suite `tests/test_runner_remote.py` is different. It executes deliberately hostile
-source that burns CPU, forks, signals its parent, and forges result files. It is skipped unless
-`NG_CRITPT_RUNNER_REMOTE=1` is set. **Run it only inside a disposable non-root sandbox with
-`/proc` mounted. Never run it on a shared host.**
-
-## Known limitations
-
-- **Exception expectations are scored.** A case whose expectation is an exception (the
-  `{input, expected_error}` alias, or an `exception` expected kind) passes when the code raises,
-  and neither the exception type nor its message is compared. The stored `message` is provenance
-  only. A reference that does not raise where an exception is expected is a reference defect
-  (`reference_mismatch`). A candidate that does not raise is a wrong answer (`candidate_mismatch`).
-- **Daytona only.** No other execution provider is implemented. The backend seam is designed for
-  further adapters, and the grading logic does not depend on the provider.
-- **One job at a time, with a small wait queue.** `max_concurrent_jobs` is pinned to exactly `1`
-  (`ge=1, le=1`), so cleanup and reconciliation never race execution. Do not raise it. `max_queued_jobs`
-  is `4`. A second concurrent verify waits in the queue and completes when the running job finishes,
-  while its cumulative wait stays within `queue_timeout_s`. Only concurrency past `1 + max_queued_jobs`
-  gets `busy`. `--concurrency 1`
-  stays recommended, but a run without it queues instead of dropping rows. To admit more waiters,
-  raise `max_queued_jobs`, not `max_concurrent_jobs`.
+`gym env test --resources-server critpt_custom_grader +should_validate_data=true` runs the host-safe suites (codec,
+comparator, symbolic, runner, execution over an in-memory provider, the HTTP adapter, the config) and a real grade of
+the example rows through the `local` provider when the host is Linux, non-root and has procfs. The hostile runner suite
+runs deliberately hostile code: set `NG_CRITPT_RUNNER_REMOTE=1` only inside a disposable non-root sandbox with procfs,
+never on a shared host.
 
 ## Licensing
 
-- Code: Apache 2.0.
-- Runtime scientific dependencies: SymPy (BSD) and its `mpmath` dependency (BSD), Pydantic (MIT).
-  Retain upstream copyright and license notices in any distributed runtime.
+Apache-2.0. `runtime/requirements.txt` pins the runtime packages; nothing is vendored, and a distributed image must
+retain the upstream license notices of those packages.

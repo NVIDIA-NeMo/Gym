@@ -5,5 +5,8 @@
 # ../../ is the Gym checkout when installed from this resources-server directory.
 # Gym pyproject.toml declares both dev (server test tooling) and sandbox (provider SDKs)
 # extras; its project metadata identifies the Apache Software License and LICENSE file.
-# No extra scientific host dependencies or global dependency changes are needed.
 -e nemo-gym[dev,sandbox] @ ../../
+
+# SymPy lets the host test suites exercise the symbolic comparator. Same pin (and uv.lock
+# version) as runtime/requirements.txt; no other scientific or global dependency changes.
+sympy==1.14.0

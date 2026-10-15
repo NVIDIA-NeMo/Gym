@@ -84,10 +84,10 @@ def test_adapt_output_keeps_a_float_atom_inside_a_larger_symbolic_expression_as_
 @pytest.mark.parametrize(
     "text",
     [
-        "-0.00613030100852602/pi",
-        "0.0362277324545884*2**(3/4)*sqrt(pi)",
-        "(-3.06138153035693 + 0.765345382589233*pi**2)*exp(-0.932557711424465*pi)",
-        "0.142857142857143*sqrt(2)*(0.00699999999999995 + 0.524*I)*(0.7 - 0.4*I)**2*exp((-0.7 - 0.4*I)*(0.7 - 0.4*I))",
+        "-0.00842117305631487/pi",
+        "0.0291826354718203*2**(3/4)*sqrt(pi)",
+        "(-2.41829406135372 + 0.612048735116094*pi**2)*exp(-0.731905162847731*pi)",
+        "0.437290516873842*sqrt(3)*(0.0123456789012345 + 0.612*I)*(0.6 - 0.2*I)**2*exp((-0.6 - 0.2*I)*(0.6 - 0.2*I))",
     ],
 )
 def test_float_bearing_symbolic_notation_parses_and_compares_equal_to_itself(text):
@@ -298,3 +298,47 @@ def test_nonfinite_and_grammar_rejected_symbolic_names_are_invalid_jobs():
         with pytest.raises(RunnerError) as raised:
             _materialize_symbolic(text)
         assert raised.value.code == "invalid_job"
+
+
+def test_per_case_timer_makes_a_slow_comparison_uncertain(monkeypatch):
+    import json
+    import os
+    import signal
+    import time
+
+    from resources_servers.critpt_custom_grader import comparator, runner
+
+    monkeypatch.setattr(runner, "_apply_limits", lambda limits: None)
+    monkeypatch.setattr(comparator, "compare_request", lambda request: time.sleep(3) or {"never": True})
+    read_fd, write_fd = os.pipe()
+    job = {
+        "limits": {"suite_deadline_s": 60, "memory_mib": 1024, "cpu_time_s": 60, "processes": 8, "per_case_s": 1},
+        "observed_role": "candidate",
+        "cases": [{"observed": {}, "expected": {}}],
+    }
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    started = time.monotonic()
+    try:
+        runner._compare_worker(write_fd, job)
+    finally:
+        # The worker installs its own SIGALRM handler; this process is pytest's, so put the previous one back.
+        signal.signal(signal.SIGALRM, previous_handler)
+        os.close(write_fd)
+    elapsed = time.monotonic() - started
+    try:
+        payload = os.read(read_fd, 1 << 16)
+    finally:
+        os.close(read_fd)
+    assert elapsed < 2.5
+    events = [json.loads(line) for line in payload.decode().splitlines() if line.strip()]
+    items = [event["item"] for event in events if event["event"] == "item"]
+    assert items == [
+        {
+            "version": 1,
+            "status": "uncertain",
+            "equal": None,
+            "side": "comparator",
+            "code": "comparator_timeout",
+            "path": "",
+        }
+    ]

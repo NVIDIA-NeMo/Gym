@@ -25,11 +25,11 @@ WIRE_FORMAT = "critpt-value-v1"
 MAX_WIRE_BYTES = 524_288
 MAX_TASK_BYTES = 4_194_304
 MAX_DEPTH = 32
-# Per-value element cap for a delivered payload, above the largest delivered value with margin. The official
+# Per-value element cap for a delivered payload, above any accepted value, with margin. The official
 # CritPt grader has no such bound. Single source of truth for codec.py and runner.py.
 MAX_ELEMENTS = 32_768
 # Aggregate JSON-node cap enforced by bounded_json. The wire form nests every scalar as a tagged list, which
-# multiplies the node count. The cap sits above the largest delivered task with margin.
+# multiplies the node count. The cap sits above any accepted value, with margin.
 MAX_JSON_NODES = 1_048_576
 MAX_TEXT_BYTES = 16_384
 MAX_INTEGER_DIGITS = 1024

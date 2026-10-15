@@ -3,7 +3,7 @@
 """Host-safe comparator regressions on synthetic values and inert hostile text.
 
 The comparator is a pure function with no IO or execution. Tests using the symbolic_runtime fixture skip
-without SymPy. None needs Daytona.
+without SymPy. None needs a sandbox or a provider.
 """
 
 import math
@@ -21,6 +21,7 @@ from resources_servers.critpt_custom_grader.codec import (
     SymbolicText,
     encode_value,
 )
+from resources_servers.critpt_custom_grader.comparator import statement_promises
 from resources_servers.critpt_custom_grader.task_data import (
     MAX_DEPTH,
     MAX_INTEGER_DIGITS,
@@ -47,6 +48,14 @@ def request(observed, expected, *, role="candidate", policy=None):
 def compare(observed, expected, *, role="candidate", policy=None):
     payload = request(value_outcome(observed), value_outcome(expected), role=role, policy=policy)
     return comparator.compare_request(payload)
+
+
+NO_PROMISE = {"clauses": [], "blanket": None, "named": {}}
+
+
+def clause_shapes(promises):
+    # What grading reads from a clause: its value, its kind and whether it is honoured, never where it sits.
+    return [(clause["value"], clause["kind"], clause["honoured"]) for clause in promises["clauses"]]
 
 
 @pytest.fixture
@@ -235,7 +244,8 @@ def test_categorical_strings_do_not_become_expressions_or_numbers():
 def test_equation_and_assignment_grade_as_categorical_and_infinity_is_rejected():
     # An equation or assignment is refused by the grammar and compared as an exact string, categorical: an
     # identical reproduction is equal and a different one mismatches. A bare infinity atom is nonfinite, so a
-    # symbolic-carrier expectation of it is unscorable (README: a nonfinite expectation is unscorable).
+    # symbolic-carrier expectation of it is an invalid expectation (nonfinite_expected), never a verdict on the
+    # candidate.
     equation = "a^2 - 4*b*c = 0"
     assignment = "y0 = k/(2*L^2)"
     for carrier in (SymbolicText, LegacyText):
@@ -393,7 +403,7 @@ def test_hostile_and_unsupported_expressions_are_side_specific(symbolic_runtime,
     assert result["equal"] is None
 
 
-@pytest.mark.parametrize("text", ["tr(psi)", "unapproved(x)", "f(x, y)"])
+@pytest.mark.parametrize("text", ["tr(rho)", "unapproved(x)", "f(x, y)"])
 def test_undefined_function_application_parses_and_compares(symbolic_runtime, text):
     # A name not in the function table is a fresh sympy.Function: it parses on both sides and grades by
     # equivalence, not as a defect.
@@ -447,10 +457,19 @@ def test_undecided_algebra_remains_uncertain(symbolic_runtime, monkeypatch):
 
 def test_symbolic_expression_against_a_number_is_decided_never_undecided(symbolic_runtime):
     # zeta binds to the SymPy library function, so an expression built from it reduces to a real number and
-    # grades definitively against a float expectation. The code is symbolic_comparison, so zeta resolved.
-    decided = compare(SymbolicText("-3/2 * zeta(3)/zeta(5)"), -1.738872689824075)
+    # grades definitively against a float expectation. 2.5 is deliberately off the expression's value (about
+    # 2.75), so the pair is a mismatch. The code is symbolic_comparison, so zeta resolved.
+    decided = compare(SymbolicText("2*zeta(3) + zeta(5)/3"), 2.5)
     assert decided["status"] == "mismatch"
     assert decided["code"] == "symbolic_comparison"
+    # A float never equals a symbolic constant, even its rounding: 1.4142135623730951 is the double nearest
+    # sqrt(2), and the pair is still a decided mismatch, with the float on either side.
+    rounded = compare(SymbolicText("sqrt(2)"), 1.4142135623730951)
+    assert rounded["status"] == "mismatch"
+    assert rounded["code"] == "symbolic_comparison"
+    flipped = compare(1.4142135623730951, SymbolicText("sqrt(2)"))
+    assert flipped["status"] == "mismatch"
+    assert flipped["code"] == "symbolic_comparison"
     # A candidate that cannot reduce to a number is undecided by algebra. Against a concrete numeric
     # expectation it collapses to mismatch. Two SymbolicText sides stay uncertain
     # (test_undecided_algebra_remains_uncertain).
@@ -460,17 +479,24 @@ def test_symbolic_expression_against_a_number_is_decided_never_undecided(symboli
 
 
 @pytest.mark.parametrize(
-    "failure, code", [(TimeoutError(), "comparator_timeout"), (MemoryError(), "comparator_memory")]
+    "failure, code, status, side",
+    [
+        (TimeoutError(), "comparator_timeout", "uncertain", "comparator"),
+        (MemoryError(), "comparator_memory", "invalid_candidate", "candidate"),
+    ],
 )
-def test_candidate_side_exhaustion_after_tractable_expected_is_scored_wrong(monkeypatch, failure, code):
+def test_candidate_memory_exhaustion_is_scored_wrong_but_a_timeout_stays_uncertain(
+    monkeypatch, failure, code, status, side
+):
     def exhaust(*args, **kwargs):
         raise failure
 
-    # The expectation resolves within the caps, so the exhaustion is in the candidate value and scored wrong.
+    # The expectation resolves within the caps, so a memory cap is in the candidate value and scored wrong. A
+    # per-case timeout bounds the comparator's own proof work, so it stays uncertain even for a candidate.
     monkeypatch.setattr(comparator, "_compare", exhaust)
     candidate = compare(1, 1, role="candidate")
-    assert candidate["status"] == "invalid_candidate"
-    assert candidate["side"] == "candidate"
+    assert candidate["status"] == status
+    assert candidate["side"] == side
     assert candidate["code"] == code
     # A reference observation is not a candidate to penalise, so its exhaustion stays uncertain.
     reference = compare(1, 1, role="reference")
@@ -523,11 +549,8 @@ def test_candidate_dictionary_cannot_supply_verdict_or_tolerances():
         ("Relative error below 10⁻⁷.", Fraction(1, 10**7), "rel"),
         ("Relative error below 2e−6.", Fraction(2, 10**6), "rel"),
         ("Accurate to within 0.02%.", Fraction(2, 10**4), "rel"),
-        ("Accurate to within 2e-6.", Fraction(2, 10**6), "unknown"),
         # "absolute" and "relative" both fall in the window. "absolut" is tested first, so the clause is abs.
         ("Absolute or relative error below 2e-6.", Fraction(2, 10**6), "abs"),
-        # A keyword in one sentence pulls a bare number out of the next through the fixed 60/160-char window.
-        ("Accurate values are required. The fixture constant is 2e-6.", Fraction(2, 10**6), "unknown"),
         ("Relative error below 1.0000000000000000001e-6.", Fraction(10000000000000000001, 10**25), "rel"),
     ],
 )
@@ -551,6 +574,8 @@ def test_statement_extraction_uses_exact_bounded_patterns(statement, value, kind
         ("Relative error below 20%.", "too_loose_to_be_an_accuracy_claim"),
         ("Report to 2048 decimal places.", "unsupported_number"),
         ("Relative error below 1e-2048.", "unsupported_number"),
+        # "within" borrows the claim of "Accurate" in its sentence, but no kind is stated for a bare number.
+        ("Accurate to within 2e-6.", "no_kind"),
     ],
 )
 def test_refused_statement_clauses_remain_visible_and_do_not_erase_author(statement, reason):
@@ -579,12 +604,14 @@ def test_statement_honour_interval_keeps_supported_boundaries(statement):
         "Absolute error below 0.0002.",
         "Report to the nearest tenth.",
         "The fixture constant is 2e-6.",
+        # A keyword's window stops at its sentence break, so it never pulls a number out of the next sentence.
+        "Accurate values are required. The fixture constant is 2e-6.",
         "```text\nRelative error below 2e-6.\n```",
         "```text\nRelative error below 2e-6.",
     ],
 )
 def test_unrecognized_prose_and_fenced_code_do_not_create_promises(statement):
-    assert comparator.statement_promises(statement) == {"clauses": [], "blanket": None, "named": {}}
+    assert comparator.statement_promises(statement) == NO_PROMISE
     policy = {"statement": statement}
     assert compare(Decimal("1.000009"), Decimal("1"), policy=policy)["status"] == "equal"
     assert compare(Decimal("1.00002"), Decimal("1"), policy=policy)["status"] == "mismatch"
@@ -596,9 +623,10 @@ def test_error_kinds_and_accuracy_windows_do_not_cross_sentences(separator):
         "Report lift with absolute error below 2e-6" + separator + "Report drift with relative error below 4e-5."
     )
     promises = comparator.statement_promises(statement, ["lift", "drift"])
-    # Kind is now sentence-bounded, the same bounds quantity attribution uses. Across a real sentence break
-    # (. ; \n) drift keeps its own "relative" kind. "!" and "?" do not end a sentence here, so the one
-    # sentence carries "absolute" first and both leaves read abs.
+    # Kind is now sentence-bounded, the same bounds quantity attribution uses. Across a real sentence break (. ; or a
+    # newline that is not a soft wrap, as here, where the next line starts with a capital) drift keeps its own
+    # "relative" kind. "!" and "?" followed by a space do not end a sentence, so the one sentence carries "absolute"
+    # first and both leaves read abs.
     if separator in (". ", "; ", "\n"):
         assert promises["named"] == {"lift": (Fraction(2, 10**6), "abs"), "drift": (Fraction(4, 10**5), "rel")}
         assert promises["blanket"] == (Fraction(4, 10**5), "rel")
@@ -614,9 +642,9 @@ def test_a_prior_sentence_cannot_claim_the_next_quantity(separator):
         "Report omitted with relative error below 2e-9" + separator + "Report residue with relative error below 4e-5."
     )
     promises = comparator.statement_promises(statement, ["residue"])
-    # Only [.;:] + whitespace and newline end a sentence. After those the two sentences split, so the
-    # earlier 2e-9 clause cannot reach residue. After "!" or "?" the text is one sentence, so that clause
-    # claims residue at the tighter 2e-9 and rejects a 3e-5 miss.
+    # Only [.;:] + whitespace and a newline that is not a soft wrap (here the next line starts with a capital) end a
+    # sentence. After those the two sentences split, so the earlier 2e-9 clause cannot reach residue. After "!" or "?"
+    # and a space the text is one sentence, so that clause claims residue at the tighter 2e-9 and rejects a 3e-5 miss.
     if separator in ("! ", "? "):
         assert promises["named"] == {"residue": (Fraction(2, 10**9), "rel")}
         expected_status = "mismatch"
@@ -700,20 +728,20 @@ def test_fenced_code_is_blank_and_normalization_preserves_clause_offsets():
 
 @pytest.mark.parametrize("author_rtol", ["1e-3", "1e-9"])
 @pytest.mark.parametrize("per_leaf", [False, True])
-def test_statement_governs_whether_tighter_or_looser_than_author(author_rtol, per_leaf):
+def test_author_governs_whether_statement_is_tighter_or_looser(author_rtol, per_leaf):
     authored = {"rtol": author_rtol, "atol": "0"}
     policy = {"tolerances": [{"path": "root", **authored}]} if per_leaf else authored
     policy["statement"] = "Return output with relative error below 2e-6."
-    assert compare(Decimal("100.0002"), Decimal("100"), policy=policy)["status"] == "equal"
-    assert compare(Decimal("100.0002000000000000001"), Decimal("100"), policy=policy)["status"] == "mismatch"
+    # The author governs either way: the statement's 2e-6 is tighter than an author 1e-3, looser than 1e-9.
+    status = "equal" if author_rtol == "1e-3" else "mismatch"
+    assert compare(Decimal("100.0002"), Decimal("100"), policy=policy)["status"] == status
+    assert compare(Decimal("100.0002000000000000001"), Decimal("100"), policy=policy)["status"] == status
 
 
 def test_named_promises_resolve_nested_leaves_without_a_task_wide_maximum():
     expected = {"band": {"width": Decimal("2"), "depth": Decimal("4")}, "other": Decimal("1")}
-    policy = {
-        "statement": "Grade width with relative error below 2e-8. Grade depth with relative error below 3e-4.",
-        "tolerances": [{"path": "/band/width", "rtol": "1e-3"}, {"path": "/band/depth", "rtol": "1e-10"}],
-    }
+    # No leaf is authored, so each named promise governs its own nested leaf and the blanket governs the rest.
+    policy = {"statement": "Grade width with relative error below 2e-8. Grade depth with relative error below 3e-4."}
     passing = {"band": {"width": Decimal("2.00000004"), "depth": Decimal("4.0012")}, "other": Decimal("1.0003")}
     assert compare(passing, expected, policy=policy)["status"] == "equal"
     for name, value in (("width", Decimal("2.000000041")), ("depth", Decimal("4.0012001"))):
@@ -770,20 +798,26 @@ def test_statement_margin_preserves_exact_integer_and_fraction_arithmetic(expect
 
 def test_absolute_scale_guard_is_per_leaf_and_preserves_deliberate_author_tolerance():
     tiny, margin = Fraction(1, 10**30), Fraction(1, 10**44)
-    expected = {"coarse": Decimal("2"), "tiny": tiny}
+    expected = {"coarse": Decimal("2"), "tiny": tiny, "pinned": tiny}
+    # The coarse leaf keeps the 5e-4 promise. The guard empties it for the unauthored tiny leaf, which falls to the
+    # strict 5e-12 relative floor. The pinned leaf keeps its author's deliberate 1e-44 window, tighter than the floor.
     policy = {
         "statement": "Report values to three decimal places.",
-        "tolerances": [
-            {"path": "/coarse", "rtol": "0", "atol": "1e-20"},
-            {"path": "/tiny", "rtol": "0", "atol": "1e-44"},
-        ],
+        "tolerances": [{"path": "/pinned", "rtol": "0", "atol": "1e-44"}],
     }
-    passing = {"coarse": Decimal("2.0005"), "tiny": tiny + margin}
+    passing = {"coarse": Decimal("2.0005"), "tiny": tiny * (1 + Fraction(4, 10**12)), "pinned": tiny + margin}
     assert compare(passing, expected, policy=policy)["status"] == "equal"
-    for wrong in (0, tiny + 2 * margin):
-        result = compare({**passing, "tiny": wrong}, expected, policy=policy)
+    wrong = (
+        ("tiny", 0),
+        ("tiny", tiny * (1 + Fraction(6, 10**12))),
+        ("pinned", 0),
+        ("pinned", tiny * (1 + Fraction(4, 10**12))),
+        ("pinned", tiny + 2 * margin),
+    )
+    for leaf, value in wrong:
+        result = compare({**passing, leaf: value}, expected, policy=policy)
         assert result["status"] == "mismatch"
-        assert result["path"] == "/tiny"
+        assert result["path"] == "/" + leaf
     result = compare({**passing, "coarse": Decimal("2.000500000000001")}, expected, policy=policy)
     assert result["status"] == "mismatch"
     assert result["path"] == "/coarse"
@@ -814,15 +848,17 @@ def test_emptied_absolute_promise_never_erases_authored_window(expected):
 
 def test_emptied_named_promise_does_not_switch_to_another_quantities_blanket():
     expected = {"speck": Fraction(1, 10**30)}
+    # The guard empties speck's own absolute promise. The unauthored leaf then falls to the strict 5e-12 relative
+    # floor, never to the 4e-4 relative blanket that governs other outputs.
     policy = {
         "statement": "Report speck with absolute error below 2e-6. Other outputs permit relative error below 4e-4.",
-        "tolerances": [{"path": "/speck", "rtol": "0", "atol": "1e-44"}],
     }
     observed = {"speck": expected["speck"] * (1 + Fraction(3, 10**4))}
     result = compare(observed, expected, policy=policy)
     assert result["status"] == "mismatch"
     assert result["path"] == "/speck"
-    assert compare({"speck": expected["speck"] + Fraction(1, 10**44)}, expected, policy=policy)["status"] == "equal"
+    floor = {"speck": expected["speck"] * (1 + Fraction(4, 10**12))}
+    assert compare(floor, expected, policy=policy)["status"] == "equal"
 
 
 @pytest.mark.parametrize(
@@ -831,8 +867,9 @@ def test_emptied_named_promise_does_not_switch_to_another_quantities_blanket():
 )
 def test_relative_promise_is_floored_only_where_no_author_spoke(authored, status):
     policy = {**authored, "statement": "Relative error below 2e-13."}
+    # Where an author spoke, the author's exact rtol 0 governs outright, so even the 2e-13 miss is rejected.
     assert compare(Decimal("1.000000000004"), Decimal("1"), policy=policy)["status"] == status
-    assert compare(Decimal("1.0000000000002"), Decimal("1"), policy=policy)["status"] == "equal"
+    assert compare(Decimal("1.0000000000002"), Decimal("1"), policy=policy)["status"] == status
     assert compare(Decimal("1.000000000006"), Decimal("1"), policy=policy)["status"] == "mismatch"
 
 
@@ -841,9 +878,11 @@ def test_absolute_promise_floor_uses_leaf_margin_not_componentwise_maxima():
     expected = Decimal("1000000000000")
     assert compare(10**12 + 5, expected, policy=policy)["status"] == "equal"
     assert compare(Fraction(10**12 + 5) + Fraction(1, 10**13), expected, policy=policy)["status"] == "mismatch"
+    # An authored entry governs its leaf outright: its own 1e-28 relative margin (1e-16 here), neither the
+    # promise's 5e-13 nor the strict default's 5.
     policy["tolerances"] = [{"path": "", "rtol": "1e-28", "atol": "0"}]
-    assert compare(Fraction(expected) + Fraction(5, 10**13), expected, policy=policy)["status"] == "equal"
-    assert compare(Fraction(expected) + Fraction(6, 10**13), expected, policy=policy)["status"] == "mismatch"
+    assert compare(Fraction(expected) + Fraction(1, 10**16), expected, policy=policy)["status"] == "equal"
+    assert compare(Fraction(expected) + Fraction(5, 10**13), expected, policy=policy)["status"] == "mismatch"
 
 
 def test_looser_absolute_promise_does_not_also_add_the_default_relative_margin():
@@ -864,19 +903,21 @@ def test_emptied_promise_without_author_falls_to_the_strict_default():
     assert compare(Decimal("1e-3"), Decimal("0"), policy=policy)["status"] == "mismatch"
 
 
-def test_unknown_kind_honours_both_components_and_scale_guard_retains_relative():
-    policy = {"statement": "Accurate to within 2e-6.", "rtol": "0", "atol": "0"}
-    assert compare(Decimal("1.000004"), Decimal("1"), policy=policy)["status"] == "equal"
-    assert compare(Decimal("1.000004000000001"), Decimal("1"), policy=policy)["status"] == "mismatch"
-    expected = Fraction(1, 10**20)
-    boundary = expected * (1 + Fraction(2, 10**6))
-    assert compare(boundary, expected, policy=policy)["status"] == "equal"
-    assert compare(boundary + Fraction(1, 10**27), expected, policy=policy)["status"] == "mismatch"
+def test_unknown_kind_clause_is_refused_rather_than_honoured_as_both_components():
+    # A number under an accuracy keyword with no stated kind is refused (no_kind) instead of binding both
+    # components, so a silent leaf keeps the server default (rtol 1e-5, atol 1e-8) and an author still governs.
+    statement = "The result must have an error below 2e-6."
+    assert [clause["reason"] for clause in statement_promises(statement)["clauses"]] == ["no_kind"]
+    silent = {"statement": statement}
+    assert compare(Decimal("1.000006"), Decimal("1"), policy=silent)["status"] == "equal"
+    assert compare(Decimal("1.0000101"), Decimal("1"), policy=silent)["status"] == "mismatch"
+    authored = {**silent, "rtol": "0", "atol": "0"}
+    assert compare(Decimal("1.000004"), Decimal("1"), policy=authored)["status"] == "mismatch"
 
 
 @pytest.mark.parametrize("role, status", [("candidate", "mismatch"), ("reference", "invalid_reference")])
 def test_statement_mismatch_preserves_reference_preflight_classification(role, status):
-    policy = {"statement": "Report rate with relative error below 2e-8.", "rtol": "0.1"}
+    policy = {"statement": "Report rate with relative error below 2e-8."}
     result = compare({"rate": Decimal("1.000001")}, {"rate": Decimal("1")}, role=role, policy=policy)
     assert result["status"] == status
     assert result["side"] == role
@@ -963,7 +1004,8 @@ def test_quantity_metadata_is_not_a_statement_name_or_positional_path_alias():
         "statement": "Report pulse with relative error below 2e-8. Other outputs permit relative error below 4e-4.",
         "tolerances": [{"path": "/0", "quantity": "pulse", "rtol": "0"}],
     }
-    assert compare([Decimal("1.0002")], [Decimal("1")], policy=policy)["status"] == "equal"
+    # The entry at "/0" is authored, so its exact rtol governs that leaf whatever its quantity label says.
+    assert compare([Decimal("1.0002")], [Decimal("1")], policy=policy)["status"] == "mismatch"
     # "/pulse" addresses no leaf and "quantity" is not a path alias, so the entry is ignored and the
     # blanket 4e-4 promise still governs "/0".
     policy["tolerances"] = [{"path": "/pulse", "quantity": "pulse", "rtol": "0"}]
@@ -1101,7 +1143,7 @@ def test_named_statement_blanket_does_not_widen_an_authored_leaf():
     assert compare(off_z, expected, policy=tight_z)["status"] == "mismatch"
 
 
-# --- set-valued answers: unordered one-to-one matching (Gap 1) --------------------------------- #
+# --- set-valued answers: unordered one-to-one matching ------------------------------------------ #
 
 
 def test_a_set_matches_a_plain_list_expectation_unordered():
@@ -1199,14 +1241,16 @@ def test_unordered_matching_over_undecided_pairs_is_uncertain_not_a_guess(symbol
     assert result["path"] == ""
 
 
-# --- parity: reference_invalid regressions on the public-70 tasks --------------------------------- #
+# --- invalid_reference regressions: notations and tolerance shapes a reference value can carry -- #
 #
-# Each test feeds a stored public-70 expectation and an identical reference-shaped observation and
-# asserts equal. Public data only. No reference or candidate source is executed. The fixed code is noted per test.
+# Each test feeds a synthetic expectation and an identical reference-shaped observation and asserts equal, so a
+# notation or tolerance shape the comparator wrongly refused would surface as invalid_expected or
+# invalid_reference. No reference or candidate source is executed. The behaviour each test pins is noted in its
+# first comment.
 
 
 def test_unused_tolerance_path_is_ignored_not_a_defect(symbolic_runtime):
-    # Code 1: a tolerance entry whose path addresses no numeric or complex leaf is ignored, never a
+    # A tolerance entry whose path addresses no numeric or complex leaf is ignored, never a
     # defect. A missing path, a symbolic leaf, and a set container all have no numeric margin to set.
     assert compare(1, 1, policy={"tolerances": [{"path": "/missing", "rtol": "0"}]})["status"] == "equal"
     symbolic = {"tolerances": [{"path": "", "rtol": "1e-9", "atol": "0"}]}
@@ -1216,7 +1260,7 @@ def test_unused_tolerance_path_is_ignored_not_a_defect(symbolic_runtime):
 
 
 def test_consumed_tolerance_entry_still_governs_its_leaf():
-    # Code 1 must not throw the baby out: an entry whose path IS a numeric leaf still governs it.
+    # The rule above must not throw the baby out: an entry whose path IS a numeric leaf still governs it.
     strict = {"tolerances": [{"path": "", "rtol": "1e-9", "atol": "0"}]}
     assert compare(Decimal("1.0000000001"), Decimal("1"), policy=strict)["status"] == "equal"
     assert compare(Decimal("1.001"), Decimal("1"), policy=strict)["status"] == "mismatch"
@@ -1227,24 +1271,24 @@ def test_consumed_tolerance_entry_still_governs_its_leaf():
     assert off["status"] == "mismatch" and off["path"] == "/0"
 
 
-def test_public70_main_12_unused_tolerance_on_symbolic_leaf(symbolic_runtime):
-    # Code 1. A root tolerance entry on a symbolic root-of-unity answer is unused, not a defect.
+def test_invalid_reference_regression_unused_tolerance_on_a_root_of_unity_leaf(symbolic_runtime):
+    # A root tolerance entry on a symbolic root-of-unity answer is unused, not a defect.
     policy = {"tolerances": [{"path": "", "rtol": "1e-9", "atol": "0"}]}
-    value = SymbolicText("exp(-2*I*pi/5)")
+    value = SymbolicText("exp(2*I*pi/7)")
     assert compare(value, value, role="reference", policy=policy)["status"] == "equal"
 
 
-def test_public70_main_39_unused_tolerance_on_complex_symbolic_leaf(symbolic_runtime):
-    # Code 1. A root tolerance entry on a complex-valued symbolic answer is unused, not a defect.
+def test_invalid_reference_regression_unused_tolerance_on_a_complex_valued_symbolic_leaf(symbolic_runtime):
+    # A root tolerance entry on a complex-valued symbolic answer with decimal coefficients is unused, not a defect.
     policy = {"tolerances": [{"path": "", "rtol": "1e-9", "atol": "0"}]}
     value = SymbolicText(
-        "0.142857142857143*sqrt(2)*(0.00699999999999995 + 0.524*I)*(0.7 - 0.4*I)**2*exp((-0.7 - 0.4*I)*(0.7 - 0.4*I))"
+        "0.437290516873842*sqrt(3)*(0.0123456789012345 + 0.612*I)*(0.6 - 0.2*I)**2*exp((-0.6 - 0.2*I)*(0.6 - 0.2*I))"
     )
     assert compare(value, value, role="reference", policy=policy)["status"] == "equal"
 
 
-def test_public70_main_59_unused_tolerance_paths_on_symbolic_list_members(symbolic_runtime):
-    # Code 1. Per-member tolerance paths "/0/1" and "/1/1" name symbolic leaves. Both are ignored,
+def test_invalid_reference_regression_unused_tolerance_paths_on_symbolic_list_members(symbolic_runtime):
+    # Per-member tolerance paths "/0/1" and "/1/1" name symbolic leaves. Both are ignored,
     # while the integer members at "/0/0" and "/1/0" still compare exactly.
     policy = {
         "tolerances": [
@@ -1252,50 +1296,587 @@ def test_public70_main_59_unused_tolerance_paths_on_symbolic_list_members(symbol
             {"path": "/1/1", "rtol": "1e-9", "atol": "0"},
         ]
     }
-    value = [[11, SymbolicText("-0.0987591240875912*pi")], [9, SymbolicText("0.0808029197080292*pi")]]
+    value = [[7, SymbolicText("-0.0612345678901234*pi")], [3, SymbolicText("0.0456789012345678*pi")]]
     assert compare(value, value, role="reference", policy=policy)["status"] == "equal"
 
 
-def test_public70_main_24_piecewise_and_undefined_function_notation(symbolic_runtime):
-    # Code 2. Piecewise((value, condition), ...), Eq(a, b) and the boolean catch-all condition parse
+def test_invalid_reference_regression_piecewise_and_undefined_function_notation(symbolic_runtime):
+    # Piecewise((value, condition), ...), Eq(a, b) and the boolean catch-all condition parse
     # as undefined-function and boolean notation instead of raising symbolic_function.
     value = [
         SymbolicText(
-            "Piecewise((-2, Eq(y, 1/2)), ((3*y - 1)*atan(sqrt(1 - 2*y)/Abs(y))"
-            "/(sqrt(1 - 2*y)*(y - 1)), True)) - 1 + (y**2 + 1)*log(-(1 - y)/y)/(1 - y) - 1/(1 - y)"
+            "Piecewise((0, Eq(w, 0)), (sin(w)*atan(w/Abs(w - 1))/sqrt(1 + w**2), True))"
+            " + (w**3 - 2)*log(1 + w)/(1 + w)"
         ),
         SymbolicText(
-            "-y + Piecewise((-2, Eq(y, 1/2)), ((3*y - 1)*atan(sqrt(1 - 2*y)/Abs(y))"
-            "/(sqrt(1 - 2*y)*(y - 1)), True)) + 2 + (y**2 + 1)*(log(4*p_z**2*y*(1 - y)/mu**2)"
-            " - 1/epsilon_IR)/(1 - y) - 1/(1 - y)"
+            "-w + Piecewise((0, Eq(w, 0)), (sin(w)*atan(w/Abs(w - 1))/sqrt(1 + w**2), True)) + 5"
+            " + (w**3 - 2)*(log(3*k_z**2*w*(1 + w)/m_0**2) - 1/eps_UV)/(1 + w)"
         ),
     ]
     assert compare(value, value, role="reference")["status"] == "equal"
 
 
-def test_public70_main_65_undefined_trace_function(symbolic_runtime):
-    # Code 2. 'tr(psi)' is an undefined function application, built as sympy.Function('tr').
-    value = [SymbolicText("tr(psi)"), SymbolicText("tr(psi**3)")]
+def test_invalid_reference_regression_undefined_function_application(symbolic_runtime):
+    # 'moment(rho)' is an undefined function application, built as sympy.Function('moment').
+    value = [SymbolicText("moment(rho)"), SymbolicText("moment(rho**3)")]
     assert compare(value, value, role="reference")["status"] == "equal"
 
 
-def test_public70_main_62_interval_constructor_notation(symbolic_runtime):
-    # Code 3. The member-access operator "." parses for the Interval.open(...) set constructor. The
+def test_invalid_reference_regression_interval_constructor_notation(symbolic_runtime):
+    # The member-access operator "." parses for the Interval.open(...) set constructor. The
     # numeric siblings resolve under the ignored root tolerance entry.
     policy = {"tolerances": [{"path": "", "rtol": "1e-9", "atol": "0"}]}
-    case0 = [0.228290381792673, SymbolicText("Interval.open(0, pi/2)"), 1.06089029087253]
+    case0 = [0.317254961830921, SymbolicText("Interval.open(0, pi/3)"), 1.30571382164927]
     assert compare(case0, case0, role="reference", policy=policy)["status"] == "equal"
-    case1 = [0.621454279011698, SymbolicText("Interval.open(0, 1.04719755119660)"), 0.724450598842256]
+    case1 = [0.682041925301384, SymbolicText("Interval.open(0, 0.785398163397448)"), 0.591738062153084]
     assert compare(case1, case1, role="reference", policy=policy)["status"] == "equal"
 
 
-def test_public70_main_49_float_bearing_expression_past_growth_bound(symbolic_runtime):
-    # Code 4. A float-bearing constant expression whose simplify explodes past the growth bound is
-    # kept comparable (parse falls back to the bounded raw expression) instead of raising
-    # symbolic_growth_limit. The unused root tolerance entry is ignored.
+def test_invalid_reference_regression_float_bearing_expression_past_growth_bound(symbolic_runtime, monkeypatch):
+    # A float-bearing constant expression whose simplify explodes past the growth bound is kept comparable (parse
+    # falls back to the bounded raw expression) instead of raising symbolic_growth_limit. The unused root tolerance
+    # entry is ignored. Simplify is forced past the node bound here, so the fallback runs whatever SymPy would do.
+    exploded = symbolic_runtime.sp.Add(*symbolic_runtime.sp.symbols(f"s0:{symbolic_runtime.MAX_RESULT_NODES + 1}"))
+    monkeypatch.setattr(symbolic_runtime.sp, "simplify", lambda expression, *args, **kwargs: exploded)
     policy = {"tolerances": [{"path": "", "rtol": "1e-9", "atol": "0"}]}
     value = SymbolicText(
-        "-2500*log(625)/log(2) + (4 + log(625)/log(2))*log(exp(2)/(4*pi))/(8*log(2))"
-        " + (4 + log(625)/log(2))**2/16 + 2500*log(E*pi)/log(2) + 24990000.0"
+        "-1800*log(81)/log(3) + (2 + log(81)/log(3))*log(exp(3)/(2*pi))/(6*log(3)) + 1500*log(E*pi)/log(3) + 1250000.0"
     )
     assert compare(value, value, role="reference", policy=policy)["status"] == "equal"
+
+
+# --- regressions: authored tolerances, prose claims, legacy text ---------------------------------- #
+
+
+def test_incidental_percentage_does_not_widen_an_authored_tolerance():
+    statement = (
+        "The trap frequency is stable to within 2% during the measurement. "
+        "Report the ground-state energy with relative error below 1e-6."
+    )
+    policy = {"rtol": "1e-9", "atol": "0", "statement": statement}
+    assert compare(Decimal("1.015"), Decimal("1"), policy=policy)["status"] == "mismatch"
+    promises = statement_promises(statement)
+    by_text = {clause["text"]: clause for clause in promises["clauses"]}
+    assert by_text["2%"]["honoured"] is False and by_text["2%"]["reason"] == "no_accuracy_keyword"
+    assert promises["blanket"] == (Fraction(1, 10**6), "rel")
+
+
+@pytest.mark.parametrize("per_leaf", [False, True])
+def test_authored_tolerances_beat_statement_promises(per_leaf):
+    def policy_for(author_rtol):
+        authored = {"rtol": author_rtol, "atol": "0"}
+        policy = {"tolerances": [{"path": "", **authored}]} if per_leaf else dict(authored)
+        policy["statement"] = "Return output with relative error below 2e-6."
+        return policy
+
+    assert (
+        compare(Decimal("100.00015"), Decimal("100"), policy=policy_for("1e-9"))["status"] == "mismatch"
+    )  # author tighter
+    assert compare(Decimal("100.05"), Decimal("100"), policy=policy_for("1e-3"))["status"] == "equal"  # author looser
+
+
+def test_accuracy_clauses_still_honoured_after_narrowing():
+    assert (
+        compare(
+            Decimal("1.00049"), Decimal("1"), policy={"statement": "Values are compared to three decimal places."}
+        )["status"]
+        == "equal"
+    )
+    rel = {"statement": "Report the result with relative error below 2e-6."}
+    assert compare(Decimal("1.0000015"), Decimal("1"), policy=rel)["status"] == "equal"
+    assert compare(Decimal("1.000003"), Decimal("1"), policy=rel)["status"] == "mismatch"
+    assert (
+        compare(Decimal("1.004"), Decimal("1"), policy={"statement": "Answers are correct to 3 significant figures."})[
+            "status"
+        ]
+        == "equal"
+    )
+    bare = statement_promises("The result must have an error below 1e-6.")
+    assert bare["blanket"] is None and [clause["reason"] for clause in bare["clauses"]] == ["no_kind"]
+    within = statement_promises("Agree to within 1e-3 of the reference.")
+    assert within["blanket"] is None and within["clauses"][0]["reason"] == "no_accuracy_keyword"
+
+
+def test_typed_symbolic_observation_against_legacy_text_expectation(symbolic_runtime):
+    assert compare(SymbolicText("-x"), LegacyText("-x"), role="reference")["status"] == "equal"
+    assert compare(SymbolicText("x - 1"), LegacyText("x-1"))["status"] == "equal"
+    assert compare(SymbolicText("y"), LegacyText("x"))["status"] == "mismatch"
+    assert compare("x-1", LegacyText("x-1"))["status"] == "equal"  # text against text stays categorical
+    assert compare("upper-band+0", LegacyText("upper-band"))["status"] == "mismatch"
+
+
+@pytest.mark.parametrize(
+    "statement, value, kind",
+    [
+        # "Accurate to within 0.02%." is covered in test_statement_extraction_uses_exact_bounded_patterns.
+        ("Relative error within 1e-6.", Fraction(1, 10**6), "rel"),
+        ("Accuracy within 0.5%.", Fraction(5, 10**3), "rel"),
+        ("Report the energy to within 1e-6 relative error.", Fraction(1, 10**6), "rel"),
+        ("Absolute error within 2e-6.", Fraction(2, 10**6), "abs"),
+    ],
+)
+def test_within_borrows_the_claim_and_kind_of_an_accuracy_keyword_in_its_sentence(statement, value, kind):
+    promises = statement_promises(statement)
+    assert [(clause["value"], clause["kind"], clause["reason"]) for clause in promises["clauses"]] == [
+        (value, kind, "")
+    ]
+    assert promises["blanket"] == (value, kind)
+
+
+def test_within_takes_the_kind_of_its_nearest_lender_when_a_sentence_carries_both_kinds():
+    promises = statement_promises("Relative error within 1e-6 and absolute error below 1e-9.")
+    assert [(clause["value"], clause["kind"], clause["honoured"]) for clause in promises["clauses"]] == [
+        (Fraction(1, 10**6), "rel", True),
+        (Fraction(1, 10**9), "abs", True),
+    ]
+
+
+@pytest.mark.parametrize(
+    "statement", ["The trap frequency is stable to within 1e-6 over the run.", "Give the answer to within 1%."]
+)
+def test_bare_within_without_an_accuracy_keyword_in_its_sentence_stays_refused(statement):
+    promises = statement_promises(statement)
+    assert promises["blanket"] is None
+    assert [clause["reason"] for clause in promises["clauses"]] == ["no_accuracy_keyword"]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        # The only accuracy keyword already claims its own number, so it lends nothing to "within".
+        "The trap is stable to within 2% and the energy has relative error below 1e-6.",
+        # A keyword's window stops at its sentence break, so the 2% in the next sentence is never pulled in.
+        "Report the energy with relative error below 1e-6. The trap frequency drifts by 2% during the measurement.",
+    ],
+)
+def test_an_incidental_percentage_beside_a_claimed_accuracy_keyword_is_not_a_promise(statement):
+    promises = statement_promises(statement)
+    assert promises["blanket"] == (Fraction(1, 10**6), "rel")
+    assert not any(clause["honoured"] and clause["value"] == Fraction(1, 50) for clause in promises["clauses"])
+
+
+def test_an_error_or_failure_rate_is_a_measured_quantity_not_a_tolerance():
+    for statement in (
+        "Consider a surface code with physical error rate 0.1%. Compute the logical error rate at distance 5.",
+        "Each gate fails with error probability 2e-3 per cycle.",
+        "The detector failure rate is 0.5% per hour.",
+    ):
+        promises = statement_promises(statement)
+        assert promises["blanket"] is None, statement
+        assert [clause["reason"] for clause in promises["clauses"]] == ["no_accuracy_keyword"], statement
+    # An "error" that states a tolerance keeps its meaning.
+    assert statement_promises("Report the energy with relative error 1e-6.")["blanket"] == (Fraction(1, 10**6), "rel")
+    bare = statement_promises("The result must have an error below 1e-6.")
+    assert [clause["reason"] for clause in bare["clauses"]] == ["no_kind"]
+
+
+@pytest.mark.parametrize(
+    "statement, value",
+    [("Tolerance: within 1%.", Fraction(1, 100)), ("Relative error: within 1e-6.", Fraction(1, 10**6))],
+)
+def test_a_colon_right_after_an_accuracy_keyword_does_not_block_borrowing(statement, value):
+    promises = statement_promises(statement)
+    assert [(clause["value"], clause["kind"], clause["reason"]) for clause in promises["clauses"]] == [
+        (value, "rel", "")
+    ]
+
+
+def test_a_sentence_break_still_blocks_borrowing():
+    promises = statement_promises("Relative error below 1e-6. Within 2%.")
+    assert promises["blanket"] == (Fraction(1, 10**6), "rel")
+    assert [(clause["value"], clause["reason"]) for clause in promises["clauses"]] == [
+        (Fraction(1, 10**6), ""),
+        (Fraction(1, 50), "no_accuracy_keyword"),
+    ]
+
+
+def test_a_borrowed_kind_is_a_whole_word_inside_the_lenders_window():
+    # "relativistic" is not the word "relative", so the lender states no kind and the bare number is refused.
+    relativistic = "Use the relativistic dispersion relation and give energies accurate to within 1e-6."
+    assert [clause["reason"] for clause in statement_promises(relativistic)["clauses"]] == ["no_kind"]
+    # A "relative" far before the lender, outside the lender's own window, states nothing about it either.
+    far = (
+        "Relative motion of the probe frame is included, "
+        + "and the setup continues at length, " * 4
+        + "giving energies accurate to within 1e-6."
+    )
+    assert [clause["reason"] for clause in statement_promises(far)["clauses"]] == ["no_kind"]
+
+
+# Statements are wrapped Markdown, so a single newline inside a sentence is a soft line wrap, never a sentence break:
+# wrapping a statement must not change what it promises. Each test sets a wrapped statement beside the same words on
+# one line, and a line break that is not a soft wrap beside the words joined, to show the break still separates them.
+def test_a_soft_line_wrap_between_a_count_and_its_keyword_does_not_change_the_promise():
+    wrapped = statement_promises("Return the ratio to 6\nsignificant figures.")
+    unwrapped = statement_promises("Return the ratio to 6 significant figures.")
+    assert clause_shapes(wrapped) == [(Fraction(5, 10**6), "rel", True)]
+    assert clause_shapes(wrapped) == clause_shapes(unwrapped)
+    assert wrapped["blanket"] == unwrapped["blanket"] == (Fraction(5, 10**6), "rel")
+    assert wrapped["named"] == unwrapped["named"] == {}
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "Results are graded to a relative tolerance of\n1e-8.",
+        "Results are graded to a relative tolerance of\n$1e-8$.",
+        "Results are graded to a relative tolerance of\n\\(1e-8\\).",
+        "Results are graded to a relative tolerance of\n(1e-8).",
+        # The wrap may also fall between the kind word and the keyword.
+        "Results are graded to a relative\ntolerance of 1e-8.",
+    ],
+)
+def test_a_soft_line_wrap_inside_a_scaled_promise_keeps_its_value_and_kind(statement):
+    promises = statement_promises(statement)
+    assert clause_shapes(promises) == [(Fraction(1, 10**8), "rel", True)]
+    assert promises["blanket"] == (Fraction(1, 10**8), "rel")
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "Return the ratio to 6  \nsignificant figures.",
+        "Return the ratio to 6\t\nsignificant figures.",
+        "Return the ratio to 6\n    significant figures.",
+        "Return the ratio to 6\n\tsignificant figures.",
+        "Return the ratio to 6 \t \n \t significant figures.",
+        "Return the ratio to 6\xa0\nsignificant figures.",
+        "Return the ratio to 6\n\xa0significant figures.",
+    ],
+)
+def test_blanks_around_a_soft_line_wrap_do_not_make_it_a_break(statement):
+    promises = statement_promises(statement)
+    assert clause_shapes(promises) == [(Fraction(5, 10**6), "rel", True)]
+    assert promises["blanket"] == (Fraction(5, 10**6), "rel")
+
+
+@pytest.mark.parametrize(
+    "statement, value",
+    [
+        ("relative tolerance of\n1.5e-6.", Fraction(15, 10**7)),
+        ("Results are graded to a relative tolerance of\n2.5 x 10^-6.", Fraction(25, 10**7)),
+        ("Results are graded to a relative tolerance of\n0.5%.", Fraction(5, 10**3)),
+        ("Report the energy with relative error within\n0.5%.", Fraction(5, 10**3)),
+        ("Report the energy to within\n0.5% relative error.", Fraction(5, 10**3)),
+    ],
+)
+def test_a_wrapped_line_that_starts_with_a_decimal_number_is_a_continuation_not_a_list_item(statement, value):
+    # A list marker is digits, then "." or ")", then a blank: "0.5%" and "1.5e-6" are numbers, so the wrap holds.
+    wrapped = statement_promises(statement)
+    unwrapped = statement_promises(statement.replace("\n", " "))
+    assert clause_shapes(wrapped) == [(value, "rel", True)]
+    assert clause_shapes(wrapped) == clause_shapes(unwrapped)
+    assert wrapped["blanket"] == unwrapped["blanket"] == (value, "rel")
+
+
+@pytest.mark.parametrize(
+    "statement, expected",
+    [
+        ("Return the ratio to 6\nsignificant figures.", [(Fraction(5, 10**6), "rel", True)]),
+        ("Return the ratio to 6  \nsignificant figures.", [(Fraction(5, 10**6), "rel", True)]),
+        ("Results are graded to a relative tolerance of\n1e-8.", [(Fraction(1, 10**8), "rel", True)]),
+        ("Results are graded to a relative tolerance of\n0.5%.", [(Fraction(5, 10**3), "rel", True)]),
+        # "error" and "rate" meet across the wrap: a measured rate, so refused and never a promise.
+        ("The physical error\nrate is 0.1%.", [(Fraction(1, 10**3), "rel", False)]),
+        # "correct to" meets across the wrap and borrows the claim of the "error" that owns no number.
+        ("Give the energy with relative error, correct\nto 0.5%.", [(Fraction(5, 10**3), "rel", True)]),
+    ],
+)
+def test_a_crlf_wrap_reads_like_its_lf_twin(statement, expected):
+    assert clause_shapes(statement_promises(statement)) == expected
+    assert clause_shapes(statement_promises(statement.replace("\n", "\r\n"))) == expected
+
+
+@pytest.mark.parametrize("lead", ["# ", "## ", "  ### ", "| "])
+def test_a_heading_or_a_table_row_never_joins_the_next_line(lead):
+    statement = f"{lead}Part 6\nsignificant figures are required."
+    # The 6 belongs to the heading or the row, so it is no count of the keyword on the next line ...
+    assert statement_promises(statement) == NO_PROMISE
+    # ... where the same two lines without the mark are one sentence.
+    joined = statement_promises(statement.removeprefix(lead))
+    assert clause_shapes(joined) == [(Fraction(5, 10**6), "rel", True)]
+
+
+def test_a_part_label_or_a_closing_question_stops_a_kind_word_reaching_the_next_part():
+    # Part (a) ends in a question mark, so the "absolute" of part (b) is another sentence and part (a) stays relative.
+    question = statement_promises(
+        "(a) State the energy to a relative accuracy of 1e-4?\n(b) State the length in absolute units, scaled by 1e-6."
+    )
+    assert [(clause["value"], clause["kind"], clause["reason"]) for clause in question["clauses"]] == [
+        (Fraction(1, 10**4), "rel", "")
+    ]
+    # Part (2) opens with a list marker and states no kind of its own: its number is refused, not given the "absolute"
+    # of part (1).
+    ratio = statement_promises(
+        "(1) Give the offset with absolute error below 1e-6\n(2) Give the ratio with error below 1e-3"
+    )
+    assert [(clause["value"], clause["kind"], clause["reason"]) for clause in ratio["clauses"]] == [
+        (Fraction(1, 10**6), "abs", ""),
+        (Fraction(1, 10**3), "unknown", "no_kind"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "statement, expected",
+    [
+        # An indent from a list item's continuation line, a trailing blank, and a double space on one line.
+        ("- Return the ratio to 6 significant\n  figures.", [(Fraction(5, 10**6), "rel", True)]),
+        ("Report the answer to 3 decimal \nplaces.", [(Fraction(5, 10**4), "abs", True)]),
+        ("Report the answer to 3 decimal  places.", [(Fraction(5, 10**4), "abs", True)]),
+        # "agree to" borrows the claim of the accuracy keyword that owns no number, however it is split.
+        ("Give the energy with relative error, agreeing\n  to 1e-6.", [(Fraction(1, 10**6), "rel", True)]),
+    ],
+)
+def test_the_words_of_a_keyword_may_be_separated_by_any_blanks(statement, expected):
+    assert clause_shapes(statement_promises(statement)) == expected
+
+
+@pytest.mark.parametrize("wrap", ["\n", "\r\n", "\n  ", " \n"])
+def test_a_borrower_split_by_a_wrap_is_refused_like_its_one_line_twin(wrap):
+    # "error" owns its own number, so "correct to" has no accuracy keyword to borrow from and its 0.5% stays refused.
+    promises = statement_promises(f"The result must have a relative error below 1e-6 and be correct{wrap}to 0.5%.")
+    assert [(clause["value"], clause["kind"], clause["reason"]) for clause in promises["clauses"]] == [
+        (Fraction(1, 10**6), "rel", ""),
+        (Fraction(5, 10**3), "rel", "no_accuracy_keyword"),
+    ]
+    assert promises["blanket"] == (Fraction(1, 10**6), "rel")
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_a_bare_part_label_ends_a_wrapped_line_whatever_the_line_endings(newline):
+    statement = newline.join(
+        [
+            "Answer the following",
+            "(a)",
+            "the energy, with relative error below 1e-4",
+            "(b)",
+            "the length, with absolute error below 1e-6",
+        ]
+    )
+    # A label alone on its line is a list marker, so it starts its part; the "absolute" of (b) stays out of part (a).
+    promises = statement_promises(statement)
+    assert [(clause["value"], clause["kind"], clause["reason"]) for clause in promises["clauses"]] == [
+        (Fraction(1, 10**4), "rel", ""),
+        (Fraction(1, 10**6), "abs", ""),
+    ]
+
+
+@pytest.mark.parametrize("blank", [" ", "\t", "\xa0", "\N{EM SPACE}"])
+def test_a_colon_ending_a_line_is_a_break_whatever_whitespace_follows_it(blank):
+    # The colon ends the line however it is padded, so the 1% is not read as the value the colon introduces.
+    assert statement_promises(f"Tolerance:{blank}\n1%") == NO_PROMISE
+
+
+def test_a_blank_line_stays_a_sentence_break():
+    statement = "The value is 6\n\nsignificant deviations are rejected with 1% error."
+    promises = statement_promises(statement)
+    # The second paragraph keeps its own percentage, and the 6 before the blank line is no count.
+    assert [(clause["text"], clause["at"]) for clause in promises["clauses"]] == [("1%", statement.index("1%"))]
+    assert clause_shapes(promises) == [(Fraction(1, 100), "rel", True)]
+    # Only a soft wrap joins two lines. Split by a blank line, with blanks on it or with CRLF endings, a count and its
+    # keyword never meet, while on one line they are a promise.
+    assert statement_promises("Return the ratio to 6\n\nsignificant figures.") == NO_PROMISE
+    assert statement_promises("Return the ratio to 6\n \nsignificant figures.") == NO_PROMISE
+    assert statement_promises("Return the ratio to 6\r\n\r\nsignificant figures.") == NO_PROMISE
+    one_line = statement_promises("Return the ratio to 6 significant figures.")
+    assert clause_shapes(one_line) == [(Fraction(5, 10**6), "rel", True)]
+
+
+def test_a_markdown_item_after_a_line_break_is_read_as_after_a_blank_line():
+    # The count and its keyword both sit inside the item, so it reads the same however the break before it is made.
+    item = statement_promises("compute to\n- 6 significant figures")
+    after_blank = statement_promises("compute to\n\n- 6 significant figures")
+    assert clause_shapes(item) == clause_shapes(after_blank) == [(Fraction(5, 10**6), "rel", True)]
+    assert item["blanket"] == after_blank["blanket"] == (Fraction(5, 10**6), "rel")
+    # A numbered item starts its own sentence: no clause comes from it.
+    assert statement_promises("accuracy of\n1. one part") == NO_PROMISE
+
+
+@pytest.mark.parametrize(
+    "item",
+    ["# 1e-6", "- 1e-6", "* 1e-6", "+ 1e-6", "| 1e-6 |", "> 1e-6", "`1e-6`", "$$1e-6$$", "1) 1e-6", "12) 1e-6"],
+)
+def test_a_line_that_starts_a_markdown_block_stays_a_sentence_break(item):
+    statement = f"Give the relative error\n{item}"
+    # The keyword's window ends at the break, so the number on the next line is nobody's promise ...
+    assert statement_promises(statement) == NO_PROMISE
+    # ... where the same two lines joined into one sentence would promise it.
+    joined = statement_promises(statement.replace("\n", " "))
+    assert clause_shapes(joined) == [(Fraction(1, 10**6), "rel", True)]
+
+
+def test_a_line_ending_in_a_colon_stays_a_break_and_colon_lending_is_unchanged():
+    # On one line, a colon right after an accuracy keyword introduces its value.
+    assert clause_shapes(statement_promises("Tolerance: 1%")) == [(Fraction(1, 100), "rel", True)]
+    # Ending the line, it does not: the next line starts a new sentence, as it did before soft wraps were read.
+    assert statement_promises("Tolerance:\n1%") == NO_PROMISE
+    # A blank after the colon changes nothing, and a line ending in a period or semicolon is a break as ever.
+    for ending in (": ", ".", ";"):
+        assert statement_promises(f"Tolerance{ending}\n1%") == NO_PROMISE
+
+
+@pytest.mark.parametrize(
+    "statement, clauses",
+    [
+        ("Return the ratio to 6\nsignificant figures.", 1),
+        ("Results are graded to a relative tolerance of\n1e-8.", 1),
+        ("Return the ratio to 6  \nsignificant figures.", 1),
+        ("Relative error below\n2e−6.", 1),
+        ("Results are graded to a relative tolerance of\n0.5%.", 1),
+        ("Return the ratio to 6\r\nsignificant figures.", 1),
+        ("Return the ratio to 6\r\n\r\nsignificant figures.", 0),
+        ("The value is 6\n\nsignificant deviations are rejected with 1% error.", 1),
+        ("compute to\n- 6 significant figures", 1),
+        ("compute to\n\n- 6 significant figures", 1),
+        ("accuracy of\n1. one part", 0),
+        ("Tolerance:\n1%", 0),
+        ("The grid holds 6\nSignificant figures matter.", 0),
+    ],
+)
+def test_reading_soft_wraps_keeps_the_text_length_and_every_clause_offset(statement, clauses):
+    assert len(comparator._normalized(statement)) == len(statement)
+    found = statement_promises(statement)["clauses"]
+    assert len(found) == clauses
+    for clause in found:
+        at, text = clause["at"], clause["text"]
+        # `at` is an offset into the statement as written, at the clause's first character.
+        assert statement[at] == text[0]
+        assert statement[at : at + len(text)].replace("\n", " ").replace("−", "-") == text
+
+
+def test_a_capitalised_continuation_stays_a_sentence_break():
+    # A line that starts with a capital begins a sentence, so the 6 before it is no count of the keyword after it ...
+    assert statement_promises("The grid holds 6\nSignificant figures matter.") == NO_PROMISE
+    # ... where the same words on one line are a promise.
+    one_line = statement_promises("The grid holds 6 Significant figures matter.")
+    assert clause_shapes(one_line) == [(Fraction(5, 10**6), "rel", True)]
+
+
+@pytest.mark.parametrize(
+    "wrapped, within, beyond",
+    [
+        ("Return the ratio to 6\nsignificant figures.", "1.000004", "1.000009"),
+        ("Results are graded to a relative tolerance of\n1e-8.", "1.000000005", "1.00000002"),
+        ("Results are graded to a relative tolerance of\n0.5%.", "1.004", "1.006"),
+        ("Return the ratio to 6\r\nsignificant figures.", "1.000004", "1.000009"),
+    ],
+)
+def test_a_soft_wrapped_statement_grades_like_the_same_statement_on_one_line(wrapped, within, beyond):
+    # Each pair is chosen so that the silent default (rtol 1e-5) would get one of the values wrong: only the
+    # statement's own promise answers equal for `within` and mismatch for `beyond`.
+    for statement in (wrapped, wrapped.replace("\n", " ")):
+        policy = {"statement": statement}
+        assert compare(Decimal(within), Decimal("1"), policy=policy)["status"] == "equal"
+        assert compare(Decimal(beyond), Decimal("1"), policy=policy)["status"] == "mismatch"
+
+
+@pytest.mark.parametrize(
+    "statement, expected",
+    [
+        ("to 6\nsignificant", "to 6 significant"),
+        ("to 6  \nsignificant", "to 6   significant"),
+        ("to 6\t\n\tsignificant", "to 6\t \tsignificant"),
+        ("to\n$x$", "to $x$"),
+        ("to\n\\(x\\)", "to \\(x\\)"),
+        ("to\n(x)", "to (x)"),
+        ("to\n6 places", "to 6 places"),
+        ("to\n15% more", "to 15% more"),
+        ("to\n1e-8", "to 1e-8"),
+        ("a\nb\nc", "a b c"),
+        ("to\n0.5% more", "to 0.5% more"),
+        ("to\n1.5e-6", "to 1.5e-6"),
+        ("to\n2.5 x 10^-6", "to 2.5 x 10^-6"),
+        ("to\n10.5%", "to 10.5%"),
+        ("to 6\r\nsignificant", "to 6\r significant"),
+        ("to 6 \r\nsignificant", "to 6 \r significant"),
+        ("to\n(1e-8)", "to (1e-8)"),
+        ("to\n(abcde) items", "to (abcde) items"),
+        ("to\ni.e. items", "to i.e. items"),
+        ("to\ne.g. items", "to e.g. items"),
+        (
+            "to 6\nsignificant figures.\nAnother sentence\nof words\n\nnew paragraph\n- item\ncontinued",
+            "to 6 significant figures.\nAnother sentence of words\n\nnew paragraph\n- item continued",
+        ),
+        ("to\n(a)\nitems", "to\n(a) items"),
+        ("to\niv)\nitems", "to\niv) items"),
+        ("to\n12)\nitems", "to\n12) items"),
+        ("to\r\n(a)\r\nitems", "to\r\n(a)\r items"),
+        ("to 6\xa0\nsignificant", "to 6\xa0 significant"),
+        ("to 6\n\xa0significant", "to 6 \xa0significant"),
+    ],
+)
+def test_normalization_turns_each_soft_line_wrap_into_a_space(statement, expected):
+    assert comparator._normalized(statement) == expected
+    assert len(comparator._normalized(statement)) == len(statement)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "to 6\n\nsignificant",
+        "to 6\n \nsignificant",
+        "to 6.\nsignificant",
+        "to 6;\nsignificant",
+        "to 6:\nsignificant",
+        "to 6: \nsignificant",
+        "to 6\nSignificant",
+        'to 6\n"significant"',
+        "to 6\n1. significant",
+        "to 6\n1) significant",
+        "to 6\n12. significant",
+        "to 6\n12) significant",
+        "\nsignificant",
+        "to 6\n",
+        "to\n12) items",
+        "accuracy of\n1. one part",
+        "to\n6.",
+        "to\n6)",
+        "to 6\nécart",
+        "to 6\r\n\r\nsignificant",
+        "to 6.\r\nsignificant",
+        "to 6:\r\nsignificant",
+        "to 6?\nsignificant",
+        "to 6!\nsignificant",
+        "to 6? \nsignificant",
+        "to 6!\r\nsignificant",
+        "to\n(a) items",
+        "to\n(iv) items",
+        "to\n(12) items",
+        "to\n(abcd) items",
+        "to\n(x) items",
+        "to\na) items",
+        "to\nb. items",
+        "to\niv) items",
+        "to\nii. items",
+        "to\nx) items",
+        "to\nv. items",
+        "to\nviii) items",
+        "## Part 6\nsignificant",
+        "# Part 6\nsignificant",
+        "  ### Part 6\nsignificant",
+        "| quantity | 6 |\nsignificant",
+        "~~~ 6\nsignificant",
+        "to\nb.\nitems",
+        "to\n1.\nitems",
+        "to\n(a)\n\nitems",
+        "to\r\n(a)\r\n\r\nitems",
+        "to 6:\xa0\nsignificant",
+        "to 6\xa0\n\xa0\nsignificant",
+    ],
+)
+def test_normalization_keeps_every_other_line_break(statement):
+    assert comparator._normalized(statement) == statement
+
+
+def test_a_fenced_block_is_blanked_before_wraps_are_read():
+    # The blanked fence leaves a blank line between the two lines, so neither newline is a soft wrap.
+    statement = "to 6\n```\nx\n```\nsignificant"
+    assert comparator._normalized(statement) == "to 6\n" + " " * 9 + "\nsignificant"
+
+
+def test_typed_string_expectation_is_never_compared_symbolically(symbolic_runtime):
+    # Authored typing wins: a typed "str" expectation is a string, so a symbolic observation of the same text is a
+    # categorical mismatch, while the same text stored as legacy text is re-read in the grammar.
+    typed = compare(SymbolicText("x - 1"), "x-1")
+    assert (typed["status"], typed["code"]) == ("mismatch", "categorical_comparison")
+    assert compare(SymbolicText("x - 1"), LegacyText("x-1"))["status"] == "equal"

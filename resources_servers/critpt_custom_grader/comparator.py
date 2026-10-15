@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Protected, single-case comparison API. Run only in an independent Daytona sandbox.
+"""Protected, single-case comparison API. In grading it runs only in the comparator's own sandbox, created
+through Gym's sandbox API by whichever provider the server is configured with.
 
 Roles, expectations, policy, and outcome kinds MUST be assembled by trusted orchestration, never merged
 from a returned candidate dict. Exception kinds attest an actual call outcome, not stdout or returned text.
@@ -67,6 +68,12 @@ _ENCODING_ERRORS = {
 @dataclass(frozen=True)
 class _Expression:
     value: Any
+
+
+class _LegacyString(str):
+    """A legacy text expectation kept as text. It compares as a string, except that a typed symbolic observation
+    re-reads it in the bounded grammar and compares symbolically. A typed "str" expectation stays a plain str and is
+    always a string comparison."""
 
 
 def _result(status: str, side: str, code: str, path: str = "") -> dict:
@@ -225,7 +232,10 @@ def _prepare(value: Any, *, expected: bool, path: str = "") -> Any:
         if _categorical_reference_form(value.text):
             # An equation or assignment kept as a categorical string, graded by exact equality.
             return value.text
-        return _parse(value.text, path) if _expression_shaped(value.text) else value.text
+        if _expression_shaped(value.text):
+            return _parse(value.text, path)
+        # An expectation keeps its legacy origin, so a symbolic observation can re-read it but never a typed "str".
+        return _LegacyString(value.text) if expected else value.text
     if kind is SymbolicText:
         if expected and _infinity_atom(value.text):
             raise RepresentationError("nonfinite_expected", path)
@@ -272,15 +282,35 @@ def _leaves(value: Any, path: str = ""):
 
 # --- statement policy: bounded extraction, run only inside the comparator ------------------------ #
 #
-# A clause is recognized only by these fixed patterns near accuracy vocabulary, never by reading prose.
-# Everything else stays unrecognized and visible through statement_promises() rather than guessed at.
+# A clause is recognized only by these fixed patterns near accuracy vocabulary, never by reading prose, and every
+# keyword and kind word matches whole words only. A number is honoured only under an accuracy keyword with a stated
+# kind: a scientific or power-of-ten number takes its kind from the word "absolute" or "relative" in its keyword's
+# window and a percentage is relative, while a significant-figure or decimal-place count names its own accuracy and
+# kind. No claim reaches across a sentence break. A refused number stays visible with its reason. Everything else
+# stays unrecognized and visible through statement_promises() rather than guessed at.
+# The words of a keyword are separated by blanks, however many: a joined line wrap leaves its own space and may leave
+# an indent, a trailing blank or a carriage return beside it.
+_WORD_GAP = r"[ \t\r]+"
 _PROMISE_KEYWORD = re.compile(
-    r"(error|accura\w+|toleran\w+|precision|within|correct to|agree\w* to|decimal places|"
-    r"significant (?:decimal )?(?:fig|digit)\w*)",
+    r"\b((?:errors?|failure)[ \t\r-]+(?:rates?|probabilit(?:y|ies))|errors?|accura\w+|toleran\w+|precision|within|"
+    rf"correct{_WORD_GAP}to|agree\w*{_WORD_GAP}to|decimal{_WORD_GAP}places|"
+    rf"significant{_WORD_GAP}(?:decimal{_WORD_GAP})?(?:fig|digit)\w*)\b",
     re.IGNORECASE,
 )
-_ABSOLUTE = re.compile("absolut", re.IGNORECASE)
-_RELATIVE = re.compile("relativ", re.IGNORECASE)
+# Keywords that make the numbers they own accuracy claims. An error or failure rate or probability is a measured
+# quantity, not a tolerance: it owns the numbers next to it but claims nothing, so a "physical error rate 0.1%"
+# is never a promise.
+_ACCURACY_KEYWORD = re.compile(
+    rf"(errors?|accura\w+|toleran\w+|precision|decimal{_WORD_GAP}places|"
+    rf"significant{_WORD_GAP}(?:decimal{_WORD_GAP})?(?:fig|digit)\w*)\Z",
+    re.IGNORECASE,
+)
+# "within", "correct to" and "agree to" open a window but claim nothing themselves, since an incidental "stable to
+# within 2%" is physics. They borrow the claim of an accuracy keyword in their sentence that claims no number of its
+# own ("relative error within 1e-6"); without one their numbers stay refused.
+_BORROWING_KEYWORD = re.compile(rf"(within|correct{_WORD_GAP}to|agree\w*{_WORD_GAP}to)\Z", re.IGNORECASE)
+_ABSOLUTE = re.compile(r"\babsolute\b", re.IGNORECASE)
+_RELATIVE = re.compile(r"\brelative\b", re.IGNORECASE)
 _NUMBER_WORD = r"\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
 _WORD_NUMBERS = {
     "one": 1,
@@ -338,66 +368,236 @@ def _count_value(token: str, extra_places: int) -> Fraction | None:
     return None if count > MAX_DECIMAL_EXPONENT else Fraction(5, 10**count)
 
 
+def _span_gap(first: tuple[int, int], second: tuple[int, int]) -> int:
+    """Characters between two (start, end) spans, 0 when they touch or overlap."""
+    return max(first[0] - second[1], second[0] - first[1], 0)
+
+
+def _numbers(region: str, offset: int) -> Iterable[tuple[str, int, Fraction | None, str]]:
+    """Every number the fixed patterns read in `region`, as (form, position in the text, exact value, matched text).
+
+    The form is "scaled" for a scientific or power-of-ten number, "percent", "significant" or "places".
+    """
+    for match in _SCIENTIFIC.finditer(region):
+        yield "scaled", offset + match.start(), _decimal_value(match.group()), match.group()
+    for match in _POWER_OF_TEN.finditer(region):
+        # Read through the decimal literal, never multiplied through floats: 2.5 x 10^-6 is exactly 2.5e-6.
+        value = _decimal_value(f"{match.group(1) or '1'}e{match.group(2)}")
+        yield "scaled", offset + match.start(), value, match.group()
+    for match in _PERCENT.finditer(region):
+        value = _decimal_value(match.group(1))
+        yield "percent", offset + match.start(), None if value is None else value / 100, match.group()
+    for match in _SIGNIFICANT.finditer(region):
+        yield "significant", offset + match.start(), _count_value(match.group(1), 0), match.group()
+    for match in _DECIMAL_PLACES.finditer(region):
+        yield "places", offset + match.start(), _count_value(match.group(1), 1), match.group()
+
+
+# --- soft line wraps: the newlines of a wrapped statement that are not sentence breaks ------------ #
+#
+# A statement is wrapped Markdown, so a newline inside a sentence only wraps the line, and wrapping a statement must
+# not change what it promises. A blank is any whitespace, a carriage return included, as in _SENTENCE_BREAK. A newline
+# is a soft wrap, and is read as a space, when
+#   - the line before it carries on: it is not blank, it does not end in ". ; : ? !" (blanks may trail it), and it is
+#     not a heading ("#"), a table row ("|") or a fence marker, none of which joins what follows; and
+#   - the line after it continues: past its indent it starts with a lowercase ASCII letter, "$" (not "$$"), a
+#     backslash, "(" or a digit, and it is neither blank, nor a Markdown block ("#", "-", "*", "+", "|", ">", a
+#     backtick, "$$"), nor a list marker.
+# A list marker is digits, then "." or ")", then a blank or the end of the line; a lowercase letter or a roman numeral
+# up to "ix", then "." or ")"; or one to four letters or digits in parentheses, these last two then a blank. The end of
+# a line that another line follows is a blank, so a label alone on its line, "(a)", is a marker whether the lines end
+# in LF or CRLF: "1.", "12)", "b.", "iv)", "(a)", "(12)". So "1.5e-6", "0.5%", "i.e.", "(1e-8)" and a "(x)" that ends
+# the text continue a sentence. The reading is deliberately narrow: a line that starts with an uppercase or non-ASCII
+# letter, or with any other character, starts a new sentence. Fenced code is blanked before this runs, so only a tilde
+# fence can still show up.
+_SENTENCE_ENDINGS = (".", ";", ":", "?", "!")
+_MARKDOWN_BLOCK_STARTS = ("#", "-", "*", "+", "|", ">", "`", "$$")
+_LIST_MARKER = re.compile(r"\d+[.)](?:\s|\Z)|(?:[a-z]|ii|iii|iv|vi|vii|viii|ix)[.)]\s|\([^\W_]{1,4}\)\s")
+
+
+def _is_blank(line: str) -> bool:
+    return not line.strip()
+
+
+def _ends_a_sentence(line: str) -> bool:
+    return line.rstrip().endswith(_SENTENCE_ENDINGS)
+
+
+def _is_heading_table_or_fence(line: str) -> bool:
+    return line.lstrip().startswith(("#", "|", "```", "~~~"))
+
+
+def _starts_a_markdown_block(line: str) -> bool:
+    return line.lstrip().startswith(_MARKDOWN_BLOCK_STARTS)
+
+
+def _is_a_list_marker(line: str, more_follows: bool) -> bool:
+    # The newline that ends a line another one follows is the blank after a label alone on it, such as "(a)".
+    return _LIST_MARKER.match(line.lstrip() + ("\n" if more_follows else "")) is not None
+
+
+def _starts_with_a_continuation(line: str) -> bool:
+    first = line.lstrip()[:1]
+    return first.isascii() and (first.islower() or first.isdigit() or first in ("$", "\\", "("))
+
+
+def _is_a_soft_wrap(previous: str, following: str, more_follows: bool) -> bool:
+    """Whether the newline between two lines only wraps one sentence."""
+    if _is_blank(previous) or _ends_a_sentence(previous) or _is_heading_table_or_fence(previous):
+        return False
+    if _is_blank(following) or _starts_a_markdown_block(following) or _is_a_list_marker(following, more_follows):
+        return False
+    return _starts_with_a_continuation(following)
+
+
+def _join_soft_wraps(text: str) -> str:
+    """`text` with the newline of each soft wrap read as a space. Only that one character changes, so the length and
+    every offset stay the same, and a carriage return before the newline stays where it is.
+    """
+    lines = text.split("\n")
+    joined = [lines[0]]
+    for index in range(1, len(lines)):
+        wraps = _is_a_soft_wrap(lines[index - 1], lines[index], index < len(lines) - 1)
+        joined.append((" " if wraps else "\n") + lines[index])
+    return "".join(joined)
+
+
 def _normalized(statement: str) -> str:
-    """Offset-preserving normalization: unicode minus and superscripts to ASCII, fenced code blanked."""
+    """Offset-preserving normalization: unicode minus and superscripts to ASCII, fenced code blanked, then each soft
+    line wrap a space (see _join_soft_wraps), so wrapping a statement never changes what it promises.
+    """
     text = statement.replace("−", "-").translate(_SUPERSCRIPTS)
-    return _FENCE.sub(lambda match: " " * len(match.group()), text)
+    text = _FENCE.sub(lambda match: " " * len(match.group()), text)
+    return _join_soft_wraps(text)
 
 
 def _clauses(text: str) -> list[dict]:
     """Every accuracy clause the fixed patterns recognize, honoured or not, in order of appearance.
 
-    Each keyword opens one fixed character window. One component kind covers the whole window: absolute,
-    else relative, else unknown. A percentage, significant-figure count and decimal-place count keep their
-    own inherent kind. The window is wide on purpose, and the loosest honoured clause becomes the blanket.
+    A sentence ends at ". ", "; ", ": ", a blank line, or a newline that is not a soft wrap, except that a colon right
+    after an accuracy keyword on the same line introduces that keyword's value ("Tolerance: within 1%"). `text` is
+    already normalized, so every newline left in it is a sentence break, and a soft wrap is a space. That reading is
+    deliberately narrow (see _join_soft_wraps): a line is joined to the next only when it is not blank, does not end in
+    ". ; : ? !" and is not a heading, a table row or a fence marker, and the next line starts with a lowercase ASCII
+    letter, "$" (not "$$"), a backslash, "(" or a number, without being a Markdown block or a list marker. A next line
+    that starts with an uppercase or non-ASCII letter, or with any other character, is read as a new sentence. Each
+    keyword opens one character window, 60 characters before it and 160 after, clipped to its own sentence, so no claim
+    reaches across a sentence break. A number belongs to the nearest keyword of its own sentence, ties to the earliest,
+    and only that keyword records it. One component kind covers each window: absolute if the word "absolute" occurs in
+    it, else relative if "relative" does, else unknown. A percentage is relative, and a significant-figure or
+    decimal-place count keeps its own kind under any keyword.
+
+    An accuracy keyword makes the numbers it records claims. "within", "correct to" and "agree to" borrow the claim
+    of the nearest accuracy keyword in their own sentence that records no number itself, with the kind read in that
+    lender's own window from the kind word nearest the lender, so a sentence carrying both kinds lends each keyword's
+    own. An error or failure rate or probability records numbers but never claims. A scientific, power-of-ten or
+    percentage number without a claim is refused as no_accuracy_keyword, and a scientific or power-of-ten number of
+    unknown kind as no_kind. The loosest honoured clause becomes the blanket.
     """
-    found: dict[tuple, str] = {}
-    breaks = list(_SENTENCE_BREAK.finditer(text))
-    break_ends = [match.end() for match in breaks]
-    break_starts = [match.start() for match in breaks]
     keywords = list(_PROMISE_KEYWORD.finditer(text))
     spans = [(keyword.start(), keyword.end()) for keyword in keywords]
+    starts = [span[0] for span in spans]
+    accurate = [bool(_ACCURACY_KEYWORD.search(keyword.group())) for keyword in keywords]
+    borrowing = [bool(_BORROWING_KEYWORD.search(keyword.group())) for keyword in keywords]
+    accuracy_ends = {span[1] for span, claims in zip(spans, accurate) if claims}
 
-    def owner(at: int) -> int:
-        # The keyword nearest the number owns it, ties to the earliest, so a number a wide window pulls
-        # across a sentence break is scored under one keyword's kind, not both.
-        best, best_distance = 0, None
-        for index, (span_start, span_end) in enumerate(spans):
-            distance = span_start - at if at < span_start else at - span_end if at > span_end else 0
-            if best_distance is None or distance < best_distance:
-                best, best_distance = index, distance
+    def introduces_value(match: re.Match) -> bool:
+        # "Relative error: within 1e-6": a colon right after an accuracy keyword on the same line opens its value.
+        if match.group()[0] != ":" or match.group()[1:] == "\n":
+            return False
+        position = match.start()
+        while position and text[position - 1] in " \t":
+            position -= 1
+        return position in accuracy_ends
+
+    breaks = [match for match in _SENTENCE_BREAK.finditer(text) if not introduces_value(match)]
+    break_ends = [match.end() for match in breaks]
+    break_starts = [match.start() for match in breaks]
+    sentence = [bisect_right(break_ends, start) for start in starts]
+
+    def window(index: int) -> tuple[int, int]:
+        before = sentence[index]
+        sentence_start = break_ends[before - 1] if before else 0
+        after = bisect_left(break_starts, spans[index][1])
+        sentence_end = break_starts[after] if after < len(break_starts) else len(text)
+        return max(spans[index][0] - _KEYWORD_LEAD, sentence_start), min(spans[index][1] + _KEYWORD_TAIL, sentence_end)
+
+    def owner(at: int) -> int | None:
+        # The nearest keyword inside the number's own sentence, ties to the earliest.
+        here, following = bisect_right(break_ends, at), bisect_right(starts, at)
+        best, best_gap = None, None
+        for index in (following - 1, following):
+            if 0 <= index < len(spans) and sentence[index] == here:
+                gap = _span_gap(spans[index], (at, at))
+                if best_gap is None or gap < best_gap:
+                    best, best_gap = index, gap
         return best
 
-    def note(at: int, value: Fraction | None, kind: str, matched: str, index: int) -> None:
-        if owner(at) != index:
-            return  # a number belongs to its nearest keyword, and only that keyword records it
-        found.setdefault((at, value, kind), matched.strip())  # overlapping windows re-read one clause
+    # First every keyword records the numbers it owns, so a lender is known to own none before any claim is made.
+    recorded: list[list[tuple[str, int, Fraction | None, str]]] = [[] for _ in keywords]
+    for index in range(len(keywords)):
+        low, high = window(index)
+        recorded[index] = [number for number in _numbers(text[low:high], low) if owner(number[1]) == index]
 
-    for index, keyword in enumerate(keywords):
-        start = max(0, keyword.start() - _KEYWORD_LEAD)
-        window = text[start : keyword.end() + _KEYWORD_TAIL]
-        # The kind read stays inside the keyword's own sentence, the same bounds name attribution uses, so
-        # "absolute" in a neighbour sentence cannot flip a "relative" clause. The number search still spans
-        # the full window: a keyword may pull a number stated after a colon or in the next sentence.
-        before = bisect_right(break_ends, keyword.start())
-        sentence_start = break_ends[before - 1] if before else 0
-        after = bisect_left(break_starts, keyword.end())
-        sentence_end = break_starts[after] if after < len(break_starts) else len(text)
-        kind_region = text[max(start, sentence_start) : min(keyword.end() + _KEYWORD_TAIL, sentence_end)]
-        kind = "abs" if _ABSOLUTE.search(kind_region) else "rel" if _RELATIVE.search(kind_region) else "unknown"
-        for match in _SCIENTIFIC.finditer(window):
-            note(start + match.start(), _decimal_value(match.group()), kind, match.group(), index)
-        for match in _POWER_OF_TEN.finditer(window):
-            # Read through the decimal literal, never multiplied through floats: 2.5 x 10^-6 is exactly 2.5e-6.
-            value = _decimal_value(f"{match.group(1) or '1'}e{match.group(2)}")
-            note(start + match.start(), value, kind, match.group(), index)
-        for match in _PERCENT.finditer(window):
-            value = _decimal_value(match.group(1))
-            note(start + match.start(), None if value is None else value / 100, "rel", match.group(), index)
-        for match in _SIGNIFICANT.finditer(window):
-            note(start + match.start(), _count_value(match.group(1), 0), "rel", match.group(), index)
-        for match in _DECIMAL_PLACES.finditer(window):
-            note(start + match.start(), _count_value(match.group(1), 1), "abs", match.group(), index)
+    lenders: dict[int, list[int]] = {}
+    for index in range(len(keywords)):
+        if accurate[index] and not recorded[index]:
+            lenders.setdefault(sentence[index], []).append(index)
+    lender_starts = {here: [starts[index] for index in members] for here, members in lenders.items()}
+    kind_words = sorted(
+        [(match.start(), match.end(), "abs") for match in _ABSOLUTE.finditer(text)]
+        + [(match.start(), match.end(), "rel") for match in _RELATIVE.finditer(text)]
+    )
+    kind_starts = [word[0] for word in kind_words]
+
+    def window_kind(low: int, high: int) -> str:
+        # Absolute if the word "absolute" lies in the window, else relative if "relative" does, else unknown.
+        inside = {
+            kind
+            for _, end, kind in kind_words[bisect_left(kind_starts, low) : bisect_left(kind_starts, high)]
+            if end <= high
+        }
+        return "abs" if "abs" in inside else "rel" if "rel" in inside else "unknown"
+
+    def lender_of(index: int) -> int | None:
+        # The nearest accuracy keyword of the borrower's sentence that owns no number, ties to the earliest.
+        members = lenders.get(sentence[index], [])
+        position = bisect_left(lender_starts.get(sentence[index], []), starts[index])
+        candidates = members[max(position - 1, 0) : position + 1]
+        return min(candidates, key=lambda member: _span_gap(spans[member], spans[index]), default=None)
+
+    def lent_kind(lender: int) -> str:
+        # The kind word nearest the lender inside the lender's own window, ties to the earliest.
+        low, high = window(lender)
+        position = bisect_left(kind_starts, starts[lender])
+        candidates = [
+            word for word in kind_words[max(position - 1, 0) : position + 1] if low <= word[0] <= word[1] <= high
+        ]
+        nearest = min(candidates, key=lambda word: _span_gap((word[0], word[1]), spans[lender]), default=None)
+        return "unknown" if nearest is None else nearest[2]
+
+    found: dict[tuple, str] = {}
+    refused: dict[tuple, str] = {}
+    for index in range(len(keywords)):
+        if not recorded[index]:
+            continue
+        kind = window_kind(*window(index))
+        claims = accurate[index]
+        if not claims and borrowing[index]:
+            lender = lender_of(index)
+            if lender is not None:
+                claims, kind = True, lent_kind(lender)
+        for form, at, value, matched in recorded[index]:
+            if form == "scaled":
+                reason = "no_accuracy_keyword" if not claims else "no_kind" if kind == "unknown" else ""
+                key = (at, value, kind)
+            elif form == "percent":
+                reason, key = ("" if claims else "no_accuracy_keyword"), (at, value, "rel")
+            else:
+                reason, key = "", (at, value, "rel" if form == "significant" else "abs")
+            found.setdefault(key, matched.strip())
+            if reason:
+                refused.setdefault(key, reason)
 
     def order(key: tuple) -> tuple:
         at, value, kind = key
@@ -405,7 +605,7 @@ def _clauses(text: str) -> list[dict]:
 
     clauses = []
     for at, value, kind in sorted(found, key=order):
-        reason = (
+        reason = refused.get((at, value, kind)) or (
             "unsupported_number"
             if value is None
             else "below_float64_resolution"
@@ -484,8 +684,10 @@ def statement_promises(statement: str, quantities: Iterable[str] = ()) -> dict:
     """What the comparator harvests from a statement, for inspection. No comparison is performed.
 
     Returns {"clauses": [...], "blanket": (value, kind) | None, "named": {name: (value, kind)}}. Values are
-    exact Fractions and kind is "abs", "rel" or "unknown". A clause is honoured only inside (1e-15, 0.1], and
-    the loosest honoured clause is the blanket. Names come from `quantities` only.
+    exact Fractions and kind is "abs", "rel" or "unknown". A clause is honoured only under an accuracy keyword
+    (or a "within", "correct to" or "agree to" that borrows one, owning no number, from its own sentence) with a
+    stated kind ("abs" or "rel") and inside (1e-15, 0.1], and the loosest honoured clause is the blanket. Names come
+    from `quantities` only.
     """
     if type(statement) is not str or len(statement) > MAX_STATEMENT_CHARS:
         raise RepresentationError("statement_limit")
@@ -574,54 +776,42 @@ class _Policy:
             promises = statement_promises(self.policy.statement, (_leaf_name(path) for path in leaves))
             self.blanket, self.named = promises["blanket"], promises["named"]
 
-    def _promise(self, path: str, magnitude: Fraction, authored_entry: bool) -> tuple[Fraction, Fraction] | None:
+    def _promise(self, path: str, magnitude: Fraction) -> tuple[Fraction, Fraction] | None:
         """The statement promise that GOVERNS this leaf, scale-guarded, as an exact pair. None when no clause
         governs it.
 
-        A promise named for this leaf governs it. A blanket clause reaches a leaf the author gave its own
-        tolerance only when the statement named no other quantity. The scale guard drops the absolute
-        component for a leaf whose magnitude sits below it. A leaf a clause governs whose promise the guard
-        empties returns ``(0, 0)``, NOT None, so pair() floors it at the strict default rather than reading it
-        as silent. Only a leaf no clause governs returns None.
+        pair() asks only for a leaf no author spoke for. A promise named for this leaf governs it, else the
+        blanket. An honoured clause is always "abs" or "rel". The scale guard drops the absolute component for a
+        leaf whose magnitude sits below it. A leaf a clause governs whose promise the guard empties returns
+        ``(0, 0)``, NOT None, so pair() floors it at the strict default rather than reading it as silent. Only a
+        leaf no clause governs returns None.
         """
         promise = self.named.get(_leaf_name(path))
-        if promise is None and not (authored_entry and self.named):
+        if promise is None:
             promise = self.blanket
         if promise is None:
             return None
         value, kind = promise
-        rtol = value if kind in ("rel", "unknown") else Fraction(0)
-        atol = value if kind in ("abs", "unknown") else Fraction(0)
+        rtol = value if kind == "rel" else Fraction(0)
+        atol = value if kind == "abs" else Fraction(0)
         if atol and magnitude < atol:
             atol = Fraction(0)  # Scale guard: an absolute promise says nothing about a leaf smaller than itself.
         return rtol, atol
 
     def pair(self, path: str, expected: Any) -> tuple[Fraction, Fraction]:
-        """Resolve one leaf: the statement promise that governs it, else an authored entry or task setting,
-        else the server default. An integer expectation no clause governs is exact.
-
-        A leaf no clause governs and no author spoke for resolves to ``self.silent``, except an integer
-        expectation, which stays exact by construction. Once a clause governs a leaf, integer exactness no
-        longer applies. Where no author spoke the promise is floored at the strict default. Where an author
-        also spoke, the promise governs unless the scale guard emptied it, and then the author's entry governs.
-        """
+        """Resolve one leaf: an authored per-leaf entry or task setting always wins over prose; else the statement
+        promise that governs the leaf, floored at the strict default; else exactness for an integer expectation;
+        else the server default for a silent leaf."""
         entry = self.by_path.get(path)
         setting = self.policy if entry is None else entry
-        authored = None
         if entry is not None or setting.rtol is not None or setting.atol is not None:
-            authored = _pair_text(setting.rtol, setting.atol)
+            return _pair_text(setting.rtol, setting.atol)
         magnitude = _magnitude(expected)
-        promise = self._promise(path, magnitude, entry is not None)
+        promise = self._promise(path, magnitude)
         if promise is None:
-            # No clause governs this leaf.
-            if authored is not None:
-                return authored
             if type(expected) is int:
                 return (Fraction(0), Fraction(0))  # an integer expectation is exact by construction
             return self.silent
-        if authored is not None:
-            # The promise governs unless the scale guard emptied it, in which case the author's entry governs.
-            return authored if promise == (Fraction(0), Fraction(0)) else promise
         default = _pair_text(None, None)  # the strict 5e-12 / 0 floor
         if _margin(promise, magnitude) < _margin(default, magnitude):
             return default
@@ -724,7 +914,16 @@ def _compare(observed: Any, expected: Any, policy: _Policy, path: str = "") -> t
     left, right = type(observed), type(expected)
     if left is bool or right is bool:
         return left is right and observed == expected, "boolean_comparison", path
-    if right is str:
+    if right is str or right is _LegacyString:
+        if right is _LegacyString and left is _Expression:
+            # A typed symbolic observation against a legacy text expectation: re-read the text in the bounded
+            # grammar and compare symbolically; a text the grammar refuses stays a categorical mismatch.
+            # A typed "str" expectation was authored as a string, so it never takes this path.
+            try:
+                expected_expression = _parse(str(expected), path)
+            except RepresentationError:
+                return False, "categorical_comparison", path
+            return _symbolic_equal(observed, expected_expression, path)
         return left is str and observed == expected, "categorical_comparison", path
     if right in REAL_TYPES or right is _Expression:
         if left is str:
@@ -808,13 +1007,13 @@ def _outcome(raw: Any, *, expected: bool) -> tuple[str, Any]:
 def _exhausted(role: str, expected_ready: bool, code: str) -> dict:
     """A time or memory cap hit during a comparison.
 
-    Uncertain by default. Once the expectation has parsed within the caps, a candidate exhaustion is
-    attributed to the candidate and scored as an invalid observation. A reference observation, and any
-    exhaustion on the expectation itself, stay uncertain.
+    A per-case wall budget bounds the comparator's own proof work, never a candidate's, so a timeout is uncertain for
+    every role. A memory cap once the expectation has parsed is attributed to a candidate observation; a reference
+    observation and any exhaustion on the expectation itself stay uncertain.
     """
-    if expected_ready and role == "candidate":
-        return _result("invalid_candidate", "candidate", code)
-    return _result("uncertain", "comparator", code)
+    if code == "comparator_timeout" or not (expected_ready and role == "candidate"):
+        return _result("uncertain", "comparator", code)
+    return _result("invalid_candidate", "candidate", code)
 
 
 def compare_request(request: dict) -> dict:
