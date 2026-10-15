@@ -81,8 +81,8 @@ sandbox:
     # metadata as Kubernetes labels on the sandbox resources, so sandboxes are
     # attributable both via the OpenSandbox list API and at the cluster level, e.g.
     # `kubectl get pods -l nemo-gym.nvidia.com/team=my-team`. Unset fields auto-detect
-    # from NEMO_GYM_TEAM / NEMO_GYM_USER / NEMO_GYM_WORKLOAD, then Slurm job env vars
-    # (SLURM_JOB_ACCOUNT / SLURM_JOB_USER / SLURM_JOB_NAME), then the OS login name for
+    # from NEMO_GYM_TEAM / NEMO_GYM_USER / NEMO_GYM_WORKLOAD / NEMO_GYM_CLUSTER, then Slurm
+    # job env vars (SLURM_JOB_ACCOUNT / SLURM_JOB_USER / SLURM_JOB_NAME / SLURM_CLUSTER_NAME), then the OS login name for
     # `user` ("root" is ignored) and the gym CLI's NEMO_GYM_CONFIG_PATH server instance
     # name for `workload`; unresolvable fields are omitted. `run` scopes sandboxes to one
     # launch of the creating process (NEMO_GYM_RUN_ID, else generated per process and
@@ -96,4 +96,5 @@ sandbox:
       # team: my-team
       # user: my-user
       # workload: my-benchmark
+      # cluster: my-slurm-cluster
       # run: my-run-id

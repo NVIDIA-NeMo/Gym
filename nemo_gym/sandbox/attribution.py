@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Automatic job attribution (team / user / workload / run) for sandbox metadata.
+"""Automatic job attribution (team / user / workload / cluster / run) for sandbox metadata.
 
 Sandbox providers merge these keys into every sandbox's metadata so cluster
-operators can attribute running sandboxes to the team, user, and workload that
-created them (on OpenSandbox, metadata becomes queryable Kubernetes labels on
+operators can attribute running sandboxes to the team, user, workload, and
+cluster (for example, the Slurm cluster) that created them (on OpenSandbox, metadata becomes queryable Kubernetes labels on
 the sandbox). Each field resolves from explicit configuration first, then
 ``NEMO_GYM_*`` environment variables, then Slurm job environment variables,
 then (for ``user`` only) the OS login name and (for ``workload``) the server
@@ -41,6 +41,7 @@ LOGGER = logging.getLogger(__name__)
 TEAM_KEY = "team"
 USER_KEY = "user"
 WORKLOAD_KEY = "workload"
+CLUSTER_KEY = "cluster"
 RUN_KEY = "run"
 
 TEAM_ENV_VARS = ("NEMO_GYM_TEAM", "SLURM_JOB_ACCOUNT")
@@ -50,6 +51,8 @@ USER_ENV_VARS = ("NEMO_GYM_USER", "SLURM_JOB_USER")
 # here to keep this module dependency-free) and names the server instance,
 # which is the best automatic description of the workload.
 WORKLOAD_ENV_VARS = ("NEMO_GYM_WORKLOAD", "SLURM_JOB_NAME", "NEMO_GYM_CONFIG_PATH")
+# Slurm sets SLURM_CLUSTER_NAME in every job step, naming the cluster the job was submitted on.
+CLUSTER_ENV_VARS = ("NEMO_GYM_CLUSTER", "SLURM_CLUSTER_NAME")
 RUN_ENV_VARS = ("NEMO_GYM_RUN_ID",)
 
 # Container images default to running as root, so a "root" login attributes the
@@ -87,9 +90,10 @@ def resolve_attribution(
     team: str | None = None,
     user: str | None = None,
     workload: str | None = None,
+    cluster: str | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Resolve ``team`` / ``user`` / ``workload`` attribution metadata.
+    """Resolve ``team`` / ``user`` / ``workload`` / ``cluster`` attribution metadata.
 
     Args:
         team: Explicit team; falls back to ``NEMO_GYM_TEAM``, then ``SLURM_JOB_ACCOUNT``.
@@ -99,10 +103,12 @@ def resolve_attribution(
         workload: Explicit workload; falls back to ``NEMO_GYM_WORKLOAD``, then
             ``SLURM_JOB_NAME``, then ``NEMO_GYM_CONFIG_PATH`` (the server instance
             name the gym CLI sets on every server process it spawns).
+        cluster: Explicit cluster; falls back to ``NEMO_GYM_CLUSTER``, then
+            ``SLURM_CLUSTER_NAME`` (the Slurm cluster that runs the job).
         environ: Environment mapping override, for testing. Defaults to ``os.environ``.
 
     Returns:
-        A dict with only the resolved keys among ``team``, ``user``, and ``workload``.
+        A dict with only the resolved keys among ``team``, ``user``, ``workload``, and ``cluster``.
         Values are returned raw; providers apply their own metadata sanitization.
     """
     environ = os.environ if environ is None else environ
@@ -116,6 +122,9 @@ def resolve_attribution(
     workload = workload or _first_env(environ, WORKLOAD_ENV_VARS)
     if workload:
         resolved[WORKLOAD_KEY] = str(workload)
+    cluster = cluster or _first_env(environ, CLUSTER_ENV_VARS)
+    if cluster:
+        resolved[CLUSTER_KEY] = str(cluster)
     return resolved
 
 
