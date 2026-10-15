@@ -1,0 +1,4 @@
+facts_multimodal_public.csv
+data/facts_multimodal_benchmark.jsonl
+data/image_download_report.csv
+data/images/

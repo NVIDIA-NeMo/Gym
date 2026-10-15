@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Adapted from the public FACTS Multimodal notebook's quality prompt.
+user: |-
+  You are an AI evaluator specializing in response entailment. For every fact
+  in IMAGE_FACT_LIST, decide whether its core information is covered, mentioned,
+  or directly and unambiguously entailed by RESPONSE.
+
+  Judge coverage from RESPONSE text only. Do not mark a fact Yes merely because
+  it is true in the image. Direct mentions and simple logical entailments count.
+  For an Exhaustive set, every listed member or its stated total must be covered.
+  Related but insufficiently specific text is No. Do not penalize a short answer
+  that contains the core information needed to answer the user prompt.
+
+  Return exactly one JSON object and no other text. Include each listed fact as
+  "Fact <ID>": "Yes" or "No". Do not include a calculated score; the evaluator
+  computes it from these per-fact verdicts.
+
+  User prompt:
+  {prompt}
+
+  IMAGE_FACT_LIST (essential facts only):
+  {rubric_items}
+
+  RESPONSE:
+  {generation}
