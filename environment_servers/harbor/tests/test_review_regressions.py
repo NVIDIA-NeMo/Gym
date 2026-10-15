@@ -110,11 +110,11 @@ async def test_concurrent_first_seeds_share_snapshot_even_if_one_is_cancelled(tm
     copies = []
     original = server._snapshot_task
 
-    def snapshot(folder, expected):
+    def snapshot(folder, expected, *args):
         copies.append(folder)
         entered.set()
         assert release.wait(10)
-        return original(folder, expected)
+        return original(folder, expected, *args)
 
     monkeypatch.setattr(server, "_snapshot_task", snapshot)
     first = asyncio.create_task(server.run_request(episode(task)))

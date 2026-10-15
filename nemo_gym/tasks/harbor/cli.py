@@ -93,6 +93,8 @@ AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
 # The top-level configuration block that sets Dockerfile builds up, and the settings it takes.
 BUILDS_KEY = "builds"
 BUILD_SETTINGS = ("tool", "repository", "platform", "enabled")
+# The top-level run setting that replaces each dataset's `[gym.defaults] timeout_multiplier`.
+TIMEOUT_MULTIPLIER_KEY = "timeout_multiplier"
 HYDRA_QUIET_OVERRIDES = (
     "hydra.run.dir=.",
     "hydra.output_subdir=null",
@@ -158,14 +160,40 @@ def _build_setting(block: Mapping[str, Any], name: str) -> str | None:
     return value
 
 
-def build_options_from_overrides(overrides: list[str]) -> BuildOptions:
-    """Read the ``builds:`` block from the configuration the command line names, before the run config exists.
+def timeout_multiplier_from_config(config: Mapping[str, Any] | None) -> float | None:
+    """The run's ``timeout_multiplier`` in a merged configuration dict; None keeps each dataset's own.
 
-    Preparation builds images before the run config can be written, so the global configuration is not
-    composed yet. This merges the sources the user controls, in the global config's order (the files
-    the ``+config_paths`` tokens name, from ``--config`` and the asset selectors, then ``env.yaml``, then
-    the ``+``/``++`` overrides), and reads the block from the result. The full global config is still
-    parsed once, at dispatch, with the run config added.
+    It replaces ``[gym.defaults] timeout_multiplier`` in the dataset's ``dataset.toml`` for this run: the
+    rows and the environment server see each task's ``[agent]`` and ``[verifier]`` ``timeout_sec`` scaled by it.
+    """
+    value = (config or {}).get(TIMEOUT_MULTIPLIER_KEY)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise ValueError(f"`{TIMEOUT_MULTIPLIER_KEY}` must be a positive number; got {value!r}")
+    return float(value)
+
+
+def build_options_from_overrides(overrides: list[str]) -> BuildOptions:
+    """Read the ``builds:`` block from the configuration the command line names, before the run config exists."""
+    return BuildOptions.from_config({BUILDS_KEY: _command_line_setting(overrides, BUILDS_KEY)})
+
+
+def timeout_multiplier_from_overrides(overrides: list[str]) -> float | None:
+    """Read the top-level ``timeout_multiplier`` from the configuration the command line names."""
+    return timeout_multiplier_from_config(
+        {TIMEOUT_MULTIPLIER_KEY: _command_line_setting(overrides, TIMEOUT_MULTIPLIER_KEY)}
+    )
+
+
+def _command_line_setting(overrides: list[str], key: str) -> Any:
+    """One top-level setting of the configuration the command line names, before the run config exists.
+
+    Preparation builds images and loads tasks before the run config can be written, so the global
+    configuration is not composed yet. This merges the sources the user controls, in the global config's
+    order (the files the ``+config_paths`` tokens name, from ``--config`` and the asset selectors, then
+    ``env.yaml``, then the ``+``/``++`` overrides), and reads the setting from the result. The full global
+    config is still parsed once, at dispatch, with the run config added.
     """
     from omegaconf import OmegaConf
     from omegaconf.errors import InterpolationResolutionError
@@ -192,12 +220,11 @@ def build_options_from_overrides(overrides: list[str]) -> BuildOptions:
     config_paths = OmegaConf.merge(dotenv, cli).get(CONFIG_PATHS_KEY_NAME) or []
     _, extra_configs = parser.load_extra_config_paths([str(path) for path in config_paths])
     merged = OmegaConf.merge(*extra_configs, dotenv, cli)
-    block = merged.get(BUILDS_KEY)
     try:
-        resolved = OmegaConf.to_container(block, resolve=True) if block is not None else None
+        value = merged.get(key)
+        return OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value
     except InterpolationResolutionError as exc:
         raise translate_interpolation_error(exc) from exc
-    return BuildOptions.from_config({BUILDS_KEY: resolved})
 
 
 @dataclass(frozen=True)
@@ -210,6 +237,8 @@ class PreparedTaskset:
     skipped: dict[str, str] = field(default_factory=dict)
     # Every distinct image the prepared tasks start from, for pre-pulling.
     images: tuple[str, ...] = ()
+    # The run's `timeout_multiplier` the tasks were loaded with; None kept each dataset's own.
+    timeout_multiplier: float | None = None
 
 
 @dataclass(frozen=True)
@@ -235,6 +264,7 @@ def prepare_target(
     exclude: list[str] | None = None,
     only: list[str] | None = None,
     build: BuildOptions | None = None,
+    timeout_multiplier: float | None = None,
 ) -> PreparedTaskset:
     """Fetch (for hub references) and load the tasks, then write the rows file.
 
@@ -245,7 +275,8 @@ def prepare_target(
     rows and listed on stdout. Dockerfiles outside pull and overlay mode are built once and
     recorded before the tasks load, as ``build`` (the ``builds:`` configuration block) says; the
     default builds locally with docker, and pushes with the first tool on PATH when a repository
-    is named.
+    is named. ``timeout_multiplier``, the run's setting, replaces each dataset's
+    ``[gym.defaults] timeout_multiplier`` when the tasks load.
     """
     build = build or BuildOptions()
     if is_hub_ref(target):
@@ -275,7 +306,7 @@ def prepare_target(
     output_dir.mkdir(parents=True, exist_ok=True)
     errors: dict[str, HarborTaskError] = {}
     try:
-        loaded = discover_tasks(folder, skipped=errors)
+        loaded = discover_tasks(folder, skipped=errors, timeout_multiplier=timeout_multiplier)
     finally:
         # Keep the omitted IDs and reasons even when no task in the dataset loads.
         _write_skipped(output_dir, errors)
@@ -313,6 +344,7 @@ def prepare_target(
         output_dir=output_dir,
         skipped={task_id: str(error) for task_id, error in errors.items()},
         images=distinct,
+        timeout_multiplier=timeout_multiplier,
     )
 
 
@@ -469,6 +501,7 @@ def build_run(
         agent_instance_name=agent.instance_name,
         agent_impl=agent.impl_name,
         agent_overrides=AGENT_OVERRIDES.get(agent.impl_name),
+        timeout_multiplier=prepared.timeout_multiplier,
     )
     # Defaults belong below explicit config files and command-line overrides.
     config["output_jsonl_fpath"] = str(prepared.output_dir / "rollouts.jsonl")
@@ -514,6 +547,7 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
             build=build,
+            timeout_multiplier=timeout_multiplier_from_overrides(overrides),
         )
     except (HarborTaskError, HubError, BuildError, ConfigError, ValueError, OSError) as exc:
         args._parser.error(str(exc))
