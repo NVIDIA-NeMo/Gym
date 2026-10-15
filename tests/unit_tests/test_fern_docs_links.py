@@ -362,7 +362,8 @@ class TestFernDocsLinks(unittest.TestCase):
         self.assertIn(expected_redirect, redirects)
 
     def test_latest_bash_blocks_have_no_placeholders_that_bash_splits(self):
-        """`WANDB_API_KEY={your W&B API key}` runs `W&B` as a command; `${Your Username}` is a bad substitution.
+        """`WANDB_API_KEY={your W&B API key}` runs `W&B` as a command; `${Your Username}` is a bad substitution;
+        `ACCOUNT=<ACCOUNT_NAME>` is a syntax error.
 
         Runnable blocks export a sample value first and reference the variable instead.
         """
@@ -373,14 +374,14 @@ class TestFernDocsLinks(unittest.TestCase):
         for page in pages.rglob("*.mdx"):
             for block in bash_block.findall(page.read_text()):
                 for line in block.splitlines():
-                    if re.search(r"\{[Yy]our [^{}]*\}", line):
+                    if re.search(r"\{[Yy]our [^{}]*\}", line) or re.match(r"\s*(?:export\s+)?\w+=<", line):
                         placeholders.append(f"{page.relative_to(REPO_ROOT)}: {line.strip()}")
 
         self.assertEqual([], placeholders)
 
     def test_latest_install_examples_use_the_newest_released_version(self):
-        snapshots = [path.stem for path in (REPO_ROOT / "fern/versions").glob("v*.yml")]
-        newest = max(snapshots, key=lambda tag: tuple(int(part) for part in tag[1:].split(".")))
+        # Bump only after the release is on PyPI and NGC; snapshots can land days earlier (no v0.6.0 NGC image).
+        newest = "v0.7.0"
         pages = REPO_ROOT / "fern/versions/latest/pages"
         pins = {
             "get-started/installation.mdx": [
@@ -397,8 +398,26 @@ class TestFernDocsLinks(unittest.TestCase):
             with self.subTest(page=page):
                 for pattern in patterns:
                     self.assertRegex(text, pattern)
-                stale = re.findall(r"(?:nemo-gym==|nemo-gym:v|NeMo Gym v|`)(\d+\.\d+\.\d+)", text)
+                stale = re.findall(r"(?:nemo-gym==|nemo-gym:v|NeMo Gym v|`v?)(\d+\.\d+\.\d+)", text)
                 self.assertEqual([], [version for version in stale if f"v{version}" != newest])
+
+    def test_latest_dataset_commands_use_a_defined_existing_resource_config(self):
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        bash_block = re.compile(r"^```(?:bash|sh|shell)[^\n]*\n(.*?)^```", re.DOTALL | re.MULTILINE)
+        problems = []
+
+        for page in pages.rglob("*.mdx"):
+            for block in bash_block.findall(page.read_text()):
+                defined = re.findall(r'^resource_config_path="([^"]+)"', block, re.MULTILINE)
+                if "${resource_config_path}" in block and not defined:
+                    problems.append(f"{page.relative_to(REPO_ROOT)}: uses an undefined ${{resource_config_path}}")
+                problems += [
+                    f"{page.relative_to(REPO_ROOT)}: {path} does not exist"
+                    for path in defined
+                    if not (REPO_ROOT / path).is_file()
+                ]
+
+        self.assertEqual([], problems)
 
     def test_latest_link_labels_are_titles_not_slugs(self):
         pages = REPO_ROOT / "fern/versions/latest/pages"

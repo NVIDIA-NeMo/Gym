@@ -42,7 +42,7 @@ dataset_name="my_dataset"  # your dataset name
 resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset upload \
     --name ${dataset_name} \
-    --input data/multineedle_benchmark.jsonl \
+    --input resources_servers/example_multi_step/data/example.jsonl \
     +resource_config_path=${resource_config_path}
 ```
 
@@ -55,7 +55,7 @@ dataset_name="my_dataset"  # your dataset name
 resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset migrate \
     --name ${dataset_name} \
-    --input data/multineedle_benchmark_validation.jsonl \
+    --input resources_servers/example_multi_step/data/example.jsonl \
     --split validation \
     +resource_config_path=${resource_config_path}
 ```
@@ -66,6 +66,7 @@ When uploading to an organization repository where you don't have direct write a
 To target a specific branch, add `--revision <branch-name>`. Without `--create-pr`, the upload commits directly to that branch; with `--create-pr`, it opens a Pull Request against that branch. In both cases the branch must already exist on Hugging Face.
 
 ```bash
+resource_config_path="resources_servers/math_with_judge/configs/math_with_judge.yaml"
 gym dataset upload \
     --name OpenMathReasoning \
     --input data/validation.jsonl \
@@ -94,7 +95,7 @@ dataset_name="my_dataset"  # your dataset name
 resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset upload \
     +dataset_name=${dataset_name} \
-    +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
+    +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
     +resource_config_path=${resource_config_path} \
     +delete_from_gitlab=true
 ```
@@ -112,7 +113,7 @@ dataset_name="my_dataset"  # your dataset name
 resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset migrate \
     --name ${dataset_name} \
-    --input data/multineedle_benchmark.jsonl \
+    --input resources_servers/example_multi_step/data/example.jsonl \
     +resource_config_path=${resource_config_path}
 ```
 
