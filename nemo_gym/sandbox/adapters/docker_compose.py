@@ -4,7 +4,15 @@
 """Run Compose services through the sandbox API.
 
 Input YAML is resolved upstream; unsupported runtime semantics are rejected
-before provisioning services.
+before provisioning services. Service fields get their meaning from
+``nemo_gym.sandbox.compose_config.check_compose_fields``: ``deploy.resources``
+sizes each service's sandbox, ``restart`` and ``pull_policy`` are recorded (and
+the pull policy applied where the provider can), ``networks`` scope which
+services see each other by name, ``extra_hosts`` add hostnames, ``post_start``
+hooks run once the service is up, and ``tmpfs``, ``ulimits``, ``sysctls`` and
+``security_opt`` need a provider that implements
+``SupportsSandboxServiceOptions``. A service may run on its own provider
+(``service_providers``), the way a GPU sidecar lands on a GPU deployment.
 """
 
 import asyncio
@@ -22,15 +30,43 @@ from urllib.parse import urlsplit
 import yaml
 
 from nemo_gym.sandbox.api import AsyncSandbox
-from nemo_gym.sandbox.compose_fields import unsupported_compose_fields
+from nemo_gym.sandbox.compose_fields import (
+    ComposeFieldError,
+    UnsupportedComposeFieldError,
+    check_compose_fields,
+    service_resources,
+)
 from nemo_gym.sandbox.providers import SandboxSpec, create_provider
 from nemo_gym.sandbox.providers.base import (
+    COMPOSE_SERVICE_OPTION_FIELDS,
     SupportsSandboxEndpoint,
     SupportsSandboxNetwork,
     SupportsSandboxPortForwarding,
+    SupportsSandboxPullPolicy,
     SupportsSandboxRuntimeRequirements,
+    SupportsSandboxServiceOptions,
     SupportsSandboxSharedStorage,
 )
+
+
+def _provider_name(provider) -> str:
+    return getattr(provider, "name", type(provider).__name__)
+
+
+def _merge_provider_options(*layers: Mapping[str, Any]) -> dict[str, Any]:
+    """Provider options from several sources: lists (``run_args``, ``volumes``) concatenate, mappings
+    (``extensions``) merge with later layers winning, scalars are replaced."""
+    merged: dict[str, Any] = {}
+    for layer in layers:
+        for key, value in layer.items():
+            current = merged.get(key)
+            if isinstance(current, list) and isinstance(value, (list, tuple)):
+                merged[key] = [*current, *value]
+            elif isinstance(current, Mapping) and isinstance(value, Mapping):
+                merged[key] = {**current, **value}
+            else:
+                merged[key] = list(value) if isinstance(value, tuple) else value
+    return merged
 
 
 def _seconds(value: str | int | float) -> float:
@@ -51,7 +87,10 @@ class AsyncSandboxCompose:
     Deployment settings stay in the provider and optional ``service_specs``.
     Compose fields override the corresponding spec fields, except ``environment``: a spec's ``env`` is
     the caller's host-resolved override for that service and wins over the service's Compose
-    ``environment`` (see ``_prepare``).
+    ``environment`` (see ``_prepare``). ``service_providers`` names another provider (instance or
+    single-key config) for particular services; every provider must reach the others' sandboxes on
+    the network. ``platform`` is the one the deployment runs, which a service's ``platform`` must
+    match. ``restart_policies`` and ``pull_policies`` record what each service declared.
     """
 
     def __init__(
@@ -64,8 +103,18 @@ class AsyncSandboxCompose:
         poll_interval_s: float = 0.5,
         volume_init_image: str = "alpine:3.22",
         volume_sources: Mapping[str, str] | None = None,
+        service_providers: Mapping[str, Any] | None = None,
+        platform: str = "linux/amd64",
     ):
         self.provider = create_provider(provider) if isinstance(provider, Mapping) else provider
+        self.service_providers = {
+            name: create_provider(value) if isinstance(value, Mapping) else value
+            for name, value in (service_providers or {}).items()
+        }
+        self.platform = platform
+        self.restart_policies: dict[str, str] = {}
+        self.pull_policies: dict[str, str] = {}
+        self._service_options: dict[str, dict[str, Any]] = {}
         self.compose_file = Path(compose_file).resolve() if compose_file is not None else None
         self.document: dict[str, Any] = {}
         self.service_specs = dict(service_specs or {})
@@ -82,7 +131,7 @@ class AsyncSandboxCompose:
         self._started = False
         self._ready = False
         self._closed = False
-        self._volume_helper: AsyncSandbox | None = None
+        self._volume_helpers: dict[int, AsyncSandbox] = {}
         self._stop_task: asyncio.Task | None = None
         self._processes: dict[str, asyncio.Task] = {}
         self._seeds: list[AsyncSandbox] = []
@@ -90,29 +139,46 @@ class AsyncSandboxCompose:
     def _load(self):
         return yaml.safe_load(self.compose_file.read_text(encoding="utf-8"))
 
+    def _provider_for(self, name: str):
+        """The provider a service runs on: its own from ``service_providers``, else the collection's."""
+        return self.service_providers.get(name, self.provider)
+
+    def _providers(self) -> list[Any]:
+        """Every distinct provider of the collection, the default first."""
+        distinct: list[Any] = [self.provider]
+        for provider in self.service_providers.values():
+            if all(provider is not seen for seen in distinct):
+                distinct.append(provider)
+        return distinct
+
     def _validate(self) -> list[str]:
         if not isinstance(self.document, Mapping):
             raise ValueError("Compose requires a mapping")
-        # The field allow-list is shared with prepare (``nemo_gym.tasks.harbor.cli``), which reports a refused
-        # field per task before any sandbox exists; here it is the last line before provisioning.
-        refused = unsupported_compose_fields(self.document)
-        if refused:
-            raise NotImplementedError(refused[0])
         services = self.document.get("services")
         if not isinstance(services, Mapping) or not services:
             raise ValueError("Compose requires a non-empty services mapping")
         for field in ("networks", "volumes"):
             if not isinstance(self.document.get(field) or {}, Mapping):
                 raise ValueError(f"Compose {field} requires a mapping")
-        networks = self.document.get("networks") or {}
-        default_network = networks.get("default") or {}
-        if set(networks) - {"default"} or set(default_network) - {"name", "ipam"} or default_network.get("ipam"):
-            raise NotImplementedError("Custom Compose networks require provider network isolation support")
-        dependencies = {}
-        aliases_seen = set(services)
         for name, service in services.items():
             if not isinstance(service, Mapping):
                 raise ValueError(f"Service {name!r} requires a mapping")
+        try:
+            # The one field check, shared with prepare (``nemo_gym.tasks.harbor.image_configs``), which reports a
+            # refused field per task before any sandbox exists; here it is the last line before provisioning. A key
+            # the group does not start is refused first, then every M28 field takes its normalized shape, so the
+            # checks below read one form each.
+            check_compose_fields(self.document, platform=self.platform)
+        except UnsupportedComposeFieldError as error:
+            raise NotImplementedError(str(error)) from error
+        except ComposeFieldError as error:
+            raise ValueError(str(error)) from error
+        unknown_services = set(self.service_providers) - set(services)
+        if unknown_services:
+            raise ValueError(f"service_providers names unknown services: {sorted(unknown_services)}")
+        networks = self.document.get("networks") or {}
+        dependencies = {}
+        for name, service in services.items():
             for field in ("environment", "depends_on", "networks", "healthcheck", "labels", "x-sandbox"):
                 if not isinstance(service.get(field) or {}, Mapping):
                     raise ValueError(f"Service {name!r}: resolve {field} to a mapping upstream")
@@ -123,15 +189,39 @@ class AsyncSandboxCompose:
                     raise ValueError(f"Service {name!r}: resolve {field} to a list of mappings upstream")
             if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", name):
                 raise ValueError(f"Invalid Compose service name: {name!r}")
-            if service.get("restart", "no") != "no":
-                raise NotImplementedError(f"Service {name!r}: restart policies are unsupported")
+            provider = self._provider_for(name)
+            # Recorded, not applied: the group starts each service once and reports an exit through the
+            # dependency gates. Compose's restart loop has no counterpart in a sandbox.
+            self.restart_policies[name] = str(service.get("restart", "no"))
             if not service.get("image"):
                 raise ValueError(f"Service {name!r} requires a prebuilt image in the Compose YAML")
             runtime = {"cap_add": tuple(service.get("cap_add") or ()), "shm_size": service.get("shm_size")}
             if runtime["cap_add"] or runtime["shm_size"] is not None:
-                if not isinstance(self.provider, SupportsSandboxRuntimeRequirements):
+                if not isinstance(provider, SupportsSandboxRuntimeRequirements):
                     raise NotImplementedError("Sandbox provider does not support runtime requirements")
-                self._runtime_metadata[name] = self.provider.validate_runtime_requirements(**runtime) or {}
+                self._runtime_metadata[name] = provider.validate_runtime_requirements(**runtime) or {}
+            declared_options = {field: service[field] for field in COMPOSE_SERVICE_OPTION_FIELDS if field in service}
+            if declared_options:
+                supported = (
+                    provider.SERVICE_OPTION_FIELDS if isinstance(provider, SupportsSandboxServiceOptions) else set()
+                )
+                for field in sorted(set(declared_options) - set(supported)):
+                    raise NotImplementedError(
+                        f"Service {name!r}: {field} is not supported by the {_provider_name(provider)} sandbox provider"
+                    )
+                self._service_options[name] = provider.service_options(
+                    tmpfs=tuple(declared_options.get("tmpfs", ())),
+                    ulimits=declared_options.get("ulimits"),
+                    sysctls=declared_options.get("sysctls"),
+                    security_opt=tuple(declared_options.get("security_opt", ())),
+                )
+            if "pull_policy" in service:
+                policy = service["pull_policy"]
+                self.pull_policies[name] = policy
+                if isinstance(provider, SupportsSandboxPullPolicy):
+                    self._service_options[name] = _merge_provider_options(
+                        self._service_options.get(name, {}), provider.pull_policy_options(policy)
+                    )
             options = service.get("x-sandbox") or {}
             if set(options) - {"hosts", "resolve_environment"}:
                 raise NotImplementedError(f"Service {name!r}: unsupported x-sandbox options")
@@ -140,6 +230,8 @@ class AsyncSandboxCompose:
                 raise ValueError("x-sandbox.resolve_environment requires a list of environment variable names")
             if "hosts" in options and options["hosts"] != []:
                 raise ValueError("x-sandbox.hosts only supports [] to explicitly disable host injection")
+            if options.get("hosts") == [] and service.get("extra_hosts"):
+                raise ValueError(f"Service {name!r}: extra_hosts cannot be applied without host injection")
             dependencies[name] = dict(service.get("depends_on") or {})
             for dependency, config in dependencies[name].items():
                 if not isinstance(config, Mapping):
@@ -167,21 +259,10 @@ class AsyncSandboxCompose:
                     raise NotImplementedError(
                         "Forwarded service network mode cannot declare networks or published ports"
                     )
-                if not isinstance(self.provider, SupportsSandboxPortForwarding):
+                if not isinstance(provider, SupportsSandboxPortForwarding):
                     raise NotImplementedError("Sandbox provider does not support service network forwarding")
-                self.provider.validate_port_forwarding()
+                provider.validate_port_forwarding()
                 dependencies[name].setdefault(target, {"condition": "service_started"})
-            service_networks = service.get("networks") or {"default": {}}
-            if set(service_networks) != {"default"}:
-                raise NotImplementedError(f"Service {name!r}: unsupported networks")
-            if set(service_networks["default"] or {}) - {"aliases"}:
-                raise NotImplementedError(f"Service {name!r}: unsupported network options")
-            for alias in (service_networks["default"] or {}).get("aliases", []):
-                if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", alias):
-                    raise ValueError(f"Invalid network alias: {alias!r}")
-                if alias in aliases_seen and alias != name:
-                    raise ValueError(f"Ambiguous Compose service alias: {alias!r}")
-                aliases_seen.add(alias)
             for port in service.get("ports", []):
                 if set(port) - {"target", "published", "host_ip", "protocol", "mode"}:
                     raise NotImplementedError(f"Service {name!r}: unsupported ports options")
@@ -189,11 +270,15 @@ class AsyncSandboxCompose:
                     raise NotImplementedError("Fixed published ports/host_ip cannot be honored by sandbox endpoints")
                 if port.get("protocol", "tcp") != "tcp" or port.get("mode", "ingress") != "ingress":
                     raise NotImplementedError("Only TCP sandbox endpoint ports are supported")
-                if not isinstance(self.provider, SupportsSandboxEndpoint):
+                if not isinstance(provider, SupportsSandboxEndpoint):
                     raise NotImplementedError("Sandbox provider does not support service endpoints")
             for volume in service.get("volumes", []):
-                if not isinstance(self.provider, SupportsSandboxSharedStorage):
-                    raise NotImplementedError("Sandbox provider does not support shared volumes")
+                # Volumes are seeded and mounted through the provider that runs the service (see _prepare_volumes).
+                if not isinstance(provider, SupportsSandboxSharedStorage):
+                    raise NotImplementedError(
+                        f"Service {name!r}: the {_provider_name(provider)} sandbox provider does not support shared "
+                        "volumes"
+                    )
                 if not isinstance(volume, Mapping) or volume.get("type") not in {"bind", "volume"}:
                     raise NotImplementedError("Only normalized bind and named volumes are supported")
                 if set(volume) - {"type", "source", "target", "read_only", "bind", "volume"}:
@@ -219,14 +304,41 @@ class AsyncSandboxCompose:
                     if declaration.get("external") and volume["source"] not in self.volume_sources:
                         raise NotImplementedError("External volumes require a volume_sources mapping")
                 source = self.volume_sources.get(volume["source"], f"{self.project}/{volume['source']}")
-                self.provider.shared_volume_options(source, volume["target"], read_only=volume.get("read_only", False))
+                provider.shared_volume_options(source, volume["target"], read_only=volume.get("read_only", False))
+        # Forwarding chains (a -> service:b -> service:c) resolve to one namespace; a cycle is named here, before
+        # the dependency sort reports it anonymously.
+        for name in services:
+            self._forwarding_root(name)
+        # Services reach each other by name on the networks they share; a custom network is a name scope on the
+        # group's one pod network, nothing more. Aliases must be unambiguous per network: a service's name is
+        # reserved on the networks it is on (a forwarded service on its chain root's, as ``_memberships`` says),
+        # not on every network, so ``main`` may alias ``db`` on a network ``db`` is not on. An alias that names a
+        # service the aliasing service shares any network with is ambiguous too: ``_visible_hosts`` would hand
+        # that service two addresses for the one name. After the forwarding roots: ``_memberships`` walks the
+        # chains.
+        memberships = self._memberships()
+        aliases_seen: dict[str, set[str]] = {
+            network: {name for name, joined in memberships.items() if network in joined}
+            for network in {"default", *networks}
+        }
+        for name, service in services.items():
+            for network, network_options in (service.get("networks") or {"default": {}}).items():
+                for alias in (network_options or {}).get("aliases", []):
+                    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", alias):
+                        raise ValueError(f"Invalid network alias: {alias!r}")
+                    if alias != name and (
+                        alias in aliases_seen[network] or memberships.get(alias, set()) & memberships[name]
+                    ):
+                        raise ValueError(f"Ambiguous Compose service alias: {alias!r}")
+                    aliases_seen[network].add(alias)
         try:
             order = list(TopologicalSorter(dependencies).static_order())
         except CycleError as error:
             raise ValueError("Compose dependency cycle") from error
-        if not isinstance(self.provider, SupportsSandboxNetwork):
-            raise NotImplementedError("Sandbox provider does not support networking between sandboxes")
-        self.provider.validate_networking()
+        for provider in self._providers():
+            if not isinstance(provider, SupportsSandboxNetwork):
+                raise NotImplementedError("Sandbox provider does not support networking between sandboxes")
+            provider.validate_networking()
         return order
 
     async def _prepare(self):
@@ -266,11 +378,8 @@ class AsyncSandboxCompose:
             ports = [int(str(port).removesuffix("/tcp")) for port in service.get("expose", [])]
             ports += [int(port["target"]) for port in service.get("ports", [])]
             spec = self.service_specs.get(name, SandboxSpec(ttl_s=self.timeout_s + 3600))
-            resources = dict(vars(spec.resources))
-            if "cpus" in service:
-                resources["cpu"] = float(service["cpus"])
-            if "mem_limit" in service:
-                resources["memory_mib"] = (int(service["mem_limit"]) + 1048575) // 1048576
+            # deploy.resources limits, then reservations, then the legacy cpus/mem_limit keys, over the spec's.
+            resources = {**dict(vars(spec.resources)), **service_resources(service)}
             user = service.get("user")
             if user == "":
                 user = None
@@ -285,6 +394,7 @@ class AsyncSandboxCompose:
                 "health": {**health, "test": test},
                 "shell": ["/bin/sh", "-c"],
                 "runtime": runtime,
+                "hooks": list(service.get("post_start") or []),
                 "spec": replace(
                     spec,
                     image=image,
@@ -309,6 +419,9 @@ class AsyncSandboxCompose:
                         **(service.get("labels") or {}),
                         **self._runtime_metadata.get(name, {}),
                     },
+                    provider_options=_merge_provider_options(
+                        spec.provider_options, self._service_options.get(name, {})
+                    ),
                 ),
             }
         for name, service in self.document["services"].items():
@@ -320,41 +433,73 @@ class AsyncSandboxCompose:
                 if options.get("condition") == "service_healthy" and self._plans[dep]["health"]["test"][0] == "NONE":
                     raise ValueError(f"Service {name!r} requires {dep!r} healthy, but it has no healthcheck")
 
+    @property
+    def _volume_helper(self) -> AsyncSandbox | None:
+        """The shared-storage init helper on the collection's provider (one per provider that mounts volumes)."""
+        return self._volume_helpers.get(id(self.provider))
+
+    @_volume_helper.setter
+    def _volume_helper(self, helper: AsyncSandbox | None) -> None:
+        if helper is None:
+            self._volume_helpers.pop(id(self.provider), None)
+        else:
+            self._volume_helpers[id(self.provider)] = helper
+
+    async def _volume_helper_for(self, provider, root: str) -> AsyncSandbox:
+        """The init helper on ``provider``'s shared storage, started on first use. A service on its own provider
+        mounts that provider's storage, so its directories are made and cleaned there."""
+        helper = self._volume_helpers.get(id(provider))
+        if helper is None:
+            helper = AsyncSandbox(
+                provider,
+                SandboxSpec(
+                    image=self.volume_init_image,
+                    ttl_s=self.timeout_s + 3600,
+                    entrypoint=["sh", "-c", "while :; do sleep 3600; done"],
+                    metadata=provider.shared_volume_metadata(),
+                    provider_options=provider.shared_volume_options(None, root),
+                ),
+                owns_provider=False,
+            )
+            await helper.start()
+            self._volume_helpers[id(provider)] = helper
+        return helper
+
     async def _prepare_volumes(self):
         root = "/tmp/compose-volumes"
-        metadata = self.provider.shared_volume_metadata()
-        helper = AsyncSandbox(
-            self.provider,
-            SandboxSpec(
-                image=self.volume_init_image,
-                ttl_s=self.timeout_s + 3600,
-                entrypoint=["sh", "-c", "while :; do sleep 3600; done"],
-                metadata=metadata,
-                provider_options=self.provider.shared_volume_options(None, root),
-            ),
-            owns_provider=False,
-        )
-        await helper.start()
-        self._volume_helper = helper
         for name, service in self.document["services"].items():
+            if not service.get("volumes"):
+                continue
+            # Everything about a service's volumes happens on the provider that runs it: the directory on its
+            # shared storage, the copy-up seed (a sandbox of the service's own spec) and the mount options.
+            provider = self._provider_for(name)
+            metadata = provider.shared_volume_metadata()
+            helper = await self._volume_helper_for(provider, root)
             mounts = []
-            for volume in service.get("volumes", []):
+            for volume in service["volumes"]:
                 source = volume["source"]
                 managed = source not in self.volume_sources
                 relative = self.volume_sources.get(source, f"{self.project}/{source}")
                 if managed:
-                    result = await self._volume_helper.exec(
-                        f"mkdir -p {shlex.quote(root + '/' + relative)}", user="root"
-                    )
+                    result = await helper.exec(f"mkdir -p {shlex.quote(root + '/' + relative)}", user="root")
                     if result.return_code:
                         raise RuntimeError(f"Shared volume initialization failed: {result.stderr}")
                     if not (volume.get("volume") or {}).get("nocopy"):
+                        # The seed reads the service's image, so it keeps the service's provider options, its
+                        # pull policy first (``pull_policy_options``, which OpenSandbox reads per spec: a deployment
+                        # default of Never would otherwise fail the seed of an uncached ``always`` image before the
+                        # service could pull it, and one of Always would pull an image declared ``never``), less
+                        # the service's own mounts: it mounts the copy-up storage alone.
+                        service_options = self._plans[name]["spec"].provider_options
                         seed_spec = replace(
                             self._plans[name]["spec"],
                             metadata=metadata,
-                            provider_options=self.provider.shared_volume_options(relative, root),
+                            provider_options=_merge_provider_options(
+                                {key: value for key, value in service_options.items() if key != "volumes"},
+                                provider.shared_volume_options(relative, root),
+                            ),
                         )
-                        seed = AsyncSandbox(self.provider, seed_spec, owns_provider=False)
+                        seed = AsyncSandbox(provider, seed_spec, owns_provider=False)
                         self._seeds.append(seed)
                         await seed.start()
                         try:
@@ -370,7 +515,7 @@ class AsyncSandboxCompose:
                                 raise RuntimeError(f"Named volume copy-up failed: {result.stderr}")
                         finally:
                             await seed.stop()
-                options = self.provider.shared_volume_options(
+                options = provider.shared_volume_options(
                     relative, volume["target"], read_only=volume.get("read_only", False)
                 )
                 mounts.extend(options["volumes"])
@@ -383,6 +528,71 @@ class AsyncSandboxCompose:
                         **spec.provider_options,
                         "volumes": [*spec.provider_options.get("volumes", []), *mounts],
                     },
+                )
+
+    def _forwarding_root(self, name: str) -> str:
+        """The service whose network namespace ``name`` ends up in: itself when it declares no ``network_mode``,
+        else the end of its ``network_mode: service:<target>`` chain. A chain that returns to a service it already
+        passed is a cycle, which raises naming it; ``_validate`` runs this before any sandbox exists."""
+        services = self.document["services"]
+        chain = [name]
+        while services[chain[-1]].get("network_mode"):
+            target = services[chain[-1]]["network_mode"].removeprefix("service:")
+            if target in chain:
+                cycle = " -> ".join([*chain[chain.index(target) :], target])
+                raise ValueError(f"Service {name!r}: network_mode cycle: {cycle}")
+            chain.append(target)
+        return chain[-1]
+
+    def _memberships(self) -> dict[str, set[str]]:
+        """The networks each service is on. A ``network_mode: service:<target>`` service shares the target's
+        network namespace, so it is on the networks of the service at the end of its forwarding chain."""
+        services = self.document["services"]
+        return {
+            name: set(services[self._forwarding_root(name)].get("networks") or {"default": {}}) for name in services
+        }
+
+    def _visible_hosts(self, addresses: Mapping[str, str]) -> dict[str, dict[str, str]]:
+        """Per service, the hostnames it resolves: itself, every service sharing a network with it (by name
+        and by the aliases on those networks) and its own ``extra_hosts``."""
+        services = self.document["services"]
+        memberships = self._memberships()
+        visible: dict[str, dict[str, str]] = {}
+        for name in services:
+            hosts: dict[str, str] = {}
+            for peer, peer_service in services.items():
+                shared = memberships[name] & memberships[peer]
+                if peer != name and not shared:
+                    continue
+                hosts[peer] = addresses[peer]
+                for network, options in (peer_service.get("networks") or {"default": {}}).items():
+                    if network in shared or peer == name:
+                        for alias in (options or {}).get("aliases", []):
+                            hosts[alias] = addresses[peer]
+            hosts.update(services[name].get("extra_hosts") or {})
+            visible[name] = hosts
+        return visible
+
+    async def _run_hooks(self, name: str) -> None:
+        """Run the service's ``post_start`` hooks in order, once its command has started (as Compose does: after
+        the container starts, not after it is healthy). A hook that exits non-zero fails the start."""
+        plan = self._plans[name]
+        for index, hook in enumerate(plan["hooks"]):
+            command = hook["command"]
+            if isinstance(command, list):
+                command = shlex.join(command)
+            env = {**plan.get("resolved_env", {}), **hook.get("environment", {})}
+            result = await self.services[name].exec(
+                command,
+                cwd=hook.get("working_dir"),
+                env=env or None,
+                user=hook.get("user", plan["user"]),
+                timeout_s=None,
+            )
+            if result.return_code:
+                detail = (result.stderr or result.stdout or "")[-4096:]
+                raise RuntimeError(
+                    f"Compose service {name!r} post_start hook {index} exited ({result.return_code}): {detail}"
                 )
 
     async def _wait(self, name, condition):
@@ -470,31 +680,36 @@ class AsyncSandboxCompose:
                 if any(service.get("volumes") for service in self.document["services"].values()):
                     await self._prepare_volumes()
                 for name in order:
-                    self.services[name] = AsyncSandbox(self.provider, self._plans[name]["spec"], owns_provider=False)
+                    provider = self._provider_for(name)
+                    self.services[name] = AsyncSandbox(provider, self._plans[name]["spec"], owns_provider=False)
                     await self.services[name].start()
                     await self._create_workdir(name)
                     service = self.document["services"][name]
                     if service.get("cap_add") or service.get("shm_size") is not None:
-                        await self.provider.configure_runtime(
+                        await provider.configure_runtime(
                             self.services[name]._require_handle(),
                             cap_add=tuple(service.get("cap_add") or ()),
                             shm_size=service.get("shm_size"),
                         )
+                hosts: dict[str, str] = {}
                 if self.services:
-                    hosts = {}
+                    addresses: dict[str, str] = {}
                     for name, sandbox in self.services.items():
-                        address = await self.provider.network_address(sandbox._require_handle())
-                        service = self.document["services"][name]
-                        aliases = ((service.get("networks") or {}).get("default") or {}).get("aliases", [])
-                        for alias in [name, *aliases]:
-                            hosts[alias] = address
+                        addresses[name] = await self._provider_for(name).network_address(sandbox._require_handle())
+                    visible = self._visible_hosts(addresses)
+                    hosts = {name: addresses[name] for name in self.services}
                     for name, sandbox in self.services.items():
                         options = self.document["services"][name].get("x-sandbox") or {}
                         plan = self._plans[name]
                         plan["resolved_env"] = {}
                         for key in options.get("resolve_environment", []):
                             url = urlsplit(plan["spec"].env[key])
-                            address = hosts[url.hostname]
+                            if url.hostname not in visible[name]:
+                                raise ValueError(
+                                    f"Service {name!r}: environment {key!r} names {url.hostname!r}, which shares no "
+                                    "network with it"
+                                )
+                            address = visible[name][url.hostname]
                             authority = f"[{address}]" if ":" in address else address
                             if url.port is not None:
                                 authority += f":{url.port}"
@@ -502,7 +717,7 @@ class AsyncSandboxCompose:
                                 authority = url.netloc.rsplit("@", 1)[0] + "@" + authority
                             plan["resolved_env"][key] = url._replace(netloc=authority).geturl()
                         if options.get("hosts") != []:
-                            await self.provider.set_hosts(sandbox._require_handle(), hosts)
+                            await self._provider_for(name).set_hosts(sandbox._require_handle(), visible[name])
                 for name in order:
                     service = self.document["services"][name]
                     for dep, options in (service.get("depends_on") or {}).items():
@@ -516,8 +731,9 @@ class AsyncSandboxCompose:
                         target = service["network_mode"].removeprefix("service:")
                         ports = self._plans[target]["spec"].ports
                         ready = runtime + "/forwarding-ready"
+                        # The relay runs inside the forwarder's sandbox, so on the provider that owns it.
                         relay = asyncio.create_task(
-                            self.provider.forward_ports(
+                            self._provider_for(name).forward_ports(
                                 self.services[name]._require_handle(), hosts[target], ports, ready_file=ready
                             )
                         )
@@ -553,6 +769,7 @@ class AsyncSandboxCompose:
                             raise RuntimeError(f"Compose service {name!r} did not start: {outcome.stderr}")
                         await asyncio.sleep(self.poll_interval_s)
                     plan["started_at"] = asyncio.get_running_loop().time()
+                    await self._run_hooks(name)
                 for name in order:
                     if self._plans[name]["health"]["test"][0] != "NONE":
                         await self._wait(name, "service_healthy")
@@ -580,12 +797,16 @@ class AsyncSandboxCompose:
         }
 
     @classmethod
-    async def connect(cls, descriptor: Mapping[str, Any], *, provider) -> "AsyncSandboxCompose":
+    async def connect(
+        cls, descriptor: Mapping[str, Any], *, provider, service_providers: Mapping[str, Any] | None = None
+    ) -> "AsyncSandboxCompose":
         """Connect to all members without provisioning or restarting services.
 
         Like AsyncSandbox.connect, stop() closes the connected sandboxes using
         provider semantics. The creator retains ownership of managed-volume
         cleanup and running service/forwarding tasks and must also call stop().
+        ``service_providers`` names the provider of members that live on another
+        one, as it did at start.
         """
         if not isinstance(descriptor, Mapping) or set(descriptor) != {"services"}:
             raise ValueError("Invalid Compose connection descriptor")
@@ -596,15 +817,16 @@ class AsyncSandboxCompose:
             or any(not isinstance(name, str) or not isinstance(value, Mapping) for name, value in services.items())
         ):
             raise ValueError("Invalid Compose connection members")
-        collection = cls(provider, None)
+        collection = cls(provider, None, service_providers=service_providers)
         try:
             for name, member in services.items():
                 collection.services[name] = await AsyncSandbox.connect(
-                    member, provider=collection.provider, owns_provider=False
+                    member, provider=collection._provider_for(name), owns_provider=False
                 )
         except BaseException:
             # A partial attach must not destroy a collection owned by another server.
-            await collection.provider.aclose()
+            for member_provider in collection._providers():
+                await member_provider.aclose()
             raise
         collection._started = collection._ready = True
         return collection
@@ -630,22 +852,23 @@ class AsyncSandboxCompose:
                 await sandbox.stop()
             except Exception as error:
                 errors.append(error)
-        if self._volume_helper:
+        for key, helper in list(self._volume_helpers.items()):
             try:
-                result = await self._volume_helper.exec(f"rm -rf /tmp/compose-volumes/{self.project}", user="root")
+                result = await helper.exec(f"rm -rf /tmp/compose-volumes/{self.project}", user="root")
                 if result.return_code:
                     raise RuntimeError(f"Shared volume cleanup failed: {result.stderr}")
             except Exception as error:
                 errors.append(error)
             try:
-                await self._volume_helper.stop()
-                self._volume_helper = None
+                await helper.stop()
+                del self._volume_helpers[key]
             except Exception as error:
                 errors.append(error)
-        try:
-            await self.provider.aclose()
-        except Exception as error:
-            errors.append(error)
+        for provider in self._providers():
+            try:
+                await provider.aclose()
+            except Exception as error:
+                errors.append(error)
         if errors:
             raise ExceptionGroup("Compose cleanup failed", errors)
         self._closed = True
