@@ -318,8 +318,6 @@ class GymAgentHarnessProcessor(BaseModel):
 class AnySweAgent(SimpleResponsesAPIAgent):
     """Runs a Gym agent in each task container."""
 
-    ray_enabled = False
-
     config: AnySweAgentConfig
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
