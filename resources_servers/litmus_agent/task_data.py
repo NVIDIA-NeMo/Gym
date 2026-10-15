@@ -48,6 +48,11 @@ class TaskData(BaseModel):
         description="Property being asked about, passed through and used for metric grouping.",
         json_schema_extra={"consumed_by": ["metrics"]},
     )
+    dataset: Optional[str] = Field(
+        default=None,
+        description="Source dataset identifier, retained unchanged.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     question_family: Optional[str] = Field(
         default=None,
         description="Source question category, retained for subset selection and provenance.",
