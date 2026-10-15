@@ -127,3 +127,24 @@ Deployments requiring an additional policy must supply their combined policy fil
 through the Tavily resource's `exclude_domains_file_path`; keep private policies
 outside the public repository. This list reduces answer exposure but cannot
 guarantee that every answer-bearing page is excluded.
+
+### Domain metrics
+
+Text and vision preparation retain `category` and `raw_subject`. The HLE and
+HLE-Verified judge configurations enable `report_hle_domains`; existing cached
+HLE datasets need to be prepared again to retain these labels.
+
+Aggregation emits flat `domains/<field>/<URL-encoded-label>/...` keys in
+`agent_metrics`: question/rollout counts, `mean/reward` (accuracy as a fraction),
+`mean/output_tokens`, and `ci_low_95_question_bootstrap/<metric>` /
+`ci_high_95_question_bootstrap/<metric>`. Headline scores and grading are unchanged.
+Missing labels are counted; incomplete token usage suppresses the token mean and
+interval rather than silently averaging a subset. Masked outcomes are excluded
+by the normal aggregation pipeline.
+
+Intervals use a 95% percentile bootstrap over questions (2,000 resamples, seed 0),
+keeping every question's repeated generations together. These estimate variation
+across questions, not across generation repeats, and therefore have distinct
+names from the existing repeat-level intervals. At least two questions are
+required. Identical question means yield zero-width empirical intervals; these
+are not evidence of certainty. No correction for checkpoint selection is made.
