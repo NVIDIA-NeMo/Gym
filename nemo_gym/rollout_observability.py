@@ -595,7 +595,10 @@ def join_model_call_observations(
 
     result.gaps.extend(join_gaps)
     for call in captured:
-        if id(call) not in owner_by_call:
+        # Collection materializes these explicitly declared verifier owners in the
+        # trajectory; they are not missing Agent-owned observations.
+        verifier_owned = call.client_invocation_role == "verifier" and call.client_session_id and call.model_call_id
+        if id(call) not in owner_by_call and not verifier_owned:
             result.gaps.append(
                 ObservationGap(
                     code="model_call_ownership_unavailable",
