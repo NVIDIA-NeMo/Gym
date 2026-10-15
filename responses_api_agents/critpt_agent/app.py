@@ -49,6 +49,9 @@ class CritPtAgentConfig(BaseResponsesAPIAgentConfig):
 
 
 class CritPtAgentRunRequest(BaseRunRequest):
+    # extra="allow" so extra row fields reach the resources server's seed and verify payloads unchanged.
+    model_config = ConfigDict(extra="allow")
+
     problem_id: str
     code_template: str
 
