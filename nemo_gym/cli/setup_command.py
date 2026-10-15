@@ -177,8 +177,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
-    # Servers sit two levels below the repo root, or three when nested (e.g. conversational_tool_use/simulation).
-    is_editable_install = any((dir_path.resolve() / up / "pyproject.toml").exists() for up in ("../..", "../../.."))
+    is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
 
     try:
         has_pyproject_toml = (dir_path / "pyproject.toml").exists()
