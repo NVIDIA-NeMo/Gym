@@ -71,6 +71,8 @@ class AgenticVBenchConfig(BaseResponsesAPIAgentConfig):
     model_call_timeout_ms: int = Field(default=3_600_000, gt=0)
     # OpenCode subagent policy: default (built-ins available), off (primary agent only), on (built-ins + media-analyst)
     opencode_subagents: Literal["default", "off", "on"] = "default"
+    # Keep task images between trials (trace generation over repeated trials); the benchmark deletes them.
+    keep_task_images: bool = False
 
 
 class AgenticVBenchRunRequest(BaseRunRequest):
@@ -237,6 +239,7 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 str(self.config.model_call_timeout_ms),
                 "--opencode-subagents",
                 self.config.opencode_subagents,
+                *(["--keep-task-images"] if self.config.keep_task_images else []),
             ]
             if self.config.judge_protocol:
                 command.extend(["--judge-protocol", self.config.judge_protocol])
