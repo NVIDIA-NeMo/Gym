@@ -386,6 +386,95 @@ def test_cancellation_metrics_use_bounded_routes_and_response_start_phases(colle
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("prefix_middleware", "request_path", "status", "route"),
+    [
+        ("none", "/ng-rollout/task-{index}/work/item-{index}", 404, "<unmatched>"),
+        ("none", "/ng-rollout/task-{index}/training-token-capture/work/item-{index}", 404, "<unmatched>"),
+        ("resources", "/ng-rollout/invalid!{index}/work/item-{index}", 404, "<unmatched>"),
+        ("resources", "/ng-rollout//work/item-{index}", 404, "<unmatched>"),
+        ("model", "/ng-rollout//work/item-{index}", 404, "<unmatched>"),
+        (
+            "resources",
+            "/ng-rollout/task-{index}/training-token-capture/work/item-{index}",
+            200,
+            "/training-token-capture/work/{item_id}",
+        ),
+    ],
+)
+def test_cancellation_route_labels_follow_server_prefix_rules(
+    collected, monkeypatch, prefix_middleware, request_path, status, route
+):
+    from fastapi import FastAPI, Response
+
+    from nemo_gym import server_utils
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.rollout_correlation import RolloutContextMiddleware
+
+    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+
+    async def run():
+        app = FastAPI()
+
+        @app.post("/work/{item_id}")
+        @app.post("/training-token-capture/work/{item_id}")
+        async def work():
+            return Response("ok")
+
+        if prefix_middleware == "model":
+            app.add_middleware(_CaptureMiddleware, store=None, model_server_name="test")
+        elif prefix_middleware == "resources":
+            app.add_middleware(RolloutContextMiddleware)
+        app.add_middleware(server_utils.ClientDisconnectCancellationMiddleware)
+
+        ready = asyncio.Event()
+        statuses = []
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                statuses.append(message["status"])
+            elif message["type"] == "http.response.body":
+                # Keep both successful and 404 responses in flight until the client disconnects.
+                ready.set()
+                await asyncio.Event().wait()
+
+        async with observer.observe_event_loop("server"):
+            for index in range(2):
+                path = request_path.format(index=index)
+                scope = {
+                    "type": "http",
+                    "method": "POST",
+                    "path": path,
+                    "raw_path": path.encode(),
+                    "headers": [],
+                    "query_string": b"",
+                    "scheme": "http",
+                    "http_version": "1.1",
+                    "state": {"existing": "preserved"},
+                }
+                ready.clear()
+                incoming = asyncio.Queue()
+                await incoming.put({"type": "http.request", "body": b"", "more_body": False})
+                task = asyncio.create_task(app(scope, incoming.get, send))
+                await asyncio.wait_for(ready.wait(), timeout=1)
+                await incoming.put({"type": "http.disconnect"})
+                await asyncio.wait_for(task, timeout=1)
+                assert scope["path"] == path
+                assert scope["raw_path"] == path.encode()
+                assert scope["state"]["existing"] == "preserved"
+
+            assert statuses == [status, status]
+            counts = observer.request_counts()
+            assert counts.cancelled == 2
+            assert counts.in_flight == counts.unhandled_exceptions == 0
+            assert counts.responses == {status: 2}
+            (point,) = collected()[observer.REQUESTS_CANCELLED_INSTRUMENT]
+            assert point.value == counts.cancelled
+            assert point.attributes == {"http.route": route, "nemo.gym.request.phase": "response_started"}
+
+    asyncio.run(run())
+
+
 def test_cancellation_before_routing_uses_one_unmatched_bucket(collected, monkeypatch):
     from nemo_gym import server_utils
 

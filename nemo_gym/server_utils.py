@@ -87,7 +87,7 @@ from nemo_gym.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import ROUTED_PATH_STATE_KEY, current_rollout_id, maybe_rollout_id_from_run_body
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.connection_pool import (
     QueueTimedTCPConnector,
@@ -1245,17 +1245,9 @@ def _cancelled_request_route(scope: Scope) -> str:
     if route is not None:
         return getattr(route, "path_format", "<unmatched>")
 
-    # Rollout-prefix middleware copies the scope before routing, so its matched route
-    # may not be visible here. Resolve against registered routes only on cancellation.
-    path = scope["path"]
-    prefix = f"/{ROLLOUT_PATH_PREFIX}/"
-    if path.startswith(prefix):
-        _, separator, rest = path[len(prefix) :].partition("/")
-        if separator:
-            path = f"/{rest}"
-            capture_prefix = f"/{TOKEN_CAPTURE_PATH_SEGMENT}/"
-            if path.startswith(capture_prefix):
-                path = path[len(capture_prefix) - 1 :]
+    # Prefix middleware copies the scope, but shares its actual routed path in state.
+    # Respect each server's prefix rules and resolve only registered templates.
+    path = scope.get("state", {}).get(ROUTED_PATH_STATE_KEY, scope["path"])
     routed_scope = {**scope, "path": path}
     for candidate in getattr(scope.get("app"), "routes", ()):
         match, _ = candidate.matches(routed_scope)
