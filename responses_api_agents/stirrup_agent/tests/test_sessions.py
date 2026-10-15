@@ -142,6 +142,34 @@ def test_an_episode_runs_stirrup_in_the_borrowed_sandbox(agent, client, root, mo
     ]
 
 
+def test_an_agent_that_runs_out_of_wall_time_answers_with_its_partial_run_as_incomplete(
+    agent, client, root, monkeypatch
+):
+    resources = _Resources(_resources_app([]))
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "echo draft > report.txt"})), None])
+    monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: model.base_url)
+    agent.config.sandbox_runner_timeout_seconds = 4
+    tool_access = _TOOL_ACCESS.model_copy(update={"base_url": resources.base_url})
+    try:
+        _seed(client, sandbox_access=_sandbox_access(str(root)), tool_accesses=[tool_access])
+        response = client.post(
+            f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
+            json={"input": [{"role": "user", "content": "Write the report."}], "model": "policy", "tools": _TOOLS},
+        )
+        closed = _close(client)
+    finally:
+        model.close()
+        resources.close()
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["status"], body["metadata"]["stop_reason"]) == ("incomplete", "wall_time")
+    assert [item["type"] for item in body["output"]].count("function_call") == 1
+    assert (root / "report.txt").read_text() == "draft\n"
+    invocation = next(r for r in closed.json()["agent_observations"]["records"] if "model_calls" in r)
+    assert invocation["status"] == "incomplete"
+
+
 def test_a_failed_episode_still_closes_with_its_evidence(agent, client, root, monkeypatch):
     resources = _Resources(_resources_app([]))
     model = _ModelServer([_call("fetch_web_page", json.dumps({"url": "x"}))])

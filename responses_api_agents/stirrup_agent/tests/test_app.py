@@ -68,9 +68,18 @@ async def _runner_payload(config: StirrupAgentWrapperConfig, body: NeMoGymRespon
     wrapper = StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
     state = SimpleNamespace(
         request=SimpleNamespace(episode_id=EpisodeId(rollout_id="rollout", attempt=0)),
-        session=SimpleNamespace(workdir="/root"),
+        session=SimpleNamespace(workdir="/root", stop_request_path="/tmp/stop-requested"),
         tool_access=DirectHTTPToolAccess(name="tools", required=True, base_url="http://resources:8000"),
-        execute=AsyncMock(return_value={"input_items": [], "output_items": [], "elapsed_seconds": 0, "usages": []}),
+        execute=AsyncMock(
+            return_value={
+                "input_items": [],
+                "output_items": [],
+                "elapsed_seconds": 0,
+                "usages": [],
+                "stop_reason": None,
+                "observations": {"status": "completed"},
+            }
+        ),
     )
     with patch.object(StirrupAgentWrapper, "resolve_model_base_url", return_value="http://policy.invalid/v1"):
         await wrapper._run_sandbox_episode(body, state)

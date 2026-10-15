@@ -330,6 +330,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "finish_tool_names": self.config.finish_tool_names,
             "tool_access": state.tool_access.model_dump(mode="json") if state.tool_access else None,
             "workdir": state.session.workdir,
+            "stop_request_path": state.session.stop_request_path,
             "max_turns": self.config.agent_max_turns,
             "min_compaction_summary_words": self.config.min_compaction_summary_words,
             "client": {
@@ -349,11 +350,20 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 "truncation_recovery": self.config.truncation_recovery,
             },
         }
-        output = await state.execute(
-            payload,
-            timeout=self.config.sandbox_runner_timeout_seconds,
-            close_timeout=self.config.session_close_timeout_seconds,
-        )
+        try:
+            output = await state.execute(
+                payload,
+                timeout=self.config.sandbox_runner_timeout_seconds,
+                close_timeout=self.config.session_close_timeout_seconds,
+            )
+        except TimeoutError:
+            # The runner normally stops at the deadline and writes its partial report. If the supervisor overran
+            # too, the episode is still a timeout when that report is there, and an infrastructure failure when not.
+            artifacts = state.session.artifacts
+            if not (isinstance(artifacts, dict) and artifacts.get("stop_reason") == "wall_time"):
+                raise
+            state.resources_cookies = artifacts["resources_cookies"]
+            output = artifacts
         return NeMoGymResponse(
             id=f"stirrup-{state.request.episode_id.capture_key}",
             created_at=int(time.time()),
@@ -363,7 +373,11 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             parallel_tool_calls=False,
             tool_choice="auto",
             tools=[],
-            metadata={"elapsed_seconds": str(output["elapsed_seconds"])},
+            metadata={
+                "elapsed_seconds": str(output["elapsed_seconds"]),
+                **({"stop_reason": output["stop_reason"]} if output["stop_reason"] else {}),
+            },
+            status=output["observations"]["status"],
             usage=_usage(output["usages"]),
         )
 

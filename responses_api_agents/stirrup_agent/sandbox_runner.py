@@ -367,8 +367,15 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             **({"system_prompt": system_prompt} if system_prompt else {}),
         )
         started = time.time()
+        stop_reason = None
         async with agent.session(cache_on_interrupt=False) as session:
-            finish_params, history, _ = await session.run(messages)
+            try:
+                finish_params, history, _ = await session.run(messages)
+            except asyncio.CancelledError:
+                # SIGTERM from the supervisor, at the deadline or on a close: report the turns completed so far.
+                asyncio.current_task().uncancel()
+                finish_params, history = None, _completed_turns(session, messages)
+                stop_reason = _stop_reason(payload)
         status = InvocationStatus.COMPLETED if finish_params is not None else InvocationStatus.INCOMPLETE
         input_items, output_items = convert_stirrup_history_to_output_items(history)
         return {
@@ -376,15 +383,33 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             "output_items": output_items,
             "elapsed_seconds": time.time() - started,
             "resources_cookies": {cookie.name: cookie.value for cookie in http.cookies.jar},
+            "stop_reason": stop_reason,
             **observer.report(status, history, output_items),
         }
+
+
+def _completed_turns(session: Any, messages: list[Any]) -> list[list[Any]]:
+    """The message history as of the start of the turn that was running, from Stirrup's per-turn snapshot."""
+    state = session._current_run_state
+    return [list(messages)] if state is None else [*state.full_msg_history, state.msgs]
+
+
+def _stop_reason(payload: dict[str, Any]) -> str:
+    """``cancelled`` when the agent server asked to stop (it publishes a marker first), else the deadline."""
+    marker = payload.get("stop_request_path")
+    return "cancelled" if marker and Path(marker).exists() else "wall_time"
+
+
+async def _run_until_terminated(payload: dict[str, Any], scratch: Path, observer: Observer) -> dict[str, Any]:
+    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
+    return await run(payload, scratch, observer)
 
 
 def main(input_path: str, output_path: str) -> None:
     payload = json.loads(Path(input_path).read_text())
     observer = Observer()
     try:
-        output = asyncio.run(run(payload, Path(input_path).parent, observer))
+        output = asyncio.run(_run_until_terminated(payload, Path(input_path).parent, observer))
     except BaseException as error:
         output = {
             "error": repr(error),

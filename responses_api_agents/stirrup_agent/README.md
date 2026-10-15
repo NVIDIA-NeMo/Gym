@@ -37,7 +37,7 @@ comes back as the response's output items; verification belongs to the resources
 | `temperature` | `0.6` | Sampling temperature when the request sets none. |
 | `finish_tool_names` | `null` | Request tools that end the episode when they succeed; `null` uses Stirrup's own finish tool. |
 | `sandbox_install_timeout_seconds` | `900` | Bound on installing the runtime in the sandbox. |
-| `sandbox_runner_timeout_seconds` | `12600` | Bound on one episode. |
+| `sandbox_runner_timeout_seconds` | `12600` | Bound on one episode. At the limit the response carries the turns completed so far, with `status: incomplete` and `metadata.stop_reason: wall_time`. |
 | `session_close_timeout_seconds` | `30` | Bound on each cleanup phase at close. |
 | `completion_token_buffer` | `1000` | Safety margin (in tokens) reserved when sizing `max_completion_tokens` per call. |
 

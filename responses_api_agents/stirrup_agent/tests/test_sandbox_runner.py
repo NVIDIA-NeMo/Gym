@@ -5,7 +5,11 @@
 import ast
 import asyncio
 import json
+import os
+import signal
 import socket
+import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,10 +36,12 @@ def _call(name: str, arguments: str) -> dict:
 
 
 class _ModelServer:
-    """Answer chat completions in order and record each request body."""
+    """Answer chat completions in order and record each request body; a ``None`` answer hangs until closed."""
 
-    def __init__(self, answers: list[dict]) -> None:
+    def __init__(self, answers: list[dict | None]) -> None:
         self.answers = answers
+        self.blocked = threading.Event()
+        self.release = threading.Event()
         self.requests: list[dict] = []
         self.session_ids: list[str | None] = []
         server = self
@@ -45,6 +51,10 @@ class _ModelServer:
                 server.requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
                 server.session_ids.append(self.headers.get("x-session-id"))
                 message = server.answers[len(server.requests) - 1]
+                if message is None:
+                    server.blocked.set()
+                    server.release.wait(60)
+                    message = {"role": "assistant", "content": "late"}
                 payload = json.dumps(
                     {
                         "id": f"chatcmpl-{len(server.requests)}",
@@ -69,6 +79,7 @@ class _ModelServer:
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
 
     def close(self) -> None:
+        self.release.set()
         self._server.shutdown()
         self._server.server_close()
 
@@ -223,6 +234,61 @@ def test_the_run_reports_its_model_calls_and_tool_executions(tmp_path, resources
     assert all(t["completed_at"] >= t["started_at"] > 1e9 and t["duration_ms"] >= 0 for t in tools)
     usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
     assert output["usages"] == [{**usage, "completion_tokens_details": None, "prompt_tokens_details": None}] * 4
+
+
+async def _cancelled_after_the_model_hangs(payload: dict, tmp_path: Path, model: _ModelServer) -> dict:
+    task = asyncio.ensure_future(run(payload, tmp_path, Observer()))
+    assert await asyncio.to_thread(model.blocked.wait, 30), "the model was never called"
+    task.cancel()
+    return await task
+
+
+@pytest.mark.parametrize(("marker_exists", "stop_reason"), [(False, "wall_time"), (True, "cancelled")])
+def test_a_cancelled_run_reports_the_turns_it_completed(tmp_path, resources, marker_exists, stop_reason):
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    marker = tmp_path / "stop-requested"
+    if marker_exists:
+        marker.touch()
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "echo draft > report.txt"})), None])
+    payload = {**_payload(model.base_url, resources.base_url, workdir), "stop_request_path": str(marker)}
+    try:
+        output = asyncio.run(_cancelled_after_the_model_hangs(payload, tmp_path, model))
+    finally:
+        model.close()
+
+    assert output["stop_reason"] == stop_reason
+    assert output["observations"]["status"] == "incomplete"
+    assert [item["type"] for item in output["output_items"]].count("function_call") == 1
+    assert [t["tool_name"] for t in output["observations"]["tool_calls"]] == ["code_exec"]
+    assert (workdir / "report.txt").read_text() == "draft\n"
+
+
+def test_sigterm_makes_the_runner_write_its_partial_report(tmp_path, resources):
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "echo draft > report.txt"})), None])
+    input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
+    input_path.write_text(json.dumps(_payload(model.base_url, resources.base_url, workdir)))
+    repo = Path(__file__).resolve().parents[3]
+    runner = repo / "responses_api_agents/stirrup_agent/sandbox_runner.py"
+    process = subprocess.Popen(
+        [sys.executable, str(runner), str(input_path), str(output_path)],
+        cwd=repo,
+        env={**os.environ, "PYTHONPATH": str(repo)},
+    )
+    try:
+        assert model.blocked.wait(60), "the model was never called"
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=60) == 0
+    finally:
+        process.kill()
+        model.close()
+
+    output = json.loads(output_path.read_text())
+    assert (output["stop_reason"], output["observations"]["status"]) == ("wall_time", "incomplete")
+    assert any(item["type"] == "function_call" for item in output["output_items"])
+    assert (workdir / "report.txt").read_text() == "draft\n"
 
 
 def test_a_failed_run_still_reports_what_it_observed(tmp_path, resources):
