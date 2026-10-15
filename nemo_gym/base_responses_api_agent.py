@@ -37,6 +37,7 @@ from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
+    VERIFICATION_EVENTS_URL_KEY_NAME,
     get_first_server_config_dict,
 )
 from nemo_gym.openai_utils import (
@@ -359,7 +360,16 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         It also requires the static agent flag or run-level ``all_agents``.
         Missing global configuration disables correlation.
         """
-        return self._model_call_capture_enabled() or self._token_id_capture_enabled()
+        return (
+            self._model_call_capture_enabled()
+            or self._token_id_capture_enabled()
+            or self._verification_events_enabled()
+        )
+
+    def _verification_events_enabled(self) -> bool:
+        """Verification events name their rollout, so the agent keeps the rollout id for its /verify call."""
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        return isinstance(global_config, Mapping) and bool(global_config.get(VERIFICATION_EVENTS_URL_KEY_NAME))
 
     def _model_call_capture_enabled(self) -> bool:
         """Whether evaluation model-call observability is enabled."""
