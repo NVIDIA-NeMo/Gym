@@ -11,7 +11,9 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.middleware.sessions import SessionMiddleware
 
+from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.base_responses_api_model import ModelCallCaptureConfig, install_model_call_capture
 from nemo_gym.chat_streaming import synthesize_chat_completion_sse
 from nemo_gym.responses_streaming import (
@@ -32,6 +34,7 @@ class Probe:
     violations: list[str] = field(default_factory=list)
     verifications: list[dict] = field(default_factory=list)
     seeded: int = 0
+    closed: int = 0
     finished: bool = False
 
     def save(self) -> None:
@@ -42,6 +45,7 @@ class Probe:
             "violations": self.violations,
             "verifications": self.verifications,
             "seeded": self.seeded,
+            "closed": self.closed,
             "finished": self.finished,
         }
         (self.directory / "witness.json").write_text(json.dumps(witness, indent=2) + "\n")
@@ -241,11 +245,21 @@ class Probe:
 
     def resources_app(self) -> FastAPI:
         app = FastAPI()
+        app.add_middleware(SessionMiddleware, secret_key=uuid4().hex, session_cookie="probe_resources_session")
 
         async def seed(request: Request) -> dict:
+            body = await request.json()
+            if "resources_session_id" in body:
+                session = ResourcesSeedSessionRequest.model_validate(body)
+                request.session["resources_session_id"] = session.resources_session_id
             self.seeded += 1
             self.save()
-            return {}
+            return {"resources_session_id": session.resources_session_id} if "resources_session_id" in body else {}
+
+        async def close(body: ResourcesCloseSessionRequest) -> dict:
+            self.closed += 1
+            self.save()
+            return {"resources_session_id": body.resources_session_id}
 
         async def verify(request: Request) -> dict:
             body = await request.json()
@@ -267,5 +281,6 @@ class Probe:
 
         for prefix in ("", "/ng-rollout/{rollout_id}"):
             app.post(prefix + "/seed_session")(seed)
+            app.post(prefix + "/close_session")(close)
             app.post(prefix + "/verify")(verify)
         return app

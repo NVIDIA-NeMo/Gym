@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+chemeval:
+  resources_servers:
+    chemeval:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: ChemEval text benchmark across 53 chemistry tasks
+      value: Task-specific grading and task-macro scores across L1-L4
+      judge_model_server: null
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/chemeval/data/example.jsonl
+chemeval_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: chemeval
+      model_server:
+        type: responses_api_models
+        name: policy_model
+chemeval_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: chemeval_simple_agent

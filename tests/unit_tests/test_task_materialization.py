@@ -8,6 +8,7 @@ import pytest
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import GlobalConfigDictParser
 from nemo_gym.rollout_collection import (
     RolloutCollectionConfig,
@@ -252,6 +253,25 @@ def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, expl
     request = SingleAgentTurnRequest.model_validate(_episode_request_body(loaded))
     assert request.episode_id.rollout_id == (f"shard-{task_index}" if explicit_rollout_id else f"{task_index}-0")
     assert request.episode_id.attempt == 2
+
+
+@pytest.mark.parametrize(
+    "identity, expected",
+    [
+        # A restored attempt carries its attempt in the explicit id.
+        ({"_ng_rollout_id": "restored-a1"}, EpisodeId(rollout_id="restored", attempt=1)),
+        # Gym's own retries stamp the attempt index.
+        (
+            {"_ng_task_index": 3, "_ng_rollout_index": 2, "_ng_attempt_index": 2},
+            EpisodeId(rollout_id="3-2", attempt=2),
+        ),
+        ({"_ng_task_index": 3, "_ng_rollout_index": 2}, EpisodeId(rollout_id="3-2", attempt=0)),
+    ],
+)
+def test_episode_request_decodes_the_capture_key_like_the_agent(identity, expected):
+    row = {"task_id": {"taskset": "tasks", "task_id": "task"}, "task_input": {}, **identity}
+
+    assert EpisodeId.model_validate(_episode_request_body(row)["episode_id"]) == expected
 
 
 def _resources_server(name, datasets, implementation="test"):

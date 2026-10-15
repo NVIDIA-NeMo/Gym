@@ -91,8 +91,13 @@ async def finalize_rollout_token_capture(
 
     Call this after the harness and verifier finish the record.
     The function mutates ``result`` in place.
-    It replaces only ``response.output``.
-    It preserves the reward and all other harness and verifier output.
+    It replaces ``response.output``.
+    It preserves the reward and all other harness and verifier output, with one exception:
+    when the rebuilt response is ``incomplete`` because the delivered chain's terminal call
+    was cut (``length`` or ``content_filter``) and the harness reported ``completed`` or no
+    status, the harness response takes that ``status`` and ``incomplete_details``, so a
+    reader of the record sees why the delivered chain stopped. A harness that reported
+    ``incomplete`` or ``failed`` itself keeps its own verdict.
 
     The function freezes capture records through ``source``.
     It rebuilds from that frozen snapshot.
@@ -195,6 +200,14 @@ async def finalize_rollout_token_capture(
     if projected is not None:
         if isinstance(result.get("response"), dict):
             result["response"]["output"] = projected["output"]
+            # The rebuilt output's truncation verdict travels with it: a harness response that
+            # reports no status, or ``completed``, takes the capture's ``incomplete`` verdict and
+            # its ``incomplete_details``, so a trainer reading the record sees why the delivered
+            # chain stopped. A harness that already reported ``incomplete`` or ``failed`` keeps its
+            # own, more specific, verdict.
+            if projected.get("status") == "incomplete" and result["response"].get("status") in (None, "completed"):
+                result["response"]["status"] = "incomplete"
+                result["response"]["incomplete_details"] = projected.get("incomplete_details")
         else:
             result["response"] = projected
 

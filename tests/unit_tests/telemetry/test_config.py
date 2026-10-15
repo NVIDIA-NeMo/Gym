@@ -19,6 +19,7 @@ has to reach a server process. These tests cover that translation and, important
 precedence: a raw env var set by the user must beat YAML, never the other way round.
 """
 
+import json
 import logging
 import os
 
@@ -77,6 +78,18 @@ def test_unknown_keys_are_preserved_not_rejected():
     config = TelemetryConfig.model_validate({"enabled": True, "some_future_knob": 7})
     assert config.enabled is True
     assert config.some_future_knob == 7
+
+
+def test_removed_instrument_aiohttp_key_still_loads_and_exports_nothing(clean_otel_env):
+    """`instrument_aiohttp` was removed because nothing read it; configs that still set it keep loading."""
+    global_config = OmegaConf.create({"telemetry": {"enabled": True, "instrument_aiohttp": False}})
+    config = telemetry_config_from_global_config(global_config)
+    assert config.enabled is True
+    assert "instrument_aiohttp" not in TelemetryConfig.model_fields
+
+    configure_telemetry_env(config)
+    assert os.environ["NEMO_GYM_OTEL_ENABLED"] == "1"
+    assert "NEMO_GYM_OTEL_INSTRUMENT_AIOHTTP" not in os.environ
 
 
 def test_config_reads_the_telemetry_block_from_a_gym_config(clean_otel_env):
@@ -422,8 +435,9 @@ def test_server_requirements_pin_the_same_lens_this_process_runs(clean_otel_env)
 
 
 def test_server_requirements_include_the_instrumentation_packages(clean_otel_env):
-    """nemo-lens imports these lazily and raises ImportError without them, so a server
-    venv that lacks them loses inbound context extraction and every SERVER span."""
+    """nemo-lens imports the FastAPI instrumentor lazily and raises ImportError without it, so
+    a server venv that lacks it loses inbound context extraction and every SERVER span. The
+    aiohttp client instrumentor is not installed: nothing calls it."""
     pytest.importorskip("nemo.lens")
     clean_otel_env.setenv("NEMO_GYM_OTEL_ENABLED", "1")
 
@@ -431,7 +445,7 @@ def test_server_requirements_include_the_instrumentation_packages(clean_otel_env
 
     requirements = " ".join(server_venv_requirements())
     assert "opentelemetry-instrumentation-fastapi" in requirements
-    assert "opentelemetry-instrumentation-aiohttp-client" in requirements
+    assert "opentelemetry-instrumentation-aiohttp-client" not in requirements
 
 
 def test_missing_lens_yields_no_requirements_rather_than_an_unpinned_one(clean_otel_env):
@@ -441,12 +455,12 @@ def test_missing_lens_yields_no_requirements_rather_than_an_unpinned_one(clean_o
     from nemo_gym.telemetry import setup as telemetry_setup
 
     with no_lens():
-        original = telemetry_setup._installed_requirement
-        telemetry_setup._installed_requirement = lambda *args: None
+        original = telemetry_setup.installed_requirement
+        telemetry_setup.installed_requirement = lambda *args: None
         try:
             assert telemetry_setup.server_venv_requirements() == []
         finally:
-            telemetry_setup._installed_requirement = original
+            telemetry_setup.installed_requirement = original
 
 
 def test_head_server_deps_carry_telemetry_into_server_venvs(clean_otel_env):
@@ -515,3 +529,68 @@ def test_enabling_via_lens_env_still_carries_yaml_settings_to_servers(clean_otel
 
     assert os.environ["NEMO_GYM_OTEL_SPAN_GROUPS"] == "per_rollout"
     assert os.environ["NEMO_GYM_OTEL_EXPORTER"] == "console"
+
+
+class _DirectURLDistribution:
+    version = "0.1.0"
+
+    def __init__(self, direct_url: dict | None) -> None:
+        self._direct_url = direct_url
+
+    def read_text(self, filename: str) -> str | None:
+        assert filename == "direct_url.json"
+        return None if self._direct_url is None else json.dumps(self._direct_url)
+
+
+def test_installed_requirement_pins_a_local_directory_install(monkeypatch):
+    """`pip install /path` records only dir_info; a version pin would name a release no index serves."""
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    monkeypatch.setattr(
+        "importlib.metadata.distribution",
+        lambda name: _DirectURLDistribution({"url": "file:///home/u/gym-substrate", "dir_info": {}}),
+    )
+    assert telemetry_setup.installed_requirement("gym-substrate", "gym-substrate") == (
+        "gym-substrate@file:///home/u/gym-substrate"
+    )
+
+
+def test_installed_requirement_pins_an_index_install_by_version(monkeypatch):
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    monkeypatch.setattr("importlib.metadata.distribution", lambda name: _DirectURLDistribution(None))
+    assert telemetry_setup.installed_requirement("gym-substrate", "gym-substrate") == "gym-substrate==0.1.0"
+
+
+def test_installed_requirement_pins_a_wheel_install_by_its_url(monkeypatch):
+    """A wheel installed from a file records archive_info; its version is on no index."""
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    monkeypatch.setattr(
+        "importlib.metadata.distribution",
+        lambda name: _DirectURLDistribution(
+            {"url": "file:///home/u/dist/gym_substrate-0.1.0-py3-none-any.whl", "archive_info": {"hashes": {}}}
+        ),
+    )
+    assert telemetry_setup.installed_requirement("gym-substrate", "gym-substrate") == (
+        "gym-substrate@file:///home/u/dist/gym_substrate-0.1.0-py3-none-any.whl"
+    )
+
+
+def test_installed_requirement_keeps_the_git_subdirectory(monkeypatch):
+    """A plugin checked out from a repository subfolder is not the project at the root."""
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    monkeypatch.setattr(
+        "importlib.metadata.distribution",
+        lambda name: _DirectURLDistribution(
+            {
+                "url": "https://github.com/org/plugins",
+                "vcs_info": {"vcs": "git", "commit_id": "0123abc"},
+                "subdirectory": "providers/gym-substrate",
+            }
+        ),
+    )
+    assert telemetry_setup.installed_requirement("gym-substrate", "gym-substrate") == (
+        "gym-substrate@git+https://github.com/org/plugins@0123abc#subdirectory=providers/gym-substrate"
+    )

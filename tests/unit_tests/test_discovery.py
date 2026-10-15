@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
+from textwrap import dedent
 
 import pytest
 from omegaconf import OmegaConf
@@ -81,8 +84,8 @@ class TestComponentSearchRoots:
         assert roots == [str(a), "/some/site-packages", str(Path.cwd()), str(PARENT_DIR)]
 
     def test_sys_path_builtins_entry_moved_last_even_if_already_present(self, tmp_path: Path, monkeypatch) -> None:
-        # Wheel install: PARENT_DIR is site-packages, already on sys.path. It must be dropped from the woven
-        # entries and appended last, so cwd/built-ins stay last and import order matches file lookup.
+        # Source checkout: if PARENT_DIR is already on sys.path it must be dropped from the woven entries and
+        # appended last, so cwd/built-ins stay last and import order matches file lookup.
         cwd = tmp_path / "cwd"
         cwd.mkdir()
         monkeypatch.chdir(cwd)
@@ -92,6 +95,27 @@ class TestComponentSearchRoots:
 
         assert resolved.count(PARENT_DIR.resolve()) == 1  # not duplicated
         assert resolved[-2:] == [Path.cwd().resolve(), PARENT_DIR.resolve()]  # cwd then built-ins, always last
+
+    @pytest.mark.parametrize("dirname", ["site-packages", "dist-packages", "target"])
+    def test_noneditable_install_root_stays_ahead_of_cwd(self, tmp_path: Path, monkeypatch, dirname: str) -> None:
+        # The install root must not be moved behind cwd, or a package in the
+        # working directory (e.g. a checkout of numpy) shadows every installed dependency.
+        import nemo_gym
+
+        site_dir = tmp_path / dirname
+        site_dir.mkdir(parents=True)
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym, "PARENT_DIR", site_dir)
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", False)
+
+        resolved = [r.resolve() for r in component_search_roots(sys_path=[Path("/usr/lib/python3.12"), site_dir])]
+
+        assert resolved == [Path("/usr/lib/python3.12").resolve(), site_dir.resolve(), Path.cwd().resolve()]
+        # File lookup (no sys_path) is unchanged: cwd before the built-ins.
+        assert [r.resolve() for r in component_search_roots()] == [Path.cwd().resolve(), site_dir.resolve()]
 
 
 class TestAugmentSysPath:
@@ -127,6 +151,132 @@ class TestAugmentSysPath:
 
         # existing entries preserved, then cwd, then built-ins last.
         assert sys.path == first == ["/some/site-packages", cwd_on_path, str(PARENT_DIR)]
+
+
+@pytest.fixture(params=["site-packages", "dist-packages", "target"])
+def installed_gym(tmp_path: Path, request) -> Path:
+    # Copy the real package into each non-editable layout without needing pip or third-party dependencies.
+    root = tmp_path / request.param
+    shutil.copytree(PARENT_DIR / "nemo_gym", root / "nemo_gym", ignore=shutil.ignore_patterns("__pycache__"))
+    return root
+
+
+def _run_import_subprocess(args: list[str], *, cwd: Path, pythonpath: list[Path]) -> None:
+    env = os.environ.copy()
+    env.pop(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, None)
+    env["PYTHONPATH"] = os.pathsep.join(map(str, pythonpath))
+    result = subprocess.run(
+        [sys.executable, *args], cwd=cwd, env=env, capture_output=True, text=True, errors="replace", timeout=30
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestImportPrecedence:
+    def test_source_checkout_keeps_cwd_override(self, tmp_path: Path) -> None:
+        source = tmp_path / "source"
+        shutil.copytree(PARENT_DIR / "nemo_gym", source / "nemo_gym", ignore=shutil.ignore_patterns("__pycache__"))
+        (source / "pyproject.toml").touch()
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        (source / "helper.py").write_text("WHERE = 'source'\n")
+        (cwd / "helper.py").write_text("WHERE = 'cwd'\n")
+        code = dedent(f"""
+            import sys
+            import nemo_gym
+            import helper
+            assert nemo_gym._is_editable_install
+            assert helper.WHERE == 'cwd'
+            assert helper.__file__ == {str(cwd / "helper.py")!r}
+            assert sys.path[-2:] == [{str(cwd)!r}, {str(source)!r}]
+        """)
+        _run_import_subprocess(["-P", "-S", "-c", code], cwd=cwd, pythonpath=[source, cwd])
+
+    def test_isolated_import_keeps_installed_dependency(self, tmp_path: Path, installed_gym: Path) -> None:
+        # A task repository can contain a dependency checkout that is not importable from its source tree.
+        cwd = tmp_path / "task"
+        cwd.mkdir()
+        (cwd / "fakedep.py").write_text("raise ImportError('dependency imported from task checkout')\n")
+        (installed_gym / "fakedep.py").write_text("WHERE = 'installed'\n")
+        code = dedent(f"""
+            import sys
+            sys.path.insert(0, {str(installed_gym)!r})
+            import nemo_gym
+            import fakedep
+            assert fakedep.WHERE == 'installed'
+            assert fakedep.__file__ == {str(installed_gym / "fakedep.py")!r}
+            assert not nemo_gym._is_editable_install
+            first = list(sys.path)
+            nemo_gym._augment_sys_path()
+            assert sys.path == first
+        """)
+        _run_import_subprocess(["-I", "-c", code], cwd=cwd, pythonpath=[])
+
+    def test_server_sibling_keeps_precedence(self, tmp_path: Path, installed_gym: Path) -> None:
+        # setup_command launches app.py with the server directory as cwd and an explicit PYTHONPATH root.
+        server = tmp_path / "server"
+        server.mkdir()
+        (server / "helper.py").write_text("WHERE = 'server'\n")
+        (installed_gym / "helper.py").write_text("WHERE = 'installed'\n")
+        app = server / "app.py"
+        app.write_text(
+            dedent(f"""
+            import nemo_gym
+            import helper
+            assert helper.WHERE == 'server'
+            assert helper.__file__ == {str(server / "helper.py")!r}
+        """)
+        )
+        _run_import_subprocess(["-S", str(app)], cwd=server, pythonpath=[server, installed_gym])
+
+    def test_pythonpath_install_keeps_dependency_precedence(self, tmp_path: Path, installed_gym: Path) -> None:
+        # In particular, pip --target installs need no site-packages name or registration with site.
+        cwd = tmp_path / "task"
+        cwd.mkdir()
+        for root, origin in [(installed_gym, "installed"), (cwd, "cwd")]:
+            package = root / "fakedep"
+            package.mkdir()
+            (package / "__init__.py").write_text(f"WHERE = {origin!r}\n")
+        code = dedent(f"""
+            import nemo_gym
+            import fakedep
+            assert fakedep.WHERE == 'installed'
+            assert fakedep.__file__ == {str(installed_gym / "fakedep/__init__.py")!r}
+        """)
+        _run_import_subprocess(["-P", "-S", "-c", code], cwd=cwd, pythonpath=[installed_gym])
+
+    @pytest.mark.parametrize("explicit_override", [False, True])
+    def test_builtin_override_and_file_lookup(
+        self, tmp_path: Path, installed_gym: Path, explicit_override: bool
+    ) -> None:
+        cwd = tmp_path / "project"
+        for root, origin in [(installed_gym, "installed"), (cwd, "cwd")]:
+            benchmark = root / "benchmarks" / "example"
+            benchmark.mkdir(parents=True)
+            (benchmark / "__init__.py").touch()
+            (benchmark / "prepare.py").write_text(f"WHERE = {origin!r}\n")
+            (benchmark / "config.yaml").write_text(origin)
+        # A new name in cwd stays importable even when installed modules precede cwd.
+        (cwd / "new_plugin.py").write_text("WHERE = 'cwd'\n")
+        code = dedent(f"""
+            import os
+            import nemo_gym
+            if {explicit_override!r}:
+                # The CLI folds --search-dir into this variable after the first import.
+                os.environ[nemo_gym.NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] = {str(cwd)!r}
+                nemo_gym._augment_sys_path()
+            from benchmarks.example import prepare
+            import new_plugin
+            assert prepare.WHERE == {"cwd" if explicit_override else "installed"!r}
+            assert new_plugin.WHERE == 'cwd'
+            config = nemo_gym._resolve_under_cwd_or_install('benchmarks/example/config.yaml')
+            assert str(config) == {str(cwd / "benchmarks/example/config.yaml")!r}
+            assert config.read_text() == 'cwd'
+        """)
+        _run_import_subprocess(["-P", "-S", "-c", code], cwd=cwd, pythonpath=[installed_gym])
+
+    def test_import_without_site_directory_helpers(self, tmp_path: Path, installed_gym: Path) -> None:
+        code = "import site; del site.getsitepackages; del site.getusersitepackages; import nemo_gym"
+        _run_import_subprocess(["-P", "-S", "-c", code], cwd=tmp_path, pythonpath=[installed_gym])
 
 
 class TestMergeByName:
