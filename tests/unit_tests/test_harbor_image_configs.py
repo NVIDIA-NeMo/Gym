@@ -18,13 +18,14 @@ from nemo_gym.sandbox.compose_fields import service_gpus
 from nemo_gym.tasks.harbor import image_configs
 from nemo_gym.tasks.harbor import registry as registry_module
 from nemo_gym.tasks.harbor.compose_variables import compose_variables
-from nemo_gym.tasks.harbor.digest import context_digest
+from nemo_gym.tasks.harbor.digest import content_hash, context_digest, is_covered
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.image_configs import (
     check_task_compose_fields,
     compose_image_references,
     dockerfile_base_images,
     load_compose_document,
+    plan_task_compose_volumes,
     record_base_images,
     record_compose_images,
     with_built_images,
@@ -915,6 +916,283 @@ class TestComposeVariablesAndEnvFile:
         write_task(tmp_path, "plain")
         (task,) = discover_tasks(tmp_path)
         assert load_compose_document(task) is None
+
+
+FIXTURES = Path(__file__).parent / "fixtures" / "harbor_compose_volumes"
+
+
+class TestComposeVolumesAtPrepare:
+    """M22: Compose volumes are planned at prepare, from the task folder and the deployment's ``volume_sources``."""
+
+    def write_task_aw(self, root: Path) -> Path:
+        task_dir = write_task(root, "task-aw")
+        for name in ("docker-compose.yaml", "seed.json"):
+            (task_dir / "environment" / name).write_bytes((FIXTURES / "task-aw" / "environment" / name).read_bytes())
+        return task_dir
+
+    def test_task_aw_seed_file_becomes_an_upload_into_the_sidecar(self, tmp_path):
+        self.write_task_aw(tmp_path)
+        (task,) = discover_tasks(tmp_path)
+        document = load_compose_document(task)
+        uploads = plan_task_compose_volumes(task, document)
+        assert uploads == {
+            "api": [{"source": str(task.path / "environment" / "seed.json"), "target": "/app/seed.json"}]
+        }
+        assert document["services"]["api"]["x-sandbox"]["uploads"] == uploads["api"]
+        assert "volumes" not in document["services"]["api"]
+        assert document["services"]["main"]["image"] == MAIN_IMAGE
+
+    def test_record_compose_images_fails_prepare_naming_an_unmapped_external_volume(self, tmp_path):
+        task_dir = write_task(
+            tmp_path,
+            "pg",
+            compose=f"""services:
+  main:
+    image: {MAIN_IMAGE}
+  db:
+    image: {SIDECAR_IMAGE}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:
+    external: true
+""",
+        )
+        (task,) = discover_tasks(tmp_path)
+        with pytest.raises(ImageConfigError, match=r"pg: environment/docker-compose.yaml: external volume 'pgdata'"):
+            record_compose_images([task], tmp_path, client=FakeClient())
+        assert not (tmp_path / "compose-images.json").exists()
+        # Mapped in the deployment's sandbox block, the same dataset prepares.
+        path = record_compose_images([task], tmp_path, client=FakeClient(), volume_sources={"pgdata": "pg/data"})
+        assert sorted(json.loads(path.read_text())) == sorted([MAIN_IMAGE, SIDECAR_IMAGE])
+        assert task_dir.is_dir()
+
+    @pytest.mark.parametrize("service", ["main", "api"])
+    @pytest.mark.parametrize("source", ["/etc/passwd", "OUTSIDE"])
+    def test_a_task_authored_x_sandbox_upload_fails_prepare_naming_the_field(self, tmp_path, service, source):
+        # Review blocker: a hub task's Compose file is untrusted. An ``x-sandbox.uploads`` written there (the
+        # planner's own output form) would have the server copy any readable host file into the sandbox.
+        outside = tmp_path / "outside" / "secret"
+        outside.parent.mkdir()
+        outside.write_text("secret")
+        source = str(outside) if source == "OUTSIDE" else source
+        smuggled = f"    x-sandbox:\n      uploads:\n        - {{source: {source}, target: /tmp/stolen}}\n"
+        compose = f"services:\n  main:\n    image: {MAIN_IMAGE}\n"
+        compose += smuggled if service == "main" else ""
+        compose += f"  api:\n    image: {SIDECAR_IMAGE}\n"
+        compose += smuggled if service == "api" else ""
+        write_task(tmp_path / "ds", "smuggler", compose=compose)
+        (task,) = discover_tasks(tmp_path / "ds")
+        document = load_compose_document(task)
+        with pytest.raises(
+            ImageConfigError,
+            match=f"smuggler: environment/docker-compose.yaml: service {service!r} declares x-sandbox",
+        ):
+            plan_task_compose_volumes(task, document)
+        with pytest.raises(ImageConfigError, match="x-sandbox"):
+            record_compose_images([task], tmp_path / "ds", client=FakeClient())
+        assert not (tmp_path / "ds" / "compose-images.json").exists()
+
+    def test_a_task_that_needs_shared_storage_is_left_out_at_prepare_when_the_block_has_none(self, tmp_path):
+        """M35 D6 (hil-bench's named volume) and D2 (kumo's sidecar bind of ``/logs/verifier``): both need the
+        provider's shared storage; told the block has none, prepare leaves the task out naming the setting instead of
+        every seed failing; told it has it, the kumo task plans the shared logs volume into both services."""
+        hil = write_task(
+            tmp_path / "hil",
+            "hil",
+            compose=f"""services:
+  main:
+    image: {MAIN_IMAGE}
+    volumes:
+      - ask-human-metrics:/harbor_shared
+  ask-human:
+    image: {SIDECAR_IMAGE}
+    volumes:
+      - ask-human-metrics:/harbor_shared
+volumes:
+  ask-human-metrics:
+""",
+        )
+        kumo = write_task(
+            tmp_path / "kumo",
+            "kumo",
+            compose=f"""services:
+  verifier:
+    image: {SIDECAR_IMAGE}
+    volumes:
+      - ${{HOST_VERIFIER_LOGS_PATH}}:${{ENV_VERIFIER_LOGS_PATH}}
+  main:
+    image: {MAIN_IMAGE}
+    volumes:
+      - ${{HOST_VERIFIER_LOGS_PATH}}:${{ENV_VERIFIER_LOGS_PATH}}
+      - ${{HOST_AGENT_LOGS_PATH}}:${{ENV_AGENT_LOGS_PATH}}
+""",
+        )
+        assert hil.is_dir() and kumo.is_dir()
+        for root, message in (
+            (tmp_path / "hil", "mounts 'ask-human-metrics'"),
+            (tmp_path / "kumo", "binds the logs tree '/logs/verifier'"),
+        ):
+            (task,) = discover_tasks(root)
+            skipped: dict[str, str] = {}
+            record_compose_images([task], root, client=FakeClient(), shared_storage=False, skipped=skipped)
+            assert list(skipped) == [task.task_id]
+            assert message in skipped[task.task_id] and "shared_storage.host_path" in skipped[task.task_id]
+            # The images are still recorded, as for any other refused field.
+            assert (root / "compose-images.json").exists()
+            for storage in (True, None):
+                assert record_compose_images([task], root, client=FakeClient(), shared_storage=storage, skipped={})
+        (task,) = discover_tasks(tmp_path / "kumo")
+        document = load_compose_document(task)
+        assert plan_task_compose_volumes(task, document, shared_storage=True) == {}
+        assert document["volumes"] == {"nemo-gym-logs-verifier": {}}
+        for name in ("verifier", "main"):
+            (mount,) = document["services"][name]["volumes"]
+            assert (mount["source"], mount["target"], mount["volume"]) == (
+                "nemo-gym-logs-verifier",
+                "/logs/verifier",
+                {"nocopy": True},
+            )
+        # A GPU-declaring task is answered for the GPU block, where the server seeds it.
+        gpu = write_task(tmp_path / "gpu", "gpu", compose=(hil / "environment" / "docker-compose.yaml").read_text())
+        (gpu / "task.toml").write_text((gpu / "task.toml").read_text() + "gpus = 1\n")
+        (task,) = discover_tasks(tmp_path / "gpu")
+        skipped = {}
+        record_compose_images(
+            [task],
+            tmp_path / "gpu",
+            client=FakeClient(),
+            shared_storage=True,
+            gpu_shared_storage=False,
+            skipped=skipped,
+        )
+        assert "shared_storage.host_path" in skipped[task.task_id]
+        assert record_compose_images(
+            [task], tmp_path / "gpu", client=FakeClient(), shared_storage=False, gpu_shared_storage=True, skipped={}
+        )
+
+    def test_gpu_tasks_are_checked_against_the_gpu_blocks_volume_sources(self, tmp_path):
+        # Review: the server seeds a GPU-declaring task from the ``gpu_sandbox_provider`` block, so prepare checks
+        # its volumes against that block's mapping (empty when the block has none), not the ``sandbox`` block's.
+        compose = f"""services:
+  main:
+    image: {MAIN_IMAGE}
+  db:
+    image: {SIDECAR_IMAGE}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:
+    external: true
+"""
+        for name, gpus in (("cpu", 0), ("gpu", 1)):
+            task_dir = write_task(tmp_path, name, compose=compose)
+            toml = task_dir / "task.toml"
+            toml.write_text(toml.read_text() + f"gpus = {gpus}\n")
+        cpu, gpu = sorted(discover_tasks(tmp_path), key=lambda task: task.task_id)
+        mapped = {"pgdata": "pg/data"}
+        # No GPU block configured: every task is checked against the sandbox block.
+        assert record_compose_images([cpu, gpu], tmp_path, client=FakeClient(), volume_sources=mapped)
+        # A GPU block without the mapping: the GPU task fails at prepare, the CPU task does not.
+        with pytest.raises(ImageConfigError, match="gpu: .*external volume 'pgdata'"):
+            record_compose_images(
+                [cpu, gpu], tmp_path, client=FakeClient(), volume_sources=mapped, gpu_volume_sources={}
+            )
+        assert record_compose_images(
+            [cpu], tmp_path, client=FakeClient(), volume_sources=mapped, gpu_volume_sources={}
+        )
+        # The mirror: mapped under the GPU block only.
+        assert record_compose_images([gpu], tmp_path, client=FakeClient(), gpu_volume_sources=mapped)
+        with pytest.raises(ImageConfigError, match="cpu: .*external volume 'pgdata'"):
+            record_compose_images([cpu], tmp_path, client=FakeClient(), gpu_volume_sources=mapped)
+
+    def test_a_gpu_reserving_sidecar_of_a_cpu_task_is_checked_against_the_gpu_blocks_volume_sources(self, tmp_path):
+        # Review (round 13): the server routes a GPU-reserving sidecar to the GPU block even when the task declares
+        # no GPUs, so its external volume is checked against that block's mapping; main and a plain sidecar stay
+        # on the task's.
+        compose = f"""services:
+  main:
+    image: {MAIN_IMAGE}
+  model:
+    image: {SIDECAR_IMAGE}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              count: 1
+    volumes:
+      - models:/models
+volumes:
+  models:
+    external: true
+"""
+        write_task(tmp_path, "cpu", compose=compose)
+        (task,) = discover_tasks(tmp_path)
+        skipped: dict[str, str] = {}
+        record_compose_images(
+            [task],
+            tmp_path,
+            client=FakeClient(),
+            volume_sources={},
+            gpu_volume_sources={"models": "gpu/models"},
+            skipped=skipped,
+        )
+        assert skipped == {}
+        # The task's own block mapping it is not enough once a GPU block exists: the sidecar runs there.
+        record_compose_images(
+            [task],
+            tmp_path,
+            client=FakeClient(),
+            volume_sources={"models": "cpu/models"},
+            gpu_volume_sources={},
+            skipped=skipped,
+        )
+        assert "external volume 'models'" in skipped.pop("cpu")
+        # Without a GPU block every service follows the task's block, as before.
+        record_compose_images(
+            [task], tmp_path, client=FakeClient(), volume_sources={"models": "cpu/models"}, skipped=skipped
+        )
+        assert skipped == {}
+
+    def test_a_bind_source_outside_the_digest_fails_prepare_while_the_hash_stays_the_publishers(self, tmp_path):
+        # Review (round 13): <task>/data/seed.json is uploadable but not digested, so an edit changed nothing in the
+        # manifest while the server uploaded the edited bytes. The planner refuses it at prepare; content_hash
+        # stays Harbor's publisher hash (the parity proof is test_archive_hash_is_the_published_hash_without_exclusions).
+        task_dir = write_task(
+            tmp_path,
+            "seeded",
+            compose=f"services:\n  main:\n    image: {MAIN_IMAGE}\n  api:\n    image: {SIDECAR_IMAGE}\n"
+            "    volumes:\n      - ../data/seed.json:/seed.json\n",
+        )
+        (task_dir / "data").mkdir()
+        (task_dir / "data" / "seed.json").write_text("v1")
+        (task,) = discover_tasks(tmp_path)
+        before = content_hash(task.path)
+        (task_dir / "data" / "seed.json").write_text("v2")
+        assert content_hash(task.path) == before  # the edit is invisible to the task's identity
+        assert not is_covered("data/seed.json") and is_covered("environment/seed.json") and is_covered("tests")
+        assert is_covered("task.toml") and not is_covered("environment/__pycache__/x.pyc") and not is_covered(".")
+        document = load_compose_document(task)
+        with pytest.raises(
+            ImageConfigError,
+            match=r"seeded: environment/docker-compose.yaml: service 'api' binds '../data/seed.json', which the task digest does not cover",
+        ):
+            plan_task_compose_volumes(task, document)
+        skipped: dict[str, str] = {}
+        record_compose_images([task], tmp_path, client=FakeClient(), skipped=skipped)
+        assert "../data/seed.json" in skipped["seeded"]
+
+    def test_record_compose_images_fails_prepare_naming_an_unsupported_volume_field(self, tmp_path):
+        write_task(
+            tmp_path,
+            "tmpfs",
+            compose=f"services:\n  main:\n    image: {MAIN_IMAGE}\n    volumes:\n      - type: tmpfs\n        target: /scratch\n",
+        )
+        (task,) = discover_tasks(tmp_path)
+        with pytest.raises(ImageConfigError, match="volume type 'tmpfs' is not supported"):
+            record_compose_images([task], tmp_path, client=FakeClient())
 
 
 class TestRecordComposeImages:

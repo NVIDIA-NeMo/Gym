@@ -216,6 +216,9 @@ class HarborEnvironmentServer(
         self._tasks: dict[tuple[Path, str], asyncio.Task[HarborTask]] = {}
         # Resolved Compose documents and the compose.yaml each is written to, by task snapshot and digest.
         self._compose_documents: dict[tuple[Path, str], asyncio.Task[tuple[dict[str, Any], Path]]] = {}
+        # The user names an overlay resolved inside a Compose group's start (`_create_compose`), by episode key,
+        # until the seed takes them.
+        self._overlay_names: dict[str, dict[str, str]] = {}
         self._snapshots = tempfile.TemporaryDirectory(prefix="nemo-gym-harbor-tasks-")
         # Built or declared verifier images found without /tests/test.sh, each warned about once.
         self._verifier_images_without_tests: set[str] = set()
@@ -672,10 +675,16 @@ class HarborEnvironmentServer(
                 provider_ref=self._provider_ref(task),
                 compose=compose,
             )
-            names = await self._apply_overlay(sandbox, task)
+            # A Compose group ran the overlay on main inside its start, before main's uploads and command.
+            if compose is not None:
+                names = self._overlay_names.pop(episode_key, {})
+            else:
+                names = await self._apply_overlay(sandbox, task)
             await self._set_default_user(sandbox, task, names)
             image_user = await self._image_user_name(sandbox, task, names)
-            # The working directory and /logs exist before the entrypoint starts, as Harbor's bind mounts do.
+            # The working directory and /logs exist before the entrypoint starts, as Harbor's bind mounts do. For a
+            # Compose group the adapter already created the /logs paths main bound, before its command; this mkdir
+            # is idempotent there and still makes the whole tree.
             session.workdir = await self._prepare_workdir(sandbox, task, task.workdir)
             # A Compose group's main was started by the adapter, its entrypoint run and its image healthcheck waited.
             managed = compose is not None
