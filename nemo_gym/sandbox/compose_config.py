@@ -11,13 +11,306 @@ healthcheck), which ``image_configs`` supplies, keyed by image reference.
 Adapted from Gym's Terminal Bench 4 server (``resources_servers/terminal_bench_4/compose_config.py``).
 """
 
+import os
 import re
 from collections.abc import Mapping
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from nemo_gym.sandbox.compose_fields import ComposeFieldError, _bytes, normalize_platform
+from nemo_gym.sandbox.compose_fields import ComposeFieldError, _bytes, normalize_platform, service_gpus
+from nemo_gym.sandbox.compose_volumes import (
+    LOGS_TREE,
+    ComposeVolumeError,
+    _bind_source,
+    absolute_link,
+    first_link,
+    parse_volume,
+)
+from nemo_gym.tasks.harbor.digest import is_covered
+
+
+def plan_compose_volumes(
+    document: dict,
+    base_dir: Path,
+    *,
+    root: Path | None = None,
+    volume_sources: dict[str, str] | None = None,
+    gpu_volume_sources: dict[str, str] | None = None,
+    shared_storage: bool | None = None,
+    gpu_shared_storage: bool | None = None,
+) -> dict[str, list[dict[str, str]]]:
+    """Decide how each service's ``volumes`` run in a sandbox group. Mutates and returns per-service uploads.
+
+    A bind mount whose source is a file or folder of the task (under ``root``, default ``base_dir``;
+    relative paths resolve against ``base_dir``, as Compose resolves them against the Compose file)
+    becomes an upload into the service once it starts: the entry leaves ``volumes`` and joins
+    ``x-sandbox.uploads`` as ``{"source": <host path>, "target": <container path>}``. With a task ``root``
+    given, such a source must be one the task digest covers (:func:`~nemo_gym.tasks.harbor.digest.is_covered`:
+    under ``environment/``, ``tests/``, ``solution/`` or ``steps/``, or one of the top-level task files, and
+    not a name the digest skips), or it raises naming the path: an upload the digest does not see could change
+    without changing the task's identity. Named volumes declared at top level stay, in long syntax, for the provider's shared
+    storage; a volume declared ``external: true``, and a bind source outside the task, resolve through
+    ``volume_sources`` (the ``sandbox`` block's mapping of volume name or host path to a shared-storage path)
+    and raise :class:`ComposeVolumeError` naming the volume when it is missing. A sidecar that reserves GPUs
+    through ``deploy.resources`` resolves through ``gpu_volume_sources`` instead when that is given (the
+    ``gpu_sandbox_provider`` block's mapping, the block the server runs it on; ``main`` follows the task, as
+    :func:`check_compose_fields` routes the capability check). A bind of Harbor's ``/logs`` tree onto ``main``
+    leaves ``volumes`` and joins ``x-sandbox.logs`` as ``{"source": <logs path>, "target": <container path>}``:
+    the adapter creates the source in the agent's sandbox before the service's command, hooks and healthcheck,
+    and links a target elsewhere to it, as Docker creates both of Harbor's bind targets at container create.
+    A sidecar that binds a path of the tree shares it with ``main`` the way Harbor's one host folder is shared:
+    the path becomes a named volume on the provider's shared storage (declared as ``nemo-gym-<path>``, with
+    ``nocopy``), mounted at the sidecar's target and at the path itself in ``main``, so what the sidecar writes
+    there is what the verifier collects. A logs path with a ``..`` segment (``/logs/../etc``) raises naming the
+    path, on ``main`` or a sidecar: it is used as written. ``shared_storage`` says whether the deployment's provider has shared
+    storage (``gpu_shared_storage`` for the services ``gpu_volume_sources`` routes): ``False`` refuses every
+    named volume, mapped source and shared logs bind at prepare, naming the setting, instead of at every seed;
+    ``None`` leaves that to the adapter. A source the task does not contain, or a symlink that leaves it, raises naming the
+    path; so does a bound folder that contains a link, and a source reached through a link with an absolute
+    target (see :func:`absolute_link`). A service that already carries ``x-sandbox`` raises naming the field:
+    that key is this planner's output, not task input. A null top-level declaration (``volumes: {pgdata:
+    null}``) is normalised to ``{}``, the form the adapter reads.
+    """
+    base = Path(base_dir).resolve()
+    task_root = Path(root).resolve() if root is not None else None
+    root = task_root if task_root is not None else base
+    base_sources = dict(volume_sources or {})
+    services = document.get("services") if isinstance(document, dict) else None
+    if not isinstance(services, dict):
+        return {}
+    declared = document.get("volumes")
+    if declared is None:
+        declared = {}
+    if not isinstance(declared, dict):
+        raise ComposeVolumeError("volumes", "top-level volumes must be a mapping")
+    # ``x-sandbox`` is what this planner (and the sidecar adaptation) write for the Compose adapter, never task
+    # input: an entry in the task file could name any host file as an upload source. Refused before anything
+    # else, so prepare fails with the field name.
+    for name, service in services.items():
+        if isinstance(service, dict) and "x-sandbox" in service:
+            raise ComposeVolumeError(
+                "x-sandbox", f"service {name!r} declares x-sandbox; it is written by Gym at prepare, not by the task"
+            )
+    # ``volumes:\n  pgdata:`` (a null declaration) is the canonical empty one; the adapter reads a mapping. Any
+    # other non-mapping (``pgdata: 123``) is refused here, naming the volume, whether or not a service mounts it
+    # (Compose rejects the file either way), as this planner's own error: prepare reports the task and goes on.
+    for volume_name, declaration in declared.items():
+        if declaration is None:
+            declared[volume_name] = {}
+        elif not isinstance(declaration, dict):
+            raise ComposeVolumeError(
+                volume_name, f"volume {volume_name!r}: declaration must be a mapping, got {declaration!r}"
+            )
+    uploads: dict[str, list[dict[str, str]]] = {}
+    logs: dict[str, list[dict[str, str]]] = {}
+    # Paths of the logs tree a sidecar binds, with every service that binds each: shared through one volume below.
+    shared_logs: dict[str, list[tuple[str, str, bool]]] = {}
+    # Whether the block each service runs on has shared storage, and that block's name for the refusal.
+    storage_of: dict[str, tuple[bool | None, str]] = {}
+    for name, service in services.items():
+        if not isinstance(service, dict) or "volumes" not in service:
+            continue
+        entries = service.pop("volumes")
+        if entries is None:
+            continue
+        if not isinstance(entries, list):
+            raise ComposeVolumeError("volumes", f"service {name!r} volumes must be a list")
+        # The mapping of the block this service runs on: a GPU-reserving sidecar lives on the GPU block.
+        sources, storage, block = base_sources, shared_storage, _TASK_BLOCK
+        if (gpu_volume_sources, gpu_shared_storage) != (None, None) and name != "main" and service_gpus(service):
+            sources, storage, block = dict(gpu_volume_sources or {}), gpu_shared_storage, _GPU_BLOCK
+        storage_of[name] = (storage, block)
+        kept: list[dict[str, Any]] = []
+        for entry in entries:
+            volume = parse_volume(entry, name)
+            source = volume["source"]
+            if volume["type"] == "volume":
+                if source not in declared:
+                    raise ComposeVolumeError(source, f"service {name!r} mounts undeclared volume {source!r}")
+                declaration = declared[source]
+                unsupported = set(declaration) - {"name", "external"}
+                if unsupported:
+                    field = sorted(unsupported)[0]
+                    raise ComposeVolumeError(field, f"volume {source!r}: unsupported option {field!r}")
+                if declaration.get("external") and source not in sources:
+                    raise ComposeVolumeError(
+                        source, f"external volume {source!r} needs a `volume_sources` entry in the sandbox block"
+                    )
+                kept.append(volume)
+                continue
+            host = _bind_source(source, base, f"service {name!r} volumes")
+            if str(host) == LOGS_TREE or str(host).startswith(LOGS_TREE + "/"):
+                if ".." in host.parts:
+                    # The path is used as written: the adapter's ``mkdir -p`` in ``main``, and for a sidecar the name
+                    # and ``main``'s target of the shared volume, which the provider refuses at every seed
+                    # (``Shared storage target must be an absolute container path without traversal``).
+                    raise ComposeVolumeError(
+                        source,
+                        f"service {name!r} binds {source!r}, a logs path with a `..` segment; write the path it means",
+                    )
+                if name == "main":
+                    # The adapter creates the logs path in the agent's sandbox before the command, and links a
+                    # target elsewhere (``/logs/artifacts:/app/output``) to it.
+                    logs.setdefault(name, []).append({"source": str(host), "target": volume["target"]})
+                    continue
+                # Under Harbor the sidecar and ``main`` bind one host folder (kumo's verifier sidecar appends to
+                # ``/logs/verifier/actions.jsonl``, which ``main``'s test reads): shared through the provider's
+                # storage, planned once every service's binds are known.
+                shared_logs.setdefault(str(host), []).append((name, volume["target"], volume["read_only"]))
+                continue
+            resolved = host.resolve()
+            if resolved.is_relative_to(root):
+                if not host.exists():
+                    raise ComposeVolumeError(
+                        source, f"service {name!r} binds {source!r}, which the task folder does not contain"
+                    )
+                link = absolute_link(host, root)
+                if link is not None:
+                    # Fine here, but on the server's copy of the task the link still points at this folder.
+                    raise ComposeVolumeError(
+                        source,
+                        f"service {name!r} binds {source!r} through a link with an absolute target: {link}; "
+                        "make the link relative",
+                    )
+                link = first_link(resolved) if resolved.is_dir() else None
+                if link is not None:
+                    # The folder is uploaded entry by entry (a copy, not a mount); a link would be read through.
+                    raise ComposeVolumeError(
+                        source,
+                        f"service {name!r} binds {source!r}, which contains a link: {link}; links are not uploaded",
+                    )
+                if task_root is not None and not is_covered(resolved.relative_to(task_root).as_posix()):
+                    # The server uploads the bytes of its task copy, which it checks by the task digest alone: a
+                    # source the digest does not cover could change without changing the task's identity.
+                    raise ComposeVolumeError(
+                        source,
+                        f"service {name!r} binds {source!r}, which the task digest does not cover; keep upload "
+                        "sources under environment/, tests/, solution/ or steps/ and free of names the digest skips",
+                    )
+                uploads.setdefault(name, []).append({"source": str(resolved), "target": volume["target"]})
+                continue
+            if Path(os.path.normpath(host)).is_relative_to(root):
+                # The source names a path inside the task folder (its ``..`` collapsed lexically, no link followed)
+                # that resolves outside it: a link inside the task that points out, not part of what prepare
+                # digested. An ordinary ``../../shared`` from ``environment/`` collapses to a path outside the task
+                # instead: a foreign source, looked up in ``volume_sources`` below, as Docker would bind it.
+                raise ComposeVolumeError(
+                    source, f"service {name!r} binds {source!r}, a link that leaves the task folder"
+                )
+            if source not in sources:
+                raise ComposeVolumeError(
+                    source,
+                    f"service {name!r} binds {source!r} from outside the task; map it under `volume_sources` in the "
+                    "sandbox block",
+                )
+            kept.append(volume)
+        if kept and storage is False:
+            raise ComposeVolumeError(
+                kept[0]["source"],
+                f"service {name!r} mounts {kept[0]['source']!r}, which needs the sandbox provider's shared storage; "
+                f"{_no_shared_storage(block, name)}",
+            )
+        if kept:
+            service["volumes"] = kept
+    for host, binders in shared_logs.items():
+        mounts = list(binders)
+        if isinstance(services.get("main"), dict):
+            # ``main`` holds the folder at the logs path itself, whether or not it binds it: that is where the
+            # verifier collects from, and its own binds of the path (created and linked by the adapter) sit on it.
+            mounts.append(("main", host, False))
+        # The volume is mounted through the block of every service that receives it, so each needs the storage:
+        # ``main``'s block (the task's, whatever it binds itself) and each binder's, which may be the GPU block.
+        for service_name, _target, _read_only in mounts:
+            storage, block = (shared_storage, _TASK_BLOCK) if service_name == "main" else storage_of[service_name]
+            if storage is False:
+                raise ComposeVolumeError(
+                    host,
+                    f"service {binders[0][0]!r} binds the logs tree {host!r}, which it shares with `main` through "
+                    f"the sandbox provider's shared storage; {_no_shared_storage(block, service_name)}",
+                )
+        volume_name = "nemo-gym" + host.replace("/", "-")
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", volume_name):
+            # The adapter mounts a named volume only under a Compose volume name (``Named volumes require a valid
+            # Compose volume name``), at every seed: a logs path with another character (a space, ``+``, ``@``) is
+            # refused here instead.
+            raise ComposeVolumeError(
+                host,
+                f"service {binders[0][0]!r} binds the logs tree {host!r}, whose name for the shared volume "
+                f"({volume_name!r}) is not a Compose volume name; use letters, digits, `_`, `.` and `-` in the path",
+            )
+        if volume_name in declared:
+            raise ComposeVolumeError(
+                volume_name, f"volume {volume_name!r} is the name Gym gives the shared logs path {host!r}; rename it"
+            )
+        declared[volume_name] = {}
+        document["volumes"] = declared
+        for service_name, target, read_only in mounts:
+            service = services[service_name]
+            service.setdefault("volumes", []).append(
+                {
+                    "type": "volume",
+                    "source": volume_name,
+                    "target": target,
+                    "read_only": read_only,
+                    "volume": {"nocopy": True},
+                }
+            )
+            if service_name != "main" and target == host:
+                # The adapter makes the path world-writable in the sidecar too, before its command.
+                logs.setdefault(service_name, []).append({"source": host, "target": target})
+    for name, service in services.items():
+        if not isinstance(service, dict):
+            continue
+        options: dict[str, Any] = {}
+        if name in uploads:
+            options["uploads"] = uploads[name]
+        if name in logs:
+            options["logs"] = logs[name]
+        if options:
+            service["x-sandbox"] = options
+    return uploads
+
+
+_TASK_BLOCK = "`sandbox:`"
+_GPU_BLOCK = "`gpu_sandbox_provider`"
+
+
+def _no_shared_storage(block: str, service_name: str) -> str:
+    """The refusal's reason: the block ``service_name`` runs on has no shared storage, and where that is set."""
+    return (
+        f"the {block} block, where {service_name!r} runs, configures none "
+        "(`shared_storage.host_path` in the OpenSandbox provider block)"
+    )
+
+
+def document_volume_sources(document: Mapping[str, Any], volume_sources: Mapping[str, str]) -> dict[str, str]:
+    """The entries of ``volume_sources`` a planned Compose document resolves through it, and nothing else.
+
+    The adapter treats every volume name it finds in its mapping as externally managed (one shared path,
+    no per-group directory, no copy-up), so a deployment-wide mapping handed over whole would make an
+    ordinary ``volumes: {pgdata: null}`` of one task share the directory another task maps as external. Only
+    the names this document declares ``external: true`` and mounts, and the host paths of its remaining
+    (foreign) bind mounts, are kept; a key the document never mounts, or mounts as an ordinary named volume,
+    is dropped, and that volume stays private to the group, as Harbor's per-trial Compose project keeps it.
+    """
+    services = document.get("services") if isinstance(document, Mapping) else None
+    declared = document.get("volumes") if isinstance(document, Mapping) else None
+    if not isinstance(services, Mapping):
+        return {}
+    if not isinstance(declared, Mapping):
+        declared = {}
+    used: set[str] = set()
+    for service in services.values():
+        for volume in (service.get("volumes") or []) if isinstance(service, Mapping) else []:
+            if not isinstance(volume, Mapping):
+                continue
+            if volume.get("type") == "bind":
+                used.add(volume.get("source"))
+            elif volume.get("type") == "volume" and (declared.get(volume.get("source")) or {}).get("external"):
+                used.add(volume.get("source"))
+    return {key: value for key, value in volume_sources.items() if key in used}
 
 
 def _compose_literals(value: Any) -> Any:
@@ -193,7 +486,7 @@ def adapt_non_root_sidecars(document: dict, image_configs: dict) -> dict:
         service = services[name]
         service.pop("user", None)
         peers = [key for key, value in (service.get("environment") or {}).items() if _peer_url(value, services)]
-        options = {"hosts": []}
+        options = {**(service.get("x-sandbox") or {}), "hosts": []}
         if peers:
             options["resolve_environment"] = peers
         service["x-sandbox"] = options

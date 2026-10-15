@@ -38,6 +38,17 @@ def is_ignored(relative: str) -> bool:
     return any(fnmatch.fnmatch(part, pattern) for part in parts for pattern in _IGNORED)
 
 
+def is_covered(relative: str) -> bool:
+    """Whether the task path at ``relative`` (a posix path under the task folder) is one :func:`content_hash`
+    covers: one of the top-level task files, or anything under ``environment/``, ``tests/``, ``solution/`` or
+    ``steps/`` (those folders themselves included), and not a name :func:`is_ignored` skips. A folder that is
+    covered may still hold skipped names after a run; they do not change the task's identity."""
+    parts = [part for part in relative.split("/") if part not in ("", ".")]
+    if not parts or is_ignored(relative):
+        return False
+    return (len(parts) == 1 and parts[0] in _SINGLE_FILES) or parts[0] in _DIRECTORIES
+
+
 def _covered_files(path: Path) -> list[Path]:
     """The regular files under the resolved task folder ``path`` that a digest covers, in record order."""
     files = [path / name for name in _SINGLE_FILES if (path / name).is_file()]
