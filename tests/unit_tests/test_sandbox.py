@@ -2071,6 +2071,19 @@ def test_sandbox_config_builds_a_spec_with_provider_config_and_server_metadata()
     assert spec.provider_options == {"platform": {"arch": "arm64"}}
 
 
+def test_sandbox_config_defaults_build_an_empty_spec() -> None:
+    spec = SandboxConfig().spec("sandbox", image=None, workdir=None, named_configs={"sandbox": {"local": {}}})
+
+    assert (spec.image, spec.workdir, spec.ttl_s, spec.ready_timeout_s) == (None, None, None, None)
+    assert (spec.env, spec.files, spec.metadata, spec.provider_options) == ({}, {}, {}, {})
+    assert spec.resources == SandboxResources()
+
+
+def test_sandbox_config_rejects_a_non_numeric_resource_value() -> None:
+    with pytest.raises(ValidationError, match="resources"):
+        SandboxConfig(resources={"cpu": "many"})
+
+
 @pytest.mark.parametrize(
     "fields", [{"ttl": 600}, {"resources": {"cores": 4}}], ids=["unknown key", "unknown resource"]
 )
